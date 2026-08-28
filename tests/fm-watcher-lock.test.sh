@@ -417,6 +417,10 @@ test_lock_late_claim_loses_after_recreate() {
 
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
   local dir state lockdir out pid
+  if host_lacks_real_symlink_support; then
+    pass "paused symlink claimant race skipped on MSYS host"
+    return
+  fi
   dir=$(make_case lock-paused-claim-steal)
   state="$dir/state"
   lockdir="$state/.contend.lock"
@@ -558,32 +562,30 @@ test_msys_lock_single_winner_under_concurrency() {
 }
 
 test_msys_lock_steals_abandoned_directory_lock() {
-  local dir state fakebin lockdir ln_used rc oldpid newpid
+  local dir state fakebin lockdir ln_used rc stalepid
   dir=$(make_case msys-lock-stale-recovery)
   state="$dir/state"
   fakebin="$dir/fakebin"
   lockdir="$state/.contend.lock"
   ln_used="$dir/ln-used"
   make_fake_msys_lock_bin "$fakebin"
-  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
-    . "$1"
-    fm_lock_try_acquire "$2" || exit 10
-    [ -d "$2" ] && [ ! -L "$2" ] || exit 11
-  ' _ "$LIB" "$lockdir" || fail "could not create an abandoned MSYS directory lock"
-  oldpid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ -n "$oldpid" ] || fail "abandoned MSYS directory lock recorded no pid"
+  stalepid=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  kill -0 "$stalepid" 2>/dev/null && fail "stale MSYS directory fixture pid is unexpectedly live"
   rc=0
-  newpid=$(PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 20
     [ -d "$2" ] && [ ! -L "$2" ] || exit 21
-    cat "$2/pid"
+    [ "${FM_LOCK_RECOVERED_PID:-}" = "$3" ] || exit 22
+    current=$(cat "$2/pid" 2>/dev/null || true)
+    [ -n "$current" ] || exit 23
+    [ "$current" != "$3" ] || exit 24
     fm_lock_release "$2"
-    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 22
-  ' _ "$LIB" "$lockdir") || rc=$?
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 25
+  ' _ "$LIB" "$lockdir" "$stalepid" || rc=$?
   [ "$rc" -eq 0 ] || fail "MSYS stale directory lock was not recovered safely (rc=$rc)"
-  [ -n "$newpid" ] || fail "recovered MSYS directory lock recorded no pid"
-  [ "$newpid" != "$oldpid" ] || fail "MSYS stale directory lock kept the abandoned pid"
   [ ! -e "$ln_used" ] || fail "MSYS stale recovery invoked ln -s"
   pass "MSYS abandoned directory locks are reclaimed cleanly"
 }
