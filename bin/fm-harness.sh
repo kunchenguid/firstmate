@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -35,7 +35,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
+  # Claude, Pi, Grok, Cursor, and agy set verified markers of their own; codex,
   # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
@@ -104,6 +104,13 @@ detect_own() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # agy (Antigravity CLI) sets ANTIGRAVITY_AGENT=1 on the shell/tool child
+  # processes it runs (verified live, agy 1.1.22), the same shape as GROK_AGENT
+  # and CLAUDECODE. It does not set CLAUDECODE, so the marker is unambiguous
+  # when present. Like grok's it is a fast path rather than a guarantee: only
+  # tool children are known to carry it, so the ancestry walk below is what
+  # actually identifies an agy pane process itself.
+  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
@@ -144,6 +151,13 @@ detect_own() {
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
       rovo) echo rovo; return ;;
+      # agy (Antigravity CLI) installs a single ~/.local/bin/agy Go binary and
+      # the live process name is the literal, unshortened string `agy`
+      # (verified live, agy 1.1.22 - no launcher renames it and no version rides
+      # the name). Deliberately anchored, never *agy*, for the same reason muse
+      # is: `agy` is a short fragment that would otherwise match unrelated
+      # commands.
+      agy) echo agy; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable

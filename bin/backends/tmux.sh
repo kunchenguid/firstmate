@@ -172,6 +172,11 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
+    # agy is anchored for the same reason muse is: Antigravity CLI installs a
+    # single ~/.local/bin/agy binary whose live process name is exactly `agy`,
+    # and an *agy* glob would claim unrelated commands that merely contain those
+    # three letters.
+    agy) printf 'agent' ;;
     # omp (Oh My Pi) is anchored for the same reason as muse: its live process
     # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
     # unrelated commands such as ompd or comp.

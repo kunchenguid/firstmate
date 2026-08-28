@@ -122,8 +122,9 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
-#   overrides it for this spawn (either kind). A non-flag string containing
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+#   overrides it for this spawn (muse, gemini, rovo and agy are crewmate/scout only and are
+#   refused for --secondmate; every other name applies to either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
@@ -258,6 +259,10 @@
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
+#     __AGYBIN__    resolved Antigravity CLI executable for an agy launch
+#     __AGYLOG__    absolute path to state/<task-id>.agy-log, the per-task agy CLI
+#                   log whose `Created conversation <id>` line binds the pane to
+#                   the conversation database its busy state is read from
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -294,6 +299,15 @@
 # Claude-Session link, or generated-with line into a commit or PR body;
 # launch_template() below owns the reason it cannot come from the captain's own
 # settings.
+#
+# agy installs no hook either - Antigravity CLI 1.1.22 exposes no lifecycle-hook
+# surface at all - so it writes state/<id>.agy-session to bind the pane to agy's
+# own conversation database, named by the per-task --log-file this script gives
+# it. agy additionally needs the task worktree PRE-TRUSTED before launch: its
+# workspace-trust prompt matches exact absolute paths (never prefixes), no CLI
+# flag suppresses it, and --dangerously-skip-permissions does not cover it, so
+# every fresh worktree would otherwise block the spawn on a dialog. agy is a
+# crewmate/scout adapter only and is refused for --secondmate.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -1547,6 +1561,22 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
+    # agy (Antigravity CLI). It accepts NO positional prompt, so the brief rides
+    # -i/--prompt-interactive, which runs an initial prompt and then continues
+    # the session interactively - the pane shape a crewmate needs.
+    # --dangerously-skip-permissions is the autonomy flag and is verified to
+    # suppress BOTH edit and shell-command approvals; --mode accept-edits covers
+    # edits only and stalls on every new shell command, so it is not sufficient.
+    # It does NOT cover the workspace-trust dialog, which has no flag at all and
+    # is handled by the pre-trust write below instead.
+    # --log-file pins this task's own CLI log, which is the whole busy-state
+    # binding: agy names the conversation it created in that file, and the
+    # sidecar written below points the classifier at it.
+    # The foreign primary markers are cleared for the same reason as cursor's:
+    # agy publishes ANTIGRAVITY_AGENT for its own children, and an inherited
+    # CLAUDECODE must not outrank it in a process that only reads the
+    # environment.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS -u CURSOR_AGENT __AGYBIN__ --dangerously-skip-permissions --log-file __AGYLOG__ __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # rovo (Atlassian Rovo CLI): a positional brief is dead-on-arrival - rovo
     # loads, never enters a working state, and drops back to an idle shell within
@@ -1637,6 +1667,17 @@ fi
 # standing one up with no way to arm its watch cycle.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# agy is refused for the same reason and on stronger evidence: Antigravity CLI
+# 1.1.22 has no lifecycle-hook surface of any kind (`agy plugin`, `agy mcp`, and
+# `agy agents` were each checked), so there is nothing a primary turn-end
+# supervision cycle could be armed on at all. Its crewmate busy state is read by
+# polling its own conversation database, which is sufficient to SUPERVISE a
+# worker and is not a substitute for a primary's own supervision protocol.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = agy ]; then
+  echo "error: agy is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1735,6 +1776,141 @@ resolve_kimi_binary() {
   return 1
 }
 
+resolve_agy_binary() {
+  local candidate dir
+  candidate=$(command -v agy 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
+  return 1
+}
+
+# agy_settings_path: the Antigravity CLI settings file whose trustedWorkspaces
+# array is the workspace-trust grant. FM_AGY_SETTINGS_OVERRIDE exists so the
+# regression can exercise this path without touching a real installation.
+agy_settings_path() {
+  printf '%s' "${FM_AGY_SETTINGS_OVERRIDE:-${HOME:-}/.gemini/antigravity-cli/settings.json}"
+}
+
+# agy_workspace_trusted: 0 when <settings> already lists <worktree> EXACTLY.
+# Exact membership, never a prefix test, because agy's own matching is exact:
+# launching in a fresh subdirectory of an already-trusted parent still raises
+# the dialog (verified live, agy 1.1.22).
+#
+# The worktree is compared and stored VERBATIM, never canonicalized. agy
+# normalizes redundant path separators before matching but does NOT resolve
+# symlinks - a pane launched through a symlinked path is trusted by that
+# symlinked path and not by its target (verified live, agy 1.1.22). Since the
+# grant and the pane's own working directory both come from this spawn's
+# recorded worktree, they agree by construction; resolving one side to a
+# physical path would break exactly the symlinked-worktree case.
+agy_workspace_trusted() {  # <settings> <worktree>
+  local settings=$1 wt=$2
+  [ -f "$settings" ] || return 1
+  jq -e --arg p "$wt" '(.trustedWorkspaces // []) | index($p) != null' \
+    "$settings" >/dev/null 2>&1
+}
+
+# agy_trust_workspace: ADD <worktree> to the settings file's trustedWorkspaces
+# array so the launch below is not blocked on an interactive dialog no flag can
+# suppress.
+#
+# This is the one place firstmate writes a file the operator also uses
+# interactively, so the write is deliberately conservative:
+#   - It is skipped entirely when the path is already trusted, so a repeat spawn
+#     rewrites nothing.
+#   - It only ever APPENDS. Existing entries are never removed or reordered, and
+#     jq assignment to an existing key leaves every other key in place and in
+#     order, so an unrelated setting cannot be dropped or moved.
+#   - Malformed JSON is a hard refusal, never an overwrite: a settings file that
+#     cannot be parsed is far more likely to be mid-write or hand-edited than
+#     genuinely disposable, and clobbering it would destroy the operator's own
+#     configuration.
+#   - The replacement is atomic (temp file in the same directory, then mv), so a
+#     reader never observes a partial file.
+#   - A firstmate-owned lock serializes this against firstmate's OWN concurrent
+#     spawns. It cannot serialize against the Antigravity CLI itself writing the
+#     same file from an interactive session; that race is inherent to a settings
+#     file with no locking protocol of its own, and its worst case here is a
+#     concurrently-added trust entry being lost, never a lost unrelated setting.
+agy_trust_workspace() {  # <worktree>
+  local wt=$1 settings dir tmp lock waited=0
+  settings=$(agy_settings_path)
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is required to pre-trust an agy workspace but was not found on PATH" >&2
+    return 1
+  }
+  agy_workspace_trusted "$settings" "$wt" && return 0
+  dir=$(dirname "$settings")
+  mkdir -p "$dir" 2>/dev/null || {
+    echo "error: cannot create the agy settings directory '$dir' to pre-trust the task worktree" >&2
+    return 1
+  }
+  lock="$STATE/.agy-trust.lock"
+  while ! fm_lock_try_acquire "$lock"; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt 100 ]; then
+      echo "error: could not acquire the agy trust lock '$lock' within 10s; another spawn may be wedged" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  # Re-read under the lock: another firstmate spawn may have added this exact
+  # path between the check above and the lock being granted.
+  if agy_workspace_trusted "$settings" "$wt"; then
+    fm_lock_release "$lock" || true
+    return 0
+  fi
+  if [ -f "$settings" ] && ! jq -e . "$settings" >/dev/null 2>&1; then
+    fm_lock_release "$lock" || true
+    echo "error: agy settings file '$settings' is not valid JSON; refusing to rewrite it. Fix or remove it, or trust the task worktree from an agy session by hand." >&2
+    return 1
+  fi
+  tmp=$(mktemp "$dir/.fm-agy-settings.XXXXXX") || {
+    fm_lock_release "$lock" || true
+    echo "error: cannot write a temporary file beside '$settings' to pre-trust the task worktree" >&2
+    return 1
+  }
+  if [ -f "$settings" ]; then
+    jq --arg p "$wt" \
+      '.trustedWorkspaces = ((.trustedWorkspaces // []) + [$p] | unique)' \
+      "$settings" > "$tmp" 2>/dev/null
+  else
+    jq -n --arg p "$wt" '{trustedWorkspaces: [$p]}' > "$tmp" 2>/dev/null
+  fi
+  if [ ! -s "$tmp" ] || ! jq -e --arg p "$wt" \
+      '(.trustedWorkspaces // []) | index($p) != null' "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    fm_lock_release "$lock" || true
+    echo "error: failed to add the task worktree to agy's trusted workspaces in '$settings'" >&2
+    return 1
+  fi
+  if [ -f "$settings" ]; then
+    chmod --reference="$settings" "$tmp" 2>/dev/null \
+      || chmod "$(stat -f '%Lp' "$settings" 2>/dev/null || echo 600)" "$tmp" 2>/dev/null || true
+  else
+    chmod 600 "$tmp" 2>/dev/null || true
+  fi
+  if ! mv -f "$tmp" "$settings"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock" || true
+    echo "error: failed to replace '$settings' while pre-trusting the task worktree" >&2
+    return 1
+  fi
+  fm_lock_release "$lock" || true
+  return 0
+}
+
 resolve_muse_binary() {
   local candidate dir
   candidate=$(command -v muse 2>/dev/null || true)
@@ -1818,14 +1994,14 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 effort=$2 model=${3:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -1889,6 +2065,31 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
+    agy)
+      # agy 1.1.22 --effort accepts only low|medium|high and REJECTS xhigh and
+      # max explicitly, so those are omitted rather than passed as a known-bad
+      # value, exactly as grok's arm does.
+      #
+      # agy is the one adapter where the effort flag depends on the model,
+      # because it rejects the combination rather than ignoring it. Two model
+      # shapes must receive no --effort at all or the launch fails outright:
+      #   - the Claude-family and gpt-oss catalog entries, for which agy answers
+      #     `--effort is not supported for model "..."`;
+      #   - the pre-suffixed catalog display names `agy models` prints
+      #     (gemini-3.6-flash-medium), which already encode the effort and for
+      #     which agy answers `--model ... conflicts with --effort=...`.
+      # Passing a BARE base name (gemini-3.6-flash) alongside --effort is the
+      # combination that works, and so is --effort with no --model at all, which
+      # applies to agy's own configured default model. All four behaviours
+      # verified live, agy 1.1.22.
+      case "$model" in
+        claude-*|gpt-oss-*) return 0 ;;
+        *-low|*-medium|*-high) return 0 ;;
+      esac
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
   esac
 }
 
@@ -1909,6 +2110,17 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__MUSEBIN__/$(shell_quote "$MUSE_BIN")}
     LAUNCH=${LAUNCH//__MUSECONFIG__/$(shell_quote "$MUSE_CONFIG_HOME")}
     LAUNCH=${LAUNCH//__MUSEDATA__/$(shell_quote "$MUSE_DATA_HOME")}
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__AGYBIN__*)
+    # Resolve the executable BEFORE any task state is created, so a missing
+    # Antigravity CLI is a loud spawn refusal rather than a pane that dies with
+    # a command-not-found the supervisor would read as a wedged worker. The
+    # worktree trust grant cannot run here because the worktree is not resolved
+    # yet; it runs with the rest of this adapter's wiring below.
+    AGY_BIN=$(resolve_agy_binary) || exit 1
     ;;
 esac
 
@@ -3484,6 +3696,36 @@ EOF
         fi
       } > "$STATE/$ID.cursor-session"
       ;;
+    agy*)
+      # agy's turn lifecycle is neither a hook nor a launch flag: Antigravity
+      # CLI 1.1.22 ships no lifecycle-hook surface at all, so firstmate folds
+      # agy's own per-conversation SQLite step table instead (bin/fm-busy-lib.sh
+      # owns the fold). Like muse and cursor that is a PULL source with no
+      # writer, so nothing is armed and no record is seeded.
+      #
+      # Two things are set up here, in this order, and both must precede the
+      # pane. First the workspace trust grant: agy reads trustedWorkspaces at
+      # startup, its matching is exact rather than by prefix, and no flag
+      # suppresses the dialog - not even --dangerously-skip-permissions - so
+      # every fresh task worktree would otherwise come up blocked on a prompt no
+      # automated path can answer. Failure is fatal for exactly that reason.
+      # Second the sidecar, which is the whole conversation binding: it pins the
+      # conversations root and this task's own log file, and the classifier reads
+      # the conversation agy names in that log. Recording the resolved root here
+      # also means a later change to the override cannot silently re-point an
+      # already-running task at a different conversation tree.
+      agy_trust_workspace "$WT" || exit 1
+      AGY_CONVERSATIONS_ROOT="${AGY_CONVERSATIONS_ROOT_OVERRIDE:-${HOME:-}/.gemini/antigravity-cli/conversations}"
+      # Retire any predecessor's log before the pane writes a new one: the
+      # binding is "the conversation named in this file", so a stale file left
+      # by an earlier incarnation of this task id would bind the classifier to a
+      # retired pane's conversation.
+      rm -f "$STATE/$ID.agy-log"
+      {
+        printf 'conversations_root=%s\n' "$AGY_CONVERSATIONS_ROOT"
+        printf 'log_file=%s\n' "$STATE/$ID.agy-log"
+      } > "$STATE/$ID.agy-session"
+      ;;
     kimi*)
       # Kimi's Stop hook is global, but it is inert unless cwd contains this
       # task's token pointer and the token resolves through Firstmate's private
@@ -3719,7 +3961,7 @@ sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}"
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 if [ "$HARNESS" = rovo ]; then
@@ -3742,6 +3984,10 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+  agy)
+    LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"}
+    LAUNCH=${LAUNCH//__AGYLOG__/"$(shell_quote "$STATE/$ID.agy-log")"}
+    ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
