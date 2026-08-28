@@ -386,7 +386,7 @@ inbox_answer_commit() {  # <window> <task>
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rest rec cause count tail40 reason ring_rc
-  local answers='' ring_result pane=idle orphan_keys
+  local answers='' ring_result pane=idle orphan_keys orphan_rc
   inbox_answer_commit "$w" "$task"
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
@@ -473,10 +473,18 @@ inbox_steer_check() {  # <window> <task>
         || reason="${reason%)} - it carries the answer to decision key(s) $answers, which stay OPEN until the worker acknowledges the record)"
       fm_wake_append stale "$w" "$reason" || exit 1
       if [ "$cause" = orphaned ]; then
-        if ! fm_task_inbox_record_orphan_escalated "$STATE" "$task" "$rec"; then
-          echo "error: stale wake was queued for $task but its orphaned sidecar could not be marked as surfaced and set aside under handled/orphaned/" >&2
+        orphan_rc=0
+        fm_task_inbox_record_orphan_escalated "$STATE" "$task" "$rec" || orphan_rc=$?
+        # 1 is the fatal one: without the marker this orphan re-escalates on
+        # every poll. 2 means the marker landed and only the cleanup move
+        # failed - already retired from every reader and retried on later
+        # polls, so it must not cost the live supervision cycle.
+        if [ "$orphan_rc" = 1 ]; then
+          echo "error: stale wake was queued for $task but its orphaned sidecar could not be marked as surfaced, so it would escalate again on every poll" >&2
           exit 1
         fi
+        [ "$orphan_rc" = 0 ] \
+          || triage_log "steer-inbox orphan retirement deferred: $task ${rec##*/} could not be moved under handled/orphaned/ yet"
       elif ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
         echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
         exit 1

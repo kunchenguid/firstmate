@@ -38,8 +38,10 @@ A key that names no task, names a task that is not captain-held, or names a task
 
 `bind`, `unbind`, and `binding` record that a captured-answer source feeds this intake, as a private record under `state/decision-bindings/`; an unbound source feeds nothing, so the path is opt-in per source, and `bind` deliberately does not require the source to exist yet.
 
-Two channels feed that one intake today, and both are ordinary callers rather than special cases.
-`bin/fm-send.sh --resolve-key` is the chat channel: its status-log close is unchanged for a key the status log still owns, and a key the status log no longer owns is resolved to a still-open captain-held task - the key as a task id, then the legacy derived identity - and fed as one keyed line.
+Three channels feed that one intake today, and all three are ordinary callers rather than special cases.
+`bin/fm-send.sh --resolve-key` is the chat channel: a key the status log still owns is closed in the status log, and a key it no longer owns is resolved to a still-open captain-held task - the key as a task id, then the legacy derived identity - and fed as one keyed line.
+On the local steering-inbox plane that close is deferred rather than immediate: both the status-log append and the hold feed wait until the worker acknowledges the record carrying the answer, because a doorbell skipped to protect pending composer text means the answer is durably enqueued but not yet seen.
+`bin/fm-task-inbox-lib.sh` is that deferred channel and owns its contract, feeding the intake from `bin/fm-watch.sh` and from `bin/fm-teardown.sh` at the moment of acknowledgement.
 `bin/fm-procevent.sh` is the captured-result channel: after capture, a bound source has its result passed to `bin/fm-procevent-<adapter>.sh answers <result-file>` and whatever that prints is piped into the intake, so any adapter with an `answers` command works and the runner names no adapter, parses no result, and carries no decision rule.
 `bin/fm-procevent-lavish.sh answers` is one such adapter command; it reads only rows tagged `choice`, relays a card's declared close mode, and can never let freeform captain prose forge a task id or a mode.
 

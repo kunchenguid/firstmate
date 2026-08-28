@@ -47,10 +47,13 @@
 #                              is never marked surfaced before its own first
 #                              attempt
 #   <task>.inbox/.NNN.resolve.committed
-#                              per-sidecar ledger of the decision identities
-#                              that sidecar has already durably closed, so a
-#                              retry after a partial commit closes each at
-#                              most once; removed once the sidecar is filed
+#                              per-sidecar ledger of the STATUS KEYS that
+#                              sidecar has already appended to the status log,
+#                              so a retry after a partial commit appends each
+#                              at most once; hold ids are not listed because
+#                              the keyed-answer intake is itself idempotent
+#                              for a replayed answer. Removed once the sidecar
+#                              is filed
 #   <task>.inbox/.orphan-escalated
 #                              append-only names of orphaned sidecars already
 #                              surfaced (the ladder's orphaned cause), so each
@@ -69,10 +72,14 @@
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
 #
-# Sequence numbers are never reused within a task: allocation scans both the
-# inbox root and handled/, so a message is processed at most once per worker
-# lifetime even if every doorbell is duplicated. Concurrent writers serialize
-# on .seq.lock; the worst racing outcome is ordering, never loss.
+# Sequence numbers are never reused within a task: allocation scans every
+# place a sequence can still be occupied from - the inbox root, handled/, and
+# handled/orphaned/, where a retired closure outlives the record a worker
+# removed instead of acknowledging - so a message is processed at most once per
+# worker lifetime even if every doorbell is duplicated, and a reissued sequence
+# can never bind a fresh closure to an already-surfaced orphan's name.
+# Concurrent writers serialize on .seq.lock; the worst racing outcome is
+# ordering, never loss.
 #
 # ACKNOWLEDGEMENT-GATED DECISION CLOSURE (fm_task_inbox_defer_resolution /
 # fm_task_inbox_commit_resolutions). A steer that answers an open keyed
@@ -211,16 +218,30 @@ fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox/handled' "$1" "$2"
 }
 
-# Numeric sequence of one record basename, or fail for a non-record name.
+# Numeric sequence of one record basename (NNN.msg) or one retired orphan
+# closure basename (NNN.resolve, the name handled/orphaned/ files it under), or
+# fail for any other name. A sidecar still in the inbox root (.NNN.resolve) is
+# deliberately not a match: its leading dot leaves a non-numeric stem, and the
+# record it is bound to already carries that sequence.
 fm_task_inbox_seq_of() {  # <basename>
-  local n=${1%.msg}
-  [ "$n" != "$1" ] || return 1
+  local n=$1
+  case "$n" in
+    *.msg) n=${n%.msg} ;;
+    *.resolve) n=${n%.resolve} ;;
+    *) return 1 ;;
+  esac
   case "$n" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$((10#$n))"
 }
 
-# Next unused sequence, scanning the inbox root AND handled/ so an
-# acknowledged sequence is never reissued. Caller must hold .seq.lock.
+# Next unused sequence, scanning EVERY location a sequence can still be
+# occupied from: the inbox root, handled/, and handled/orphaned/. The last one
+# is not optional. A retired orphan closure is the only surviving trace of a
+# record the worker removed instead of acknowledging, so counting only the two
+# .msg locations would reissue that sequence, and the fresh sidecar bound to it
+# would carry a name .orphan-escalated already lists - retiring an answer that
+# was never surfaced and never closing its decision. Caller must hold
+# .seq.lock.
 fm_task_inbox_next_seq() {  # <inbox-dir>
   local dir=$1 max=0 d f n
   for d in "$dir" "$dir/handled"; do
@@ -229,6 +250,11 @@ fm_task_inbox_next_seq() {  # <inbox-dir>
       n=$(fm_task_inbox_seq_of "${f##*/}") || continue
       [ "$n" -le "$max" ] || max=$n
     done
+  done
+  for f in "$dir/handled/orphaned"/*.resolve; do
+    [ -e "$f" ] || continue
+    n=$(fm_task_inbox_seq_of "${f##*/}") || continue
+    [ "$n" -le "$max" ] || max=$n
   done
   printf '%03d' "$((max + 1))"
 }
@@ -430,7 +456,10 @@ fm_task_inbox_resolution_record() {  # <resolution-path>
 }
 
 # Per-sidecar committed-identity ledger: <resolution-path>.committed, one
-# already-closed "status-key:K" or "hold-id:K" identity per line. Scoped to
+# already-appended "status-key:K" identity per line. Status keys only: the
+# status log is append-only text this library must not append twice, whereas a
+# hold id is re-fed to the one keyed-answer intake on every retry and that
+# intake owns its own idempotence for a replayed answer. Scoped to
 # THIS sidecar, never to the status log's text, so a key legitimately reopened
 # and answered again with identical wording is never mistaken for a retry of
 # this same sidecar's own earlier append - a global "does this exact line
@@ -905,10 +934,16 @@ fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
 # to settle it by hand, and left in the root it would keep reading as a
 # pending answer for its keys - so a later, genuine reopening of the same key
 # would be annotated as already answered and still unread. The marker stays
-# the dedupe of record and already retires the sidecar from every reader: if
-# the retirement itself fails, the orphan is still surfaced exactly once, the
-# failure is returned so the caller can name it, and fm_task_inbox_due_action
-# retries the move on later polls so the inbox root heals on its own.
+# the dedupe of record and already retires the sidecar from every reader.
+#
+# The two failures are NOT the same failure, so they return different codes:
+#   1  the marker append failed. Nothing is deduplicated and nothing is
+#      retired, so this orphan would re-escalate on every poll; the caller must
+#      stop rather than wake firstmate forever.
+#   2  the marker landed and only the move into handled/orphaned/ failed. That
+#      is bounded and self-healing: the marker alone already retires the
+#      sidecar from every reader, and fm_task_inbox_due_action retries the move
+#      on later polls, so the caller may note it and keep running.
 fm_task_inbox_record_orphan_escalated() {  # <state-dir> <task-id> <sidecar-path>
   local dir sidecar=$3
   dir=$(fm_task_inbox_dir "$1" "$2")
@@ -917,7 +952,7 @@ fm_task_inbox_record_orphan_escalated() {  # <state-dir> <task-id> <sidecar-path
     [ -d "$dir" ] || return 0
     return 1
   fi
-  _fm_task_inbox_retire_orphan "$dir" "$sidecar"
+  _fm_task_inbox_retire_orphan "$dir" "$sidecar" || return 2
 }
 
 # Move a surfaced orphan out of the inbox root into handled/orphaned/ and drop

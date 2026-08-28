@@ -28,7 +28,8 @@
 #      survives a sloppy glob sweep of the inbox root, a commit that partly
 #      fails closes each key at most once when retried, the surfaced marker
 #      names only the closures a pass actually failed on, a surfaced orphan
-#      that could not be retired never hides a newer one, a captain-held task
+#      that could not be retired never hides a newer one, a retired orphan's
+#      sequence is never reissued to a later answer, a captain-held task
 #      settled through another channel counts as closed, and a hold-id
 #      closure actually closes its captain-held task with the acknowledging
 #      task's provenance when the real watcher commits it.
@@ -835,7 +836,7 @@ test_orphaned_sidecar_escalates_instead_of_going_silent() {
 # reopened later would read as already answered and still unread. Later polls
 # retry the move so the root heals once it can.
 test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan() {
-  local home state rec1 rec2 sidecar1 sidecar2 out pending
+  local home state rec1 rec2 sidecar1 sidecar2 out pending rc
   home="$TMP_ROOT/orphan-shadow"; state="$home/state"; mkdir -p "$state" "$home/data"
   printf 'needs-decision [key=first]: pick\nneeds-decision [key=second]: pick\n' > "$state/t1.status"
   rec1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer one")
@@ -847,8 +848,10 @@ test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan() {
   : > "$state/t1.inbox/handled/orphaned"
   out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$out" = "escalate 0 orphaned $sidecar1" ] || fail "the orphan should escalate first: $out"
-  inbox_lib "$state" fm_task_inbox_record_orphan_escalated "$state" t1 "$sidecar1" \
-    && fail "a retirement whose move failed must be returned, not swallowed"
+  rc=0
+  inbox_lib "$state" fm_task_inbox_record_orphan_escalated "$state" t1 "$sidecar1" || rc=$?
+  [ "$rc" = 2 ] \
+    || fail "a landed marker whose retirement move failed must return the self-healing code 2, not $rc (1 is reserved for the fatal marker-write failure the watcher exits on)"
   [ -e "$sidecar1" ] || fail "the failed retirement should have left the surfaced orphan in the root"
   out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$out" = quiet ] || fail "a surfaced orphan must not re-escalate while it waits for retirement: $out"
@@ -867,6 +870,57 @@ test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan() {
   [ -f "$state/t1.inbox/handled/orphaned/001.resolve" ] \
     || fail "the retried retirement should set the orphan aside under handled/orphaned/:"$'\n'"$(ls -laR "$state/t1.inbox")"
   pass "inbox: a surfaced orphan that could not be retired never shadows a newer orphan, never reads pending, and retires on a later poll"
+}
+
+# A retired orphan closure is the ONLY surviving trace of the sequence it was
+# bound to: the worker removed its record, so neither the inbox root nor
+# handled/ holds that NNN.msg. If sequence allocation counted only those two
+# places it would reissue the sequence, and the next answering steer would park
+# its closure under a name .orphan-escalated already lists - so the fresh,
+# genuinely pending answer would read as an already-surfaced orphan, be
+# quarantined on top of the old one, and close nothing, never annotate, never
+# escalate. That is the exact silent loss this whole machinery exists to end,
+# so the allocator must count handled/orphaned/ too.
+test_a_retired_orphan_sequence_is_never_reissued() {
+  local state rec1 rec2 sidecar1 sidecar2 out pending
+  state="$TMP_ROOT/orphan-seq-reuse/state"; mkdir -p "$state"
+  printf 'needs-decision [key=first]: pick\nneeds-decision [key=second]: pick\n' > "$state/t1.status"
+  rec1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer one")
+  sidecar1=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec1" "answer one" "first" "")
+  [ "${rec1##*/}" = 001.msg ] || fail "fixture: the first record should be 001.msg, got ${rec1##*/}"
+  # The contract violation: the worker removes its record instead of moving it.
+  rm -f "$rec1"
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" = "escalate 0 orphaned $sidecar1" ] || fail "the orphan should escalate: $out"
+  inbox_lib "$state" fm_task_inbox_record_orphan_escalated "$state" t1 "$sidecar1" \
+    || fail "the orphan should have been surfaced and retired"
+  [ -f "$state/t1.inbox/handled/orphaned/001.resolve" ] \
+    || fail "fixture: the surfaced orphan should now sit under handled/orphaned/"
+
+  # Neither the root nor handled/ holds any .msg now, so an allocator that
+  # ignores the quarantine hands out 001 a second time.
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer two")
+  [ "${rec2##*/}" != 001.msg ] \
+    || fail "a sequence whose only surviving trace is a retired orphan closure was reissued, so the next answer would inherit an already-surfaced orphan's name"
+  sidecar2=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec2" "answer two" "second" "")
+
+  pending=$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)
+  [ "$pending" = second ] \
+    || fail "the fresh answer must read as a genuinely pending, undelivered one: $pending"
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" != "escalate 0 orphaned $sidecar2" ] \
+    || fail "the fresh closure was mistaken for an already-surfaced orphan"
+  [ -e "$sidecar2" ] || fail "the fresh closure was quarantined instead of left parked"
+  [ -f "$state/t1.inbox/handled/orphaned/001.resolve" ] \
+    || fail "the earlier quarantined orphan was clobbered"
+
+  # And it still closes normally once the worker acknowledges its record.
+  mv "$rec2" "$state/t1.inbox/handled/"
+  inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null \
+    || fail "the fresh closure should commit on acknowledgement"
+  grep -q '^resolved \[key=second\]: answered: answer two$' "$state/t1.status" \
+    || fail "the fresh answer never closed its decision:"$'\n'"$(cat "$state/t1.status")"
+  pass "inbox: a sequence whose record survives only as a retired orphan closure is never reissued"
 }
 
 # A captain-held task the sidecar answers, driven through the REAL watcher in
@@ -1242,6 +1296,43 @@ test_watcher_escalates_an_orphan_for_hand_closure() {
   pass "watcher: an orphaned closure is surfaced for hand closure by name, then set aside"
 }
 
+# The two orphan-escalation failures are not the same failure. A marker that
+# never lands is fatal - the orphan would escalate on every poll - but a marker
+# that landed while only the cleanup move failed is bounded and self-healing:
+# the marker alone already retires the sidecar from every reader, and a later
+# poll retries the move. Killing the live supervision cycle over that cleanup
+# move costs far more than the move is worth, so the watcher must deliver its
+# wake and exit clean.
+test_watcher_survives_a_failed_orphan_retirement() {
+  local dir state out log pid rec sidecar rc=0
+  dir=$(setup_watch_case orphan-retire-fail)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  prime_status_seen "$state" "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "")
+  rm -f "$rec"
+  # A regular file on the quarantine path makes the retirement move fail while
+  # the marker append still succeeds.
+  : > "$state/t1.inbox/handled/orphaned"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "an orphaned sidecar never escalated through the watcher"; }
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "the watcher died (rc=$rc) over a cleanup move the library already documents as self-healing"
+  grep -qF 'steering-inbox contract violation' "$out" \
+    || fail "the wake should have been delivered before the watcher exited:"$'\n'"$(cat "$out")"
+  grep -Fxq -- "${sidecar##*/}" "$state/t1.inbox/.orphan-escalated" \
+    || fail "the surfaced marker should have landed even though the move failed"
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" = quiet ] || fail "the surfaced orphan must not escalate again on the next poll: $out"
+  pass "watcher: a failed orphan retirement is noted, not fatal, once the surfaced marker lands"
+}
+
 # The other half of the same contract: once the worker acknowledges, the real
 # watcher is what turns the parked closure into the closing resolved line.
 test_watcher_commits_the_closure_on_acknowledgement() {
@@ -1374,6 +1465,7 @@ test_reopened_key_with_identical_answer_closes_again
 test_blocked_escalation_fires_one_poll_after_first_skip
 test_orphaned_sidecar_escalates_instead_of_going_silent
 test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan
+test_a_retired_orphan_sequence_is_never_reissued
 test_watcher_closes_the_captain_held_task_with_its_provenance
 test_commit_treats_a_hold_settled_elsewhere_as_closed
 test_watcher_rerings_idle_pane_quietly
@@ -1386,6 +1478,7 @@ test_watcher_escalates_overdue_on_busy_pane
 test_watcher_overdue_on_idle_pane_says_idle
 test_watcher_escalates_blocked_composer_and_names_the_decision
 test_watcher_escalates_an_orphan_for_hand_closure
+test_watcher_survives_a_failed_orphan_retirement
 test_watcher_commits_the_closure_on_acknowledgement
 test_watcher_surfaces_a_failed_closure_once
 test_watcher_stops_on_an_unwritable_failure_handoff
