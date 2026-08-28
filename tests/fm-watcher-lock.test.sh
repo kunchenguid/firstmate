@@ -61,6 +61,15 @@ wait_for_glob_absent() {
   return 1
 }
 
+wait_for_other_pids_exit() {  # <winner-pid> <space-delimited-pid-list>
+  local winner=$1 pid_list=${2:-} pid
+  for pid in $pid_list; do
+    [ -n "$pid" ] || continue
+    [ "$pid" = "$winner" ] && continue
+    wait_for_exit "$pid" 100 >/dev/null 2>&1 || return 1
+  done
+}
+
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
   dir=$(make_case singleton)
@@ -492,7 +501,7 @@ SH
 }
 
 test_msys_lock_single_winner_under_concurrency() {
-  local dir state fakebin lockdir marker ready release ln_used i pids pid wins rc
+  local dir state fakebin lockdir marker ready release ln_used i pids pid wins rc winner_pid
   dir=$(make_case msys-lock-concurrency)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -537,6 +546,14 @@ test_msys_lock_single_winner_under_concurrency() {
     done
     fail "expected exactly one MSYS lock winner under concurrency, got $wins"
   }
+  winner_pid=$(sed -n '1p' "$marker" | tr -d '[:space:]')
+  [ -n "$winner_pid" ] || {
+    : > "$release"
+    for pid in $pids; do
+      wait "$pid" 2>/dev/null || true
+    done
+    fail "MSYS winner did not record its pid"
+  }
   [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || {
     : > "$release"
     for pid in $pids; do
@@ -544,11 +561,14 @@ test_msys_lock_single_winner_under_concurrency() {
     done
     fail "MSYS winner did not publish a directory lock"
   }
+  wait_for_other_pids_exit "$winner_pid" "$pids" || {
+    : > "$release"
+    wait "$winner_pid" 2>/dev/null || true
+    fail "MSYS losing contenders did not finish cleanly"
+  }
   if ! wait_for_glob_absent "$state/.contend.lock.owner.*"; then
     : > "$release"
-    for pid in $pids; do
-      wait "$pid" 2>/dev/null || true
-    done
+    wait "$winner_pid" 2>/dev/null || true
     fail "MSYS losing contenders left owner directories behind"
   fi
   [ -e "$ln_used" ] || {
@@ -560,9 +580,7 @@ test_msys_lock_single_winner_under_concurrency() {
   }
   : > "$release"
   rc=0
-  for pid in $pids; do
-    wait "$pid" || rc=$?
-  done
+  wait "$winner_pid" || rc=$?
   [ "$rc" -eq 0 ] || fail "MSYS concurrent lock worker failed (rc=$rc)"
   [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || fail "MSYS winner did not release the directory lock"
   PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
