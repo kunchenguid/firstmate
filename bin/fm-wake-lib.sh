@@ -352,10 +352,13 @@ fm_lock_points_to_owner() {
   [ "$actual" = "$ownerdir" ]
 }
 
-# Git Bash can report `ln -s <directory> <lock>` success while copying the
-# directory instead of publishing a readable symlink.
-# A legacy token carries the copied directory's pid so recovery can fence an
-# allowed `.steal` lock with the same identity check as a symlink owner path.
+fm_lock_uses_legacy_directory() {
+  case "$_FM_UNAME" in
+    MSYS*|MINGW*|CYGWIN*) return 0 ;;
+  esac
+  return 1
+}
+
 fm_lock_publication_matches() {  # <lockdir> <owner-path-or-legacy-token>
   local lockdir=$1 owner=$2 pid
   case "$owner" in
@@ -375,23 +378,12 @@ fm_lock_discard_owner() {
   rmdir "$ownerdir" 2>/dev/null || true
 }
 
-# A raced `ln -s` against an existing holder can publish our prepared owner
-# beneath that holder instead of at the lock path on GNU/MSYS variants.
-# Clean only the exact nested symlink or copied owner directory that still
-# proves our own pid, so contention never removes a foreign holder payload.
-fm_lock_remove_stray_owner_artifact() {
-  local lockdir=$1 ownerdir=$2 stray mypid stray_pid
+fm_lock_remove_stray_owner_link() {
+  local lockdir=$1 ownerdir=$2 stray
   stray="$lockdir/$(basename "$ownerdir")"
   if [ -L "$stray" ] && [ "$(readlink "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
     rm -f "$stray" 2>/dev/null || true
-    return 0
   fi
-  [ -d "$stray" ] && [ ! -L "$stray" ] || return 0
-  mypid=${BASHPID:-$$}
-  stray_pid=$(cat "$stray/pid" 2>/dev/null || true)
-  [ "$stray_pid" = "$mypid" ] || return 0
-  fm_lock_clean_known_files "$stray"
-  rmdir "$stray" 2>/dev/null || true
 }
 
 fm_lock_claim_blocked_by_steal() {
@@ -430,9 +422,30 @@ fm_lock_claim() {
   return 0
 }
 
-fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir mypid copied_pid legacy_owner
+fm_lock_try_create_legacy() {
+  local lockdir=$1 allowed_steal_owner=${2:-} mypid
   FM_LOCK_OWNER_DIR=
+  mkdir "$lockdir" 2>/dev/null || return 1
+  if ! fm_lock_prepare_owner "$lockdir"; then
+    fm_lock_discard_owner "$lockdir"
+    return 1
+  fi
+  if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+    fm_lock_discard_owner "$lockdir"
+    return 1
+  fi
+  mypid=${BASHPID:-$$}
+  FM_LOCK_OWNER_DIR="legacy:$mypid"
+  return 0
+}
+
+fm_lock_try_create() {
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  FM_LOCK_OWNER_DIR=
+  if fm_lock_uses_legacy_directory; then
+    fm_lock_try_create_legacy "$lockdir" "$allowed_steal_owner"
+    return $?
+  fi
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
@@ -442,33 +455,16 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null; then
-    if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-      if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
-        FM_LOCK_OWNER_DIR=$ownerdir
-        return 0
-      fi
-      if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-        rm -f "$lockdir" 2>/dev/null || true
-      fi
-    elif [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
-      mypid=${BASHPID:-$$}
-      copied_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-      if [ "$copied_pid" = "$mypid" ]; then
-        if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
-          fm_lock_clean_known_files "$lockdir"
-          rmdir "$lockdir" 2>/dev/null || true
-        else
-          legacy_owner=legacy:$mypid
-          fm_lock_discard_owner "$ownerdir"
-          FM_LOCK_OWNER_DIR=$legacy_owner
-          return 0
-        fi
-      fi
+  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+    if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
+      FM_LOCK_OWNER_DIR=$ownerdir
+      return 0
     fi
-    fm_lock_remove_stray_owner_artifact "$lockdir" "$ownerdir"
+    if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+      rm -f "$lockdir" 2>/dev/null || true
+    fi
   else
-    fm_lock_remove_stray_owner_artifact "$lockdir" "$ownerdir"
+    fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
