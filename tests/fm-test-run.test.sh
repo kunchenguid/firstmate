@@ -705,7 +705,7 @@ SH
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
 # failure, not a note in the log.
 test_max_wall_ms_is_a_result_not_advice() {
-  local tmp repo runner fast rc
+  local tmp repo runner fast final fifo rc runner_pid waited summary_duration budget_duration
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
@@ -750,6 +750,43 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--max-wall-ms with a non-number must be refused (exit 2), got $rc"
+
+  final=tests/fm-finalization-fixture.test.sh
+  fifo="$tmp/timing.fifo"
+  cat >"$repo/$final" <<'SH'
+#!/usr/bin/env bash
+echo "ok - finalization fixture"
+SH
+  chmod +x "$repo/$final"
+  mkfifo "$fifo"
+  set +e
+  "$runner" --max-wall-ms 2000 --json "$fifo" "$final" \
+    >"$tmp/finalization.out" 2>"$tmp/finalization.err" &
+  runner_pid=$!
+  set -e
+  waited=0
+  while kill -0 "$runner_pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  if kill -0 "$runner_pid" 2>/dev/null; then
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid" 2>/dev/null || true
+    fail "blocking JSON finalization outlived the invocation budget"
+  fi
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "blocking JSON finalization must fail the budgeted run"
+  summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/finalization.out")
+  budget_duration=$(awk '/^FM_TEST_BUDGET / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/finalization.out")
+  [ -n "$summary_duration" ] && [ "$summary_duration" -lt 2000 ] \
+    || fail "suite duration unexpectedly included blocking finalization: $(cat "$tmp/finalization.out")"
+  [ -n "$budget_duration" ] && [ "$budget_duration" -gt 2000 ] \
+    || fail "budget duration omitted blocking finalization: $(cat "$tmp/finalization.out")"
+  grep -Fq 'timing artifact finalization failed' "$tmp/finalization.err" \
+    || fail "blocking finalization failure was not reported: $(cat "$tmp/finalization.err")"
 
   rm -rf "$tmp"
   pass "--max-wall-ms fails an over-budget run and refuses a malformed budget"
@@ -888,6 +925,68 @@ SH
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
+test_signal_cleanup_reaps_concurrent_descendants() {
+  local tmp repo runner track unrelated runner_pid rc waited pid_file child
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-signal.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  track="$tmp/track"
+  mkdir -p "$repo/bin" "$repo/tests" "$track"
+  cp "$RUNNER" "$runner"
+  for script in fm-brief.test.sh fm-composer-lib.test.sh; do
+    cat >"$repo/tests/$script" <<'SH'
+#!/usr/bin/env bash
+name=$(basename "$0")
+sh -c 'trap "" TERM; echo $$ >"$1"; sleep 600' _ "$TRACK_DIR/$name.pid" &
+wait
+SH
+    chmod +x "$repo/tests/$script"
+  done
+  sleep 600 &
+  unrelated=$!
+  set +e
+  TRACK_DIR="$track" "$runner" --jobs 2 \
+    tests/fm-brief.test.sh tests/fm-composer-lib.test.sh \
+    >"$tmp/out" 2>"$tmp/err" &
+  runner_pid=$!
+  set -e
+  waited=0
+  while [ "$(find "$track" -name '*.pid' -type f 2>/dev/null | wc -l | tr -d ' ')" -lt 2 ] \
+    && [ "$waited" -lt 100 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  if [ "$waited" -ge 100 ]; then
+    kill -TERM "$runner_pid" "$unrelated" 2>/dev/null || true
+    wait "$runner_pid" "$unrelated" 2>/dev/null || true
+    fail "concurrent cleanup fixtures did not start"
+  fi
+  kill -TERM "$runner_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || fail "SIGTERM runner exit must be 143, got $rc"
+  for pid_file in "$track"/*.pid; do
+    child=$(cat "$pid_file")
+    waited=0
+    while kill -0 "$child" 2>/dev/null && [ "$waited" -lt 50 ]; do
+      sleep 0.05
+      waited=$((waited + 1))
+    done
+    if kill -0 "$child" 2>/dev/null; then
+      kill -KILL "$child" "$unrelated" 2>/dev/null || true
+      wait "$unrelated" 2>/dev/null || true
+      fail "SIGTERM left tracked test descendant $child running"
+    fi
+  done
+  kill -0 "$unrelated" 2>/dev/null || fail "runner cleanup killed an unrelated sibling process"
+  kill -TERM "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  rm -rf "$tmp"
+  pass "runner signals reap only tracked concurrent descendants"
+}
+
 test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
@@ -985,5 +1084,6 @@ test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
+test_signal_cleanup_reaps_concurrent_descendants
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json

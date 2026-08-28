@@ -1746,7 +1746,96 @@ RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
-trap 'rm -rf "$RUN_TMP"' EXIT
+declare -a WORKER_PIDS=()
+declare -a WORKER_IDX=()
+declare -a WORKER_SCRIPTS=()
+declare -a BOUNDED_PIDS=()
+RUN_CLEANED=0
+
+remove_bounded_pid() {
+  local want=$1 slot
+  for slot in "${!BOUNDED_PIDS[@]}"; do
+    [ "${BOUNDED_PIDS[$slot]}" = "$want" ] && unset 'BOUNDED_PIDS[slot]'
+  done
+}
+
+descendants_of_pid() {
+  local root=$1
+  ps -eo pid=,ppid= 2>/dev/null | awk -v root="$root" '
+    { pid[NR] = $1; ppid[NR] = $2 }
+    END {
+      seen[root] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= NR; i++) {
+          if (seen[ppid[i]] && !seen[pid[i]]) {
+            seen[pid[i]] = 1
+            print pid[i]
+            changed = 1
+          }
+        }
+      }
+    }
+  '
+}
+
+terminate_tracked_roots() {
+  local tree="$RUN_TMP/cleanup-pids" pid any=0
+  : >"$tree"
+  for pid in "$@"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      any=1
+      descendants_of_pid "$pid" >>"$tree"
+    fi
+  done
+  sort -u "$tree" -o "$tree"
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+  done <"$tree"
+  for pid in "$@"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  [ "$any" -eq 0 ] || sleep 0.2
+  for pid in "$@"; do
+    descendants_of_pid "$pid" >>"$tree"
+  done
+  sort -u "$tree" -o "$tree"
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
+  done <"$tree"
+  for pid in "$@"; do
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  rm -f "$tree"
+}
+
+cleanup_run() {
+  local roots=() slot
+  [ "$RUN_CLEANED" -eq 0 ] || return 0
+  RUN_CLEANED=1
+  for slot in "${!WORKER_PIDS[@]}"; do
+    roots+=("${WORKER_PIDS[$slot]}")
+  done
+  for slot in "${!BOUNDED_PIDS[@]}"; do
+    roots+=("${BOUNDED_PIDS[$slot]}")
+  done
+  [ "${#roots[@]}" -eq 0 ] || terminate_tracked_roots "${roots[@]}"
+  rm -rf "$RUN_TMP"
+}
+
+signal_exit() {
+  local code=$1
+  trap '' HUP INT TERM
+  cleanup_run
+  exit "$code"
+}
+
+trap cleanup_run EXIT
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
 
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
@@ -1826,25 +1915,32 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc
+  local rc pid
   : "$id"
-  set +e
-  if [ "$stream" -eq 1 ]; then
-    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
-        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
-      rc=$?
-    else
+  (
+    trap - EXIT HUP INT TERM
+    set +e
+    if [ "$stream" -eq 1 ]; then
+      if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+        fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+          'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
+        exit $?
+      fi
       bash "$script" 2>&1 | tee "$out"
-      rc=${PIPESTATUS[0]}
+      exit "${PIPESTATUS[0]}"
     fi
-  elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
-    rc=$?
-  else
+    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+      exit $?
+    fi
     bash "$script" >"$out" 2>&1
-    rc=$?
-  fi
+  ) &
+  pid=$!
+  BOUNDED_PIDS+=("$pid")
+  set +e
+  wait "$pid"
+  rc=$?
+  remove_bounded_pid "$pid"
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
       "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
@@ -1890,9 +1986,6 @@ else
   # Bounded concurrent execution for proven-isolated scripts only. Each worker
   # gets a private mode-0700 TMPDIR so mktemp roots cannot collide. Retries are
   # never used as a green strategy.
-  declare -a WORKER_PIDS=()
-  declare -a WORKER_IDX=()
-  declare -a WORKER_SCRIPTS=()
   worker_n=0
   active_workers=0
 
@@ -1901,13 +1994,13 @@ else
     pid=${WORKER_PIDS[$slot]}
     idx=${WORKER_IDX[$slot]}
     script=${WORKER_SCRIPTS[$slot]}
+    set +e
+    wait "$pid"
+    set -e
     unset 'WORKER_PIDS[slot]'
     unset 'WORKER_IDX[slot]'
     unset 'WORKER_SCRIPTS[slot]'
     active_workers=$((active_workers - 1))
-    set +e
-    wait "$pid"
-    set -e
     work="$RUN_TMP/w$idx"
     rc=$(cat "$work/exit" 2>/dev/null || echo 1)
     duration=$(cat "$work/duration_ms" 2>/dev/null || echo 0)
@@ -1968,6 +2061,7 @@ else
     printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
       "$(now_iso)" "$script" "$family" "$expected"
     (
+      trap - EXIT HUP INT TERM
       set +e
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
@@ -2012,18 +2106,6 @@ fi
 printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s\n' \
   "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION"
 
-# The wall-clock budget is a first-class result, not advice. A suite that still
-# produces green scripts but takes longer than its caller can afford is the
-# regression this guard exists to catch: an agent-invoked verification that
-# outgrows its invocation budget gets killed mid-run and retried invisibly.
-if [ -n "$MAX_WALL_MS" ]; then
-  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$RUN_DURATION"
-  if [ "$RUN_DURATION" -gt "$MAX_WALL_MS" ]; then
-    log "wall-clock budget exceeded: ${RUN_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
-    AGG_RC=1
-  fi
-fi
-
 if [ -s "$FAMILIES_TSV" ]; then
   # Stable family summary order by name.
   sort -t$'\t' -k1,1 "$FAMILIES_TSV" | while IFS=$'\t' read -r name count duration failed_count; do
@@ -2050,11 +2132,52 @@ if [ -n "$JSON_PATH" ]; then
   else
     : >"$FAMILIES_TSV"
   fi
-  write_json_artifact "$JSON_PATH" \
-    "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
-    "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
-    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
-  log "wrote timing artifact: $JSON_PATH"
+  json_status="$RUN_TMP/json-status"
+  (
+    trap - EXIT HUP INT TERM
+    set +e
+    write_json_artifact "$JSON_PATH" \
+      "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
+      "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
+      "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
+    printf '%s\n' "$?" >"$json_status"
+  ) &
+  json_pid=$!
+  BOUNDED_PIDS+=("$json_pid")
+  if [ -n "$MAX_WALL_MS" ]; then
+    while [ ! -f "$json_status" ]; do
+      finalization_now=$(now_ms)
+      if [ "$((finalization_now - RUN_STARTED_MS))" -gt "$MAX_WALL_MS" ]; then
+        terminate_tracked_roots "$json_pid"
+        break
+      fi
+      sleep 0.01
+    done
+  fi
+  set +e
+  wait "$json_pid" 2>/dev/null
+  json_rc=$?
+  set -e
+  remove_bounded_pid "$json_pid"
+  if [ -f "$json_status" ]; then
+    json_rc=$(cat "$json_status" 2>/dev/null || printf '1')
+  fi
+  if [ "$json_rc" -eq 0 ]; then
+    log "wrote timing artifact: $JSON_PATH"
+  else
+    log "timing artifact finalization failed: $JSON_PATH"
+    AGG_RC=1
+  fi
+fi
+
+if [ -n "$MAX_WALL_MS" ]; then
+  BUDGET_DURATION=$(($(now_ms) - RUN_STARTED_MS))
+  [ "$BUDGET_DURATION" -ge 0 ] || BUDGET_DURATION=0
+  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$BUDGET_DURATION"
+  if [ "$BUDGET_DURATION" -gt "$MAX_WALL_MS" ]; then
+    log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+    AGG_RC=1
+  fi
 fi
 
 exit "$AGG_RC"
