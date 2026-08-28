@@ -252,6 +252,49 @@ SH
   pass "away checks retain private evidence and hand off once until acknowledgement"
 }
 
+test_away_process_event_reannouncements_handoff_once() {
+  local dir state fakebin ack old_daemon_dir count
+  dir=$(make_supercase away-procevent-reannouncement)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ack="$dir/acked"
+  mkdir -p "$fakebin" "$state/procevent-inbox"
+  printf 'lavish\n' > "$state/procevent-inbox/review-source.7.adapter"
+  printf 'lavish\n' > "$state/procevent-inbox/review-source.8.adapter"
+  cat > "$fakebin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -gt 0 ]; then
+  : > "$FM_TEST_ACK"
+  exit 0
+fi
+if [ ! -e "$FM_TEST_ACK" ]; then
+  printf '1700000000\t4\tcheck\tprocevent:review-source:7\t%s\n' 'check: procevent lavish review-source 7'
+  printf '1700000000\t5\tcheck\tprocevent:review-source:7\t%s\n' 'check: procevent lavish review-source 7'
+  printf '1700000000\t6\tcheck\tprocevent:review-source:8\t%s\n' 'check: procevent lavish review-source 8'
+fi
+printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 6 --recovery-generation fixture\n' >&2
+SH
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  old_daemon_dir=$FM_DAEMON_DIR
+  FM_DAEMON_DIR=$fakebin
+  FM_TEST_ACK="$ack" FM_ESCALATE_BATCH_SECS=90 \
+    handle_durable_wakes 'check: procevent lavish review-source 7' "$state" \
+    || fail "away process-event routing failed"
+  [ ! -e "$ack" ] || fail "away daemon acknowledged process-event evidence before handling"
+  count=$(grep -c 'Lavish review: a captured result is ready now.' "$state/.subsuper-escalations")
+  [ "$count" -eq 2 ] \
+    || fail "away daemon did not deduplicate one result while preserving a distinct result: $count"
+  [ "$(find "$state" -maxdepth 1 -name '.subsuper-check-handoff-*' | wc -l | tr -d ' ')" -eq 3 ] \
+    || fail "away daemon did not bind every retained queue row to a handoff marker"
+  FM_TEST_ACK="$ack" FM_ESCALATE_BATCH_SECS=90 \
+    handle_durable_wakes 'check: procevent lavish review-source 7' "$state" \
+    || fail "away process-event replay routing failed"
+  count=$(grep -c 'Lavish review: a captured result is ready now.' "$state/.subsuper-escalations")
+  [ "$count" -eq 2 ] || fail "away daemon replayed a retained process-event result: $count"
+  FM_DAEMON_DIR=$old_daemon_dir
+  pass "away process-event reannouncements hand off once per authenticated result"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -2212,6 +2255,7 @@ test_classify_terminal_signal_escalates
 test_classify_buried_open_decision_escalates
 test_classify_check_and_unknown_escalate
 test_away_check_retains_private_wake_until_handling
+test_away_process_event_reannouncements_handoff_once
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates

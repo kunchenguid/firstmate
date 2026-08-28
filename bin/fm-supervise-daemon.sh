@@ -1528,10 +1528,21 @@ check_handoff_marker() {  # <state> <epoch> <sequence>
   printf '%s/.subsuper-check-handoff-%s-%s' "$1" "$2" "$3"
 }
 
+durable_wake_procevent_identity() {  # <state> <queue-key> <payload>
+  local state=$1 key=$2 payload=$3 adapter source result_sequence extra
+  case "$payload" in "check: procevent "*) ;; *) return 1 ;; esac
+  payload=${payload#"check: procevent "}
+  read -r adapter source result_sequence extra <<<"$payload"
+  [ -z "$extra" ] || return 1
+  [ "$key" = "procevent:$source:$result_sequence" ] || return 1
+  fm_human_notify_procevent_label "$state" "$source" "$result_sequence" "$adapter" >/dev/null || return 1
+  printf '%s:%s' "$source" "$result_sequence"
+}
+
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
   local handled=0 defer_ack=0 ack_through ack_generation marker marker_id active_check_handoffs=' '
-  local handoff_failed=0 marker_tmp
+  local handoff_failed=0 marker_tmp procevent_identity duplicate_procevent seen_procevents=' '
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1557,8 +1568,16 @@ handle_durable_wakes() {  # <watcher-reason> <state>
       marker=$(check_handoff_marker "$state" "$epoch" "$sequence")
       marker_id="$epoch-$sequence"
       active_check_handoffs="$active_check_handoffs$marker_id "
+      duplicate_procevent=0
+      if [ "$kind" = check ] \
+        && procevent_identity=$(durable_wake_procevent_identity "$state" "$key" "$payload"); then
+        case "$seen_procevents" in
+          *" $procevent_identity "*) duplicate_procevent=1 ;;
+          *) seen_procevents="$seen_procevents$procevent_identity " ;;
+        esac
+      fi
       if [ ! -e "$marker" ]; then
-        handle_wake "$payload" "$state"
+        [ "$duplicate_procevent" -eq 1 ] || handle_wake "$payload" "$state"
         marker_tmp="$marker.tmp.$$"
         if ! printf '%s\n%s\n' "$epoch" "$sequence" > "$marker_tmp" || ! mv -f "$marker_tmp" "$marker"; then
           rm -f "$marker_tmp"
