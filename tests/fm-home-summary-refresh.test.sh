@@ -422,3 +422,65 @@ elapsed=$(( $(date +%s) - started ))
 [ "$elapsed" -lt 6 ] \
   || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
 pass "best-effort refresh bounds state initialization"
+
+SIGNALBIN="$TMP_ROOT/signalbin"
+SIGNAL_MARKER="$TMP_ROOT/worker-signaled"
+REAL_PERL=$(command -v perl)
+mkdir -p "$SIGNALBIN"
+cat > "$SIGNALBIN/perl" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "$FM_TEST_SIGNAL_MARKER" ]; then
+  : > "$FM_TEST_SIGNAL_MARKER"
+  exit 143
+fi
+exec "$FM_TEST_REAL_PERL" "$@"
+SH
+chmod +x "$SIGNALBIN/perl"
+rm -f "$HOME_DIR/state/.home-summary-refresh.log"
+PATH="$SIGNALBIN:$FAKEBIN:$PATH" FM_TEST_REAL_PERL="$REAL_PERL" \
+  FM_TEST_SIGNAL_MARKER="$SIGNAL_MARKER" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" "$WRITER" --best-effort \
+  || fail "worker termination changed the best-effort caller result"
+grep -F 'refresh worker failed with exit 143' \
+  "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
+  || fail "worker termination was not logged at the parent boundary"
+pass "best-effort refresh logs worker termination"
+
+rm -f "$SIGNAL_MARKER" "$HOME_DIR/state/.home-summary-refresh.log"
+mkdir "$HOME_DIR/state/.home-summary-refresh.log"
+PATH="$SIGNALBIN:$FAKEBIN:$PATH" FM_TEST_REAL_PERL="$REAL_PERL" \
+  FM_TEST_SIGNAL_MARKER="$SIGNAL_MARKER" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" WRITER="$WRITER" python3 - <<'PY'
+import os
+import subprocess
+import time
+
+read_fd, write_fd = os.pipe()
+os.set_blocking(write_fd, False)
+try:
+    while True:
+        os.write(write_fd, b"x" * 4096)
+except BlockingIOError:
+    pass
+os.set_blocking(write_fd, True)
+started = time.monotonic()
+try:
+    result = subprocess.run(
+        [os.environ["WRITER"], "--best-effort"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=write_fd,
+        env=os.environ,
+        timeout=7,
+    )
+finally:
+    os.close(write_fd)
+    os.close(read_fd)
+elapsed = time.monotonic() - started
+if result.returncode != 0:
+    raise SystemExit(f"blocked failure logger changed caller result: {result.returncode}")
+if elapsed >= 6:
+    raise SystemExit(f"blocked failure logger exceeded its bound: {elapsed:.2f}s")
+PY
+[ "$?" -eq 0 ] || fail "best-effort failure reporting was not fully bounded"
+pass "best-effort refresh bounds failure reporting fallback"

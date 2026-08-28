@@ -60,7 +60,7 @@ case "${1:-}" in
     HOME_SUMMARY_MODE=worker
     BEST_EFFORT=${FM_HOME_SUMMARY_WORKER_BEST_EFFORT:-0}
     ;;
-  --_log-timeout) HOME_SUMMARY_MODE=log-timeout ;;
+  --_log-failure) HOME_SUMMARY_MODE=log-failure ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -194,8 +194,8 @@ home_summary_log_failure() {
   fi
 }
 
-if [ "$HOME_SUMMARY_MODE" = log-timeout ]; then
-  HOME_SUMMARY_ERROR="refresh exceeded its ${HOME_SUMMARY_TIMEOUT}-second deadline"
+if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
+  HOME_SUMMARY_ERROR=${FM_HOME_SUMMARY_PARENT_ERROR:-"refresh worker failed"}
   home_summary_log_failure
   exit 0
 fi
@@ -208,18 +208,21 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
   else
     refresh_rc=$?
   fi
-  if [ "$refresh_rc" -ne 124 ]; then
-    exit "$refresh_rc"
-  fi
   if [ "$BEST_EFFORT" -eq 1 ]; then
-    fm_run_timed 2 env FM_HOME_SUMMARY_TIMEOUT="$HOME_SUMMARY_TIMEOUT" \
-      "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_log-timeout >/dev/null 2>&1 \
-      || printf 'fm-home-summary-refresh: refresh exceeded its %s-second deadline\n' \
-        "$HOME_SUMMARY_TIMEOUT" >&2
+    if [ "$refresh_rc" -eq 124 ]; then
+      parent_error="refresh exceeded its ${HOME_SUMMARY_TIMEOUT}-second deadline"
+    else
+      parent_error="refresh worker failed with exit $refresh_rc"
+    fi
+    fm_run_timed 2 env \
+      FM_HOME_SUMMARY_PARENT_ERROR="$parent_error" \
+      "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_log-failure >/dev/null || true
     exit 0
   fi
-  printf 'fm-home-summary-refresh: refresh exceeded its %s-second deadline\n' \
-    "$HOME_SUMMARY_TIMEOUT" >&2
+  if [ "$refresh_rc" -eq 124 ]; then
+    printf 'fm-home-summary-refresh: refresh exceeded its %s-second deadline\n' \
+      "$HOME_SUMMARY_TIMEOUT" >&2
+  fi
   exit "$refresh_rc"
 fi
 
