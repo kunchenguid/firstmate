@@ -116,8 +116,10 @@ resolve_base_ref() {
   done
   return 1
 }
-BASE_REF=$(resolve_base_ref) \
-  || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
+if ! BASE_REF=$(resolve_base_ref); then
+  printf '%s\n' 'skip: fm-backend baseline requires local main or origin/main'
+  exit 0
+fi
 
 # Newest first-parent revision whose bin/backends/tmux.sh still uses the
 # pre-exact permissive kill-window target. Content-addressed from history so the
@@ -522,14 +524,22 @@ test_backend_source_shell_portable() {
 }
 
 test_backend_source_missing_adapter_returns_to_caller() {
-  local saved_dir out
+  local saved_dir out rc had_errexit
   saved_dir=$FM_BACKEND_LIB_DIR
   FM_BACKEND_LIB_DIR="$TMP_ROOT/missing-adapter"
   mkdir -p "$FM_BACKEND_LIB_DIR/backends"
+  case $- in
+    *e*) had_errexit=1 ;;
+    *) had_errexit=0 ;;
+  esac
   set +e
   out=$(fm_backend_source herdr 2>&1)
-  local rc=$?
-  set -e
+  rc=$?
+  if [ "$had_errexit" -eq 1 ]; then
+    set -e
+  else
+    set +e
+  fi
   FM_BACKEND_LIB_DIR=$saved_dir
   [ "$rc" -ne 0 ] || fail "fm_backend_source should refuse a missing adapter"
   [ -z "$out" ] || fail "fm_backend_source should leave refusal reporting to its caller"
