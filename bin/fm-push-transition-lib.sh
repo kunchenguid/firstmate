@@ -165,7 +165,7 @@ mark_surfaced() {  # <status-file>
 }
 
 fm_push_transition_apply_status() {  # <state> <window> <backend-status>
-  local state=$1 window=$2 to=$3 task status_file last line
+  local state=$1 window=$2 to=$3 task status_file last line class
   FM_PUSH_TRANSITION_STATUS_LINE=
   task=$(window_to_task "$window" "$state")
   [ -n "$task" ] || return 1
@@ -178,6 +178,11 @@ fm_push_transition_apply_status() {  # <state> <window> <backend-status>
       line='working: live supervision reported active work'
       ;;
     blocked)
+      if class=$(fm_human_notify_class "$last" 2>/dev/null); then
+        [ "$class" = blocker ] || return 0
+      elif status_is_terminal_verb "$last" || status_is_captain_relevant "$last"; then
+        return 0
+      fi
       if [ "$(status_line_verb "$last")" = blocked ]; then
         line=$last
       else
@@ -218,6 +223,11 @@ handle_push_transition() {  # <backend> <session> <record>
   fi
   if [ "$to" = blocked ]; then
     fm_push_transition_apply_status "$STATE" "$window" "$to" || exit 1
+    if [ -z "$FM_PUSH_TRANSITION_STATUS_LINE" ]; then
+      triage_log "absorbed push $to (current human outcome takes precedence): $window"
+      fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+      return
+    fi
     last=$FM_PUSH_TRANSITION_STATUS_LINE
   fi
   if fm_human_notify_class "$last" >/dev/null 2>&1; then

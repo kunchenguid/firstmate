@@ -132,7 +132,14 @@ test_classify_buried_open_decision_escalates() {
   [ "$(printf '%s' "$out" | awk -F 'new failure evidence surfaced' '{ print NF - 1 }')" -eq 1 ] \
     || fail "away signal repeated one logical failure in its digest: $out"
   case "$out" in *'compiler crashed'*) fail "away signal exposed private failure evidence: $out" ;; esac
-  pass "away signal classification folds and deduplicates unread conditions"
+  printf 'PR ready: inspect /home/private/state/task and endpoint https://internal.example\n' > "$state/t.status"
+  cp "$state/t.status" "$state/t.away-unread"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in escalate\|*'new actionable update surfaced.'*'Action required:'*) ;;
+    *) fail "legacy actionable status did not produce a readable generic escalation: $out" ;;
+  esac
+  case "$out" in *'/home/private/'*|*'internal.example'*) fail "legacy actionable status exposed private evidence: $out" ;; esac
+  pass "away signal classification folds, deduplicates, and sanitizes unread conditions"
 }
 
 test_classify_check_and_unknown_escalate() {
@@ -192,7 +199,9 @@ if [ "$#" -gt 0 ]; then
   : > "$FM_TEST_ACK"
   exit 0
 fi
-printf '1700000000\t4\tcheck\t%s\t%s\n' "$FM_TEST_KEY" "$FM_TEST_PAYLOAD"
+if [ ! -e "$FM_TEST_ACK" ]; then
+  printf '1700000000\t4\tcheck\t%s\t%s\n' "$FM_TEST_KEY" "$FM_TEST_PAYLOAD"
+fi
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 4 --recovery-generation fixture\n' >&2
 SH
   chmod +x "$fakebin/fm-wake-drain.sh"
@@ -202,7 +211,6 @@ SH
   FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
     FM_ESCALATE_BATCH_SECS=90 handle_durable_wakes "$payload" "$state" \
     || fail "away check routing failed"
-  FM_DAEMON_DIR=$old_daemon_dir
   [ ! -e "$ack" ] || fail "away daemon acknowledged private check evidence before its handling turn"
   grep -F 'Relay: an authenticated state check produced a new result now.' "$state/.subsuper-escalations" >/dev/null \
     || fail "away daemon did not publish a readable Relay presentation"
@@ -214,7 +222,20 @@ SH
   case "$replay" in *'x-mention private-request-7'*) ;;
     *) fail "private check result was unavailable to the handling turn: $replay" ;;
   esac
-  pass "away checks retain private evidence until the handling turn"
+  FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
+    FM_ESCALATE_BATCH_SECS=90 handle_durable_wakes "$payload" "$state" \
+    || fail "away check replay routing failed"
+  [ "$(grep -c 'Relay: an authenticated state check' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "away daemon handed off the same retained check more than once"
+  FM_TEST_ACK="$ack" "$fakebin/fm-wake-drain.sh" --ack-through 4 --recovery-generation fixture
+  FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
+    FM_ESCALATE_BATCH_SECS=90 handle_durable_wakes heartbeat "$state" \
+    || fail "away check acknowledgement reconciliation failed"
+  if compgen -G "$state/.subsuper-check-handoff-*" >/dev/null; then
+    fail "away check handoff marker survived handler acknowledgement"
+  fi
+  FM_DAEMON_DIR=$old_daemon_dir
+  pass "away checks retain private evidence and hand off once until acknowledgement"
 }
 
 test_stale_transient_self_records_marker() {

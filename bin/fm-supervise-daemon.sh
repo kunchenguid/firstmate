@@ -377,14 +377,13 @@ daemon_window_human_ref() {  # <window> <state>
 }
 
 daemon_terminal_summary() {  # <task> <state> <status-line>
-  local task=$1 state=$2 line=$3 display verb note
+  local task=$1 state=$2 line=$3 display verb
   display=$(daemon_task_human_ref "$task" "$state")
   verb=$(status_line_verb "$line")
-  note=$(status_line_note "$line")
   case "$verb" in
-    failed) printf '%s: new failure evidence surfaced - %s. Action required: inspect and choose recovery.' "$display" "$note" ;;
-    done) printf '%s: a new result surfaced - %s. Action required: review the result.' "$display" "$note" ;;
-    *) printf '%s: a new actionable update surfaced - %s. Action required: review and respond.' "$display" "$note" ;;
+    failed) printf '%s: new failure evidence surfaced. Action required: inspect the private task record and choose recovery.' "$display" ;;
+    done) printf '%s: a new result surfaced. Action required: inspect the private task record and review the result.' "$display" ;;
+    *) printf '%s: a new actionable update surfaced. Action required: inspect the private task record and respond.' "$display" ;;
   esac
 }
 
@@ -1520,9 +1519,14 @@ handle_wake() {  # <reason> <state>
   fi
 }
 
+check_handoff_marker() {  # <state> <epoch> <sequence>
+  printf '%s/.subsuper-check-handoff-%s-%s' "$1" "$2" "$3"
+}
+
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 defer_ack=0 ack_through ack_generation
+  local handled=0 defer_ack=0 ack_through ack_generation marker marker_id active_check_handoffs=' '
+  local handoff_failed=0 marker_tmp
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1536,10 +1540,35 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
     case "$sequence" in ''|*[!0-9]*) continue ;; esac
     case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
-    handle_wake "$payload" "$state"
-    [ "$kind" = check ] && defer_ack=1
+    if [ "$kind" = check ]; then
+      defer_ack=1
+      marker=$(check_handoff_marker "$state" "$epoch" "$sequence")
+      marker_id="$epoch-$sequence"
+      active_check_handoffs="$active_check_handoffs$marker_id "
+      if [ ! -e "$marker" ]; then
+        handle_wake "$payload" "$state"
+        marker_tmp="$marker.tmp.$$"
+        if ! printf '%s\n%s\n' "$epoch" "$sequence" > "$marker_tmp" || ! mv -f "$marker_tmp" "$marker"; then
+          rm -f "$marker_tmp"
+          handoff_failed=1
+          break
+        fi
+      fi
+    else
+      handle_wake "$payload" "$state"
+    fi
     handled=$((handled + 1))
   done < "$out"
+  if [ "$handoff_failed" -eq 1 ]; then
+    rm -f "$out" "$err"
+    log "check handoff marker could not be persisted; retaining durable wakes"
+    return 1
+  fi
+  for marker in "$state"/.subsuper-check-handoff-*; do
+    [ -e "$marker" ] || continue
+    marker_id=${marker##*.subsuper-check-handoff-}
+    case "$active_check_handoffs" in *" $marker_id "*) ;; *) rm -f "$marker" ;; esac
+  done
   [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
 
   ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)

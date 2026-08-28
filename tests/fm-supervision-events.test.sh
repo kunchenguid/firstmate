@@ -36,6 +36,7 @@ reset_state() {
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
     "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.herdr-working-* \
     "$STATE_DIR"/.hb-surfaced-* "$STATE_DIR"/.subsuper-seen-status-* \
+    "$STATE_DIR"/.subsuper-check-handoff-* \
     "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   rm -rf "$STATE_DIR/human-notifications"
   : > "$WAKE_LOG"
@@ -93,6 +94,17 @@ fi
 [ ! -e "$STATE_DIR/.herdr-working-default_wG_pQ" ] \
   || fail "terminal evidence incorrectly armed a synthetic blocker reopen"
 pass "handle_push_transition: Herdr working cannot supersede genuine terminal evidence"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "display_name=CRM · Import"
+printf 'done: PR https://example.test/review/7 checks green\n' > "$STATE_DIR/tk1.status"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+[ "$(last_status_line "$STATE_DIR/tk1.status")" = 'done: PR https://example.test/review/7 checks green' ] \
+  || fail "synthetic blocked evidence superseded a genuine terminal result"
+[ ! -s "$WAKE_LOG" ] || fail "synthetic blocked evidence emitted a competing terminal wake"
+[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
+  || fail "absorbed synthetic blocked evidence was not committed"
+pass "handle_push_transition: Herdr blocked cannot supersede genuine terminal evidence"
 
 reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
