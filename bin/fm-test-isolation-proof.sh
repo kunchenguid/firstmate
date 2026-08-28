@@ -224,6 +224,15 @@ global_git_snapshot() {
   git config --global --list 2>/dev/null | LC_ALL=C sort || true
 }
 
+detect_gate_skip() {
+  local file=$1 first
+  first=$(awk 'NF { print; exit }' "$file" 2>/dev/null || true)
+  case "$first" in
+    skip:*) printf '%s\n' "$first" ;;
+    *) return 1 ;;
+  esac
+}
+
 write_json_artifact() {
   local out=$1 started=$2 finished=$3 run_id=$4 total=$5 failed=$6 concurrency=$7 duration=$8 records=$9 pool=${10} jobs_enabled=${11}
   python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$concurrency" "$duration" "$records" "$pool" "$jobs_enabled" <<'PY'
@@ -397,7 +406,7 @@ declare -a WORKER_IDX=()
 ACTIVE_WORKERS=0
 
 wait_one_slot() {
-  local slot=$1 pid idx work rc duration script mode
+  local slot=$1 pid idx work rc duration script mode gate_skip
   pid=${WORKER_PIDS[$slot]}
   idx=${WORKER_IDX[$slot]}
   unset 'WORKER_PIDS[slot]'
@@ -410,6 +419,10 @@ wait_one_slot() {
   script=${CANDIDATES[$((idx - 1))]}
   rc=$(cat "$work/out/exit" 2>/dev/null || echo 1)
   duration=$(cat "$work/out/duration_ms" 2>/dev/null || echo 0)
+  if [ "$rc" -eq 0 ] && gate_skip=$(detect_gate_skip "$work/out/output"); then
+    rc=1
+    log "pool $POOL candidate gate-skipped without proving concurrency: $script: $gate_skip"
+  fi
   printf 'FM_ISOLATION_CANDIDATE_END %s %s exit=%s duration_ms=%s worker=%s\n' \
     "$(now_iso)" "$script" "$rc" "$duration" "$idx"
   printf '%s\t%s\t%s\t%s\n' "$script" "$rc" "$duration" "$idx" >>"$RECORDS"
@@ -417,13 +430,9 @@ wait_one_slot() {
     FAILED=$((FAILED + 1))
     AGG_RC=1
     log "candidate failed: $script exit=$rc"
-    if [ -s "$work/out/stdout" ]; then
-      log "--- stdout ($script) ---"
-      tail -n 40 "$work/out/stdout" >&2 || true
-    fi
-    if [ -s "$work/out/stderr" ]; then
-      log "--- stderr ($script) ---"
-      tail -n 40 "$work/out/stderr" >&2 || true
+    if [ -s "$work/out/output" ]; then
+      log "--- output ($script) ---"
+      tail -n 40 "$work/out/output" >&2 || true
     fi
   fi
   # Isolation: worker root must remain mode 0700 and under the proof parent.
@@ -499,7 +508,7 @@ for script in "${CANDIDATES[@]}"; do
       FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
     cd "$ROOT" || exit 1
     begin_ms=$(now_ms)
-    bash "$script" >"$work/out/stdout" 2>"$work/out/stderr"
+    bash "$script" >"$work/out/output" 2>&1
     rc=$?
     end_ms=$(now_ms)
     duration=$((end_ms - begin_ms))

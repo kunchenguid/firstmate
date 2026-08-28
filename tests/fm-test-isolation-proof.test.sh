@@ -25,13 +25,14 @@ test_unknown_pool_is_refused() {
 }
 
 test_family_pool_json_identifies_admission() {
-  local tmp repo proof json admitted_json capped_json rc
+  local tmp repo proof json admitted_json capped_json skipped_json rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-isolation-proof-json.XXXXXX")
   repo="$tmp/repo"
   proof="$repo/bin/fm-test-isolation-proof.sh"
   json="$tmp/proof.json"
   admitted_json="$tmp/admitted-proof.json"
   capped_json="$tmp/capped-proof.json"
+  skipped_json="$tmp/skipped-proof.json"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$PROOF" "$proof"
   cat >"$repo/bin/fm-test-run.sh" <<'SH'
@@ -46,15 +47,23 @@ if { [ "$1" = --list ] || [ "$1" = --list-scheduled ]; } && [ "$2" = --family ];
       printf '%s\n' tests/fm-proof-slow.test.sh tests/fm-proof-fast.test.sh tests/fm-proof-replacement.test.sh
       exit 0
       ;;
+    skipped-family)
+      printf '%s\n' tests/fm-proof-skipped.test.sh
+      exit 0
+      ;;
   esac
 fi
 if [ "$1" = --list-concurrent-safe-families ]; then
-  printf '%s\n' admitted-family
+  printf '%s\n' admitted-family skipped-family
   exit 0
 fi
-if [ "$1" = --concurrent-safe-family-jobs-max ] && [ "$2" = admitted-family ]; then
-  printf '2\n'
-  exit 0
+if [ "$1" = --concurrent-safe-family-jobs-max ]; then
+  case "$2" in
+    admitted-family|skipped-family)
+      printf '2\n'
+      exit 0
+      ;;
+  esac
 fi
 exit 2
 SH
@@ -87,6 +96,11 @@ if [ -e "$PROOF_SCHED_EVIDENCE/slow-done" ]; then
 fi
 touch "$PROOF_SCHED_EVIDENCE/replacement-started"
 echo "ok - replacement proof fixture"
+SH
+  cat >"$repo/tests/fm-proof-skipped.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo
+echo "skip: herdr not found"
 SH
   chmod +x "$proof" "$repo/bin/fm-test-run.sh" "$repo/tests/fm-proof-"*.test.sh
   set +e
@@ -132,6 +146,24 @@ assert artifact["concurrency"] == 3
 assert artifact["fm_test_run_jobs_enabled"] is False
 assert artifact["summary"]["failed"] == 0
 ' "$capped_json" || fail "over-cap family pool artifact metadata is incorrect"
+  set +e
+  "$proof" --pool skipped-family --jobs 2 --json "$skipped_json" >"$tmp/skipped.out" 2>"$tmp/skipped.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "gate-skipped family proof must fail, got $rc"
+  grep -Fq 'pool skipped-family candidate gate-skipped' "$tmp/skipped.err" \
+    || fail "gate-skipped proof did not name its pool: $(cat "$tmp/skipped.err")"
+  grep -Fq 'tests/fm-proof-skipped.test.sh: skip: herdr not found' "$tmp/skipped.err" \
+    || fail "gate-skipped proof did not name its candidate and prerequisite: $(cat "$tmp/skipped.err")"
+  python3 -c '
+import json, sys
+artifact = json.load(open(sys.argv[1], encoding="utf-8"))
+assert artifact["pool"] == "skipped-family"
+assert artifact["fm_test_run_jobs_enabled"] is False
+assert artifact["summary"]["total"] == 1
+assert artifact["summary"]["failed"] == 1
+assert artifact["scripts"][0]["exit"] == 1
+' "$skipped_json" || fail "gate-skipped family artifact was admitted"
   rm -rf "$tmp"
   pass "family pool JSON scopes jobs admission to proven concurrency"
 }
