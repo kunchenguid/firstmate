@@ -24,6 +24,46 @@ test_unknown_pool_is_refused() {
   pass "unknown candidate pools are refused"
 }
 
+test_family_pool_json_identifies_admission() {
+  local tmp repo proof json rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-isolation-proof-json.XXXXXX")
+  repo="$tmp/repo"
+  proof="$repo/bin/fm-test-isolation-proof.sh"
+  json="$tmp/proof.json"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$PROOF" "$proof"
+  cat >"$repo/bin/fm-test-run.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = --list ] && [ "$2" = --family ] && [ "$3" = fixture-family ]; then
+  printf '%s\n' tests/fm-proof-fixture.test.sh
+  exit 0
+fi
+exit 2
+SH
+  cat >"$repo/tests/fm-proof-fixture.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - proof fixture"
+SH
+  chmod +x "$proof" "$repo/bin/fm-test-run.sh" "$repo/tests/fm-proof-fixture.test.sh"
+  set +e
+  "$proof" --pool fixture-family --jobs 1 --json "$json" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "family pool proof fixture failed: $(cat "$tmp/out") $(cat "$tmp/err")"
+  python3 -c '
+import json, sys
+artifact = json.load(open(sys.argv[1], encoding="utf-8"))
+assert artifact["kind"] == "isolation-proof"
+assert artifact["pool"] == "fixture-family"
+assert artifact["fm_test_run_jobs_enabled"] is True
+assert artifact["production_sharding_enabled"] is False
+assert artifact["summary"]["total"] == 1
+assert artifact["summary"]["failed"] == 0
+' "$json" || fail "family pool artifact metadata is incorrect"
+  rm -rf "$tmp"
+  pass "family pool JSON identifies its successful jobs admission"
+}
+
 test_list_candidates_nonempty_and_stable() {
   local listed count sorted
   listed=$("$PROOF" --list)
@@ -113,6 +153,7 @@ test_parallel_shards_consume_the_proven_set() {
 }
 
 test_unknown_pool_is_refused
+test_family_pool_json_identifies_admission
 test_list_candidates_nonempty_and_stable
 test_candidates_exclude_serial_classes
 test_extra_hermetic_candidates_present

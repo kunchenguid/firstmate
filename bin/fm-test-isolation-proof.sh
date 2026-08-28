@@ -225,10 +225,10 @@ global_git_snapshot() {
 }
 
 write_json_artifact() {
-  local out=$1 started=$2 finished=$3 run_id=$4 total=$5 failed=$6 concurrency=$7 duration=$8 records=$9
-  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$concurrency" "$duration" "$records" <<'PY'
+  local out=$1 started=$2 finished=$3 run_id=$4 total=$5 failed=$6 concurrency=$7 duration=$8 records=$9 pool=${10} jobs_enabled=${11}
+  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$concurrency" "$duration" "$records" "$pool" "$jobs_enabled" <<'PY'
 import json, sys
-out, started, finished, run_id, total, failed, concurrency, duration, records_path = sys.argv[1:10]
+out, started, finished, run_id, total, failed, concurrency, duration, records_path, pool, jobs_enabled = sys.argv[1:12]
 scripts = []
 with open(records_path, encoding="utf-8") as fh:
     for line in fh:
@@ -248,6 +248,7 @@ doc = {
     "started_at": started,
     "finished_at": finished,
     "kind": "isolation-proof",
+    "pool": pool,
     "concurrency": int(concurrency),
     "summary": {
         "total": int(total),
@@ -256,7 +257,7 @@ doc = {
     },
     "scripts": scripts,
     "production_sharding_enabled": False,
-    "fm_test_run_jobs_enabled": False,
+    "fm_test_run_jobs_enabled": jobs_enabled == "1",
 }
 with open(out, "w", encoding="utf-8") as fh:
     json.dump(doc, fh, indent=2, sort_keys=True)
@@ -525,9 +526,11 @@ if [ -n "$JSON_PATH" ]; then
   mkdir -p "$(dirname "$JSON_PATH")"
   # Stable record order for the artifact.
   sort -t$'\t' -k1,1 "$RECORDS" -o "$RECORDS"
+  jobs_enabled=0
+  [ "$AGG_RC" -ne 0 ] || jobs_enabled=1
   write_json_artifact "$JSON_PATH" \
     "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
-    "$TOTAL" "$FAILED" "$JOBS" "$RUN_DURATION" "$RECORDS"
+    "$TOTAL" "$FAILED" "$JOBS" "$RUN_DURATION" "$RECORDS" "$POOL" "$jobs_enabled"
   log "wrote isolation proof artifact: $JSON_PATH"
 fi
 
