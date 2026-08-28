@@ -109,8 +109,12 @@ fm_backend_tmux_current_path() {  # <target>
 # composer verification - used for the fixed spawn-time commands
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
 # inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
+#
+# One call, so this adapter holds neither of the states bin/fm-spawn.sh's
+# spawn_send_text_line reserves statuses 2 and 3 for; every failure collapses to
+# 1 explicitly rather than resting on tmux happening never to return them.
 fm_backend_tmux_send_text_line() {  # <target> <text>
-  tmux send-keys -t "$1" "$2" Enter
+  tmux send-keys -t "$1" "$2" Enter || return 1
 }
 
 # fm_backend_tmux_send_literal: send TEXT as literal bytes with no

@@ -210,9 +210,14 @@ make_fake_spawn_toolchain() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys) fm-fake-shell-exec "$@"; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

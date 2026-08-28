@@ -30,12 +30,16 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  # Run the typed line as the pane's shell would, so fm-spawn's
+  # shell-readiness probe is answered.
+  send-keys) fm-fake-shell-exec "$@"; exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  fm_fake_shell_exec "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

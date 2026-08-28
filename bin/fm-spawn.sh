@@ -134,6 +134,60 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Before each fixed spawn-time command is typed into the endpoint - `treehouse
+#   get`, and again the environment exports plus the agent launch line - the
+#   spawn proves the target shell is actually READING INPUT, by sending an
+#   idempotent probe and waiting for the marker file only an executing shell can
+#   create. A pane whose shell is still running its startup (a project whose
+#   .envrc loads direnv or devenv is the common case) swallows anything typed
+#   before its line editor is up, and the pty echoes those swallowed keystrokes,
+#   so the pane's own scrollback cannot be trusted as proof a command ran. The
+#   probe is re-sent while unconfirmed, on a backing-off cadence so a slow
+#   startup is probed to the end of the budget without burying the pane's
+#   scrollback in probe lines; the real commands are never re-sent, because a
+#   repeated `treehouse get` would acquire a second worktree and a repeated
+#   launch would start a second agent. The wait is bounded and the spawn refuses
+#   loudly rather than launching into a shell that is not listening. The marker
+#   is only proof while nothing else can write it, so it lives in a private
+#   directory this spawn creates atomically inside the task temp root - never a
+#   pre-existing path it adopts, and never a path whose mode it adjusts - and a
+#   marker directory that stops being one this account owns with neither group
+#   nor other able to write it refuses the spawn instead of being believed. That
+#   pair of conditions is the requirement, never one exact permission value, and
+#   the task temp root HOLDING that directory must meet it too: whoever can
+#   write the root can replace the entry for the marker directory inside it, so
+#   an adopted root anyone else can write refuses the spawn, while one this
+#   spawn created satisfies the requirement by construction. That root is named
+#   after the task id alone and so is shared by every home on the host spawning
+#   that id: creation of it is claimed atomically, and a refused spawn takes it
+#   back only by `rmdir`, so another home's marker or a live worker's build temp
+#   inside it keeps it standing rather than being deleted along with it.
+#   A probe that cannot be DELIVERED is a different failure from one that was
+#   delivered and never answered: the send is not retried past its own error,
+#   and the refusal names the unreachable endpoint rather than blaming
+#   shell-init latency. TWO more classes sit between those two, each naming a
+#   pane state and a repair neither of the first two does, and each with a
+#   status of its own reserved across every backend. A line the endpoint typed
+#   but could neither submit nor clear is now sitting in that shell's input line
+#   where it would prefix whatever is typed there next, so it is reported as the
+#   uncleared input it is (spawn_send_stranded and spawn_send_stranded_detail
+#   below) and is never re-sent onto the front of itself. A line the endpoint
+#   typed and then CLEARED again, because the submitting keystroke failed on its
+#   own, left an endpoint that is demonstrably alive and an input line that is
+#   demonstrably clean, so it is reported as neither unreachable nor uncleared
+#   (spawn_send_cleared and spawn_send_cleared_detail below). A reserved status
+#   is answerable only by an adapter that really holds that state - an adapter
+#   that types and submits in one call holds neither, so it owes every failure
+#   the plain undelivered status however its own internals number them.
+#   The gate proves the shell was reading input immediately BEFORE each line was
+#   typed, which is not the same as proving that line then ran. The worktree half
+#   has a backstop for the difference - the settle loop below waits for the
+#   pane's cwd to move and refuses when `treehouse get` never took effect. The
+#   launch half has none: the launch line is checked for backend delivery only
+#   (kimi alone waits for its own ready signal afterwards), so a launch line the
+#   shell's next pre-prompt cycle flushes right after the gate confirmed is
+#   still reported as a spawn. That residual window is named here rather than
+#   half-closed.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -681,6 +735,9 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_READY_ROOT=
+TASK_TMP=
+SPAWN_TASK_TMP_CREATED=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -792,6 +849,37 @@ spawn_abort_cleanup() {
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
+  # Everything below is scoped to a REFUSAL, which is the only outcome that owns
+  # what this spawn created under /tmp. Both gates are finished by the time this
+  # trap runs, so a refusal's marker root has no remaining reader and goes here;
+  # a spawn that SUCCEEDED leaves its own marker root standing, and fm-teardown
+  # reaps it by id with the rest of the root. That survivor is load-bearing, not
+  # a leak to tidy away: it is what makes another home's `rmdir` below fail on
+  # this shared root while this spawn's task is still live.
+  #
+  # The task temp root goes only when THIS spawn created it and no meta names
+  # it, which is also the window before GOTMPDIR is exported into any pane - so
+  # nothing live can be using it, an adopted or foreign-planted root is never
+  # touched, and a published task stays reapable by id through fm-teardown.
+  #
+  # `rmdir`, never `rm -rf`, and that is the whole point of these two lines. The
+  # root is named after the task id alone, so a second home spawning the same id
+  # shares this exact path, and "this spawn created it" does not mean "this
+  # spawn is the only one in it": the other home can have adopted it and put its
+  # own readiness marker or a launched worker's Go build temp inside. rmdir
+  # removes only the empty tree this spawn made and FAILS on anything else, so
+  # someone else's work is what keeps the root standing rather than what gets
+  # deleted. gotmp goes back when that happens, because it was never this
+  # spawn's alone to take away from a live worker pointing GOTMPDIR at it.
+  if [ "$status" -ne 0 ]; then
+    [ -z "$SPAWN_READY_ROOT" ] || rm -rf "$SPAWN_READY_ROOT" 2>/dev/null || true
+    if [ "$SPAWN_TASK_TMP_CREATED" = 1 ] && [ -n "$TASK_TMP" ] \
+       && [ ! -e "$STATE/${ID:-}.meta" ]; then
+      if rmdir "$TASK_TMP/gotmp" 2>/dev/null; then
+        rmdir "$TASK_TMP" 2>/dev/null || mkdir "$TASK_TMP/gotmp" 2>/dev/null || true
+      fi
+    fi
+  fi
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -799,6 +887,23 @@ trap spawn_abort_cleanup EXIT
 # One bounded lock per live Herdr session/socket, shared across all homes.
 # <session> is required so secondmate and primary spawns serialize against the
 # same session without writing any other home's state directory.
+#
+# The 5s bound stays short deliberately, even though a projected spawn now holds
+# this lock across the shell-readiness gates below and can therefore hold it for
+# minutes: on the fresh-projection path presentation is best-effort, so a
+# contending spawn taking the flat layout is a far better outcome than one
+# blocking for minutes behind another task's slow-starting shell - fm-bootstrap
+# runs a spawn synchronously per secondmate, with no timeout around it. That
+# fallback is SILENT as the code stands: of the projection site's four arms, two
+# announce their degradation (a session server that cannot be ensured, and a
+# parent workspace that is absent or ambiguous, each with its own warning) while
+# a lost acquire falls out of the elif chain with nothing printed, the way the
+# preference/support arm deliberately does - so an operator sees a flat pane and
+# not the reason for it. A presentation RECOVERY is the one caller that cannot
+# degrade: a task whose
+# journal already claims a projected pane refuses the resume outright rather than
+# reclaiming that pane concurrently, so there this bound decides how long a
+# resume waits before failing, not whether it falls back.
 spawn_herdr_presentation_order_lock_acquire() {
   local session=${1:-} attempt lock_path
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
@@ -2169,6 +2274,19 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# spawn_send_text_line: one line typed and submitted. Statuses 2 and 3 are
+# RESERVED, for every backend, for the two outcomes a bare failure does not name
+# - a line that was typed and could then be neither submitted nor cleared (2,
+# see spawn_send_stranded below), and one that was typed and then cleared again
+# because only its submitting keystroke failed (3, see spawn_send_cleared). An
+# adapter may only answer either when it genuinely holds that state, which in
+# practice means the ones composing the line from a literal send plus Enter and
+# then trying to clear what they typed; an adapter that submits in one call has
+# neither state and must collapse every failure to 1, however its own internals
+# number them. bin/backends/orca.sh's send is the worked example: its JSON
+# envelope check exits 2 when Orca answered `ok:false` and NOTHING was typed, so
+# it collapses that itself rather than reporting the opposite of what happened
+# through a status whose meaning is fixed here.
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -2203,6 +2321,41 @@ spawn_send_key() {  # <target> <key>
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
+}
+
+# spawn_send_text_line answers with FOUR outcomes, not two, because a failed
+# send leaves the endpoint in more than one state and each state has its own
+# repair: 0 is typed and submitted; status 2 is a line that WAS typed but could
+# neither be submitted nor cleared, so it is sitting in that shell's input line
+# where it prefixes whatever is typed there next; status 3 is a line that was
+# typed and then CLEARED again after only its submitting keystroke failed, so
+# the endpoint answered twice, its input line is clean, and nothing ran; and
+# status 1 is the send that never landed at all, which is the only one that says
+# anything about the endpoint being unreachable.
+#
+# Collapsing 3 into 1 is what this pair exists to prevent. The adapters that
+# compose the line (bin/backends/cmux.sh, bin/backends/zellij.sh) can reach it
+# on their own reasoning - the ladder's Enter and its C-c fail independently -
+# and reporting it as an undelivered send tells the operator a live endpoint is
+# dead, which at the post-meta launch gate becomes the task's durable last
+# state and points its repair at a dropped server instead of a re-spawn.
+#
+# Who may answer 2 or 3 at all - and why an adapter's own internal 2 is not
+# automatically this one - is spawn_send_text_line's own contract above, so by
+# the time a status reaches here it already carries that meaning. Every caller
+# reporting a failed send composes its message through here, so no state is ever
+# told as another one and the operator is never sent to the wrong repair.
+spawn_send_stranded() {  # <status>
+  [ "$1" -eq 2 ]
+}
+spawn_send_stranded_detail() {  # <what-was-typed>
+  printf '%s' "$1 input could not be cleared for $W: the $BACKEND backend typed it but could neither submit nor clear it, so it is sitting uncleared in that shell's input line where it would prefix whatever is typed there next"
+}
+spawn_send_cleared() {  # <status>
+  [ "$1" -eq 3 ]
+}
+spawn_send_cleared_detail() {  # <what-was-typed>
+  printf '%s' "$1 input was typed into $W and then cleared again: the $BACKEND backend could not submit it and cleared what it had typed, so that endpoint is reachable and its input line is clean, but the line never ran"
 }
 
 kimi_capture() {
@@ -2258,10 +2411,355 @@ kimi_wait_for_delivery() {
   return 1
 }
 
-kimi_spawn_fail() {  # <detail>
+spawn_record_failed_status() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
 }
+
+# The shared owner of post-meta refusals whose message is a bare detail: it
+# records the durable last state, prints that detail, and exits. It is not the
+# only route - the readiness gate and the trace refusal compose a full message
+# that already names the window to inspect, so they call
+# spawn_record_failed_status directly rather than have this one append that
+# tail twice. What every post-meta path does share is the record. The
+# alternative is `set -e` aborting on a backend's own nonzero status, which
+# leaves the fleet a task with a real window, a real worktree, no agent, and no
+# recorded reason - the meta correctly survives so the endpoint stays reapable
+# by id, so the record is the only thing that can say what happened.
+spawn_fail_after_meta() {  # <detail>
+  spawn_record_failed_status "$1"
+  echo "error: $1; inspect window $T" >&2
+  exit 1
+}
+
+# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
+# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
+# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
+# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# Created here, ahead of the first typed send, because the shell-readiness gate
+# below keeps its marker inside this same root and teardown already removes it.
+TASK_TMP="/tmp/fm-$ID"
+# Creation is claimed by the CREATE, never by a preceding `[ -d ]` test. This
+# path is named after the task id alone, so it is shared by every home on the
+# host that spawns that id, and those homes serialize on per-home locks that say
+# nothing about each other. A test-then-set therefore lets two concurrent spawns
+# BOTH conclude they created this root - after which either one's refusal
+# cleanup below would remove a root the other is still using, taking out its
+# readiness marker or a launched worker's live GOTMPDIR. `mkdir` is atomic, so
+# exactly one of them can succeed and only that one may ever remove it.
+#
+# The mode comes from `umask` rather than a `chmod` afterwards: it lands with
+# the directory in the same syscall instead of on whatever the path names a
+# moment later, and it makes a root created HERE private under any host umask.
+#
+# What that cannot cover is a root created before the privacy requirement
+# existed, or by the fallback `mkdir -p` further down, which creates at the
+# ambient umask: on a umask-002 host - Debian/Ubuntu's user-private-group
+# default - either lands at 0775 and the group-write arm below refuses it. That
+# is the upgrade window, and it is the only way an operator meets a mode
+# refusal over a root nobody but this account can write. It is per task id and
+# clears for good once that root is removed, which is why the refusal says so:
+# a `--relaunch` arrives here with the previous agent already stopped, so that
+# message is the only guidance the operator gets.
+if (umask 077; mkdir "$TASK_TMP" 2>/dev/null); then
+  SPAWN_TASK_TMP_CREATED=1
+fi
+# The readiness marker below is a correctness boolean, so it lives in a
+# directory this spawn CREATED and never in one it adopted. /tmp is
+# world-writable and a task id is an ordinary slug, so /tmp/fm-<id> is a path
+# another local account can pre-create, and a marker anyone can write is a
+# marker anyone can forge - which would confirm readiness for a shell that
+# executed nothing and reinstate exactly the swallowed-input failure the gate
+# exists to prevent.
+#
+# `mktemp -d` is the whole defence, deliberately instead of a sequence of
+# guards: it creates one fresh unguessable directory at mode 0700 and fails
+# outright if that path is taken, so there is no pre-existing path to inspect,
+# no window between a test and a create, and nothing to chmod afterwards. Never
+# chmod a path this spawn did not just create: test-then-create-then-chmod is
+# racy by construction, because the path can become a symlink to anything this
+# account owns in between, and the mode change lands on the link's target. So
+# the task temp root itself is left exactly as found - the spawn adds a
+# directory to it and adjusts nothing that was already there - and a root it
+# cannot privately write refuses the spawn rather than proving nothing quietly.
+#
+# The marker directory's privacy is re-established, not assumed, on every read
+# below: one swapped out underneath the wait is not proof of anything.
+#
+# What makes the directory private is exactly two things: THIS uid owns it, and
+# neither group nor other can WRITE it. That pair is the whole requirement, so
+# it is what the check asserts - never an exact permission value, which would
+# turn any additional bit into a total refusal of every spawn on the host. An
+# inherited setgid bit is the concrete case: a new directory under a setgid
+# parent carries S_ISGID, so `mktemp -d` yields 2700 on such a host even though
+# it asked for owner-only. Setgid decides which GROUP newly created entries get,
+# and grants write access to nobody, so a 2700 directory this uid owns is
+# genuinely private and a marker in it is genuinely proof. A default ACL on the
+# parent adds group bits the same way. Re-pinning this to one number would be a
+# self-inflicted outage, not a tighter defence.
+SPAWN_READY_ROOT_PRIVACY_ISSUE=
+# `mode` means this uid owns the directory and only a write bit disqualifies it,
+# which is the one shape an operator can clear themselves; every other value is
+# a directory whose identity is not this account's to begin with.
+SPAWN_READY_ROOT_PRIVACY_KIND=
+spawn_ready_root_private() {  # <dir> - on false, names the failed condition
+  local dir=$1 owner mode perms me
+  SPAWN_READY_ROOT_PRIVACY_ISSUE=
+  SPAWN_READY_ROOT_PRIVACY_KIND=
+  if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+    SPAWN_READY_ROOT_PRIVACY_ISSUE="it is not a plain directory any more - gone, or replaced by a symlink"
+    SPAWN_READY_ROOT_PRIVACY_KIND=identity
+    return 1
+  fi
+  if [ "$(uname)" = Darwin ]; then
+    owner=$(stat -f %u "$dir" 2>/dev/null) || owner=
+    mode=$(stat -f %Lp "$dir" 2>/dev/null) || mode=
+  else
+    owner=$(stat -c %u "$dir" 2>/dev/null) || owner=
+    mode=$(stat -c %a "$dir" 2>/dev/null) || mode=
+  fi
+  if [ -z "$owner" ] || [ -z "$mode" ]; then
+    SPAWN_READY_ROOT_PRIVACY_ISSUE="its owner and permission bits could not be read"
+    SPAWN_READY_ROOT_PRIVACY_KIND=identity
+    return 1
+  fi
+  me=$(id -u)
+  if [ "$owner" != "$me" ]; then
+    SPAWN_READY_ROOT_PRIVACY_ISSUE="it is owned by uid $owner, not by this account's uid $me"
+    SPAWN_READY_ROOT_PRIVACY_KIND=identity
+    return 1
+  fi
+  while [ "${#mode}" -lt 3 ]; do mode="0$mode"; done
+  perms=${mode#"${mode%???}"}
+  if [ $(( ${perms:1:1} & 2 )) -ne 0 ]; then
+    SPAWN_READY_ROOT_PRIVACY_ISSUE="its group-write bit is set, mode $mode"
+    SPAWN_READY_ROOT_PRIVACY_KIND=mode
+    return 1
+  fi
+  if [ $(( ${perms:2:1} & 2 )) -ne 0 ]; then
+    SPAWN_READY_ROOT_PRIVACY_ISSUE="its other-write bit is set, mode $mode"
+    SPAWN_READY_ROOT_PRIVACY_KIND=mode
+    return 1
+  fi
+  return 0
+}
+
+# Every refusal below fires with the task's endpoint ALREADY created: a fresh
+# spawn makes it at the backend dispatch far above, and the temp root is only
+# established here. That endpoint is deliberately left standing so the shell it
+# names can be inspected - but on a fresh spawn it is also what the operator's
+# next attempt collides with, since tmux, zellij, cmux and herdr all refuse a
+# duplicate endpoint name, so a remedy that names only the temp root does not
+# describe a spawnable state. Two cases owe nothing extra and say so by
+# omission: a relaunch adopts the recorded endpoint rather than creating one,
+# and the abort trap reclaims the two endpoint kinds it can prove this spawn
+# made, an orca terminal and a herdr projection.
+spawn_task_tmp_endpoint_note() {
+  if [ "$RELAUNCH" -eq 1 ] || [ "$ORCA_ABORT_CLEANUP" = 1 ]      || [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    return 0
+  fi
+  printf '%s' ". Task $ID's endpoint $T already exists - this spawn created it before reaching this check, and a refusal leaves it standing so that shell can be inspected - so it has to be gone before another spawn of $ID can create its own"
+}
+
+# A mode refusal is the operator's to clear, and often their ONLY notice:
+# `bin/fm-control.sh <id> relaunch` stops the old agent before it calls this
+# script, so a refusal here leaves the task with nothing running and this
+# message as the whole explanation. The root is never chmod-ed to fix it - a
+# path whose identity was never established can become a symlink between the
+# look and the change, and the mode would land on the link's target - so the
+# way out is to remove the root, which is what the remedy names.
+spawn_refuse_unprivate_task_tmp() {
+  local remedy=
+  if [ "$SPAWN_READY_ROOT_PRIVACY_KIND" = mode ]; then
+    remedy=". This account owns $TASK_TMP, so it is a stale root of firstmate's own rather than another account's: it either predates this requirement, or was created at the host umask by the fallback mkdir that runs when the umask-scoped one could not create it - which leaves 0775 on a umask-002 host such as Debian or Ubuntu with user-private groups. Remove $TASK_TMP and spawn again. A relaunch reaches this point with the task's previous agent already stopped, so nothing is running for $ID until you do"
+  fi
+  echo "error: task $ID's per-task temp root $TASK_TMP is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so another local account could replace the readiness-marker directory this spawn is about to create inside it and no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn$remedy$(spawn_task_tmp_endpoint_note)" >&2
+  exit 1
+}
+
+# Asked of a root this spawn ADOPTED before anything is written into it, and
+# not only before the marker directory is minted. `mkdir -p` follows a symlink
+# at the root position, so a root whose identity is still unestablished must
+# not receive gotmp either: a local account that pre-created /tmp/fm-<id> as a
+# link into a directory it controls would otherwise get a directory created
+# wherever it chose, and `SPAWN_TASK_TMP_CREATED` is 0 for exactly that root,
+# so the refusal cleanup above would never take it back. A root this spawn
+# created is private by construction (see the umask above) and a root that
+# cannot be created at all is still owned by the guarded `mkdir -p` below,
+# which names it.
+if [ "$SPAWN_TASK_TMP_CREATED" != 1 ] && { [ -e "$TASK_TMP" ] || [ -L "$TASK_TMP" ]; }; then
+  spawn_ready_root_private "$TASK_TMP" || spawn_refuse_unprivate_task_tmp
+fi
+
+# Guarded, and not left to `set -e`, for the same reason the marker directory
+# above refuses out loud. What reaches this guard is narrower than the path's
+# name suggests: a root another account owns is refused by the identity check
+# above, at any mode, so what is left here is a root THIS account owns and
+# cannot write into - a stale 0500 left behind, or a mode changed under a live
+# task - and a /tmp that cannot hold the root at all, full or read-only. The
+# window already exists by now, so a bare `mkdir: .../gotmp: Permission denied`
+# would leave the operator an orphan pane and a path they have no reason to
+# connect to a spawn, while the failure of the marker directory inside this
+# root explains itself in full. Both are the same refusal and owe the same
+# explanation.
+mkdir -p "$TASK_TMP/gotmp" || {
+  echo "error: could not create the per-task temp root $TASK_TMP for $ID (its own reason is above); a root another local account owns is refused by name before this point, so what lands here is a path this account cannot write into or a /tmp that cannot hold it, and the readiness marker that proves the endpoint shell ran what was typed into it lives there; refusing to spawn$(spawn_task_tmp_endpoint_note)" >&2
+  exit 1
+}
+
+# An unguessable name inside the root is not on its own what keeps the marker
+# directory the spawn's own: the ENTRY for it lives in the root, so whoever can
+# write the root can rename or replace that entry with a symlink to anywhere
+# this account can write, and every later `rm -f`/`touch` of a fixed marker name
+# would then land through the replacement instead. Re-checking the marker
+# directory cannot undo that - a check and the operation after it are two steps,
+# and the swap fits between them. The one thing that closes it is the parent:
+# in a root no other account can write, the entry cannot be replaced at all.
+#
+# So the same private-directory requirement the marker directory must meet is
+# demanded of the root that holds it, and for the same reason - a root this
+# spawn just created satisfies it by construction (see the umask above), while
+# an adopted one that anybody else can write refuses the spawn instead of
+# yielding a marker that proves nothing. Demanded, never imposed: the root's
+# mode is still left exactly as found, because a spawn that chmod-ed a path
+# whose identity it never established would be aiming that mode change at
+# whatever a raced symlink pointed to.
+spawn_ready_root_private "$TASK_TMP" || spawn_refuse_unprivate_task_tmp
+
+SPAWN_READY_ROOT=$(mktemp -d "$TASK_TMP/shell-ready.XXXXXXXX") || SPAWN_READY_ROOT=
+if [ -z "$SPAWN_READY_ROOT" ]; then
+  SPAWN_READY_ROOT_ISSUE="mktemp refused to create one; its own reason, if any, is above"
+elif spawn_ready_root_private "$SPAWN_READY_ROOT"; then
+  SPAWN_READY_ROOT_ISSUE=
+else
+  SPAWN_READY_ROOT_ISSUE="$SPAWN_READY_ROOT is not private: $SPAWN_READY_ROOT_PRIVACY_ISSUE"
+fi
+if [ -n "$SPAWN_READY_ROOT_ISSUE" ]; then
+  echo "error: could not create a private readiness-marker directory under $TASK_TMP for $ID ($SPAWN_READY_ROOT_ISSUE), so no marker there would be proof the endpoint shell ran what was typed into it; refusing to spawn rather than trusting a marker another local account could write$(spawn_task_tmp_endpoint_note)" >&2
+  exit 1
+fi
+
+# Shell-readiness gate: prove the endpoint's shell is actually READING INPUT
+# before typing a command into it that must not be lost.
+#
+# A pane's shell is not reading its pty the instant the pane exists. Anything
+# typed before its line editor is up is swallowed. Seen live on 2026-08-25
+# spawning onto a project whose .envrc loads direnv plus devenv: the echoed
+# `treehouse get` sat ABOVE direnv's own loading line in the pane's scrollback
+# and never ran, so the worktree-settle loop below spent its whole budget
+# waiting on a command that had never executed. Shell-init latency is the
+# trigger, not any one backend or tool, so this gate is backend-agnostic and
+# runs before every fixed spawn-time send.
+#
+# Screen text cannot answer the question: the pty echoes swallowed keystrokes,
+# so seeing the command in the pane is not proof it ran. The probe is proven by
+# a side effect instead - a marker file only an executing shell can create,
+# which no echo can forge, and which every spawn-capable backend supports
+# because they all address a local shell through spawn_send_text_line. The
+# probe is idempotent, so a swallowed one is answered by re-sending the PROBE
+# rather than the real command: re-sending `treehouse get` would acquire a
+# second worktree, and re-sending a launch would start a second agent.
+#
+# Five distinct refusals, never conflated, because each names a different
+# repair. A probe that the BACKEND COULD NOT DELIVER (a pane that died, a
+# dropped server) is not shell-init latency: the send is not retried past its
+# own nonzero status, so the spawn refuses at once with the unreachable endpoint
+# named and the backend's own diagnostic immediately above it, instead of
+# burning the whole budget on a target already reporting itself gone. A probe
+# that WAS typed and could neither be submitted nor cleared (spawn_send_text_line
+# status 2) is the opposite failure - the endpoint answered and the probe text is
+# now sitting in its input line - so it is reported as the stranded input it is,
+# through spawn_send_stranded_detail, and is not re-sent onto the front of that
+# text. A probe that was typed and then CLEARED again (status 3) says the
+# endpoint answered twice and left nothing behind, so it is reported as neither
+# of those two: an unreachable-endpoint message would send the operator to
+# repair a pane that is alive. A marker whose directory stopped being private is
+# not proof at all and refuses rather than being believed. Only a probe that was
+# genuinely delivered and never answered gets the readiness-timeout message.
+#
+# Re-sends BACK OFF instead of repeating at a flat cadence: after N polls, then
+# 2N, 4N and so on, capped so no more than ten times the first gap ever passes
+# between attempts. The probe is a typed line, so every attempt lands in the
+# pane's scrollback and in its interactive history - and the slow spawn this
+# gate exists for is exactly when an operator reads that scrollback, where dozens
+# of `touch` lines per gate would bury the diagnosis they came for. Backing off
+# keeps the dense early attempts that cover an ordinary startup and the cap keeps
+# probing a shell that starts reading late, at a handful of lines instead of one
+# per second for the whole budget.
+#
+# Tuning knobs (test and pathological-host use, defaults are the contract):
+# FM_SPAWN_SHELL_READY_POLLS, FM_SPAWN_SHELL_READY_INTERVAL (seconds per poll),
+# FM_SPAWN_SHELL_READY_RESEND (polls before the FIRST re-send, doubling to a cap
+# of ten times that; 0 disables re-sending).
+SPAWN_READY_POLLS=${FM_SPAWN_SHELL_READY_POLLS:-300}
+SPAWN_READY_INTERVAL=${FM_SPAWN_SHELL_READY_INTERVAL:-0.2}
+SPAWN_READY_RESEND=${FM_SPAWN_SHELL_READY_RESEND:-5}
+SPAWN_READY_BUDGET=$(awk -v p="$SPAWN_READY_POLLS" -v i="$SPAWN_READY_INTERVAL" \
+  'BEGIN { printf "%.0f", p * i }')
+SPAWN_READY_REFUSAL=
+
+spawn_wait_shell_ready() {  # <target> <label> <what-would-be-typed>
+  local target=$1 label=$2 what=$3 marker probe i=0 send_status
+  local resend_gap=$SPAWN_READY_RESEND resend_cap next_resend
+  SPAWN_READY_REFUSAL=
+  resend_cap=$((SPAWN_READY_RESEND * 10))
+  next_resend=$SPAWN_READY_RESEND
+  marker="$SPAWN_READY_ROOT/$label"
+  rm -f "$marker"
+  probe="touch $(shell_quote "$marker")"
+  send_status=0
+  spawn_send_text_line "$target" "$probe" || send_status=$?
+  if spawn_send_stranded "$send_status"; then
+    SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_stranded_detail 'shell-readiness probe'); refusing to type $what into it; inspect window $T"
+    return 1
+  fi
+  if spawn_send_cleared "$send_status"; then
+    SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_cleared_detail 'shell-readiness probe'), so $what was never typed; inspect window $T"
+    return 1
+  fi
+  if [ "$send_status" -ne 0 ]; then
+    SPAWN_READY_REFUSAL="error: task $ID's endpoint could not be reached: the $BACKEND backend failed to deliver the shell-readiness probe (status $send_status; its own diagnostic, if any, is above), so $what was never typed; inspect window $T"
+    return 1
+  fi
+  while [ "$i" -lt "$SPAWN_READY_POLLS" ]; do
+    sleep "$SPAWN_READY_INTERVAL"
+    i=$((i + 1))
+    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      if ! spawn_ready_root_private "$SPAWN_READY_ROOT"; then
+        SPAWN_READY_REFUSAL="error: task $ID's readiness-marker directory $SPAWN_READY_ROOT is no longer private: $SPAWN_READY_ROOT_PRIVACY_ISSUE, so the marker in it is not proof the endpoint shell ran anything; refusing to type $what; inspect window $T"
+        return 1
+      fi
+      rm -f "$marker"
+      return 0
+    fi
+    if [ "$SPAWN_READY_RESEND" -gt 0 ] && [ "$i" -ge "$next_resend" ]; then
+      send_status=0
+      spawn_send_text_line "$target" "$probe" || send_status=$?
+      if spawn_send_stranded "$send_status"; then
+        rm -f "$marker"
+        SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_stranded_detail 'shell-readiness probe re-send'); refusing to type $what into it; inspect window $T"
+        return 1
+      fi
+      if spawn_send_cleared "$send_status"; then
+        rm -f "$marker"
+        SPAWN_READY_REFUSAL="error: task $ID's $(spawn_send_cleared_detail 'shell-readiness probe re-send'), so $what was never typed; inspect window $T"
+        return 1
+      fi
+      if [ "$send_status" -ne 0 ]; then
+        rm -f "$marker"
+        SPAWN_READY_REFUSAL="error: task $ID's endpoint stopped being reachable while waiting for its shell: the $BACKEND backend failed to deliver the shell-readiness probe (status $send_status; its own diagnostic, if any, is above), so $what was never typed; inspect window $T"
+        return 1
+      fi
+      resend_gap=$((resend_gap * 2))
+      [ "$resend_gap" -le "$resend_cap" ] || resend_gap=$resend_cap
+      next_resend=$((i + resend_gap))
+    fi
+  done
+  rm -f "$marker"
+  SPAWN_READY_REFUSAL="error: task $ID's endpoint shell never confirmed it was reading input within ${SPAWN_READY_BUDGET}s, so $what would have been typed into a shell that is not listening and silently lost; inspect window $T"
+  return 1
+}
+
 
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
@@ -2281,7 +2779,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if ! spawn_wait_shell_ready "$WT_TARGET" worktree-entry "'treehouse get'"; then
+    echo "$SPAWN_READY_REFUSAL" >&2
+    exit 1
+  fi
+  WT_SEND_STATUS=0
+  spawn_send_text_line "$WT_TARGET" 'treehouse get' || WT_SEND_STATUS=$?
+  if spawn_send_stranded "$WT_SEND_STATUS"; then
+    echo "error: task $ID's $(spawn_send_stranded_detail "'treehouse get'"); no worktree was acquired; inspect window $T" >&2
+    exit 1
+  fi
+  if spawn_send_cleared "$WT_SEND_STATUS"; then
+    echo "error: task $ID's $(spawn_send_cleared_detail "'treehouse get'") although its shell had just been proven ready, so no worktree was acquired; inspect window $T" >&2
+    exit 1
+  fi
+  if [ "$WT_SEND_STATUS" -ne 0 ]; then
+    echo "error: task $ID's endpoint could not be reached: the $BACKEND backend failed to deliver 'treehouse get' (status $WT_SEND_STATUS; its own diagnostic, if any, is above) although its shell had just been proven ready, so no worktree was acquired; inspect window $T" >&2
+    exit 1
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2323,7 +2838,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    # The claim stops at "was reading input immediately before", not "was
+    # delivered": readiness is proven when the probe RAN, and the real line is
+    # typed one pre-prompt cycle later - exactly where a shell loading direnv or
+    # devenv spends its seconds, and where a typeahead flush can still swallow
+    # it. Saying the line was delivered would rule out the one failure this gate
+    # exists to catch and send the operator to treehouse instead of shell init.
+    echo "error: task $ID's endpoint shell confirmed it was reading input immediately before treehouse get was typed, but the pane did not settle in a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
@@ -2332,14 +2853,6 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
-
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -2772,7 +3285,13 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
+# Publication hands the endpoint to the task record, so from here a refusal has
+# to leave it standing: every post-meta refusal names a window for the operator
+# to inspect, and fm-teardown reaps that window by id from the backend identity
+# just written above. Tearing it down inside the abort trap would delete the
+# evidence the refusal points at.
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+HERDR_PROJECTION_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -2853,10 +3372,41 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+# The launch stage repeats the same shell-readiness gate, against a DIFFERENT
+# shell. On tmux and herdr the worktree-settle loop above reads the pane's cwd
+# passively (pane_current_path / foreground_cwd), so it confirms as soon as
+# treehouse get's inner shell has chdir'd - while that shell may still be
+# running its own .envrc and not yet reading input. The exports below are
+# idempotent, but the launch command is not, so it can never be re-sent: the
+# readiness proof has to come first. zellij and cmux reach this point already
+# proven, because their current_path op is an active pwd probe the inner shell
+# must EXECUTE for the loop to have settled at all; the gate is cheap enough
+# there to keep uniform rather than special-case. Relaunch, secondmate, and
+# Orca spawns skip the loop entirely and are gated here for the first time.
+if ! spawn_wait_shell_ready "$T" launch "the agent launch command"; then
+  # The first refusal that fires after the meta is published - every exit from
+  # here to the end of the launch sequence is another one, and each records the
+  # same way. Stderr alone would leave the fleet reading a spawned task with a
+  # live window, a real worktree and no agent, and a background or
+  # bootstrap-driven spawn discards that stderr. The meta stays (the window and
+  # worktree exist and must remain reapable by id); what is added is the
+  # durable last state.
+  spawn_record_failed_status "${SPAWN_READY_REFUSAL#error: }"
+  echo "$SPAWN_READY_REFUSAL" >&2
+  exit 1
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+GOTMP_SEND_STATUS=0
+spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp" || GOTMP_SEND_STATUS=$?
+if spawn_send_stranded "$GOTMP_SEND_STATUS"; then
+  spawn_fail_after_meta "$(spawn_send_stranded_detail 'the Go temp export'); refusing to append the launch command, so the agent was not launched"
+elif spawn_send_cleared "$GOTMP_SEND_STATUS"; then
+  spawn_fail_after_meta "$(spawn_send_cleared_detail 'the Go temp export') although its shell had just been proven ready, so the agent was not launched"
+elif [ "$GOTMP_SEND_STATUS" -ne 0 ]; then
+  spawn_fail_after_meta "the Go temp export could not be delivered to $W although its shell had just been proven ready, so the agent was not launched"
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
@@ -2867,25 +3417,27 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
   else
     TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+    if spawn_send_stranded "$TRACE_SEND_STATUS"; then
+      TRACE_REFUSAL="$(spawn_send_stranded_detail 'trace-context'); refusing to append the launch command"
+      spawn_record_failed_status "$TRACE_REFUSAL"
+      echo "error: $TRACE_REFUSAL" >&2
       exit 1
     fi
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+spawn_send_literal "$T" "$LAUNCH" \
+  || spawn_fail_after_meta "the agent launch command could not be typed into $W although its shell had just been proven ready, so no agent was started"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+spawn_send_key "$T" Enter \
+  || spawn_fail_after_meta "the agent launch command was typed into $W but its submitting Enter could not be delivered, so the command is sitting unsubmitted and no agent started"
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
-    exit 1
+    spawn_fail_after_meta "kimi did not show a verified ready signal before brief delivery"
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
@@ -2893,17 +3445,13 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
-    exit 1
-  }
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") \
+    || spawn_fail_after_meta "kimi brief pointer could not be submitted"
   if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
-    exit 1
+    spawn_fail_after_meta "kimi brief pointer could not be submitted"
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
-    exit 1
+    spawn_fail_after_meta "kimi brief pointer delivery was not confirmed"
   fi
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then

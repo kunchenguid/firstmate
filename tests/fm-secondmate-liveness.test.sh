@@ -301,10 +301,14 @@ case "${1:-}" in
     exit 0
     ;;
   has-session) exit 0 ;;
+  # Run a submitted text line as the pane's shell would, so fm-spawn's
+  # shell-readiness probe is answered during a recovery relaunch.
+  send-keys) fm-fake-shell-exec "$@"; exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

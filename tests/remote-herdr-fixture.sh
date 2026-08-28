@@ -90,6 +90,14 @@ case "${1:-} ${2:-}" in
       '.tabs |= [.[]|select(.pane_id != $p)]
        | .typed |= with_entries(select(.key != $p))
        | .working |= with_entries(select(.key != $p))' | save ;;
+  "pane run")
+    [ ! -f "$SEND_FAIL" ] || exit 1
+    jq_state --arg p "${3:-}" '.typed[$p] = true' | save
+    # A pane run types AND submits one line, so the pane's shell runs it. That
+    # matters because fm-spawn proves an endpoint's shell is reading input by
+    # a side effect the shell must produce before it types the launch command.
+    ( eval "${4:-}" ) >/dev/null 2>&1 || true
+    ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;

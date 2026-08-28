@@ -93,6 +93,12 @@ case "${1:-}" in
           [ -z "${FM_FAKE_TRACE_EXPORTED:-}" ] || : > "$FM_FAKE_TRACE_EXPORTED"
           ;;
       esac
+      # Run a submitted line as the pane's shell would, so fm-spawn's
+      # shell-readiness probe is answered. A bare key press carries no
+      # trailing Enter and is left unrun.
+      if [ "${2:-}" = Enter ]; then
+        ( eval "$payload" ) >/dev/null 2>&1 || true
+      fi
     fi
     exit 0 ;;
   display-message)

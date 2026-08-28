@@ -3420,6 +3420,44 @@ test_wait_for_working_treats_blocked_as_submit_active() {
   pass "fm_backend_herdr_wait_for_working: treats blocked as submit-active for confirmation without changing watcher busy-state semantics"
 }
 
+# --- send_text_line: one call, so statuses 2 and 3 are never this adapter's -
+#
+# bin/fm-spawn.sh's spawn_send_text_line reserves status 2 for a line that was
+# typed but could then be neither submitted nor cleared, and status 3 for one
+# that was typed and then cleared again - backend-wide, for the adapters that
+# compose a line from a literal send plus Enter and really can leave a pane in
+# those states. `pane run` types and submits in a single call, so a herdr pane
+# is in neither, while the status the call returns is the herdr PROCESS's own
+# exit code: a third party's numbering that may collide with the reserved ones.
+# fm-spawn reads a 2 or a 3 as a pane state it must describe to an operator (and
+# at the post-meta launch gate, record as the task's durable last state), so
+# every failure this adapter can have must arrive there as 1 - "the send did not
+# land" - and a success must still arrive as 0.
+
+test_send_text_line_collapses_every_cli_status_to_undelivered() {
+  local dir log resp fb status cli_status
+  for cli_status in 0 1 2 3 7; do
+    dir="$TMP_ROOT/send-line-$cli_status"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    # Slot 1 is the `pane run` itself: target_ready's server check is a
+    # `herdr status --json` call, which the fake answers without consuming one.
+    [ "$cli_status" -eq 0 ] || printf '%s\n' "$cli_status" > "$resp/1.exit"
+    fb=$(make_herdr_fakebin "$dir")
+    status=0
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_line default:w1:p2 "treehouse get"' "$ROOT" \
+      || status=$?
+    assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''run'$'\x1f''w1:p2'$'\x1f''treehouse get' \
+      "send_text_line should submit the line with a single pane-run call"
+    if [ "$cli_status" -eq 0 ]; then
+      [ "$status" -eq 0 ] || fail "a herdr CLI exit of 0 must stay 0 (the send landed), got $status"
+    else
+      [ "$status" -eq 1 ] || fail "a herdr CLI exit of $cli_status must reach fm-spawn as 1 (undelivered), never as the reserved typed-but-uncleared (2) or typed-then-cleared (3) pane state, got $status"
+    fi
+  done
+  pass "fm_backend_herdr_send_text_line: collapses every herdr CLI failure status to 1, never into spawn_send_text_line's reserved 2/3"
+}
+
 # --- send_text_submit: native agent-state (agent get) verify-and-retry ------
 # Rewritten for the 2026-07-07 incident (docs/herdr-backend.md): confirmation
 # no longer reads composer content in the normal idle-baseline path, so a
@@ -4564,6 +4602,7 @@ test_send_text_submit_applies_herdr_minimum_confirm_budget
 test_wait_for_working_returns_idle_when_never_busy_but_readable
 test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
+test_send_text_line_collapses_every_cli_status_to_undelivered
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter

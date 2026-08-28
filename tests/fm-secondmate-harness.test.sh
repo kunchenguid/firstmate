@@ -423,9 +423,14 @@ make_noop_tmux() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys) fm-fake-shell-exec "$@"; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -645,6 +650,10 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    # Run a submitted text line as the pane's shell would, so fm-spawn's
+    # shell-readiness probe is answered; the literal launch send stays this
+    # fake's own to log.
+    fm-fake-shell-exec "$@"
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -660,6 +669,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   fm_fake_exit0 "$fakebin" pi
   printf '%s\n' "$fakebin"
 }

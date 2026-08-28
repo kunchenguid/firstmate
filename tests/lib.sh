@@ -170,6 +170,32 @@ SH
   done
 }
 
+# fm_fake_shell_exec <fakebin>: install `fm-fake-shell-exec`, the minimum
+# "the pane's shell actually runs what was typed into it" behaviour a fake
+# backend needs. fm-spawn proves an endpoint's shell is reading input before
+# typing a command it cannot afford to lose, and it proves it by a side effect
+# the shell must produce, so a backend stub that swallows every send now reads
+# as a pane that never came up. Pass the stub's own argv straight through.
+#
+# Only tmux's submitted-text-line shape (`send-keys -t <target> <text> Enter`)
+# is run. The literal (`-l`) and bare-key shapes are separate input events, and
+# leaving them unmodelled keeps a stub from launching the fake harness binaries
+# these suites install for their own assertions. A test that needs the full
+# line discipline models it directly (tests/fm-spawn-shell-ready.test.sh).
+fm_fake_shell_exec() {
+  local fakebin=$1
+  cat > "$fakebin/fm-fake-shell-exec" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = send-keys ] || exit 0
+[ "${4:-}" != -l ] || exit 0
+[ "${5:-}" = Enter ] || exit 0
+( eval "${4:-}" ) >/dev/null 2>&1 || true
+exit 0
+SH
+  chmod +x "$fakebin/fm-fake-shell-exec"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

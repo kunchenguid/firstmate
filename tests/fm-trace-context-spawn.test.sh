@@ -32,6 +32,9 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    # Run a submitted text line as the pane's shell would, so fm-spawn's
+    # shell-readiness probe is answered before it types the exports.
+    fm-fake-shell-exec "$@"
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do
         case "$a" in
@@ -78,6 +81,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -316,6 +320,9 @@ test_unsafe_delivery_refuses_to_append_launch() {
   [ "$status" -ne 0 ] || fail "uncleared traceparent input must stop spawn"
   assert_contains "$out" "refusing to append the launch command" \
     "unsafe traceparent delivery should report why spawn stopped"
+  assert_grep "failed: trace-context input could not be cleared" \
+    "$HOME_DIR/state/$CASE_ID.status" \
+    "a refusal on the far side of meta publication was not recorded as the task's last state"
   ! grep -q 'claude' "$LAUNCH_LOG" \
     || fail "unsafe traceparent delivery must not append the launch command"
   pass "uncleared TRACEPARENT input stops before the launch command is appended"

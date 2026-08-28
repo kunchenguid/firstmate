@@ -468,11 +468,19 @@ fm_backend_zellij_send_key() {  # <target> <key> [expected-label]
   fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action send-keys --pane-id "$FM_BACKEND_ZELLIJ_PANE" "$key" >/dev/null 2>&1
 }
 
-# fm_backend_zellij_send_text_line: send one line of TEXT then submit.
+# fm_backend_zellij_send_text_line: send one line of TEXT then submit. Composed
+# from a literal send plus Enter, so like cmux's it holds three distinct failed
+# states and answers each with the status firstmate reserves for it
+# (bin/fm-spawn.sh's spawn_send_text_line owns those meanings): 1 when the
+# literal never landed and nothing was typed, 3 when the text WAS typed, only
+# the Enter failed, and the C-c that followed cleared it again, and 2 when that
+# clear failed too and the text is still sitting in the pane's input line.
+# Collapsing 3 into 1 would report a pane that answered twice as an unreachable
+# one, which is a repair for a state the operator does not have.
 fm_backend_zellij_send_text_line() {  # <target> <text> [expected-label]
   fm_backend_zellij_send_literal "$1" "$2" "${3:-}" || return 1
   fm_backend_zellij_send_key "$1" Enter "${3:-}" && return 0
-  fm_backend_zellij_send_key "$1" C-c "${3:-}" >/dev/null 2>&1 && return 1
+  fm_backend_zellij_send_key "$1" C-c "${3:-}" >/dev/null 2>&1 && return 3
   return 2
 }
 

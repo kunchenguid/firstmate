@@ -7,6 +7,12 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+# A task id names the per-task temp root under the shared real /tmp, which this
+# file's spawn cases reap on their way out. Several worktrees of this repo run
+# their gate on one host at the same time, so any id whose root is reaped needs a
+# token unique to this run or two runs would delete each other's roots mid-spawn;
+# the mktemp suffix on this run's own temp root is already that token.
+RUN_TAG=${TMP_ROOT##*.}
 
 make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
@@ -23,6 +29,42 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+# A send Orca REJECTED: its ordinary error envelope, returned at process exit
+# 0, which is how every Orca failure arrives (the CLI reserves its own exit
+# codes for not running at all). Nothing was typed, so the line below is not
+# run either. Keyed on the send text so a case can reject one specific send and
+# leave the rest of the sequence untouched.
+if [ "${1:-}" = terminal ] && [ "${2:-}" = send ] && [ -n "${FM_ORCA_SEND_REJECT_TEXT:-}" ]; then
+  for a in "$@"; do
+    case "$a" in
+      *"$FM_ORCA_SEND_REJECT_TEXT"*)
+        printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n'
+        exit 0
+        ;;
+    esac
+  done
+fi
+# Run a submitted text line the way the terminal's own shell would, so
+# fm-spawn's shell-readiness probe is answered. A literal send and the bare
+# Enter key (an empty --text with --enter) are input events, not submitted
+# lines, so leaving them unrun keeps this stub from launching a harness.
+# The parse runs in a subshell so the response sequencing below still sees
+# the original argv.
+(
+  if [ "${1:-}" = terminal ] && [ "${2:-}" = send ]; then
+    text=; enter=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --text) text=${2:-}; shift ;;
+        --enter) enter=1 ;;
+      esac
+      shift
+    done
+    if [ "$enter" = 1 ] && [ -n "$text" ]; then
+      ( eval "$text" ) >/dev/null 2>&1 || true
+    fi
+  fi
+)
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
@@ -489,7 +531,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
   local proj wt data state config id out log
-  id="orcaspawnz1"
+  id="orcaspawnz1-$RUN_TAG"
   proj="$TMP_ROOT/spawn-project"
   wt="$TMP_ROOT/spawn-wt"
   data="$TMP_ROOT/spawn-data"
@@ -518,12 +560,64 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
-  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
+  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f'"export GOTMPDIR=/tmp/fm-$id/gotmp"$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
   assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
+}
+
+# Orca submits a text line in ONE call (`terminal send --enter`), so it has no
+# state in which a line was typed and then left neither submitted nor cleared -
+# and no status meaning that. Its send nevertheless exits 2, straight out of the
+# JSON envelope check, whenever Orca answers `ok:false`: the terminal REFUSED the
+# send and nothing was typed at all. fm-spawn's readiness gate must therefore
+# report an unreachable endpoint here, not input sitting uncleared in a shell's
+# input line - a repair for a pane state that does not exist, and one that
+# becomes the task's durable last state because this gate runs after the meta is
+# published. The regression is the inversion: every non-fatal Orca send failure
+# arrives as 2, so a backend-agnostic reading of that status makes the
+# unreachable-endpoint refusal unreachable on this backend entirely.
+test_spawn_reports_rejected_orca_send_as_undelivered_not_stranded() {
+  local proj wt data state config id out status recorded
+  id="orcarejectz1-$RUN_TAG"
+  proj="$TMP_ROOT/reject-project"
+  wt="$TMP_ROOT/reject-wt"
+  data="$TMP_ROOT/reject-data"
+  state="$TMP_ROOT/reject-state"
+  config="$TMP_ROOT/reject-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case reject-send
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-reject"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-reject","path":"%s"},"terminal":{"handle":"term-reject"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_SEND_REJECT_TEXT='shell-ready.' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-reject-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn.sh --backend orca should refuse when Orca rejects the readiness probe"$'\n'"$out"
+  assert_contains "$out" "endpoint could not be reached" \
+    "the refusal did not name the endpoint that rejected the send"$'\n'"$out"
+  assert_contains "$out" "was never typed" \
+    "the refusal did not say the probe was never typed"$'\n'"$out"
+  assert_not_contains "$out" "could not be cleared" \
+    "a send Orca rejected was reported as input sitting uncleared in a shell's input line"$'\n'"$out"
+  recorded=$(cat "$state/$id.status" 2>/dev/null || true)
+  assert_contains "$recorded" "endpoint could not be reached" \
+    "the task's durable last state did not name the unreachable endpoint"
+  assert_not_contains "$recorded" "could not be cleared" \
+    "the task's durable last state told the uncleared-input story instead"
+  assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
+  assert_not_contains "$(cat "$LOG")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "the launch command was sent into a terminal that had rejected the probe"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: a rejected send is undelivered, never uncleared input"
 }
 
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
@@ -1331,6 +1425,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_reports_rejected_orca_send_as_undelivered_not_stranded
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree

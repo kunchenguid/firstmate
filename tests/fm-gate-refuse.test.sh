@@ -147,12 +147,14 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|set-window-option) exit 0 ;;
+  has-session|new-session|new-window|set-window-option) exit 0 ;;
+  send-keys) fm-fake-shell-exec "$@"; exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_shell_exec "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

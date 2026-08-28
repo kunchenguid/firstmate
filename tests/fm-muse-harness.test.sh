@@ -85,6 +85,10 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    # Run a submitted text line as the pane's shell would, so fm-spawn's
+    # shell-readiness probe is answered; the literal launch send below stays
+    # under this fake's own control.
+    fm-fake-shell-exec "$@"
     prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
@@ -104,6 +108,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash

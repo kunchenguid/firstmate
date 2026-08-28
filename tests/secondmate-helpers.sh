@@ -26,8 +26,15 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  has-session|new-session|new-window|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  send-keys)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    # Run a submitted text line as the pane's shell would, so fm-spawn's
+    # shell-readiness probe is answered.
+    fm-fake-shell-exec "$@"
     exit 0
     ;;
   list-windows)
@@ -96,6 +103,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_shell_exec "$fakebin"
   chmod +x "$fakebin/treehouse"
   : > "$dir/tmux.log"
   printf '%s\n' "$fakebin"
