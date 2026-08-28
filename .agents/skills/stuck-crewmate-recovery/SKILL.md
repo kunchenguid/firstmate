@@ -39,6 +39,10 @@ Preserve its uncommitted changes and commits, keep the same task identity, and r
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
+A recorded worktree that `treehouse status` shows leased to a DIFFERENT holder, or that another task's own `state/<id>.meta` also names, is not this task's to reconcile: its slot was recycled to a live task after this record went stale (`bin/fm-teardown.sh`'s header, "Worktree slot-collision guard", owns the exact mechanics).
+Never relaunch into a worktree in that state - it is not actually available, and doing so risks disrupting the other task's live work.
+Retire only the stale record with `bin/fm-teardown.sh <task-id> --retire-stale-record`, which verifies the collision for itself and then drops just this task's own bookkeeping, leaving the worktree, branch, and the other task's work untouched, then report the task failed or blocked with that evidence.
+
 ## Live-endpoint escalation
 
 Escalate in order:
