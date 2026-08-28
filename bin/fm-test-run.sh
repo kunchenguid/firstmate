@@ -65,9 +65,10 @@
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
-#   --max-wall-ms N fail the run when its measured suite wall clock exceeds N
-#                   milliseconds. It is evaluated after suite execution and
-#                   cannot interrupt a running script; per-script hangs are
+#   --max-wall-ms N fail the run when its measured invocation wall clock exceeds
+#                   N milliseconds, including an empty selection. It is
+#                   evaluated after selection and suite execution and cannot
+#                   interrupt a running script; per-script hangs are
 #                   bounded by --per-script-timeout-secs. Pathological output
 #                   sinks that block finalization are explicitly out of scope.
 #   -h, --help      print this header
