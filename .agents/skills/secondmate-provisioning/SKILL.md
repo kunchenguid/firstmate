@@ -63,8 +63,14 @@ Preserve the generated charter sections unless the domain genuinely needs a hard
 Provision a local persistent home and registry entry after the charter is filled:
 
 ```sh
-bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects} [--readonly]
 ```
+
+Pass `--readonly` for a read-only secondmate whose charter forbids editing, spawning, and merging.
+It refuses `-` so a read-only entity never consumes a writable treehouse lease, and clones `<home>` as a lightweight firstmate home that holds no pool slot, writing a `.fm-secondmate-readonly` provisioning marker.
+Teardown removes such a home with a plain `rm -rf` (it is not a treehouse worktree, so no lease is held).
+The charter, not this flag, owns the no-write-authority contract; the flag is the lease-avoidance guard and provisioning evidence.
+An existing read-only secondmate that currently holds a leased worktree migrates by staging its durable records (`data/backlog.md`, `data/projects.md`, `state/`), retiring the leased home (which releases the treehouse lease), re-seeding a `--readonly` clone at a new explicit path (the charter is re-copied from the surviving parent brief), then restoring the staged records.
 
 Provision a whole remote home through its configured SSH host with:
 

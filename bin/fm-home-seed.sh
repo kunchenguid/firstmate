@@ -2,7 +2,7 @@
 # Provision and route persistent secondmate homes.
 #
 # Usage:
-#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects} [--readonly]
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
@@ -22,6 +22,13 @@
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe; a failed return warns because the lease may still be held.
+#       Pass --readonly for a read-only secondmate whose charter forbids editing,
+#       spawning, and merging: it refuses "-" so a read-only entity never consumes
+#       a writable treehouse lease, clones <home> as a lightweight firstmate home
+#       that holds no pool slot, and writes a .fm-secondmate-readonly provisioning
+#       marker. Teardown removes a readonly home with a plain rm -rf (it is not a
+#       treehouse worktree, so no lease is held). The marker is provisioning
+#       evidence; the charter, not this flag, owns the no-write-authority contract.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -41,6 +48,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+SUB_HOME_READONLY_MARKER=".fm-secondmate-readonly"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
@@ -51,7 +59,7 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
+  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects} [--readonly]" >&2
   echo "       fm-home-seed.sh validate" >&2
 }
 
@@ -287,7 +295,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER" "$SUB_HOME_READONLY_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -456,6 +464,18 @@ EOF
   return 1
 }
 
+refuse_readonly_linked_worktree() {
+  local home=$1 linked_home
+  while IFS= read -r linked_home; do
+    if [ "$linked_home" = "$home" ]; then
+      echo "error: --readonly secondmate home $home is already a linked git worktree; retire it before provisioning a lease-free home" >&2
+      return 1
+    fi
+  done <<EOF
+$(git -C "$FM_ROOT" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+EOF
+}
+
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
   src="$PROJECTS/$project"
@@ -530,6 +550,7 @@ SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
 SEED_PARENT_MARKER_EXISTED=0
+SEED_READONLY_MARKER_EXISTED=0
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -650,6 +671,7 @@ seed_rollback() {
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
+        restore_seed_file "$SEED_READONLY_MARKER_EXISTED" "$SEED_BACKUP_DIR/readonly-marker" "$SEED_HOME/$SUB_HOME_READONLY_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
@@ -800,14 +822,19 @@ refuse_projectful_projectless_charter() {
 
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
-  local no_projects=0 arg
+  local no_projects=0 readonly=0 arg
   local filtered=()
   shift 2
   # A deliberate --no-projects signal (anywhere in the project position) seeds a
   # project-less home; an accidental omission with no signal still fails loudly.
+  # --readonly marks a read-only secondmate that must not consume a writable
+  # treehouse lease; it refuses "-" so the home is always an explicit, non-leased
+  # clone rather than a pool worktree.
   for arg in "$@"; do
     if [ "$arg" = "--no-projects" ]; then
       no_projects=1
+    elif [ "$arg" = "--readonly" ]; then
+      readonly=1
     else
       filtered+=("$arg")
     fi
@@ -821,6 +848,10 @@ seed_home() {
     [ $# -eq 0 ] || { echo "error: --no-projects cannot be combined with a project list" >&2; return 1; }
   else
     [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
+  fi
+  if [ "$readonly" -eq 1 ] && [ "$requested_home" = "-" ]; then
+    echo "error: --readonly secondmate must not consume a writable treehouse lease; pass an explicit home path instead of '-'" >&2
+    return 1
   fi
 
   mkdir -p "$STATE" || return 1
@@ -864,6 +895,9 @@ seed_home() {
   else
     requested_abs=$(abs_path_for_new "$requested_home")
     refuse_active_home_path "$requested_abs" || return 1
+    if [ "$readonly" -eq 1 ]; then
+      refuse_readonly_linked_worktree "$requested_abs" || return 1
+    fi
     validate_home_assignment "$id" "$requested_abs" || return 1
     SEED_HOME="$requested_abs"
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
@@ -897,6 +931,10 @@ seed_home() {
   if [ -f "$home/$SUB_HOME_PARENT_MARKER" ]; then
     SEED_PARENT_MARKER_EXISTED=1
     cp "$home/$SUB_HOME_PARENT_MARKER" "$SEED_BACKUP_DIR/parent-marker"
+  fi
+  if [ -f "$home/$SUB_HOME_READONLY_MARKER" ]; then
+    SEED_READONLY_MARKER_EXISTED=1
+    cp "$home/$SUB_HOME_READONLY_MARKER" "$SEED_BACKUP_DIR/readonly-marker"
   fi
   SEED_HOME_BACKED_UP=1
 
@@ -959,6 +997,12 @@ seed_home() {
   mv -f -- "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" "$home/$SUB_HOME_PARENT_MARKER"
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER.tmp.$$"
   mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
+  if [ "$readonly" -eq 1 ]; then
+    printf 'readonly\n' > "$home/$SUB_HOME_READONLY_MARKER.tmp.$$"
+    mv -f -- "$home/$SUB_HOME_READONLY_MARKER.tmp.$$" "$home/$SUB_HOME_READONLY_MARKER"
+  else
+    rm -f -- "$home/$SUB_HOME_READONLY_MARKER" 2>/dev/null || true
+  fi
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1

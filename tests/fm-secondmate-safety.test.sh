@@ -2953,6 +2953,207 @@ EOF
   pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
+# --readonly provisions a read-only secondmate home that never consumes a
+# writable treehouse lease: it refuses "-" (which would lease a pool worktree)
+# so the caller must supply an explicit path, which the seeder clones as a
+# lightweight firstmate home holding no pool slot.
+test_home_seed_readonly_refuses_dash_lease() {
+  local home err
+  home="$TMP_ROOT/readonly-dash-home"
+  mkdir -p "$home/data" "$home/state"
+  err="$TMP_ROOT/readonly-dash.err"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='readonly domain' FM_SECONDMATE_SCOPE='readonly scope' \
+    "$ROOT/bin/fm-home-seed.sh" rdev - --no-projects --readonly >/dev/null 2>"$err"; then
+    fail "readonly seed accepted '-' and would have leased a writable treehouse worktree"
+  fi
+  grep -F -- '--readonly secondmate must not consume a writable treehouse lease' "$err" >/dev/null \
+    || fail "readonly dash refusal did not explain the lease guard"
+  grep -F "pass an explicit home path instead of '-'" "$err" >/dev/null \
+    || fail "readonly dash refusal did not direct to an explicit path"
+  pass "home seeding refuses to lease a writable worktree for a readonly secondmate"
+}
+
+test_home_seed_readonly_refuses_existing_leased_worktree() {
+  local home root leased err
+  home="$TMP_ROOT/readonly-existing-leased-home"
+  root="$TMP_ROOT/readonly-existing-leased-root"
+  leased="$TMP_ROOT/readonly-existing-leased-worktree"
+  err="$TMP_ROOT/readonly-existing-leased.err"
+  mkdir -p "$home/data" "$home/state"
+  make_firstmate_git_root "$root"
+  git -C "$root" worktree add --quiet --detach "$leased" HEAD
+  if FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_SECONDMATE_CHARTER='readonly domain' FM_SECONDMATE_SCOPE='readonly scope' \
+    "$ROOT/bin/fm-home-seed.sh" rdev "$leased" --no-projects --readonly >/dev/null 2>"$err"; then
+    fail "readonly seed accepted an existing linked worktree and would retain a pool lease"
+  fi
+  grep -F 'already a linked git worktree' "$err" >/dev/null \
+    || fail "readonly linked-worktree refusal did not explain the lease guard"
+  [ ! -f "$leased/.fm-secondmate-readonly" ] || fail "readonly linked-worktree refusal wrote its marker"
+  pass "readonly seeding refuses an existing linked worktree that may hold a treehouse lease"
+}
+
+test_home_seed_readonly_clones_without_treehouse_lease() {
+  # A readonly secondmate seeded at an explicit path is a genuine firstmate home
+  # (clone of the firstmate repo) that holds no treehouse pool slot: treehouse is
+  # never invoked, the readonly marker is written, and the registry routes to it.
+  local home sub sub_abs fakebin log out
+  home="$TMP_ROOT/readonly-clone-home"
+  sub="$TMP_ROOT/readonly-clone-subhome"
+  mkdir -p "$home/data" "$home/state"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/readonly-clone-fake")
+  log="$TMP_ROOT/readonly-clone-fake/tmux.log"
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='readonly domain' FM_SECONDMATE_SCOPE='readonly scope' \
+    "$ROOT/bin/fm-home-seed.sh" rdev "$sub" --no-projects --readonly) \
+    || fail "readonly seed at an explicit path failed"
+  sub_abs=$(cd "$sub" && pwd -P)
+  printf '%s\n' "$out" | grep -F "home=$sub_abs" >/dev/null || fail "readonly seed did not report the cloned home"
+  grep -F 'treehouse' "$log" >/dev/null && fail "readonly seed invoked treehouse (must not lease a pool slot)"
+  [ -f "$sub/AGENTS.md" ] || fail "readonly home is not a firstmate home (missing AGENTS.md)"
+  [ -d "$sub/bin" ] || fail "readonly home is not a firstmate home (missing bin/)"
+  [ -f "$sub/.fm-secondmate-home" ] || fail "readonly seed did not write the identity marker"
+  [ "$(cat "$sub/.fm-secondmate-home")" = rdev ] || fail "readonly identity marker has the wrong id"
+  [ -f "$sub/.fm-secondmate-readonly" ] || fail "readonly seed did not write the readonly provisioning marker"
+  assert_grep 'home: '"$sub_abs" "$home/data/secondmates.md" "readonly registry did not record the cloned home"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after readonly seed"
+  pass "readonly seeding clones a genuine firstmate home without leasing a treehouse worktree"
+}
+
+test_home_seed_readonly_refuses_non_firstmate_directory() {
+  # The seeder still accepts only a genuine firstmate home: an existing directory
+  # that is not a firstmate home (no AGENTS.md) is refused even under --readonly,
+  # so a random directory can never become a secondmate home by accident.
+  local home bad err
+  home="$TMP_ROOT/readonly-invalid-home"
+  bad="$TMP_ROOT/readonly-invalid-not-a-home"
+  mkdir -p "$home/data" "$home/state" "$bad"
+  printf 'not a firstmate home\n' > "$bad/README.md"
+  err="$TMP_ROOT/readonly-invalid.err"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='readonly domain' FM_SECONDMATE_SCOPE='readonly scope' \
+    "$ROOT/bin/fm-home-seed.sh" rdev "$bad" --no-projects --readonly >/dev/null 2>"$err"; then
+    fail "readonly seed accepted a directory that is not a firstmate home"
+  fi
+  grep -F 'is not a firstmate home (missing AGENTS.md)' "$err" >/dev/null \
+    || fail "readonly seed did not refuse the non-home directory via home validation"
+  [ ! -f "$bad/.fm-secondmate-home" ] || fail "readonly seed marked a non-home directory as a secondmate home"
+  [ ! -f "$bad/.fm-secondmate-readonly" ] || fail "readonly seed wrote its marker into a non-home directory"
+  pass "readonly seeding still refuses a directory that is not a firstmate home"
+}
+
+test_home_seed_readonly_migration_preserves_charter_and_state() {
+  # Existing read-only secondmates leased a pool worktree under the old shape.
+  # The safe migration path: stage the home's durable records, retire the leased
+  # home (releasing its treehouse lease), re-seed a readonly clone at a new
+  # explicit path (the charter is re-copied from the surviving parent brief),
+  # then restore the staged records. Charter and state survive; the lease is
+  # released; the old home is gone; the new home holds no pool slot.
+  local home acquired acquired_abs new_sub new_sub_abs fakebin log lease stage fmroot out
+  home="$TMP_ROOT/readonly-migrate-home"
+  acquired="$TMP_ROOT/readonly-migrate-old-home"
+  new_sub="$TMP_ROOT/readonly-migrate-new-home"
+  stage="$TMP_ROOT/readonly-migrate-stage"
+  fmroot="$TMP_ROOT/readonly-migrate-fmroot"
+  mkdir -p "$home/data" "$home/state"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/readonly-migrate-fake")
+  log="$TMP_ROOT/readonly-migrate-fake/tmux.log"
+  lease="$TMP_ROOT/readonly-migrate-fake/lease"
+  # Old shape: a leased pool worktree. Represent it as a real git worktree of a
+  # fake firstmate root (so teardown sees a registered worktree and returns it
+  # through treehouse) plus a recorded lease, the same way the retirement suite
+  # models an empty leased home.
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$acquired" HEAD
+  mkdir -p "$acquired/data" "$acquired/state"
+  printf 'rdev\n' > "$acquired/.fm-secondmate-home"
+  printf 'rdev\n' > "$lease"
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  printf -- '- rdev - readonly domain (home: %s; scope: readonly scope; projects: ; added 2026-08-21)\n' "$acquired_abs" > "$home/data/secondmates.md"
+  cat > "$home/state/rdev.meta" <<EOF
+window=firstmate:fm-rdev
+worktree=$acquired_abs
+project=$acquired_abs
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$acquired_abs
+projects=
+EOF
+  # The parent charter brief survives teardown and re-seed re-copies it.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='readonly domain' FM_SECONDMATE_SCOPE='readonly scope' \
+    "$ROOT/bin/fm-brief.sh" rdev --secondmate --no-projects >/dev/null \
+    || fail "migration baseline: charter scaffold failed"
+  # Durable records the captain expects to survive a migration.
+  printf '## Queued\n- [ ] survive-migration - stays (repo: alpha)\n' > "$acquired/data/backlog.md"
+  printf 'migration-witness\n' > "$acquired/state/rdev.witness"
+  printf -- '- alpha [direct-PR] - alpha project (added 2026-08-21)\n' > "$acquired/data/projects.md"
+
+  # 1. Stage durable records out of the leased home.
+  mkdir -p "$stage/data" "$stage/state"
+  cp "$acquired/data/backlog.md" "$stage/data/backlog.md"
+  cp "$acquired/data/projects.md" "$stage/data/projects.md"
+  cp "$acquired/state/rdev.witness" "$stage/state/rdev.witness"
+
+  # 2. Retire the leased home: releases the treehouse lease, removes the home,
+  #    clears the registry route and parent meta; the parent brief survives.
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/readonly-migrate-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    "$ROOT/bin/fm-teardown.sh" rdev >/dev/null 2>/dev/null \
+    || fail "migration: retiring the leased home failed"
+  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
+    || fail "migration: retiring the leased home did not release its treehouse lease"
+  [ ! -e "$lease" ] || fail "migration: the treehouse lease was not released"
+  [ ! -d "$acquired" ] || fail "migration: the leased home was not removed"
+  [ ! -e "$home/state/rdev.meta" ] || fail "migration: parent meta was not cleared"
+  [ -f "$home/data/rdev/brief.md" ] || fail "migration: the parent charter brief did not survive teardown"
+
+  # 3. Re-seed a readonly clone at a new explicit path; the charter is re-copied
+  #    from the surviving parent brief, so no charter content is lost.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" rdev "$new_sub" --no-projects --readonly) \
+    || fail "migration: readonly re-seed failed"
+  new_sub_abs=$(cd "$new_sub" && pwd -P)
+  printf '%s\n' "$out" | grep -F "home=$new_sub_abs" >/dev/null || fail "migration: re-seed did not report the new home"
+  [ -f "$new_sub/data/charter.md" ] || fail "migration: charter was not preserved in the new home"
+  grep -F 'readonly domain' "$new_sub/data/charter.md" >/dev/null \
+    || fail "migration: the re-copied charter lost its content"
+  [ -f "$new_sub/.fm-secondmate-readonly" ] || fail "migration: the new home is not marked readonly"
+  grep -F "home: $new_sub_abs" "$home/data/secondmates.md" >/dev/null \
+    || fail "migration: the registry did not route to the new home"
+
+  # 4. Restore the staged durable records into the new home.
+  cp "$stage/data/backlog.md" "$new_sub/data/backlog.md"
+  cp "$stage/data/projects.md" "$new_sub/data/projects.md"
+  cp "$stage/state/rdev.witness" "$new_sub/state/rdev.witness"
+  [ -f "$new_sub/data/backlog.md" ] || fail "migration: staged backlog was not restored"
+  [ -f "$new_sub/state/rdev.witness" ] || fail "migration: staged state witness was not restored"
+  [ "$(cat "$new_sub/state/rdev.witness")" = migration-witness ] \
+    || fail "migration: restored state witness content did not match"
+
+  # 5. The new home holds no treehouse pool slot: retiring it must raw-remove
+  #    rather than call treehouse return, proving no lease is held.
+  cat > "$home/state/rdev.meta" <<EOF
+window=firstmate:fm-rdev
+worktree=$new_sub_abs
+project=$new_sub_abs
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$new_sub_abs
+projects=
+EOF
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/readonly-migrate-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" rdev >/dev/null 2>/dev/null \
+    || fail "migration: retiring the new readonly home failed"
+  grep -F "treehouse return --force $new_sub_abs" "$log" >/dev/null \
+    && fail "migration: the readonly home was treated as a leased worktree on teardown"
+  [ ! -d "$new_sub" ] || fail "migration: the readonly home was not removed"
+  pass "readonly migration preserves charter and state and releases the old treehouse lease"
+}
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -3030,3 +3231,8 @@ test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely
 test_backlog_handoff_refuses_done_items_and_non_secondmate_homes
+test_home_seed_readonly_refuses_dash_lease
+test_home_seed_readonly_refuses_existing_leased_worktree
+test_home_seed_readonly_clones_without_treehouse_lease
+test_home_seed_readonly_refuses_non_firstmate_directory
+test_home_seed_readonly_migration_preserves_charter_and_state
