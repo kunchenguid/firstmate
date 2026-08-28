@@ -1,33 +1,49 @@
-Mode: Codex durable-wake supervision (present-mode daemon primary, foreground checkpoint backstop).
+Mode: Codex durable-wake supervision (`codex queue` doorbell first, marked terminal injection second, bounded foreground checkpoint last).
 
-Codex cannot reason while a foreground tool call is running and has no background-task completion wake, so a bare watcher exit cannot start a fresh turn by itself.
-The present-mode supervision daemon closes that gap: it runs in a separate non-visible terminal, owns the watcher, and injects a marked supervision nudge into this pane on each actionable wake, starting the turn that drains the queue.
-This is the durable wake path; the bounded foreground checkpoint remains only as the degraded backstop.
+Codex does not start a turn when an asynchronous `Stop` hook finishes.
+The present-mode daemon therefore owns the watcher and uses `codex queue` to ring the exact bound primary thread when an actionable wake is already durable.
+The queued message is a fixed `FIRSTMATE_OP` drain instruction and never carries the wake payload.
+`state/.wake-queue` remains the authority, and queue acceptance means only that Codex accepted a doorbell.
 
 When this session owns supervision and away mode is not active:
+
 1. Drain first with `bin/fm-wake-drain.sh`.
-   After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
+   Handle every emitted wake, reconcile open decisions and unread status, and then run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`.
+   Until that acknowledgement succeeds, wake rows and their recovery generation remain durable for idempotent re-handling.
 2. Source `__FM_X_MODE_ENV__` first when Relay is active.
 3. Ensure the present-mode daemon is running with `bin/fm-present-launch.sh start`.
-   It is idempotent: it no-ops when the daemon is already live and reconciles a leaked terminal from a prior crash before relaunching.
-   The daemon is now this session's live supervision cycle - it owns the watcher and touches the same beacon the turn-end guard checks, so the turn may end without a blocking foreground checkpoint.
-4. When a marked supervision nudge arrives, or any wake, drain queued wakes with `bin/fm-wake-drain.sh`, handle the wake per this protocol, then re-run `bin/fm-present-launch.sh start` to confirm the daemon is still live before ending the turn.
-5. Never use shell `&` or Codex background tasks for firstmate watcher supervision; the daemon owns its own separate terminal.
-6. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
-   If it is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.
+   It is idempotent, reconciles a leaked terminal before relaunching, and may use a detached tmux session only to host the watcher when the Codex primary itself is on an independent pty.
+4. On a `FIRSTMATE_OP: v1 watcher:` message or a marked terminal fallback (`FM_INJECT_MARK` prefix), drain and handle the durable queue, run its acknowledgement, and re-run `bin/fm-present-launch.sh start` before ending the turn.
+5. Never use shell `&`, Codex background tasks, or `bin/fm-watch-arm.sh` for routine Codex supervision.
+   The daemon owns its separate terminal, and the PreToolUse seatbelt in `.codex/hooks.json` denies backgrounded, piped, or bundled arm commands.
 
-A marked supervision nudge (`FM_INJECT_MARK` prefix) while away mode is inactive is the present daemon waking this pane.
-It is not an away-mode escalation and does not load `/afk`; just drain and handle it per this protocol.
+The daemon validates an authoritative private primary-thread binding captured by `bin/fm-session-start.sh` from the Codex `SessionStart` payload when that hook fires, cross-checked against the `CODEX_THREAD_ID` that Codex injects into its own shell-tool environment.
+That binding is accepted only while its home, session-lock generation, owner PID, and process identity still match.
+Running the required bootstrap in a resumed or restarted primary replaces the binding; re-running it after compaction preserves the same native UUID.
+The interactive TUI does not fire the tracked project `SessionStart` hook on verified 0.150.1, so its required bootstrap binds directly from that same native shell identity instead of inferring a session from transcripts or titles.
+An in-process compaction leaves the validated process and native thread identity unchanged, but it does not provide an instruction-refresh channel.
+Firstmate never chooses a thread from transcript recency, session title, or the general session list.
 
-Degraded backstop (honest, not silent):
-`bin/fm-present-launch.sh start` returns exit code 3 when it cannot inject automatically here - most often because this primary runs on an independent pty rather than inside tmux or herdr, so no injectable supervisor pane resolves.
-That is an EXPECTED degrade, not a failure: durable notifications still work (wakes are queued and never lost), only the automatic fresh-turn injection is unavailable, and the command says exactly that on stderr.
-Report it to the captain in those terms - durable notifications available, automatic Codex injection unavailable, using the foreground checkpoint fallback - rather than as a broken supervisor, and distinguish "the event was durably queued" from "Codex automatically started a new turn".
-On that exit code 3, or any other non-zero start (the daemon genuinely would not launch), fall back to the bounded foreground checkpoint:
-1. Run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
-2. If it prints `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, handle that wake, then start the next checkpoint.
-3. If it prints `checkpoint:` or exits 124 with no wake, drain queued wakes anyway, process any queued user message now visible to Codex, then start the next checkpoint.
+For one bound session and recovery generation, accepted, timed-out, or interrupted native submissions suppress another native submission until post-handling acknowledgement.
+This coalesces a burst behind one generic drain turn and makes ambiguous acceptance harmless.
+Only the drain acknowledgement consumes wake rows and retires the delivery record, so duplicate turns can observe an empty eligible queue but cannot duplicate a captain report.
 
-Do not run both the present daemon and a foreground checkpoint at once: the watcher singleton lock lets only one live watcher exist, so the second one no-ops.
-Do not run `bin/fm-watch.sh` directly and do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
-If either is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.
+Fallback order is exact:
+
+1. Invoke bounded `codex queue --thread <validated UUID> --message <fixed drain prompt>` when the installed command exposes `queue --thread` and `--message`.
+2. On a missing or stale binding, unsupported command, timeout, rejection, or ambiguous submission, retain every wake and try the existing marked tmux/herdr injection.
+   Its composer and target-ownership guards are unchanged: only an affirmatively empty composer receives the marked message.
+3. If no safe injectable pane exists, retain every wake for `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
+
+`bin/fm-present-launch.sh start` returns exit code 3 when neither an injectable tmux/herdr target nor a detached host with both native queue capability and a currently validated binding is available.
+Report that as durable notifications available but automatic Codex delivery unavailable, then use the bounded checkpoint.
+If a checkpoint prints `signal:`, `stale:`, `check:`, or `heartbeat`, drain and handle the queue before starting the next checkpoint.
+If it prints `checkpoint:` or exits 124 without a wake, drain anyway, process any queued user message visible to Codex, and start the next checkpoint.
+That clean timeout is an orderly watcher handoff and must not itself produce `check: rearm-resurface`; genuine watcher death remains recoverable from the durable queue and stale-lock evidence.
+
+The synchronous `Stop` guard remains a boundary backstop.
+`stop_hook_active=true` prevents a queue-triggered turn from recursively forcing another continuation.
+Do not describe Codex's asynchronous `Stop` hook as Claude-style rewake: the native `codex queue` ingress is the enabling primitive.
+
+Do not run the present daemon and a foreground checkpoint together because the watcher singleton permits only one live watcher.
+Do not run `bin/fm-watch.sh` directly.

@@ -34,6 +34,7 @@ RUN="$ROOT/bin/fm-sessionstart-run.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
+CODEX_SESSION_UUID=11111111-1111-4111-8111-111111111111
 fm_operational_input_encode session-start "$NUDGE_TEXT" NUDGE_LINE \
   || fail "could not construct expected session-start nudge"
 fm_git_identity fmtest fmtest@example.invalid
@@ -493,6 +494,32 @@ test_run_reads_source_from_the_hook_payload() {
   pass "run wrapper: the hook payload's source field drives routing with no explicit argument"
 }
 
+test_run_codex_payload_binds_session_id() {
+  local root="$TMP_ROOT/run-codex-session-id" harness out status=0 binding
+  make_run_primary "$root"
+  harness="$TMP_ROOT/run-codex-session-id-harness"
+  mkdir -p "$harness"
+  ln -s /bin/bash "$harness/codex"
+  # shellcheck disable=SC2016 # SESSION_ID and RUN expand in the child shell.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    CODEX_THREAD_ID="$CODEX_SESSION_UUID" FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" RUN="$RUN" \
+    SESSION_ID="$CODEX_SESSION_UUID" "$harness/codex" -c \
+    'printf '\''{"session_id":"%s","hook_event_name":"SessionStart","source":"startup"}'\'' "$SESSION_ID" | "$RUN"') \
+    || status=$?
+  expect_code 0 "$status" "run wrapper Codex SessionStart binding"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "a Codex SessionStart payload did not run the full digest"
+  assert_present "$root/state/.codex-primary-binding" \
+    "the public session-start wrapper did not publish the Codex primary binding"
+  binding=$(cat "$root/state/.codex-primary-binding")
+  assert_contains "$binding" "thread_uuid=$CODEX_SESSION_UUID" \
+    "the SessionStart session_id did not reach the authoritative binding"
+  assert_contains "$binding" "source=startup" \
+    "the SessionStart source did not reach the authoritative binding"
+  pass "run wrapper: Codex SessionStart.session_id reaches the authoritative primary binding"
+}
+
 test_run_unknown_source_takes_the_helm() {
   local root="$TMP_ROOT/run-unknown" out status=0
   make_run_primary "$root"
@@ -549,6 +576,7 @@ test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
+test_run_codex_payload_binds_session_id
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text

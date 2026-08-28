@@ -1138,6 +1138,7 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+WATCHER_EXPECTED_CHECKPOINT_STOP=0
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -1150,7 +1151,12 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
-  if [ "$owns_lock" -eq 1 ] \
+  if [ "$owns_lock" -eq 1 ] && [ "$WATCHER_EXPECTED_CHECKPOINT_STOP" -eq 1 ]; then
+    # A bounded foreground checkpoint ending on its own timer is an orderly
+    # handoff, not watcher downtime. Release only the singleton; pending wake
+    # and handling markers, if any, remain untouched for the successor.
+    fm_lock_release "$WATCH_LOCK" || cleanup_status=1
+  elif [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
@@ -1158,7 +1164,17 @@ watcher_cleanup() {
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
+watcher_signal_exit() {
+  local signal=$1 status=$2
+  if [ "$signal" = USR1 ] && [ "${FM_WATCH_BOUNDED_CHECKPOINT:-0}" = 1 ]; then
+    WATCHER_EXPECTED_CHECKPOINT_STOP=1
+  fi
+  exit "$status"
+}
+trap 'watcher_signal_exit HUP 1' HUP
+trap 'watcher_signal_exit INT 1' INT
+trap 'watcher_signal_exit TERM 1' TERM
+trap 'watcher_signal_exit USR1 1' USR1
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.

@@ -642,6 +642,10 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
   }
 fi
+if [ "$READ_ONLY" -eq 0 ] && [ "$PRIMARY_HARNESS" = codex ]; then
+  "$SCRIPT_DIR/fm-codex-primary.sh" bind "${SESSION_SOURCE:-bootstrap}" \
+    "${FM_CODEX_SESSION_START_ID:-}" >/dev/null 2>&1 || true
+fi
 REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 

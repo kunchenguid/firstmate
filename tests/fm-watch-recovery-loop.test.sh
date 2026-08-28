@@ -7,8 +7,15 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
+DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-recovery-loop)
 export NODE_NO_WARNINGS=1
+
+mark_pr_check_migration_complete() { # <state>
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$1/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$1/.pr-check-migration-v1"
+  chmod 0600 "$1/.pr-check-migration-scan-v1" "$1/.pr-check-migration-v1"
+}
 
 install_pi_watch_extension_fixture() {
   local repo=$1
@@ -219,5 +226,110 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: exercise the public present-daemon entry over two watcher cycles. The
+# first real status wake exits its watcher and is delivered through the queue
+# adapter fake. The daemon must start the replacement as the handling successor,
+# which stays live across more than one former rapid-loop interval without
+# emitting a synthetic rearm-resurface or changing the recovery generation.
+test_present_daemon_rearms_one_live_successor_without_storm() {
+  local dir state fakebin daemon_pid first_generation second_generation watcher_pid i deliveries
+  local owner_identity identity_hash home_hash drain_out drain_err ack sequence generation
+  dir="$TMP_ROOT/t3"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$state" "$fakebin"
+  mark_pr_check_migration_complete "$state"
+  : > "$state/crew.meta"
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = queue ] && [ "${2:-}" = --help ]; then
+  printf 'Usage: codex queue --thread THREAD --message TEXT\n'
+  exit 0
+fi
+[ "${1:-}" = queue ] || exit 2
+printf '%s\n' "$*" >> "${FM_FAKE_DELIVERIES:?}"
+exit 0
+SH
+  chmod +x "$fakebin/codex"
+  owner_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$")
+  if command -v shasum >/dev/null 2>&1; then
+    identity_hash=$(printf '%s' "$owner_identity" | shasum -a 256 | awk '{print $1}')
+    home_hash=$(printf '%s' "$dir" | shasum -a 256 | awk '{print $1}')
+  else
+    identity_hash=$(printf '%s' "$owner_identity" | sha256sum | awk '{print $1}')
+    home_hash=$(printf '%s' "$dir" | sha256sum | awk '{print $1}')
+  fi
+  printf '%s\n' "$$" > "$state/.lock"
+  printf 'fm-session-lock-generation-v1\n%s\npresent-t3\n%s\n' "$$" "$identity_hash" > "$state/.lock-generation"
+  printf 'fm-codex-primary-binding-v1\nthread_uuid=33333333-3333-4333-8333-333333333333\nhome_sha256=%s\nowner_pid=%s\nowner_identity_sha256=%s\nsession_generation=present-t3\nsource=startup\n' \
+    "$home_hash" "$$" "$identity_hash" > "$state/.codex-primary-binding"
+  chmod 0600 "$state/.lock-generation" "$state/.codex-primary-binding"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_SUPERVISE_PRESENT=1 FM_CODEX_QUEUE_ONLY=1 \
+    FM_DAEMON_PRIMARY_HARNESS=codex FM_CODEX_QUEUE_BIN="$fakebin/codex" \
+    FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE="$$" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_WATCHER_STALE_GRACE=10 FM_HOUSEKEEPING_TICK=1 \
+    FM_FAKE_DELIVERIES="$dir/deliveries" "$DAEMON" >"$dir/daemon.out" 2>"$dir/daemon.err" &
+  daemon_pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] || {
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    fail "present daemon did not establish its first watcher"
+  }
+  printf 'done: one real present-mode wake\n' > "$state/crew.status"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ -s "$dir/deliveries" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$dir/deliveries" ] || {
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    fail "present daemon did not deliver the real status wake"
+  }
+  first_generation=$(recovery_marker_generation "$state/.watcher-down")
+  sleep 4
+  deliveries=$(wc -l < "$dir/deliveries" | tr -d ' ')
+  second_generation=$(recovery_marker_generation "$state/.watcher-down")
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ "$deliveries" != 1 ]; then
+    fail "present daemon re-delivered $deliveries times instead of coalescing one recovery episode: $(cat "$dir/deliveries")"
+  elif [ -z "$first_generation" ] || [ "$second_generation" != "$first_generation" ]; then
+    fail "present daemon successor churned the recovery generation ($first_generation -> $second_generation)"
+  elif ! kill -0 "$watcher_pid" 2>/dev/null; then
+    fail "present daemon did not leave a live successor watcher (pid $watcher_pid)"
+  elif grep -F 'wake: check: rearm-resurface' "$state/.supervise-present.log" >/dev/null 2>&1; then
+    fail "present daemon successor generated a recursive rearm-resurface wake"
+  fi
+  drain_out="$dir/drain.out"
+  drain_err="$dir/drain.err"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_SUPERVISION_MODEL=extension \
+    "$ROOT/bin/fm-wake-drain.sh" > "$drain_out" 2> "$drain_err" \
+    || fail "present daemon E2E drain failed"
+  assert_contains "$(cat "$drain_out")" "done: one real present-mode wake" \
+    "present daemon E2E drain omitted the done signal"
+  ack=$(grep '^WAKE_ACK_REQUIRED:' "$drain_err" | tail -1)
+  sequence=$(printf '%s\n' "$ack" | sed -n 's/.*--ack-through \([0-9][0-9]*\).*/\1/p')
+  generation=$(printf '%s\n' "$ack" | sed -n 's/.*--recovery-generation \([A-Za-z0-9._-]*\).*/\1/p')
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "present daemon E2E drain omitted its acknowledgement"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_SUPERVISION_MODEL=extension \
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$generation" \
+    >/dev/null 2>&1 || fail "present daemon E2E acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "present daemon E2E acknowledgement left the done row queued"
+  [ ! -e "$state/.codex-queue-outstanding" ] || fail "present daemon E2E acknowledgement left the queue doorbell outstanding"
+  kill -0 "$watcher_pid" 2>/dev/null || fail "present daemon successor died across handling acknowledgement"
+  pass "done signal reaches one queue turn, drain/ack, and a stable live successor"
+  kill -TERM "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+}
+
 test_handling_successor_does_not_go_blind
+test_present_daemon_rearms_one_live_successor_without_storm
 test_unacknowledged_recovery_is_announced_once_per_generation

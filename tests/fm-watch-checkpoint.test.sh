@@ -28,6 +28,68 @@ test_quiet_checkpoint_exits_124_cleanly() {
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
+test_quiet_checkpoint_hands_off_without_false_recovery() {
+  local home first_out second_out status generation
+  home=$(make_home quiet-successor)
+  first_out="$home/first.out"
+  second_out="$home/second.out"
+  generation=handled-generation
+  printf 'acked:handling:%s\n' "$generation" > "$home/state/.watcher-down"
+  chmod 0600 "$home/state/.watcher-down"
+
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 1 >"$first_out" 2>"$home/first.err" || status=$?
+  expect_code 124 "$status" "first quiet checkpoint exit"
+  [ "$(cat "$home/state/.watcher-down")" = "acked:handling:$generation" ] \
+    || fail "a planned checkpoint expiry minted a false downtime generation"
+
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 1 >"$second_out" 2>"$home/second.err" || status=$?
+  expect_code 124 "$status" "successor quiet checkpoint exit"
+  assert_not_contains "$(cat "$second_out")" "check: rearm-resurface" \
+    "a clean checkpoint handoff resurfaced false downtime"
+  [ "$(cat "$home/state/.watcher-down")" = "acked:handling:$generation" ] \
+    || fail "the successor checkpoint changed acknowledged recovery state"
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "a clean checkpoint handoff enqueued a synthetic recovery wake"
+  pass "clean checkpoint expiry hands off to a successor without rearm-resurface"
+}
+
+test_crashed_checkpoint_still_resurfaces_recovery() {
+  local home out child watcher_pid status i
+  home=$(make_home crashed-checkpoint)
+  out="$home/crashed.out"
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 20 >"$out" 2>"$home/crashed.err" &
+  child=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    watcher_pid=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$watcher_pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "${watcher_pid:-}" ] || {
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "crash fixture checkpoint never acquired the watcher lock"
+  }
+  kill -KILL "$watcher_pid" 2>/dev/null || fail "could not crash the checkpoint watcher"
+  wait "$child" 2>/dev/null || true
+
+  status=0
+  # Recovery is immediate once startup reaches the stale lock, but leave enough
+  # outer headroom for migration/bootstrap subprocesses on a loaded CI worker.
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 10 >"$home/recovery.out" 2>"$home/recovery.err" || status=$?
+  expect_code 0 "$status" "crashed checkpoint recovery exit"
+  assert_contains "$(cat "$home/recovery.out")" "check: rearm-resurface" \
+    "a real watcher crash did not resurface recovery"
+  pass "a real checkpoint watcher crash still resurfaces recovery"
+}
+
 test_signal_passes_through_and_exits_zero() {
   local home out err status drained
   home=$(make_home signal)
@@ -136,6 +198,8 @@ test_completed_coalescing_does_not_duplicate_raw_records() {
 }
 
 test_quiet_checkpoint_exits_124_cleanly
+test_quiet_checkpoint_hands_off_without_false_recovery
+test_crashed_checkpoint_still_resurfaces_recovery
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success

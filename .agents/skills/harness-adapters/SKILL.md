@@ -108,7 +108,7 @@ Before inspecting or changing session-open behavior, read `docs/sessionstart-nud
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
 Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
-Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
+Codex 0.150.1 uses the present daemon to send one coalesced `codex queue` doorbell to its authoritative `CODEX_THREAD_ID` binding; guarded terminal injection and `bin/fm-watch-checkpoint.sh` remain ordered fallbacks.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
@@ -226,7 +226,7 @@ A project-level `.claude/settings.json` only takes effect when Claude Code's pro
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
 
-## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
+## codex (VERIFIED 2026-08-27, codex-cli 0.150.1)
 
 | Fact | Value |
 |---|---|
@@ -254,8 +254,12 @@ Codex Stop hooks block on exit 2 and expose `stop_hook_active` for the same one-
 Codex's Stop payload includes `cwd`, but the tracked primary hook does not use it to choose the guard executable.
 Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
-Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
-The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
+Codex's primary watcher protocol is the queue-first present daemon in `docs/supervision-protocols/codex.md`, not `bin/fm-watch-arm.sh`.
+The required `bin/fm-session-start.sh` bootstrap prefers the exact UUID from Codex's `SessionStart` payload where that hook fires, requires it to agree with `CODEX_THREAD_ID`, and binds only after the same process owns the home lock generation; the interactive TUI uses its exact native shell identity because it does not load that tracked project hook.
+The daemon validates the bound home, generation, PID, and process identity before invoking bounded `codex queue` with a fixed drain prompt.
+The interactive TUI does not load the tracked project `SessionStart` hook on verified 0.150.1, so never use that hook as the interactive binding authority and never discover a replacement from transcript recency or titles.
+The durable wake queue and its post-handling acknowledgement remain authoritative, and marked tmux/herdr injection plus the bounded foreground checkpoint remain ordered fallbacks.
+An asynchronous Codex `Stop` hook does not start a new turn after completion, so it is not a substitute for this queue ingress and must not be described as Claude-style `asyncRewake`.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 

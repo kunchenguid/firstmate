@@ -52,6 +52,7 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 SOURCE=
+SESSION_ID=
 while [ $# -gt 0 ]; do
   case "$1" in
     --source)
@@ -107,10 +108,25 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
     seen == 1 { seen = 0 }
     $0 == "source" { seen = 1 }
   ')
+  SESSION_ID=$(printf '%s' "$PAYLOAD" | awk '
+    BEGIN { RS = "\"" }
+    seen == 2 { print; exit }
+    seen == 1 && $0 ~ /^[[:space:]]*:[[:space:]]*$/ { seen = 2; next }
+    seen == 1 { seen = 0 }
+    $0 == "session_id" { seen = 1 }
+  ')
+fi
+
+if [ -n "$SESSION_ID" ]; then
+  export FM_CODEX_SESSION_START_ID=$SESSION_ID
 fi
 
 case "$SOURCE" in
   resume|reload|fork)
+    if [ -n "$SESSION_ID" ] && [ -n "${CODEX_THREAD_ID:-}" ] \
+      && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || true)" = codex ]; then
+      "$SCRIPT_DIR/fm-codex-primary.sh" bind "$SOURCE" "$SESSION_ID" >/dev/null 2>&1 || true
+    fi
     exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
     ;;
   clear|compact)
