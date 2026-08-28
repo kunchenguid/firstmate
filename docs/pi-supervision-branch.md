@@ -45,7 +45,8 @@ This feature is Pi-only by construction and changes nothing anywhere else:
 ## How the branch knows what the captain said
 
 Main's captain and assistant text - never tool calls, tool results, operational injections, or the branch's own merged notes - is mirrored into the branch as read-only `fm-main-mirror` messages.
-The idle path mirrors at main's turn end. For an in-flight turn, Pi's authoritative `before_agent_start` prompt is staged verbatim before SessionManager persists that user entry, so the complete current captain message precedes a branch wake; the later persisted copy is suppressed and older dialog entries remain bounded.
+The idle path mirrors at main's turn end.
+At `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry, so the complete current captain message precedes any branch wake accepted after that boundary; the later persisted copy is suppressed and older dialog entries remain bounded.
 The mirror cursor is durable (`state/.branch-mirror-cursor`), so a restart replays only the not-yet-mirrored dialog from main's session file, and a replacement main session re-anchors from its start.
 The branch prompt frames mirrored text as context for judgment, never as instructions addressed to the branch; an authorization addressed to main (for example "you may merge when green") does not relax the branch's role limits.
 
