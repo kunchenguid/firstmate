@@ -141,7 +141,8 @@ drain_ack_pair() {  # <drain-stderr>
 start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   local home=$1 state=$2 fakebin=$3 armout=$4 predecessor=${5:-} i
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=60 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" \
     "$WATCH_ARM" --restart > "$armout" &
   ARM_PID=$!
@@ -287,16 +288,14 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   append_wake "$state" check startup-network 'check: startup-network'
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  sleep 0.25
-  if is_live_non_zombie "$ARM_PID"; then
-    # End the fixture through an ordinary actionable status transition so this
-    # failing pre-fix path leaves no child behind.
-    printf 'done: fixture cleanup\n' > "$state/cleanup.status"
-    wait_for_exit "$ARM_PID" 80 || true
+  # The arm reaps its liveness watchdog before returning the watcher reason, so
+  # assert the recovery's bounded outcome instead of a scheduler-sensitive
+  # quarter-second process snapshot.
+  wait_for_exit "$ARM_PID" 100
+  status=$?
+  if [ "$status" -eq 124 ]; then
     fail "re-arm stayed live instead of surfacing durable wakes and the still-open remote decision"
   fi
-  wait "$ARM_PID"
-  status=$?
   expect_code 0 "$status" "re-arm re-surface wake must close successfully"
   grep -F 'check: rearm-resurface' "$armout" >/dev/null \
     || fail "re-arm did not report the durable recovery wake: $(cat "$armout")"
@@ -779,6 +778,67 @@ test_moved_generation_acknowledgement_is_self_healing() {
   pass "watch-arm: a moved recovery generation consumes handled rows and names its remedy"
 }
 
+# A lost startup race (another watcher holds the singleton, so the arm's own
+# forked child must stand down) must never block the arm forever on that child.
+# Predicate: while the "other" watcher is healthy, the arm's own child is alive
+# but genuinely stalled (hung before it can stand down). The arm retires the
+# stalled child within a bounded wait and fails loudly instead of blocking on
+# `wait $child` indefinitely - the exact regression this bounds the forever-wait
+# against.
+test_lost_race_child_stand_down_is_bounded() {
+  local dir home state fakebin armout holder_pid identity rc
+  dir=$(make_case lost-race-stalled-child)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home"
+
+  # A live process P holds a well-formed singleton lock, so the arm's healthy
+  # predicate can name a healthy "other" watcher that is NOT the arm's child.
+  sleep 1000 & holder_pid=$!
+  identity=$(LC_ALL=C ps -p "$holder_pid" -o lstart= -o command= | sed 's/^ *//')
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  # The arm's own forked child is the real watcher. A FIFO in the state dir makes
+  # its pre-lock check migration block on an open-for-read with no writer, so the
+  # child stays alive and never stands down - the stalled-child shape the arm
+  # must retire instead of waiting on forever.
+  mkfifo "$state/stand-down.block.check.sh"
+  # No fresh beacon yet: the delegated holder is NOT healthy at arm start, so the
+  # arm forks a child rather than attaching. The beacon is published mid-window
+  # to flip the holder healthy while that child is still stalled.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_ATTACH_POLL=0.05 FM_ARM_CONFIRM_TIMEOUT=3 FM_POLL=999999 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  sleep 0.6
+  touch "$state/.last-watcher-beat"
+
+  wait_for_exit "$ARM_PID" 150
+  rc=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  # The arm must have exited on its own (bounded), not have been killed by the
+  # wait_for_exit deadline (124: a pre-fix arm blocks forever on the stalled
+  # child and only dies when the tester kills it).
+  [ "$rc" -ne 124 ] \
+    || fail "the arm blocked forever on the stalled lost-race child instead of retiring it"
+  grep -qF 'stalled before standing down' "$armout" \
+    || fail "the arm did not report the stalled stand-down child: $(cat "$armout")"
+  grep -q '^watcher: FAILED' "$armout" \
+    || fail "a retired stalled child must fail the cycle loudly: $(cat "$armout")"
+  grep -q 'reason=child-stand-down-stalled' "$state/.watch-cycle-exits.log" \
+    || fail "the stalled stand-down was not classified in the lifecycle ledger"
+  is_live_non_zombie "$ARM_PID" && fail "the arm is still alive after reporting"
+  pass "watch-arm: a lost-race child that stalls before standing down is retired instead of blocking the arm forever"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -817,4 +877,5 @@ test_restart_preserves_recovery_across_reused_pid_lock
 test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
+test_lost_race_child_stand_down_is_bounded
 test_downtime_marker_does_not_follow_symlink
