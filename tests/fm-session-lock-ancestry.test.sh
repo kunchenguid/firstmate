@@ -48,17 +48,20 @@ lib_eval() {  # <fakebin> <expression>
   " "$LIB"
 }
 
-# Run one library expression on the Windows inspection path. The three native
-# data seams are shadowed from fixture files (as lib_eval shadows kill): this
-# shell's Windows pid, the Win32_Process ancestry walk, and the `ps -W` table.
-# WIN_SELF, WIN_CHAIN, and WIN_PSW are read from the environment.
+# Run one library expression on the Windows inspection path. The native data
+# seams are shadowed from fixtures (as lib_eval shadows kill): this shell's MSYS
+# pid, the MSYS logical process table, the Win32_Process ancestry walk, the
+# `ps -W` native table, and the /proc winpid fallback. WIN_MSYSSELF, WIN_MSYSPS,
+# WIN_CHAIN, WIN_PSW, and WIN_SELF are read from the environment.
 win_eval() {  # <expression>
   local expr=$1
   FM_LOCK_PLATFORM=windows bash -c "
     . \"\$0\"
-    _fm_win_self_winpid() { printf '%s\n' \"\$WIN_SELF\"; }
-    _fm_win_walk_rows() { cat \"\$WIN_CHAIN\"; }
+    _fm_win_self_msyspid() { printf '%s\n' \"\$WIN_MSYSSELF\"; }
+    _fm_win_ps() { cat \"\$WIN_MSYSPS\"; }
+    _fm_win_walk_rows() { [ \"\$1\" = \"\${WIN_EXPECT_START:-100}\" ] && cat \"\$WIN_CHAIN\"; }
     _fm_win_ps_w() { cat \"\$WIN_PSW\"; }
+    _fm_win_self_winpid() { printf '%s\n' \"\$WIN_SELF\"; }
     $expr
   " "$LIB"
 }
@@ -265,7 +268,16 @@ win_fixture() {  # <dir>
     printf '%s\n' '  4194308       0       0          4   ?              0 Jul 30 System'
     printf '%s\n' '  4207384       0       0        101   ?              0 10:02:04 C:\Program Files\Git\usr\bin\bash.exe'
   } > "$dir/psw"
-  export WIN_SELF=100 WIN_CHAIN="$dir/chain" WIN_PSW="$dir/psw"
+  # MSYS logical process table: this subprocess (msys 50, winpid 3856 - orphaned,
+  # never a valid Win32 walk start) under the topmost MSYS shell (msys 51, winpid
+  # 100), which was spawned directly by the harness and whose winpid IS the valid
+  # Win32 walk entry point. The chain above is keyed to start at winpid 100.
+  {
+    printf '%s\n' '      PID    PPID    PGID     WINPID   TTY   UID STIME COMMAND'
+    printf '%s\n' '   50 51 50 3856 ? 197609 17:31 /usr/bin/bash'
+    printf '%s\n' '   51 1 51 100 ? 197609 17:31 /usr/bin/bash'
+  } > "$dir/msysps"
+  export WIN_MSYSSELF=50 WIN_MSYSPS="$dir/msysps" WIN_CHAIN="$dir/chain" WIN_PSW="$dir/psw" WIN_SELF=999
 }
 
 test_windows_harness_is_found_beyond_the_bash_hops() {
@@ -314,6 +326,33 @@ test_windows_lock_above_the_harness_is_not_owned() {
     fail "windows: a lock held by a process above the harness was claimed as this session's own"
   fi
   pass "session-lock: on Windows ownership stops at the first non-harness above the session"
+}
+
+test_windows_ancestry_start_bridges_msys_to_windows() {
+  local dir got
+  dir="$TMP_ROOT/win-bridge"
+  win_fixture "$dir"
+  # A Git Bash subprocess is fork-orphaned: its own winpid (WIN_SELF=999) has no
+  # valid Win32 parent. The start pid must instead be the topmost MSYS shell's
+  # winpid (100), resolved by climbing the MSYS logical table.
+  got=$(win_eval '_fm_win_ancestry_start_winpid') \
+    || fail "windows: could not resolve an ancestry start winpid"
+  [ "$got" = 100 ] \
+    || fail "windows: start winpid resolved '$got', expected the top MSYS shell's winpid 100 (not the orphaned self)"
+  pass "session-lock: on Windows the ancestry start bridges the MSYS chain to the top shell's winpid"
+}
+
+test_windows_ancestry_start_falls_back_when_msys_table_lacks_self() {
+  local dir got
+  dir="$TMP_ROOT/win-fallback"
+  win_fixture "$dir"
+  # If the MSYS table cannot place this shell, fall back to its own winpid.
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY   UID STIME COMMAND' > "$dir/msysps"
+  got=$(WIN_SELF=4242 win_eval '_fm_win_ancestry_start_winpid') \
+    || fail "windows: fallback did not produce a start winpid"
+  [ "$got" = 4242 ] \
+    || fail "windows: fallback resolved '$got', expected this shell's own winpid 4242"
+  pass "session-lock: on Windows the ancestry start falls back to the own winpid when the MSYS table lacks self"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -459,6 +498,8 @@ test_competing_version_named_session_is_seen_as_live
 test_windows_harness_is_found_beyond_the_bash_hops
 test_windows_liveness_reads_the_native_process_table
 test_windows_lock_above_the_harness_is_not_owned
+test_windows_ancestry_start_bridges_msys_to_windows
+test_windows_ancestry_start_falls_back_when_msys_table_lacks_self
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

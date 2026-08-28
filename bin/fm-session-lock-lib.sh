@@ -116,9 +116,12 @@ _fm_lock_platform() {
 }
 
 # Windows data sources, each a single seam a test can shadow (as the suite
-# already shadows `kill`): this shell's Windows pid, the Win32_Process ancestry
-# walk from a start pid, and the native-process table.
+# already shadows `kill`): this shell's MSYS pid and Windows pid, the MSYS
+# logical process table, the Win32_Process ancestry walk from a start pid, and
+# the native-process table.
+_fm_win_self_msyspid() { printf '%s\n' "$$"; }
 _fm_win_self_winpid() { cat "/proc/$$/winpid" 2>/dev/null; }
+_fm_win_ps() { ps 2>/dev/null; }
 _fm_win_walk_rows() {  # <start-winpid> -> pid<TAB>name<TAB>commandline, innermost first
   local start=$1 script
   script="$(dirname -- "${BASH_SOURCE[0]}")/fm-win-ancestry.ps1"
@@ -152,11 +155,49 @@ _fm_unix_ancestry_rows() {
 
 # The walker already emits pid<TAB>name<TAB>commandline innermost-first, with the
 # executable name playing the role of comm and the command line the role of args.
+# It must start from a shell with a valid Windows parent link (see
+# _fm_win_ancestry_start_winpid).
 _fm_win_ancestry_rows() {
   local start
-  start=$(_fm_win_self_winpid | tr -d '[:space:]')
+  start=$(_fm_win_ancestry_start_winpid)
   [ -n "$start" ] || return 0
   _fm_win_walk_rows "$start"
+}
+
+# Print the Windows pid the ancestry walk must start from. Not simply this
+# shell's own winpid: an MSYS / Git Bash subprocess is fork/exec-orphaned - its
+# Windows ParentProcessId points at a launcher stub that has already exited - so
+# a Win32 walk from here stops at the first hop and never reaches the harness.
+# The MSYS ps table still records the logical parent chain though, and the
+# topmost MSYS shell in it was spawned directly by the harness (claude.exe ->
+# bash), so THAT shell keeps an intact Windows parent link. Climb the MSYS chain
+# to it and start the Win32 walk from its winpid. Fall back to this shell's own
+# winpid when the MSYS table cannot be read.
+_fm_win_ancestry_start_winpid() {
+  local top
+  top=$(_fm_win_top_msys_winpid)
+  if [ -n "$top" ]; then printf '%s\n' "$top"; return 0; fi
+  _fm_win_self_winpid | tr -d '[:space:]'
+}
+
+# Walk the MSYS logical process table from this shell to the topmost MSYS
+# ancestor (the one whose parent is not itself an MSYS process) and print that
+# ancestor's Windows pid. Columns are: PID PPID PGID WINPID ...
+_fm_win_top_msys_winpid() {
+  _fm_win_ps | awk -v self="$(_fm_win_self_msyspid)" '
+    NR == 1 { next }
+    { par[$1] = $2; win[$1] = $4 }
+    END {
+      if (!(self in win)) exit
+      cur = self; top = self
+      for (i = 0; i < 64 && (cur in par); i++) {
+        p = par[cur]
+        if (!(p in win)) break
+        top = p; cur = p
+      }
+      print win[top]
+    }
+  '
 }
 
 # Look up a live Windows process by its WINPID in the native-process table.
