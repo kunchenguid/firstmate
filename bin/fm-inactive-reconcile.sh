@@ -366,6 +366,13 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
       mark_reported "$RECORD_PENDING" || return 1
     else
       payload="inactive terminal outcome needs parent report: child=$id state=$state"
+      # A home seeded without its parent binding cannot report upward at all,
+      # and every later terminal outcome fails the same way for the same
+      # reason. Name the missing binding so the diagnostic points at the repair
+      # instead of reading as one report that happened to fail.
+      if ! fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent"; then
+        payload="$payload (missing or unreadable parent binding .fm-secondmate-parent)"
+      fi
       queue_notice_once "$RECORD_PENDING" "inactive-reconcile:$fingerprint" "$payload" || true
     fi
     return 0

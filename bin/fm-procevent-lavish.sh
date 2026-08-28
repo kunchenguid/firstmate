@@ -5,6 +5,7 @@
 #   fm-procevent-lavish.sh arm <artifact.html>
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
+#   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
@@ -20,6 +21,28 @@
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
 #            calls, and the only place Lavish's notion of "ended" is decided.
+# silent     Exit 0 when the captured result is a routine no-op the runner should
+#            record and never announce; any other exit publishes the wake. This
+#            is the generic no-op contract bin/fm-procevent.sh calls, and the
+#            only place Lavish's notion of "nothing was said" is decided.
+#
+# AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
+# Closing a review surface that carried nothing is the single most common Lavish
+# result: the captain reads a board, says nothing, and closes it. Announcing that
+# put a wake in front of the handler whose entire content was that nothing
+# happened. `silent` therefore holds one narrow, positively-determined shape -
+# a session this adapter classifies `ended` that carries no queued content block
+# at all - and every other result stays announced.
+#
+# Deliberately narrow, in both directions. A `Send & End` close carrying the
+# captain's actual answer arrives as `status: feedback` with `session_ended`, so
+# it classifies `feedback`, never `ended`, and is announced exactly as before; so
+# is any `ended` result that still carries a `prompts` or `feedback` block, which
+# the published poll is not expected to produce but which must never be dropped
+# on that expectation. A `waiting` session, a `missing` one, an `unknown` or
+# unreadable result, and any error all stay announced, because none of them
+# positively proves nothing was said. Silence is only ever an absence this
+# adapter can see in the result, never an absence it assumes.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
@@ -81,7 +104,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,92p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -303,6 +326,54 @@ cmd_terminal() {
   return 1
 }
 
+# Whether a completed result carries any queued content block at all. The
+# published response frames content as a top-level `prompts[N]{...}:` or
+# `feedback[N]{...}:` header whose rows are INDENTED, so this anchors on column
+# zero: an indented payload line is captain-supplied text and must never be able
+# to forge - or, here, to hide behind - a content header. Any recognized block
+# is content regardless of its declared count, while a malformed top-level
+# prompts or feedback header makes the result indeterminate.
+#
+# 0 = content present, 1 = provably no content, anything else = the check did
+# not complete. The caller must distinguish those three, because "the check
+# failed" is never proof that nothing was said.
+result_has_queued_content() {  # <result-file>
+  awk '
+    /^(prompts|feedback)\[[0-9]+\]\{[^}]*\}:[[:space:]]*$/ {
+      verdict = "present"
+      exit
+    }
+    /^(prompts|feedback)/ {
+      verdict = "indeterminate"
+      exit
+    }
+    END {
+      if (verdict == "present") exit 0
+      if (verdict == "indeterminate") exit 2
+      exit 1
+    }
+  ' "$1"
+}
+
+# Whether a captured result is a routine no-op the runner should record without
+# announcing, for the generic runner's silence seam. Lavish's notion of "nothing
+# was said" lives here and nowhere else: an ended session carrying no queued
+# content block is a board the captain closed without saying anything, and the
+# handler learns nothing from being told. Anything else - a real answer, a
+# missing or waiting session, an unreadable result - is announced.
+cmd_silent() {
+  local file=${1-} content_rc
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  [ "$(cmd_classify "$file")" = ended ] || return 1
+  result_has_queued_content "$file"
+  content_rc=$?
+  # Only a completed check that proved the result carries nothing declares
+  # silence; a check that could not complete announces, like every other
+  # uncertainty here.
+  [ "$content_rc" -eq 1 ]
+}
+
 # Print `key<TAB>answer<TAB>label[<TAB>mode]` for every structured choice the
 # captain submitted in a captured result; the optional mode column relays the
 # card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
@@ -391,6 +462,7 @@ case "${1-}" in
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
+  silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;

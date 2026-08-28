@@ -51,7 +51,7 @@
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
+#          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
 #          build below its floor reports MISSING like no-mistakes, so the operator
@@ -949,7 +949,7 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN=1.31.2
+NO_MISTAKES_MIN=1.46.0
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
 # newest axi tools. It is NOT the minimum feature-introduced version. These floors
@@ -1507,7 +1507,7 @@ detect_local_tools() {
   # The treehouse lease-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
-if fm_backend_list_contains "$TOOLS" treehouse \
+  if fm_backend_list_contains "$TOOLS" treehouse \
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_task_leases; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
   fi

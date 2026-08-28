@@ -17,8 +17,10 @@
 #   bin/fm-cd-pretool-check.sh --command '<cmd>'
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. CLI mode is used by OpenCode and Pi after their adapters
-# extract the exact command string.
+# Claude, Codex, and Cursor. CLI mode is used by OpenCode and Pi after their
+# adapters extract the exact command string. --cursor selects Cursor's own deny
+# rendering and marks this invocation as the Cursor registration rather than the
+# Claude-settings duplicate Cursor also loads.
 #
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
@@ -33,6 +35,7 @@
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
+# Cursor consumes the stdout decision object.
 set -u
 
 CMD=""
@@ -42,7 +45,7 @@ CURSOR_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude]
+Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command).
@@ -51,6 +54,8 @@ child writer worktree, reader scratch directory, or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
+With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
+because Cursor reads the returned object rather than the exit status.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }

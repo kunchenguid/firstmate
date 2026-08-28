@@ -51,6 +51,21 @@
 # only terminal verdict. A missing command, an error, or any other exit keeps the
 # registration armed, so an adapter that has no notion of ending needs no change.
 #
+# Routine no-op knowledge is adapter-owned through the same kind of seam. Some
+# sources produce a result that carries no news at all - a review surface that
+# simply closed with nothing said - and announcing it makes the handler read a
+# wake to learn that nothing happened. So before publishing, this runner calls
+# `bin/fm-procevent-<adapter>.sh silent <result-file>` and treats exit 0 as the
+# only silence verdict: the result is recorded handled and never announced, so
+# it neither wakes a handler now nor returns on a later reconcile. A missing
+# adapter command, an error, or any other exit publishes the wake exactly as
+# before, so an adapter with no notion of a no-op needs no change and an
+# unknown or degraded result always reaches its handler. This runner still
+# inspects nothing and still names no adapter-specific condition. Silence is
+# deliberately independent of the keyed-answer feed below, which runs once per
+# capture for every adapter: suppressing an announcement never suppresses the
+# captain's own answer.
+#
 # Applying a result is adapter-owned through the same kind of seam. Some results
 # carry no judgement at all - they must simply be applied idempotently to the
 # home's own durable state - and leaving that to an agent that has to remember
@@ -120,7 +135,7 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,104p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,119p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -133,6 +148,18 @@ adapter_result_is_terminal() {  # <adapter> <result-file>
   script=$(adapter_script "$1")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   "$script" terminal "$2" >/dev/null 2>&1
+}
+
+# Ask the source's own adapter whether a captured result is a routine no-op that
+# needs no wake at all. This mirrors the terminal seam above exactly: exit 0 is
+# the only silence verdict, and everything else - including a missing adapter
+# command - publishes the wake. See the routine-no-op note in the header: no
+# adapter-specific condition may appear in this runner.
+adapter_result_is_silent() {  # <adapter> <result-file>
+  local script
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  "$script" silent "$2" >/dev/null 2>&1
 }
 
 # Ask the adapter whether its autohandled results announce themselves through a
@@ -246,9 +273,26 @@ publish_result() {  # <result-file>
   [ -n "$adapter" ] || return 1
   line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || return 1
   fm_procevent_source_lock_acquire "$id" || return 1
-  if ! fm_procevent_is_handled "$STATE" "$id" "$seq" \
-    && fm_wake_append check "procevent:$id:$seq" "check: $line"; then
-    status=0
+  if ! fm_procevent_is_handled "$STATE" "$id" "$seq"; then
+    # A result its own adapter declares a routine no-op is recorded as handled
+    # and never announced, so it neither wakes a handler now nor comes back on
+    # a later reconcile's re-announcement. Recording it is what makes that
+    # silence durable, so both a newly written marker (0) and one a concurrent
+    # caller already wrote (1) settle it; only an unrecordable silence (2)
+    # falls through and announces, because a silence nothing remembers would
+    # otherwise be re-evaluated on every reconcile forever.
+    if adapter_result_is_silent "$adapter" "$result"; then
+      fm_procevent_mark_handled "$STATE" "$id" "$seq"
+      case "$?" in
+        0|1)
+          fm_procevent_source_lock_release "$id"
+          return 1
+          ;;
+      esac
+    fi
+    if fm_wake_append check "procevent:$id:$seq" "check: $line"; then
+      status=0
+    fi
   fi
   fm_procevent_source_lock_release "$id"
   return "$status"
@@ -307,7 +351,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 self_announcing=0
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -426,6 +470,8 @@ cmd_start() {
   else
     if publish_result "$durable"; then
       published_capture=1
+    elif fm_procevent_is_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$durable")"; then
+      handled_capture=1
     fi
     publish_pending "$durable" >/dev/null
   fi
@@ -458,6 +504,8 @@ cmd_start() {
       published_capture=1
     fi
     publish_pending "$durable" >/dev/null
+  elif [ "$handled_capture" -eq 1 ]; then
+    :
   elif [ "$published_capture" -eq 1 ] && adapter_autohandle "$adapter" "$id" "$durable"; then
     printf 'autohandled: %s\n' "$id"
   else

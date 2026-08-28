@@ -99,13 +99,16 @@
 # pipeline owns that mode's checks and provides no worker evidence sink for counts.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
-# There is no --yolo flag here. The worker never owns approval decisions, so yolo is
+# There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # The emitted PUBLISH_SECTION below owns worker publication-language guidance.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every scaffold also carries the steering-inbox receive-and-ack section:
+# process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
+# handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -233,7 +236,7 @@ for a in "$@"; do
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
-    --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's approval posture" >&2; exit 1 ;;
+    --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's merge posture" >&2; exit 1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -400,6 +403,20 @@ IFS= read -r -d '' LOAD_BEARING_BOOKEND <<'EOF' || true
 EOF
 LOAD_BEARING_BOOKEND=${LOAD_BEARING_BOOKEND%$'\n'}
 FIRSTMATE_SESSION_SCOPE_RULE='The fleet lock and bin/fm-session-start.sh are firstmate-only.'
+INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+
+# The receive-and-ack half of the steering-inbox contract, included in every
+# scaffold kind. The record format, doorbell line, and re-ring ladder are
+# owned by bin/fm-task-inbox-lib.sh; the doorbell itself is self-describing,
+# so this section is reinforcement for the natural-checkpoint habit, not the
+# only carrier of the instruction.
+IFS= read -r -d '' INBOX_SECTION <<EOF || true
+# Firstmate instruction inbox
+Firstmate steers you through durable message files in $INBOX_DIR.
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
+The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
+EOF
+INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -455,6 +472,9 @@ For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`captain-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
 A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
+A request arriving through the instruction inbox below follows the same marker and reply rules.
+
+$INBOX_SECTION
 
 # Escalation to main firstmate
 Handle routine work yourself.
@@ -462,7 +482,8 @@ Report only true captain-relevant outcomes or a declared external wait by append
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
-Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
+Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
+Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
 This is also how you return the answer to a marked from-firstmate request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
 Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
@@ -470,10 +491,8 @@ When a routed-work phase has a supervisor-actionable material change worth repor
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
-A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-A keyed decision closes only with \`resolved\` naming that key; a bare \`resolved\` with only a correlation token does not close it.
-\`done\` records work completion and never closes a decision key.
+\`resolved\` separately closes an escalated decision or blocker, and only a \`resolved\` line carrying that decision's exact key closes it: a later \`done\` or \`working\` event never does, even when the answer is what started that work.
+The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -554,7 +573,7 @@ HERDR_SECTION=$(printf '%s\n' \
 else
 IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
-**HARD SAFETY GATE:** this scaffold cannot inspect the task text inserted after scaffolding.
+**HARD SAFETY GATE:** this scaffold cannot inspect the task text filled in above.
 If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
@@ -591,7 +610,6 @@ IFS= read -r -d '' SCOUT_RULES_3_TO_7 <<EOF || true
    Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-   \`done\` records work completion and never closes a decision key.
 7. Never stop, restart, or update a \`no-mistakes\` daemon. The default instance is private to this
    Firstmate home, while an explicit operator \`NM_HOME\` remains authoritative; the legacy shared
    default root and its parked runs are outside this task. On ANY no-mistakes daemon error, append
@@ -600,6 +618,9 @@ EOF
 SCOUT_RULES_3_TO_7=${SCOUT_RULES_3_TO_7%$'\n'}
 
 IFS= read -r -d '' SCOUT_DOD_COMMON <<EOF || true
+$INBOX_SECTION
+
+# Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 When the investigation follows diagnostic-reasoning, include the bounded two-row table contract from \`$FM_ROOT/.agents/skills/diagnostic-reasoning/SKILL.md\`.
@@ -821,7 +842,7 @@ Do not hand-edit, commit, or fix findings yourself while a run is active - the p
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  The repository owner applies \`ask-user-authority\` and obtains any required decision.
+  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
@@ -949,7 +970,6 @@ $RULE1
    Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-   \`done\` records work completion and never closes a decision key.
 7. Never stop, restart, or update a \`no-mistakes\` daemon. The default instance is private to this
    Firstmate home, while an explicit operator \`NM_HOME\` remains authoritative; the legacy shared
    default root and its parked runs are outside this task. On ANY no-mistakes daemon error, append
@@ -963,6 +983,8 @@ When a change spans a seam between independently tested components, add a real-c
 When a change alters a sequence or lifecycle rather than only its end state, add continuity assertions that prove the sequence holds, not just the final state.
 Before escalating an architecture or design question, search once for an existing project contract: ADRs, ticket references in code, invariants named in tests, or a prior implementation of the same shape.
 State what you searched and what you found, including finding nothing; the escalation rides on that evidence.
+
+$INBOX_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
