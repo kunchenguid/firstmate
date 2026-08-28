@@ -398,6 +398,21 @@ fm_lock_generated_owner_dir_is_removable() {
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  (
+    shopt -s dotglob nullglob
+    local entry base
+    for entry in "$ownerdir"/*; do
+      base=${entry##*/}
+      case "$base" in
+        pid|fm-home|pid-identity|role|watcher-path)
+          [ -f "$entry" ] && [ ! -L "$entry" ] || exit 1
+          ;;
+        *)
+          exit 1
+          ;;
+      esac
+    done
+  )
 }
 
 fm_lock_remove_generated_owner_dirs() {

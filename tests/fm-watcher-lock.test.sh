@@ -718,6 +718,7 @@ test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
   mkdir -p "$nested"
   printf '%s\n' "$stalepid" > "$lockdir/pid"
   printf '%s\n' "$stalepid" > "$nested/pid"
+  printf '%s\n' "$state" > "$nested/fm-home"
   printf 'keep\n' > "$nested/foreign.txt"
   rc=0
   PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
@@ -725,11 +726,14 @@ test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
     fm_lock_try_acquire "$2" && exit 10
     [ -d "$2" ] || exit 11
     [ -d "$3" ] || exit 12
-    [ -f "$3/foreign.txt" ] || exit 13
-  ' _ "$LIB" "$lockdir" "$nested" || rc=$?
+    [ "$(cat "$2/pid" 2>/dev/null || true)" = "$4" ] || exit 13
+    [ "$(cat "$3/pid" 2>/dev/null || true)" = "$4" ] || exit 14
+    [ "$(cat "$3/fm-home" 2>/dev/null || true)" = "$5" ] || exit 15
+    [ -f "$3/foreign.txt" ] || exit 16
+  ' _ "$LIB" "$lockdir" "$nested" "$stalepid" "$state" || rc=$?
   [ "$rc" -eq 0 ] || fail "MSYS stale lock with foreign nested content was not refused safely (rc=$rc)"
   [ ! -e "$ln_used" ] || fail "MSYS foreign-content refusal invoked ln -s"
-  pass "MSYS stale lock recovery refuses foreign nested content"
+  pass "MSYS stale lock recovery refuses foreign nested content without deleting evidence"
 }
 
 test_cygwin_lock_keeps_symlink_publication() {
