@@ -1177,6 +1177,11 @@ def inventory(controller, include_metrics=True, target_slot=None):
         storage = os.environ.get("FM_AZURE_STORAGE_NAME", "")
 
         vm_id = exact_id(controller, "Microsoft.Compute", "virtualMachines", names["vm"])
+        child_ids = {
+            "monitor-extension": vm_id + "/extensions/" + names["monitor-extension"],
+            "bootstrap-command": vm_id + "/runCommands/" + names["bootstrap-command"],
+            "task-command": vm_id + "/runCommands/" + names["task-command"],
+        }
         exact = show_exact_optional_many(controller, [
             ("vm", [
                 "vm", "show", "--resource-group", resource_group,
@@ -1204,15 +1209,18 @@ def inventory(controller, include_metrics=True, target_slot=None):
             ]),
             ("monitor-extension", [
                 "resource", "show", "--ids",
-                vm_id + "/extensions/" + names["monitor-extension"],
+                child_ids["monitor-extension"],
+                "--api-version", RESOURCE_API["monitor-extension"],
             ]),
             ("bootstrap-command", [
                 "resource", "show", "--ids",
-                vm_id + "/runCommands/" + names["bootstrap-command"],
+                child_ids["bootstrap-command"],
+                "--api-version", RESOURCE_API["bootstrap-command"],
             ]),
             ("task-command", [
                 "resource", "show", "--ids",
-                vm_id + "/runCommands/" + names["task-command"],
+                child_ids["task-command"],
+                "--api-version", RESOURCE_API["task-command"],
             ]),
             ("ttl-schedule", [
                 "resource", "show", "--ids", exact_id(
@@ -1224,6 +1232,20 @@ def inventory(controller, include_metrics=True, target_slot=None):
                 "--account-name", storage, "--name", names["state-container"],
             ]),
         ])
+        for kind, resource_id in child_ids.items():
+            value = exact[kind]
+            if value is None:
+                continue
+            if str(value.get("id") or "").lower() != resource_id.lower():
+                raise ProviderIdentityRefusal(
+                    "exact {} read returned a different Azure resource".format(kind)
+                )
+            value = dict(value)
+            # `az resource show` returns only the final child segment in
+            # `name`; the fleet listing returns `vm/child`. Normalize the
+            # exact response to the already-reviewed inventory shape.
+            value["name"] = names["vm"] + "/" + names[kind]
+            exact[kind] = value
 
         def present(kind):
             return [exact[kind]] if exact[kind] is not None else []

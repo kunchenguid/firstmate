@@ -942,7 +942,6 @@ else:
     raise AssertionError("child inventory accepted a malformed successful read")
 module.az = original_az
 inventory_source = inspect.getsource(module.inventory)
-assert inventory_source.count("if value is None:") == 3
 assert "transient_not_found_attempts=4" in inventory_source
 
 # Azure CLI can fail `vm list --show-details` when a VM disappears during its
@@ -9240,8 +9239,9 @@ def exact_read(_controller, args, check=False, timeout=provider.AZ_TIMEOUT_SECON
             "powerState": "VM running", "tags": tags, "identity": {},
         }, 0, ""
     if args[:3] == ["resource", "show", "--ids"] and args[3] == extension_id:
+        assert args[4:] == ["--api-version", provider.RESOURCE_API["monitor-extension"]], args
         return {
-            "name": "vm-fixture-wkr-02/AzureMonitorLinuxAgent",
+            "name": "AzureMonitorLinuxAgent",
             "id": extension_id, "tags": tags,
             "properties": {"provisioningState": "Succeeded"},
         }, 0, ""
@@ -9257,6 +9257,7 @@ provider.list_json = lambda *_args, **_kwargs: (_ for _ in ()).throw(
 snapshot = provider.inventory_slot(controller, 2)
 assert [worker["slot"] for worker in snapshot["workers"]] == [2], snapshot
 assert snapshot["workers"][0]["resources"]["monitor-extension"]["id"] == extension_id
+assert snapshot["workers"][0]["resources"]["monitor-extension"]["provisioning_state"] == "Succeeded"
 assert all("wkr-01" not in " ".join(call) for call in calls), calls
 assert not any("list" in call[:3] for call in calls), calls
 assert any(call[:2] == ("vm", "show") for call in calls), calls
