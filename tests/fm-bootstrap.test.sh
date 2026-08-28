@@ -714,6 +714,117 @@ test_treehouse_lease_check_follows_resolved_backend() {
   pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
 }
 
+test_bootstrap_reregisters_recorded_worktrees_as_durable_leases() {
+  local case_dir home pool worktree remote_pool remote_worktree fakebin out state_file remote_state_file
+  case_dir="$TMP_ROOT/durable-worktree-guard"
+  home="$case_dir/home"
+  pool="$case_dir/pool"
+  worktree="$pool/1/project"
+  remote_pool="$case_dir/remote-pool"
+  remote_worktree="$remote_pool/1/project"
+  state_file="$pool/treehouse-state.json"
+  remote_state_file="$remote_pool/treehouse-state.json"
+  mkdir -p "$home/config" "$home/state" "$worktree" "$remote_worktree"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf 'worktree=%s\n' "$worktree" > "$home/state/live-task.meta"
+  printf 'worktree=%s\nremote_host=remote-mac\n' "$remote_worktree" > "$home/state/remote-task.meta"
+  printf '{"project_owned":true}\n' > "$worktree/treehouse-state.json"
+  cat > "$state_file" <<EOF
+{
+  "worktrees": [
+    {
+      "name": "1",
+      "path": "$worktree",
+      "destroying": true,
+      "owner_pid": 999999,
+      "owner_started_at": 1
+    }
+  ]
+}
+EOF
+  cat > "$remote_state_file" <<EOF
+{
+  "worktrees": [
+    {
+      "name": "1",
+      "path": "$remote_worktree",
+      "owner_pid": 888888,
+      "owner_started_at": 2
+    }
+  ]
+}
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/node"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "TREEHOUSE_GUARD:" "bootstrap failed to register the durable worktree guard"
+  node - "$state_file" "$worktree" <<'NODE' || fail "bootstrap did not write the expected pid-less durable lease"
+const fs = require('fs');
+const [stateFile, expectedPath] = process.argv.slice(2);
+const entry = JSON.parse(fs.readFileSync(stateFile, 'utf8')).worktrees[0];
+if (entry.path !== expectedPath || entry.leased !== true || !entry.lease_id ||
+    entry.lease_holder !== 'firstmate:live-task' || !entry.leased_at ||
+    'destroying' in entry || 'owner_pid' in entry || 'owner_started_at' in entry) process.exit(1);
+NODE
+  node - "$worktree/treehouse-state.json" "$remote_state_file" <<'NODE' \
+    || fail "bootstrap mutated project-owned state or a remote secondmate pool"
+const fs = require('fs');
+const [projectState, remoteState] = process.argv.slice(2);
+if (JSON.parse(fs.readFileSync(projectState, 'utf8')).project_owned !== true) process.exit(1);
+const entry = JSON.parse(fs.readFileSync(remoteState, 'utf8')).worktrees[0];
+if (entry.owner_pid !== 888888 || entry.owner_started_at !== 2 || entry.leased) process.exit(1);
+NODE
+  pass "bootstrap durably guards only pool-owned local recorded worktrees"
+}
+
+test_treehouse_guard_uses_perl_flock_fallback() {
+  local case_dir pool worktree state_file fallback_bin node_bin perl_bin dirname_bin
+  case_dir="$TMP_ROOT/treehouse-perl-lock"
+  pool="$case_dir/pool"
+  worktree="$pool/1/project"
+  state_file="$pool/treehouse-state.json"
+  fallback_bin="$case_dir/fallback-bin"
+  node_bin=$(command -v node)
+  perl_bin=$(command -v perl) || fail "perl is required to exercise the macOS treehouse lock path"
+  dirname_bin=$(command -v dirname)
+  mkdir -p "$worktree" "$fallback_bin"
+  ln -s "$node_bin" "$fallback_bin/node"
+  ln -s "$perl_bin" "$fallback_bin/perl"
+  ln -s "$dirname_bin" "$fallback_bin/dirname"
+  cat > "$state_file" <<EOF
+{"worktrees":[{"name":"1","path":"$worktree","owner_pid":777777,"owner_started_at":3}]}
+EOF
+  PATH="$fallback_bin" /bin/bash -c \
+    '. "$1"; fm_treehouse_register_durable_lease "$2" "$3" firstmate:fallback' \
+    bash "$ROOT/bin/fm-treehouse-lease-lib.sh" "$state_file" "$worktree" \
+    || fail "the portable fallback could not register a durable treehouse guard"
+  node - "$state_file" <<'NODE' || fail "the portable fallback did not persist a pid-less lease"
+const fs = require('fs');
+const entry = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).worktrees[0];
+if (!entry.leased || entry.lease_holder !== 'firstmate:fallback' ||
+    'owner_pid' in entry || 'owner_started_at' in entry) process.exit(1);
+NODE
+  pass "treehouse guard uses the Perl flock fallback without a flock executable"
+}
+
+test_treehouse_guard_refuses_without_node() {
+  local case_dir state fallback_bin dirname_bin
+  case_dir="$TMP_ROOT/treehouse-missing-node"
+  state="$case_dir/state"
+  fallback_bin="$case_dir/fallback-bin"
+  dirname_bin=$(command -v dirname)
+  mkdir -p "$state" "$fallback_bin"
+  printf 'worktree=%s\n' "$case_dir/pool/1/project" > "$state/live-task.meta"
+  ln -s "$dirname_bin" "$fallback_bin/dirname"
+  if PATH="$fallback_bin" /bin/bash -c \
+    '. "$1"; fm_treehouse_guard_recorded_worktrees "$2"' \
+    bash "$ROOT/bin/fm-treehouse-lease-lib.sh" "$state" >/dev/null 2>&1; then
+    fail "treehouse guard succeeded without its state-discovery runtime"
+  fi
+  pass "treehouse guard refuses recorded-worktree scans without node"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -1163,6 +1274,9 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
+test_bootstrap_reregisters_recorded_worktrees_as_durable_leases
+test_treehouse_guard_uses_perl_flock_fallback
+test_treehouse_guard_refuses_without_node
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

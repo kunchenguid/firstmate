@@ -134,6 +134,13 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Before every fresh Treehouse allocation, the spawn path restores pid-less
+#   durable leases for local worktrees recorded by existing task metadata and
+#   refuses if that guard cannot be established. After allocation it also
+#   refuses any worktree that another local task still records, independently
+#   of Treehouse's lease state. These fresh-allocation checks do not apply to
+#   Orca or secondmate spawns, and metadata marked remote_host belongs to
+#   another filesystem namespace and is excluded from the local scan.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -269,6 +276,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-treehouse-lease-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lease-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2281,6 +2290,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  if ! fm_treehouse_guard_recorded_worktrees "$STATE"; then
+    echo "error: could not register durable guards for recorded live worktrees; refusing a fresh treehouse lease" >&2
+    exit 1
+  fi
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2328,6 +2341,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  if collision_task=$(fm_treehouse_recorded_worktree_owner "$STATE" "$ID" "$WT"); then
+    echo "error: treehouse get selected '$WT', which state records for live task '$collision_task'; refusing to launch into another task's checkout" >&2
+    exit 1
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1

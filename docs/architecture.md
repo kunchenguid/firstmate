@@ -179,6 +179,8 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Local `state/<id>.meta` worktree records remain authoritative across a reboot even when Treehouse has lost its process-bound reservation: locked session start restores pid-less durable leases for recorded local pool worktrees, and every fresh Treehouse spawn both restores those guards before allocation and rejects a selected checkout recorded by another live local task.
+`bin/fm-treehouse-lease-lib.sh` owns the pool-state and host-namespace mechanics, while `tests/fm-bootstrap.test.sh` and `tests/fm-spawn-worktree-settle.test.sh` own the portable regressions.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 

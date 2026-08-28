@@ -37,12 +37,42 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    path=${FM_FAKE_PANE_PATH:-}
+    if [ -n "${FM_FAKE_PANE_PATH_MAP:-}" ]; then
+      prev=
+      target=
+      for a in "$@"; do
+        if [ "$prev" = "-t" ]; then
+          target=$a
+          break
+        fi
+        prev=$a
+      done
+      mapped=$(awk -F '\t' -v target="$target" '$1 == target { print $2; exit }' "$FM_FAKE_PANE_PATH_MAP")
+      [ -z "$mapped" ] || path=$mapped
+    fi
+    printf '%s\n' "$path"
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    prev=
+    name=
+    for a in "$@"; do
+      if [ "$prev" = "-n" ]; then
+        name=$a
+        break
+      fi
+      prev=$a
+    done
+    printf '@%s\n' "$name"
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -125,6 +155,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH_MAP="${FM_TEST_PANE_PATH_MAP:-}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
@@ -241,6 +272,11 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
     "relative FM_HOME leaked into Pi's default cross-process extension path"
   assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
+
+  # The next assertion is an independent fresh spawn that reuses this fixture's
+  # one fake worktree. Retire the first simulated task so the collision guard
+  # sees the same sequential lifecycle the test intends to model.
+  rm -f "$HOME_DIR/state/$relative_id.meta"
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
@@ -741,14 +777,19 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status wt2 path_map
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  wt2="$CASE_DIR/wt-2"
+  path_map="$CASE_DIR/pane-paths.tsv"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-batch-2 "$wt2"
+  printf '@fm-%s\t%s\n@fm-%s\t%s\n' "$id1" "$WT_DIR" "$id2" "$wt2" > "$path_map"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(FM_TEST_PANE_PATH_MAP="$path_map" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
@@ -756,6 +797,10 @@ test_batch_forwards_shared_profile_flags() {
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
   assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id1.meta" \
+    "first batch task did not keep its distinct worktree"
+  assert_grep "worktree=$wt2" "$HOME_DIR/state/$id2.meta" \
+    "second batch task did not receive a distinct worktree"
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 

@@ -141,7 +141,41 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_recorded_live_worktree_is_refused() {
+  local rec id out status
+  id=settle-recorded-collision-z3
+  rec=$(make_settle_case settle-recorded-collision "$id" 0)
+  read_settle_record "$rec"
+  printf 'worktree=%s\n' "$WT_DIR" > "$HOME_DIR/state/live-other-task.meta"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a worktree recorded for another live task"
+  assert_contains "$out" "state records for live task 'live-other-task'" \
+    "spawn did not name the recorded-worktree collision"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "collision spawn published metadata for the new task"
+  pass "a fresh spawn refuses a worktree recorded for another live task"
+}
+
+test_remote_recorded_worktree_does_not_collide_locally() {
+  local rec id out status
+  id=settle-remote-record-z4
+  rec=$(make_settle_case settle-remote-record "$id" 0)
+  read_settle_record "$rec"
+  printf 'worktree=%s\nremote_host=remote-mac\n' "$WT_DIR" > "$HOME_DIR/state/remote-task.meta"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should not treat a remote worktree path as local"
+  assert_contains "$out" "spawned $id" "spawn did not proceed past remote metadata"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "spawn did not record the locally acquired worktree"
+  pass "a remote worktree record does not collide in the local filesystem namespace"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_recorded_live_worktree_is_refused
+test_remote_recorded_worktree_does_not_collide_locally
 
 echo "# all fm-spawn-worktree-settle tests passed"
