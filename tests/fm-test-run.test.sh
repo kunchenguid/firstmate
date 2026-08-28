@@ -703,7 +703,7 @@ SH
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
 # failure, not a note in the log.
 test_max_wall_ms_is_a_result_not_advice() {
-  local tmp repo runner fast rc
+  local tmp repo runner fast rc summary_duration budget_duration
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
@@ -740,6 +740,10 @@ SH
     || fail "an over-budget run omitted its slowest result: $(cat "$tmp/over")"
   grep -Eq '^FM_TEST_BUDGET max_wall_ms=500 duration_ms=[0-9]+$' "$tmp/over" \
     || fail "an over-budget run omitted its budget result: $(cat "$tmp/over")"
+  summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/over")
+  budget_duration=$(awk '/^FM_TEST_BUDGET / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/over")
+  [ "$budget_duration" = "$summary_duration" ] \
+    || fail "budget verdict used a different duration than the summary: $(cat "$tmp/over")"
 
   # A malformed budget is refused rather than silently ignored.
   set +e

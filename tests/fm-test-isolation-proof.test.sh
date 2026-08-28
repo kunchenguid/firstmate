@@ -25,12 +25,13 @@ test_unknown_pool_is_refused() {
 }
 
 test_family_pool_json_identifies_admission() {
-  local tmp repo proof json admitted_json rc
+  local tmp repo proof json admitted_json capped_json rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-isolation-proof-json.XXXXXX")
   repo="$tmp/repo"
   proof="$repo/bin/fm-test-isolation-proof.sh"
   json="$tmp/proof.json"
   admitted_json="$tmp/admitted-proof.json"
+  capped_json="$tmp/capped-proof.json"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$PROOF" "$proof"
   cat >"$repo/bin/fm-test-run.sh" <<'SH'
@@ -49,6 +50,10 @@ if { [ "$1" = --list ] || [ "$1" = --list-scheduled ]; } && [ "$2" = --family ];
 fi
 if [ "$1" = --list-concurrent-safe-families ]; then
   printf '%s\n' admitted-family
+  exit 0
+fi
+if [ "$1" = --concurrent-safe-family-jobs-max ] && [ "$2" = admitted-family ]; then
+  printf '2\n'
   exit 0
 fi
 exit 2
@@ -113,6 +118,20 @@ assert artifact["fm_test_run_jobs_enabled"] is True
 assert artifact["summary"]["total"] == 3
 assert artifact["summary"]["failed"] == 0
 ' "$admitted_json" || fail "admitted family pool artifact metadata is incorrect"
+  mkdir "$tmp/capped-evidence"
+  set +e
+  PROOF_SCHED_EVIDENCE="$tmp/capped-evidence" "$proof" --pool admitted-family --jobs 3 --json "$capped_json" >"$tmp/capped.out" 2>"$tmp/capped.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "over-cap family proof fixture failed: $(cat "$tmp/capped.out") $(cat "$tmp/capped.err")"
+  python3 -c '
+import json, sys
+artifact = json.load(open(sys.argv[1], encoding="utf-8"))
+assert artifact["pool"] == "admitted-family"
+assert artifact["concurrency"] == 3
+assert artifact["fm_test_run_jobs_enabled"] is False
+assert artifact["summary"]["failed"] == 0
+' "$capped_json" || fail "over-cap family pool artifact metadata is incorrect"
   rm -rf "$tmp"
   pass "family pool JSON scopes jobs admission to proven concurrency"
 }
@@ -184,13 +203,15 @@ test_list_exclusions_documents_reasons() {
 }
 
 test_family_map_labels_this_contract() {
-  local fam safe scheduled_first
+  local fam safe safe_max scheduled_first
   fam=$("$RUNNER" --list --family pure-contract-unit)
   printf '%s\n' "$fam" | grep -Fq 'tests/fm-test-isolation-proof.test.sh' \
     || fail "fm-test-isolation-proof.test.sh must map to pure-contract-unit"
   safe=$("$RUNNER" --list-concurrent-safe-families)
   printf '%s\n' "$safe" | grep -Fxq watcher-wake-lock \
     || fail "runner must expose the admitted concurrent-safe family"
+  safe_max=$("$RUNNER" --concurrent-safe-family-jobs-max watcher-wake-lock)
+  [ "$safe_max" -eq 4 ] || fail "runner exposed the wrong watcher family worker cap: $safe_max"
   scheduled_first=$("$RUNNER" --list-scheduled --family watcher-wake-lock | head -n 1)
   [ "$scheduled_first" = tests/fm-watch-triage.test.sh ] \
     || fail "runner scheduled the watcher family out of longest-hint order: $scheduled_first"

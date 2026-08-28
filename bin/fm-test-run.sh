@@ -20,6 +20,7 @@
 #   fm-test-run.sh --list-scheduled --family <name>
 #   fm-test-run.sh --list-families
 #   fm-test-run.sh --list-concurrent-safe-families
+#   fm-test-run.sh --concurrent-safe-family-jobs-max <name>
 #   fm-test-run.sh --list-lanes
 #   fm-test-run.sh --check-coverage
 #
@@ -1564,6 +1565,15 @@ while [ "$#" -gt 0 ]; do
       LIST_CONCURRENT_SAFE_FAMILIES=1
       shift
       ;;
+    --concurrent-safe-family-jobs-max)
+      [ "$#" -gt 1 ] || die "--concurrent-safe-family-jobs-max requires a family name"
+      concurrent_safe_family_jobs_max "$2"
+      exit 0
+      ;;
+    --concurrent-safe-family-jobs-max=*)
+      concurrent_safe_family_jobs_max "${1#--concurrent-safe-family-jobs-max=}"
+      exit 0
+      ;;
     --list-lanes)
       LIST_LANES=1
       shift
@@ -2136,11 +2146,9 @@ if [ -n "$JSON_PATH" ]; then
 fi
 
 if [ -n "$MAX_WALL_MS" ]; then
-  BUDGET_DURATION=$(($(now_ms) - RUN_STARTED_MS))
-  [ "$BUDGET_DURATION" -ge 0 ] || BUDGET_DURATION=0
-  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$BUDGET_DURATION"
-  if [ "$BUDGET_DURATION" -gt "$MAX_WALL_MS" ]; then
-    log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$RUN_DURATION"
+  if [ "$RUN_DURATION" -gt "$MAX_WALL_MS" ]; then
+    log "wall-clock budget exceeded: ${RUN_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
     AGG_RC=1
   fi
 fi
