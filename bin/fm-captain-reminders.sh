@@ -116,8 +116,9 @@
 # Reminders app. FM_REMINDERS_EXEC replaces osascript for tests: it is called as
 # `<cmd> <verb> <args...>` with the same arguments and the same stdout contract,
 # so the projection logic is exercised on a host with no Reminders app.
-# Verbs: `list <listname>`, `upsert <listname> <id> <title> <note> <due0|1>`,
-# `complete <listname> <id>`, `complete-one <listname> <id> <reminder-id>`.
+# Verbs: `list <listname>`, `detail <listname>`, `upsert-batch <listname>
+# <payload>`, and `complete-batch <listname> <payload>`; the batch wire format
+# and each verb's per-record answer are owned by that library's header.
 # Which of several entries sharing a marker survives is decided in THIS file
 # rather than in AppleScript, so that rule is covered by the regression suite.
 set -u
@@ -174,6 +175,44 @@ list_contains() {  # <newline-separated-list> <value>
   esac
 }
 
+# One write phase, one Reminders process, whatever the entry count.
+#
+# Waking the Reminders app costs seconds, so a projection that spent a process
+# per entry cost seconds per entry and was abandoned at its own deadline before
+# it had done anything - which on this path means the captain silently stops
+# being told what is waiting on him. Every write phase therefore hands its whole
+# record set to one batch verb.
+#
+# <records> is one TAB-separated record per line, in the field order that verb
+# documents; this turns them into the batch payload, runs the verb, and leaves
+# the records joined to the verb's per-record answers in $BATCH_JOINED, one line
+# per INPUT record: the record's own fields, then the answered task id, then the
+# answer. A record whose answer is missing or names a different task is
+# UNCONFIRMED and the caller must treat it as not done - that is what keeps a
+# run cut short mid-batch from claiming work it cannot prove, and what lets the
+# deadline report an exact remainder rather than a vague failure.
+BATCH_JOINED=
+batch_run() {  # <verb> <list-name> <records>
+  local verb=$1 list_name=$2 records=$3 payload records_file answers_file
+  records_file="$WORK_DIR/batch.records"
+  answers_file="$WORK_DIR/batch.answers"
+  BATCH_JOINED="$WORK_DIR/batch.joined"
+  printf '%s\n' "$records" | awk 'NF' > "$records_file"
+  payload=$(awk -F'\t' -v us="$FM_OSA_US" -v rs="$FM_OSA_RS" '
+    {
+      rec = $1
+      for (i = 2; i <= NF; i++) rec = rec us $i
+      out = (n++ ? out rs rec : rec)
+    }
+    END { printf "%s", out }
+  ' "$records_file")
+  : > "$answers_file"
+  if projection_osa "$verb" "$list_name" "$payload"; then
+    printf '%s\n' "$OSA_OUT" > "$answers_file"
+  fi
+  paste "$records_file" "$answers_file" > "$BATCH_JOINED"
+}
+
 # Which of several entries sharing one marker survives, decided here rather than
 # in AppleScript so the rule is exercised by the regression suite on a host with
 # no Reminders app.
@@ -213,6 +252,7 @@ keeper_reminder_id() {  # <rows> <task-id>
 CONVERGED_COUNT=0
 converge_duplicates() {  # <list-name> <rows> <dry-run 0|1>
   local list_name=$1 rows=$2 dry=$3 dup_ids id keeper row_id row_rid _rest rc=0
+  local records='' ans_id ack
   CONVERGED_COUNT=0
   dup_ids=$(printf '%s\n' "$rows" | awk -F'\t' '
     NF >= 4 { seen[$1]++ }
@@ -226,24 +266,35 @@ converge_duplicates() {  # <list-name> <rows> <dry-run 0|1>
     while IFS=$'\t' read -r row_id row_rid _rest; do
       [ "$row_id" = "$id" ] || continue
       [ "$row_rid" != "$keeper" ] || continue
-      if [ "$dry" -eq 1 ]; then
-        printf 'would tick off a duplicate entry for %s\n' "$id"
-        CONVERGED_COUNT=$((CONVERGED_COUNT + 1))
-        continue
-      fi
-      if projection_osa complete-one "$list_name" "$id" "$row_rid"; then
-        note "ticked off a duplicate entry for $id"
-        CONVERGED_COUNT=$((CONVERGED_COUNT + 1))
-      else
-        rc=1
-        [ "$PROJECTION_TIMED_OUT" -eq 0 ] || return 1
-      fi
+      records=${records:+$records$'\n'}"$id"$'\t'"$row_rid"
     done <<INNER
 $rows
 INNER
   done <<EOF
 $dup_ids
 EOF
+  [ -n "$records" ] || return 0
+  if [ "$dry" -eq 1 ]; then
+    while IFS=$'\t' read -r row_id _rest; do
+      [ -n "$row_id" ] || continue
+      printf 'would tick off a duplicate entry for %s\n' "$row_id"
+      CONVERGED_COUNT=$((CONVERGED_COUNT + 1))
+    done <<DRY
+$records
+DRY
+    return 0
+  fi
+  batch_run complete-batch "$list_name" "$records"
+  while IFS=$'\t' read -r row_id _rest ans_id ack; do
+    [ -n "$row_id" ] || continue
+    if [ "$ans_id" = "$row_id" ] && [ -n "$ack" ]; then
+      note "ticked off a duplicate entry for $row_id"
+      CONVERGED_COUNT=$((CONVERGED_COUNT + 1))
+    else
+      rc=1
+    fi
+  done < "$BATCH_JOINED"
+  [ "$PROJECTION_TIMED_OUT" -eq 0 ] || return 1
   return "$rc"
 }
 
@@ -326,8 +377,9 @@ projection_osa() {  # <verb> <args...>
 }
 
 run_projection() {  # <dry-run 0|1> <fresh-ids newline-separated>
-  local dry=$1 fresh=$2 list_name desired desired_ids projected projected_rows stale_ids=''
-  local id title body due outcome now rc desired_count stale_count total remaining
+  local dry=$1 fresh=$2 list_name desired desired_ids projected projected_lines repeated stale_ids=''
+  local id title body _body _action current due outcome ans_id ack now rc desired_count stale_count total remaining
+  local upsert_records='' stale_records='' _rid converge_failed=''
   local alerted='' to_alert='' alerted_next=''
   local failures=0 acted=0 processed=0
 
@@ -429,16 +481,13 @@ EOF
     fi
     return 1
   fi
-  projected_rows=$OSA_OUT
-  projected=$(printf '%s\n' "$projected_rows" | cut -f1 | awk 'NF' | LC_ALL=C sort -u)
-  if ! converge_duplicates "$list_name" "$projected_rows" "$dry"; then
-    [ "$PROJECTION_TIMED_OUT" -eq 0 ] || {
-      note "projection did not finish before the ${TIMEOUT_SECS}s deadline while reconciling duplicate entries."
-      return 1
-    }
-    failures=$((failures + 1))
-  fi
-  acted=$((acted + CONVERGED_COUNT))
+  projected_lines=$OSA_OUT
+  projected=$(printf '%s\n' "$projected_lines" | cut -f1 | awk 'NF' | LC_ALL=C sort -u)
+  # Whether any marker repeats at all is free from the read above; telling those
+  # entries apart is not, and that is why the answer is only remembered here.
+  # The reconciliation itself runs last, after the entries the captain is
+  # actually waiting on have been written.
+  repeated=$(printf '%s\n' "$projected_lines" | cut -f1 | awk 'NF { n[$0]++ } END { for (k in n) if (n[k] > 1) { print "yes"; exit } }')
 
 
   while IFS= read -r id; do
@@ -460,30 +509,58 @@ EOF
     # creates, so an entry that is merely refreshed cannot ring either way.
     due=0
     list_contains "$to_alert" "$id" && due=1
-    if list_contains "$projected" "$id"; then
-      if [ "$dry" -eq 1 ]; then
+    if [ "$dry" -eq 1 ]; then
+      if list_contains "$projected" "$id"; then
         printf 'would check %s (%s) and refresh it only if its title or reason changed\n' "$id" "$title"
-        acted=$((acted + 1))
-        continue
+      elif [ "$due" -eq 1 ]; then
+        printf 'would add %s (%s) and alert the captain\n' "$id" "$title"
+      else
+        printf 'would add %s (%s) without alerting him again\n' "$id" "$title"
       fi
-    else
-      if [ "$dry" -eq 1 ]; then
-        if [ "$due" -eq 1 ]; then
-          printf 'would add %s (%s) and alert the captain\n' "$id" "$title"
-        else
-          printf 'would add %s (%s) without alerting him again\n' "$id" "$title"
-        fi
-        acted=$((acted + 1))
-        continue
-      fi
+      acted=$((acted + 1))
+      continue
     fi
-    if projection_osa upsert "$list_name" "$id" "$title" "$body" "$due"; then
-      outcome=$OSA_OUT
-      # Reached his list under any outcome, so he has seen this call and must
-      # not be rung for it again. Recorded AFTER the entry exists, the same way
-      # this repo's other report-once records commit: a record that cannot be
-      # written costs at worst one repeated alert, while recording first would
-      # cost a call its only alert.
+    # What this entry needs is decided HERE, from the list read, rather than by
+    # asking the Reminders app again: every question put to that app costs about
+    # a second, and an entry that already reads correctly needs no question at
+    # all. The consequence is that an entry the captain ticks off in the moment
+    # between that read and this write is restated by the NEXT pass rather than
+    # this one - the same convergence this whole capability already rests on,
+    # and it still cannot ring him twice, because the record below remembers
+    # that he was already rung for this call.
+    current=$(printf '%s\n' "$projected_lines" | awk -F'\t' -v want="$id" '$1 == want { sub(/^[^\t]*\t/, ""); print; exit }')
+    if list_contains "$projected" "$id"; then
+      # Already in his list, so this call has reached him whatever happens to
+      # the write below. Recorded here rather than after the write, because the
+      # evidence that he has seen it is the entry, not the rewrite.
+      list_contains "$alerted_next" "$id" \
+        || alerted_next=${alerted_next:+$alerted_next$'\n'}$id
+      if [ "$current" = "$title"$'\t'"$body" ]; then
+        processed=$((processed + 1))
+        continue
+      fi
+      upsert_records=${upsert_records:+$upsert_records$'\n'}"$id"$'\t'update$'\t'"$title"$'\t'"$body"$'\t'"$due"
+    else
+      upsert_records=${upsert_records:+$upsert_records$'\n'}"$id"$'\t'create$'\t'"$title"$'\t'"$body"$'\t'"$due"
+    fi
+  done <<EOF
+$desired
+EOF
+
+  if [ "$dry" -eq 0 ] && [ -n "$upsert_records" ]; then
+    batch_run upsert-batch "$list_name" "$upsert_records"
+    while IFS=$'\t' read -r id _action title _body due ans_id outcome; do
+      [ -n "$id" ] || continue
+      if [ "$ans_id" != "$id" ] || [ -z "$outcome" ]; then
+        failures=$((failures + 1))
+        continue
+      fi
+      # A created entry has now reached his list, so he has seen this call and
+      # must not be rung for it again. Recorded only for a record the batch
+      # actually ANSWERED, the same way this repo's other report-once records
+      # commit: a record that cannot be written costs at worst one repeated
+      # alert, while recording an unconfirmed entry would cost a call its only
+      # alert.
       list_contains "$alerted_next" "$id" \
         || alerted_next=${alerted_next:+$alerted_next$'\n'}$id
       case "$outcome" in
@@ -497,14 +574,9 @@ EOF
           ;;
         updated) note "refreshed $id ($title)"; acted=$((acted + 1)) ;;
       esac
-    else
-      [ "$PROJECTION_TIMED_OUT" -eq 0 ] || break
-      failures=$((failures + 1))
-    fi
-    processed=$((processed + 1))
-  done <<EOF
-$desired
-EOF
+      processed=$((processed + 1))
+    done < "$BATCH_JOINED"
+  fi
 
   # One write per pass, placed here so a run cut short by the deadline still
   # remembers the calls it did ring, instead of ringing them again next time.
@@ -513,7 +585,7 @@ EOF
     failures=$((failures + 1))
   fi
 
-  if [ "$PROJECTION_TIMED_OUT" -eq 0 ]; then
+  if [ "$PROJECTION_TIMED_OUT" -eq 0 ] && [ -n "$stale_ids" ]; then
     while IFS= read -r id; do
       [ -n "$id" ] || continue
       if [ "$dry" -eq 1 ]; then
@@ -521,23 +593,58 @@ EOF
         acted=$((acted + 1))
         continue
       fi
-      if projection_osa complete "$list_name" "$id"; then
-        note "ticked off $id (no longer waiting on the captain)"
-        acted=$((acted + 1))
-      else
-        [ "$PROJECTION_TIMED_OUT" -eq 0 ] || break
-        failures=$((failures + 1))
-      fi
-      processed=$((processed + 1))
+      # `-` is the batch verb's "every open entry carrying this marker".
+      stale_records=${stale_records:+$stale_records$'\n'}"$id"$'\t'-
     done <<EOF
 $stale_ids
 EOF
+    if [ -n "$stale_records" ]; then
+      batch_run complete-batch "$list_name" "$stale_records"
+      while IFS=$'\t' read -r id _rid ans_id ack; do
+        [ -n "$id" ] || continue
+        if [ "$ans_id" != "$id" ] || [ -z "$ack" ]; then
+          failures=$((failures + 1))
+          continue
+        fi
+        note "ticked off $id (no longer waiting on the captain)"
+        acted=$((acted + 1))
+        processed=$((processed + 1))
+      done < "$BATCH_JOINED"
+    fi
   fi
 
   if [ "$PROJECTION_TIMED_OUT" -eq 1 ]; then
     remaining=$((total - processed))
     note "projection did not finish before the ${TIMEOUT_SECS}s deadline; $remaining entries were left unprocessed."
     return 1
+  fi
+
+  # DUPLICATES LAST, AND NEVER AT THE EXPENSE OF THE REST. Telling several
+  # entries that share one marker apart takes four more whole-column reads, and
+  # against a real Reminders app each of those is a second or two the deadline
+  # does not get back. That price is worth paying only after every call the
+  # captain is actually waiting on has been written and every answered one has
+  # been ticked off - a spare copy of a call cannot make him miss it, while a
+  # projection that spent its whole bound sorting copies out could.
+  #
+  # So this runs on what is left of the deadline, and running out here is
+  # reported rather than treated as a failed projection: the extra copy simply
+  # survives until a pass has the room, exactly the convergence this file's
+  # header already describes.
+  if [ -n "$repeated" ]; then
+    if projection_osa detail "$list_name"; then
+      converge_duplicates "$list_name" "$OSA_OUT" "$dry" || converge_failed=1
+      acted=$((acted + CONVERGED_COUNT))
+    else
+      converge_failed=1
+    fi
+    if [ -n "$converge_failed" ]; then
+      if [ "$PROJECTION_TIMED_OUT" -eq 1 ]; then
+        note "no room left in the ${TIMEOUT_SECS}s deadline to reconcile duplicate entries; a spare copy of a call is still open and the next sync will settle it."
+      else
+        failures=$((failures + 1))
+      fi
+    fi
   fi
 
   while IFS= read -r id; do

@@ -48,8 +48,12 @@ fi
 [ -z "${FAKE_REMINDERS_FAIL:-}" ] || { printf '%s\n' "$FAKE_REMINDERS_FAIL" >&2; exit 1; }
 hasMarker='function hasMarker(b,    n) { n = length(p); return (substr(b, length(b) - n + 1) == p) || (substr(b, 1, n) == p) }'
 case "$verb" in
-  list)
-    awk -F'\t' -v OFS='\t' '
+  list|detail)
+    # `list` answers the task id, title, and note of every open marked entry -
+    # a repeated task id IS the duplicate signal - while `detail` answers the
+    # four columns that tell
+    # several entries sharing a marker apart.
+    awk -F'\t' -v OFS='\t' -v verb="$verb" '
       function markerId(body,    id) {
         if (body ~ /\[fm:[A-Za-z0-9._-]+\]$/) {
           id = body
@@ -65,60 +69,61 @@ case "$verb" in
       }
       $1 == "0" {
         id = markerId($3)
+        if (id == "") next
         # A synthetic reminder identity and age: the store never removes a row, so
         # its line number is stable within a run and earlier lines are older.
-        if (id != "") print id, "r" NR, ($4 == "1" ? "1" : "0"), NR - 1000
+        if (verb == "list") print id, $2, $3
+        else print id, "r" NR, ($4 == "1" ? "1" : "0"), NR - 1000
     }' "$store"
     ;;
-  upsert)
-    prefix="[fm:$2]"
-    name=$3
-    body=$4
-    due=$5
-    if [ -n "${FAKE_REMINDERS_COMPLETE_BEFORE_UPSERT:-}" ]; then
-      awk -F'\t' -v OFS='\t' -v p="$prefix" "$hasMarker"' $1 == "0" && hasMarker($3) { $1 = "1" } { print }' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
-    fi
-    exists=0
-    if awk -F'\t' -v p="$prefix" "$hasMarker"'
-      $1 == "0" && hasMarker($3) { found = 1 } END { exit !found }' "$store"; then
-      exists=1
-    fi
+  upsert-batch)
+    # One process for the whole phase, exactly like the AppleScript it stands
+    # in for: the payload is RS-separated records of US-separated fields, the
+    # caller has already decided create or update from its own `list` read, and
+    # the answer is one `<task-id>TAB<outcome>` line per INPUT record, in order.
     if [ -n "${FAKE_REMINDERS_GATE:-}" ]; then
       : > "$FAKE_REMINDERS_GATE.entered"
       while [ ! -e "$FAKE_REMINDERS_GATE.release" ]; do sleep 0.05; done
     fi
-    if [ "$exists" -eq 1 ]; then
-      before=$(cat "$store")
-      awk -F'\t' -v OFS='\t' -v p="$prefix" -v n="$name" -v b="$body" "$hasMarker"'
-        $1 == "0" && hasMarker($3) && !done { $2 = n; $3 = b; done = 1 }
+    handled=0
+    while IFS= read -r rec; do
+      [ -n "$rec" ] || continue
+      # FAKE_REMINDERS_PARTIAL stops the batch after N records with no error,
+      # which is how a real batch that ran out of time looks from outside: the
+      # records it never reached simply have no answer line.
+      handled=$((handled + 1))
+      if [ -n "${FAKE_REMINDERS_PARTIAL:-}" ] && [ "$handled" -gt "$FAKE_REMINDERS_PARTIAL" ]; then
+        break
+      fi
+      IFS=$'\037' read -r id action name body due <<<"$rec"
+      prefix="[fm:$id]"
+      if [ "$action" = update ]; then
+        awk -F'\t' -v OFS='\t' -v p="$prefix" -v n="$name" -v b="$body" "$hasMarker"'
+          $1 == "0" && hasMarker($3) { $2 = n; $3 = b }
+          { print }
+        ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
+        printf '%s\tupdated\n' "$id"
+      else
+        printf '0\t%s\t%s\t%s\n' "$name" "$body" "$due" >> "$store"
+        printf '%s\tcreated\n' "$id"
+      fi
+    done < <(printf '%s\n' "$2" | tr '\036' '\n')
+    ;;
+  complete-batch)
+    # Each record is `<task-id>US<reminder-id>`; a reminder id of `-`
+    # means every open entry carrying that marker. A named reminder is still
+    # only reachable among entries carrying the marker, so the id alone can
+    # never reach an unmarked row.
+    while IFS= read -r rec; do
+      [ -n "$rec" ] || continue
+      IFS=$'\037' read -r id target <<<"$rec"
+      prefix="[fm:$id]"
+      awk -F'\t' -v OFS='\t' -v p="$prefix" -v t="$target" "$hasMarker"'
+        $1 == "0" && hasMarker($3) && (t == "-" || ("r" NR) == t) { $1 = "1" }
         { print }
       ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
-      if [ "$before" = "$(cat "$store")" ]; then printf 'unchanged\n'; else printf 'updated\n'; fi
-    else
-      printf '0\t%s\t%s\t%s\n' "$name" "$body" "$due" >> "$store"
-      printf 'created\n'
-    fi
-    ;;
-  complete)
-    prefix="[fm:$2]"
-    awk -F'\t' -v OFS='\t' -v p="$prefix" "$hasMarker"'
-      $1 == "0" && hasMarker($3) { $1 = "1"; n++ }
-      { print }
-      END { }
-    ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
-    printf '1\n'
-    ;;
-  complete-one)
-    # Named reminder, but still only among entries carrying the marker: the id
-    # alone can never reach an unmarked row.
-    prefix="[fm:$2]"
-    target=$3
-    awk -F'\t' -v OFS='\t' -v p="$prefix" -v t="$target" "$hasMarker"'
-      $1 == "0" && hasMarker($3) && ("r" NR) == t { $1 = "1"; n++ }
-      { print }
-      END { }
-    ' "$store" > "$store.tmp" && mv "$store.tmp" "$store"
-    printf '1\n'
+      printf '%s\tok\n' "$id"
+    done < <(printf '%s\n' "$2" | tr '\036' '\n')
     ;;
   *) printf 'unknown verb %s\n' "$verb" >&2; exit 2 ;;
 esac
@@ -450,7 +455,9 @@ assert_not_contains "$OUT" "alerted the captain" "a rerun does not re-alert a ca
 # filters on `completed is false`, so the projection cannot see what he did and
 # restates the call - but the durable record of who has already been rung must
 # keep that restatement silent.
-OUT=$(FAKE_REMINDERS_COMPLETE_BEFORE_UPSERT=1 run sync --fresh call-d 2>&1)
+awk -F'\t' -v OFS='\t' '$3 ~ /\[fm:call-d\]$/ && $1 == "0" { $1 = "1" } { print }' "$STORE" \
+  > "$STORE.tmp" && mv "$STORE.tmp" "$STORE"
+OUT=$(run sync --fresh call-d 2>&1)
 ACTIVE_CALL_D=$(row_for call-d | grep '^0' || true)
 assert_contains "$OUT" "added call-d" "a call ticked off while still open is restated"
 assert_not_contains "$OUT" "alerted the captain" \
@@ -506,7 +513,7 @@ START=$(date +%s)
 OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
   FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$TIMEOUT_STORE" \
   FAKE_REMINDERS_LOG="$TIMEOUT_LOG" FAKE_REMINDERS_HANG=60 \
-  FAKE_REMINDERS_HANG_VERB=upsert FM_REMINDERS_TIMEOUT_SECS=6 \
+  FAKE_REMINDERS_HANG_VERB=upsert-batch FM_REMINDERS_TIMEOUT_SECS=6 \
   "$REMINDERS" sync 2>&1)
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
@@ -517,7 +524,7 @@ ELAPSED=$(( $(date +%s) - START ))
 [ ! -e "$HOME_DIR/state/.captain-reminders.lock" ] && [ ! -L "$HOME_DIR/state/.captain-reminders.lock" ] \
   || fail "an unwrapped session-start-style timeout left the projection lock held"
 [ "$(grep -c '^list$' "$TIMEOUT_LOG")" = 1 ] || fail "the deadline test did not list once: $(cat "$TIMEOUT_LOG")"
-[ "$(grep -c '^upsert$' "$TIMEOUT_LOG")" = 1 ] || fail "the whole deadline allowed repeated wedged upserts: $(cat "$TIMEOUT_LOG")"
+[ "$(grep -c '^upsert-batch$' "$TIMEOUT_LOG")" = 1 ] || fail "the whole deadline allowed repeated wedged upserts: $(cat "$TIMEOUT_LOG")"
 assert_not_contains "$(cat "$TIMEOUT_LOG")" "complete" "no further Reminders calls run after the deadline"
 assert_contains "$OUT" "3 entries were left unprocessed" "the caller is told the exact unprocessed remainder"
 assert_contains "$OUT" "Automation" "the caller is told where to approve the automation prompt"
@@ -941,3 +948,221 @@ assert_not_contains "$OUT" "alerted the captain" "a further rerun still rings no
 [ "$(multi_open pick-db | grep -c .)" = 0 ] \
   || fail "an answered call came back into his list: $(multi_row pick-db)"
 pass "clearing or deleting an entry never earns him a repeat alert, and an answered call never returns"
+
+# --- the whole projection costs a fixed number of Reminders calls -------------
+#
+# The reason this matters is not tidiness. Waking the Reminders app costs
+# seconds, so a projection that spent one call per entry cost seconds per entry
+# and was abandoned at its own deadline before it wrote anything - and being
+# abandoned on this path means the captain silently stops being told what is
+# waiting on him. Doubling the number of calls waiting on him must therefore
+# not change how many times the Reminders app is entered.
+
+SCALE_HOME="$TMP_ROOT/scale-home"
+mkdir -p "$SCALE_HOME/data" "$SCALE_HOME/state" "$SCALE_HOME/config"
+cp "$ROOT/.tasks.toml" "$SCALE_HOME/.tasks.toml"
+cat > "$SCALE_HOME/data/backlog.md" <<'BACKLOG'
+## In flight
+
+## Queued
+
+## Done
+BACKLOG
+printf '\n' > "$SCALE_HOME/config/captain-reminders"
+SCALE_STORE="$TMP_ROOT/scale-reminders.tsv"
+SCALE_LOG="$TMP_ROOT/scale-reminders.log"
+
+scale_axi() { (cd "$SCALE_HOME" && tasks-axi "$@" >/dev/null); }
+scale_run() {  # <args...>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SCALE_HOME" FM_CONFIG_OVERRIDE="$SCALE_HOME/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$SCALE_STORE" \
+    FAKE_REMINDERS_LOG="$SCALE_LOG" "$REMINDERS" "$@"
+}
+scale_calls() { awk 'END { print NR + 0 }' "$SCALE_LOG"; }
+
+scale_hold() {  # <count> <prefix>
+  local i=1
+  while [ "$i" -le "$1" ]; do
+    scale_axi add "$2-$i" "Scale call $2-$i" --repo demo
+    scale_axi hold "$2-$i" --reason "scale call $2-$i" --kind captain
+    i=$((i + 1))
+  done
+}
+
+: > "$SCALE_STORE"
+scale_hold 3 few
+: > "$SCALE_LOG"
+scale_run sync >/dev/null 2>&1
+FEW_CALLS=$(scale_calls)
+[ "$(awk -F'\t' '$1 == "0"' "$SCALE_STORE" | awk 'END { print NR }')" = 3 ] \
+  || fail "the three-call sync did not project every call: $(cat "$SCALE_STORE")"
+
+scale_hold 9 many
+: > "$SCALE_LOG"
+scale_run sync >/dev/null 2>&1
+MANY_CALLS=$(scale_calls)
+[ "$(awk -F'\t' '$1 == "0"' "$SCALE_STORE" | awk 'END { print NR }')" = 12 ] \
+  || fail "the twelve-call sync did not project every call: $(cat "$SCALE_STORE")"
+[ "$MANY_CALLS" = "$FEW_CALLS" ] \
+  || fail "Reminders calls grew with the entry count: $FEW_CALLS for 3 calls, $MANY_CALLS for 12"
+[ "$FEW_CALLS" -le 3 ] \
+  || fail "a plain sync entered Reminders $FEW_CALLS times; it should read once and write once per phase"
+pass "a 12-call projection enters Reminders exactly as often as a 3-call one ($MANY_CALLS calls)"
+
+# Ticking off a whole set of answered calls is one call too.
+for i in 1 2 3; do scale_axi unhold "few-$i"; done
+: > "$SCALE_LOG"
+scale_run sync >/dev/null 2>&1
+[ "$(scale_calls)" -le 3 ] \
+  || fail "ticking off three answered calls entered Reminders $(scale_calls) times"
+for i in 1 2 3; do
+  case "$(grep -F "[fm:few-$i]" "$SCALE_STORE")" in
+    1$'\t'*) ;;
+    *) fail "few-$i was not ticked off: $(grep -F "[fm:few-$i]" "$SCALE_STORE")" ;;
+  esac
+done
+pass "a set of answered calls is ticked off in one Reminders call, not one per entry"
+
+# --- a batch that stops half way loses no call its one alert ------------------
+#
+# A batch either answers a record or it does not. A record with no answer must
+# be treated as never written: counting it as done would cost that call the one
+# alert this whole capability exists to raise, while re-trying it costs at worst
+# a second look at an entry that already exists.
+
+PARTIAL_HOME="$TMP_ROOT/partial-home"
+mkdir -p "$PARTIAL_HOME/data" "$PARTIAL_HOME/state" "$PARTIAL_HOME/config"
+cp "$ROOT/.tasks.toml" "$PARTIAL_HOME/.tasks.toml"
+cat > "$PARTIAL_HOME/data/backlog.md" <<'BACKLOG'
+## In flight
+
+## Queued
+
+## Done
+BACKLOG
+printf '\n' > "$PARTIAL_HOME/config/captain-reminders"
+PARTIAL_STORE="$TMP_ROOT/partial-reminders.tsv"
+: > "$PARTIAL_STORE"
+
+partial_axi() { (cd "$PARTIAL_HOME" && tasks-axi "$@" >/dev/null); }
+partial_run() {  # <args...>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$PARTIAL_HOME" FM_CONFIG_OVERRIDE="$PARTIAL_HOME/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$PARTIAL_STORE" \
+    "$REMINDERS" "$@"
+}
+partial_row() { grep -F "[fm:$1]" "$PARTIAL_STORE" 2>/dev/null || true; }
+
+for id in part-a part-b part-c; do
+  partial_axi add "$id" "Partial call $id" --repo demo
+  partial_axi hold "$id" --reason "partial call $id" --kind captain
+done
+
+OUT=$(FAKE_REMINDERS_PARTIAL=2 partial_run sync 2>&1)
+RC=$?
+[ "$RC" -ne 0 ] || fail "a batch that answered only part of its records must not report success"
+assert_contains "$OUT" "added part-a" "the answered records are reported"
+assert_contains "$OUT" "added part-b" "the answered records are reported"
+assert_not_contains "$OUT" "added part-c" "a record the batch never answered is not claimed as added"
+[ "$(partial_row part-c)" = "" ] || fail "part-c should not exist yet: $(partial_row part-c)"
+
+OUT=$(partial_run sync 2>&1)
+assert_contains "$OUT" "added part-c" "the unanswered call is projected on the next pass"
+case "$(partial_row part-c)" in
+  *$'\t'1) pass "a call the truncated batch never reached still gets its one alert" ;;
+  *) fail "the retried call lost its alert: $(partial_row part-c)" ;;
+esac
+assert_not_contains "$OUT" "added part-a" "an already-projected call is not added again"
+assert_not_contains "$OUT" "part-a) and alerted" "an already-alerted call is not rung a second time"
+
+OUT=$(partial_run sync 2>&1)
+assert_not_contains "$OUT" "alerted the captain" "a further pass rings nothing"
+[ "$(awk -F'\t' '$1 == "0"' "$PARTIAL_STORE" | awk 'END { print NR }')" = 3 ] \
+  || fail "the retry duplicated an entry: $(cat "$PARTIAL_STORE")"
+pass "a batch cut short re-raises only what it could not confirm, and rings each call exactly once"
+
+# --- a deadline hit mid-projection still names the exact remainder ------------
+#
+# Batching changed what "how many are left" is derived from, so the number the
+# caller is given must still be the real count of entries this pass did not
+# process - here: every call was written, and only the answered calls waiting to
+# be ticked off were left.
+
+REMAINDER_STORE="$TMP_ROOT/remainder-reminders.tsv"
+: > "$REMAINDER_STORE"
+partial_axi add rem-stale-a "Remainder stale a" --repo demo
+partial_axi add rem-stale-b "Remainder stale b" --repo demo
+{
+  printf '0\tRemainder stale a\tanswered already [fm:rem-stale-a]\t0\n'
+  printf '0\tRemainder stale b\tanswered already [fm:rem-stale-b]\t0\n'
+} > "$REMAINDER_STORE"
+OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$PARTIAL_HOME" FM_CONFIG_OVERRIDE="$PARTIAL_HOME/config" \
+  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$REMAINDER_STORE" \
+  FAKE_REMINDERS_HANG=60 FAKE_REMINDERS_HANG_VERB=complete-batch \
+  FM_REMINDERS_TIMEOUT_SECS=6 "$REMINDERS" sync 2>&1)
+RC=$?
+[ "$RC" -ne 0 ] || fail "a projection abandoned at its deadline must not report success"
+assert_contains "$OUT" "2 entries were left unprocessed" \
+  "the remainder counts exactly the entries the abandoned phase never reached"
+pass "a deadline hit after the write phase still names the exact unprocessed remainder"
+
+# --- telling duplicates apart is asked for only when there ARE duplicates -----
+#
+# The extra columns that decide which of several entries sharing a marker
+# survives cost a whole read each against the Reminders app. The cheap read the
+# projection already does answers whether any marker repeats at all, so the
+# expensive one must never be spent on a list that has no duplicates - and when
+# it is spent, it must come after the calls the captain is waiting on are
+# written, so a spare copy can never starve the projection's real work.
+
+ORDER_STORE="$TMP_ROOT/order-reminders.tsv"
+ORDER_LOG="$TMP_ROOT/order-reminders.log"
+order_run() {
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$ORDER_STORE" \
+    FAKE_REMINDERS_LOG="$ORDER_LOG" "$REMINDERS" "$@"
+}
+
+axi add order-a "Ordered call" --repo demo
+axi hold order-a --reason "no duplicate yet" --kind captain
+: > "$ORDER_STORE"
+: > "$ORDER_LOG"
+order_run sync >/dev/null 2>&1
+assert_not_contains "$(cat "$ORDER_LOG")" "detail" \
+  "a list with no repeated marker must not pay for the duplicate-only read"
+pass "the duplicate-only read is never spent on a list that has no duplicates"
+
+# Now a genuine duplicate, plus a reason change, in one pass: the refresh the
+# captain needs must land, and the duplicate must be reconciled after it.
+axi hold order-a --reason "the reason changed in the same pass" --kind captain
+awk -F'\t' -v OFS='\t' '{ print } $1 == "0" && $3 ~ /\[fm:order-a\]$/ && !done { print; done = 1 }' \
+  "$ORDER_STORE" > "$ORDER_STORE.tmp" && mv "$ORDER_STORE.tmp" "$ORDER_STORE"
+[ "$(awk -F'\t' '$1 == "0" && $3 ~ /\[fm:order-a\]$/' "$ORDER_STORE" | awk 'END { print NR }')" = 2 ] \
+  || fail "the duplicate fixture did not produce two open copies: $(cat "$ORDER_STORE")"
+: > "$ORDER_LOG"
+OUT=$(order_run sync 2>&1)
+assert_contains "$(cat "$ORDER_LOG")" "detail" "a repeated marker does buy the duplicate-only read"
+assert_contains "$OUT" "refreshed order-a" "the call the captain is waiting on is still refreshed"
+assert_contains "$OUT" "ticked off a duplicate entry for order-a" "the duplicate is reconciled"
+UPSERT_AT=$(grep -n '^upsert-batch$' "$ORDER_LOG" | head -1 | cut -d: -f1)
+DETAIL_AT=$(grep -n '^detail$' "$ORDER_LOG" | head -1 | cut -d: -f1)
+[ -n "$UPSERT_AT" ] && [ -n "$DETAIL_AT" ] && [ "$DETAIL_AT" -gt "$UPSERT_AT" ] \
+  || fail "duplicates must be reconciled after the real work, got: $(cat "$ORDER_LOG")"
+[ "$(awk -F'\t' '$1 == "0" && $3 ~ /\[fm:order-a\]$/' "$ORDER_STORE" | awk 'END { print NR }')" = 1 ] \
+  || fail "convergence left the wrong number of open copies: $(cat "$ORDER_STORE")"
+pass "a spare copy is reconciled after the captain's own calls, never instead of them"
+
+# Running out of deadline on that reconciliation is reported, not a failure:
+# the calls he is waiting on already landed, and the spare copy settles later.
+axi hold order-a --reason "another reason change while a copy exists" --kind captain
+awk -F'\t' -v OFS='\t' '{ print } $1 == "0" && $3 ~ /\[fm:order-a\]$/ && !done { print; done = 1 }' \
+  "$ORDER_STORE" > "$ORDER_STORE.tmp" && mv "$ORDER_STORE.tmp" "$ORDER_STORE"
+: > "$ORDER_LOG"
+OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+  FM_REMINDERS_EXEC="$FAKE" FAKE_REMINDERS_STORE="$ORDER_STORE" FAKE_REMINDERS_LOG="$ORDER_LOG" \
+  FAKE_REMINDERS_HANG=60 FAKE_REMINDERS_HANG_VERB=detail FM_REMINDERS_TIMEOUT_SECS=8 \
+  "$REMINDERS" sync 2>&1)
+RC=$?
+assert_contains "$OUT" "refreshed order-a" "the refresh still lands when the duplicate read runs out of time"
+assert_contains "$OUT" "no room left" "running out of time on duplicates is said plainly"
+[ "$RC" -eq 0 ] || fail "a spare copy left for the next pass must not be reported as a failed projection, got $RC"
+pass "no deadline left for duplicates is reported and left for the next pass, not treated as a failure"
