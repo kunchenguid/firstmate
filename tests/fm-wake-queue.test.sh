@@ -1149,6 +1149,52 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+# Git Bash can report `ln -s <owner-dir> <lock>` success while materializing a
+# copied directory instead of a readable symlink. That platform result must be
+# adopted as the already-supported legacy directory lock rather than abandoned
+# as a permanent lock that prevents every later task dispatch.
+test_msys_copied_owner_directory_is_a_valid_lock() {
+  local dir state fakebin lock rc
+  dir=$(make_case msys-copied-owner)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lock="$state/.fixture.lock"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ln" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = -s ] && [ "$#" -eq 3 ] || exit 64
+mkdir "$3" || exit 1
+cp -R "$2"/. "$3"/ || exit 1
+EOF
+  chmod +x "$fakebin/ln"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    fm_lock_try_acquire "$lock" || exit 10
+    [ -d "$lock" ] && [ ! -L "$lock" ] || exit 11
+    ( fm_lock_try_acquire "$lock" && exit 12; exit 0 ) || exit 12
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 13
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MSYS copied-owner lock was not acquired and released safely (rc=$rc)"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 20
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || fail "could not create abandoned copied-owner lock"
+  rc=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 21
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 22
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || rc=$?
+  [ "$rc" -eq 0 ] || fail "abandoned MSYS copied-owner lock was not recovered safely (rc=$rc)"
+  pass "MSYS copied owner directories preserve lock ownership, contention, release, and recovery"
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -1199,6 +1245,7 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_msys_copied_owner_directory_is_a_valid_lock
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
