@@ -75,7 +75,7 @@ case "${1:-}" in
           printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
-        *'encode launch-brief'*)
+        *'encode launch-brief'*|*claude*|*codex*|*opencode*|*grok*|*kimi*|*cursor*|*muse*)
           cat "$D/becomes" > "$D/command"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -120,6 +120,23 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/date" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "$*" = "-u +%s" ] && [ -n "${FM_FAKE_DATE_FIRST_EPOCH:-}" ]; then
+  count=$(cat "$FM_FAKE_DATE_STATE" 2>/dev/null || printf 0)
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_DATE_STATE"
+  if [ "$count" -le "${FM_FAKE_DATE_SWITCH_AFTER:-1}" ]; then
+    printf '%s\n' "$FM_FAKE_DATE_FIRST_EPOCH"
+  else
+    printf '%s\n' "$FM_FAKE_DATE_LATE_EPOCH"
+  fi
+  exit 0
+fi
+exec "${FM_REAL_DATE:-/bin/date}" "$@"
+SH
+  chmod +x "$fb/date"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -160,6 +177,116 @@ add_ship_task() {
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+routing_sha_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+routing_sha_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+write_committed_routing_receipt() {
+  local dir=$1 id=$2 task_dir="$1/home/data/$2" brief intent receipt generation generation_dir
+  brief="$task_dir/committed-brief.md"
+  cp "$task_dir/brief.md" "$brief"
+  intent="$task_dir/routing-intent.json"
+  jq -cn --arg brief_hash "$(routing_sha_file "$brief")" '{brief_sha256: $brief_hash}' > "$intent"
+  receipt="$task_dir/committed-receipt.json"
+  jq -cn --arg intent_hash "$(routing_sha_file "$intent")" '{intent_sha256: $intent_hash}' > "$receipt"
+  generation=$(routing_sha_file "$receipt")
+  generation_dir="$task_dir/routing-generation.$generation"
+  mkdir "$generation_dir"
+  mv "$receipt" "$generation_dir/receipt.json"
+  mv "$brief" "$generation_dir/brief.md"
+  chmod 0400 "$generation_dir/receipt.json" "$generation_dir/brief.md"
+  printf '%s/receipt.json\n' "$generation_dir"
+}
+
+prepare_relaunch_receipt() { # <case-dir> <id> <harness> <model> <effort> [note] [authority]
+  local dir=$1 id=$2 harness=$3 model=$4 effort=$5 note=${6:-}
+  local authority=${7:-EXPLICIT_RUNTIME_OVERRIDE} source=explicit_override
+  local task_dir="$dir/home/data/$id" brief="$dir/home/data/$id/brief.md"
+  local brief_hash intent_hash home_hash host_hash now model_json=null effort_json=null binding_effort=$effort
+  [ -z "$note" ] || printf '\n## Progress note\n\n%s\n' "$note" >> "$brief"
+  [ "$authority" != STATIC_HARNESS ] || source=static_harness
+  brief_hash=$(routing_sha_file "$brief")
+  jq -n --arg id "$id" --arg brief_hash "$brief_hash" --arg authority "$authority" '{
+    schema_version: 1,
+    task_id: $id,
+    brief_sha256: $brief_hash,
+    hard_capability: "transactional relaunch",
+    ambiguity: "LOW",
+    risk: "LOCAL_FAIL_CLOSED",
+    authority: $authority,
+    gate: "no-mistakes",
+    forbidden_effects: ["push", "merge"]
+  }' > "$task_dir/routing-intent.json"
+  intent_hash=$(routing_sha_file "$task_dir/routing-intent.json")
+  home_hash=$(printf '%s' "$dir/home" | routing_sha_text)
+  host_hash=$(uname -n | routing_sha_text)
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  [ "$model" = default ] || model_json=$(jq -cn --arg value "$model" '$value')
+  case "$harness:$effort" in
+    *:default|opencode:*|kimi:*|cursor:*) ;;
+    codex:max|grok:xhigh|grok:max) ;;
+    muse:max) effort_json=$(jq -cn --arg value ultra '$value') ;;
+    *) effort_json=$(jq -cn --arg value "$binding_effort" '$value') ;;
+  esac
+  jq -n \
+    --arg id "$id" \
+    --arg intent_hash "$intent_hash" \
+    --arg home_hash "$home_hash" \
+    --arg host_hash "$host_hash" \
+    --arg source "$source" \
+    --arg harness "$harness" \
+    --arg model "$model" \
+    --arg effort "$effort" \
+    --arg now "$now" \
+    --argjson binding_model "$model_json" \
+    --argjson binding_effort "$effort_json" '{
+      schema_version: 1,
+      task_id: $id,
+      intent_sha256: $intent_hash,
+      dispatch_config: {kind: "absent", sha256: null},
+      matched_profile: {source: $source, index: null},
+      supervisor: {kind: "current-firstmate-home", home_sha256: $home_hash},
+      host: {kind: "local", identity_sha256: $host_hash},
+      launch_binding: {kind: "verified_template", harness: $harness, model: $binding_model, effort: $binding_effort},
+      harness: $harness,
+      model: $model,
+      effort: $effort,
+      candidates_considered: [{harness: $harness, model: $model, effort: $effort}],
+      quota: {source: "NOT_APPLICABLE_SINGLETON", observed_at: null, snapshot_sha256: null},
+      quota_basis: "NOT_APPLICABLE_SINGLETON",
+      fallback: "NONE",
+      rationale: "single attested relaunch route",
+      required_gate: "no-mistakes",
+      selection_order: ["hard_capability", "ambiguity_complexity", "fresh_quota_among_capable"],
+      generated_at: $now
+    }' > "$task_dir/routing-decision.pending.json"
+}
+
+age_relaunch_receipt() { # <case-dir> <id> <seconds>
+  local dir=$1 id=$2 age=$3 now epoch timestamp file tmp
+  now=$(date -u +%s)
+  epoch=$((now - age))
+  timestamp=$(date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ)
+  file="$dir/home/data/$id/routing-decision.pending.json"
+  tmp="$file.tmp"
+  jq --arg timestamp "$timestamp" '.generated_at = $timestamp' "$file" > "$tmp"
+  mv "$tmp" "$file"
+  ROUTING_TEST_NOW=$now
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
@@ -171,6 +298,11 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_REAL_DATE="${FM_REAL_DATE:-$(command -v date)}" \
+    FM_FAKE_DATE_FIRST_EPOCH="${FM_FAKE_DATE_FIRST_EPOCH:-}" \
+    FM_FAKE_DATE_LATE_EPOCH="${FM_FAKE_DATE_LATE_EPOCH:-}" \
+    FM_FAKE_DATE_STATE="${FM_FAKE_DATE_STATE:-$dir/fake/date-count}" \
+    FM_FAKE_DATE_SWITCH_AFTER="${FM_FAKE_DATE_SWITCH_AFTER:-1}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -181,12 +313,38 @@ run_spawn() {  # <case-dir> <args...>
     "$SPAWN" "$@" 2>&1
 }
 
+run_forged_control_spawn() {  # <case-dir> <id> <spawn> <receipt> <brief> <output>
+  local dir=$1 id=$2 spawn=$3 receipt=$4 brief=$5 output=$6
+  mkdir -p "$dir/home/state/.control-$id.lock"
+  printf '%s\n' "${BASHPID:-$$}" > "$dir/home/state/.control-$id.lock/pid"
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_CONTROL_ROUTING_COMMITTED=1 \
+    FM_CONTROL_ROUTING_DECISION_FINAL="$receipt" \
+    FM_CONTROL_ROUTING_BRIEF_FINAL="$brief" \
+    "$spawn" "$id" --relaunch --harness codex > "$output" 2>&1
+}
+
 meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
 
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
+}
+
+emitted_launch_input() {  # <emitted-launch-command>
+  local launch=$1 prelude
+  case "$launch" in
+    FM_LAUNCH_INPUT=*'encode launch-brief'*'env -u '*) ;;
+    *) return 1 ;;
+  esac
+  prelude=${launch%%env -u *}
+  (
+    unset FM_LAUNCH_INPUT
+    eval "$prelude"
+    printf '%s' "$FM_LAUNCH_INPUT"
+  )
 }
 
 make_git_failure_stub() {  # <case-dir>
@@ -273,15 +431,19 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
-test_relaunch_preserves_durable_task_metadata() {
-  local dir out rc
+test_control_relaunch_preserves_unrelated_metadata_and_launches_the_progress_note() {
+  local dir out rc receipt brief launch launch_input
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
+  receipt=$(write_committed_routing_receipt "$dir" rl19)
+  brief="$(dirname "$receipt")/brief.md"
   {
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
+    printf 'routing_decision=%s\n' "$receipt"
+    printf 'routing_brief=%s\n' "$brief"
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
@@ -294,7 +456,105 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
-  pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+  [ -z "$(meta_field "$dir" rl19 routing_decision)" ] \
+    || fail "a progress-note mutation must invalidate inherited routing receipt metadata"
+  [ -z "$(meta_field "$dir" rl19 routing_brief)" ] \
+    || fail "a progress-note mutation must invalidate the immutable generation brief"
+  launch=$(grep 'encode launch-brief' "$dir/fake/literal" | tail -1)
+  launch_input=$(emitted_launch_input "$launch") \
+    || fail "the replacement's emitted launch input could not be evaluated"
+  assert_contains "$launch_input" "continuing review work" \
+    "the replacement's emitted launch input omitted the required progress note"
+  pass "fm-control relaunch: unrelated metadata survives while the replacement receives its progress note"
+}
+
+test_spawn_relaunch_preserves_coherent_routing_metadata() {
+  local dir out rc receipt brief
+  dir=$(new_case coherent-routing-meta rl46)
+  add_ship_task "$dir" rl46 claude
+  receipt=$(write_committed_routing_receipt "$dir" rl46)
+  brief="$(dirname "$receipt")/brief.md"
+  printf 'routing_decision=%s\n' "$receipt" >> "$dir/home/state/rl46.meta"
+  printf 'routing_brief=%s\n' "$brief" >> "$dir/home/state/rl46.meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl46 --relaunch); rc=$?
+  expect_code 0 "$rc" "direct relaunch with coherent routing provenance should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl46 routing_decision)" = "$receipt" ] \
+    || fail "an unchanged source brief should preserve its coherent routing receipt pointer"
+  [ "$(meta_field "$dir" rl46 routing_brief)" = "$brief" ] \
+    || fail "an unchanged source brief should preserve its coherent routing brief pointer"
+  pass "fm-spawn relaunch: coherent inherited routing metadata is preserved"
+}
+
+test_relaunch_drops_symlinked_routing_pointers_together_with_a_warning() {
+  local dir out rc receipt brief linked
+  dir=$(new_case symlinked-routing-receipt rl43)
+  add_ship_task "$dir" rl43 claude
+  receipt=$(write_committed_routing_receipt "$dir" rl43)
+  brief="$(dirname "$receipt")/brief.md"
+  linked="$dir/home/data/rl43/routing-decision.link.json"
+  ln -s "$receipt" "$linked"
+  [ -f "$linked" ] || fail "symlinked receipt counterexample did not satisfy the legacy regular-file test"
+  printf 'routing_decision=%s\n' "$linked" >> "$dir/home/state/rl43.meta"
+  printf 'routing_brief=%s\n' "$brief" >> "$dir/home/state/rl43.meta"
+
+  out=$(run_control "$dir" rl43 relaunch --note "continue without symlinked provenance"); rc=$?
+  expect_code 0 "$rc" "unchanged relaunch with a symlinked prior receipt should still relaunch"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl43 routing_decision)" ] \
+    || fail "relaunch republished a symlinked routing receipt pointer"
+  [ -z "$(meta_field "$dir" rl43 routing_brief)" ] \
+    || fail "relaunch left a routing brief without an inherited receipt"
+  assert_contains "$out" "prior routing generation is unavailable" \
+    "relaunch did not warn that it stripped unavailable routing provenance"
+  pass "fm-control relaunch: unavailable symlinked routing pointers are stripped together with a warning"
+}
+
+test_relaunch_drops_tampered_routing_brief_together_with_a_warning() {
+  local dir out rc receipt brief
+  dir=$(new_case tampered-routing-brief rl45)
+  add_ship_task "$dir" rl45 claude
+  receipt=$(write_committed_routing_receipt "$dir" rl45)
+  brief="$(dirname "$receipt")/brief.md"
+  chmod 0600 "$brief"
+  printf 'tampered brief\n' > "$brief"
+  chmod 0400 "$brief"
+  [ -f "$brief" ] && [ ! -L "$brief" ] \
+    || fail "tampered brief counterexample did not satisfy the legacy regular-file test"
+  printf 'routing_decision=%s\n' "$receipt" >> "$dir/home/state/rl45.meta"
+  printf 'routing_brief=%s\n' "$brief" >> "$dir/home/state/rl45.meta"
+
+  out=$(run_control "$dir" rl45 relaunch --note "continue without tampered provenance"); rc=$?
+  expect_code 0 "$rc" "unchanged relaunch with a tampered prior brief should still relaunch"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl45 routing_decision)" ] \
+    || fail "relaunch republished a receipt whose inherited brief bytes were tampered"
+  [ -z "$(meta_field "$dir" rl45 routing_brief)" ] \
+    || fail "relaunch republished a tampered routing brief"
+  assert_contains "$out" "prior routing generation is unavailable" \
+    "relaunch did not warn that it stripped tampered routing provenance"
+  assert_grep "/exit" "$dir/fake/literal" \
+    "tampered routing provenance should not prevent the replacement relaunch"
+  pass "fm-control relaunch: tampered inherited brief provenance is stripped with a warning"
+}
+
+test_relaunch_drops_missing_routing_pointers_together_with_a_warning() {
+  local dir out rc receipt brief
+  dir=$(new_case missing-routing-receipt rl36)
+  add_ship_task "$dir" rl36 claude
+  receipt="$dir/home/data/rl36/routing-decision.json"
+  brief="$dir/home/data/rl36/routing-brief.md"
+  printf 'routing_decision=%s\n' "$receipt" >> "$dir/home/state/rl36.meta"
+  printf 'routing_brief=%s\n' "$brief" >> "$dir/home/state/rl36.meta"
+
+  out=$(run_control "$dir" rl36 relaunch --note "continue without stale provenance"); rc=$?
+  expect_code 0 "$rc" "unchanged relaunch with a missing prior receipt should still relaunch"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl36 routing_decision)" ] \
+    || fail "relaunch must not republish a pointer whose receipt is missing"
+  [ -z "$(meta_field "$dir" rl36 routing_brief)" ] \
+    || fail "relaunch left a dangling routing brief after its receipt disappeared"
+  assert_contains "$out" "prior routing generation is unavailable" \
+    "relaunch did not warn that it stripped unavailable routing provenance"
+  pass "fm-control relaunch: unavailable routing pointers are stripped together with a warning"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -371,7 +631,7 @@ test_disabled_relaunch_clears_prior_trace_context() {
   expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
+  grep -q 'unset TRACEPARENT; .*claude' "$dir/fake/literal" \
     || fail "disabled relaunch must clear the pane carrier before replacement launch"
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
@@ -408,6 +668,212 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   pass "fm-control relaunch: a ship task refuses without the progress note its replacement needs"
 }
 
+test_explicit_same_route_requires_a_receipt_before_control_effects() {
+  local dir out rc
+  dir=$(new_case explicit-same-missing rl37)
+  add_ship_task "$dir" rl37 claude
+  printf '\n## Progress note\n\nreceipt must precede control effects\n' \
+    >> "$dir/home/data/rl37/brief.md"
+  cp "$dir/home/state/rl37.meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl37 relaunch --harness claude \
+    --note "receipt must precede control effects"); rc=$?
+  expect_code 1 "$rc" "an explicit same-value route without a receipt should refuse"
+  assert_contains "$out" "ROUTING_DECISION missing" \
+    "the refusal should come from the fresh routing-decision gate"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl37.meta" \
+    || fail "a routing preflight refusal must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a routing preflight refusal must leave the old agent running"
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "a routing preflight refusal must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl37.control-relaunch" ] \
+    || fail "a routing preflight refusal must create no transaction journal"
+  pass "fm-control relaunch: an explicit same-value route needs a receipt before control effects"
+}
+
+test_route_change_requires_a_structured_progress_note() {
+  local dir out rc
+  dir=$(new_case note-substring rl45)
+  add_ship_task "$dir" rl45 claude
+  printf '\nBackground: fix parser remains relevant.\n' >> "$dir/home/data/rl45/brief.md"
+  printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl45 codex default default
+  cp "$dir/home/state/rl45.meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl45 relaunch --harness codex --note "fix parser"); rc=$?
+  expect_code 1 "$rc" "a bare note substring must not authorize a route-changing relaunch"
+  assert_contains "$out" "progress note to be present in the task brief" \
+    "the refusal should name the missing structured progress note"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl45.meta" \
+    || fail "a structured-note refusal must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a structured-note refusal must leave the old agent running"
+  [ ! -e "$dir/home/state/rl45.control-relaunch" ] \
+    || fail "a structured-note refusal must create no transaction journal"
+  pass "fm-control relaunch: route changes require the structured progress-note section"
+}
+
+test_late_expiry_refuses_before_journal_writes() {
+  local dir out rc counter
+  dir=$(new_case late-journal rl38)
+  add_ship_task "$dir" rl38 claude
+  printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl38 codex default default "late receipt"
+  age_relaunch_receipt "$dir" rl38 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$((ROUTING_TEST_NOW + 2))
+  FM_FAKE_DATE_STATE="$dir/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=1
+  out=$(run_control "$dir" rl38 relaunch --harness codex --note "late receipt"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 1 "$rc" "a receipt expiring during preflight should refuse"
+  assert_contains "$out" "ROUTING_DECISION STALE" "late preflight refusal should name freshness"
+  [ ! -e "$dir/home/state/rl38.control-relaunch" ] \
+    || fail "late preflight refusal must precede the first journal write"
+
+  counter=$(new_case late-journal-counter rl39)
+  add_ship_task "$counter" rl39 claude
+  printf 'codex' > "$counter/fake/becomes"
+  prepare_relaunch_receipt "$counter" rl39 codex default default "late receipt counterexample"
+  age_relaunch_receipt "$counter" rl39 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_STATE="$counter/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=1
+  out=$(run_control "$counter" rl39 relaunch --harness codex --note "late receipt counterexample"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 0 "$rc" "freshness counterexample should reach journal publication"$'\n'"$out"
+  [ -e "$counter/home/state/rl39.control-relaunch" ] \
+    || fail "late-expiry journal assertion has no firing counterexample"
+  pass "fm-control relaunch: late expiry refuses before journal writes"
+}
+
+test_late_expiry_refuses_before_agent_exit() {
+  local dir out rc counter
+  dir=$(new_case late-exit rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl40 codex default default "late exit receipt"
+  age_relaunch_receipt "$dir" rl40 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$((ROUTING_TEST_NOW + 2))
+  FM_FAKE_DATE_STATE="$dir/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=1
+  out=$(run_control "$dir" rl40 relaunch --harness codex --note "late exit receipt"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 1 "$rc" "a receipt expiring during preflight should refuse before exit"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "late preflight refusal stopped the running agent"
+
+  counter=$(new_case late-exit-counter rl41)
+  add_ship_task "$counter" rl41 claude
+  printf 'codex' > "$counter/fake/becomes"
+  prepare_relaunch_receipt "$counter" rl41 codex default default "late exit counterexample"
+  age_relaunch_receipt "$counter" rl41 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_STATE="$counter/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=1
+  out=$(run_control "$counter" rl41 relaunch --harness codex --note "late exit counterexample"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 0 "$rc" "freshness counterexample should replace the running agent"$'\n'"$out"
+  [ "$(cat "$counter/fake/command")" = codex ] \
+    || fail "late-expiry exit assertion has no firing counterexample"
+  pass "fm-control relaunch: late expiry refuses before agent exit"
+}
+
+test_committed_handoff_revalidates_without_reaging() {
+  local dir out rc old_receipt old_brief new_receipt new_brief
+  dir=$(new_case committed-handoff rl42)
+  add_ship_task "$dir" rl42 claude
+  old_receipt="$dir/home/data/rl42/routing-decision.prior.json"
+  old_brief="$dir/home/data/rl42/routing-brief.prior.md"
+  printf '{}\n' > "$old_receipt"
+  printf 'prior brief\n' > "$old_brief"
+  printf 'routing_decision=%s\n' "$old_receipt" >> "$dir/home/state/rl42.meta"
+  printf 'routing_brief=%s\n' "$old_brief" >> "$dir/home/state/rl42.meta"
+  printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl42 codex default default "committed handoff"
+  age_relaunch_receipt "$dir" rl42 299
+  new_receipt=$(fm_test_routing_decision_path "$dir/home" rl42)
+  new_brief=$(fm_test_routing_brief_path "$dir/home" rl42)
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$((ROUTING_TEST_NOW + 2))
+  FM_FAKE_DATE_STATE="$dir/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=2
+  out=$(run_control "$dir" rl42 relaunch --harness codex --note "committed handoff"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 0 "$rc" "a committed routing handoff must validate without re-aging after exit"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "committed routing handoff did not launch the replacement"
+  [ "$(meta_field "$dir" rl42 routing_decision)" = "$new_receipt" ] \
+    || fail "route-changing relaunch did not point metadata at its new generation"
+  [ "$(grep -c '^routing_brief=' "$dir/home/state/rl42.meta")" -eq 1 ] \
+    || fail "route-changing relaunch published ambiguous routing brief metadata"
+  [ "$(meta_field "$dir" rl42 routing_brief)" = "$new_brief" ] \
+    || fail "route-changing relaunch did not replace the prior routing brief pointer"
+  assert_present "$old_receipt" "route-changing relaunch deleted its prior receipt generation"
+  assert_present "$new_receipt" "control preflight did not publish the committed receipt generation"
+  [ -f "$new_receipt" ] && [ ! -L "$new_receipt" ] \
+    || fail "control preflight did not publish its regular receipt generation"
+  assert_present "$dir/home/data/rl42/routing-decision.pending.json" \
+    "control preflight deleted the retained pending receipt pathname"
+  pass "fm-control relaunch: committed handoff validates its durable generation without re-aging"
+}
+
+test_forged_control_handoff_requires_a_valid_receipt() {
+  local dir counter out rc final brief counter_root
+  dir=$(new_case forged-handoff rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'zsh' > "$dir/fake/command"
+  final=$(write_committed_routing_receipt "$dir" rl43)
+  brief="$(dirname "$final")/brief.md"
+  cp "$dir/home/state/rl43.meta" "$dir/meta.before"
+  run_forged_control_spawn "$dir" rl43 "$SPAWN" "$final" "$brief" "$dir/spawn.out"
+  rc=$?
+  out=$(cat "$dir/spawn.out")
+  expect_code 1 "$rc" "a forged committed handoff without a valid receipt should refuse"
+  assert_contains "$out" "ROUTING_DECISION missing" \
+    "forged committed handoff refusal should come from receipt validation"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl43.meta" \
+    || fail "forged committed handoff changed task metadata"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "forged committed handoff started a replacement agent"
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "forged committed handoff sent endpoint input"
+
+  counter=$(new_case forged-handoff-counter rl44)
+  add_ship_task "$counter" rl44 claude
+  printf 'zsh' > "$counter/fake/command"
+  printf 'codex' > "$counter/fake/becomes"
+  final=$(write_committed_routing_receipt "$counter" rl44)
+  brief="$(dirname "$final")/brief.md"
+  counter_root="$counter/counterexample-root"
+  mkdir "$counter_root"
+  cp -R "$ROOT/bin" "$counter_root/bin"
+  cat >> "$counter_root/bin/fm-routing-decision-lib.sh" <<'SH'
+
+fm_routing_decision_validate_committed_handoff() {
+  FM_ROUTING_DECISION_FINAL=$FM_CONTROL_ROUTING_DECISION_FINAL
+  FM_ROUTING_BRIEF_FINAL=$FM_CONTROL_ROUTING_BRIEF_FINAL
+  FM_ROUTING_BRIEF_HASH=$(fm_routing_sha256_file "$FM_ROUTING_BRIEF_FINAL")
+  FM_ROUTING_PREPARED_DIR=$DATA/$ID
+  FM_ROUTING_PREPARED_GENERATION=$(basename "$(dirname "$FM_ROUTING_DECISION_FINAL")")
+  FM_ROUTING_PREPARED_GENERATION=${FM_ROUTING_PREPARED_GENERATION#routing-generation.}
+  FM_ROUTING_PREPARED_PUBLISHED=0
+}
+SH
+  run_forged_control_spawn "$counter" rl44 "$counter_root/bin/fm-spawn.sh" \
+    "$final" "$brief" "$counter/spawn.out"
+  rc=$?
+  out=$(cat "$counter/spawn.out")
+  expect_code 0 "$rc" "forged handoff counterexample should launch when its receipt validator is neutered"$'\n'"$out"
+  [ "$(cat "$counter/fake/command")" = codex ] \
+    || fail "forged handoff counterexample did not start the replacement agent"
+  [ "$(meta_field "$counter" rl44 routing_decision)" = "$final" ] \
+    || fail "forged handoff counterexample did not publish caller-supplied provenance"
+  pass "fm-spawn relaunch: forged committed handoff requires a validated receipt"
+}
+
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
@@ -418,6 +884,7 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   mkdir -p "$dir/wt/.claude"
   printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl4 codex default default "switching runtime"
   out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   assert_contains "$out" "harness=codex from=claude" "the outcome should name both harnesses"
@@ -438,6 +905,7 @@ test_harness_switch_does_not_carry_the_old_profile_axes() {
     "$dir/home/state/rl5.meta" > "$dir/home/state/rl5.meta.tmp"
   mv "$dir/home/state/rl5.meta.tmp" "$dir/home/state/rl5.meta"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl5 codex default default "switching runtime"
   out=$(run_control "$dir" rl5 relaunch --harness codex --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl5 model)" = default ] \
@@ -458,6 +926,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness() {
   printf '%s\n' "$dir/home/state/rl32.turn-ended" > "$auth"
   printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
 
+  prepare_relaunch_receipt "$dir" rl32 claude default default "switching runtime"
   out=$(run_control "$dir" rl32 relaunch --harness claude --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "relaunch should resolve a prefixed recorded harness"$'\n'"$out"
   [ "$(sed -n '1p' "$dir/fake/literal")" = /exit ] \
@@ -523,6 +992,7 @@ test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
   add_ship_task "$dir" rl7 claude
+  prepare_relaunch_receipt "$dir" rl7 claude sonnet low "dialling down"
   out=$(run_control "$dir" rl7 relaunch --model sonnet --effort low --note "dialling down"); rc=$?
   expect_code 0 "$rc" "relaunch with explicit axes should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl7 model)" = sonnet ] || fail "an explicit model should be recorded"
@@ -630,6 +1100,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   printf '%s\n' "fm-sm3" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" sm3 codex some-model high "" STATIC_HARNESS
   out=$(run_control "$dir" sm3 relaunch); rc=$?
   expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
@@ -669,6 +1140,7 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   printf '%s\n' "fm-sm6" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" sm6 codex some-model default "" STATIC_HARNESS
   out=$(run_control "$dir" sm6 relaunch); rc=$?
   expect_code 0 "$rc" "an invalid configured effort should be ignored before stop"$'\n'"$out"
   assert_contains "$out" "effort token 'impossible'" \
@@ -748,6 +1220,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   printf '%s\n' "fm-sm4" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" sm4 codex default default
   out=$(run_control "$dir" sm4 relaunch --harness codex); rc=$?
   expect_code 0 "$rc" "an explicit secondmate harness should relaunch"$'\n'"$out"
   [ "$(meta_field "$dir" sm4 model)" = default ] \
@@ -800,6 +1273,7 @@ test_prefixed_prior_harness_wiring_is_still_retired() {
   printf '%s\n' "$dir/home/state/rl30.turn-ended" > "$auth"
   printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
   printf 'zsh' > "$dir/fake/command"
+  prepare_relaunch_receipt "$dir" rl30 claude default default
   run_spawn "$dir" rl30 --relaunch --harness claude >/dev/null
   [ ! -e "$auth" ] \
     || fail "a prefixed prior harness must still have its turn-end registry entry revoked"
@@ -822,6 +1296,7 @@ test_muse_session_binding_is_retired_on_a_harness_switch() {
     > "$dir/home/state/rl31.muse-session"
   printf '/nonexistent/session.jsonl\n' > "$dir/home/state/rl31.muse-session-current"
   printf 'zsh' > "$dir/fake/command"
+  prepare_relaunch_receipt "$dir" rl31 claude default default
   run_spawn "$dir" rl31 --relaunch --harness claude >/dev/null
   [ ! -e "$dir/home/state/rl31.muse-session" ] \
     || fail "the retired muse incarnation's session binding must not outlive it"
@@ -837,6 +1312,7 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   printf 'workspace=%s\nprior_conversation=old-conversation\n' "$dir/wt" \
     > "$dir/home/state/rl35.cursor-session"
   printf 'zsh' > "$dir/fake/command"
+  prepare_relaunch_receipt "$dir" rl35 claude default default
   run_spawn "$dir" rl35 --relaunch --harness claude >/dev/null
   [ ! -e "$dir/home/state/rl35.cursor-session" ] \
     || fail "the retired cursor incarnation's session binding must not outlive it"
@@ -916,6 +1392,7 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
   # The endpoint's shell is not in the recorded worktree, so the launch owner
   # refuses AFTER the previous agent has already been stopped.
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  prepare_relaunch_receipt "$dir" rl13 codex default default "carry this forward"
   out=$(run_control "$dir" rl13 relaunch --harness codex --note "carry this forward"); rc=$?
   expect_code 1 "$rc" "a failed launch should fail closed"$'\n'"$out"
   assert_contains "$out" "no agent is running" "the failure should say no agent is running"
@@ -936,6 +1413,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
   dir=$(new_case rollback-race rl30)
   add_ship_task "$dir" rl30 claude
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  prepare_relaunch_receipt "$dir" rl30 codex default default "preserve concurrent metadata"
   FM_FAKE_CWD_RACE_READY="$dir/cwd-race-ready" \
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
@@ -969,6 +1447,7 @@ test_post_publication_launch_failure_keeps_the_new_record() {
   dir=$(new_case published rl24)
   add_ship_task "$dir" rl24 claude
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl24 codex default default "keep the published record"
   out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
     run_control "$dir" rl24 relaunch --harness codex --note "keep the published record"); rc=$?
   expect_code 1 "$rc" "a post-publication launch failure should fail closed"$'\n'"$out"
@@ -1006,6 +1485,7 @@ test_complete_journal_failure_rolls_back_from_durable_phase() {
   printf 'codex' > "$dir/fake/becomes"
   real_mv=$(command -v mv)
   make_mv_failure_stub "$dir"
+  prepare_relaunch_receipt "$dir" rl27 codex default default "keep durable phase honest"
   out=$(FM_REAL_MV="$real_mv" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL=1 \
     run_control "$dir" rl27 relaunch --harness codex --note "keep durable phase honest"); rc=$?
   expect_code 1 "$rc" "a failed complete journal replacement should fail closed"$'\n'"$out"
@@ -1306,6 +1786,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   add_ship_task "$dir" rl18 claude
   printf 'zsh' > "$dir/fake/command"
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  prepare_relaunch_receipt "$dir" rl18 claude default default
   out=$(run_spawn "$dir" rl18 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "a pane outside the worktree should refuse"
   assert_contains "$out" "not its recorded worktree" "the refusal should name the wrong location"
@@ -1313,11 +1794,21 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
-test_relaunch_preserves_durable_task_metadata
+test_control_relaunch_preserves_unrelated_metadata_and_launches_the_progress_note
+test_spawn_relaunch_preserves_coherent_routing_metadata
+test_relaunch_drops_missing_routing_pointers_together_with_a_warning
+test_relaunch_drops_symlinked_routing_pointers_together_with_a_warning
+test_relaunch_drops_tampered_routing_brief_together_with_a_warning
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
+test_explicit_same_route_requires_a_receipt_before_control_effects
+test_route_change_requires_a_structured_progress_note
+test_late_expiry_refuses_before_journal_writes
+test_late_expiry_refuses_before_agent_exit
+test_committed_handoff_revalidates_without_reaging
+test_forged_control_handoff_requires_a_valid_receipt
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness

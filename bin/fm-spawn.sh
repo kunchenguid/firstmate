@@ -98,6 +98,14 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
+#   Every fresh crewmate or scout invocation and every relaunch given
+#   --harness, --model, or --effort requires a task-scoped ROUTING_INTENT and
+#   pending ROUTING_DECISION under data/<id>/.
+#   The gate is unconditional; canonical config presence or absence is attested,
+#   and FM_CONFIG_OVERRIDE cannot relocate the requirement. Its deterministic
+#   generation is published before hook installation, worktree lease, endpoint
+#   creation, metadata publication, pane input, or model execution. Fresh
+#   secondmate spawns are exempt.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -106,10 +114,12 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
-#   name from PATH once, probes that concrete path with --help, and launches the
-#   same path. It adds --tui-mode regular only when that help advertises the flag;
+#   whitespace is treated as a RAW launch command.
+#   For a receipt-covered spawn, its executable head and exact model and effort
+#   axes must satisfy the routing-receipt contract in docs/configuration.md.
+#   For pi and pi-signed, fm-spawn resolves the selected executable name from PATH
+#   once, probes that concrete path with --help, and launches the same path.
+#   It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
@@ -158,7 +168,7 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEF__    absolute path to the task brief input
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -167,7 +177,7 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-#     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __OPINPUT__   absolute path to the canonical operational-input owner
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
@@ -244,6 +254,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# ROUTING_CONFIG is the canonical home-local authority input for routing receipts.
+# FM_CONFIG_OVERRIDE may relocate ordinary configuration reads for fixtures and
+# compatibility, but it cannot relocate this safety contract out of existence.
+ROUTING_CONFIG="$FM_HOME/config"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
@@ -269,6 +283,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-routing-decision-lib.sh
+. "$SCRIPT_DIR/fm-routing-decision-lib.sh"
+# shellcheck source=bin/fm-operational-input.sh
+. "$SCRIPT_DIR/fm-operational-input.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -292,6 +310,8 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+ROUTING_PREFLIGHT_ONLY=${FM_CONTROL_ROUTING_PREFLIGHT:-0}
+ROUTING_COMMITTED_HANDOFF=${FM_CONTROL_ROUTING_COMMITTED:-0}
 POS=()
 want_value=
 for a in "$@"; do
@@ -341,6 +361,14 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+case "$ROUTING_PREFLIGHT_ONLY" in
+  0|1) ;;
+  *) echo "error: FM_CONTROL_ROUTING_PREFLIGHT must be 0 or 1" >&2; exit 1 ;;
+esac
+case "$ROUTING_COMMITTED_HANDOFF" in
+  0|1) ;;
+  *) echo "error: FM_CONTROL_ROUTING_COMMITTED must be 0 or 1" >&2; exit 1 ;;
+esac
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -701,6 +729,9 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "${FM_ROUTING_PREPARED_DIR:-}" ]; then
+    fm_routing_decision_discard_prepared
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -763,6 +794,8 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            [ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
+            [ -z "$FM_ROUTING_BRIEF_FINAL" ] || echo "routing_brief=$FM_ROUTING_BRIEF_FINAL"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -862,7 +895,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$ROUTING_CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
@@ -922,6 +955,34 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: another lifecycle action is already running for task $ID" >&2
     exit 1
   fi
+fi
+if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
+  [ "$RELAUNCH" -eq 1 ] || {
+    echo "error: the control-plane routing preflight applies only to --relaunch" >&2
+    exit 1
+  }
+  [ "$SPAWN_CONTROL_PARENT" -eq 1 ] || {
+    echo "error: the control-plane routing preflight requires the owning fm-control transaction" >&2
+    exit 1
+  }
+  [ "$HARNESS_SET" -eq 1 ] || [ "$MODEL_SET" -eq 1 ] || [ "$EFFORT_SET" -eq 1 ] || {
+    echo "error: the control-plane routing preflight requires a routing-axis override" >&2
+    exit 1
+  }
+fi
+if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+  [ "$RELAUNCH" -eq 1 ] && [ "$ROUTING_PREFLIGHT_ONLY" -eq 0 ] || {
+    echo "error: the committed control-plane routing handoff applies only to the launch half of --relaunch" >&2
+    exit 1
+  }
+  [ "$SPAWN_CONTROL_PARENT" -eq 1 ] || {
+    echo "error: the committed control-plane routing handoff requires the owning fm-control transaction" >&2
+    exit 1
+  }
+  [ "$HARNESS_SET" -eq 1 ] || [ "$MODEL_SET" -eq 1 ] || [ "$EFFORT_SET" -eq 1 ] || {
+    echo "error: the committed control-plane routing handoff requires a routing-axis override" >&2
+    exit 1
+  }
 fi
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
@@ -994,6 +1055,11 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] \
+  && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+  echo "error: task $ID already has metadata at $STATE/$ID.meta; refusing a fresh spawn before routing receipt consumption" >&2
+  exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1004,6 +1070,10 @@ FIRSTMATE_HOME=
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_MODEL=
+RELAUNCH_PRIOR_EFFORT=
+RELAUNCH_PRIOR_ROUTING_DECISION=
+RELAUNCH_PRIOR_ROUTING_BRIEF=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1026,12 +1096,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  if [ "$ROUTING_PREFLIGHT_ONLY" -eq 0 ]; then
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+    [ "$RELAUNCH_STATE" = dead ] || {
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+    }
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+  [ -n "$RELAUNCH_PRIOR_MODEL" ] || RELAUNCH_PRIOR_MODEL=default
+  RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+  [ -n "$RELAUNCH_PRIOR_EFFORT" ] || RELAUNCH_PRIOR_EFFORT=default
+  RELAUNCH_PRIOR_ROUTING_DECISION=$(fm_meta_get "$RELAUNCH_META" routing_decision)
+  RELAUNCH_PRIOR_ROUTING_BRIEF=$(fm_meta_get "$RELAUNCH_META" routing_brief)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1068,6 +1146,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  if [ "$HARNESS_SET" -eq 0 ]; then
+    [ "$MODEL_SET" -eq 1 ] || MODEL=$RELAUNCH_PRIOR_MODEL
+    [ "$EFFORT_SET" -eq 1 ] || EFFORT=$RELAUNCH_PRIOR_EFFORT
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
@@ -1135,21 +1217,21 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG____LAUNCHINPUT__' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __LAUNCHINPUT__'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" __LAUNCHINPUT__'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt __LAUNCHINPUT__' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ __LAUNCHINPUT__'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ __LAUNCHINPUT__'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1159,7 +1241,7 @@ launch_template() {
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG____LAUNCHINPUT__' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
     # --yolo does NOT cover and which would otherwise block every spawn, since
     # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -1172,9 +1254,9 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ __LAUNCHINPUT__' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
-    # only an absolute brief pointer after the TUI readiness gate below.
+    # its verified typed brief after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
@@ -1199,18 +1281,22 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG____LAUNCHINPUT__' ;;
     *) return 1 ;;
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *' '*)  # raw launch command headed by a supported harness executable
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    RAW_HARNESS=$(fm_routing_raw_harness_for_executable "$HARNESS" 2>/dev/null || true)
+    [ -z "$RAW_HARNESS" ] || HARNESS=$RAW_HARNESS
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1219,26 +1305,31 @@ case "$ARG3" in
     # active. Resolving here on every spawn is what makes the split DURABLE - a
     # respawn (recovery, /updatefirstmate, restart) re-resolves, so
     # config/secondmate-harness keeps governing secondmate launches across restarts.
-    # The launch_template lookup below is the unverified-adapter guard for both
+    # The launch_template lookup below is the verified-adapter guard for both
     # kinds: a harness with no template aborts the spawn.
     if [ "$KIND" = secondmate ]; then
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
       harness_src='config/secondmate-harness (falling back to config/crew-harness)'
     else
-      if [ -f "$CONFIG/crew-dispatch.json" ]; then
+      if [ -f "$ROUTING_CONFIG/crew-dispatch.json" ]; then
         echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
         exit 1
       fi
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a fully observed raw command headed by a supported harness executable" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a fully observed raw command headed by a supported harness executable" >&2; exit 1; }
     ;;
 esac
+
+# A raw receipt binds the command bytes supplied by the caller.
+# Adapter-owned environment added below is derived from the already-observed
+# harness, while a caller-written assignment remains in these bytes and refuses.
+FM_ROUTING_CALLER_LAUNCH=$LAUNCH
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
@@ -1448,6 +1539,76 @@ effort_flag_for_harness() {
   esac
 }
 
+# Compute the exact adapter fragments before receipt validation.
+# These same bytes replace __MODELFLAG__ and __EFFORTFLAG__ in the command sent
+# to the worker, so an omitted unsupported axis remains null in the receipt even
+# though its requested value is still recorded later in task metadata.
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "${MODEL:-default}")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "${EFFORT:-default}")
+
+# A same-route relaunch republishes the existing inspectable receipt pointer.
+# Supplying any routing-axis flag is a fresh decision even when its value equals
+# the recorded value, so only a flag-free relaunch reaches this exemption.
+ROUTING_DECISION_REQUIRED=0
+if fm_routing_decision_required \
+  "$KIND" "$RELAUNCH" "$HARNESS_SET" "$MODEL_SET" "$EFFORT_SET"; then
+  ROUTING_DECISION_REQUIRED=1
+fi
+if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
+  && [ "$RELAUNCH" -eq 1 ] \
+  && [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
+  && [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
+  && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ]; then
+  if fm_routing_decision_resolve_inherited "$RELAUNCH_PRIOR_ROUTING_DECISION" "$DATA/$ID"; then
+    :
+  elif [ -n "$RELAUNCH_PRIOR_ROUTING_DECISION" ] || [ -n "$RELAUNCH_PRIOR_ROUTING_BRIEF" ]; then
+    echo "warning: task $ID's prior routing generation is unavailable; relaunching without routing_decision or routing_brief metadata" >&2
+  fi
+fi
+
+# Routing-receipt enforcement is a source-code invariant for every fresh
+# crewmate or scout route and every relaunch with a routing-axis override.
+# Canonical config presence or absence is attested inside the receipt, while an
+# override directory is deliberately irrelevant to the decision authority.
+# Validate and snapshot before fallible spawn preflight, then consume only after
+# that preflight succeeds and immediately before the first spawn side effect.
+# Fresh secondmate routing retains its separate provisioning and registry
+# contract, while a secondmate relaunch with an explicit routing override is a
+# fresh decision under the same receipt gate as every other relaunch.
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+  if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+    fm_routing_decision_validate_committed_handoff \
+      "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
+      "$RAW_LAUNCH" "$FM_ROUTING_CALLER_LAUNCH" "$MODELFLAG" "$EFFORTFLAG" "$RELAUNCH_PRIOR_ROUTING_DECISION" \
+      || exit 1
+  else
+    fm_routing_decision_validate_and_prepare \
+      "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
+      "$RAW_LAUNCH" "$FM_ROUTING_CALLER_LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
+      || exit 1
+  fi
+  fm_operational_verified_file_input \
+    launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
+    echo "error: validated routing brief changed before launch input construction" >&2
+    exit 1
+  }
+  if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+    fm_routing_decision_seal_committed_handoff || {
+      echo "error: validated control-plane routing handoff could not be sealed" >&2
+      exit 1
+    }
+  fi
+fi
+if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
+  fm_routing_decision_persist_prepared || exit 1
+  fm_routing_decision_consume_prepared || exit 1
+  fm_routing_decision_seal_prepared || {
+    echo "error: validated relaunch routing preflight could not be sealed" >&2
+    exit 1
+  }
+  exit 0
+fi
+
 case "$LAUNCH" in
   *__MUSEBIN__*)
     MUSE_BIN=$(resolve_muse_binary) || exit 1
@@ -1473,8 +1634,8 @@ case "$LAUNCH" in
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
     LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
     if [ "$KIND" != secondmate ]; then
-      "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
-        echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
+      "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" check || {
+        echo "error: refusing Kimi spawn because the global turn-end hook cannot be installed safely" >&2
         exit 1
       }
     fi
@@ -1615,47 +1776,9 @@ if [ "$KIND" = secondmate ]; then
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
   fi
   WT="$PROJ_ABS"
-  # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
-  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
-  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
-  # spawn section). Purely local - no fetch: the home is a worktree of this same
-  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
-  # wrong-branch home is left untouched and launches as-is. The agent re-reads
-  # AGENTS.md fresh on launch, so no nudge is needed here.
-  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
-    case "$sm_ff_out" in
-      *': skipped:'*)
-        sm_ff_line=$(first_line "$sm_ff_out")
-        sm_ff_prefix="secondmate $ID: skipped: "
-        sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
-        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
-        ;;
-    esac
-  else
-    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
-  fi
-  mkdir -p "$PROJ_ABS/state" || {
-    echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
-    exit 1
-  }
-  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
-    CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
-      echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
-      exit 1
-    }
-    if ! fm_lock_acquire_wait "$CONFIG_INHERIT_LOCK"; then
-      echo "error: could not acquire secondmate inheritance lock for $PROJ_ABS" >&2
-      exit 1
-    fi
-    CONFIG_INHERIT_LOCK_HELD=1
-    # Inheritance propagation: push the primary-authoritative live-safe local inheritance
-    # surface into this secondmate home (fm-config-inherit-lib.sh).
-    FM_CONFIG_INHERIT_LIVE=1 \
-      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
-      || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
-  fi
-  if [ -f "$PROJ_ABS/data/charter.md" ]; then
+  if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+    BRIEF=$FM_ROUTING_BRIEF_FINAL
+  elif [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
     BRIEF="$DATA/$ID/brief.md"
@@ -1663,7 +1786,7 @@ if [ "$KIND" = secondmate ]; then
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
-  BRIEF="$DATA/$ID/brief.md"
+  BRIEF=${FM_ROUTING_BRIEF_FINAL:-$DATA/$ID/brief.md}
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
@@ -1913,6 +2036,69 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+  fm_routing_decision_persist_prepared || exit 1
+fi
+if [ -n "${KIMI_BIN:-}" ] && [ "$KIND" != secondmate ]; then
+  "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
+    if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+      fm_routing_decision_discard_prepared
+    fi
+    echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
+    exit 1
+  }
+fi
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+  fm_routing_decision_consume_prepared || exit 1
+  fm_routing_decision_seal_prepared || {
+    echo "error: validated routing decision could not be sealed" >&2
+    exit 1
+  }
+fi
+
+if [ "$KIND" = secondmate ]; then
+  # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
+  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
+  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
+  # spawn section). Purely local - no fetch: the home is a worktree of this same
+  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
+  # wrong-branch home is left untouched and launches as-is. The agent re-reads
+  # AGENTS.md fresh on launch, so no nudge is needed here.
+  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
+    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
+    case "$sm_ff_out" in
+      *': skipped:'*)
+        sm_ff_line=$(first_line "$sm_ff_out")
+        sm_ff_prefix="secondmate $ID: skipped: "
+        sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
+        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
+        ;;
+    esac
+  else
+    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+  fi
+  mkdir -p "$PROJ_ABS/state" || {
+    echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
+    exit 1
+  }
+  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
+    CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
+      echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
+      exit 1
+    }
+    if ! fm_lock_acquire_wait "$CONFIG_INHERIT_LOCK"; then
+      echo "error: could not acquire secondmate inheritance lock for $PROJ_ABS" >&2
+      exit 1
+    fi
+    CONFIG_INHERIT_LOCK_HELD=1
+    # Inheritance propagation: push the primary-authoritative live-safe local inheritance
+    # surface into this secondmate home (fm-config-inherit-lib.sh).
+    FM_CONFIG_INHERIT_LIVE=1 \
+      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
+      || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+  fi
+fi
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -2701,7 +2887,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort routing_decision routing_brief busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2719,6 +2905,8 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
+  [ -z "$FM_ROUTING_BRIEF_FINAL" ] || echo "routing_brief=$FM_ROUTING_BRIEF_FINAL"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -2781,8 +2969,11 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+  sq_launch_input=$(shell_quote "$FM_ROUTING_LAUNCH_INPUT")
+else
+  launch_prelude="FM_LAUNCH_INPUT=\$($sq_opinput encode launch-brief < $sq_brief) || exit; "
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
@@ -2796,6 +2987,14 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+  LAUNCH=${LAUNCH//__LAUNCHINPUT__/$sq_launch_input}
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    LAUNCH="$LAUNCH $sq_launch_input"
+  fi
+else
+  LAUNCH=${LAUNCH//__LAUNCHINPUT__/\"\$FM_LAUNCH_INPUT\"}
+fi
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
@@ -2856,6 +3055,11 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
+if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
+  && { [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ]; } \
+  && [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != kimi ]; then
+  LAUNCH="$launch_prelude$LAUNCH"
+fi
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -2887,22 +3091,26 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+    KIMI_INPUT=$FM_ROUTING_LAUNCH_INPUT
+  else
+    KIMI_INPUT="Read the brief at $BRIEF_REAL and follow it exactly."
+  fi
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
-    "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
+    "$BACKEND" "$T" "$KIMI_INPUT" "$KIMI_SUBMIT_RETRIES" \
     "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    kimi_spawn_fail "kimi brief input could not be submitted"
     exit 1
   }
   if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    kimi_spawn_fail "kimi brief input could not be submitted"
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    kimi_spawn_fail "kimi brief input delivery was not confirmed"
     exit 1
   fi
 fi

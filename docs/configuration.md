@@ -300,7 +300,7 @@ Changing this pin affects the next secondmate spawn or control-plane relaunch; t
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
-When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
+When canonical `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
@@ -315,9 +315,10 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
-Batch spawns satisfy the same requirement with a shared `--harness`.
-Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
+Every fresh crewmate or scout spawn and every relaunch given `--harness`, `--model`, or `--effort` requires its own valid task-scoped `ROUTING_DECISION` receipt, whether this optional file is present or absent.
+When canonical `config/crew-dispatch.json` exists, `fm-spawn.sh` additionally refuses crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
+Batch spawns satisfy the harness requirement with a shared `--harness`, while each task keeps its own receipt so one decision cannot be reused for another id.
+Fresh secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
 `AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
 
@@ -352,6 +353,151 @@ Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstr
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+### ROUTING_DECISION receipts
+
+This subsection is the single owner of the `ROUTING_INTENT` and `ROUTING_DECISION` schemas and field semantics.
+The exact validation and persistence mechanics live in `bin/fm-routing-decision-lib.sh`, and `fm-spawn.sh` is the only dispatch integration point.
+The receipt does not replace the natural-language profile match or the agent-owned capability and quota judgment.
+It makes that judgment inspectable and binds the concrete result to exact brief and intent bytes, canonical configuration state, identity, candidate set, emitted command axes, and freshness facts before a worktree lease, worker endpoint, metadata publication, pane input, or model execution.
+
+Receipt enforcement is an unconditional source-code invariant for every fresh crewmate and scout spawn and every relaunch given `--harness`, `--model`, or `--effort`.
+It is not enabled by `config/crew-dispatch.json`, an environment variable, or a movable feature flag.
+The authoritative configuration input is always `<FM_HOME>/config/crew-dispatch.json`, independently of `FM_CONFIG_OVERRIDE`.
+The receipt explicitly attests whether that canonical file is present or absent, so relocating configuration or removing a file changes the attested input and never removes the requirement.
+Fresh secondmate launches retain their separate provisioning, registry, host, and harness contract and do not consume this receipt.
+A flag-free same-route relaunch also stays exempt and preserves an existing non-symlink regular `routing_decision` pointer only when its task-scoped generation name matches the receipt bytes, the receipt matches the current routing intent, and that intent matches both the inherited generation brief and the current source brief.
+Supplying any routing-axis flag is a fresh routing decision even when the supplied value equals the recorded value.
+
+Each covered task directory supplies `data/<task-id>/routing-intent.json` and `data/<task-id>/routing-decision.pending.json`.
+A multi-candidate route also supplies the exact one-intake `quota-axi --json` object as `data/<task-id>/quota-snapshot.json`.
+
+`routing-intent.json` schema version 1 has exactly these fields:
+
+```json
+{
+  "schema_version": 1,
+  "task_id": "task-slug",
+  "brief_sha256": "64 lowercase hexadecimal characters",
+  "hard_capability": "required capability stated by the task authority",
+  "ambiguity": "LOW",
+  "risk": "task risk classification",
+  "authority": "bounded authority for this task",
+  "gate": "required validation gate",
+  "forbidden_effects": ["push", "merge", "publication"]
+}
+```
+
+Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `data/<task-id>/brief.md` bytes, and `forbidden_effects` is a non-empty string array.
+The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
+The validator recomputes the brief hash against a private snapshot before accepting the intent, so replacing the brief before that snapshot returns `BRIEF_HASH_MISMATCH`.
+The executable boundary operations are `identity`, `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
+The committed [`routing-receipt-guard-sites.tsv`](verification/routing-receipt-guard-sites.tsv) inventory is generated from explicit syntax classes rather than a semantic control-flow analysis.
+The library matcher selects non-definition `fm_routing_refuse` calls, literal `return 1` lines, and bracket predicates in `fm_routing_decision_required`, `fm_routing_raw_environment_assignment`, and `fm_routing_literal_words`.
+The Perl matcher selects lines containing `fail(`.
+The spawn matcher selects non-comment lines containing `ROUTING_CONFIG`, `ROUTING_DECISION_REQUIRED`, `ROUTING_COMMITTED_HANDOFF`, `ROUTING_PREFLIGHT_ONLY`, an `FM_ROUTING_*` or `RELAUNCH_PRIOR_ROUTING_*` name, an `fm_routing_decision_*` name, or `fm_operational_verified_file_input`, plus the generator's continuation rows.
+Refusal-capable lines outside these syntax classes are not enumerated.
+The inventory drift test detects changes within the matched syntax classes but cannot prove that the class list is complete.
+`identity` opens the final directory component with `O_NOFOLLOW` and reports the held directory identity.
+`snapshot` opens the final `data/<task-id>` directory component with `O_NOFOLLOW`, creates the private validation directory relative to that held task handle, opens the final canonical config directory component with `O_NOFOLLOW`, and copies each selected input relative to a held directory handle.
+`publish` opens the final task and snapshot directory components with `O_NOFOLLOW`, creates or opens the generation directory relative to the held task handle, and creates or verifies each receipt and brief artifact relative to the held generation handle.
+`hash` opens its final directory component with `O_NOFOLLOW` and reads the named regular file relative to that handle.
+`consume-generation` opens the final task directory component with `O_NOFOLLOW` and creates or opens the ledger relative to that held handle.
+`verify-committed-generation` opens the final task and snapshot directory components with `O_NOFOLLOW` and reads the ledger and generation artifacts relative to held handles.
+The routing lifecycle as a whole is not handle-based, path-based operations remain, and these boundaries do not reject symlinks in intermediate components, including the `FM_HOME/data` root.
+On acceptance, per-artifact no-clobber publication exclusively creates each single-link mode-0400 receipt and brief with `O_NOFOLLOW`, accepts an existing artifact only when its bytes and ownership shape are identical, and never overwrites or deletes an earlier generation.
+Publication is not atomic or all-or-none, so a failed attempt may leave a partial generation directory or artifact and neither cleanup nor rollback is guaranteed.
+Stranded residue cannot resolve as an authoritative receipt because dispatch never scans generation paths and flag-free inheritance requires the `routing_decision` pointer from successful task metadata to name a non-symlink regular receipt whose task-scoped generation matches its bytes.
+Before publishing a generation, `consume-generation` exclusively creates or opens the task-scoped mode-0600 `routing-generations.consumed` ledger relative to the held task handle, takes an exclusive lock, validates every existing row as one lowercase SHA-256 generation, appends and synchronizes the new generation, synchronizes the already-held task directory when the ledger is first created, and verifies that the pathname still identifies the held ledger.
+The ledger is append-only: dispatch never rewrites, compacts, or deletes prior rows, and a missing ledger grants no permission unless its exclusive creation and first synchronized append both succeed.
+A ledger read, ownership, lock, append, synchronization, or identity failure is a routing refusal before worktree lease, endpoint, or task metadata effects; a crash or later publication failure after the append burns that generation fail-closed.
+`fm-spawn.sh` synchronously reads the brief path once, verifies those captured bytes against `brief_sha256` before any worktree lease, endpoint creation, launch input, or metadata publication, and retains every typed launch-input byte, including trailing newlines, through a result-variable API shared by every verified and raw adapter consumer.
+
+`routing-decision.pending.json` schema version 1 has exactly this shape:
+
+```json
+{
+  "schema_version": 1,
+  "task_id": "task-slug",
+  "intent_sha256": "64 lowercase hexadecimal characters",
+  "dispatch_config": {"kind": "present", "sha256": "64 lowercase hexadecimal characters"},
+  "matched_profile": {"source": "rule", "index": 0},
+  "supervisor": {"kind": "current-firstmate-home", "home_sha256": "64 lowercase hexadecimal characters"},
+  "host": {"kind": "local", "identity_sha256": "64 lowercase hexadecimal characters"},
+  "launch_binding": {"kind": "verified_template", "harness": "codex", "model": "example-model", "effort": "high"},
+  "harness": "codex",
+  "model": "example-model",
+  "effort": "high",
+  "candidates_considered": [
+    {"harness": "codex", "model": "example-model", "effort": "high"}
+  ],
+  "quota": {"source": "NOT_APPLICABLE_SINGLETON", "observed_at": null, "snapshot_sha256": null},
+  "quota_basis": "NOT_APPLICABLE_SINGLETON",
+  "fallback": "NONE",
+  "rationale": "hard capability and ambiguity selected this singleton before quota",
+  "required_gate": "required validation gate",
+  "selection_order": ["hard_capability", "ambiguity_complexity", "fresh_quota_among_capable"],
+  "generated_at": "2026-08-21T20:00:00Z"
+}
+```
+
+`dispatch_config.kind` is `present` with the SHA-256 of the exact canonical file bytes or `absent` with a null hash.
+Any other file type, unreadable canonical file, presence mismatch, or byte mismatch refuses as configuration that cannot support the receipt.
+`matched_profile.source` is `rule`, `default`, `static_harness`, or `explicit_override`.
+`rule` requires a zero-based integer `index`, `default` requires a null index, and both bind `candidates_considered` to the exact normalized canonical configuration candidate set in array order.
+Normalization represents an omitted selected model or effort as the literal string `default`.
+`static_harness` requires canonical dispatch configuration to be absent, a null index, `authority: "STATIC_HARNESS"` in the exact intent, and a singleton candidate set matching the selected tuple.
+`explicit_override` requires a null index, `authority: "EXPLICIT_RUNTIME_OVERRIDE"` in the exact intent, and a singleton candidate set matching the selected tuple.
+Neither authority label independently proves captain authorization; it records the bounded authority claim that the caller must already possess.
+
+The top-level `harness`, `model`, and `effort` are the selected routing tuple and must be one exact member of `candidates_considered`.
+The `launch_binding` object independently records only values that the command to be emitted demonstrably carries.
+For a verified adapter template, `launch_binding.kind` is `verified_template`, its harness is the selected adapter, and its model or effort is the exact emitted flag value or JSON null when that axis is omitted.
+The requested effort remains in task metadata and the selected tuple when an adapter intentionally omits an unsupported value, but the launch binding stays null and never claims that requested value was emitted or derived.
+For example, codex `max`, grok `xhigh` or `max`, and every opencode, Kimi, or Cursor effort produce a null emitted effort while retaining the requested metadata value.
+Muse's selected `max` emits and binds the adapter value `ultra`.
+
+For a raw command, `launch_binding.kind` is `raw_launch`, every axis must be observed through the fixed literal command itself, and the accepted command head must be `claude`, `codex`, `pi`, `pi-signed`, `grok`, or `muse`.
+The bare command must resolve through `PATH`, every relative path spelling is refused, and an absolute spelling is accepted only when it identifies the same executable as that supported bare command.
+Outside shell quotes, raw commands allow only alphanumerics, space separators, and `-`, `_`, `.`, `/`, `:`, `,`, `+`, `@`, or `%`, while `=` is accepted only after a word has begun so zsh cannot expand a leading `=command`.
+Single-quoted content is accepted literally except for control or non-ASCII input, while double-quoted content accepts alphanumerics, space, and `#`, `%`, `&`, `'`, `(`, `)`, `*`, `+`, `,`, `-`, `.`, `/`, `:`, `;`, `<`, `=`, `>`, `?`, `@`, `[`, `]`, `^`, `_`, `{`, `|`, `}`, or `~`.
+Double-quoted expansion, history, and backslash syntax are refused rather than interpreted or normalized.
+Every other character refuses, including non-ASCII input and all control characters, and a home-relative raw binary such as `~/bin/claude` must be written as an absolute path.
+The only accepted raw model spelling is `--model <literal>` or `--model=<literal>`, and a separate value beginning with `-` is refused while the equals form remains unambiguous.
+Raw effort syntax is adapter-specific: Claude accepts `--effort` with `low`, `medium`, `high`, `xhigh`, or `max`; Codex accepts `-c model_reasoning_effort=` with `low`, `medium`, `high`, or `xhigh`; Grok accepts `--reasoning-effort` with `low`, `medium`, or `high`; Pi and Pi Signed accept `--thinking` with `low`, `medium`, `high`, `xhigh`, or `max`; and Muse accepts `--reasoning-effort` with `low`, `medium`, `high`, `xhigh`, or emitted `ultra` for selected `max`.
+OpenCode, Kimi, and Cursor raw launches are refused because their interactive adapters cannot express the separately required effort axis.
+Applicable equals forms remain accepted, while separate axis values beginning with `-` and unmatched Codex config quotes are refused.
+Raw commands with shell expansion, command substitution, control operators, environment-assignment prefixes, duplicate or missing values, non-standard model spellings such as `-m` or `--model-name`, unattested fallback or model-bearing configuration selectors, or either model or effort axis absent return `RAW_LAUNCH_NOT_VERIFIABLE` or `RAW_LAUNCH_UNRESOLVED`.
+An observed raw harness, model, or effort that contradicts the selected tuple returns `RAW_LAUNCH_MISMATCH`.
+
+The receipt's `required_gate` must equal the exact intent gate as a self-consistency check rather than independent gate authorization.
+The separate brief delivery-contract guard enforces the spawn's `--mode`.
+`fallback` is fixed to `NONE` in schema version 1 so a fallback cannot silently lower capability, authority, risk, or validation.
+The fixed `selection_order` records that hard capability is applied before ambiguity or complexity, and fresh quota is considered only among the candidates that remain.
+
+A singleton candidate set must use `quota_basis: "NOT_APPLICABLE_SINGLETON"`, `quota.source: "NOT_APPLICABLE_SINGLETON"`, and null quota timestamp and snapshot hash fields.
+It is invalid to attach quota evidence or claim quota-aware routing for a singleton.
+A multi-candidate set must use `quota_basis: "FRESH_QUOTA_COMPARISON"`, `quota.source: "quota-axi --json"`, and the exact `generatedAt` plus SHA-256 of its task-scoped `quota-snapshot.json`.
+The quota snapshot must be valid schema 5 JSON with at least one provider evidence record.
+Missing, malformed, hash-mismatched, or older-than-five-minutes multi-candidate evidence returns `NOT_VERIFIABLE(QUOTA)`.
+
+The receipt and quota timestamps use RFC3339 UTC and are accepted for five minutes, with at most 30 seconds of future clock skew.
+The supervisor home and local host are represented by SHA-256 identities and are recomputed by the spawn process rather than trusted from caller prose.
+During ordinary spawn preflight, `fm-spawn.sh` validates the pending receipt and prepares immutable launch input before publishing its generation, so a project, delivery, credential, backend, or adapter refusal before publication leaves the same receipt retryable.
+The control-plane preflight for a route-changing relaunch is the exception: it publishes the receipt before any checkpoint journal or agent exit so the routing decision is accepted while every prior agent effect remains untouched.
+The launch half ignores caller-supplied receipt paths and launch-input bytes, uses `snapshot` to resnapshot the task inputs, validates the selected and emitted route, derives the deterministic generation paths, and uses `verify-committed-generation` to verify the exact published receipt, brief, and latest consumed-ledger row.
+That validation does not re-age the timestamp accepted by preflight, and the committed handoff has no independent time bound.
+The launch half is instead constrained by the generation remaining the latest consumed-ledger row and by the recorded endpoint being positively dead before replacement.
+The handoff validation is an audit-trail guarantee, not an authorization mechanism, because an actor that can write `FM_HOME` can also author receipt artifacts and ledger bytes.
+The published artifacts remain even if a later non-routing checkpoint, stop, or launch operation fails.
+Routing refusals always precede worktree lease, worker endpoint, task metadata, pane input, and model-execution effects; the consumed-generation ledger append is the fail-closed safety record at that boundary, while non-routing preflight failures may occur afterward and leave non-authoritative artifacts, including Kimi hook installation after ordinary publication and Muse credential failure after a published control handoff.
+For an ordinary spawn, after fallible preflight succeeds, `fm-spawn.sh` exclusively publishes the generation at the effect boundary, records its exact artifact paths in task metadata, and continues into the established spawn path in the same invocation.
+The pending pathname is retained, and the routing lifecycle performs no path-based deletion of validation snapshots or generation artifacts.
+While the append-only consumed-generation ledger and generation artifacts remain intact, a recorded generation cannot authorize another route-changing attempt after a later generation becomes authoritative.
+An actor able to rewrite `FM_HOME` can remove those audit artifacts and recreate a byte-identical pending receipt, so this replay resistance is an integrity property of the retained local record rather than an authorization boundary.
+Route-changing relaunches publish a new generation without overwriting prior receipt or brief artifacts, while flag-free same-route relaunches preserve only an existing non-symlink regular receipt whose task-scoped generation matches its bytes.
+Any receipt refusal is terminal and occurs before a worktree lease, worker endpoint, task metadata, pane input, or model execution.
+An existing generation symlink, a directory with the wrong mode, or a conflicting artifact is rejected before publication completes.
 
 ## Toolchain
 

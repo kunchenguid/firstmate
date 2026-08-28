@@ -19,6 +19,8 @@ KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
+CHMOD_BIN=$(command -v chmod) || fail "test needs chmod"
+PERL_BIN=$(command -v perl) || fail "test needs perl"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
@@ -44,7 +46,7 @@ fake_screen() {
       printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
       ;;
     delivered)
-      printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      printf '✨ Launch brief accepted.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
       ;;
     *)
       printf 'shell starting\n$ \n'
@@ -80,7 +82,7 @@ case "${1:-}" in
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
         *)
-          printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
+          printf '%s' "$literal" > "$FM_FAKE_POINTER_LOG"
           printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE"
           ;;
       esac
@@ -134,6 +136,24 @@ SH
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
+  cat > "$fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+set -u
+exec "$FM_REAL_CHMOD" "$@"
+SH
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+set -u
+"$FM_REAL_PERL" "$@"
+status=$?
+if [ "$status" -eq 0 ] \
+  && [ "${2:-}" = publish ] \
+  && [ "${FM_FAKE_KIMI_INSTALL_FAIL:-no}" = yes ]; then
+  : > "$HOME/.kimi-code/fm-turn-end.d"
+fi
+exit "$status"
+SH
+  chmod +x "$fakebin/chmod" "$fakebin/perl"
   printf '%s\n' "$fakebin"
 }
 
@@ -158,8 +178,26 @@ make_spawn_case() {
 }
 
 run_spawn() {
-  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6 arg next='' model=default effort=default secondmate=0
+  local delivery_args=(--mode no-mistakes --yolo off)
+  local receipt_rationale=${FM_KIMI_RECEIPT_RATIONALE:-explicit test-only singleton receipt}
   shift 6
+  for arg in "$@"; do
+    if [ -n "$next" ]; then
+      case "$next" in model) model=$arg ;; effort) effort=$arg ;; esac
+      next=
+      continue
+    fi
+    case "$arg" in
+      --model) next=model ;;
+      --model=*) model=${arg#*=} ;;
+      --effort) next=effort ;;
+      --effort=*) effort=${arg#*=} ;;
+      --secondmate) secondmate=1 ;;
+    esac
+  done
+  [ "$secondmate" -eq 0 ] || delivery_args=()
+  fm_test_write_routing_receipt "$home" "$id" kimi "$model" "$effort" "$home/data" "$receipt_rationale"
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -169,11 +207,14 @@ run_spawn() {
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
+    FM_FAKE_KIMI_INSTALL_FAIL="${FM_FAKE_KIMI_INSTALL_FAIL:-no}" \
+    FM_REAL_CHMOD="$CHMOD_BIN" \
+    FM_REAL_PERL="$PERL_BIN" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness kimi ${delivery_args[@]+"${delivery_args[@]}"} "$@" 2>&1
 }
 
 read_spawn_record() {
@@ -183,13 +224,14 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch input meta task_tmp expected_input_file
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
   rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  printf 'brief for kimi with trailing newlines\n\n\n' > "$HOME_DIR/data/$id/brief.md"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
@@ -204,10 +246,16 @@ test_kimi_launch_then_send_is_verified() {
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
 
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
-  pointer=$(cat "$CASE_DIR/pointer.log")
-  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
-    || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
+  input=$(cat "$CASE_DIR/pointer.log")
+  assert_contains "$input" 'FIRSTMATE_OP: v1 launch-brief: brief for' \
+    "kimi did not receive the typed validated brief input"
+  assert_not_contains "$input" 'Read the brief at' \
+    "fresh kimi delivery still reopened a brief pathname"
+  expected_input_file="$CASE_DIR/kimi-launch-input.expected"
+  "$ROOT/bin/fm-operational-input.sh" encode launch-brief \
+    < "$HOME_DIR/data/$id/brief.md" > "$expected_input_file"
+  cmp -s "$expected_input_file" "$CASE_DIR/pointer.log" \
+    || fail "kimi did not receive every receipt-bound launch-input byte"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
@@ -250,6 +298,11 @@ model = "some/model"
 
 EOF
   cp "$config" "$original"
+
+  HOME="$home" "$KIMI_HOOK" check || fail "Kimi hook preflight refused a realistic config"
+  cmp -s "$original" "$config" || fail "Kimi hook preflight changed config bytes"
+  assert_absent "$home/.kimi-code/fm-turn-end.sh" "Kimi hook preflight installed the hook script"
+  assert_absent "$home/.kimi-code/fm-turn-end.d" "Kimi hook preflight created the registry"
 
   HOME="$home" "$KIMI_HOOK" install || fail "Kimi hook install refused a realistic config"
   cp "$config" "$once"
@@ -421,6 +474,64 @@ test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
   pass "fm-spawn: unsafe Kimi global config refuses before pane creation"
 }
 
+test_kimi_install_failure_leaves_non_authoritative_artifacts() {
+  local id rec out rc decision brief retry_decision
+  id=kimi-install-rollback-z9
+  rec=$(make_spawn_case install-rollback "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_INSTALL_FAIL=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "Kimi spawn accepted a failed hook installation"
+  assert_contains "$out" "Firstmate registry is not a regular directory" \
+    "Kimi hook installation failure omitted its concrete refusal"
+  assert_present "$HOME_DIR/data/$id/routing-decision.pending.json" \
+    "Kimi hook installation failure burned the retryable pending receipt"
+  decision=$(fm_test_routing_decision_path "$HOME_DIR" "$id")
+  brief=$(fm_test_routing_brief_path "$HOME_DIR" "$id")
+  assert_present "$decision" "Kimi hook installation failure did not leave its receipt artifact counterexample"
+  assert_present "$brief" "Kimi hook installation failure did not leave its brief artifact counterexample"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] \
+    || fail "Kimi hook installation failure made stranded artifacts authoritative through metadata"
+  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
+    fail "Kimi hook installation failure created a tmux container or pane"
+  fi
+  rm "$HOME_DIR/.kimi-code/fm-turn-end.d"
+  rc=0
+  out=$(FM_KIMI_RECEIPT_RATIONALE="retry after hook installation refusal" \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "Kimi retry with a fresh validated receipt should succeed"$'\n'"$out"
+  retry_decision=$(fm_test_routing_decision_path "$HOME_DIR" "$id")
+  [ "$retry_decision" != "$decision" ] || fail "Kimi retry counterexample did not create a fresh receipt generation"
+  assert_present "$decision" "Kimi retry removed the prior stranded generation"
+  [ "$(sed -n 's/^routing_decision=//p' "$HOME_DIR/state/$id.meta")" = "$retry_decision" ] \
+    || fail "successful Kimi retry did not make only its generation authoritative through metadata"
+  pass "fm-spawn: Kimi failure artifacts remain inert until successful metadata publication"
+}
+
+test_kimi_secondmate_skips_global_hook_installation() {
+  local id rec out rc config_before
+  id=kimi-secondmate-z10
+  rec=$(make_spawn_case secondmate "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$WT_DIR/bin" "$WT_DIR/data"
+  printf '# Firstmate\n' > "$WT_DIR/AGENTS.md"
+  printf '%s\n' "$id" > "$WT_DIR/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$WT_DIR/data/charter.md"
+  printf '[malformed\n' > "$HOME_DIR/.kimi-code/config.toml"
+  config_before=$(cat "$HOME_DIR/.kimi-code/config.toml")
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --secondmate) || rc=$?
+  expect_code 0 "$rc" "Kimi secondmate should ignore the unused global hook configuration: $out"
+  assert_contains "$out" "spawned $id harness=kimi kind=secondmate" \
+    "Kimi secondmate did not complete through its secondmate path"
+  [ "$(cat "$HOME_DIR/.kimi-code/config.toml")" = "$config_before" ] \
+    || fail "Kimi secondmate modified the global hook configuration"
+  assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.sh" \
+    "Kimi secondmate installed an unused global hook"
+  pass "fm-spawn: Kimi secondmates skip global hook installation"
+}
+
 test_kimi_teardown_removes_pointer_and_registry_token() {
   local id rec out rc token
   id=kimi-teardown-z8
@@ -487,11 +598,11 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
-  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+  assert_contains "$out" "kimi brief input delivery was not confirmed" \
     "unconfirmed kimi delivery lacked a loud diagnostic"
-  assert_grep 'failed: kimi brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
+  assert_grep 'failed: kimi brief input delivery was not confirmed' "$HOME_DIR/state/$id.status" \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
-  pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
+  pass "fm-spawn: kimi treats a silent brief-input drop as a failed spawn"
 }
 
 test_kimi_readiness_gate_precedes_pointer() {
@@ -505,8 +616,8 @@ test_kimi_readiness_gate_precedes_pointer() {
   [ "$rc" -ne 0 ] || fail "kimi spawn without a ready signal should fail"
   assert_contains "$out" "kimi did not show a verified ready signal" \
     "kimi readiness failure lacked a loud diagnostic"
-  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
-  pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi brief input was sent before readiness"
+  pass "fm-spawn: kimi never sends brief input before an observable ready signal"
 }
 
 test_kimi_detection_uses_ancestry_after_markers() {
@@ -672,6 +783,8 @@ test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
+test_kimi_install_failure_leaves_non_authoritative_artifacts
+test_kimi_secondmate_skips_global_hook_installation
 test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation

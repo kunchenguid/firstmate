@@ -16,6 +16,7 @@
 #
 # CLI:
 #   fm-operational-input.sh encode <kind>  # body on stdin, encoded input stdout
+#   fm-operational-input.sh encode-verified-file <kind> <sha256> <path>
 #   fm-operational-input.sh kind           # current input on stdin, kind stdout
 #   fm-operational-input.sh classify       # current or legacy input on stdin
 #   fm-operational-input.sh body           # current generic input on stdin
@@ -194,10 +195,34 @@ fm_operational_read_stdin() {  # <result-var>
   printf -v "$result_var" '%s' "$value"
 }
 
+fm_operational_sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+fm_operational_verified_file_input() {  # <kind> <sha256> <path> <result-var>
+  local kind=${1-} expected=${2-} path=${3-} result_var=${4-} input actual
+  [ -n "$result_var" ] || return 2
+  [ "${#expected}" -eq 64 ] || return 2
+  case "$expected" in *[!0-9a-f]*) return 2 ;; esac
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  input=$(cat -- "$path" && printf x) || return 1
+  input=${input%x}
+  actual=$(printf '%s' "$input" | fm_operational_sha256_text) || return 1
+  [ "$actual" = "$expected" ] || return 1
+  fm_operational_input_construct "$kind" "$input" "$result_var"
+}
+
 fm_operational_usage() {
   cat <<'EOF'
 Usage:
   bin/fm-operational-input.sh encode <kind>  # body on stdin
+  bin/fm-operational-input.sh encode-verified-file <kind> <sha256> <path>
   bin/fm-operational-input.sh kind           # current input on stdin
   bin/fm-operational-input.sh classify       # current or legacy input on stdin
   bin/fm-operational-input.sh body           # current input on stdin
@@ -220,6 +245,11 @@ fm_operational_main() {
       [ "$#" -eq 2 ] || return 2
       fm_operational_read_stdin input || return 2
       fm_operational_input_construct "$argument" "$input" output || return 2
+      printf '%s' "$output"
+      ;;
+    encode-verified-file)
+      [ "$#" -eq 4 ] || return 2
+      fm_operational_verified_file_input "$argument" "$3" "$4" output || return $?
       printf '%s' "$output"
       ;;
     kind)

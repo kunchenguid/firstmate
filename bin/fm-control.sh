@@ -44,6 +44,11 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              Any explicit harness, model, or effort choice - including a
+#              config-resolved route change - must pass its own routing receipt
+#              preflight before the checkpoint, note, or old agent is touched;
+#              for that fresh decision, the progress note must already be in
+#              the receipt-bound task brief rather than appended afterwards.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -751,13 +756,18 @@ safe_checkpoint() {
 # actually reads. A secondmate's charter is a durable standing document and is
 # never rewritten: a secondmate reconciles its own home's records at startup,
 # so the note stays parent-side audit evidence.
-record_note() {
-  local stamp
+record_note() { # <fresh-routing-decision:0|1>
+  local route_decision_fresh=$1 stamp
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
   case "$KIND" in
     ship|scout)
+      # A fresh routing receipt is already bound to the exact instructions the
+      # replacement will read. Its continuation note must therefore have been
+      # materialized before the receipt was authored; mutating the brief here
+      # would make the validated receipt contradict the emitted launch input.
+      [ "$route_decision_fresh" -eq 0 ] || return 0
       cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
         || die "could not preserve task $ID's instructions before recording the progress note"
       {
@@ -779,7 +789,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local brief_content exit_result note_line progress_note_section route_decision_fresh=0 state
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -808,12 +818,35 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
+  spawn_args=("$ID" --relaunch)
+  if [ "$HARNESS_SET" = 1 ] || [ "$MODEL_SET" = 1 ] || [ "$EFFORT_SET" = 1 ] \
+    || [ "$TARGET_HARNESS" != "$PRIOR_HARNESS" ] \
+    || [ "$TARGET_MODEL" != "$PRIOR_MODEL" ] \
+    || [ "$TARGET_EFFORT" != "$PRIOR_EFFORT" ]; then
+    route_decision_fresh=1
+    spawn_args+=(--harness "$TARGET_HARNESS")
+    [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
+    [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  fi
   safe_checkpoint
+  if [ "$route_decision_fresh" -eq 1 ]; then
+    if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+      brief_content=$(cat "$RELAUNCH_BRIEF")
+      progress_note_section=$(printf '\n## Progress note\n\n%s' "$NOTE")
+      case "$brief_content" in
+        *"$progress_note_section") ;;
+        *) die "a route-changing relaunch requires its progress note to be present in the task brief before the routing receipt is authored" ;;
+      esac
+    fi
+    FM_CONTROL_ROUTING_PREFLIGHT=1 FM_CONTROL_ROUTING_COMMITTED=0 \
+      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null \
+      || die "the routing receipt for relaunching $ID onto $TARGET_HARNESS was refused; the running agent and durable task record are untouched"
+  fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  record_note
+  record_note "$route_decision_fresh"
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
@@ -824,10 +857,8 @@ do_relaunch() {
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
-  spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
-  [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
-  [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+      FM_CONTROL_ROUTING_COMMITTED="$route_decision_fresh" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else

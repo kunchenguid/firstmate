@@ -75,8 +75,8 @@ ROWS
   pass "batch detection: single pair batches, non-pair rejected, single-task and slash-id stay single"
 }
 
-# A projects/ path is resolved through the firstmate home, never the caller cwd,
-# before the missing-brief check. One row per home-scoping override.
+# A missing universal receipt is resolved through the firstmate home's data
+# directory before any project worktree handling. One row per projects override.
 test_projects_path_scoping() {
   local label use_override id home projects out status expected
   while IFS='|' read -r label use_override id; do
@@ -95,17 +95,17 @@ test_projects_path_scoping() {
         "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
     fi
     status=$?
-    [ "$status" -ne 0 ] || fail "$label: spawn with missing brief should fail"
-    expected="error: no brief at $home/data/$id/brief.md"
+    [ "$status" -ne 0 ] || fail "$label: spawn with missing routing receipt should fail"
+    expected="error: ROUTING_DECISION missing: required regular task-scoped file is absent: $home/data/$id/routing-decision.pending.json"
     printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
-      || fail "$label: projects/alpha was not resolved through the home before the brief check"
+      || fail "$label: routing receipt was not resolved through the active home"
     printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null \
       && fail "$label: spawn resolved projects/alpha from the caller cwd"
   done <<'ROWS'
 FM_HOME scopes projects/|no|nope-home-z7
 FM_PROJECTS_OVERRIDE scopes projects/|yes|nope-override-z8
 ROWS
-  pass "projects/ paths are scoped through the firstmate home for single-task spawn"
+  pass "routing receipts are scoped through the firstmate home before project handling"
 }
 
 # A ship batch carries one shared delivery contract. Missing flags must stop the

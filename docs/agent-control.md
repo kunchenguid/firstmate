@@ -66,7 +66,9 @@ It is not deterministic across the verified adapters: codex and grok resume only
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
 3. **Record the note.**
-   A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
+   A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation.
+   A same-route relaunch appends the note to the instructions it reads.
+   For a fresh route decision, the exact note must already be present in the task brief before its routing receipt is authored, because changing the brief after receipt validation would contradict the launch input that receipt binds.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.

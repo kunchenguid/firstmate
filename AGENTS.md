@@ -212,6 +212,7 @@ When every candidate is tight, preserve the captain's strongest-reasoning class 
 Break genuine evidence ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows and remains data-only.
 Load `quota-array-dispatch` before choosing among a matched profile array; that skill is the single owner of the TOON-first spendPriority selection procedure.
+Before every receipt-covered spawn or relaunch, materialize the task-scoped `ROUTING_INTENT` and pending `ROUTING_DECISION` owned by `docs/configuration.md`; `fm-spawn.sh` validates and consumes the receipt before dispatch effects, regardless of configuration presence or relocation, and any refusal is terminal.
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
 Do not add model-specific versions of that policy.
 

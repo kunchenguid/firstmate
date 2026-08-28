@@ -1,0 +1,385 @@
+bin/fm-routing-decision-lib.sh	44	implicit-status-predicate	[ "$harness_set" -eq 1 ] || [ "$model_set" -eq 1 ] || [ "$effort_set" -eq 1 ]
+bin/fm-routing-decision-lib.sh	47	implicit-status-predicate	[ "$kind" != secondmate ]
+bin/fm-routing-decision-lib.sh	53	failure-return	output=$(shasum -a 256 "$file" 2>/dev/null) || return 1
+bin/fm-routing-decision-lib.sh	55	failure-return	output=$(sha256sum "$file" 2>/dev/null) || return 1
+bin/fm-routing-decision-lib.sh	57	failure-return	return 1
+bin/fm-routing-decision-lib.sh	68	failure-return	return 1
+bin/fm-routing-decision-lib.sh	75	failure-return	return 1
+bin/fm-routing-decision-lib.sh	81	refusal-call	fm_routing_refuse "$label" "required regular task-scoped file is absent: $path"
+bin/fm-routing-decision-lib.sh	82	failure-return	return 1
+bin/fm-routing-decision-lib.sh	85	refusal-call	fm_routing_refuse "$unreadable_label" "required regular task-scoped file is unreadable"
+bin/fm-routing-decision-lib.sh	86	failure-return	return 1
+bin/fm-routing-decision-lib.sh	97	failure-return	[ "$(dirname "$(dirname "$receipt")")" = "$task_dir" ] || return 1
+bin/fm-routing-decision-lib.sh	98	failure-return	[ "$(basename "$receipt")" = receipt.json ] || return 1
+bin/fm-routing-decision-lib.sh	99	failure-return	[ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+bin/fm-routing-decision-lib.sh	102	failure-return	[ "$generation_dir" = "routing-generation.$generation" ] || return 1
+bin/fm-routing-decision-lib.sh	103	failure-return	[[ "$generation" =~ ^[0-9a-f]{64}$ ]] || return 1
+bin/fm-routing-decision-lib.sh	104	failure-return	expected=$(fm_routing_fs_boundary hash "$(dirname "$receipt")" receipt.json 2>/dev/null) || return 1
+bin/fm-routing-decision-lib.sh	105	failure-return	[ "$expected" = "$generation" ] || return 1
+bin/fm-routing-decision-lib.sh	107	failure-return	[ -f "$brief" ] && [ ! -L "$brief" ] || return 1
+bin/fm-routing-decision-lib.sh	109	failure-return	[ -f "$intent" ] && [ ! -L "$intent" ] || return 1
+bin/fm-routing-decision-lib.sh	110	failure-return	command -v jq >/dev/null 2>&1 || return 1
+bin/fm-routing-decision-lib.sh	111	failure-return	expected_intent=$(jq -er '.intent_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "$receipt" 2>/dev/null) || return 1
+bin/fm-routing-decision-lib.sh	112	failure-return	actual_intent=$(fm_routing_fs_boundary hash "$task_dir" routing-intent.json 2>/dev/null) || return 1
+bin/fm-routing-decision-lib.sh	113	failure-return	[ "$actual_intent" = "$expected_intent" ] || return 1
+bin/fm-routing-decision-lib.sh	114	failure-return	expected_brief=$(jq -er '.brief_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "$intent" 2>/dev/null) || return 1
+bin/fm-routing-decision-lib.sh	115	failure-return	actual_brief=$(fm_routing_fs_boundary hash "$(dirname "$receipt")" brief.md 2>/dev/null) || return 1
+bin/fm-routing-decision-lib.sh	116	failure-return	[ "$actual_brief" = "$expected_brief" ] || return 1
+bin/fm-routing-decision-lib.sh	117	failure-return	source_brief=$(fm_routing_fs_boundary hash "$task_dir" brief.md 2>/dev/null) || return 1
+bin/fm-routing-decision-lib.sh	118	failure-return	[ "$source_brief" = "$expected_brief" ] || return 1
+bin/fm-routing-decision-lib.sh	126	implicit-status-predicate	[[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]
+bin/fm-routing-decision-lib.sh	135	failure-return	*) return 1 ;;
+bin/fm-routing-decision-lib.sh	144	failure-return	fm_routing_raw_ascii_text "$input" || return 1
+bin/fm-routing-decision-lib.sh	161	failure-return	[ -n "$token" ] || return 1
+bin/fm-routing-decision-lib.sh	169	failure-return	*) return 1 ;;
+bin/fm-routing-decision-lib.sh	187	failure-return	*) return 1 ;;
+bin/fm-routing-decision-lib.sh	192	failure-return	[ "$state" = plain ] || return 1
+bin/fm-routing-decision-lib.sh	196	implicit-status-predicate	[ "${#FM_ROUTING_WORDS[@]}" -gt 0 ]
+bin/fm-routing-decision-lib.sh	216	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch command head is not a supported harness executable"
+bin/fm-routing-decision-lib.sh	217	failure-return	return 1
+bin/fm-routing-decision-lib.sh	225	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch command head uses a relative path"
+bin/fm-routing-decision-lib.sh	226	failure-return	return 1
+bin/fm-routing-decision-lib.sh	232	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "supported raw harness executable cannot be resolved through PATH"
+bin/fm-routing-decision-lib.sh	233	failure-return	return 1
+bin/fm-routing-decision-lib.sh	237	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "absolute raw harness path is not the supported executable resolved through PATH"
+bin/fm-routing-decision-lib.sh	238	failure-return	return 1
+bin/fm-routing-decision-lib.sh	250	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config quote pair is unmatched"
+bin/fm-routing-decision-lib.sh	251	failure-return	return 1
+bin/fm-routing-decision-lib.sh	259	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config quote pair is unmatched"
+bin/fm-routing-decision-lib.sh	260	failure-return	return 1
+bin/fm-routing-decision-lib.sh	265	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config quote pair is unmatched"
+bin/fm-routing-decision-lib.sh	266	failure-return	return 1
+bin/fm-routing-decision-lib.sh	270	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config has no fixed literal value"
+bin/fm-routing-decision-lib.sh	271	failure-return	return 1
+bin/fm-routing-decision-lib.sh	281	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort spelling is not supported by the selected raw harness"
+bin/fm-routing-decision-lib.sh	282	failure-return	return 1
+bin/fm-routing-decision-lib.sh	288	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort value is not supported by the selected raw harness"
+bin/fm-routing-decision-lib.sh	289	failure-return	return 1
+bin/fm-routing-decision-lib.sh	306	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch contains a reserved template placeholder expanded after receipt validation"
+bin/fm-routing-decision-lib.sh	307	failure-return	return 1
+bin/fm-routing-decision-lib.sh	312	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+bin/fm-routing-decision-lib.sh	313	failure-return	return 1
+bin/fm-routing-decision-lib.sh	320	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch environment assignments can select an unobserved runtime"
+bin/fm-routing-decision-lib.sh	321	failure-return	return 1
+bin/fm-routing-decision-lib.sh	327	failure-return	harness_word=$(fm_routing_raw_harness_for_executable "$word") || return 1
+bin/fm-routing-decision-lib.sh	336	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch environment assignments can select an unobserved runtime"
+bin/fm-routing-decision-lib.sh	337	failure-return	return 1
+bin/fm-routing-decision-lib.sh	344	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model flag is missing a value or duplicated"
+bin/fm-routing-decision-lib.sh	345	failure-return	return 1
+bin/fm-routing-decision-lib.sh	350	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model flag has no fixed literal value"
+bin/fm-routing-decision-lib.sh	351	failure-return	return 1
+bin/fm-routing-decision-lib.sh	357	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model flag is duplicated"
+bin/fm-routing-decision-lib.sh	358	failure-return	return 1
+bin/fm-routing-decision-lib.sh	362	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model flag has no fixed literal value"
+bin/fm-routing-decision-lib.sh	363	failure-return	return 1
+bin/fm-routing-decision-lib.sh	368	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses a non-standard model flag spelling"
+bin/fm-routing-decision-lib.sh	369	failure-return	return 1
+bin/fm-routing-decision-lib.sh	372	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested model or fallback selector"
+bin/fm-routing-decision-lib.sh	373	failure-return	return 1
+bin/fm-routing-decision-lib.sh	377	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested model-bearing Claude configuration"
+bin/fm-routing-decision-lib.sh	378	failure-return	return 1
+bin/fm-routing-decision-lib.sh	383	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested Codex model or provider configuration"
+bin/fm-routing-decision-lib.sh	384	failure-return	return 1
+bin/fm-routing-decision-lib.sh	388	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested provider, account, router, or backend selector"
+bin/fm-routing-decision-lib.sh	389	failure-return	return 1
+bin/fm-routing-decision-lib.sh	394	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is missing a value or duplicated"
+bin/fm-routing-decision-lib.sh	395	failure-return	return 1
+bin/fm-routing-decision-lib.sh	400	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag has no fixed literal value"
+bin/fm-routing-decision-lib.sh	401	failure-return	return 1
+bin/fm-routing-decision-lib.sh	403	failure-return	fm_routing_set_raw_effort "$word" "$value" || return 1
+bin/fm-routing-decision-lib.sh	407	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is duplicated"
+bin/fm-routing-decision-lib.sh	408	failure-return	return 1
+bin/fm-routing-decision-lib.sh	412	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag has no fixed literal value"
+bin/fm-routing-decision-lib.sh	413	failure-return	return 1
+bin/fm-routing-decision-lib.sh	415	failure-return	fm_routing_set_raw_effort "${word%%=*}" "$value" || return 1
+bin/fm-routing-decision-lib.sh	419	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested configuration or session selector"
+bin/fm-routing-decision-lib.sh	420	failure-return	return 1
+bin/fm-routing-decision-lib.sh	423	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "config flag has no fixed literal value"
+bin/fm-routing-decision-lib.sh	424	failure-return	return 1
+bin/fm-routing-decision-lib.sh	431	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model_reasoning_effort config is only verifiable for the codex harness"
+bin/fm-routing-decision-lib.sh	432	failure-return	return 1
+bin/fm-routing-decision-lib.sh	435	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is duplicated"
+bin/fm-routing-decision-lib.sh	436	failure-return	return 1
+bin/fm-routing-decision-lib.sh	438	failure-return	fm_routing_set_codex_effort "${value#model_reasoning_effort=}" || return 1
+bin/fm-routing-decision-lib.sh	441	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested Codex configuration override"
+bin/fm-routing-decision-lib.sh	442	failure-return	return 1
+bin/fm-routing-decision-lib.sh	448	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model_reasoning_effort config is only verifiable for the codex harness"
+bin/fm-routing-decision-lib.sh	449	failure-return	return 1
+bin/fm-routing-decision-lib.sh	452	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is duplicated"
+bin/fm-routing-decision-lib.sh	453	failure-return	return 1
+bin/fm-routing-decision-lib.sh	455	failure-return	fm_routing_set_codex_effort "${word#-c=model_reasoning_effort=}" || return 1
+bin/fm-routing-decision-lib.sh	458	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested Codex configuration override"
+bin/fm-routing-decision-lib.sh	459	failure-return	return 1
+bin/fm-routing-decision-lib.sh	464	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "launch has no executable harness word"
+bin/fm-routing-decision-lib.sh	465	failure-return	return 1
+bin/fm-routing-decision-lib.sh	479	failure-return	fm_routing_parse_command_axes "$parse_input" "$raw" || return 1
+bin/fm-routing-decision-lib.sh	483	refusal-call	fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "selected raw harness cannot express the required effort axis"
+bin/fm-routing-decision-lib.sh	484	failure-return	return 1
+bin/fm-routing-decision-lib.sh	489	refusal-call	fm_routing_refuse "RAW_LAUNCH_MISMATCH" "emitted harness contradicts the selected tuple"
+bin/fm-routing-decision-lib.sh	490	failure-return	return 1
+bin/fm-routing-decision-lib.sh	495	refusal-call	fm_routing_refuse "RAW_LAUNCH_UNRESOLVED" "raw launches must expose fixed literal model and effort selections"
+bin/fm-routing-decision-lib.sh	496	failure-return	return 1
+bin/fm-routing-decision-lib.sh	501	refusal-call	fm_routing_refuse "RAW_LAUNCH_MISMATCH" "emitted model contradicts the selected tuple"
+bin/fm-routing-decision-lib.sh	502	failure-return	return 1
+bin/fm-routing-decision-lib.sh	514	refusal-call	fm_routing_refuse "RAW_LAUNCH_MISMATCH" "emitted effort contradicts the selected tuple"
+bin/fm-routing-decision-lib.sh	515	failure-return	return 1
+bin/fm-routing-decision-lib.sh	537	refusal-call	fm_routing_refuse "$predicate" "timestamp is not RFC3339 UTC"
+bin/fm-routing-decision-lib.sh	538	failure-return	return 1
+bin/fm-routing-decision-lib.sh	543	refusal-call	fm_routing_refuse "$predicate" "timestamp exceeds the ${FM_ROUTING_DECISION_MAX_AGE_SECONDS}s freshness policy"
+bin/fm-routing-decision-lib.sh	544	failure-return	return 1
+bin/fm-routing-decision-lib.sh	547	refusal-call	fm_routing_refuse "$predicate" "timestamp is more than ${FM_ROUTING_DECISION_MAX_FUTURE_SECONDS}s in the future"
+bin/fm-routing-decision-lib.sh	548	failure-return	return 1
+bin/fm-routing-decision-lib.sh	569	failure-return	*) return 1 ;;
+bin/fm-routing-decision-lib.sh	591	failure-return	fm_routing_private_input "$pending" "missing" "UNREADABLE_RECEIPT" || return 1
+bin/fm-routing-decision-lib.sh	592	failure-return	fm_routing_private_input "$intent" "missing" "UNREADABLE_INTENT" || return 1
+bin/fm-routing-decision-lib.sh	593	failure-return	fm_routing_private_input "$brief" "missing" "NOT_VERIFIABLE(BRIEF)" || return 1
+bin/fm-routing-decision-lib.sh	595	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(SCHEMA)" "jq is unavailable"
+bin/fm-routing-decision-lib.sh	596	failure-return	return 1
+bin/fm-routing-decision-lib.sh	612	refusal-call	fm_routing_refuse "MALFORMED_INTENT" "routing-intent.json does not satisfy schema version 1"
+bin/fm-routing-decision-lib.sh	613	failure-return	return 1
+bin/fm-routing-decision-lib.sh	647	refusal-call	fm_routing_refuse "MALFORMED_SCHEMA" "routing-decision.pending.json does not satisfy schema version 1"
+bin/fm-routing-decision-lib.sh	648	failure-return	return 1
+bin/fm-routing-decision-lib.sh	653	refusal-call	fm_routing_refuse "TASK_MISMATCH" "receipt and intent task_id must match the invocation task"
+bin/fm-routing-decision-lib.sh	654	failure-return	return 1
+bin/fm-routing-decision-lib.sh	657	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(BRIEF)" "brief SHA-256 could not be computed"
+bin/fm-routing-decision-lib.sh	658	failure-return	return 1
+bin/fm-routing-decision-lib.sh	661	refusal-call	fm_routing_refuse "BRIEF_HASH_MISMATCH" "intent is not bound to the exact brief bytes"
+bin/fm-routing-decision-lib.sh	662	failure-return	return 1
+bin/fm-routing-decision-lib.sh	665	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(INTENT)" "intent SHA-256 could not be computed"
+bin/fm-routing-decision-lib.sh	666	failure-return	return 1
+bin/fm-routing-decision-lib.sh	669	refusal-call	fm_routing_refuse "INTENT_HASH_MISMATCH" "receipt is not bound to the exact intent bytes"
+bin/fm-routing-decision-lib.sh	670	failure-return	return 1
+bin/fm-routing-decision-lib.sh	675	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(CONFIG)" "canonical dispatch configuration is not a readable regular file"
+bin/fm-routing-decision-lib.sh	676	failure-return	return 1
+bin/fm-routing-decision-lib.sh	679	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(CONFIG)" "canonical dispatch configuration SHA-256 could not be computed"
+bin/fm-routing-decision-lib.sh	680	failure-return	return 1
+bin/fm-routing-decision-lib.sh	687	refusal-call	fm_routing_refuse "DISPATCH_CONFIG_MISMATCH" "receipt is not bound to canonical dispatch configuration presence and bytes"
+bin/fm-routing-decision-lib.sh	688	failure-return	return 1
+bin/fm-routing-decision-lib.sh	693	failure-return	fresh) fm_routing_timestamp_fresh "$generated_at" "STALE" || return 1 ;;
+bin/fm-routing-decision-lib.sh	696	refusal-call	fm_routing_refuse "STALE" "timestamp is not RFC3339 UTC"
+bin/fm-routing-decision-lib.sh	697	failure-return	return 1
+bin/fm-routing-decision-lib.sh	701	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(SCHEMA)" "routing freshness mode is unsupported"
+bin/fm-routing-decision-lib.sh	702	failure-return	return 1
+bin/fm-routing-decision-lib.sh	708	refusal-call	fm_routing_refuse "GATE_MISMATCH" "receipt required_gate differs from the exact intent"
+bin/fm-routing-decision-lib.sh	709	failure-return	return 1
+bin/fm-routing-decision-lib.sh	712	refusal-call	fm_routing_refuse "FORBIDDEN_FALLBACK" "schema version 1 permits no fallback route"
+bin/fm-routing-decision-lib.sh	713	failure-return	return 1
+bin/fm-routing-decision-lib.sh	717	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(SUPERVISOR)" "current home identity could not be hashed"
+bin/fm-routing-decision-lib.sh	718	failure-return	return 1
+bin/fm-routing-decision-lib.sh	721	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(HOST)" "local host identity could not be hashed"
+bin/fm-routing-decision-lib.sh	722	failure-return	return 1
+bin/fm-routing-decision-lib.sh	728	refusal-call	fm_routing_refuse "SUPERVISOR_MISMATCH" "receipt supervisor is not this Firstmate home"
+bin/fm-routing-decision-lib.sh	729	failure-return	return 1
+bin/fm-routing-decision-lib.sh	733	refusal-call	fm_routing_refuse "HOST_MISMATCH" "receipt host is not the current local host"
+bin/fm-routing-decision-lib.sh	734	failure-return	return 1
+bin/fm-routing-decision-lib.sh	742	refusal-call	fm_routing_refuse "DISPATCH_CONFIG_MISMATCH" "rule source requires canonical dispatch configuration"
+bin/fm-routing-decision-lib.sh	743	failure-return	return 1
+bin/fm-routing-decision-lib.sh	746	refusal-call	fm_routing_refuse "MALFORMED_SCHEMA" "rule match requires a non-negative integer index"
+bin/fm-routing-decision-lib.sh	747	failure-return	return 1
+bin/fm-routing-decision-lib.sh	750	refusal-call	fm_routing_refuse "DISPATCH_CONFIG_MISMATCH" "matched rule is absent or malformed in canonical configuration"
+bin/fm-routing-decision-lib.sh	751	failure-return	return 1
+bin/fm-routing-decision-lib.sh	756	refusal-call	fm_routing_refuse "DISPATCH_CONFIG_MISMATCH" "default source requires canonical configuration and a null index"
+bin/fm-routing-decision-lib.sh	757	failure-return	return 1
+bin/fm-routing-decision-lib.sh	760	refusal-call	fm_routing_refuse "DISPATCH_CONFIG_MISMATCH" "default profile is absent or malformed in canonical configuration"
+bin/fm-routing-decision-lib.sh	761	failure-return	return 1
+bin/fm-routing-decision-lib.sh	768	refusal-call	fm_routing_refuse "AUTHORITY_MISMATCH" "static harness source requires canonical configuration absence and matching intent authority"
+bin/fm-routing-decision-lib.sh	769	failure-return	return 1
+bin/fm-routing-decision-lib.sh	773	refusal-call	fm_routing_refuse "MALFORMED_SCHEMA" "static harness source must be a singleton candidate set"
+bin/fm-routing-decision-lib.sh	774	failure-return	return 1
+bin/fm-routing-decision-lib.sh	780	refusal-call	fm_routing_refuse "AUTHORITY_MISMATCH" "explicit runtime override is not present in the exact intent"
+bin/fm-routing-decision-lib.sh	781	failure-return	return 1
+bin/fm-routing-decision-lib.sh	785	refusal-call	fm_routing_refuse "MALFORMED_SCHEMA" "explicit runtime override must be a singleton candidate set"
+bin/fm-routing-decision-lib.sh	786	failure-return	return 1
+bin/fm-routing-decision-lib.sh	790	refusal-call	fm_routing_refuse "MALFORMED_SCHEMA" "matched_profile.source is unsupported"
+bin/fm-routing-decision-lib.sh	791	failure-return	return 1
+bin/fm-routing-decision-lib.sh	796	refusal-call	fm_routing_refuse "DISPATCH_CONFIG_MISMATCH" "candidate set is not the exact authoritative set"
+bin/fm-routing-decision-lib.sh	797	failure-return	return 1
+bin/fm-routing-decision-lib.sh	807	refusal-call	fm_routing_refuse "INCAPABLE_CANDIDATE" "selected spawn tuple is not the attested capable candidate"
+bin/fm-routing-decision-lib.sh	808	failure-return	return 1
+bin/fm-routing-decision-lib.sh	811	failure-return	"$raw_launch" "$launch" "$harness" "$model" "$effort" "$model_fragment" "$effort_fragment") || return 1
+bin/fm-routing-decision-lib.sh	813	refusal-call	fm_routing_refuse "LAUNCH_BINDING_MISMATCH" "receipt launch binding does not match emitted command fragments"
+bin/fm-routing-decision-lib.sh	814	failure-return	return 1
+bin/fm-routing-decision-lib.sh	824	refusal-call	fm_routing_refuse "MALFORMED_QUOTA_BASIS" "singleton route must record NOT_APPLICABLE_SINGLETON without quota evidence"
+bin/fm-routing-decision-lib.sh	825	failure-return	return 1
+bin/fm-routing-decision-lib.sh	830	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "multi-candidate route lacks the required quota basis"
+bin/fm-routing-decision-lib.sh	831	failure-return	return 1
+bin/fm-routing-decision-lib.sh	833	failure-return	fm_routing_private_input "$quota_snapshot" "NOT_VERIFIABLE(QUOTA)" "NOT_VERIFIABLE(QUOTA)" || return 1
+bin/fm-routing-decision-lib.sh	844	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "quota snapshot is not schema 5 provider evidence"
+bin/fm-routing-decision-lib.sh	845	failure-return	return 1
+bin/fm-routing-decision-lib.sh	848	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "quota snapshot SHA-256 could not be computed"
+bin/fm-routing-decision-lib.sh	849	failure-return	return 1
+bin/fm-routing-decision-lib.sh	855	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "receipt is not bound to the exact quota snapshot"
+bin/fm-routing-decision-lib.sh	856	failure-return	return 1
+bin/fm-routing-decision-lib.sh	859	failure-return	fresh) fm_routing_timestamp_fresh "$quota_observed" "NOT_VERIFIABLE(QUOTA)" || return 1 ;;
+bin/fm-routing-decision-lib.sh	862	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "timestamp is not RFC3339 UTC"
+bin/fm-routing-decision-lib.sh	863	failure-return	return 1
+bin/fm-routing-decision-lib.sh	878	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "no validated routing decision is prepared"
+bin/fm-routing-decision-lib.sh	879	failure-return	return 1
+bin/fm-routing-decision-lib.sh	887	failure-return	fm_routing_timestamp_fresh "$generated_at" "STALE" || return 1
+bin/fm-routing-decision-lib.sh	891	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "current routing receipt pointer is ambiguous"
+bin/fm-routing-decision-lib.sh	892	failure-return	return 1
+bin/fm-routing-decision-lib.sh	895	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "receipt generation already authorizes the current agent"
+bin/fm-routing-decision-lib.sh	896	failure-return	return 1
+bin/fm-routing-decision-lib.sh	900	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
+bin/fm-routing-decision-lib.sh	901	failure-return	return 1
+bin/fm-routing-decision-lib.sh	904	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "consumed-generation ledger returned an unexpected identity"
+bin/fm-routing-decision-lib.sh	905	failure-return	return 1
+bin/fm-routing-decision-lib.sh	912	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
+bin/fm-routing-decision-lib.sh	913	failure-return	return 1
+bin/fm-routing-decision-lib.sh	923	failure-return	[ "$FM_ROUTING_PREPARED_PUBLISHED" -eq 1 ] || return 1
+bin/fm-routing-decision-lib.sh	944	failure-return	[ "$FM_ROUTING_PREPARED_PUBLISHED" -eq 1 ] || return 1
+bin/fm-routing-decision-lib.sh	979	refusal-call	fm_routing_refuse "NOT_VERIFIABLE(SCHEMA)" "jq is unavailable"
+bin/fm-routing-decision-lib.sh	980	failure-return	return 1
+bin/fm-routing-decision-lib.sh	989	refusal-call	*routing-decision.pending.json*) fm_routing_refuse "missing" "$snapshot_error" ;;
+bin/fm-routing-decision-lib.sh	990	refusal-call	*routing-intent.json*) fm_routing_refuse "missing" "$snapshot_error" ;;
+bin/fm-routing-decision-lib.sh	991	refusal-call	*brief.md*) fm_routing_refuse "NOT_VERIFIABLE(BRIEF)" "$snapshot_error" ;;
+bin/fm-routing-decision-lib.sh	992	refusal-call	*crew-dispatch.json*) fm_routing_refuse "NOT_VERIFIABLE(CONFIG)" "$snapshot_error" ;;
+bin/fm-routing-decision-lib.sh	993	refusal-call	*quota-snapshot.json*) fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "$snapshot_error" ;;
+bin/fm-routing-decision-lib.sh	994	refusal-call	*) fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "$snapshot_error" ;;
+bin/fm-routing-decision-lib.sh	996	failure-return	return 1
+bin/fm-routing-decision-lib.sh	1022	failure-return	"${10:-}" "${11:-}" committed || return 1
+bin/fm-routing-decision-lib.sh	1028	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "receipt generation already authorizes the current agent"
+bin/fm-routing-decision-lib.sh	1029	failure-return	return 1
+bin/fm-routing-decision-lib.sh	1035	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
+bin/fm-routing-decision-lib.sh	1036	failure-return	return 1
+bin/fm-routing-decision-lib.sh	1039	refusal-call	fm_routing_refuse "PERSISTENCE_REFUSED" "committed generation verification returned an unexpected identity"
+bin/fm-routing-decision-lib.sh	1040	failure-return	return 1
+bin/fm-routing-decision-lib.sh	1051	failure-return	&& [ -n "$FM_ROUTING_BRIEF_FINAL" ] || return 1
+bin/fm-routing-decision-lib.sh	1066	failure-return	fm_routing_decision_validate_and_prepare "$@" || return 1
+bin/fm-routing-fs-boundary.pl	15	failure-call	chdir($_[0]) or fail("CHDIR:$!");
+bin/fm-routing-fs-boundary.pl	23	failure-call	fail("OPEN_DIR:$path:$!");
+bin/fm-routing-fs-boundary.pl	26	failure-call	@st && S_ISDIR($st[2]) or fail("OPEN_DIR:$path:not-directory");
+bin/fm-routing-fs-boundary.pl	36	failure-call	fail("OPEN_DIR:$name:$!");
+bin/fm-routing-fs-boundary.pl	39	failure-call	@st && S_ISDIR($st[2]) or fail("OPEN_DIR:$name:not-directory");
+bin/fm-routing-fs-boundary.pl	49	failure-call	fail("OPEN_REGULAR:$name:$!");
+bin/fm-routing-fs-boundary.pl	52	failure-call	@st && S_ISREG($st[2]) or fail("OPEN_REGULAR:$name:not-regular");
+bin/fm-routing-fs-boundary.pl	58	failure-call	seek($fh, 0, 0) or fail("READ:seek:$!");
+bin/fm-routing-fs-boundary.pl	62	failure-call	defined($count) or fail("READ:$!");
+bin/fm-routing-fs-boundary.pl	77	failure-call	defined($count) && $count > 0 or fail("STAGING_RESIDUE:$name:WRITE:$!");
+bin/fm-routing-fs-boundary.pl	80	failure-call	chmod($mode, $fh) or fail("STAGING_RESIDUE:$name:CHMOD:$!");
+bin/fm-routing-fs-boundary.pl	91	failure-call	$target or fail("CREATE_SNAPSHOT:$target_name:$!");
+bin/fm-routing-fs-boundary.pl	112	failure-call	($snapshot_st->[2] & 0777) == 0700 or fail("SNAPSHOT_CREATE:$name:mode");
+bin/fm-routing-fs-boundary.pl	115	failure-call	$! == EEXIST or fail("SNAPSHOT_CREATE:$name:$!");
+bin/fm-routing-fs-boundary.pl	117	failure-call	fail('SNAPSHOT_CREATE:collisions');
+bin/fm-routing-fs-boundary.pl	122	failure-call	$id =~ /\A[A-Za-z0-9._-]+\z/ or fail("SNAPSHOT:task-id");
+bin/fm-routing-fs-boundary.pl	127	failure-call	mkdir('data', 0700) or fail("SNAPSHOT:data:$!");
+bin/fm-routing-fs-boundary.pl	128	failure-call	mkdir('config', 0700) or fail("SNAPSHOT:config:$!");
+bin/fm-routing-fs-boundary.pl	131	failure-call	mkdir($id, 0700) or fail("SNAPSHOT:id:$!");
+bin/fm-routing-fs-boundary.pl	137	failure-call	$pending_copy or fail("SNAPSHOT:pending:$!");
+bin/fm-routing-fs-boundary.pl	151	failure-call	$! == EEXIST or fail("PUBLISH:$name:$!");
+bin/fm-routing-fs-boundary.pl	154	failure-call	or fail("COLLISION:$name:ownership");
+bin/fm-routing-fs-boundary.pl	155	failure-call	read_all($existing) eq $bytes or fail("COLLISION:$name:bytes");
+bin/fm-routing-fs-boundary.pl	161	failure-call	$id =~ /\A[A-Za-z0-9._-]+\z/ or fail("PUBLISH:task-id");
+bin/fm-routing-fs-boundary.pl	162	failure-call	$expected_generation =~ /\A[0-9a-f]{64}\z/ or fail("PUBLISH:generation");
+bin/fm-routing-fs-boundary.pl	165	failure-call	$snapshot_st->[0] == $snapshot_dev && $snapshot_st->[1] == $snapshot_ino or fail("SNAPSHOT_IDENTITY");
+bin/fm-routing-fs-boundary.pl	168	failure-call	$pending_st->[0] == $pending_dev && $pending_st->[1] == $pending_ino or fail("PENDING_IDENTITY");
+bin/fm-routing-fs-boundary.pl	174	failure-call	$generation eq $expected_generation or fail("PUBLISH:generation-mismatch");
+bin/fm-routing-fs-boundary.pl	175	failure-call	read_all($pending) eq $receipt_bytes or fail("PENDING_BYTES");
+bin/fm-routing-fs-boundary.pl	180	failure-call	fail("STAGING:$generation_name:$!");
+bin/fm-routing-fs-boundary.pl	184	failure-call	$mode == 0700 or fail("COLLISION:$generation_name:mode");
+bin/fm-routing-fs-boundary.pl	199	failure-call	$generation =~ /\A[0-9a-f]{64}\z/ or fail("CONSUME:generation");
+bin/fm-routing-fs-boundary.pl	206	failure-call	$! == EEXIST or fail("OPEN_LEDGER:$name:$!");
+bin/fm-routing-fs-boundary.pl	208	failure-call	or fail("OPEN_LEDGER:$name:$!");
+bin/fm-routing-fs-boundary.pl	211	failure-call	chmod(0600, $fh) or fail("LEDGER_CHMOD:$name:$!");
+bin/fm-routing-fs-boundary.pl	215	failure-call	or fail("LEDGER_OWNERSHIP:$name");
+bin/fm-routing-fs-boundary.pl	216	failure-call	flock($fh, LOCK_EX) or fail("LEDGER_LOCK:$name:$!");
+bin/fm-routing-fs-boundary.pl	218	failure-call	$bytes =~ /\A(?:[0-9a-f]{64}\n)*\z/ or fail("LEDGER_FORMAT:$name");
+bin/fm-routing-fs-boundary.pl	219	failure-call	index($bytes, "$generation\n") < 0 or fail("CONSUMED_GENERATION:$generation");
+bin/fm-routing-fs-boundary.pl	224	failure-call	defined($count) && $count > 0 or fail("LEDGER_WRITE:$name:$!");
+bin/fm-routing-fs-boundary.pl	227	failure-call	$fh->sync or fail("LEDGER_SYNC:$name:$!");
+bin/fm-routing-fs-boundary.pl	229	failure-call	$task->sync or fail("LEDGER_DIR_SYNC:$name:$!");
+bin/fm-routing-fs-boundary.pl	233	failure-call	or fail("LEDGER_IDENTITY:$name");
+bin/fm-routing-fs-boundary.pl	239	failure-call	$id =~ /\A[A-Za-z0-9._-]+\z/ or fail("VERIFY_COMMITTED:task-id");
+bin/fm-routing-fs-boundary.pl	240	failure-call	$expected_generation =~ /\A[0-9a-f]{64}\z/ or fail("VERIFY_COMMITTED:generation");
+bin/fm-routing-fs-boundary.pl	244	failure-call	or fail("SNAPSHOT_IDENTITY");
+bin/fm-routing-fs-boundary.pl	251	failure-call	or fail("VERIFY_COMMITTED:generation-mismatch");
+bin/fm-routing-fs-boundary.pl	255	failure-call	or fail("LEDGER_OWNERSHIP:routing-generations.consumed");
+bin/fm-routing-fs-boundary.pl	258	failure-call	or fail("LEDGER_FORMAT:routing-generations.consumed");
+bin/fm-routing-fs-boundary.pl	261	failure-call	or fail("COMMITTED_GENERATION_NOT_LATEST:$expected_generation");
+bin/fm-routing-fs-boundary.pl	263	failure-call	or fail("COMMITTED_GENERATION_AMBIGUOUS:$expected_generation");
+bin/fm-routing-fs-boundary.pl	268	failure-call	or fail("COLLISION:$generation_name:mode");
+bin/fm-routing-fs-boundary.pl	272	failure-call	or fail("COLLISION:receipt.json:ownership");
+bin/fm-routing-fs-boundary.pl	274	failure-call	or fail("COLLISION:brief.md:ownership");
+bin/fm-routing-fs-boundary.pl	275	failure-call	read_all($receipt) eq $receipt_bytes or fail("COMMITTED_RECEIPT_BYTES");
+bin/fm-routing-fs-boundary.pl	276	failure-call	read_all($brief) eq $brief_bytes or fail("COMMITTED_BRIEF_BYTES");
+bin/fm-routing-fs-boundary.pl	280	failure-call	my $operation = shift(@ARGV) // fail('USAGE');
+bin/fm-routing-fs-boundary.pl	295	failure-call	fail('USAGE');
+bin/fm-spawn.sh	251	dispatch-routing-candidate	ROUTING_CONFIG="$FM_HOME/config"
+bin/fm-spawn.sh	304	dispatch-routing-candidate	ROUTING_PREFLIGHT_ONLY=${FM_CONTROL_ROUTING_PREFLIGHT:-0}
+bin/fm-spawn.sh	305	dispatch-routing-candidate	ROUTING_COMMITTED_HANDOFF=${FM_CONTROL_ROUTING_COMMITTED:-0}
+bin/fm-spawn.sh	355	dispatch-routing-candidate	case "$ROUTING_PREFLIGHT_ONLY" in
+bin/fm-spawn.sh	359	dispatch-routing-candidate	case "$ROUTING_COMMITTED_HANDOFF" in
+bin/fm-spawn.sh	723	dispatch-routing-candidate	if [ -n "${FM_ROUTING_PREPARED_DIR:-}" ]; then
+bin/fm-spawn.sh	724	dispatch-routing-candidate	fm_routing_decision_discard_prepared
+bin/fm-spawn.sh	788	dispatch-routing-candidate	[ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
+bin/fm-spawn.sh	789	dispatch-routing-candidate	[ -z "$FM_ROUTING_BRIEF_FINAL" ] || echo "routing_brief=$FM_ROUTING_BRIEF_FINAL"
+bin/fm-spawn.sh	889	dispatch-routing-candidate	if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$ROUTING_CONFIG/crew-dispatch.json" ]; then
+bin/fm-spawn.sh	950	dispatch-routing-candidate	if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
+bin/fm-spawn.sh	964	dispatch-routing-candidate	if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+bin/fm-spawn.sh	965	dispatch-routing-candidate	[ "$RELAUNCH" -eq 1 ] && [ "$ROUTING_PREFLIGHT_ONLY" -eq 0 ] || {
+bin/fm-spawn.sh	966	dispatch-routing-candidate	echo "error: the committed control-plane routing handoff applies only to the launch half of --relaunch" >&2
+bin/fm-spawn.sh	967	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	1066	dispatch-routing-candidate	RELAUNCH_PRIOR_ROUTING_DECISION=
+bin/fm-spawn.sh	1067	dispatch-routing-candidate	RELAUNCH_PRIOR_ROUTING_BRIEF=
+bin/fm-spawn.sh	1090	dispatch-routing-candidate	if [ "$ROUTING_PREFLIGHT_ONLY" -eq 0 ]; then
+bin/fm-spawn.sh	1102	dispatch-routing-candidate	RELAUNCH_PRIOR_ROUTING_DECISION=$(fm_meta_get "$RELAUNCH_META" routing_decision)
+bin/fm-spawn.sh	1103	dispatch-routing-candidate	RELAUNCH_PRIOR_ROUTING_BRIEF=$(fm_meta_get "$RELAUNCH_META" routing_brief)
+bin/fm-spawn.sh	1305	dispatch-routing-candidate	if [ -f "$ROUTING_CONFIG/crew-dispatch.json" ]; then
+bin/fm-spawn.sh	1323	dispatch-routing-candidate	FM_ROUTING_CALLER_LAUNCH=$LAUNCH
+bin/fm-spawn.sh	1543	dispatch-routing-candidate	ROUTING_DECISION_REQUIRED=0
+bin/fm-spawn.sh	1544	dispatch-routing-candidate	if fm_routing_decision_required \
+bin/fm-spawn.sh	1545	dispatch-routing-candidate	"$KIND" "$RELAUNCH" "$HARNESS_SET" "$MODEL_SET" "$EFFORT_SET"; then
+bin/fm-spawn.sh	1546	dispatch-routing-candidate	ROUTING_DECISION_REQUIRED=1
+bin/fm-spawn.sh	1548	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
+bin/fm-spawn.sh	1549	dispatch-routing-candidate	&& [ "$RELAUNCH" -eq 1 ] \
+bin/fm-spawn.sh	1550	dispatch-routing-candidate	&& [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
+bin/fm-spawn.sh	1551	dispatch-routing-candidate	&& [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
+bin/fm-spawn.sh	1552	dispatch-routing-candidate	&& [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ]; then
+bin/fm-spawn.sh	1553	dispatch-routing-candidate	if fm_routing_decision_resolve_inherited "$RELAUNCH_PRIOR_ROUTING_DECISION" "$DATA/$ID"; then
+bin/fm-spawn.sh	1555	dispatch-routing-candidate	elif [ -n "$RELAUNCH_PRIOR_ROUTING_DECISION" ] || [ -n "$RELAUNCH_PRIOR_ROUTING_BRIEF" ]; then
+bin/fm-spawn.sh	1569	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	1570	dispatch-routing-candidate	if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+bin/fm-spawn.sh	1571	dispatch-routing-candidate	fm_routing_decision_validate_committed_handoff \
+bin/fm-spawn.sh	1572	dispatch-routing-candidate	"$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
+bin/fm-spawn.sh	1573	dispatch-routing-candidate	"$RAW_LAUNCH" "$FM_ROUTING_CALLER_LAUNCH" "$MODELFLAG" "$EFFORTFLAG" "$RELAUNCH_PRIOR_ROUTING_DECISION" \
+bin/fm-spawn.sh	1574	dispatch-routing-candidate	|| exit 1
+bin/fm-spawn.sh	1576	dispatch-routing-candidate	fm_routing_decision_validate_and_prepare \
+bin/fm-spawn.sh	1577	dispatch-routing-candidate	"$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
+bin/fm-spawn.sh	1578	dispatch-routing-candidate	"$RAW_LAUNCH" "$FM_ROUTING_CALLER_LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
+bin/fm-spawn.sh	1579	dispatch-routing-candidate	|| exit 1
+bin/fm-spawn.sh	1581	dispatch-routing-candidate	fm_operational_verified_file_input \
+bin/fm-spawn.sh	1582	dispatch-routing-candidate	launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
+bin/fm-spawn.sh	1583	dispatch-routing-candidate	echo "error: validated routing brief changed before launch input construction" >&2
+bin/fm-spawn.sh	1584	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	1586	dispatch-routing-candidate	if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+bin/fm-spawn.sh	1587	dispatch-routing-candidate	fm_routing_decision_seal_committed_handoff || {
+bin/fm-spawn.sh	1588	dispatch-routing-candidate	echo "error: validated control-plane routing handoff could not be sealed" >&2
+bin/fm-spawn.sh	1589	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	1593	dispatch-routing-candidate	if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
+bin/fm-spawn.sh	1594	dispatch-routing-candidate	fm_routing_decision_persist_prepared || exit 1
+bin/fm-spawn.sh	1595	dispatch-routing-candidate	fm_routing_decision_consume_prepared || exit 1
+bin/fm-spawn.sh	1596	dispatch-routing-candidate	fm_routing_decision_seal_prepared || {
+bin/fm-spawn.sh	1597	dispatch-routing-candidate	echo "error: validated relaunch routing preflight could not be sealed" >&2
+bin/fm-spawn.sh	1598	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	1770	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	1771	dispatch-routing-candidate	BRIEF=$FM_ROUTING_BRIEF_FINAL
+bin/fm-spawn.sh	1780	dispatch-routing-candidate	BRIEF=${FM_ROUTING_BRIEF_FINAL:-$DATA/$ID/brief.md}
+bin/fm-spawn.sh	1986	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+bin/fm-spawn.sh	1987	dispatch-routing-candidate	fm_routing_decision_persist_prepared || exit 1
+bin/fm-spawn.sh	1991	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+bin/fm-spawn.sh	1992	dispatch-routing-candidate	fm_routing_decision_discard_prepared
+bin/fm-spawn.sh	1998	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+bin/fm-spawn.sh	1999	dispatch-routing-candidate	fm_routing_decision_consume_prepared || exit 1
+bin/fm-spawn.sh	2000	dispatch-routing-candidate	fm_routing_decision_seal_prepared || {
+bin/fm-spawn.sh	2001	dispatch-routing-candidate	echo "error: validated routing decision could not be sealed" >&2
+bin/fm-spawn.sh	2002	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	2854	dispatch-routing-candidate	[ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
+bin/fm-spawn.sh	2855	dispatch-routing-candidate	[ -z "$FM_ROUTING_BRIEF_FINAL" ] || echo "routing_brief=$FM_ROUTING_BRIEF_FINAL"
+bin/fm-spawn.sh	2918	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	2919	dispatch-routing-candidate	sq_launch_input=$(shell_quote "$FM_ROUTING_LAUNCH_INPUT")
+bin/fm-spawn.sh	2936	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	3004	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
+bin/fm-spawn.sh	3005	dispatch-routing-candidate	&& { [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ]; } \
+bin/fm-spawn.sh	3006	dispatch-routing-candidate	&& [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != kimi ]; then
+bin/fm-spawn.sh	3040	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	3041	dispatch-routing-candidate	KIMI_INPUT=$FM_ROUTING_LAUNCH_INPUT

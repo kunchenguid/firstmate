@@ -202,3 +202,48 @@ It asserts that the script accepts no harness, model, or provider input, never c
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
 It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.
 The skill's primary path is that default TOON; `--json` is the documented defensive fallback, and this section records the producer `--json` shape that fallback consumes.
+
+## Routing receipt boundary
+
+This section records the generation-specific routing receipt verification contract.
+The executable boundary operations are `identity`, `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
+`snapshot` opens the final task directory component with `O_NOFOLLOW`, creates the private validation directory relative to that held task handle, opens the final canonical config directory component with `O_NOFOLLOW`, and copies selected inputs relative to held handles.
+`publish` opens the final task and snapshot directory components with `O_NOFOLLOW`, creates or opens the generation directory relative to the held task handle, and creates or verifies the receipt and brief relative to the held generation handle.
+`identity`, `hash`, `consume-generation`, and `verify-committed-generation` open their final directory components with `O_NOFOLLOW` and operate on the held directory, named files, or nested directories relative to held handles.
+The routing lifecycle as a whole is not handle-based, path-based operations remain, and the boundary does not reject symlinks in intermediate components, including the `FM_HOME/data` root.
+Publication uses per-artifact exclusive creation with `O_NOFOLLOW`, preserves every prior generation, and is not atomic or all-or-none.
+A refused publication may leave partial artifacts, and neither cleanup nor rollback is guaranteed.
+Those stranded artifacts cannot resolve as authoritative receipts because the runtime never scans generation directories and flag-free inheritance starts only from the successful task metadata `routing_decision` pointer, then requires a non-symlink regular receipt whose task-scoped generation matches its bytes, whose intent hash matches the current routing intent, and whose intent brief hash matches both the inherited generation brief and the current source brief.
+Final receipt freshness is read from the immutable prepared snapshot rather than the mutable pending pathname.
+Every accepted deterministic generation is synchronized to the locked append-only task ledger before generation publication, so restoring generation A after generations A and B were consumed refuses before worktree lease, endpoint, or metadata effects.
+The route-changing control launch half does not trust caller-supplied receipt paths or launch bytes; it uses `snapshot` to resnapshot and validate the receipt semantics, derives the generation paths, and uses `verify-committed-generation` to verify the published artifacts plus latest ledger row without re-aging the preflight acceptance.
+This is an audit-trail property rather than authorization against an actor with write access to `FM_HOME`.
+The negative battery's shared-validator mutations prove that the dispatch integration call site is load-bearing, and its two raw-launch guard mutations separately prove that shell-expansion and trailing-environment-assignment assertions go red when their exact guards are neutered.
+The committed [`routing-receipt-guard-sites.tsv`](routing-receipt-guard-sites.tsv) inventory is a syntax-derived population of routing-refusal candidates across `bin/fm-routing-decision-lib.sh`, `bin/fm-routing-fs-boundary.pl`, and the routing-gate path in `bin/fm-spawn.sh`.
+The library matcher selects non-definition `fm_routing_refuse` calls, literal `return 1` lines, and bracket predicates in `fm_routing_decision_required`, `fm_routing_raw_environment_assignment`, and `fm_routing_literal_words`.
+The Perl matcher selects lines containing `fail(`.
+The spawn matcher selects non-comment lines containing `ROUTING_CONFIG`, `ROUTING_DECISION_REQUIRED`, `ROUTING_COMMITTED_HANDOFF`, `ROUTING_PREFLIGHT_ONLY`, an `FM_ROUTING_*` or `RELAUNCH_PRIOR_ROUTING_*` name, an `fm_routing_decision_*` name, or `fm_operational_verified_file_input`, plus the generator's continuation rows.
+Refusal-capable lines outside these syntax classes are not enumerated, and a listed candidate is not necessarily independently load-bearing.
+Run `bin/fm-routing-guard-inventory.sh --write` to regenerate that inventory and `bin/fm-routing-guard-inventory.sh --check` to compare it with the current sources.
+`tests/fm-routing-guard-inventory.test.sh` detects source and inventory drift within the matched syntax classes, but it cannot prove that the class list is complete.
+
+The call sites this ship retained through the removal-API refactor are `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_validate_committed_handoff` for control-handoff receipt validation, and `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance.
+That is a refactor scope, not an inventory of where the routing gate attaches to dispatch; enumerate the current attachment points with `grep -oE 'fm_routing_decision_[a-z_]+' bin/fm-spawn.sh | sort -u`, which returns a strictly larger set including the primary validation entry point `fm_routing_decision_validate_and_prepare` and the applicability predicate `fm_routing_decision_required`.
+There are no surviving routing-lifecycle removal call sites.
+Atomic publication across the generation directory and its two artifacts, cleanup of partial artifacts, rollback, and adversarial replacement after an identity check remain deliberately outside this ship.
+
+The routing boundary verification entrypoints are:
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
+```
+
+```sh
+bin/fm-test-run.sh tests/fm-routing-decision-negative-battery.test.sh
+```
+
+```sh
+bin/fm-test-run.sh tests/fm-control-relaunch.test.sh
+```
+
+Pipeline-owned test and documentation phases must refresh dated results, counts, timings, shell versions, and empirical outcome claims after any entrypoint changes.

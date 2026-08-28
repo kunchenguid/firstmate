@@ -260,6 +260,139 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- explicit routing-receipt fixtures --------------------------------------
+
+fm_test_sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+fm_test_sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+fm_test_routing_generation() { # <home> <id> [data]
+  local home=$1 id=$2 data=${3:-$1/data}
+  fm_test_sha256_file "$data/$id/routing-decision.pending.json"
+}
+
+fm_test_routing_decision_path() { # <home> <id> [data]
+  local home=$1 id=$2 data=${3:-$1/data} generation
+  generation=$(fm_test_routing_generation "$home" "$id" "$data") || return 1
+  printf '%s/%s/routing-generation.%s/receipt.json\n' "$data" "$id" "$generation"
+}
+
+fm_test_routing_brief_path() { # <home> <id> [data]
+  local home=$1 id=$2 data=${3:-$1/data} generation
+  generation=$(fm_test_routing_generation "$home" "$id" "$data") || return 1
+  printf '%s/%s/routing-generation.%s/brief.md\n' "$data" "$id" "$generation"
+}
+
+fm_test_existing_routing_decision_path() { # <home> <id> [data]
+  local home=$1 id=$2 data=${3:-$1/data} candidate
+  for candidate in "$data/$id"/routing-generation.*/receipt.json; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+# fm_test_write_routing_receipt <home> <id> <harness> [model] [effort] [data] [rationale]
+# writes one explicit test-only schema-v1 receipt for a verified template.
+# Production code never calls this helper and every fixture still exercises the
+# real receipt validator rather than suppressing or bypassing the contract.
+fm_test_write_routing_receipt() {
+  local home=$1 id=$2 harness=$3 model=${4:-default} effort=${5:-default}
+  local data=${6:-$home/data} rationale=${7:-explicit test-only singleton receipt}
+  local task_dir brief intent intent_hash brief_hash home_hash host_hash now source authority
+  local config_binding launch_model launch_effort
+  task_dir="$data/$id"
+  brief="$task_dir/brief.md"
+  intent="$task_dir/routing-intent.json"
+  mkdir -p "$task_dir" "$home/config"
+  [ -f "$brief" ] || printf 'test brief for %s\n' "$id" > "$brief"
+  brief_hash=$(fm_test_sha256_file "$brief")
+  if [ -f "$home/config/crew-dispatch.json" ]; then
+    source=explicit_override
+    authority=EXPLICIT_RUNTIME_OVERRIDE
+    config_binding=$(jq -cn --arg sha256 "$(fm_test_sha256_file "$home/config/crew-dispatch.json")" \
+      '{kind: "present", sha256: $sha256}')
+  else
+    source=static_harness
+    authority=STATIC_HARNESS
+    config_binding='{"kind":"absent","sha256":null}'
+  fi
+  jq -n \
+    --arg task_id "$id" \
+    --arg brief_sha256 "$brief_hash" \
+    --arg authority "$authority" '{
+      schema_version: 1,
+      task_id: $task_id,
+      brief_sha256: $brief_sha256,
+      hard_capability: "test fixture dispatch",
+      ambiguity: "LOW",
+      risk: "LOCAL_TEST_ONLY",
+      authority: $authority,
+      gate: "LOCAL_TEST_GATE",
+      forbidden_effects: ["push", "merge", "publication"]
+    }' > "$intent"
+  intent_hash=$(fm_test_sha256_file "$intent")
+  home_hash=$(printf '%s' "$home" | fm_test_sha256_text)
+  host_hash=$(uname -n | fm_test_sha256_text)
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  launch_model=null
+  [ "$model" = default ] || launch_model=$(jq -cn --arg value "$model" '$value')
+  launch_effort=null
+  case "$harness:$effort" in
+    claude:low|claude:medium|claude:high|claude:xhigh|claude:max|codex:low|codex:medium|codex:high|codex:xhigh|grok:low|grok:medium|grok:high|pi:low|pi:medium|pi:high|pi:xhigh|pi:max|pi-signed:low|pi-signed:medium|pi-signed:high|pi-signed:xhigh|pi-signed:max|muse:low|muse:medium|muse:high|muse:xhigh)
+      launch_effort=$(jq -cn --arg value "$effort" '$value')
+      ;;
+    muse:max) launch_effort='"ultra"' ;;
+  esac
+  jq -n \
+    --arg task_id "$id" \
+    --arg intent_sha256 "$intent_hash" \
+    --argjson dispatch_config "$config_binding" \
+    --arg source "$source" \
+    --arg harness "$harness" \
+    --arg model "$model" \
+    --arg effort "$effort" \
+    --argjson launch_model "$launch_model" \
+    --argjson launch_effort "$launch_effort" \
+    --arg home_sha256 "$home_hash" \
+    --arg identity_sha256 "$host_hash" \
+    --arg rationale "$rationale" \
+    --arg generated_at "$now" '{
+      schema_version: 1,
+      task_id: $task_id,
+      intent_sha256: $intent_sha256,
+      dispatch_config: $dispatch_config,
+      matched_profile: {source: $source, index: null},
+      supervisor: {kind: "current-firstmate-home", home_sha256: $home_sha256},
+      host: {kind: "local", identity_sha256: $identity_sha256},
+      launch_binding: {kind: "verified_template", harness: $harness, model: $launch_model, effort: $launch_effort},
+      harness: $harness,
+      model: $model,
+      effort: $effort,
+      candidates_considered: [{harness: $harness, model: $model, effort: $effort}],
+      quota: {source: "NOT_APPLICABLE_SINGLETON", observed_at: null, snapshot_sha256: null},
+      quota_basis: "NOT_APPLICABLE_SINGLETON",
+      fallback: "NONE",
+      rationale: $rationale,
+      required_gate: "LOCAL_TEST_GATE",
+      selection_order: ["hard_capability", "ambiguity_complexity", "fresh_quota_among_capable"],
+      generated_at: $generated_at
+    }' > "$task_dir/routing-decision.pending.json"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

@@ -208,7 +208,7 @@ family_for_basename() {
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|\
+    fm-routing-decision-negative-battery.test.sh|fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -385,6 +385,8 @@ list_portable_serial() {
 # only: the shard partition stays complete and disjoint whatever they say, so a
 # stale hint costs balance rather than coverage. That doc owns the refresh
 # procedure.
+# docs/fm-test-portable-shards.md records the routing battery's temporary local
+# timing override until the next green CI timing refresh replaces it.
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-inject-e2e.test.sh 35900
@@ -474,7 +476,8 @@ tests/fm-sessionstart-hook-live-e2e.test.sh 21
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 21
 tests/fm-sessionstart-nudge.test.sh 26684
 tests/fm-shared-captain-inheritance.test.sh 10672
-tests/fm-spawn-dispatch-profile.test.sh 57765
+tests/fm-routing-decision-negative-battery.test.sh 60000
+tests/fm-spawn-dispatch-profile.test.sh 120000
 tests/fm-spawn-pool-base-freshen.test.sh 13257
 tests/fm-spawn-worktree-settle.test.sh 4828
 tests/fm-startup-memory-budget.test.sh 6550
@@ -1005,7 +1008,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-routing-decision-lib.sh|bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit

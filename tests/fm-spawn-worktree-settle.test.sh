@@ -78,6 +78,7 @@ make_settle_case() {
   fm_git_init_commit "$stale"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  fm_test_write_routing_receipt "$home" "$id" codex
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads"
 }
