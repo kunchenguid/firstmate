@@ -122,6 +122,8 @@ Both `bin/fm-test-run.sh` and the current proof harness therefore order concurre
 This family is what a change to `bin/fm-test-run.sh` itself selects, so it decides that selection's wall clock.
 Before admission, 14 of its scripts fell to the serial tail and the 33-script selection measured 327.3s against a 300s budget: the concurrent group was 19 scripts totalling 273.4s while the tail alone was 215.7s, dominated by `fm-calm-pi-extension` (77.5s), `fm-vendor-auth-probe` (51.0s), and `fm-muse-harness` (39.7s).
 Admitting the family moves that tail into the bounded concurrent group.
+After admission, three runs of `bin/fm-test-run.sh --changed --base HEAD --max-wall-ms 300000` with no `--jobs` flag selected all 33 scripts, including `tests/fm-calm-pi-extension.test.sh`, completed with 0 failures, and reported 181.8s, 178.5s, and 172.7s.
+Each run therefore exercised the production automatic scheduler and passed the five-minute result check.
 
 ## Scope
 
