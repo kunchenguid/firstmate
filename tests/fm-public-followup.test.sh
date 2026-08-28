@@ -23,6 +23,9 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 TMP_ROOT=$(fm_test_tmproot fm-public-followup)
+# Keep the seven-day Relay window stable instead of letting dated fixtures
+# expire as wall-clock time advances.
+export FMX_NOW_OVERRIDE=${FMX_NOW_OVERRIDE:-1787539200}
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 # Presence alone is not the precondition: these cases drive real backlog
