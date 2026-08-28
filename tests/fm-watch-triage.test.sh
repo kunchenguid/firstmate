@@ -720,7 +720,7 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
   # exact announced bytes, never on task identity.
   printf 'needs-decision [key=k2]: a genuinely new decision\n' >> "$status_file"
   wait_for_exit "$pid" 100 || fail "a later different note after a self-announced close was swallowed"
-  grep -F "signal: Task: a decision changed - a genuinely new decision. Action required: answer the question." "$out" >/dev/null \
+  grep -F "signal: Task: decision evidence changed. Action required: inspect the private task record and answer the question." "$out" >/dev/null \
     || fail "the later decision did not surface as a readable transition"
   pass "a self-announced close never wakes its own home, and the next real note still does"
 }
@@ -737,7 +737,7 @@ test_actionable_signal_surfaced() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher swallowed an unread needs-decision followed by a routine note"
-  grep -F "signal: Planning · CRM Scope: a decision changed - pick A or B. Action required: answer the question." "$out" >/dev/null \
+  grep -F "signal: Planning · CRM Scope: decision evidence changed. Action required: inspect the private task record and answer the question." "$out" >/dev/null \
     || fail "watcher did not print the readable decision transition: $(cat "$out")"
   grep -F "$status_file" "$out" >/dev/null && fail "decision presentation leaked its private status path"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
@@ -755,7 +755,7 @@ test_actionable_batch_omits_absorbed_sibling() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher swallowed an actionable batch"
-  grep -F 'Decision owner: a decision changed - choose a route.' "$out" >/dev/null \
+  grep -F 'Decision owner: decision evidence changed. Action required:' "$out" >/dev/null \
     || fail "actionable batch omitted its decision: $(cat "$out")"
   ! grep -F 'Routine sibling' "$out" >/dev/null \
     || fail "actionable batch presented an absorbed routine sibling: $(cat "$out")"

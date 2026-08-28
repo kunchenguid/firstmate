@@ -67,7 +67,7 @@ test_signal_catchup_without_running_watcher() {
   printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
-  grep -F "signal: Task: blocker evidence changed - first. Action required:" "$out" >/dev/null || fail "watcher did not print first readable blocker transition"
+  grep -F "signal: Task: blocker evidence changed. Action required:" "$out" >/dev/null || fail "watcher did not print first readable blocker transition"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\ttask.status\t')" "$drain_out" >/dev/null || fail "first signal was not queued"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
@@ -79,7 +79,7 @@ test_signal_catchup_without_running_watcher() {
   : > "$out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for second signal"
-  grep -F "signal: Task: a new result surfaced - second. Action required: review the result." "$out" >/dev/null || fail "signal written with no watcher was not caught"
+  grep -F "signal: Task: a new result surfaced. Action required: inspect the private task record and review the result." "$out" >/dev/null || fail "signal written with no watcher was not caught"
   pass "signal written while no watcher runs is caught on next run"
 }
 
@@ -107,7 +107,7 @@ test_stale_enqueue_before_suppressor() {
   printf '1\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for stale pane"
-  grep -F "stale: Stale: the review-ready result changed - ready in branch fm/stale. Action required:" "$out" >/dev/null || fail "watcher did not print the readable review-ready transition"
+  grep -F "stale: Stale: the review-ready result changed. Action required:" "$out" >/dev/null || fail "watcher did not print the readable review-ready transition"
   grep -F "$window" "$out" >/dev/null && fail "review-ready presentation leaked its private endpoint"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "stale wake was not queued"
@@ -174,7 +174,7 @@ SH
     || fail "could not register queue custom check"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for check output"
-  grep -F "check: Task: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome." "$out" >/dev/null \
+  grep -F "check: State check: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome." "$out" >/dev/null \
     || fail "watcher did not print a readable check wake"
   grep -F "$check_file" "$out" >/dev/null && fail "check presentation leaked its private source path"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after check wake failed"

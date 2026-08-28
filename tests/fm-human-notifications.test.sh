@@ -137,12 +137,13 @@ fm_human_notify_pr_observation_record "$STATE" decision-task OPEN \
 assert_absorbed decision-task "$REVIEW"
 pass "durable PR observations change fingerprints without reviving red review targets"
 
-SUMMARY=$(fm_human_notify_summary "$STATE" decision-task "$BLOCKER")
+PRIVATE_BLOCKER='blocked: cannot access /home/private/state/request-7 at https://internal.example'
+SUMMARY=$(fm_human_notify_summary "$STATE" decision-task "$PRIVATE_BLOCKER")
 assert_contains "$SUMMARY" 'CRM · Data Shape' "summary omitted the readable label"
 assert_contains "$SUMMARY" 'blocker evidence changed' "summary omitted why it surfaced"
 assert_contains "$SUMMARY" 'Action required:' "summary omitted the exact action"
-case "$SUMMARY" in *'/state/'*|*'endpoint '*|*'followUp'*|*'queue generation'*) fail "summary leaked private routing terms: $SUMMARY" ;; esac
-pass "presentation names the readable outcome, transition reason, and required action without routing internals"
+case "$SUMMARY" in *'/home/'*|*'https:'*|*'request-7'*|*'blocked:'*) fail "summary leaked private status evidence: $SUMMARY" ;; esac
+pass "presentation names the readable outcome, transition reason, and required action without private status evidence"
 
 # A held condition is deliberate human waiting, while an undeclared idle worker
 # remains on the stale-worker path.
@@ -228,7 +229,7 @@ if kill -0 "$WATCH_PID" 2>/dev/null; then
 fi
 wait "$WATCH_PID" 2>/dev/null || true
 DEDUP_REASON=$(cat "$TMP_ROOT/dedup.out")
-[ "$(printf '%s' "$DEDUP_REASON" | grep -Fo 'a decision changed' | wc -l | tr -d ' ')" -eq 1 ] \
+[ "$(printf '%s' "$DEDUP_REASON" | grep -Fo 'decision evidence changed' | wc -l | tr -d ' ')" -eq 1 ] \
   || fail "one unread range rendered an identical decision more than once: $DEDUP_REASON"
 pass "one unread range renders each notification fingerprint once"
 

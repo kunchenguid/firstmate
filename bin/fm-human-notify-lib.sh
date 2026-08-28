@@ -333,26 +333,25 @@ fm_human_notify_clear_task() {  # <state> <task>
 }
 
 fm_human_notify_summary() {  # <state> <task> <status-line>
-  local state=$1 task=$2 line=$3 class display note
+  local state=$1 task=$2 line=$3 class display
   class=$(fm_human_notify_class "$line") || return 1
   if [ -f "$state/$task.meta" ]; then
     display=$(fm_display_name_for_meta "$state/$task.meta" "$task")
   else
     display=$(fm_display_name_fallback "$task")
   fi
-  note=$(status_line_note "$line")
   case "$class" in
     decision)
-      printf '%s: a decision changed - %s. Action required: answer the question.' "$display" "$note" ;;
+      printf '%s: decision evidence changed. Action required: inspect the private task record and answer the question.' "$display" ;;
     blocker)
-      printf '%s: blocker evidence changed - %s. Action required: remove the blocker or provide the requested input.' "$display" "$note" ;;
+      printf '%s: blocker evidence changed. Action required: inspect the private task record and remove the blocker or provide the requested input.' "$display" ;;
     captain-hold)
-      printf '%s: a captain-owned approval or decision opened - %s. Action required: answer or defer it.' "$display" "$note" ;;
+      printf '%s: a captain-owned approval or decision opened. Action required: inspect the private task record and answer or defer it.' "$display" ;;
     review-ready)
-      printf '%s: the review-ready result changed - %s. Action required: review it and approve or merge only if authorized.' "$display" "$note" ;;
+      printf '%s: the review-ready result changed. Action required: inspect the private task record and approve or merge only if authorized.' "$display" ;;
     result)
-      printf '%s: a new result surfaced - %s. Action required: review the result.' "$display" "$note" ;;
+      printf '%s: a new result surfaced. Action required: inspect the private task record and review the result.' "$display" ;;
     failure)
-      printf '%s: new failure evidence surfaced - %s. Action required: inspect and choose recovery.' "$display" "$note" ;;
+      printf '%s: new failure evidence surfaced. Action required: inspect the private task record and choose recovery.' "$display" ;;
   esac
 }

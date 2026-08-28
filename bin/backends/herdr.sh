@@ -3351,9 +3351,11 @@ fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
       ;;
     absorb)
       rm -f "$marker" 2>/dev/null || true
-      : > "$(fm_backend_herdr_working_marker "$state" "$window")"
       if command -v fm_push_transition_apply_status >/dev/null 2>&1; then
         fm_push_transition_apply_status "$state" "$window" working || return 1
+        if [ -n "${FM_PUSH_TRANSITION_STATUS_LINE:-}" ]; then
+          : > "$(fm_backend_herdr_working_marker "$state" "$window")"
+        fi
       fi
       ;;
   esac

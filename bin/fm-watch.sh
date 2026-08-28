@@ -1606,7 +1606,7 @@ EOF
         elif [ -f "$STATE/$id.meta" ]; then
           check_display=$(fm_display_name_for_meta "$STATE/$id.meta" "$id")
         else
-          check_display=$(fm_display_name_fallback "$id")
+          check_display='State check'
         fi
         reason="check: $check_display: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome."
         fm_wake_append check "$c" "$queue_reason" || exit 1

@@ -174,6 +174,7 @@ fm_push_transition_apply_status() {  # <state> <window> <backend-status>
   last=$(last_status_line "$status_file")
   case "$to" in
     working)
+      [ "$last" = 'blocked: live supervision reported the worker blocked' ] || return 0
       line='working: live supervision reported active work'
       ;;
     blocked)

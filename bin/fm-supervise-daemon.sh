@@ -556,11 +556,11 @@ classify_check() {  # <full reason> <state>
       elif [ -f "$state/$id.meta" ]; then
         display=$(fm_display_name_for_meta "$state/$id.meta" "$id")
       else
-        display=$(fm_display_name_fallback "$id")
+        display='State check'
       fi
       printf 'escalate|%s: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome.' "$display"
       ;;
-    *) printf 'escalate|%s' "$reason" ;;
+    *) printf 'escalate|State check: a registered check produced a new result now. Action required: inspect the pending result and run its registered handler.' ;;
   esac
 }
 

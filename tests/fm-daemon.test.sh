@@ -123,14 +123,15 @@ test_classify_buried_open_decision_escalates() {
   printf 'needs-decision [key=route]: choose north or south\nworking: preparing both routes\n' > "$state/t.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
   case "$out" in
-    escalate\|*'choose north or south'*) ;;
+    escalate\|*'decision evidence changed.'*'answer the question.'*) ;;
     *) fail "buried open decision did not escalate: $out" ;;
   esac
   printf 'failed: compiler crashed\nfailed: compiler crashed\n' > "$state/t.status"
   cp "$state/t.status" "$state/t.away-unread"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
-  [ "$(printf '%s' "$out" | awk -F 'compiler crashed' '{ print NF - 1 }')" -eq 1 ] \
+  [ "$(printf '%s' "$out" | awk -F 'new failure evidence surfaced' '{ print NF - 1 }')" -eq 1 ] \
     || fail "away signal repeated one logical failure in its digest: $out"
+  case "$out" in *'compiler crashed'*) fail "away signal exposed private failure evidence: $out" ;; esac
   pass "away signal classification folds and deduplicates unread conditions"
 }
 
@@ -145,6 +146,17 @@ test_classify_check_and_unknown_escalate() {
     *) fail "check did not produce a readable actionable escalation: $out" ;;
   esac
   case "$out" in *'/secret/'*|*'.check.sh'*) fail "check escalation exposed private evidence: $out" ;; esac
+  rm -f "$state/c.meta"
+  out=$(classify_check "check: $state/private-route.check.sh: opaque-result" "$state")
+  case "$out" in escalate\|'State check: an authenticated state check produced a new result now.'*) ;;
+    *) fail "metadata-free check did not use a generic readable label: $out" ;;
+  esac
+  case "$out" in *private-route*|*opaque-result*) fail "metadata-free check exposed routing evidence: $out" ;; esac
+  out=$(classify_check "check: $state/bin/fm-startup-network.sh" "$state")
+  case "$out" in escalate\|'State check: a registered check produced a new result now.'*) ;;
+    *) fail "unknown check did not use a generic readable presentation: $out" ;;
+  esac
+  case "$out" in *startup-network*|*'/bin/'*|escalate\|check:*) fail "unknown check exposed protocol or routing evidence: $out" ;; esac
   mkdir -p "$state/procevent-inbox"
   printf 'lavish\n' > "$state/procevent-inbox/private-source.7.adapter"
   out=$(classify_check "check: procevent lavish private-source 7" "$state")
@@ -935,7 +947,7 @@ test_away_escalations_present_display_name_with_machine_identity() {
   printf 'done: ready for review\n' > "$state/$task.status"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/$task.status" "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication: a new result surfaced - ready for review. Action required: review the result." \
+  assert_contains "$escalation" "CRM · Authentication: a new result surfaced. Action required: inspect the private task record and review the result." \
     "away signal escalation omitted the readable result transition"
   assert_not_contains "$escalation" "$task" "away signal presentation leaked its machine task id"
 
@@ -961,7 +973,7 @@ test_away_escalations_present_display_name_with_machine_identity() {
   printf 'done: final review ready\n' > "$state/$task.status"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   escalation=$(cat "$state/.subsuper-escalations")
-  assert_contains "$escalation" "CRM · Authentication: a new result surfaced - final review ready. Action required: review the result." \
+  assert_contains "$escalation" "CRM · Authentication: a new result surfaced. Action required: inspect the private task record and review the result." \
     "away catch-all escalation omitted the readable result transition"
   assert_not_contains "$escalation" "$task" "away catch-all presentation leaked its machine task id"
 
