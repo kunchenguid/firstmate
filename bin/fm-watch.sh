@@ -596,8 +596,14 @@ clear_write_tracking() {  # <window-key>
 # stale record a torn-down task leaves behind never matches POLL_SEQ - 1 the next time
 # that window name is recorded, so a reused name simply starts a fresh pair rather than
 # alarming instantly.
+#
+# A secondmate's endpoint liveness is deliberately never read here, matching
+# pause_state_class: a mate whose window vanishes is owned by startup
+# secondmate-liveness, not surfaced as a lost ordinary endpoint, so this never reads
+# fm_backend_agent_state for a mate.
 endpoint_gone_check() {  # <window>
   local win=$1 key marker pending reason recorded
+  [ "$(window_kind "$win")" = secondmate ] && return 0
   key=$(window_key "$win")
   marker="$STATE/.endpoint-gone-$key"
   pending="$STATE/.endpoint-gone-pending-$key"
