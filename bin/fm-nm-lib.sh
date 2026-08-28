@@ -50,7 +50,7 @@ fm_nm_supports_watch() {
   bin=$(fm_nm_bin)
   command -v "$bin" >/dev/null 2>&1 || return 2
   output=$(fm_nm_help_probe watch --help) || return 1
-  printf '%s\n' "$output" | grep -Eq '^[[:space:]]*(-[A-Za-z0-9][[:space:]]*,[[:space:]]*)?--pr([[:space:],=]|$)'
+  printf '%s\n' "$output" | grep -Eq '^[[:space:]]*(-[A-Za-z0-9][[:space:],]+)?--pr([[:space:],=]|$)'
 }
 
 # fm_nm_supports_axi_intent: does AXI run expose the required intent contract?
@@ -60,7 +60,7 @@ fm_nm_supports_axi_intent() {
   bin=$(fm_nm_bin)
   command -v "$bin" >/dev/null 2>&1 || return 2
   output=$(fm_nm_help_probe axi run --help) || return 1
-  printf '%s\n' "$output" | grep -Eq '^[[:space:]]*(-[A-Za-z0-9][[:space:]]*,[[:space:]]*)?--intent([[:space:],=]|$)'
+  printf '%s\n' "$output" | grep -Eq '^[[:space:]]*(-[A-Za-z0-9][[:space:],]+)?--intent([[:space:],=]|$)'
 }
 
 _fm_nm_is_semver() {  # <version>

@@ -127,6 +127,14 @@ if [ "${1:-}" = watch ] && [ "${2:-}" = --help ]; then
     description-only)
       printf '%s\n' 'Description: uses the --pr flag; no flags section'
       exit 0 ;;
+    space-separated)
+      printf '%s\n' 'Usage:' '  no-mistakes watch [flags]' \
+        'Flags:' '  -p --pr URL   URL of the pull/merge request to watch'
+      exit 0 ;;
+    slash-separated)
+      printf '%s\n' 'Usage:' '  no-mistakes watch [flags]' \
+        'Flags:' '      --pr / -p URL   URL of the pull/merge request to watch'
+      exit 0 ;;
     *)
       printf '%s\n' 'Usage:' '  no-mistakes watch --pr <url> [flags]' \
         'Flags:' '      --pr string   URL of the pull/merge request to watch (required)'
@@ -151,6 +159,14 @@ if [ "${1:-}" = axi ] && [ "${2:-}" = run ] && [ "${3:-}" = --help ]; then
     cobra-alias)
       printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
         'Flags:' '      --intent, --goal string   what the user set out to accomplish'
+      exit 0 ;;
+    space-separated)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '  -i --intent string   what the user set out to accomplish'
+      exit 0 ;;
+    slash-separated)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '      --intent / -i string   what the user set out to accomplish'
       exit 0 ;;
     *)
       printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
@@ -561,6 +577,9 @@ compatible SemVer with tab after version keyword is accepted^v1.31.2 (fake)^ok^o
 compatible hash build with extra space after version keyword is accepted^5c46a8b (5c46a8b) 2026-08-26T06:12:28Z^ok^ok^extra-space^empty^
 SemVer meeting floor with cobra short-long watch and intent is accepted^no-mistakes version v1.31.2 (fake)^cobra-combined^cobra-combined^ok^empty^
 SemVer meeting floor with long-alias watch and intent is accepted^no-mistakes version v1.31.2 (fake)^cobra-alias^cobra-alias^ok^empty^
+SemVer meeting floor with space-separated short-long flags is accepted^no-mistakes version v1.31.2 (fake)^space-separated^space-separated^ok^empty^
+SemVer meeting floor with slash-separated long-first flags is accepted^no-mistakes version v1.31.2 (fake)^slash-separated^slash-separated^ok^empty^
+SemVer meeting floor with mixed separators is accepted^no-mistakes version v1.31.2 (fake)^space-separated^cobra-combined^ok^empty^
 SemVer meeting floor with watch flag only in description text is rejected^no-mistakes version v1.31.2 (fake)^description-only^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.31.2 is installed but required capability watch --pr is unavailable; upgrade it before using direct-PR delivery (upgrade: no-mistakes update)
 SemVer meeting floor missing AXI intent is incompatible^no-mistakes version v1.31.2 (fake)^ok^no-intent^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.31.2 is installed but required capability axi run --intent is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
 newer SemVer missing AXI intent is incompatible^no-mistakes version v1.32.0 (fake)^ok^no-intent^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.32.0 is installed but required capability axi run --intent is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
