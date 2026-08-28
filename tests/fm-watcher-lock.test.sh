@@ -773,7 +773,7 @@ SH
     fail "symlink contender never reached the publication race"
   }
 
-  FM_STATE_OVERRIDE="$state" bash -c '
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 20
     [ -L "$2" ] || exit 21
@@ -807,7 +807,7 @@ SH
 
   : > "$release"
   wait "$holder" || fail "symlink holder did not release cleanly after contention"
-  FM_STATE_OVERRIDE="$state" bash -c '
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 30
     fm_lock_release "$2"
