@@ -745,6 +745,23 @@ test_actionable_signal_surfaced() {
   pass "an unread captain-relevant status is surfaced even when a routine note follows"
 }
 
+test_actionable_batch_omits_absorbed_sibling() {
+  local dir state fakebin out pid
+  dir=$(make_case actionable-batch); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'window=test:fm-decision\ndisplay_name=Decision owner\n' > "$state/decision.meta"
+  printf 'needs-decision [key=route]: choose a route\n' > "$state/decision.status"
+  printf 'window=test:fm-routine\ndisplay_name=Routine sibling\n' > "$state/routine.meta"
+  printf 'working: continuing implementation\n' > "$state/routine.status"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher swallowed an actionable batch"
+  grep -F 'Decision owner: a decision changed - choose a route.' "$out" >/dev/null \
+    || fail "actionable batch omitted its decision: $(cat "$out")"
+  ! grep -F 'Routine sibling' "$out" >/dev/null \
+    || fail "actionable batch presented an absorbed routine sibling: $(cat "$out")"
+  pass "an actionable batch omits absorbed sibling updates"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2656,7 +2673,7 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   pid=$!
   wait_for_exit "$pid" 100 \
     || fail "an unacknowledged process-event result was not re-surfaced on re-arm: $(cat "$out")"
-  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+  grep -F 'check: Fleet supervision recovery:' "$out" >/dev/null \
     || fail "the successor did not report recovery for the unacknowledged result: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$replay_err" \
     || fail "the successor could not re-drain the unacknowledged process-event result"
@@ -2800,7 +2817,7 @@ test_procevent_surface_crash_boundaries() {
   procevent_watch_bg "$dir" "$out.replay"; pid=$!
   wait_for_exit "$pid" 100 \
     || fail "an unacknowledged delivered record was not re-surfaced on re-arm: $(cat "$out.replay")"
-  grep -F 'check: rearm-resurface' "$out.replay" >/dev/null \
+  grep -F 'check: Fleet supervision recovery:' "$out.replay" >/dev/null \
     || fail "the successor did not recover the delivered-but-unacknowledged record: $(cat "$out.replay")"
   replay_err="$out.replay.err"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out.replay.drain" 2> "$replay_err" \
@@ -3003,6 +3020,7 @@ test_working_note_not_working_absorbed
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
+test_actionable_batch_omits_absorbed_sibling
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

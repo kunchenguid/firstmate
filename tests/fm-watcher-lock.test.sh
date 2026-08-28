@@ -444,7 +444,7 @@ test_watch_restart_rejects_reused_pid() {
   is_live_non_zombie "$pid" \
     && fail "restart did not surface recovery after replacing a reused-pid lock"
   wait "$pid" 2>/dev/null || true
-  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+  grep -F 'check: Fleet supervision recovery:' "$out" >/dev/null \
     || fail "restart replaced reused-pid lock without surfacing recovery: $(cat "$out")"
   is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid"
   kill "$live" 2>/dev/null || true
@@ -675,7 +675,7 @@ test_arm_starts_and_self_heals() {
       is_live_non_zombie "$armpid" \
         && fail "arm did not surface recovery after reclaiming a dead-pid lock"
       wait "$armpid" 2>/dev/null || true
-      grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+      grep -F 'check: Fleet supervision recovery:' "$armout" >/dev/null \
         || fail "arm reclaimed dead-pid lock without surfacing recovery: $(cat "$armout")"
       continue
     fi

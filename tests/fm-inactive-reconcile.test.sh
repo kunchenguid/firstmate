@@ -347,7 +347,7 @@ test_watcher_hook_and_idle_secondmate_exemption() {
     i=$((i + 1))
   done
   wait "$pid" 2>/dev/null || true
-  grep -Fq 'check: inactive-outcome' "$out" || fail "watcher did not surface its reconciliation result"
+  grep -Fq 'check: Fleet terminal outcome:' "$out" || fail "watcher did not surface its reconciliation result"
 
   make_world idle-secondmate; bind_secondmate local; write_mate_meta; prime_seen "$MAIN/state" "$MAIN/state/mate.status"
   PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \

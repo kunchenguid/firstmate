@@ -388,7 +388,7 @@ daemon_terminal_summary() {  # <task> <state> <status-line>
 
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen class summary open key verb note line
-  local unread_file unread unread_had_last
+  local unread_file unread unread_had_last fingerprints=""
   for f in $reason; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
@@ -404,6 +404,10 @@ classify_signal() {  # <reason-after-colon> <state>
         [ "$line" = "$last" ] || continue
         rel=1
         if fm_human_notify_pending "$state" "$task" "$line"; then
+          case "$fingerprints" in
+            *"|$FM_HUMAN_NOTIFY_FINGERPRINT|"*) continue ;;
+          esac
+          fingerprints="$fingerprints|$FM_HUMAN_NOTIFY_FINGERPRINT|"
           all_seen=0
           summary=$(fm_human_notify_summary "$state" "$task" "$line") || summary=''
           distilled="${distilled}${summary} | "
@@ -422,6 +426,10 @@ EOF
       line="$verb [key=$key]: $note"
       rel=1
       if fm_human_notify_pending "$state" "$task" "$line"; then
+        case "$fingerprints" in
+          *"|$FM_HUMAN_NOTIFY_FINGERPRINT|"*) continue ;;
+        esac
+        fingerprints="$fingerprints|$FM_HUMAN_NOTIFY_FINGERPRINT|"
         all_seen=0
         summary=$(fm_human_notify_summary "$state" "$task" "$line") || summary=''
         distilled="${distilled}${summary} | "

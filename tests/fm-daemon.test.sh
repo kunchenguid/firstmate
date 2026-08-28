@@ -126,14 +126,12 @@ test_classify_buried_open_decision_escalates() {
     escalate\|*'choose north or south'*) ;;
     *) fail "buried open decision did not escalate: $out" ;;
   esac
-  printf 'failed: compiler crashed\nworking: retrying compilation\n' > "$state/t.status"
-  printf 'failed: compiler crashed\nworking: retrying compilation' > "$state/t.away-unread"
+  printf 'failed: compiler crashed\nfailed: compiler crashed\n' > "$state/t.status"
+  cp "$state/t.status" "$state/t.away-unread"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
-  case "$out" in
-    escalate\|*'compiler crashed'*) ;;
-    *) fail "buried unread failure did not escalate: $out" ;;
-  esac
-  pass "away signal classification folds unread transitions and buried open decisions"
+  [ "$(printf '%s' "$out" | awk -F 'compiler crashed' '{ print NF - 1 }')" -eq 1 ] \
+    || fail "away signal repeated one logical failure in its digest: $out"
+  pass "away signal classification folds and deduplicates unread conditions"
 }
 
 test_classify_check_and_unknown_escalate() {

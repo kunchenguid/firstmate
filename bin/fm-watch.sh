@@ -86,9 +86,13 @@
 #                          removing poll artifacts; paths remain private queue keys.
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
-#   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
-#                          inactive terminal outcome that still lacks its durable
-#                          upstream receipt
+#   check: Fleet supervision recovery: pending durable updates resurfaced after
+#                          watcher downtime. Action required: inspect and handle
+#                          the recovered updates. Recovery keys remain private.
+#   check: Fleet terminal outcome: live supervision found a newly inactive
+#                          terminal result. Action required: inspect the queued
+#                          outcome and record or recover it. Task identity remains
+#                          private in the durable queue record.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -98,6 +102,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+REARM_RESURFACE_PRESENTATION='check: Fleet supervision recovery: pending durable updates resurfaced after watcher downtime. Action required: inspect and handle the recovered updates.'
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -303,28 +308,39 @@ window_human_ref() {  # <window>
 
 signal_human_reason() {  # stdin: scan_signals rows
   local sf sig f seen base task display_name last summary reason='' unread line before fingerprints=''
+  local class kind file_has_unclassified_actionable
   while IFS=$(printf '\t') read -r sf sig f seen; do
     [ -n "$sf" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
     base=$(basename "$f")
     task=${base%.status}
+    kind=$(grep '^kind=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     unread=$(status_unread_range "$f" "$seen" "$sig") || unread=''
     before=$reason
+    file_has_unclassified_actionable=0
     while IFS= read -r line || [ -n "$line" ]; do
       [ -n "$line" ] || continue
-      if status_human_condition_is_current "$f" "$line" \
-        && fm_human_notify_pending "$STATE" "$task" "$line"; then
-        case "$fingerprints" in
-          *"|$FM_HUMAN_NOTIFY_FINGERPRINT|"*) continue ;;
-        esac
-        fingerprints="$fingerprints|$FM_HUMAN_NOTIFY_FINGERPRINT|"
-        summary=$(fm_human_notify_summary "$STATE" "$task" "$line") || summary=''
-        [ -z "$summary" ] || reason="$reason${reason:+ | }$summary"
+      if class=$(fm_human_notify_class "$line"); then
+        if status_human_condition_is_current "$f" "$line" \
+          && fm_human_notify_pending "$STATE" "$task" "$line"; then
+          case "$fingerprints" in
+            *"|$FM_HUMAN_NOTIFY_FINGERPRINT|"*) continue ;;
+          esac
+          fingerprints="$fingerprints|$FM_HUMAN_NOTIFY_FINGERPRINT|"
+          summary=$(fm_human_notify_summary "$STATE" "$task" "$line") || summary=''
+          [ -z "$summary" ] || reason="$reason${reason:+ | }$summary"
+        fi
+        continue
+      fi
+      [ "$(status_line_verb "$line")" = resolved ] && continue
+      if status_is_captain_relevant "$line" || [ "$kind" = secondmate ]; then
+        file_has_unclassified_actionable=1
       fi
     done <<EOF
 $unread
 EOF
     [ "$reason" = "$before" ] || continue
+    [ "$file_has_unclassified_actionable" -eq 1 ] || continue
     if [ -f "$STATE/$task.meta" ]; then
       display_name=$(fm_display_name_for_meta "$STATE/$task.meta" "$task")
     else
@@ -1366,7 +1382,7 @@ watcher_cleanup() {
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
-      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
+      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "$REARM_RESURFACE_PRESENTATION" ]; then
       transition=release-lock-existing
     fi
   fi
@@ -1440,7 +1456,7 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
-  wake "check: rearm-resurface"
+  wake "$REARM_RESURFACE_PRESENTATION"
 }
 
 while :; do
@@ -1486,7 +1502,7 @@ while :; do
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
     if [ -n "$inactive_out" ]; then
-      wake "check: inactive-outcome"
+      wake "check: Fleet terminal outcome: live supervision found a newly inactive terminal result. Action required: inspect the queued outcome and record or recover it."
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
