@@ -13,6 +13,7 @@
 #   (f) scout with origin only in the authoritative checkout -> review from that origin
 #   (g) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (h) legacy ship without mode and without task origin -> refuse stale PR evidence
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -170,6 +171,34 @@ test_pr_backed_review_refuses_without_origin() {
   pass "fm-review-diff refuses a PR-backed review without valid origin"
 }
 
+test_legacy_pr_review_requires_task_origin() {
+  local case_dir out status origin_url stale_sha
+  case_dir=$(make_case legacy-project-origin)
+  stale_and_pr_commits "$case_dir"
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  origin_url=$(git -C "$case_dir/project" remote get-url origin)
+  git -C "$case_dir/project" remote remove origin
+  git -C "$case_dir/project" config extensions.worktreeConfig true
+  git -C "$case_dir/project" config --worktree remote.origin.url "$origin_url"
+  [ "$(git -C "$case_dir/project" remote)" = origin ] \
+    || fail "legacy fixture did not retain origin in the authoritative project"
+  [ -z "$(git -C "$case_dir/wt" remote)" ] \
+    || fail "legacy fixture leaked project-only origin into the task worktree"
+  write_task_meta "$case_dir" \
+    "kind=ship" \
+    "pr=https://github.com/example/repo/pull/9" \
+    "pr_head=$stale_sha"
+
+  out=$(run_review_diff "$case_dir" task-x1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy no-mistakes review accepted stale PR evidence without task origin"
+  assert_contains "$out" 'PR-backed task contract requires origin' \
+    "legacy no-mistakes review did not require task origin"
+  assert_not_contains "$out" '+stale-local' \
+    "legacy no-mistakes review displayed stale recorded PR evidence"
+  pass "fm-review-diff defaults legacy ships to the no-mistakes origin contract"
+}
+
 test_remoteless_review_ignores_stale_origin_head() {
   local case_dir out initial
   case_dir="$TMP_ROOT/remoteless-stale-default"
@@ -232,5 +261,6 @@ test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_pr_backed_review_refuses_without_origin
+test_legacy_pr_review_requires_task_origin
 test_remoteless_review_ignores_stale_origin_head
 test_scout_review_uses_authoritative_project_origin

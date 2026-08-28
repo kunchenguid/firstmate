@@ -54,14 +54,15 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 TASK_KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -n "$TASK_KIND" ] || TASK_KIND=ship
 TASK_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -z "$TASK_MODE" ] && [ "$TASK_KIND" != scout ]; then
+  TASK_MODE=no-mistakes
+fi
 ALLOW_REMOTELESS=no
+REQUIRE_TASK_ORIGIN=yes
 if [ "$TASK_KIND" = scout ] || [ "$TASK_MODE" = local-only ]; then
   ALLOW_REMOTELESS=yes
+  REQUIRE_TASK_ORIGIN=no
 fi
-REQUIRE_TASK_ORIGIN=no
-case "$TASK_MODE" in
-  no-mistakes|direct-PR) REQUIRE_TASK_ORIGIN=yes ;;
-esac
 if ! fm_project_base_resolve "$PROJ" "$WT" "$ALLOW_REMOTELESS" "$REQUIRE_TASK_ORIGIN"; then
   echo "error: $FM_PROJECT_BASE_ERROR; refusing to review against an unverified base" >&2
   exit 1
