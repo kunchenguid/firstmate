@@ -2,8 +2,8 @@
 # Stable project hook transport for Codex.
 # Usage: fm-codex-hook.sh sessionstart|arm-pretool|cd-pretool|stop
 # Reads the original Codex hook payload on stdin and passes it unchanged to the
-# selected Firstmate hook after verifying the hook process started at a tracked
-# Firstmate root. Every unavailable or malformed transport prerequisite steps
+# selected Firstmate hook after verifying its repository is a tracked Firstmate
+# root. Every unavailable or malformed transport prerequisite steps
 # aside with exit 0; the selected hook keeps ownership of its own exit contract.
 set -u
 
@@ -25,7 +25,8 @@ esac
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
-ROOT=$(pwd -P) || exit 0
+SCRIPT_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 0
+ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P) || exit 0
 [ -x "$ROOT/bin/$TARGET" ] || exit 0
 [ -f "$ROOT/AGENTS.md" ] || exit 0
 [ -f "$ROOT/.codex/hooks.json" ] || exit 0

@@ -9,7 +9,10 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-codex-hook)
 FIXTURE="$TMP_ROOT/firstmate root with spaces"
 SCAN_LOG="$TMP_ROOT/ancestry-scans"
-mkdir -p "$FIXTURE/bin" "$FIXTURE/.codex"
+SUBDIR="$FIXTURE/src/nested"
+INVALID="$TMP_ROOT/not a firstmate root"
+mkdir -p "$FIXTURE/bin" "$FIXTURE/.codex" "$SUBDIR"
+git init -q "$FIXTURE"
 : > "$FIXTURE/AGENTS.md"
 cp "$ROOT/.codex/hooks.json" "$FIXTURE/.codex/hooks.json"
 cp "$ROOT/bin/fm-codex-hook.sh" "$FIXTURE/bin/fm-codex-hook.sh"
@@ -33,15 +36,17 @@ SH
   chmod +x "$FIXTURE/bin/$target"
 done
 
-exercise_hook() {  # <jq-path> <command-field> <expected-target>
-  local query=$1 field=$2 expected=$3 command payload out status=0
+exercise_hook() {  # <jq-path> <command-field> <expected-target> [cwd]
+  local query=$1 field=$2 expected=$3 cwd=${4:-$FIXTURE} command payload out status=0
   command=$(jq -r "$query.$field // empty" "$FIXTURE/.codex/hooks.json")
   [ -n "$command" ] || fail "$field is missing for $expected"
   payload=$(jq -cn --arg expected "$expected" '{hook_event_name:"fixture",expected:$expected}')
   if [ "$field" = commandWindows ]; then
-    out=$(printf '%s' "$payload" | (cd "$FIXTURE" && env -u FM_SESSION_HARNESS_PID MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /s /c "$command") 2>&1) || status=$?
+    out=$(printf '%s' "$payload" | (cd "$cwd" && env -u FM_SESSION_HARNESS_PID \
+      FM_TEST_CODEX_COMMAND="$command" MSYS2_ARG_CONV_EXCL='*' \
+      cmd.exe /d /s /c '%FM_TEST_CODEX_COMMAND%') 2>&1) || status=$?
   else
-    out=$(printf '%s' "$payload" | (cd "$FIXTURE" && env -u FM_SESSION_HARNESS_PID bash -c "$command") 2>&1) || status=$?
+    out=$(printf '%s' "$payload" | (cd "$cwd" && env -u FM_SESSION_HARNESS_PID bash -c "$command") 2>&1) || status=$?
   fi
   [ "$status" -eq 0 ] || fail "$field transport for $expected exited $status: $out"
   assert_contains "$out" "target=$expected" "$field did not dispatch to $expected"
@@ -56,19 +61,35 @@ exercise_hook() {  # <jq-path> <command-field> <expected-target>
   esac
 }
 
-exercise_all() {  # <command-field>
-  local field=$1
-  exercise_hook '.hooks.SessionStart[0].hooks[0]' "$field" fm-sessionstart-run.sh
-  exercise_hook '.hooks.PreToolUse[0].hooks[0]' "$field" fm-arm-pretool-check.sh
-  exercise_hook '.hooks.PreToolUse[0].hooks[1]' "$field" fm-cd-pretool-check.sh
-  exercise_hook '.hooks.Stop[0].hooks[0]' "$field" fm-turnend-guard.sh
+exercise_all() {  # <command-field> [cwd]
+  local field=$1 cwd=${2:-$FIXTURE}
+  exercise_hook '.hooks.SessionStart[0].hooks[0]' "$field" fm-sessionstart-run.sh "$cwd"
+  exercise_hook '.hooks.PreToolUse[0].hooks[0]' "$field" fm-arm-pretool-check.sh "$cwd"
+  exercise_hook '.hooks.PreToolUse[0].hooks[1]' "$field" fm-cd-pretool-check.sh "$cwd"
+  exercise_hook '.hooks.Stop[0].hooks[0]' "$field" fm-turnend-guard.sh "$cwd"
+}
+
+exercise_quiet_noop() {  # <command-field>
+  local field=$1 command payload out status=0
+  command=$(jq -r ".hooks.Stop[0].hooks[0].$field // empty" "$FIXTURE/.codex/hooks.json")
+  payload=$(jq -cn '{hook_event_name:"fixture",expected:"quiet-noop"}')
+  if [ "$field" = commandWindows ]; then
+    out=$(printf '%s' "$payload" | (cd "$INVALID/subdir" && \
+      FM_TEST_CODEX_COMMAND="$command" MSYS2_ARG_CONV_EXCL='*' \
+      cmd.exe /d /s /c '%FM_TEST_CODEX_COMMAND%') 2>&1) || status=$?
+  else
+    out=$(printf '%s' "$payload" | (cd "$INVALID/subdir" && bash -c "$command") 2>&1) || status=$?
+  fi
+  [ "$status" -eq 0 ] || fail "$field invalid-root transport exited $status: $out"
+  [ -z "$out" ] || fail "$field invalid-root transport was not quiet: $out"
 }
 
 rm -f "$SCAN_LOG"
 exercise_all command
-[ "$(wc -l < "$SCAN_LOG" | tr -d ' ')" = 1 ] \
+exercise_all command "$SUBDIR"
+[ "$(wc -l < "$SCAN_LOG" | tr -d ' ')" = 2 ] \
   || fail "POSIX lifecycle hooks performed more than the SessionStart ancestry scan"
-pass "Codex hook transport: POSIX commands dispatch all tracked hooks with stdin intact"
+pass "Codex hook transport: POSIX commands dispatch from repository subdirectories"
 
 test_login_profile_dependency() {
   local home no_login_bin login_bin jq_path command payload out status=0
@@ -100,12 +121,26 @@ SH
 
 test_login_profile_dependency
 
+mkdir -p "$INVALID/bin" "$INVALID/subdir"
+git init -q "$INVALID"
+cp "$ROOT/bin/fm-codex-hook.sh" "$INVALID/bin/fm-codex-hook.sh"
+cp "$ROOT/bin/fm-codex-hook.cmd" "$INVALID/bin/fm-codex-hook.cmd"
+chmod +x "$INVALID/bin/fm-codex-hook.sh"
+cat > "$INVALID/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'invalid root target executed\n'
+SH
+chmod +x "$INVALID/bin/fm-turnend-guard.sh"
+exercise_quiet_noop command
+
 if command -v cmd.exe >/dev/null 2>&1; then
   rm -f "$SCAN_LOG"
   exercise_all commandWindows
-  [ "$(wc -l < "$SCAN_LOG" | tr -d ' ')" = 1 ] \
+  exercise_all commandWindows "$SUBDIR"
+  [ "$(wc -l < "$SCAN_LOG" | tr -d ' ')" = 2 ] \
     || fail "native Windows lifecycle hooks performed more than the SessionStart ancestry scan"
-  pass "Codex hook transport: native Windows commands survive cmd.exe and preserve stdin"
+  exercise_quiet_noop commandWindows
+  pass "Codex hook transport: native Windows commands dispatch from repository subdirectories"
 else
   pass "Codex hook transport: native Windows command path skipped (cmd.exe unavailable)"
 fi

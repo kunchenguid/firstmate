@@ -5,8 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -l bin/fm-codex-hook.sh sessionstart",
-            "commandWindows": "bin\\fm-codex-hook.cmd sessionstart",
+            "command": "bash -l -c 'root=$(git -C \"$0\" rev-parse --show-toplevel 2>/dev/null) || exit 0; [ -x \"$root/bin/fm-codex-hook.sh\" ] || exit 0; exec \"$root/bin/fm-codex-hook.sh\" \"$1\"' \"$PWD\" sessionstart",
+            "commandWindows": "for /f \"delims=\" %G in ('git rev-parse --show-toplevel 2^>nul') do @if exist \"%G\\bin\\fm-codex-hook.cmd\" call \"%G\\bin\\fm-codex-hook.cmd\" sessionstart",
             "timeout": 180
           }
         ]
@@ -18,14 +18,14 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -l bin/fm-codex-hook.sh arm-pretool",
-            "commandWindows": "bin\\fm-codex-hook.cmd arm-pretool",
+            "command": "bash -l -c 'root=$(git -C \"$0\" rev-parse --show-toplevel 2>/dev/null) || exit 0; [ -x \"$root/bin/fm-codex-hook.sh\" ] || exit 0; exec \"$root/bin/fm-codex-hook.sh\" \"$1\"' \"$PWD\" arm-pretool",
+            "commandWindows": "for /f \"delims=\" %G in ('git rev-parse --show-toplevel 2^>nul') do @if exist \"%G\\bin\\fm-codex-hook.cmd\" call \"%G\\bin\\fm-codex-hook.cmd\" arm-pretool",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "bash -l bin/fm-codex-hook.sh cd-pretool",
-            "commandWindows": "bin\\fm-codex-hook.cmd cd-pretool",
+            "command": "bash -l -c 'root=$(git -C \"$0\" rev-parse --show-toplevel 2>/dev/null) || exit 0; [ -x \"$root/bin/fm-codex-hook.sh\" ] || exit 0; exec \"$root/bin/fm-codex-hook.sh\" \"$1\"' \"$PWD\" cd-pretool",
+            "commandWindows": "for /f \"delims=\" %G in ('git rev-parse --show-toplevel 2^>nul') do @if exist \"%G\\bin\\fm-codex-hook.cmd\" call \"%G\\bin\\fm-codex-hook.cmd\" cd-pretool",
             "timeout": 10
           }
         ]
@@ -36,8 +36,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -l bin/fm-codex-hook.sh stop",
-            "commandWindows": "bin\\fm-codex-hook.cmd stop",
+            "command": "bash -l -c 'root=$(git -C \"$0\" rev-parse --show-toplevel 2>/dev/null) || exit 0; [ -x \"$root/bin/fm-codex-hook.sh\" ] || exit 0; exec \"$root/bin/fm-codex-hook.sh\" \"$1\"' \"$PWD\" stop",
+            "commandWindows": "for /f \"delims=\" %G in ('git rev-parse --show-toplevel 2^>nul') do @if exist \"%G\\bin\\fm-codex-hook.cmd\" call \"%G\\bin\\fm-codex-hook.cmd\" stop",
             "timeout": 30
           }
         ]
