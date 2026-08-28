@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 .env
 config/
+bin/fm-verify-page/node_modules/
