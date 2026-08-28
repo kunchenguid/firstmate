@@ -50,7 +50,8 @@ No would-have-approved pull request was reverted.
 2 of 6 pull requests would have been candidates.
 
 • Eligibility is doing real work — 59 of 71 evaluations were blocked,
-  and 34 of those were CI that had not reported yet
+  and 34 of those were `checksGreen`: CI had not reported yet, which a
+  later re-evaluation resolves on its own
 • Risk graded every candidate medium (11 of 11) — expected this early;
   few repos and thin history pull grades down
 • adoption and provenance read 5 of 71, but they only ever run on
@@ -87,21 +88,29 @@ This is the part most likely to be built wrong, so it gets the most precision.
 So every interpreted sentence is generated from a **stated precondition over the data**, and disappears when its precondition stops holding. Not a constant string with a comment; a rule.
 
 ```ts
-interface Interpretation {
+interface Rule {
   /** Does this reading apply to this week's data at all? */
-  applies: (a: WeeklyAggregate) => boolean;
+  applies: (a: WeeklyAggregate, ctx: InterpretContext) => boolean;
   /** The sentence, with its own numbers substituted in. */
-  render: (a: WeeklyAggregate) => string;
+  render: (a: WeeklyAggregate, ctx: InterpretContext) => string;
+}
+
+/** What the rules need beyond the week's own numbers. */
+interface InterpretContext {
+  fleetSize: number;   // passed in, NOT read from the compiled POLICY
+  minFleet: number;    // rules.risk.minFleetForConfidence
 }
 ```
+
+`fleetSize` arrives as an argument rather than from `enrollment.fleetSize()`, which reads the compiled `POLICY`. A precondition that cannot be varied in a test is a precondition nobody can prove expires.
 
 Three concrete rules, each with its precondition:
 
 | Dot | Precondition | When the precondition fails |
 |---|---|---|
-| "expected this early" on a medium-heavy risk distribution | fewer than `minFleetForConfidence` repos enrolled **and** ≥1 signal `unknown` on every graded evaluation | The sentence is omitted. A medium-heavy week in a mature fleet gets the bare distribution and no reassurance. |
-| "mostly CI that had not reported" | ≥50% of blocked evaluations failed a `CI_DEPENDENT_GATES` member | Reports the top gate plainly instead, with no transience claim |
-| "the real figure is 5 of 12" | a candidate-scoped recorder's coverage differs from its all-evaluation coverage | Omitted once scope and denominator agree |
+| "expected this early" on a medium-heavy risk distribution | fewer than `minFleetForConfidence` repos enrolled **and** at least one signal `unknown` on every evaluation eligible for it | The sentence is omitted. A medium-heavy week in a mature fleet gets the bare distribution and no reassurance. |
+| "CI had not reported yet" | the **dominant gate by name** is in `CI_REPORTING_GATES` (`checksGreen`, `coverageFloor`) | Names the dominant gate and its own cause instead. A `notBlocked`-dominated week says a label is holding them; a `classificationPermits`-dominated week says it needs a different change rather than more time. |
+| "the real figure is 5 of 12" | a recorder's coverage is below its own population's ceiling | Omitted once the recorder is at full coverage |
 
 **The test that keeps this honest:** a fixture with 12 enrolled repositories and a medium-heavy distribution must render **no** "expected this early" sentence. That single assertion is what stops the reassurance outliving its basis.
 
