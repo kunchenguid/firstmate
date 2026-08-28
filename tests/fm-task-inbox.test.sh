@@ -278,6 +278,24 @@ test_ladder_writes_ignore_vanished_inbox() {
   pass "inbox: ladder bookkeeping ignores a concurrently removed inbox"
 }
 
+test_fire_and_forget_records_never_enter_the_ladder() {
+  local state fire tracked action
+  state="$TMP_ROOT/fire-and-forget/state"; mkdir -p "$state"
+  fire=$(inbox_lib "$state" fm_task_inbox_write_idempotent "$state" t1 "one-shot steer" fire-and-forget)
+  age_path "$fire"
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a fire-and-forget record entered the re-ring ladder: $action"
+  tracked=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "tracked steer")
+  age_path "$tracked"
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate $tracked 0" ] \
+    || fail "a fire-and-forget record hid the later tracked steer: $action"
+  [ -f "$fire" ] || fail "excluding fire-and-forget from escalation removed its durable record"
+  pass "inbox: fire-and-forget records stay durable and outside the ladder"
+}
+
 test_ring_ladder_policy() {
   local state rec action
   state="$TMP_ROOT/ladder/state"; mkdir -p "$state"
@@ -485,6 +503,7 @@ test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
 test_ladder_writes_ignore_vanished_inbox
+test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane

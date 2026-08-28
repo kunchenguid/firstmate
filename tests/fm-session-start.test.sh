@@ -112,7 +112,7 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z'
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
   exit 0
 fi
 exit 0
@@ -1212,6 +1212,48 @@ EOF
   } > "$home/state/task-cap.status"
 
   out=$(FM_SESSION_START_STATUS_TAIL=5 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "$lede" "the cap discarded the lede that carries the state word and decision key"
+  assert_contains "$out" " [truncated]" "an over-long status line was not marked as truncated"
+  assert_contains "$out" "working: short line kept whole" "the cap mangled a status line already under it"
+  assert_contains "$out" "each capped at 220 characters" "the status tail header does not disclose its per-line cap"
+  assert_contains "$out" "$home/state/task-cap.status" "a capped tail dropped the full log path that recovers the rest"
+
+  # Nothing the tail emits may exceed the cap, and the padded line really was
+  # long enough to exercise it.
+  tail_section=$(printf '%s\n' "$out" | awk '/^status tail \(/ { flag = 1; next } flag && /^$/ { flag = 0 } flag')
+  longest=$(printf '%s\n' "$tail_section" | awk '{ if (length($0) > max) max = length($0) } END { print max + 0 }')
+  [ "$longest" -le 220 ] || fail "a status tail line ran $longest characters past the 220-character cap"
+  capped=$(printf '%s\n' "$tail_section" | grep -c ' \[truncated\]$')
+  [ "$capped" -eq 1 ] || fail "expected exactly one truncated tail line, got $capped: $tail_section"
+
+  pass "status tail lines are capped with a truncation marker while the full log stays reachable"
+}
+
+# A crewmate writes its own status lines, so nothing upstream bounds their
+# length: an observed one ran 865 characters. The tail is a wake-EVENT view
+# whose full log path is printed beside it, so a long line is cut, marked, and
+# left recoverable rather than allowed to scale the digest with fleet load.
+test_status_tail_line_cap() {
+  local rec root home fakebin out lede longest capped tail_section
+  rec=$(new_world status-line-cap)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  lede='needs-decision: [key=cap] pick the rendering strategy'
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-cap.meta"
+  {
+    printf '%s' "$lede"
+    awk 'BEGIN { while (i++ < 400) printf " padding" }'
+    printf '\n'
+    printf 'working: short line kept whole\n'
+  } > "$home/state/task-cap.status"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "$lede" "the cap discarded the lede that carries the state word and decision key"
   assert_contains "$out" " [truncated]" "an over-long status line was not marked as truncated"

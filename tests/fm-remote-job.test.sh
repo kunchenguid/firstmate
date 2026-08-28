@@ -624,8 +624,11 @@ RECOVERY_REFUSED_RC=$?
 set -e
 [ "$RECOVERY_REFUSED_RC" -ne 0 ] || fail "quarantine recovery ignored a recorded live process"
 assert_present "$RECOVERY_STATE/worker.lock/quarantine" "a live recorded process lost quarantine protection"
-kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
-wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/owner"
+printf 'stale owner identity\n' > "$RECOVERY_JOB/.claim/owner_start"
+printf 'stale supervisor identity\n' > "$RECOVERY_JOB/.claim/supervisor_start"
+chmod 600 "$RECOVERY_JOB/.claim/owner" "$RECOVERY_JOB/.claim/owner_start" \
+  "$RECOVERY_JOB/.claim/supervisor_start"
 HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$RECOVERY_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
   > "$TMP_ROOT/recovery-worker.out" 2> "$TMP_ROOT/recovery-worker.err" &
@@ -634,12 +637,133 @@ for _ in $(seq 1 300); do
   [ -f "$RECOVERY_STATE/worker.ready" ] && break
   sleep 0.05
 done
-assert_present "$RECOVERY_STATE/worker.ready" "a stopped quarantined execution did not permit worker recovery"
+assert_present "$RECOVERY_STATE/worker.ready" "a reused supervisor pid did not permit worker recovery"
 assert_absent "$RECOVERY_STATE/worker.lock/quarantine" "recovered worker retained stale quarantine"
+kill -0 "$QUARANTINED_PROCESS_PID" 2>/dev/null \
+  || fail "worker recovery signalled a process whose supervisor identity did not match"
 kill -TERM "$RECOVERY_WORKER_PID"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
-pass "quarantine clears only after recorded execution has stopped"
+kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+pass "quarantine recovery refuses unverifiable supervisors and ignores reused pids"
+
+# A replacement stops a Linux worker by signalling its whole isolated group, and
+# the supervisor in that group forwards a second stop signal to the same serving
+# child, so the serving child is always signalled more than once. Signal a small
+# bounded burst and then keep signalling until it is gone: the first signal
+# starts the shutdown and every later one lands inside it, the same way the group
+# signal and the forwarded signal do. A shutdown that dies part way through
+# leaves its ownership lock behind holding a half-written temp file no later
+# worker can clear, and every replacement then fails to report ready.
+#
+# The burst is bounded and the follow-up signals are paced deliberately. An
+# unpaced signal loop delivers hundreds of thousands of signals per second,
+# which corrupts the signalled bash's own pending-trap bookkeeping ("warning:
+# run_pending_traps: bad value in trap_list[15]") and then kills it part way
+# through the shutdown with SIGTERM or SIGSEGV. That reports a shutdown defect
+# this worker does not have. Ten back-to-back signals still all land inside the
+# shutdown's first file operation, so the repeat this pins is unchanged: with
+# the default disposition restored instead of ignored, the ownership lock is
+# left behind every run.
+REPEAT_HOME="$TMP_ROOT/repeat-signal-account"
+REPEAT_STATE="$TMP_ROOT/repeat-signal-jobs"
+mkdir -p "$REPEAT_HOME"
+chmod 700 "$REPEAT_HOME"
+HOME="$REPEAT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$REPEAT_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/repeat-signal.out" 2> "$TMP_ROOT/repeat-signal.err" &
+REPEAT_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$REPEAT_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$REPEAT_STATE/worker.ready" "the repeated-signal worker did not become ready"
+REPEAT_DEADLINE=$((SECONDS + 30))
+REPEAT_BURST=0
+while [ "$REPEAT_BURST" -lt 10 ]; do
+  kill -TERM "$REPEAT_WORKER_PID" 2>/dev/null || true
+  REPEAT_BURST=$((REPEAT_BURST + 1))
+done
+while kill -0 "$REPEAT_WORKER_PID" 2>/dev/null && [ "$SECONDS" -lt "$REPEAT_DEADLINE" ]; do
+  kill -TERM "$REPEAT_WORKER_PID" 2>/dev/null || true
+  sleep 0.05
+done
+if kill -0 "$REPEAT_WORKER_PID" 2>/dev/null; then
+  kill -KILL "$REPEAT_WORKER_PID" 2>/dev/null || true
+  wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+  REPEAT_WORKER_PID=
+  fail "the repeatedly signalled worker never finished its shutdown"
+fi
+wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+REPEAT_WORKER_PID=
+assert_absent "$REPEAT_STATE/worker.lock" \
+  "a repeatedly signalled shutdown left its ownership lock behind"
+assert_absent "$REPEAT_STATE/worker.ready" \
+  "a repeatedly signalled shutdown left its readiness heartbeat behind"
+HOME="$REPEAT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$REPEAT_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  >> "$TMP_ROOT/repeat-signal.out" 2>> "$TMP_ROOT/repeat-signal.err" &
+REPEAT_WORKER_PID=$!
+for _ in $(seq 1 600); do
+  [ -f "$REPEAT_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$REPEAT_STATE/worker.ready" \
+  "the worker after a repeatedly signalled shutdown never reported ready"
+kill -TERM "$REPEAT_WORKER_PID"
+wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+REPEAT_WORKER_PID=
+pass "a repeatedly signalled shutdown still releases ownership for the next worker"
+
+# A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
+# consecutive-failure backoff, so a child that dies just past that threshold
+# used to reset the only guard the supervisor had and restart forever. The
+# fixture below is that worker: it exits non-zero after living just longer than
+# the healthy window, so every restart is accounted as healthy-then-failed.
+RESTART_ROOT="$TMP_ROOT/restart-root"
+RESTART_HOME="$TMP_ROOT/restart-account"
+RESTART_STATE="$TMP_ROOT/restart-state"
+RESTART_CHILD_LOG="$TMP_ROOT/restart-children"
+mkdir -p "$RESTART_ROOT/bin" "$RESTART_HOME"
+cp "$ROOT/bin/fm-remote-job-lib.sh" "$RESTART_ROOT/bin/"
+cp "$ROOT/bin/fm-remote-job-worker.sh" "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh"
+printf 'fixture\n' > "$RESTART_ROOT/AGENTS.md"
+cat > "$RESTART_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
+#!/bin/bash
+set -u
+[ "${1:-}" = --serve ] || exit 2
+printf '%s\n' "${BASHPID:-$$}" >> "$FM_TEST_SUPERVISOR_CHILD_LOG"
+sleep "$FM_TEST_SUPERVISOR_CHILD_SECONDS"
+exit "$FM_TEST_SUPERVISOR_CHILD_STATUS"
+SH
+chmod +x "$RESTART_ROOT/bin"/*.sh
+HOME="$RESTART_HOME" FM_ROOT_OVERRIDE="$RESTART_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$RESTART_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=1 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=3 \
+  FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=0 FM_TEST_SUPERVISOR_CHILD_LOG="$RESTART_CHILD_LOG" \
+  FM_TEST_SUPERVISOR_CHILD_SECONDS=1.1 FM_TEST_SUPERVISOR_CHILD_STATUS=1 \
+  "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
+  > "$TMP_ROOT/restart-supervisor.out" 2> "$TMP_ROOT/restart-supervisor.err" &
+RESTART_SUPERVISOR_PID=$!
+for _ in $(seq 1 300); do
+  kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null; then
+  fail "workers dying just past the healthy threshold drove an unbounded restart loop"
+fi
+set +e
+wait "$RESTART_SUPERVISOR_PID"
+RESTART_SUPERVISOR_RC=$?
+set -e
+RESTART_SUPERVISOR_PID=
+[ "$RESTART_SUPERVISOR_RC" -ne 0 ] || fail "the exhausted restart guard reported success"
+[ "$(wc -l < "$RESTART_CHILD_LOG" | tr -d ' ')" -eq 3 ] \
+  || fail "the restart guard did not stop at the configured maximum"
+assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_ROOT/restart-supervisor.err" \
+  "the restart guard did not explain why it stopped"
+pass "barely healthy worker failures remain bounded by the restart guard"
 
 # A replacement stops a Linux worker by signalling its whole isolated group, and
 # the supervisor in that group forwards a second stop signal to the same serving

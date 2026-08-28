@@ -6,12 +6,23 @@
 # definitions must be accepted by the real tool registry, the session file and
 # pointer must persist on disk, and - because the isolated agent dir carries no
 # credentials and no models - the branch's first prompt must fail fast and
-# prove the never-lose-a-wake fallback to main against the real SDK.
+# prove the never-lose-a-wake fallback to main against the real SDK. It also
+# resolves the supervision-branch model pin through the branch's REAL
+# ModelRuntime, so a pin the vendor cannot resolve is proven to refuse the
+# build rather than silently running the branch on main's model. A second
+# probe pins the vendor contract that pin rests on: an explicit model must beat
+# the model a reopened session recorded, proven against a local,
+# never-contacted fake provider. A third probe does the same for the
+# supervision-branch effort pin: Pi's own supported-level list is what the
+# picker offers, Pi's own clamp is what lowers a level a model cannot run, and
+# an explicit thinking level must beat the level a reopened session recorded.
 #
-# No credentials are read and no provider call leaves the machine: the guard
-# points PI_CODING_AGENT_DIR at an empty directory, so model resolution stays
-# empty by construction. Run after every Pi upgrade and before trusting
-# refreshed per-harness evidence (docs/verification/runtime-backends.md).
+# No provider call leaves the machine. The branch probe points
+# PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
+# model resolution stays empty by construction. The precedence probe reads
+# only a local placeholder key for its never-contacted fake provider. Run after
+# every Pi upgrade and before trusting refreshed per-harness evidence
+# (docs/verification/runtime-backends.md).
 set -u
 
 if [ "${FM_PI_BRANCH_LIVE_E2E:-0}" != 1 ]; then
@@ -37,18 +48,21 @@ mkdir -p "$repo/.pi/extensions/lib" "$repo/node_modules/@earendil-works" \
   "$home/state" "$home/config" "$agentdir"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$repo/.pi/extensions/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
 mkdir -p "$repo/bin"
 cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
 chmod +x "$repo/bin/fm-operational-input.sh"
 ln -s "$PI_PACKAGE_DIR" "$repo/node_modules/@earendil-works/pi-coding-agent"
 ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$repo/node_modules/@earendil-works/pi-tui"
+ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-ai" "$repo/node_modules/@earendil-works/pi-ai"
 ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$repo/node_modules/typebox"
 
 # Stock macOS Bash 3.2 cannot reliably parse JavaScript template literals in a
 # heredoc nested inside command substitution, so capture through a file.
 PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-  PI_CODING_AGENT_DIR="$agentdir" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+  PI_CODING_AGENT_DIR="$agentdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -87,8 +101,24 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+// The real model surface, built from the same empty agent dir: no
+// credentials are read and no catalog is fetched, so every model lookup is
+// genuinely empty by construction.
+const { ModelRegistry, ModelRuntime } = await import(
+  pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href
+);
+const modelRegistry = new ModelRegistry(
+  await ModelRuntime.create({
+    authPath: `${process.env.PI_CODING_AGENT_DIR}/auth.json`,
+    modelsPath: `${process.env.PI_CODING_AGENT_DIR}/models.json`,
+  }),
+);
+if (typeof modelRegistry.getAvailable !== "function" || typeof modelRegistry.hasConfiguredAuth !== "function") {
+  throw new Error("the real ModelRegistry no longer exposes the model surface the supervision picker reads");
+}
 const sessionCtx = {
   sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
+  modelRegistry,
 };
 for (const handler of piHandlers.get("session_start") ?? []) await handler({}, sessionCtx);
 if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
@@ -136,6 +166,34 @@ if (!pointer.startsWith(`${home}/state/branch-session/`) || !pointer.endsWith(".
 if (!existsSync(`${home}/state/branch-session`)) {
   throw new Error("branch session store directory was not created");
 }
+
+// A model pin the branch's REAL runtime cannot resolve must refuse the build
+// and return the wake to main naming the pin, rather than silently running the
+// branch on whatever model main would have used.
+writeFileSync(`${home}/config/supervision-branch-model`, "openai/no-such-live-model\n");
+for (const handler of piHandlers.get("session_shutdown") ?? []) await handler({}, sessionCtx);
+for (const handler of piHandlers.get("session_start") ?? []) await handler({}, sessionCtx);
+writeFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tlive-probe.status\tsignal: live pin probe\n");
+const pinOffer = {
+  message: "signal: live pin probe",
+  projects: [approvedProject],
+  heartbeat: false,
+  eligible: true,
+  accepted: false,
+  accept() {
+    pinOffer.accepted = true;
+  },
+};
+bus.emit("fm-branch-supervision:dispatch", pinOffer);
+if (!pinOffer.accepted) throw new Error("branch did not accept the pinned wake offer");
+for (let i = 0; i < 600 && mainUserMessages.length === 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+if (mainUserMessages.length !== 2) throw new Error("pinned wake was lost: no fallback reached main");
+const pinFallback = mainUserMessages[1].content;
+if (!pinFallback.includes("openai/no-such-live-model") || !pinFallback.includes("supervision model pin")) {
+  throw new Error(`the real-SDK fallback did not name the unusable pin: ${pinFallback}`);
+}
 console.log("LIVE_OK");
 process.exit(0);
 EOF
@@ -145,3 +203,325 @@ if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
   fail "real-SDK Pi branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION accepts the branch session construction and preserves an unpromptable wake"
+
+# Second probe: the vendor contract the supervision-branch model pin rests on.
+# An explicit model must beat the model a reopened session recorded, or a pin
+# would silently stop applying the first time the branch reopens. Proven with
+# a local, never-contacted fake provider with a placeholder key, so no request
+# leaves the machine and no user credential is read.
+modeldir="$TMP_ROOT/model-agent-dir"
+mkdir -p "$modeldir" "$TMP_ROOT/model-sessions"
+cat > "$modeldir/models.json" <<'JSON'
+{
+  "providers": {
+    "fm-live-fake": {
+      "baseUrl": "http://127.0.0.1:9/v1",
+      "api": "openai-completions",
+      "apiKey": "fm-live-placeholder",
+      "models": [
+        { "id": "fm-live-a", "name": "fm live a", "contextWindow": 8192, "maxTokens": 512 },
+        { "id": "fm-live-b", "name": "fm live b", "contextWindow": 8192, "maxTokens": 512 }
+      ]
+    }
+  }
+}
+JSON
+PI_PACKAGE_DIR="$PI_PACKAGE_DIR" PI_CODING_AGENT_DIR="$modeldir" FM_LIVE_SESSIONS="$TMP_ROOT/model-sessions" \
+  node --input-type=module > "$TMP_ROOT/model-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const pkg = pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href;
+const { ModelRegistry, ModelRuntime, SessionManager, createAgentSession } = await import(pkg);
+const runtime = await ModelRuntime.create({
+  authPath: `${process.env.PI_CODING_AGENT_DIR}/auth.json`,
+  modelsPath: `${process.env.PI_CODING_AGENT_DIR}/models.json`,
+});
+const registry = new ModelRegistry(runtime);
+await registry.refresh();
+
+// The candidates resolve through the same registry calls the picker makes.
+const first = registry.find("fm-live-fake", "fm-live-a");
+const second = registry.find("fm-live-fake", "fm-live-b");
+if (!first || !second) throw new Error("the real registry did not resolve the locally declared models");
+if (!registry.hasConfiguredAuth(first)) throw new Error("hasConfiguredAuth rejected a locally declared model with a key");
+if (!registry.getAvailable().some((model) => model.id === "fm-live-a")) {
+  throw new Error("getAvailable no longer lists a model with configured credentials, so the picker would be empty");
+}
+
+const cwd = process.cwd();
+const sessions = process.env.FM_LIVE_SESSIONS;
+const creating = SessionManager.create(cwd, sessions);
+const created = await createAgentSession({ cwd, sessionManager: creating, modelRuntime: runtime, model: first, tools: [] });
+if (created.session.model?.id !== "fm-live-a") {
+  throw new Error(`a pinned model was not applied on create: ${created.session.model?.id}`);
+}
+const sessionFile = creating.getSessionFile();
+
+// Reopen the SAME session with a different pin: the explicit model must win
+// over the one the session recorded.
+const repinned = await createAgentSession({
+  cwd,
+  sessionManager: SessionManager.open(sessionFile, sessions),
+  modelRuntime: runtime,
+  model: second,
+  tools: [],
+});
+if (repinned.session.model?.id !== "fm-live-b") {
+  throw new Error(`a reopened session ignored the pin and kept its recorded model: ${repinned.session.model?.id}`);
+}
+
+// With no pin the reopened session restores its own recorded model, which is
+// the untouched behavior an absent pin must keep.
+const unpinned = await createAgentSession({
+  cwd,
+  sessionManager: SessionManager.open(sessionFile, sessions),
+  modelRuntime: runtime,
+  tools: [],
+});
+if (unpinned.session.model?.id !== "fm-live-a") {
+  throw new Error(`an unpinned reopen did not restore the session's own model: ${unpinned.session.model?.id}`);
+}
+console.log("MODEL_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/model-output")
+if [ "$status" -ne 0 ] || [ "$out" != "MODEL_OK" ]; then
+  fail "real-SDK model-pin precedence guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION applies an explicit branch model on create and over a reopened session's recorded model"
+
+# Third probe: the vendor contract the supervision-branch EFFORT pin rests on.
+# Same never-contacted local provider, now declaring models with different
+# reasoning ceilings so Pi's own supported-level list and clamp are exercised
+# for real. The recorded-level case needs a session file on disk, and Pi
+# flushes one only once an assistant message exists, so the probe appends both
+# entries through the real SessionManager rather than hand-writing the format.
+effortdir="$TMP_ROOT/effort-agent-dir"
+mkdir -p "$effortdir" "$TMP_ROOT/effort-sessions"
+cat > "$effortdir/models.json" <<'JSON'
+{
+  "providers": {
+    "fm-live-fake": {
+      "baseUrl": "http://127.0.0.1:9/v1",
+      "api": "openai-completions",
+      "apiKey": "fm-live-placeholder",
+      "models": [
+        {
+          "id": "fm-live-deep",
+          "name": "fm live deep",
+          "contextWindow": 8192,
+          "maxTokens": 512,
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          }
+        },
+        { "id": "fm-live-shallow", "name": "fm live shallow", "contextWindow": 8192, "maxTokens": 512, "reasoning": true },
+        { "id": "fm-live-plain", "name": "fm live plain", "contextWindow": 8192, "maxTokens": 512 }
+      ]
+    }
+  }
+}
+JSON
+PI_PACKAGE_DIR="$PI_PACKAGE_DIR" PI_CODING_AGENT_DIR="$effortdir" FM_LIVE_SESSIONS="$TMP_ROOT/effort-sessions" \
+  node --input-type=module > "$TMP_ROOT/effort-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const pkg = pathToFileURL(`${packageRoot}/dist/index.js`).href;
+const { ModelRegistry, ModelRuntime, SessionManager, createAgentSession } = await import(pkg);
+// The same specifier the extension imports; Pi's extension loader aliases it
+// to this package's own bundled copy.
+const { clampThinkingLevel, getSupportedThinkingLevels } = await import(
+  pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-ai/dist/compat.js`).href
+);
+const runtime = await ModelRuntime.create({
+  authPath: `${process.env.PI_CODING_AGENT_DIR}/auth.json`,
+  modelsPath: `${process.env.PI_CODING_AGENT_DIR}/models.json`,
+});
+const registry = new ModelRegistry(runtime);
+await registry.refresh();
+
+const deep = registry.find("fm-live-fake", "fm-live-deep");
+const shallow = registry.find("fm-live-fake", "fm-live-shallow");
+const plain = registry.find("fm-live-fake", "fm-live-plain");
+if (!deep || !shallow || !plain) throw new Error("the real registry did not resolve the locally declared effort models");
+
+// Pi's own vocabulary, and the same list the extension declares for rejecting
+// an unrecognized hand-edited pin. The tracked strict typecheck enforces this
+// from the type side; this is the runtime half, checked after a Pi upgrade.
+const vocabulary = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const deepLevels = getSupportedThinkingLevels(deep);
+if (JSON.stringify(deepLevels) !== JSON.stringify(vocabulary)) {
+  throw new Error(`Pi's own effort vocabulary changed: ${JSON.stringify(deepLevels)}`);
+}
+// A reasoning model that maps no extended levels stops below them, and a
+// non-reasoning model offers only "off" - so the picker's menu really does
+// narrow with the model the captain just chose.
+const shallowLevels = getSupportedThinkingLevels(shallow);
+if (shallowLevels.includes("xhigh") || shallowLevels.includes("max") || !shallowLevels.includes("high")) {
+  throw new Error(`Pi no longer narrows the level list for an unmapped model: ${JSON.stringify(shallowLevels)}`);
+}
+if (JSON.stringify(getSupportedThinkingLevels(plain)) !== JSON.stringify(["off"])) {
+  throw new Error("Pi no longer reports a non-reasoning model as effort-off only");
+}
+if (clampThinkingLevel(shallow, "max") !== "high") {
+  throw new Error(`Pi's own clamp no longer lowers an unsupported level: ${clampThinkingLevel(shallow, "max")}`);
+}
+// An unrecognized token collapses to the model's lowest level, which is why
+// the extension rejects one as "no pin" before it can reach this clamp.
+if (clampThinkingLevel(shallow, "fm-not-a-level") !== "off") {
+  throw new Error("Pi's clamp no longer collapses an unrecognized token, so the extension's guard needs review");
+}
+
+const cwd = process.cwd();
+const sessions = process.env.FM_LIVE_SESSIONS;
+const creating = SessionManager.create(cwd, sessions);
+const created = await createAgentSession({
+  cwd,
+  sessionManager: creating,
+  modelRuntime: runtime,
+  model: deep,
+  thinkingLevel: "xhigh",
+  tools: [],
+});
+if (created.session.thinkingLevel !== "xhigh") {
+  throw new Error(`a pinned effort was not applied on create: ${created.session.thinkingLevel}`);
+}
+
+// Record a level in a session file Pi will actually restore from.
+const recording = SessionManager.create(cwd, sessions);
+recording.appendThinkingLevelChange("xhigh");
+recording.appendMessage({
+  role: "assistant",
+  content: [{ type: "text", text: "recorded" }],
+  api: "openai-completions",
+  provider: "fm-live-fake",
+  model: "fm-live-deep",
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  stopReason: "stop",
+});
+const recorded = recording.getSessionFile();
+
+// With no override the reopened session restores its own recorded level -
+// which is exactly why an unpinned branch must apply main's effort
+// explicitly instead of merely omitting it.
+const restored = await createAgentSession({
+  cwd,
+  sessionManager: SessionManager.open(recorded, sessions),
+  modelRuntime: runtime,
+  model: deep,
+  tools: [],
+});
+if (restored.session.thinkingLevel !== "xhigh") {
+  throw new Error(`a reopened session no longer restores its recorded effort: ${restored.session.thinkingLevel}`);
+}
+// An explicit level must beat that recorded one, or the pin would silently
+// stop applying the first time the branch reopens.
+const overridden = await createAgentSession({
+  cwd,
+  sessionManager: SessionManager.open(recorded, sessions),
+  modelRuntime: runtime,
+  model: deep,
+  thinkingLevel: "low",
+  tools: [],
+});
+if (overridden.session.thinkingLevel !== "low") {
+  throw new Error(`a reopened session ignored the effort override and kept its recorded level: ${overridden.session.thinkingLevel}`);
+}
+// Pi clamps at build time, so a pin above the branch model's ceiling lowers
+// the branch rather than refusing it.
+const clamped = await createAgentSession({
+  cwd,
+  sessionManager: SessionManager.open(recorded, sessions),
+  modelRuntime: runtime,
+  model: shallow,
+  thinkingLevel: "max",
+  tools: [],
+});
+if (clamped.session.thinkingLevel !== "high") {
+  throw new Error(`an over-ceiling effort override was not clamped on build: ${clamped.session.thinkingLevel}`);
+}
+console.log("EFFORT_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/effort-output")
+if [ "$status" -ne 0 ] || [ "$out" != "EFFORT_OK" ]; then
+  fail "real-SDK effort-pin guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level"
+
+# Fourth probe: the vendor contract the captain-outcome envelope rests on. Pi
+# keeps ONLY `content` when it converts a custom message for the provider, so
+# `content` is the entire payload main's model receives and is the only place a
+# captain outcome can carry its own identity. When it carried none, main could
+# not tell an incoming outcome from its own earlier answer and re-emitted that
+# answer instead of relaying the outcome. This runs the real SDK's own
+# convertToLlm over bytes the REAL protocol encoder produced, then hands the
+# model-visible text back to the real parser, proving the delivery path end to
+# end instead of assuming it.
+captain_payload=$(printf 'relay this\n\ntask-9: PR ready' \
+  | "$ROOT/bin/fm-operational-input.sh" encode branch-outcome) \
+  || fail "the operational-input owner does not encode the branch-outcome kind"
+CAPTAIN_PAYLOAD="$captain_payload" ROUTINE_PAYLOAD="⛵ task-9: worker healthy" \
+  DELIVERY_DIR="$TMP_ROOT" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/delivery-output" 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const pkg = resolve(process.env.PI_PACKAGE_DIR);
+const { convertToLlm } = await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+if (typeof convertToLlm !== "function") {
+  throw new Error("this Pi no longer exports convertToLlm: the delivery contract is unproven");
+}
+
+const captainContent = process.env.CAPTAIN_PAYLOAD;
+const routineContent = process.env.ROUTINE_PAYLOAD;
+const converted = convertToLlm([
+  { role: "custom", customType: "fm-branch-merge", content: captainContent, display: false, timestamp: 1 },
+  { role: "custom", customType: "fm-branch-merge", content: routineContent, display: true, timestamp: 2 },
+]);
+if (converted.length !== 2) {
+  throw new Error(`Pi no longer delivers one provider message per custom message: ${converted.length}`);
+}
+for (const message of converted) {
+  if (message.role !== "user") {
+    throw new Error(`Pi delivers a custom message as role ${message.role}, not user`);
+  }
+  if ("customType" in message || "display" in message) {
+    throw new Error("Pi now forwards customType or display, so content is no longer the whole payload");
+  }
+}
+const textOf = (message) =>
+  typeof message.content === "string"
+    ? message.content
+    : message.content.map((block) => block.text ?? "").join("");
+if (textOf(converted[0]) !== captainContent || textOf(converted[1]) !== routineContent) {
+  throw new Error("Pi altered custom-message content on the way to the provider");
+}
+writeFileSync(`${process.env.DELIVERY_DIR}/live-delivered-captain`, textOf(converted[0]));
+writeFileSync(`${process.env.DELIVERY_DIR}/live-delivered-routine`, textOf(converted[1]));
+console.log("DELIVERY_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/delivery-output")
+if [ "$status" -ne 0 ] || [ "$out" != "DELIVERY_OK" ]; then
+  fail "real-SDK custom-message delivery guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+delivered_kind=$("$ROOT/bin/fm-operational-input.sh" kind < "$TMP_ROOT/live-delivered-captain") \
+  || fail "pi-coding-agent $PI_VERSION delivered the captain outcome as text the protocol cannot type"
+[ "$delivered_kind" = branch-outcome ] \
+  || fail "pi-coding-agent $PI_VERSION delivered the captain outcome as kind '$delivered_kind'"
+if "$ROOT/bin/fm-operational-input.sh" kind < "$TMP_ROOT/live-delivered-routine" >/dev/null 2>&1; then
+  fail "a routine note survived Pi conversion as typed operational input"
+fi
+pass "real Pi SDK $PI_VERSION delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model"

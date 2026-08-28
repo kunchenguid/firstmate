@@ -411,6 +411,25 @@ test_full_scan_budget_includes_wake_lock_wait() {
   pass "aggregate scan budget includes durable wake operations"
 }
 
+# A secondmate home seeded without its parent binding cannot report ANY terminal
+# outcome upward, and every later one fails for the same reason. The diagnostic
+# has to name the binding, or three weeks of identical failures read as three
+# weeks of unrelated report failures.
+test_missing_parent_binding_names_itself() {
+  local out
+  make_world missing-binding
+  printf 'mate\n' > "$MATE/.fm-secondmate-home"
+  write_child "$MATE" child 'done: PR merged'
+  out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup)
+  case "$out" in
+    *"actionable: inactive terminal outcome needs parent report"*".fm-secondmate-parent"*) ;;
+    *) fail "a missing parent binding did not name itself: $out" ;;
+  esac
+  [ "$(outcome_count "$MATE" reported)" = 0 ] \
+    || fail "an outcome that never reached a parent was recorded as reported"
+  pass "a secondmate home with no parent binding names the missing binding instead of failing quietly"
+}
+
 test_notice_recovery_does_not_duplicate_wake() {
   local record err seq generation
   make_world notice-recovery; bind_secondmate remote
@@ -459,6 +478,7 @@ test_watcher_hook_and_idle_secondmate_exemption
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
+test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 
 echo "all inactive reconciliation tests passed"
