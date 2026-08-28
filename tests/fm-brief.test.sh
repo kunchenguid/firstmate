@@ -177,9 +177,11 @@ test_help_includes_entire_header() {
   pass "fm-brief.sh: --help renders the complete header"
 }
 
-# Registry with one project per delivery mode. fm-brief.sh no longer reads it -
-# the ship mode arrives as an explicit flag - so this fixture exists to prove the
-# scaffold ignores the registered posture (test_ship_mode_is_explicit_not_registry).
+# Registry with one project per delivery mode. The ship mode arrives as an
+# explicit flag, so this fixture exists to prove the scaffold follows the
+# explicit --mode regardless of the registered posture
+# (test_ship_mode_is_explicit_not_registry). The registry is consulted only for
+# the optional `jj` token that selects the jj branch step, never for the mode.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
@@ -246,7 +248,8 @@ ROWS
 
 # The registry is the captain's standing posture, not this task's answer: the
 # scaffold must follow the explicit flag even when the project is registered
-# with a different mode, and must not consult the registry at all.
+# with a different mode; the registry is consulted only for the optional `jj`
+# token that switches the branch step, never for the delivery mode.
 test_ship_mode_is_explicit_not_registry() {
   local home brief
   home="$TMP_ROOT/explicit-over-registry-home"
@@ -259,12 +262,156 @@ test_ship_mode_is_explicit_not_registry() {
   assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
-  # An unregistered project is not a blocker either, because nothing is looked up.
+  # An unregistered project is not a blocker either: a missing row simply
+  # means the default git branch step.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
     || fail "unregistered project should still scaffold from the explicit mode"
   grep -qx "Delivery contract: mode=local-only" "$home/data/brief-explicit-a6/brief.md" \
     || fail "unregistered project did not honour the explicit --mode"
   pass "fm-brief.sh: the explicit ship mode wins over the registered posture"
+}
+
+# A `jj` token after the mode bracket opts the scaffold into the jj bookmark
+# branch step; its absence keeps the git branch step. The token is honoured
+# through the FM_DATA_OVERRIDE seam like the rest of the script, and only when
+# the jj/jjhouse tooling is present. Tooling presence is simulated with a
+# minimal PATH so the tests are deterministic whether or not the host (or CI
+# runner) has jujutsu installed.
+make_tooling_bin() {
+  local dir=$1; shift
+  mkdir -p "$dir"
+  local tool real
+  for tool in env bash awk cat mkdir dirname basename pwd sed grep tail tr; do
+    real=$(command -v "$tool") || continue
+    ln -sf "$real" "$dir/$tool"
+  done
+  local fake
+  for fake in "$@"; do
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$dir/$fake"
+    chmod +x "$dir/$fake"
+  done
+}
+
+test_jj_token_selects_jj_branch_step() {
+  local home data brief toolbin
+  home="$TMP_ROOT/jj-token-home"
+  data="$TMP_ROOT/jj-token-data"
+  toolbin="$TMP_ROOT/jj-toolbin"
+  make_tooling_bin "$toolbin" jj jjhouse
+  mkdir -p "$data"
+  cat > "$data/projects.md" <<'EOF'
+- jj-proj [no-mistakes] jj - fixture for jj-managed (added 2026-07-01)
+- git-proj [no-mistakes] - fixture for git-managed (added 2026-07-01)
+EOF
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
+    "$ROOT/bin/fm-brief.sh" brief-jj-a9 jj-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "jj-token brief should scaffold"
+  brief="$data/brief-jj-a9/brief.md"
+  assert_grep 'jj bookmark create fm/brief-jj-a9' "$brief" \
+    "jj-token project brief did not scaffold the jj bookmark step"
+  assert_no_grep 'git checkout -b fm/brief-jj-a9' "$brief" \
+    "jj-token project brief still scaffolds the git branch step"
+  assert_grep 'command -v jj && command -v jjhouse' "$brief" \
+    "jj-token brief does not make the worker verify the jj tooling in its own environment"
+  assert_grep 'blocked: jj tooling missing in worker environment' "$brief" \
+    "jj-token brief does not give the worker a blocked path when the jj tooling is missing in the worker env"
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
+    "$ROOT/bin/fm-brief.sh" brief-git-b9 git-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "git-managed brief should scaffold"
+  brief="$data/brief-git-b9/brief.md"
+  assert_grep 'git checkout -b fm/brief-git-b9' "$brief" \
+    "project without the jj token did not keep the git branch step"
+  assert_no_grep 'jj bookmark create fm/brief-git-b9' "$brief" \
+    "project without the jj token got the jj bookmark step"
+  assert_no_grep 'command -v jj' "$brief" \
+    "git-managed brief carries the worker-side jj tooling check it should not need"
+
+  # A relocated data dir (FM_DATA_OVERRIDE) is where the token is read from;
+  # a home whose default-location registry has no jj token must not flip it.
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- jj-proj [no-mistakes] - no jj token in the default-location registry (added 2026-07-01)
+EOF
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
+    "$ROOT/bin/fm-brief.sh" brief-jj-c9 jj-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "jj-token brief with relocated data should scaffold"
+  brief="$data/brief-jj-c9/brief.md"
+  assert_grep 'jj bookmark create fm/brief-jj-c9' "$brief" \
+    "FM_DATA_OVERRIDE relocated registry token was ignored"
+  pass "fm-brief.sh: jj registry token selects the jj branch step through FM_DATA_OVERRIDE"
+}
+
+# The jj token never emits a mandatory command the worker cannot run: a
+# jj-managed project's AGENTS.md forbids raw git writes, so when the token is
+# present but the jj/jjhouse tooling is absent from PATH there is no branch
+# step this host can run and the scaffold refuses outright (exit 1, no brief)
+# instead of degrading to a forbidden git command.
+test_jj_token_without_tooling_refuses_scaffold() {
+  local home data out rc
+  home="$TMP_ROOT/jj-no-tooling-home"
+  data="$TMP_ROOT/jj-no-tooling-data"
+  make_tooling_bin "$TMP_ROOT/jj-no-toolbin"
+  mkdir -p "$data"
+  cat > "$data/projects.md" <<'EOF'
+- jj-proj [no-mistakes] jj - fixture for jj-managed (added 2026-07-01)
+EOF
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$TMP_ROOT/jj-no-toolbin" \
+    "$ROOT/bin/fm-brief.sh" brief-nool-d1 jj-proj --mode no-mistakes 2>&1); rc=$?
+  expect_code 1 "$rc" "jj token without jj tooling must refuse the scaffold (got $rc)"
+  assert_contains "$out" "jj-proj is registered jj-managed" \
+    "jj token without jj tooling must name the misconfigured project"
+  assert_contains "$out" "jjhouse" \
+    "jj token without jj tooling must point at the missing tooling"
+  assert_absent "$data/brief-nool-d1/brief.md" \
+    "jj token without jj tooling must not scaffold a brief with an unrunnable first action"
+  pass "fm-brief.sh: jj token without jj/jjhouse tooling refuses the scaffold instead of a git fallback"
+}
+
+# The jj scan reads only the documented registry line format: the mode bracket
+# must open at field 3 right after the project name. Legacy rows without a
+# bracket, and bracket-like description text after the mode bracket, must never
+# be misread as an opt-in even when the jj tooling is installed.
+test_jj_scan_ignores_legacy_description_brackets() {
+  local home data brief toolbin
+  home="$TMP_ROOT/jj-legacy-home"
+  data="$TMP_ROOT/jj-legacy-data"
+  toolbin="$TMP_ROOT/jj-legacy-toolbin"
+  make_tooling_bin "$toolbin" jj jjhouse
+  mkdir -p "$data"
+  cat > "$data/projects.md" <<'EOF'
+- legacy-proj - uses [custom] jj workflows in the description (added 2026-07-01)
+- v2legacy-proj - handles [v2] jj migration (added 2026-07-01)
+- bracketed-proj [no-mistakes] - fixture with [note] jj text (added 2026-07-01)
+EOF
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
+    "$ROOT/bin/fm-brief.sh" brief-legacy-e1 legacy-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "legacy-row brief should scaffold"
+  brief="$data/brief-legacy-e1/brief.md"
+  assert_grep 'git checkout -b fm/brief-legacy-e1' "$brief" \
+    "legacy row without a mode bracket was misread as jj-managed"
+  assert_no_grep 'jj bookmark create fm/brief-legacy-e1' "$brief" \
+    "legacy description bracket text flipped the branch step to jj"
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
+    "$ROOT/bin/fm-brief.sh" brief-v2legacy-f3 v2legacy-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "legacy [v2] jj row brief should scaffold"
+  brief="$data/brief-v2legacy-f3/brief.md"
+  assert_grep 'git checkout -b fm/brief-v2legacy-f3' "$brief" \
+    "legacy [v2] jj description row was misread as jj-managed"
+  assert_no_grep 'jj bookmark create fm/brief-v2legacy-f3' "$brief" \
+    "legacy [v2] jj description row flipped the branch step to jj"
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
+    "$ROOT/bin/fm-brief.sh" brief-bracket-e2 bracketed-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "bracketed-description brief should scaffold"
+  brief="$data/brief-bracket-e2/brief.md"
+  assert_grep 'git checkout -b fm/brief-bracket-e2' "$brief" \
+    "description text after the mode bracket flipped the branch step to jj"
+  assert_no_grep 'jj bookmark create fm/brief-bracket-e2' "$brief" \
+    "description bracket text after the mode bracket was misread as a jj token"
+  pass "fm-brief.sh: jj scan reads only the documented registry line format"
 }
 
 # yolo is firstmate's merge authority and never reaches the worker, and a scout
@@ -757,6 +904,9 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
+test_jj_token_selects_jj_branch_step
+test_jj_token_without_tooling_refuses_scaffold
+test_jj_scan_ignores_legacy_description_brackets
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording

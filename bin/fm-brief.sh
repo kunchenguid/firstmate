@@ -29,7 +29,15 @@
 #   without it carry a loud declaration so an omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never reads it:
+# captain's standing posture as context plus the optional `jj` opt-in token that
+# selects jj bookmarks for jj-managed projects when the jj/jjhouse tooling is
+# installed (a jj-managed project without that tooling refuses to scaffold: its
+# AGENTS.md forbids raw git writes, so no branch command this host could emit
+# would be runnable and the token must never mandate one; the generated brief
+# also makes the worker verify the tooling in its own environment, which may
+# not inherit this host's PATH, and report `blocked:` if it is missing); the
+# delivery mode itself is never read from it here - the explicit --mode is
+# authoritative:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
@@ -433,6 +441,54 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+# jj-managed projects (registry token `jj` after the mode bracket) get a jj
+# branch step instead of `git checkout -b`: their AGENTS.md forbids raw git
+# write commands and jj is their version control. The token is part of the
+# registry line format documented in bin/fm-project-mode.sh, so firstmate
+# records it once per project instead of hand-patching every brief.
+#
+# The token takes effect only when the tooling that makes the step executable
+# is present on this host (the same host the crew worktrees live on): `jj`
+# runs the bookmark command and `jjhouse` provisions the jj workspace pool.
+# A jj-managed project without that tooling cannot be worked on from this host
+# at all: `jj bookmark create` would fail and the git fallback would violate
+# the project's raw-git-write ban, so the scaffold refuses instead of emitting
+# a mandatory first action the worker cannot run. The scaffold PATH check is a
+# fast-fail only, not the whole gate: the worker runs in a daemon-owned pane
+# that does not inherit this PATH, so the generated branch step makes the
+# worker verify jj/jjhouse in its own environment and report a `blocked:`
+# status if either is missing there.
+JJ_MANAGED=0
+if [ -f "$DATA/projects.md" ]; then
+  # The token is read only from the documented registry line format: the mode
+  # bracket must open at field 3 right after the project name. Legacy rows
+  # without a bracket are never scanned, so bracket-like description text
+  # cannot be mistaken for an opt-in.
+  JJ_TOKEN=$(awk -v n="$REPO" '
+    $1=="-" && $2==n {
+      if ($3 ~ /^\[/) {
+        for (i=3; i<=NF; i++)
+          if ($i ~ /\]$/) {
+            if ($(i+1)=="jj") print "jj"
+            break
+          }
+      }
+      exit
+    }
+  ' "$DATA/projects.md")
+  [ "$JJ_TOKEN" = jj ] && JJ_MANAGED=1
+fi
+if [ "$JJ_MANAGED" = 1 ]; then
+  if command -v jj >/dev/null 2>&1 && command -v jjhouse >/dev/null 2>&1; then
+    BRANCH_STEP="1. First action: create your branch. This repo is jj-managed (its AGENTS.md forbids raw git write commands): first verify the jj tooling exists in YOUR environment, not just firstmate's - run \`command -v jj && command -v jjhouse\`; if either is missing, append \`blocked: jj tooling missing in worker environment\` to the status file and stop; if both are present, run \`jj bookmark create fm/$ID\`."
+  else
+    echo "error: $REPO is registered jj-managed in data/projects.md but jj/jjhouse is not on PATH; a jj-managed project forbids raw git writes, so there is no branch step this host can run - provision jjhouse here or remove the jj token, then re-scaffold" >&2
+    exit 1
+  fi
+else
+  BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -448,7 +504,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$BRANCH_STEP$SETUP2
 
 # Rules
 $RULE1

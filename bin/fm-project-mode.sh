@@ -15,6 +15,7 @@
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#   - <name> [<mode>] jj - <desc> (added <date>)       -> <mode> off (jj-managed)
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -28,6 +29,16 @@
 #                          project as the remote-backed pipeline project it is.
 # yolo (orthogonal) = merge authority only: when on, firstmate merges green,
 #   in-scope work itself (AGENTS.md section 7).
+# jj (orthogonal) = the project's crew worktrees are jj-managed: bin/fm-brief.sh
+#   scaffolds `jj bookmark create` instead of `git checkout -b` because the
+#   project's AGENTS.md forbids raw git write commands. The token implies
+#   captain-side jjhouse provisioning and is ignored by this parser, so the
+#   emitted mode/yolo are unaffected. fm-brief.sh honours the token only when
+#   the jj/jjhouse tooling is on PATH, else it refuses the scaffold: a jj-managed
+#   project without that tooling has no runnable branch step (its AGENTS.md
+#   forbids the raw-git fallback), so no brief is emitted. The generated brief
+#   also makes the worker verify the tooling in its own environment and report
+#   `blocked:` if it is missing there (mechanics in bin/fm-brief.sh).
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.
