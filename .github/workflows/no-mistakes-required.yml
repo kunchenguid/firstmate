@@ -34,6 +34,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
@@ -100,6 +101,26 @@ jobs:
               } >&2
               exit 1
             fi
+            # Bind the attestation to this PR's head: an attestation produced for an
+            # earlier commit is not proof this head passed the pipeline. The
+            # attestation's head_sha must exactly match the pull request head.
+            attestation_head=$(printf '%s' "$json" | jq -r '.head_sha // empty' 2>/dev/null) || attestation_head=''
+            if [ -z "$attestation_head" ] || [ "$attestation_head" != "$PR_HEAD_SHA" ]; then
+              {
+                echo "::error::The no-mistakes pipeline attestation is not bound to this pull request head."
+                echo
+                echo "The attestation's head_sha (${attestation_head:-missing}) must exactly match the"
+                echo "pull request head (${PR_HEAD_SHA}). An attestation produced for an earlier"
+                echo "commit does not prove this head passed review, test, and document."
+                echo
+                echo "Re-run the pipeline with 'git push no-mistakes' at the current head."
+                echo "See CONTRIBUTING.md for setup and the full workflow."
+                echo
+                echo "PR author: ${PR_AUTHOR}"
+              } >&2
+              exit 1
+            fi
+            echo "Attestation is bound to pull request head ${PR_HEAD_SHA}."
             incomplete=''
             for required in review test document; do
               status=$(printf '%s' "$json" | jq -r --arg step "$required" \

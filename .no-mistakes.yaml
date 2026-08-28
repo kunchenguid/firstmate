@@ -48,7 +48,8 @@ document:
 commands:
   lint: 'bin/fm-lint.sh'
 
-# Keep test evidence out of this repo; it stays in a temp dir instead.
+# Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
+# The evidence is not committed to the feature or default branch.
 test:
   evidence:
-    store_in_repo: false
+    store_in_repo: true
