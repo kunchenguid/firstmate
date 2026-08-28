@@ -521,6 +521,21 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
+test_backend_source_missing_adapter_returns_to_caller() {
+  local saved_dir out
+  saved_dir=$FM_BACKEND_LIB_DIR
+  FM_BACKEND_LIB_DIR="$TMP_ROOT/missing-adapter"
+  mkdir -p "$FM_BACKEND_LIB_DIR/backends"
+  set +e
+  out=$(fm_backend_source herdr 2>&1)
+  local rc=$?
+  set -e
+  FM_BACKEND_LIB_DIR=$saved_dir
+  [ "$rc" -ne 0 ] || fail "fm_backend_source should refuse a missing adapter"
+  [ -z "$out" ] || fail "fm_backend_source should leave refusal reporting to its caller"
+  pass "fm_backend_source: missing adapter returns non-zero without aborting its caller"
+}
+
 # The fm_backend_source missing/unreadable adapter refusal contract lives in
 # tests/fm-backend-adapter-source.test.sh. It is deliberately kept out of this
 # file: that contract only fails on stock macOS bash 3.2, so it must run on the
@@ -1155,6 +1170,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_missing_adapter_returns_to_caller
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
