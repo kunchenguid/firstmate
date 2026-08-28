@@ -96,7 +96,10 @@ import {
   FOLLOW_MAIN_VALUE,
   type BranchPickerItem,
 } from "./lib/fm-branch-model-picker.ts";
-import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import {
+  classifyFirstmateCurrentOperationalText,
+  encodeFirstmateOperationalInput,
+} from "./lib/fm-operational-input.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -302,10 +305,9 @@ function textOfContent(content: unknown): string {
 // Operational injections (watcher wakes, away-supervisor escalations, launch
 // briefs) are fleet machinery, not captain dialog; the report's volume
 // analysis counts them apart from dialog, and mirroring them would feed the
-// branch its own supervision traffic back. Current injections start with the
-// U+2063 operational prefix; the plain legacy form starts with FIRSTMATE.
+// branch its own supervision traffic back.
 function isOperationalUserText(text: string): boolean {
-  return text.startsWith("⁣") || /^FIRSTMATE[ _]/.test(text);
+  return classifyFirstmateCurrentOperationalText(text) !== undefined;
 }
 
 function capMirrorText(text: string): string {

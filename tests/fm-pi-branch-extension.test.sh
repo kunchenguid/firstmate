@@ -895,6 +895,7 @@ const longRequests = [
   `${"middle context ".repeat(250)}${explicitRequest}${" middle context".repeat(250)}`,
   `${"tail context ".repeat(500)}${explicitRequest}`,
 ];
+const requestedPrompts = [...longRequests, "FIRSTMATE give me a fresh system-resource report."];
 // Match Pi's real AgentSession.prompt ordering: before_agent_start receives
 // the expanded prompt before _runAgentPrompt appends its user message to the
 // SessionManager. Keeping entries stale at the hook boundary is the regression.
@@ -906,6 +907,14 @@ const mainCtx = {
     getEntries: () => entries,
   },
 };
+const operational = spawnSync(
+  "bash",
+  [`${realRoot}/bin/fm-operational-input.sh`, "encode", "watcher"],
+  { encoding: "utf8", input: "operational watcher injection" },
+);
+if (operational.status !== 0) throw new Error(`could not create operational input: ${operational.stderr}`);
+fire("before_agent_start", { prompt: operational.stdout }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: operational.stdout } });
 const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
 fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
@@ -930,9 +939,11 @@ if (visibleToMain.isError || !mainOutcomeText.includes("healthy resource report:
 }
 if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocessed the fleet event");
 
-for (let index = 0; index < longRequests.length; index += 1) {
-  const content = longRequests[index];
-  if (content.length <= 4000) throw new Error(`request fixture ${index} did not exceed the mirror bound`);
+for (let index = 0; index < requestedPrompts.length; index += 1) {
+  const content = requestedPrompts[index];
+  if (index < longRequests.length && content.length <= 4000) {
+    throw new Error(`request fixture ${index} did not exceed the mirror bound`);
+  }
   fire("before_agent_start", { prompt: content }, mainCtx);
   // Pi persists this only after every before_agent_start handler has returned.
   entries.push({ type: "message", message: { role: "user", content } });
@@ -954,13 +965,16 @@ for (let index = 0; index < longRequests.length; index += 1) {
 const mirroredCaptainText = globalThis.__fmSessions[0].ops
   .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
   .map((op) => op.message.content);
-for (const content of [unsolicitedPrompt, ...longRequests]) {
+for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
   const copies = mirroredCaptainText.filter((text) => text === `[captain] ${content}`).length;
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
-if ((globalThis.__fmPrompts ?? []).length !== 4) throw new Error("a handled fleet wake was rerun");
-if (sentToMain.length !== 4) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
-if (fleetOperations.length !== 8 || fleetOperations.some((operation) => operation.status !== 0)) {
+if (mirroredCaptainText.some((text) => text.includes("operational watcher injection"))) {
+  throw new Error("canonical operational input entered captain mirror context");
+}
+if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
+if (sentToMain.length !== 5) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
+if (fleetOperations.length !== 10 || fleetOperations.some((operation) => operation.status !== 0)) {
   throw new Error(`fleet event ownership repeated or failed work: ${JSON.stringify(fleetOperations)}`);
 }
 if (fleetOperations.some((operation) => operation.actor !== "branch")) {
@@ -970,7 +984,7 @@ if (existsSync(`${home}/state/.wake-queue`) && readFileSync(`${home}/state/.wake
   throw new Error("acknowledged fleet wake remained queued for another owner");
 }
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-if (rows.length !== 4 || rows[0].verdict !== "routine" || rows.slice(1).some((row) => row.verdict !== "captain")) {
+if (rows.length !== 5 || rows[0].verdict !== "routine" || rows.slice(1).some((row) => row.verdict !== "captain")) {
   throw new Error(`provider classifications were not recorded once in order: ${JSON.stringify(rows)}`);
 }
 if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes remained unread for redelivery");
