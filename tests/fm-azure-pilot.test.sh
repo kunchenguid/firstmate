@@ -103,6 +103,21 @@ assert "spot" not in lower
 nested = next(resource for resource in data["resources"] if resource["type"] == "Microsoft.Resources/deployments")
 resources = nested["properties"]["template"]["resources"]
 
+# Incremental worker-create owns only the exact slot resources. Existing
+# foundation resources are referenced, not resubmitted, and ARM automatically
+# removes dependencies on resources whose condition is false.
+incremental_foundation_condition = "not(parameters('incrementalWorkerDeploy'))"
+for index in (0, 2):
+    assert data["resources"][index].get("condition") == f"[{incremental_foundation_condition}]"
+worker_resource_indices = {19, 36, 39, 40, 42, 44, 47, 49, 51, 60}
+assert len(resources) == 63
+for index, resource in enumerate(resources):
+    condition = resource.get("condition", "")
+    if index in worker_resource_indices:
+        assert incremental_foundation_condition not in condition, (index, resource["type"], resource["name"])
+    else:
+        assert incremental_foundation_condition in condition, (index, resource["type"], resource["name"])
+
 supervisor_condition = "[and(not(parameters('incrementalWorkerDeploy')), not(equals(parameters('capacityProfile'), 'foundation')))]"
 supervisor_resource_names = {
     "[variables('supervisorIdentityName')]",

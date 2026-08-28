@@ -324,7 +324,8 @@
       "apiVersion": "2022-09-01",
       "name": "[variables('safeResourceGroupName')]",
       "location": "[parameters('region')]",
-      "tags": "[variables('commonTags')]"
+      "tags": "[variables('commonTags')]",
+      "condition": "[not(parameters('incrementalWorkerDeploy'))]"
     },
     {
       "type": "Microsoft.Resources/deployments",
@@ -589,7 +590,8 @@
                   "defaultAction": "Deny",
                   "ipRules": "[if(empty(parameters('operatorDataPlaneIp')), createArray(), createArray(createObject('value', parameters('operatorDataPlaneIp'), 'action', 'Allow')))]"
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.OperationalInsights/workspaces",
@@ -604,7 +606,8 @@
                 },
                 "publicNetworkAccessForIngestion": "Enabled",
                 "publicNetworkAccessForQuery": "Enabled"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Insights/actionGroups",
@@ -622,7 +625,8 @@
                     "useCommonAlertSchema": true
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/networkSecurityGroups",
@@ -646,7 +650,8 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/networkSecurityGroups",
@@ -670,7 +675,8 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/networkSecurityGroups",
@@ -707,7 +713,8 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/networkSecurityGroups",
@@ -744,7 +751,8 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/publicIPAddresses",
@@ -759,7 +767,8 @@
                 "publicIPAllocationMethod": "Static",
                 "publicIPAddressVersion": "IPv4",
                 "idleTimeoutInMinutes": 4
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/natGateways",
@@ -780,7 +789,8 @@
                     "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('natPublicIpName'))]"
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/virtualNetworks",
@@ -899,21 +909,24 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/privateDnsZones",
               "apiVersion": "2020-06-01",
               "name": "[variables('blobPrivateDnsZone')]",
               "location": "global",
-              "tags": "[variables('privateDnsZoneTags')]"
+              "tags": "[variables('privateDnsZoneTags')]",
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/privateDnsZones",
               "apiVersion": "2020-06-01",
               "name": "[variables('vaultPrivateDnsZone')]",
               "location": "global",
-              "tags": "[variables('privateDnsZoneTags')]"
+              "tags": "[variables('privateDnsZoneTags')]",
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
@@ -929,7 +942,8 @@
                 "virtualNetwork": {
                   "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
@@ -945,7 +959,8 @@
                 "virtualNetwork": {
                   "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.KeyVault/vaults",
@@ -968,7 +983,8 @@
                   "bypass": "None",
                   "defaultAction": "Deny"
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts",
@@ -993,7 +1009,8 @@
                   "defaultAction": "Deny",
                   "ipRules": "[if(empty(parameters('operatorDataPlaneIp')), createArray(), createArray(createObject('value', parameters('operatorDataPlaneIp'), 'action', 'Allow')))]"
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices",
@@ -1021,7 +1038,8 @@
                   "enabled": true,
                   "days": 30
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
@@ -1032,7 +1050,8 @@
               ],
               "properties": {
                 "publicAccess": "None"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
@@ -1043,7 +1062,8 @@
               ],
               "properties": {
                 "publicAccess": "None"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
@@ -1069,7 +1089,8 @@
               ],
               "properties": {
                 "publicAccess": "None"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
@@ -1080,7 +1101,8 @@
               ],
               "properties": {
                 "publicAccess": "None"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
@@ -1091,7 +1113,8 @@
               ],
               "properties": {
                 "publicAccess": "None"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
@@ -1106,7 +1129,8 @@
                   "schema": "fm-azure-runner-control-v1",
                   "deploymentgeneration": "[parameters('deploymentGeneration')]"
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
@@ -1117,7 +1141,8 @@
               ],
               "properties": {
                 "publicAccess": "None"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
@@ -1128,7 +1153,8 @@
               ],
               "properties": {
                 "publicAccess": "None"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/privateEndpoints",
@@ -1156,7 +1182,8 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
@@ -1175,7 +1202,8 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/privateEndpoints",
@@ -1202,7 +1230,8 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
@@ -1221,7 +1250,8 @@
                     }
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "condition": "[and(not(parameters('incrementalWorkerDeploy')), not(equals(parameters('capacityProfile'), 'foundation')))]",
@@ -1236,35 +1266,40 @@
               "apiVersion": "2023-01-31",
               "name": "[variables('validationIdentityName')]",
               "location": "[parameters('region')]",
-              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'validation-cell', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden'))]"
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'validation-cell', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden'))]",
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
               "apiVersion": "2023-01-31",
               "name": "[variables('reviewIdentityName')]",
               "location": "[parameters('region')]",
-              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'policy-review', 'lifecycle', 'elastic-scale-to-zero', 'credential-boundary', 'separate'))]"
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'policy-review', 'lifecycle', 'elastic-scale-to-zero', 'credential-boundary', 'separate'))]",
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
               "apiVersion": "2023-01-31",
               "name": "[variables('browserIdentityName')]",
               "location": "[parameters('region')]",
-              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'browser-tool', 'lifecycle', 'elastic-scale-to-zero', 'credential-boundary', 'uncredentialed-tool'))]"
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'browser-tool', 'lifecycle', 'elastic-scale-to-zero', 'credential-boundary', 'uncredentialed-tool'))]",
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
               "apiVersion": "2023-01-31",
               "name": "[variables('validationShardIdentityName')]",
               "location": "[parameters('region')]",
-              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'validation-shard', 'credential-boundary', 'uncredentialed-command', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden', 'cost-attribution', 'validation-shards'))]"
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'validation-shard', 'credential-boundary', 'uncredentialed-command', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden', 'cost-attribution', 'validation-shards'))]",
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
               "apiVersion": "2023-01-31",
               "name": "[variables('verifierIdentityName')]",
               "location": "[parameters('region')]",
-              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'networkless-verifier', 'credential-boundary', 'fresh-uncredentialed', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden', 'cost-attribution', 'verification'))]"
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'networkless-verifier', 'credential-boundary', 'fresh-uncredentialed', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden', 'cost-attribution', 'verification'))]",
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
@@ -1696,7 +1731,8 @@
                     ]
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "condition": "[and(not(parameters('incrementalWorkerDeploy')), not(equals(parameters('capacityProfile'), 'foundation')))]",
@@ -1887,7 +1923,8 @@
                     "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
                   ]
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Insights/scheduledQueryRules",
@@ -1927,7 +1964,8 @@
                     "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
                   ]
                 }
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Insights/metricAlerts",
@@ -1967,7 +2005,8 @@
                     "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
                   }
                 ]
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/providers/roleAssignments",
@@ -1979,7 +2018,8 @@
               "properties": {
                 "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobDelegatorRoleId'))]",
                 "principalId": "[parameters('runnerOperatorPrincipalId')]"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers/providers/roleAssignments",
@@ -1991,7 +2031,8 @@
               "properties": {
                 "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobDataContributorRoleId'))]",
                 "principalId": "[parameters('runnerOperatorPrincipalId')]"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "type": "Microsoft.Storage/storageAccounts/blobServices/containers/providers/roleAssignments",
@@ -2005,7 +2046,8 @@
                 "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobDataContributorRoleId'))]",
                 "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('validationShardIdentityName')), '2023-01-31').principalId]",
                 "principalType": "ServicePrincipal"
-              }
+              },
+              "condition": "[not(parameters('incrementalWorkerDeploy'))]"
             },
             {
               "condition": "[and(not(parameters('incrementalWorkerDeploy')), not(equals(parameters('capacityProfile'), 'foundation')))]",
@@ -2056,7 +2098,7 @@
               }
             },
             {
-              "condition": "[parameters('protectDurableState')]",
+              "condition": "[and(not(parameters('incrementalWorkerDeploy')), parameters('protectDurableState'))]",
               "type": "Microsoft.Storage/storageAccounts/providers/locks",
               "apiVersion": "2016-09-01",
               "name": "[format('{0}/Microsoft.Authorization/state-storage-lock', parameters('storageAccountName'))]",
@@ -2069,7 +2111,7 @@
               }
             },
             {
-              "condition": "[parameters('protectDurableState')]",
+              "condition": "[and(not(parameters('incrementalWorkerDeploy')), parameters('protectDurableState'))]",
               "type": "Microsoft.KeyVault/vaults/providers/locks",
               "apiVersion": "2016-09-01",
               "name": "[format('{0}/Microsoft.Authorization/key-vault-lock', parameters('keyVaultName'))]",
@@ -2221,7 +2263,8 @@
             ]
           }
         }
-      }
+      },
+      "condition": "[not(parameters('incrementalWorkerDeploy'))]"
     }
   ],
   "outputs": {
