@@ -48,6 +48,13 @@
 #                   alone at the tail. Default is 1 (serial) for every selection
 #                   mode EXCEPT --changed, which defaults to min(4, cpus) when
 #                   every script it selected is admissible. Explicit --jobs wins.
+#   --per-script-timeout-secs N
+#                   terminate a script that runs longer than N seconds and
+#                   record it as exit 124 (0 disables, the default). The
+#                   auto-concurrent --changed path applies 900s automatically:
+#                   no real script approaches it, so it only converts a HUNG
+#                   script into a bounded failure. --max-wall-ms is checked
+#                   after the run and so cannot catch a hang on its own.
 #   --max-wall-ms N fail the run when its wall clock exceeds N milliseconds,
 #                   after reporting the per-script results. Duration is a
 #                   result: a suite that outgrows its caller's invocation budget
@@ -105,6 +112,12 @@ JOBS=1
 JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
+PER_SCRIPT_TIMEOUT_SECS=0
+# Bound applied automatically on the auto-concurrent --changed path. No real
+# script comes close: the slowest measured behavior test is the 341s Herdr
+# presentation E2E. It exists so a HUNG script becomes a bounded failure instead
+# of an unbounded suite, which is the shape that outruns a caller's budget.
+CHANGED_DEFAULT_TIMEOUT_SECS=900
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -1455,6 +1468,15 @@ while [ "$#" -gt 0 ]; do
       MAX_WALL_MS=${1#--max-wall-ms=}
       shift
       ;;
+    --per-script-timeout-secs)
+      [ "$#" -gt 1 ] || die "--per-script-timeout-secs requires a whole number of seconds"
+      PER_SCRIPT_TIMEOUT_SECS=$2
+      shift 2
+      ;;
+    --per-script-timeout-secs=*)
+      PER_SCRIPT_TIMEOUT_SECS=${1#--per-script-timeout-secs=}
+      shift
+      ;;
     --list)
       LIST_ONLY=1
       shift
@@ -1648,6 +1670,9 @@ if [ "$JOBS_EXPLICIT" -eq 0 ] && [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt
     [ "$JOBS" -le 4 ] || JOBS=4
     [ "$JOBS" -ge 1 ] || JOBS=1
     [ "$JOBS" -eq 1 ] || AUTO_CONCURRENCY=1
+    if [ "$AUTO_CONCURRENCY" -eq 1 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
+      PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
+    fi
   fi
 fi
 
@@ -1697,6 +1722,10 @@ if [ -n "$MAX_WALL_MS" ]; then
   esac
   [ "$MAX_WALL_MS" -gt 0 ] || die "--max-wall-ms requires a positive integer"
 fi
+
+case "$PER_SCRIPT_TIMEOUT_SECS" in
+  ''|*[!0-9]*) die "--per-script-timeout-secs requires a whole number of seconds (0 disables)" ;;
+esac
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
@@ -1777,6 +1806,59 @@ record_script_result() {
   TOTAL=$((TOTAL + 1))
 }
 
+# Run <script>, capturing output to <out>. <stream> 1 also echoes it live.
+# <id> only has to be unique within this run. When PER_SCRIPT_TIMEOUT_SECS is
+# positive, a script that outruns it is terminated and reported as exit 124: a
+# hung script must become a bounded failure rather than an unbounded suite,
+# because an unbounded suite is what silently outruns its caller's budget.
+run_script_bounded() {  # <script> <out> <stream> <id>
+  local script=$1 out=$2 stream=$3 id=$4
+  local pid watchdog rc rcfile timeout_marker
+  rcfile="$RUN_TMP/rc.$id"
+  timeout_marker="$RUN_TMP/timeout.$id"
+  rm -f "$rcfile" "$timeout_marker"
+  if [ "$stream" -eq 1 ]; then
+    # PIPESTATUS[0] is the script; tee's own exit is not the result.
+    ( bash "$script" 2>&1 | tee "$out"; printf '%s\n' "${PIPESTATUS[0]}" >"$rcfile" ) &
+  else
+    ( bash "$script" >"$out" 2>&1; printf '%s\n' "$?" >"$rcfile" ) &
+  fi
+  pid=$!
+  watchdog=
+  if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+    (
+      sleep "$PER_SCRIPT_TIMEOUT_SECS"
+      kill -0 "$pid" 2>/dev/null || exit 0
+      : >"$timeout_marker"
+      pkill -TERM -P "$pid" 2>/dev/null || true
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 5
+      pkill -KILL -P "$pid" 2>/dev/null || true
+      kill -KILL "$pid" 2>/dev/null || true
+    ) &
+    watchdog=$!
+  fi
+  # Errexit stays off from here: this function returns a non-zero script exit as
+  # data, and both callers wrap the call in their own set +e / set -e pair.
+  set +e
+  wait "$pid" >/dev/null 2>&1
+  if [ -n "$watchdog" ]; then
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+  fi
+  if [ -e "$timeout_marker" ]; then
+    printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
+      "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
+    [ "$stream" -eq 1 ] && tail -1 "$out"
+    rm -f "$timeout_marker" "$rcfile"
+    return 124
+  fi
+  rc=$(cat "$rcfile" 2>/dev/null || printf '1')
+  rm -f "$rcfile"
+  case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
+  return "$rc"
+}
+
 run_one_serial() {
   local script=$1
   local base family expected out begin_iso begin_ms end_ms end_iso duration rc
@@ -1792,9 +1874,8 @@ run_one_serial() {
 
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
-  rc=${PIPESTATUS[0]}
+  run_script_bounded "$script" "$out" 1 "s$TOTAL"
+  rc=$?
   set -e
   : "${rc:=1}"
 
@@ -1900,8 +1981,10 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      set +e
+      run_script_bounded "$script" "$work/output" 0 "w$worker_n"
       rc=$?
+      set -e
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
       if [ "$duration" -lt 0 ]; then

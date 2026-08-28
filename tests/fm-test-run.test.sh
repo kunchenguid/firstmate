@@ -579,6 +579,53 @@ test_concurrent_runs_are_ordered_longest_first() {
   pass "a concurrent run starts the longest-hint script first"
 }
 
+# --max-wall-ms is checked after the run, so it cannot end a run that never
+# finishes. A hung script has to become a bounded failure, because an unbounded
+# suite is exactly what silently outruns its caller's invocation budget.
+test_per_script_timeout_bounds_a_hang() {
+  local tmp repo runner hang rc began ended
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-hang.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  hang=tests/fm-hang-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$hang" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture is about to hang"
+sleep 600
+SH
+  chmod +x "$runner" "$repo/$hang"
+
+  began=$(date +%s)
+  set +e
+  "$runner" --per-script-timeout-secs 3 "$hang" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  ended=$(date +%s)
+
+  [ "$rc" -ne 0 ] || fail "a terminated script must fail the run: $(cat "$tmp/out")"
+  [ "$((ended - began))" -lt 120 ] \
+    || fail "the per-script bound did not stop a 600s hang (took $((ended - began))s)"
+  grep -Fq 'exceeded the per-script bound' "$tmp/out" \
+    || fail "the terminated script was not named: $(cat "$tmp/out")"
+  grep -Eq 'FM_TEST_END .* exit=124 ' "$tmp/out" \
+    || fail "a terminated script must be recorded as exit 124: $(cat "$tmp/out")"
+  # The run still completes and accounts for the script, rather than dying.
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out" \
+    || fail "the bounded run did not report a complete summary: $(cat "$tmp/out")"
+
+  # 0 keeps the historical unbounded behavior, so no existing caller changes.
+  set +e
+  "$runner" --per-script-timeout-secs nope "$hang" >"$tmp/o2" 2>"$tmp/e2"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--per-script-timeout-secs with a non-number must be refused, got $rc"
+
+  rm -rf "$tmp"
+  pass "--per-script-timeout-secs turns a hung script into a bounded failure"
+}
+
 # The duration regression this guard exists for: a suite whose scripts are all
 # green but whose wall clock outgrew its caller's invocation budget. The caller
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
@@ -861,6 +908,7 @@ test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_concurrent_runs_are_ordered_longest_first
+test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
