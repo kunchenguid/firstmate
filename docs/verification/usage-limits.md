@@ -103,6 +103,28 @@ The phrasing is now in the table with the observed line as its provenance and a 
 This is the argument for the table's own rule rather than an exception to it.
 The signature list is only ever as complete as the phrasings actually observed, which is exactly why a miss returns `no-signature` and never "it crashed" - the negative that is not a verdict is what kept a missing pattern from becoming a wrong answer.
 
+## A wall verdict needs corroboration, and this page is its open residual
+
+A matching phrasing is necessary but not sufficient, so the account above describes only half of what produces a verdict.
+A `wall` also needs the harness's own non-zero exit on a different line of the same evidence, and that corroborating line must not itself carry a limit phrasing.
+[`docs/usage-limit-survivability.md`](../usage-limit-survivability.md) owns the rule and the reasoning for it.
+
+The rule exists because this detector's evidence sources can carry this repository's own documentation of the detector.
+`tests/fm-usage-wall.test.sh` pins it, and builds its fixture from the tracked files themselves rather than from a paraphrase of them.
+
+```
+$ ./bin/fm-test-run.sh tests/fm-usage-wall.test.sh
+ok - diagnose does not read this repository own tracked phrasings as a wall
+ok - diagnose still reports a corroborated wall for both observed phrasings
+FM_TEST_END 2026-08-28T13:37:00Z tests/fm-usage-wall.test.sh exit=0 duration_ms=37464 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=37512
+```
+
+What the rule does not close is stated here because this is the page it affects.
+The step-log extract quoted above carries the limit line and the harness's exit line on separate lines, exactly as the harness emitted them, so a pane displaying that part of this page still reads as a wall.
+Closing it would mean either degrading a record whose value depends on quoting real evidence, or guessing from layout, and both are worse trades than the residual.
+Revisit it if the vendor ever emits the phrasing and the exit on one line, or if a real transcript turns up a multi-line wall being missed.
+
 ## The record generates from real fleet state
 
 `bin/fm-usage-wall.sh resume --out <path>` run against a home with six tasks in flight, then read back from disk after the process that wrote it exited.
