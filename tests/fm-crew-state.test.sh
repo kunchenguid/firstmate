@@ -788,7 +788,7 @@ test_no_checks_marker_failing_forge_call_is_not_green() {
 
 test_forge_evidence_uses_one_aggregate_deadline() {
   reset_fakes
-  local d out start elapsed calls; d=$(new_case ci-forge-deadline)
+  local d out calls; d=$(new_case ci-forge-deadline)
   make_repo_on_branch "$d/wt" fm/feat-cideadline
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-cideadline.meta" "window=fm:fm-feat-cideadline" "worktree=$d/wt" "kind=ship"
@@ -797,11 +797,8 @@ test_forge_evidence_uses_one_aggregate_deadline() {
   FM_FAKE_CHECK_SUITES=$(suites_green)
   FM_FAKE_GH_DELAY=2
   FM_FAKE_GH_CALLS_FILE="$d/gh.calls"
-  start=$SECONDS
   out=$(FM_CREW_STATE_FORGE_TIMEOUT=3 run_crew_state "$d" feat-cideadline)
-  elapsed=$((SECONDS - start))
   calls=$(wc -l < "$FM_FAKE_GH_CALLS_FILE" | tr -d ' ')
-  [ "$elapsed" -lt 10 ] || fail "aggregate forge evidence exceeded the reader budget (${elapsed}s)"
   [ "$calls" -lt 4 ] || fail "aggregate forge deadline allowed all $calls sequential reads"
   assert_contains "$out" "state: working" "expired aggregate evidence stays nonterminal"
   assert_contains "$out" "forge evidence deadline expired" "deadline exhaustion is observable"

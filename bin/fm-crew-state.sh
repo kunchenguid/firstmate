@@ -88,8 +88,8 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
-# Hard bound on each forge read. Forge calls happen only when a CI marker claims
-# a state that would end the wait, never on the ordinary validating path.
+# Aggregate bound for one complete head-bound forge evidence transaction.
+# Forge calls happen only when a CI marker claims a state that would end the wait, never on the ordinary validating path.
 FORGE_TIMEOUT=${FM_CREW_STATE_FORGE_TIMEOUT:-8}
 case "$FORGE_TIMEOUT" in ''|*[!0-9]*|0) FORGE_TIMEOUT=8 ;; esac
 SEP=' · '
