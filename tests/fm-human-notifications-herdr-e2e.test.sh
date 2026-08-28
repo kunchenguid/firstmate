@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 # Opt-in real Pi proof that unchanged human-owned evidence never starts a second turn.
 # Every Herdr operation is scoped through the guarded non-default lab helper.
 set -u
@@ -57,8 +58,8 @@ PI_CMD=$(printf 'exec env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_PI_CAPTURE_PATH=%q F
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$PANE" "$PI_CMD" >/dev/null
 
 wait_for() { # <predicate> <message>
-  local predicate=$1 message=$2 i
-  for i in $(seq 1 240); do
+  local predicate=$1 message=$2
+  for _ in $(seq 1 240); do
     eval "$predicate" && return 0
     sleep 0.25
   done

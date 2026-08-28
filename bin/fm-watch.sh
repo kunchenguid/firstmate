@@ -961,7 +961,7 @@ procevent_display_label() {  # <private-queue-key>
 }
 
 procevent_surface_queued() {
-  local sequence key payload reason selected_sequence='' selected_payload='' label labels='' label_count=0
+  local sequence key payload reason selected_sequence='' selected_payload='' label display_labels='' label_count=0
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -970,9 +970,9 @@ procevent_surface_queued() {
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED${PROCEVENT_SURFACED:+$'\n'}$key"
     label=$(procevent_display_label "$key") || label='Background process'
-    case ";$labels;" in
+    case ";$display_labels;" in
       *";$label;"*) ;;
-      *) labels="$labels${labels:+;}$label"; label_count=$((label_count + 1)) ;;
+      *) display_labels="$display_labels${display_labels:+;}$label"; label_count=$((label_count + 1)) ;;
     esac
     if [ -z "$selected_sequence" ] || [ "$sequence" -gt "$selected_sequence" ]; then
       selected_sequence=$sequence
@@ -993,9 +993,9 @@ procevent_surface_queued() {
     return 0
   fi
   if [ "$label_count" -eq 1 ]; then
-    reason="check: $labels: a captured result is ready now. Action required: inspect the pending result and run its registered handler."
+    reason="check: $display_labels: a captured result is ready now. Action required: inspect the pending result and run its registered handler."
   else
-    reason="check: $labels: captured results are ready now. Action required: inspect each pending result and run its registered handler."
+    reason="check: $display_labels: captured results are ready now. Action required: inspect each pending result and run its registered handler."
   fi
   watch_delivery_preselect "$selected_sequence" "$selected_payload" || {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"

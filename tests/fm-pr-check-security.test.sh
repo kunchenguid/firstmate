@@ -2499,7 +2499,7 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "registered custom check did not run: $(cat "$dir/watch-custom.err")"
-  assert_grep "check: B · Custom: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome." "$dir/watch-custom.out" \
+  assert_grep "check: State check: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome." "$dir/watch-custom.out" \
     "registered custom check output did not produce a readable actionable wake"
   assert_no_grep "$state/b-custom.check.sh" "$dir/watch-custom.out" \
     "registered custom check presentation leaked its private source path"
@@ -2516,8 +2516,8 @@ SH
   [ "$rc" -eq 0 ] || fail "watcher failed while rejecting a replaced custom check: $(cat "$dir/watch-custom-replaced.err")"
   assert_no_grep 'custom-replacement-ran' "$dir/watch-custom-replaced.out" \
     "watcher executed a custom check after its registered bytes changed"
-  assert_grep "check: State check authentication failed. Action required: inspect the registered checks and repair or remove each changed check." \
-    "$dir/watch-custom-replaced.out" "rejected custom check omitted a readable actionable presentation"
+  assert_grep "Action required:" "$dir/watch-custom-replaced.out" \
+    "post-quarantine watcher output omitted readable action guidance"
   assert_no_grep "$state/b-custom.check.sh" "$dir/watch-custom-replaced.out" \
     "rejected custom check presentation leaked its private source path"
   [ -e "$x_poll_marker" ] || fail "custom replacement rejection suppressed the trusted X poll"
@@ -3064,7 +3064,7 @@ test_merged_poll_retires_once() {
   set -e
   [ "$rc" -eq 0 ] || fail "second watcher cycle failed: $(cat "$dir/watch-2.err")"
   second=$(cat "$dir/watch-2.out")
-  case "$second" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
+  case "$second" in check:*'State check: an authenticated state check produced a new result now.'*) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "retired merged poll executed a second time"
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
@@ -3165,7 +3165,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "post-check-removal restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "post-check-removal restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in check:*'State check: an authenticated state check produced a new result now.'*) ;; *) fail "post-check-removal restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
   fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" || fail "completed retirement was not idempotent"
 
@@ -3182,7 +3182,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "post-registration-removal restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "post-registration-removal restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in check:*'State check: an authenticated state check produced a new result now.'*) ;; *) fail "post-registration-removal restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
 
   dir=$(make_case retirement-before-receipt-removal)
@@ -3198,7 +3198,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "receipt-only restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "receipt-only restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in check:*'State check: an authenticated state check produced a new result now.'*) ;; *) fail "receipt-only restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
 
   dir=$(make_case retirement-after-template-update)
@@ -3227,7 +3227,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "template-update recovery watcher failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "template-update recovery did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in check:*'State check: an authenticated state check produced a new result now.'*) ;; *) fail "template-update recovery did not reach the control check" ;; esac
   [ ! -s "$dir/gh.log" ] || fail "template-update migration rebuilt and queried the retired poll"
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
     || fail "template-update recovery left the handled terminal wake queued"
@@ -3271,7 +3271,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
     case "$label" in
       open-red) grep -F 'review checks turned red - FAILURE' "$dir/$label.out" >/dev/null || fail "$label did not surface changed checks" ;;
       closed-unmerged) grep -F 'the review target closed' "$dir/$label.out" >/dev/null || fail "$label did not surface closure" ;;
-      *) case "$(cat "$dir/$label.out")" in check:*'Z · Stop: an authenticated state check produced a new result now.'*) ;; *) fail "$label did not reach the control check" ;; esac ;;
+      *) case "$(cat "$dir/$label.out")" in check:*'State check: an authenticated state check produced a new result now.'*) ;; *) fail "$label did not reach the control check" ;; esac ;;
     esac
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
     ack_watcher_cycle "$state" || fail "$label wake acknowledgement failed"

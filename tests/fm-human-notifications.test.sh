@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031
 # Portable contract and watcher delivery tests for edge-triggered human waits.
 set -euo pipefail
 # shellcheck source=tests/lib.sh

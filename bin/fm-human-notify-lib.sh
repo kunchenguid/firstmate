@@ -44,7 +44,6 @@ FM_HUMAN_NOTIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HUMAN_NOTIFY_SCHEMA=fm-human-notification.v1
 FM_HUMAN_NOTIFY_CLASS=
 FM_HUMAN_NOTIFY_KEY=
-FM_HUMAN_NOTIFY_EVIDENCE=
 FM_HUMAN_NOTIFY_FINGERPRINT=
 FM_HUMAN_NOTIFY_MARKER=
 
@@ -91,7 +90,7 @@ fm_human_notify_procevent_label() {  # <state> <source-id> <sequence> [expected-
 _fm_human_notify_review_ready() {
   local line=$1 verb note
   verb=$(status_line_verb "$line")
-  [ "$verb" = done ] || return 1
+  [ "$verb" = "done" ] || return 1
   note=$(status_line_note "$line")
   case "$note" in
     *'PR https://'*) return 0 ;;
@@ -114,7 +113,7 @@ fm_human_notify_class() {  # <status-line>
     printf 'review-ready'
     return 0
   fi
-  if [ "$verb" = done ]; then
+  if [ "$verb" = "done" ]; then
     printf 'result'
     return 0
   fi
@@ -171,7 +170,6 @@ _fm_human_notify_derive() {  # <state> <task> <line>
   marker_id=$(printf '%s' "$class|$task|$key" | _fm_human_notify_sha256)
   FM_HUMAN_NOTIFY_CLASS=$class
   FM_HUMAN_NOTIFY_KEY=$key
-  FM_HUMAN_NOTIFY_EVIDENCE=$evidence
   FM_HUMAN_NOTIFY_FINGERPRINT=$(printf '%s' "$material" | _fm_human_notify_sha256)
   FM_HUMAN_NOTIFY_MARKER="$state/human-notifications/$marker_id"
 }
