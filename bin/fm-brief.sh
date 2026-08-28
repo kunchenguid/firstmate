@@ -327,6 +327,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+TESTS: {TESTS}
+VERIFY: every command runs once under \`timeout 60\`; running the full test suite is forbidden; the demo runs exactly once; any failure = needs-decision, never silent retries.
 
 $HERDR_SECTION
 
@@ -400,6 +402,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+TESTS: {TESTS}
+VERIFY: every command runs once under \`timeout 60\`; running the full test suite is forbidden; the demo runs exactly once; any failure = needs-decision, never silent retries.
 
 $HERDR_SECTION
 

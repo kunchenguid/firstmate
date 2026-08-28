@@ -740,6 +740,32 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Deslimed throughput contract: every generated ship and scout brief must carry
+# the two mandatory task-area lines - the {TESTS} placeholder firstmate fills at
+# intake and the static VERIFY discipline.
+test_every_brief_carries_tests_and_verify_lines() {
+  local home id kind brief
+  home="$TMP_ROOT/tests-verify-home"
+  mkdir -p "$home/data"
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-tests-verify-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+        || fail "$kind brief scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1 \
+        || fail "$kind brief scaffold exited non-zero"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep 'TESTS: {TESTS}' "$brief" "$kind brief missing the TESTS placeholder line"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'VERIFY: every command runs once under `timeout 60`; running the full test suite is forbidden; the demo runs exactly once; any failure = needs-decision, never silent retries.' "$brief" \
+      "$kind brief missing the static VERIFY line"
+  done
+  pass "fm-brief.sh: every ship mode and scout brief carries the TESTS and VERIFY lines"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -781,5 +807,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_every_brief_carries_tests_and_verify_lines
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
