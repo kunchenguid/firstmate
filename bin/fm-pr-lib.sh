@@ -155,8 +155,22 @@ fm_pr_forgejo_host_valid() {
 # Forgejo owner names are at most 40 characters, start with an alphanumeric,
 # and otherwise allow "-", "_", and "."; the forge additionally refuses a run of
 # two or more of those three and refuses to end on one. A repository name is at
-# most 100 characters over the same character set, is never "." or "..", and
-# never ends in one of the suffixes the forge reserves for its own routes.
+# most 100 characters over the same character set and is never one of the exact
+# names the forge reserves, ".", ".." or "-", nor ends in one of its reserved
+# route suffixes. The forge lowercases a name before comparing it against those
+# reserved words, so the suffixes are matched here without regard to case.
+# There is deliberately no rule against a run of "-", "_" or "." inside a
+# repository name: that restriction is the forge's username rule, enforced above
+# for the owner, and applying it to a repository would refuse one the forge can
+# genuinely host.
+#
+# The forge's reserved USERNAME list is deliberately not encoded for the owner.
+# It is forge policy that varies by version, so a copy here would rot into
+# refusing owners the forge accepts. "-" is a different kind of thing: it is the
+# route separator and can never name a hostable repository.
+#
+# bin/fm-pr-poll.sh re-validates these same rules rather than trusting its
+# sidecar, so a change here needs the matching change there.
 fm_pr_forgejo_owner_valid() {
   local owner=${1-}
   local LC_ALL=C
@@ -172,7 +186,8 @@ fm_pr_forgejo_repo_valid() {
   local LC_ALL=C
   [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || return 1
   case "$repo" in
-    .|..|*[!A-Za-z0-9._-]*|*.git|*.wiki|*.rss|*.atom) return 1 ;;
+    .|..|-|*[!A-Za-z0-9._-]*) return 1 ;;
+    *.[gG][iI][tT]|*.[wW][iI][kK][iI]|*.[rR][sS][sS]|*.[aA][tT][oO][mM]) return 1 ;;
   esac
 }
 

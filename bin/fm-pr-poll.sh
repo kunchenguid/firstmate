@@ -122,9 +122,15 @@ case "$provider" in
       [!A-Za-z0-9]*|*[!A-Za-z0-9._-]*|*[-._]) exit 0 ;;
       *--*|*-.*|*-_*|*.-*|*..*|*._*|*_-*|*_.*|*__*) exit 0 ;;
     esac
+    # These rules are the ones bin/fm-pr-lib.sh applies; they are repeated here
+    # because this poll re-validates its sidecar rather than trusting it, so a
+    # change to either side needs the matching change to the other. "-" is one
+    # of the exact names the forge reserves, and it lowercases a name before
+    # comparing, so the reserved suffixes are matched without regard to case.
     [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
     case "$repo" in
-      .|..|*[!A-Za-z0-9._-]*|*.git|*.wiki|*.rss|*.atom) exit 0 ;;
+      .|..|-|*[!A-Za-z0-9._-]*) exit 0 ;;
+      *.[gG][iI][tT]|*.[wW][iI][kK][iI]|*.[rR][sS][sS]|*.[aA][tT][oO][mM]) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
     # --base-url is what binds this read to the instance the record names.

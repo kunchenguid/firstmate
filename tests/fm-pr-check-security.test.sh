@@ -434,6 +434,12 @@ INVALID_URLS=(
   'https://forgejo.example/o/r.wiki/pulls/1'
   'https://forgejo.example/o/r.rss/pulls/1'
   'https://forgejo.example/o/r.atom/pulls/1'
+  'https://forgejo.example/o/-/pulls/1'
+  'https://forgejo.example/o/r.GIT/pulls/1'
+  'https://forgejo.example/o/r.Git/pulls/1'
+  'https://forgejo.example/o/r.WIKI/pulls/1'
+  'https://forgejo.example/o/r.Rss/pulls/1'
+  'https://forgejo.example/o/r.AtOm/pulls/1'
   'https://forgejo.example/o/r+z/pulls/1'
   'https://forgejo.example/o/r`/pulls/1'
   $'https://forgejo.example/o/r/pulls/1\n'
@@ -519,7 +525,25 @@ https://forgejo.example/o/r/pulls/1|forgejo.example|o|r|1
 https://codeberg.org/forgejo/forgejo/pulls/1234|codeberg.org|forgejo|forgejo|1234
 https://git.example.co.uk/My-Org/repo-name_with.parts/pulls/123456|git.example.co.uk|My-Org|repo-name_with.parts|123456
 https://git.example/o/pulls/pulls/1|git.example|o|pulls|1
+https://forgejo.example/o/a..b/pulls/1|forgejo.example|o|a..b|1
+https://forgejo.example/o/a--b/pulls/1|forgejo.example|o|a--b|1
+https://forgejo.example/o/r.gitx/pulls/1|forgejo.example|o|r.gitx|1
+https://forgejo.example/o/-leading/pulls/1|forgejo.example|o|-leading|1
 EOF
+  # The forge reserves the exact repository names ".", ".." and "-", and matches
+  # its reserved route suffixes after lowercasing, so both are refused whatever
+  # case they arrive in. It applies no rule against a run of "-", "_" or "."
+  # inside a repository name - that restriction is its username rule, enforced
+  # separately for the owner - so a repository the forge can host is not refused
+  # here for carrying one.
+  for row in - r.GIT r.Wiki r.RSS r.AtOm; do
+    ! fm_pr_url_parse "https://forgejo.example/o/$row/pulls/1" \
+      || fail "parser accepted a repository name the forge reserves"
+  done
+  for row in a..b a--b a__b r.gitx -leading trailing-; do
+    fm_pr_url_parse "https://forgejo.example/o/$row/pulls/1" \
+      || fail "parser refused a repository name the forge can host"
+  done
   # The plural is what tells a Forgejo pull request from a GitHub one, and each
   # provider keeps its own spelling: the same host and path with the other
   # provider's segment is not a second accepted spelling for either of them.
@@ -3115,6 +3139,25 @@ EOF
     > "$state/task-a.pr-poll"
   out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
   [ -z "$out" ] || fail "Forgejo poll emitted for a sidecar carrying a nested project path"
+
+  # The poll re-validates rather than trusting the sidecar, so the repository
+  # names the forge reserves are refused here too, in whatever case they arrive.
+  for value in - tools.git tools.GIT tools.Wiki tools.RSS tools.AtOm; do
+    printf '%s\n%s\n%s\n%s\n%s\n' forgejo \
+      "https://forgejo.example/my-org/$value/pulls/7" forgejo.example "my-org/$value" 7 \
+      > "$state/task-a.pr-poll"
+    out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+    [ -z "$out" ] || fail "Forgejo poll emitted for a repository name the forge reserves"
+  done
+  # A repository the forge can host still wakes, so the refusals above are not
+  # simply a stricter poll that never fires.
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo \
+    "https://forgejo.example/my-org/a..b/pulls/7" forgejo.example my-org/a..b 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll refused a repository name the forge can host"
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" forgejo.example my-org/tools 7 \
+    > "$state/task-a.pr-poll"
 
   # Arming is where a missing CLI can still be reported, so it refuses there.
   write_task_meta "$dir" task-b
