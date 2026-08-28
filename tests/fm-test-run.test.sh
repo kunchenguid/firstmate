@@ -120,12 +120,16 @@ init_changed_fixture_repo() {
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
-  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" \
+    "$repo/src" "$repo/tests/assets"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   : >"$repo/src/unmapped.ts"
+  : >"$repo/tests/assets/board-render-harness.mjs"
+  : >"$repo/tests/assets/unreferenced-helper.mjs"
+  printf '# tests/assets/board-render-harness.mjs\n' >>"$repo/tests/fm-bearings-snapshot.test.sh"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
@@ -144,6 +148,24 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" "shared helper selects snapshot dependents"
   git -C "$repo" add tests/lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm helper-change
+
+  printf '\n' >>"$repo/tests/assets/board-render-harness.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" \
+    "test asset selects its consuming test family"
+  git -C "$repo" add tests/assets/board-render-harness.mjs
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm test-asset-change
+
+  printf '\n' >>"$repo/tests/assets/unreferenced-helper.mjs"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "unreferenced test asset must fail with exit 2, got $rc"
+  grep -Fq 'no changed-test mapping for source path: tests/assets/unreferenced-helper.mjs' "$tmp/err" \
+    || fail "unreferenced test asset failure is not actionable: $(cat "$tmp/err")"
+  git -C "$repo" add tests/assets/unreferenced-helper.mjs
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm unmapped-test-asset-change
 
   printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

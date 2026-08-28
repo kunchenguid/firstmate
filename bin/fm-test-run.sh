@@ -1061,6 +1061,10 @@ families_for_changed_path() {
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
+    tests/assets/*)
+      families_for_test_reference "$path" \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
     tests/fixtures/*/*)
       # A fixture belongs to whichever suite reads its directory, found by the
       # same reference scan used for shared helpers. Keyed on the directory
