@@ -14,8 +14,9 @@
 # complete ledger in place and never exposes partial JSON at the ledger path.
 # A home-local refresh lock serializes concurrent triggers so an older in-flight
 # summary cannot overwrite one computed after a later status change. The shared
-# timeout owner bounds each producer run with FM_HOME_SUMMARY_TIMEOUT (default
-# 60 seconds). No reader can observe temporary output through the ledger path.
+# timeout owner bounds lock acquisition and production together with
+# FM_HOME_SUMMARY_TIMEOUT (default 60 seconds). No reader can observe temporary
+# output through the ledger path.
 #
 # With --best-effort, any failure is appended to the bounded home-local
 # state/.home-summary-refresh.log and the command exits zero. Session start,
@@ -82,7 +83,9 @@ home_summary_fail() {
 }
 
 home_summary_refresh_once() {
-  local producer_rc producer_error
+  local producer_rc producer_error started_epoch deadline_epoch remaining
+  started_epoch=$(date +%s)
+  deadline_epoch=$((started_epoch + HOME_SUMMARY_TIMEOUT))
   if ! mkdir -p "$STATE" 2>/dev/null; then
     home_summary_fail "state directory is unavailable: $STATE"
     return 1
@@ -91,7 +94,13 @@ home_summary_refresh_once() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  fm_lock_acquire_wait "$REFRESH_LOCK"
+  while ! fm_lock_try_acquire "$REFRESH_LOCK"; do
+    if [ "$(date +%s)" -ge "$deadline_epoch" ]; then
+      home_summary_fail "refresh timed out waiting for its publication lock"
+      return 1
+    fi
+    sleep 0.1
+  done
   HOME_SUMMARY_LOCK_HELD=1
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
@@ -102,7 +111,12 @@ home_summary_refresh_once() {
     return 1
   }
 
-  if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
+  remaining=$((deadline_epoch - $(date +%s)))
+  if [ "$remaining" -le 0 ]; then
+    home_summary_fail "refresh timed out before summary production"
+    return 1
+  fi
+  if fm_run_timed "$remaining" env \
     FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_HOME="$FM_HOME" \
     FM_STATE_OVERRIDE="$STATE" \

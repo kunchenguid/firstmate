@@ -18,10 +18,11 @@ WATCH_PID=
 SLOW_WRITER_PID=
 SLOW_SNAPSHOT_PID=
 SLOW_NM_PID=
+LOCK_HOLDER_PID=
 
 cleanup() {
   local pid
-  for pid in "$WATCH_PID" "$SLOW_WRITER_PID" "$SLOW_SNAPSHOT_PID" "$SLOW_NM_PID"; do
+  for pid in "$WATCH_PID" "$SLOW_WRITER_PID" "$SLOW_SNAPSHOT_PID" "$SLOW_NM_PID" "$LOCK_HOLDER_PID"; do
     [ -n "$pid" ] || continue
     kill -KILL "$pid" >/dev/null 2>&1 || true
   done
@@ -151,6 +152,30 @@ cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
   || fail "the status-triggered ledger differed from the real fresh producer"
 pass "watcher-carried status append publishes the real home summary"
 
+python3 - "$HOME_DIR/data/backlog.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+path.write_text(text.replace("## Queued\n\n## Done", "## Queued\n- [ ] cadence-task - Publish without a status signal (repo: firstmate) (kind: ship)\n\n## Done"))
+PY
+sleep 1
+PATH="$FAKEBIN:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=1 FM_SIGNAL_GRACE=0 \
+  FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
+  "$WATCH" > "$TMP_ROOT/cadence-watch.out" 2> "$TMP_ROOT/cadence-watch.err" &
+WATCH_PID=$!
+wait_for_ledger_generation "$NOW_THREE" 50 \
+  || fail "a backlog-only change did not refresh within the configured watcher cadence"
+kill "$WATCH_PID" >/dev/null 2>&1 || true
+wait "$WATCH_PID" >/dev/null 2>&1 || true
+WATCH_PID=
+jq -e 'any(.queued[]; .id == "cadence-task")' "$HOME_DIR/state/home-summary.json" >/dev/null \
+  || fail "the cadence refresh did not publish the backlog-only change"
+pass "live watcher cadence bounds publication staleness without signals"
+
 # Publication-only boundary: poison the ledger with a structurally complete but
 # semantically false state, then prove the current parent snapshot still computes
 # the home summary from the owning home instead of consuming this file.
@@ -266,3 +291,32 @@ cmp -s "$TMP_ROOT/before-best-effort.json" "$HOME_DIR/state/home-summary.json" \
 grep -F 'summary producer failed' "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "best-effort refresh did not log its failure"
 pass "best-effort publication logs and continues"
+
+LOCK_MARKER="$TMP_ROOT/lock-held"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
+  : > "$3"
+  sleep 30
+' _ "$ROOT" "$HOME_DIR" "$LOCK_MARKER" &
+LOCK_HOLDER_PID=$!
+i=0
+while [ ! -e "$LOCK_MARKER" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$LOCK_HOLDER_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$LOCK_MARKER" ] || fail "could not hold the publication lock for timeout coverage"
+started=$(date +%s)
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
+  || fail "lock timeout changed the best-effort caller result"
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
+grep -F 'refresh timed out waiting for its publication lock' \
+  "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
+  || fail "publication lock timeout was not logged"
+kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+LOCK_HOLDER_PID=
+pass "best-effort refresh bounds publication lock acquisition"
