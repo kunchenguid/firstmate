@@ -466,7 +466,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # attribute nothing. Never fall through to the coarse list for this
       # branch: an own-branch head mismatch that is not pipeline-owned-active
       # is exactly the shape that let a stale coarse row bind as "failed"
-      # over a genuinely live run.
+      # over a genuinely live run (see
+      # test_own_branch_head_mismatch_does_not_consult_the_coarse_list in
+      # tests/fm-crew-state.test.sh).
       if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
         HAVE_RUN=1
       fi
