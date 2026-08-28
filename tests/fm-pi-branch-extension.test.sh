@@ -895,10 +895,10 @@ const longRequests = [
   `${"middle context ".repeat(250)}${explicitRequest}${" middle context".repeat(250)}`,
   `${"tail context ".repeat(500)}${explicitRequest}`,
 ];
-const entries = [{
-  type: "message",
-  message: { role: "user", content: "Please keep responses concise while monitoring the fleet." },
-}];
+// Match Pi's real AgentSession.prompt ordering: before_agent_start receives
+// the expanded prompt before _runAgentPrompt appends its user message to the
+// SessionManager. Keeping entries stale at the hook boundary is the regression.
+const entries = [];
 const mainCtx = {
   model: { provider: "anthropic", id: "main-model" },
   sessionManager: {
@@ -906,7 +906,9 @@ const mainCtx = {
     getEntries: () => entries,
   },
 };
-fire("before_agent_start", { prompt: entries[0].message.content }, mainCtx);
+const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
+fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
 fire("agent_start", {}, mainCtx);
 const unsolicited = dispatch("signal: healthy resource result");
 if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
@@ -931,8 +933,9 @@ if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocess
 for (let index = 0; index < longRequests.length; index += 1) {
   const content = longRequests[index];
   if (content.length <= 4000) throw new Error(`request fixture ${index} did not exceed the mirror bound`);
-  entries.push({ type: "message", message: { role: "user", content } });
   fire("before_agent_start", { prompt: content }, mainCtx);
+  // Pi persists this only after every before_agent_start handler has returned.
+  entries.push({ type: "message", message: { role: "user", content } });
   fire("agent_start", {}, mainCtx);
   const requested = dispatch("signal: healthy resource result");
   if (!requested.accepted) throw new Error(`branch did not accept requested result ${index}`);
@@ -947,6 +950,13 @@ for (let index = 0; index < longRequests.length; index += 1) {
   if (turns.length !== index + 1 || turns.at(-1).options.deliverAs !== "followUp") {
     throw new Error(`requested result ${index} did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
   }
+}
+const mirroredCaptainText = globalThis.__fmSessions[0].ops
+  .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+  .map((op) => op.message.content);
+for (const content of [unsolicitedPrompt, ...longRequests]) {
+  const copies = mirroredCaptainText.filter((text) => text === `[captain] ${content}`).length;
+  if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
 if ((globalThis.__fmPrompts ?? []).length !== 4) throw new Error("a handled fleet wake was rerun");
 if (sentToMain.length !== 4) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);

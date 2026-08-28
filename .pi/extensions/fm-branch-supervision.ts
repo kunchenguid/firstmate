@@ -6,8 +6,8 @@
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh) and then
 // merges an append-only note to main's tail. Main's captain/assistant dialog
-// is mirrored into the branch as read-only fm-main-mirror context at the
-// pre-dispatch boundary and at main's turn_end. Pi-only by construction: this
+// is mirrored into the branch as read-only fm-main-mirror context from Pi's
+// before_agent_start prompt and at main's turn_end. Pi-only by construction: this
 // file lives in .pi/extensions, so no
 // other harness ever loads it. Supervision is default-on for every task once
 // this Pi session owns the fleet lock: no captain grant file is required.
@@ -347,6 +347,10 @@ type ReadonlyEntries = {
 type MirrorCollectionState = {
   collectAnchor: MirrorCursor | null;
   pendingCursor: MirrorCursor | null;
+  // Pi emits before_agent_start before it appends that turn's user message to
+  // SessionManager. The prompt is mirrored from the event immediately, then
+  // this marker suppresses the same persisted entry when turn_end collects it.
+  stagedCaptain: { file: string; index: number; text: string } | null;
 };
 
 function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState): MirrorItem[] {
@@ -375,6 +379,16 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
     const text = textOfContent(message.content).trim();
     if (!text) continue;
     if (message.role === "user" && isOperationalUserText(text)) continue;
+    const staged = collection.stagedCaptain;
+    if (
+      message.role === "user" &&
+      staged?.file === file &&
+      staged.index === index &&
+      staged.text === text
+    ) {
+      collection.stagedCaptain = null;
+      continue;
+    }
     items.push({
       tag: message.role === "user" ? "captain" : "main",
       text: index === currentCaptainIndex ? text : capMirrorText(text),
@@ -401,7 +415,11 @@ export default function (pi: ExtensionAPI) {
   // serially by design).
   let branchChain: Promise<void> = Promise.resolve();
   const pendingMirror: MirrorItem[] = [];
-  const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
+  const mirrorCollection: MirrorCollectionState = {
+    collectAnchor: null,
+    pendingCursor: null,
+    stagedCaptain: null,
+  };
   let currentMainSession: ReadonlyEntries | null = null;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -999,9 +1017,22 @@ ${context.command}
     enqueueWake(offer.message, generation);
   });
 
-  pi.on?.("before_agent_start", (_event, ctx) => {
+  pi.on?.("before_agent_start", (event, ctx) => {
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
+    if (!actingAsOwner() || !currentMainSession || !collectCurrentMainDialog()) return;
+
+    // This event is Pi's authoritative complete current prompt. At this point
+    // SessionManager still contains only the preceding dialog, so relying on
+    // getEntries() here loses the captain request that the next wake may answer.
+    // Stage it verbatim and remember the future persisted index for turn_end's
+    // duplicate suppression. Operational extension injections are not dialog.
+    const prompt = event.prompt.trim();
+    if (!prompt || isOperationalUserText(prompt)) return;
+    const file = currentMainSession.getSessionFile() ?? "";
+    const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
+    pendingMirror.push({ tag: "captain", text: prompt });
+    mirrorCollection.stagedCaptain = { file, index, text: prompt };
   });
 
   pi.on?.("agent_start", () => {
@@ -1014,8 +1045,9 @@ ${context.command}
     mainStreaming = false;
   });
 
-  // The dispatch handler collects from the live main session immediately
-  // before accepting a wake, so dialog from the current in-flight turn joins
+  // before_agent_start stages Pi's authoritative in-flight prompt before
+  // SessionManager persists it. The dispatch handler then collects any newly
+  // persisted dialog immediately before accepting a wake, so all context joins
   // the serialized chain before that wake's branch prompt. turn_end remains
   // the idle-path mirror flush. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
@@ -1076,6 +1108,7 @@ ${context.command}
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
+    mirrorCollection.stagedCaptain = null;
     if (branch) {
       try {
         branch.dispose();
