@@ -26,7 +26,7 @@ EOF
 }
 
 mode_falls_back_contract() {
-  local tmp repo base focused shell_head broad out rc
+  local tmp repo base focused template_head shell_head broad out rc
   fm_test_tmproot_into tmp fm-azure-service-test-scope
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
@@ -47,6 +47,13 @@ mode_falls_back_contract() {
   [ "$out" = focused ] || fail "an owned Azure service change selected $out"
   [ -z "$($repo/bin/fm-azure-service-test-scope.py shell "$base" "$focused")" ] \
     || fail "a focused non-shell change invented a lint target"
+  mkdir -p "$repo/docs/azure-pilot"
+  printf '{}\n' > "$repo/docs/azure-pilot/main.json"
+  git -C "$repo" add docs/azure-pilot/main.json
+  git -C "$repo" commit -qm focused-template
+  template_head=$(git -C "$repo" rev-parse HEAD)
+  [ "$($repo/bin/fm-azure-service-test-scope.py mode "$base" "$template_head")" = focused ] \
+    || fail "the authoritative Azure template did not select focused mode"
   printf '#!/bin/sh\n' > "$repo/bin/fm-worker-lifecycle.sh"
   git -C "$repo" add bin/fm-worker-lifecycle.sh
   git -C "$repo" commit -qm focused-shell

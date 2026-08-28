@@ -35,6 +35,7 @@ FOCUSED_SOURCES = frozenset(
         "bin/fm-worker-lifecycle.py",
         "bin/fm-worker-lifecycle.sh",
         "bin/fm-worker-supervisor.py",
+        "docs/azure-pilot/main.json",
         "docs/azure-workers.md",
     )
     + FOCUSED_TESTS
