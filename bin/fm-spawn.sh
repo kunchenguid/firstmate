@@ -1331,7 +1331,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+      # muse, gemini, rovo and agy are listed even though a secondmate launch on any is
+      # refused below: recognizing the name here is what routes the caller to
+      # that explicit refusal and its stated reason. Omitting one instead sends
+      # it to the catch-all, where it is taken for a firstmate home path and
+      # dies with a misleading "not a valid firstmate home".
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1829,9 +1834,12 @@ agy_workspace_trusted() {  # <settings> <worktree>
 # interactively, so the write is deliberately conservative:
 #   - It is skipped entirely when the path is already trusted, so a repeat spawn
 #     rewrites nothing.
-#   - It only ever APPENDS. Existing entries are never removed or reordered, and
-#     jq assignment to an existing key leaves every other key in place and in
-#     order, so an unrelated setting cannot be dropped or moved.
+#   - It only ever APPENDS, and only when the path is absent. Existing entries
+#     keep their exact order and none is removed, which is why the update tests
+#     membership with `index` rather than piping through jq's `unique` - unique
+#     sorts the array and drops duplicates. jq assignment to an existing key
+#     leaves every other key in place and in order, so an unrelated setting
+#     cannot be dropped or moved either.
 #   - Malformed JSON is a hard refusal, never an overwrite: a settings file that
 #     cannot be parsed is far more likely to be mid-write or hand-edited than
 #     genuinely disposable, and clobbering it would destroy the operator's own
@@ -1843,8 +1851,14 @@ agy_workspace_trusted() {  # <settings> <worktree>
 #     same file from an interactive session; that race is inherent to a settings
 #     file with no locking protocol of its own, and its worst case here is a
 #     concurrently-added trust entry being lost, never a lost unrelated setting.
+# Sets FM_AGY_TRUST_ADDED=1 when THIS call added the grant, and 0 when the path
+# was already trusted. Teardown retires only a grant firstmate itself added, so a
+# workspace the operator had trusted on their own is never revoked underneath
+# them.
+FM_AGY_TRUST_ADDED=0
 agy_trust_workspace() {  # <worktree>
   local wt=$1 settings dir tmp lock waited=0
+  FM_AGY_TRUST_ADDED=0
   settings=$(agy_settings_path)
   command -v jq >/dev/null 2>&1 || {
     echo "error: jq is required to pre-trust an agy workspace but was not found on PATH" >&2
@@ -1882,8 +1896,14 @@ agy_trust_workspace() {  # <worktree>
     return 1
   }
   if [ -f "$settings" ]; then
+    # Append only, and ONLY when absent. Deliberately not `unique`: jq's unique
+    # SORTS the array and drops duplicates, which would reorder every entry the
+    # operator already had and silently remove a repeated one. `index($p)`
+    # decides membership without touching order, so an existing array is
+    # returned byte-identical apart from the one appended element.
     jq --arg p "$wt" \
-      '.trustedWorkspaces = ((.trustedWorkspaces // []) + [$p] | unique)' \
+      '.trustedWorkspaces = ((.trustedWorkspaces // [])
+         | if index($p) == null then . + [$p] else . end)' \
       "$settings" > "$tmp" 2>/dev/null
   else
     jq -n --arg p "$wt" '{trustedWorkspaces: [$p]}' > "$tmp" 2>/dev/null
@@ -1907,6 +1927,7 @@ agy_trust_workspace() {  # <worktree>
     echo "error: failed to replace '$settings' while pre-trusting the task worktree" >&2
     return 1
   fi
+  FM_AGY_TRUST_ADDED=1
   fm_lock_release "$lock" || true
   return 0
 }
@@ -3724,6 +3745,8 @@ EOF
       {
         printf 'conversations_root=%s\n' "$AGY_CONVERSATIONS_ROOT"
         printf 'log_file=%s\n' "$STATE/$ID.agy-log"
+        printf 'workspace_root=%s\n' "$WT"
+        printf 'trust_added=%s\n' "$FM_AGY_TRUST_ADDED"
       } > "$STATE/$ID.agy-session"
       ;;
     kimi*)

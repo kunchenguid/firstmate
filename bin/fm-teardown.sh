@@ -1168,6 +1168,52 @@ remove_grok_turnend_auth() {
   rm -f -- "$path"
 }
 
+# remove_agy_workspace_trust: retire the trustedWorkspaces grant bin/fm-spawn.sh
+# wrote for this task's worktree.
+#
+# Without this the array grows by one absolute path per agy spawn and never
+# shrinks, and - the part that actually matters - a torn-down worktree path stays
+# trusted, so anything that later recreates that path opens in an interactive agy
+# session with no trust dialog at all.
+#
+# Three guards keep the removal narrow. It runs only for a task that recorded an
+# agy session, it removes only the exact recorded worktree path, and it removes
+# it only when the sidecar says firstmate itself added the grant - a workspace
+# the operator had already trusted on their own records trust_added=0 and is left
+# alone. Every other entry keeps its position, so the file is returned to the
+# order it had before this task existed.
+#
+# Best-effort by design: a settings file that is missing, unreadable, or no
+# longer valid JSON leaves the grant in place rather than failing a teardown that
+# has already confirmed the work landed.
+remove_agy_workspace_trust() {  # <state-dir> <id>
+  local state_dir=$1 id=$2 sidecar settings wt added dir tmp
+  sidecar="$state_dir/$id.agy-session"
+  [ -f "$sidecar" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  added=$(LC_ALL=C awk -F= '$1 == "trust_added" { sub(/^[^=]*=/, ""); print; exit }' "$sidecar")
+  [ "$added" = 1 ] || return 0
+  wt=$(LC_ALL=C awk -F= '$1 == "workspace_root" { sub(/^[^=]*=/, ""); print; exit }' "$sidecar")
+  [ -n "$wt" ] || return 0
+  settings="${FM_AGY_SETTINGS_OVERRIDE:-${HOME:-}/.gemini/antigravity-cli/settings.json}"
+  [ -f "$settings" ] || return 0
+  jq -e . "$settings" >/dev/null 2>&1 || return 0
+  jq -e --arg p "$wt" '(.trustedWorkspaces // []) | index($p) != null' \
+    "$settings" >/dev/null 2>&1 || return 0
+  dir=$(dirname "$settings")
+  tmp=$(mktemp "$dir/.fm-agy-settings.XXXXXX") || return 0
+  if jq --arg p "$wt" \
+      '.trustedWorkspaces = ((.trustedWorkspaces // []) | map(select(. != $p)))' \
+      "$settings" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    chmod --reference="$settings" "$tmp" 2>/dev/null \
+      || chmod "$(stat -f '%Lp' "$settings" 2>/dev/null || echo 600)" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$settings" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+  return 0
+}
+
 remove_kimi_turnend_auth() {
   local state_dir=$1 id=$2 token_path token='' path
   token_path=$(fm_control_harness_turnend_token_path kimi "$state_dir" "$id") || return 1
@@ -3331,6 +3377,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+remove_agy_workspace_trust "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.

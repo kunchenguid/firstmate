@@ -1288,7 +1288,7 @@ agy runs crewmate and scout work only; `bin/fm-spawn.sh` refuses `--secondmate` 
 The evidence below was produced on 2026-08-28 against the installed CLI on macOS 26.5.2 arm64 with tmux, running as `landonbrice`, with sqlite 3.51.0.
 
 - Binary: `~/.local/bin/agy`, a single Go binary; `agy --version` reported `1.1.22`.
-- Account: `landonbrice2005@gmail.com (Google AI Pro)`, reported in the CLI banner.
+- Account: a Google AI Pro account, reported in the CLI banner.
 
 ### Process identity
 
@@ -1369,6 +1369,19 @@ Measured directly against that live conversation:
 --- t+24s ---  highest-idx: 5/3   any-nonidle: 0   <- turn settled
 ```
 
+An interrupted step settles to 3 as well, so cancelling a turn leaves no
+permanent non-3 row that would pin the fold at busy.
+Measured directly: a streaming generation observed at status 8 was cancelled with a single Escape, the pane printed `Interrupted · What should Antigravity CLI do instead?`, and that row settled to 3 within four seconds.
+
+```text
+mid-generation:  0/3 1/3 2/3 3/3 4/3 5/3 6/3 7/3 8/3 9/8
+>>> Escape
+t+4:             0/3 1/3 2/3 3/3 4/3 5/3 6/3 7/3 8/3 9/3
+```
+
+A conversation holding a normal turn, a backgrounded-command turn, and an interrupted turn reported `SELECT DISTINCT status FROM steps` as `3` alone.
+The only non-3 values observed anywhere are 2, an enclosing step running, and 8, a streaming or tool step running.
+
 Two read-only open modes are needed, and their order matters.
 While the WAL sidecars exist, `file:<db>?mode=ro` reads them and is the only mode that sees steps agy has written but not yet checkpointed.
 Once agy checkpoints and removes them, that mode cannot open the database at all, while `immutable=1` reads it correctly:
@@ -1419,7 +1432,7 @@ That footer is a DELIVERY guard only and could not be a state source: agy auto-p
 | Action | Verified behavior |
 | --- | --- |
 | Interrupt | A single Escape or a single Ctrl+C stops a foreground turn and leaves a clean composer; no follow-up clear key is needed. |
-| Interrupt limit | Neither key kills a shell command agy has promoted to its background-task tracker: a `sleep 30` kept running after Escape and the agent later reported its completion. A hard stop needs the pane or process tree killed. |
+| Interrupt limit | Neither key kills a shell command agy has promoted to its background-task tracker: a `sleep 30` kept running after Escape and the agent later reported its completion, and a re-measurement with `sleep 40` behaved the same way. A hard stop needs the pane or process tree killed. |
 | Exit | `/exit` terminated the process cleanly, confirmed twice. |
 | Resume | `--continue`/`-c` and `--conversation <id>` both restored prior conversation state, confirmed by recalling a number injected in an earlier process. |
 
@@ -1485,9 +1498,11 @@ ok - agy's real idle composer still classifies empty
 not ok - agy accepted the turn but its account could not start one (pane says: ⚠ Verifying your account...). This is an account/quota condition, not adapter drift - retry when the account is available (agy 1.1.22)
 ```
 
-The guard's turn-dependent legs - the conversation binding, the busy fold, and the effort axes - could not complete on that run because the Antigravity account entered an eligibility/quota hold partway through the session.
-Those same guarantees are recorded above from the direct live measurements taken earlier in the same session, before the hold.
-Rerun the guard when the account is available to bring its automated evidence up to the level of the manual evidence here; the guard distinguishes that account condition from adapter drift so a maintainer is not sent looking in the wrong place.
+The guard's turn-dependent legs - the conversation binding, the busy fold, the interrupt path, and the effort axes - did not complete on that run.
+The Antigravity account repeatedly entered an eligibility hold (`⚠ Verifying your account...`) under the burst of turns this verification itself generated, and every turn-dependent leg needs a turn.
+Each of those guarantees is nevertheless recorded above from a direct live measurement that did complete, including the interrupt path: the busy fold was polled across a real turn, and a real streaming generation was cancelled with Escape and observed settling to status 3.
+What is outstanding is the guard's own automated re-proof, not the underlying evidence.
+Rerun the guard when the account has been idle, spacing runs rather than repeating them back to back; it distinguishes that account condition from adapter drift so a maintainer is not sent looking in the wrong place.
 
 ## Pi supervision branch
 

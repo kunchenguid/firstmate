@@ -853,6 +853,15 @@ fm_busy_cursor_turn_state() {  # <transcript>
 #   idx=3 step_type=15  status=3   <- a LATER step that already finished
 # and, once the turn settled, every row at status=3 with no other value present.
 #
+# An INTERRUPTED step settles to 3 as well, so an interrupt leaves no permanent
+# non-3 row that would pin this fold at busy forever. Measured live on agy
+# 1.1.22 (2026-08-28): a streaming generation observed at status 8 was cancelled
+# with a single Escape, the pane printed `Interrupted`, and that row settled to
+# 3; a conversation holding a normal turn, a backgrounded-command turn, and an
+# interrupted turn reported `SELECT DISTINCT status FROM steps` as 3 alone.
+# The only non-3 values ever observed are 2 (an enclosing step running) and 8 (a
+# streaming or tool step running).
+#
 # The busy predicate is therefore "ANY row is not status 3", never "the
 # highest-idx row is not status 3". Those two are not equivalent, and the
 # highest-idx form is actively wrong: the capture above was taken while a shell
