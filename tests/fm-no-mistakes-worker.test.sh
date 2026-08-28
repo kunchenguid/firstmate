@@ -320,6 +320,8 @@ target = temporary / "verified-runtime"
 module.stage_no_mistakes_runtime(archive_path, target, enforce_linux=False)
 assert (target / "bin/no-mistakes").read_bytes() == binary
 assert (target / "bin/no-mistakes").stat().st_mode & 0o111
+assert target.stat().st_mode & 0o777 == 0o755
+assert all(path.stat().st_mode & 0o777 == 0o755 for path in target.rglob("*") if path.is_dir())
 PY
 pass "guest supervisor re-verifies the sealed runtime inventory and executable"
 

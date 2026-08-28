@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import subprocess
@@ -387,7 +388,8 @@ def stage_no_mistakes_runtime(source, target, enforce_linux=True):
         if target.is_symlink() or not target.is_dir():
             raise SupervisorError("no-mistakes runtime target is unsafe")
         shutil.rmtree(target)
-    target.mkdir(mode=0o700)
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
     extracted = {}
     total = 0
     try:
@@ -411,7 +413,7 @@ def stage_no_mistakes_runtime(source, target, enforce_linux=True):
                 if total > 2 * 1024 * 1024 * 1024:
                     raise SupervisorError("no-mistakes runtime expands beyond its bound")
                 destination = target.joinpath(*parts)
-                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
                 destination.write_bytes(body)
                 destination.chmod(member.mode)
                 extracted[member.name] = body
@@ -482,11 +484,66 @@ def stage_no_mistakes_runtime(source, target, enforce_linux=True):
             ):
                 raise SupervisorError(
                     "no-mistakes runtime {} is not Linux amd64".format(path))
+    for directory, directories, _ in os.walk(target):
+        Path(directory).chmod(0o755)
+        for name in directories:
+            child = Path(directory) / name
+            if child.is_symlink():
+                raise SupervisorError("no-mistakes runtime contains a redirected directory")
+            child.chmod(0o755)
+
+
+def no_mistakes_execution_identity():
+    try:
+        identity = pwd.getpwnam("fmworker") if os.geteuid() == 0 else pwd.getpwuid(os.geteuid())
+    except KeyError:
+        raise SupervisorError("no-mistakes service user is unavailable") from None
+    if identity.pw_uid == 0 or identity.pw_gid == 0:
+        raise SupervisorError("no-mistakes service user is privileged")
+    return identity
+
+
+def chown_tree(root, uid, gid):
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise SupervisorError("no-mistakes writable root is unavailable or redirected")
+    os.chown(root, uid, gid, follow_symlinks=False)
+    for directory, directories, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        os.chown(base, uid, gid, follow_symlinks=False)
+        for name in directories + files:
+            os.chown(base / name, uid, gid, follow_symlinks=False)
+
+
+def prepare_no_mistakes_execution(worktree, worktree_root, account_home, brief):
+    identity = no_mistakes_execution_identity()
+    if os.geteuid() == 0:
+        chown_tree(worktree, identity.pw_uid, identity.pw_gid)
+        chown_tree(account_home, identity.pw_uid, identity.pw_gid)
+    account_home.chmod(0o700)
+    runtime = worktree_root / ".fm-runtime"
+    if runtime.is_symlink() or not runtime.is_dir():
+        raise SupervisorError("no-mistakes runtime root is unavailable or redirected")
+    for directory, directories, _ in os.walk(runtime, followlinks=False):
+        Path(directory).chmod(0o755)
+        for name in directories:
+            child = Path(directory) / name
+            if child.is_symlink():
+                raise SupervisorError("no-mistakes runtime contains a redirected directory")
+            child.chmod(0o755)
+    worktree_root.chmod(0o711)
+    brief.parent.chmod(0o711)
+    if os.geteuid() == 0:
+        os.chown(brief, identity.pw_uid, identity.pw_gid, follow_symlinks=False)
+    brief.chmod(0o400)
+    if os.geteuid() == 0:
+        return {"user": identity.pw_uid, "group": identity.pw_gid, "extra_groups": []}
+    return {}
 
 
 def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
     return subprocess.run(
-        ["git", "-C", str(repo), *arguments],
+        ["git", "-c", "safe.directory={}".format(repo), "-C", str(repo), *arguments],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=timeout, check=False,
     )
@@ -945,6 +1002,7 @@ def execute(request, worktree, worktree_root):
         "GIT_ASKPASS": "/bin/false",
     }
     argv = request["argv"]
+    execution_identity = {}
     if request.get("worker_role") == "no-mistakes":
         # The no-mistakes guest is already the isolated Azure test boundary.
         # Its project command uses this fixed marker to avoid recursively
@@ -959,11 +1017,13 @@ def execute(request, worktree, worktree_root):
             raise SupervisorError("no-mistakes staged brief is unavailable or redirected")
         argv = list(argv)
         argv[6] = str(brief.resolve())
+        execution_identity = prepare_no_mistakes_execution(
+            worktree, worktree_root, account_home, brief)
     try:
         completed = subprocess.run(
             argv, cwd=str(worktree), env=safe_env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=request["wall_seconds"], check=False,
+            timeout=request["wall_seconds"], check=False, **execution_identity,
         )
         timed_out = False
         exit_code = completed.returncode
