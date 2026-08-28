@@ -93,6 +93,12 @@ if [ "${1:-}" = --version ]; then
     error)
       echo 'panic: runtime error' >&2
       exit 2 ;;
+    extra-space)
+      printf 'no-mistakes version  %s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-v1.31.2}"
+      exit 0 ;;
+    tab)
+      printf 'no-mistakes version\t%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-v1.31.2}"
+      exit 0 ;;
     *)
       printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.31.2 (fake)}"
       exit 0 ;;
@@ -546,6 +552,11 @@ malformed SemVer trailing-dot build metadata is unclassifiable^no-mistakes versi
 malformed SemVer numeric prerelease leading zero bare is unclassifiable^no-mistakes version v2.0.0-01 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.31.2 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
 malformed SemVer numeric prerelease leading zero suffix is unclassifiable^no-mistakes version v2.0.0-rc.01 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.31.2 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
 SemVer prerelease single zero identifier is accepted^no-mistakes version v2.0.0-0 (fake)^ok^ok^ok^empty^
+malformed SemVer 4-part core is unclassifiable^no-mistakes version v9.9.9.9-deadbeef (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.31.2 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer 4-part core floor suffix is unclassifiable^no-mistakes version v1.2.3.4 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.31.2 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+compatible SemVer with extra space after version keyword is accepted^v1.31.2 (fake)^ok^ok^extra-space^empty^
+compatible SemVer with tab after version keyword is accepted^v1.31.2 (fake)^ok^ok^tab^empty^
+compatible hash build with extra space after version keyword is accepted^5c46a8b (5c46a8b) 2026-08-26T06:12:28Z^ok^ok^extra-space^empty^
 SemVer meeting floor with cobra short-long watch and intent is accepted^no-mistakes version v1.31.2 (fake)^cobra-combined^cobra-combined^ok^empty^
 SemVer meeting floor with long-alias watch and intent is accepted^no-mistakes version v1.31.2 (fake)^cobra-alias^cobra-alias^ok^empty^
 SemVer meeting floor with watch flag only in description text is rejected^no-mistakes version v1.31.2 (fake)^description-only^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.31.2 is installed but required capability watch --pr is unavailable; upgrade it before using direct-PR delivery (upgrade: no-mistakes update)

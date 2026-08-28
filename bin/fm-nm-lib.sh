@@ -100,9 +100,9 @@ _fm_nm_is_semver_core() {  # <core_plus_extensions>
 }
 
 _fm_nm_is_semver_core_version() {  # <core>
-  local major minor patch
-  IFS='.' read -r major minor patch <<< "$1"
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] || return 1
+  local major minor patch extra
+  IFS='.' read -r major minor patch extra <<< "$1"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "${extra:-}" ] || return 1
   case "$major" in
     0) ;;
     [1-9]*)
@@ -267,7 +267,7 @@ fm_nm_bootstrap_compatible() {
   command -v "$bin" >/dev/null 2>&1 || return 2
   version_failed=0
   if output=$(fm_nm_help_probe --version); then
-    version_token=$(printf '%s\n' "$output" | sed -nE 's/^no-mistakes version ([^[:space:]]+).*/\1/p' | head -n 1)
+    version_token=$(printf '%s\n' "$output" | sed -nE 's/^no-mistakes version[[:space:]]+([^[:space:]]+).*/\1/p' | head -n 1)
     if _fm_nm_is_semver "$version_token"; then
       version=$(printf '%s\n' "$version_token" | sed -nE 's/^[vV]?([0-9]+\.[0-9]+\.[0-9]+([-+].*)?)$/\1/p')
     else
