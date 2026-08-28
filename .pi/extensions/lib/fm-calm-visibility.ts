@@ -6,7 +6,6 @@ import {
 export const CALM_TRANSCRIPT_CLASSES = [
   "genuine-user-prompt",
   "genuine-agent-response",
-  "assistant-working-note",
   "assistant-thinking",
   "assistant-tool-call",
   "tool-result",
@@ -29,8 +28,8 @@ export const CALM_TRANSCRIPT_CLASSES = [
 
 export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 
-// Calm is on or off. "assistant-working-note" is deliberately absent from the allowlist:
-// Calm hides mid-turn assistant working notes, keeping the genuine final reply.
+// Calm is on or off. Assistant text remains visible even when it immediately precedes
+// a tool call, so the conversation stays intelligible while presentation-only rows hide.
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",

@@ -1073,6 +1073,7 @@ const assistantThinkingTool = new AssistantMessageComponent({
   ...assistantBase,
   content: [
     { type: "thinking", thinking: "HIDDEN_TOOL_THINKING" },
+    { type: "text", text: "VISIBLE_TOOL_INTENT" },
     { type: "toolCall", id: "assistant-layout-tool", name: "read", arguments: { path: "sample.txt" } },
   ],
   stopReason: "toolUse",
@@ -1289,8 +1290,12 @@ if (!customRow.render(100).join("\n").includes("CUSTOM_CALL")) {
 if (watchActual.render(100).length !== 0) {
   throw new Error("Calm left the fm_watch_arm_pi call/result shell visible");
 }
-if (assistantThinkingTool.render(100).length !== 0) {
-  throw new Error("Calm-hidden thinking beside a tool call retained vertical height");
+const assistantThinkingToolRendered = assistantThinkingTool.render(100).join("\n");
+if (!assistantThinkingToolRendered.includes("VISIBLE_TOOL_INTENT")) {
+  throw new Error("Calm removed assistant text immediately before a tool call");
+}
+if (assistantThinkingToolRendered.includes("HIDDEN_TOOL_THINKING")) {
+  throw new Error("Calm left reasoning beside a tool call visible");
 }
 if (JSON.stringify(assistantThinkingText.render(100)) !== JSON.stringify(assistantTextOnly.render(100))) {
   throw new Error("Calm-hidden thinking changed final assistant row geometry");
@@ -1300,8 +1305,9 @@ if (!assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING
   throw new Error("expanding thinking did not restore the original reasoning content");
 }
 assistantThinkingTool.setHideThinkingBlock(true);
-if (assistantThinkingTool.render(100).length !== 0) {
-  throw new Error("collapsing thinking again restored residual Calm rows");
+const assistantThinkingToolCollapsed = assistantThinkingTool.render(100).join("\n");
+if (!assistantThinkingToolCollapsed.includes("VISIBLE_TOOL_INTENT") || assistantThinkingToolCollapsed.includes("HIDDEN_TOOL_THINKING")) {
+  throw new Error("collapsing thinking changed the pre-tool assistant text contract");
 }
 if (JSON.stringify(sessionEntries) !== entriesBefore) {
   throw new Error("calm mode changed session entries or model context");
@@ -2909,12 +2915,33 @@ test_interactive_terminal_e2e() {
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/fm-primary-turnend-guard.ts"
   cp \
+    "$ROOT/bin/fm-sessionstart-run.sh" \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-hook-host-lib.sh" \
+    "$ROOT/bin/fm-backend.sh" \
+    "$ROOT/bin/fm-pr-lib.sh" \
+    "$ROOT/bin/fm-record-contradictions-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$project/bin/"
   chmod +x "$project/bin/"*.sh
+  for required_script in \
+    fm-sessionstart-run.sh \
+    fm-sessionstart-nudge.sh \
+    fm-primary-scope-lib.sh \
+    fm-gate-refuse-lib.sh \
+    fm-session-lock-lib.sh \
+    fm-hook-host-lib.sh \
+    fm-backend.sh \
+    fm-pr-lib.sh \
+    fm-record-contradictions-lib.sh \
+    fm-operational-input.sh
+  do
+    [ -x "$project/bin/$required_script" ] \
+      || fail "native session-start fixture dependency is missing: $required_script"
+  done
   cat >"$project/.pi/extensions/fm-calm-e2e-inject.ts" <<'TS'
 import {
   type AssistantMessage,
@@ -3070,8 +3097,9 @@ TS
   printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
   printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+  session_started_at=2020-01-01T00:00:00.000Z
   cat >"$session_file" <<JSON
-{"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
+{"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$session_started_at","cwd":"$project"}
 {"type":"message","id":"a0000001","parentId":null,"timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Show a deterministic tool example."}],"timestamp":1}}
 {"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first internal reasoning block"},{"type":"text","text":"I will run one command."},{"type":"toolCall","id":"call_calm_e2e","name":"bash","arguments":{"command":"printf 'CALM_E2E_OUTPUT\\n'"}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}
 {"type":"message","id":"a0000003","parentId":"a0000002","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_calm_e2e","toolName":"bash","content":[{"type":"text","text":"CALM_E2E_OUTPUT"}],"details":{},"isError":false,"timestamp":3}}
