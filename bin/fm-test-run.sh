@@ -883,10 +883,11 @@ select_family() {
 }
 
 families_for_test_reference() {
-  local needle=$1 s
+  local needle=$1 excluded_script=${2:-} s
   local found=0
   while IFS= read -r s; do
     [ -n "$s" ] || continue
+    [ "$s" = "$excluded_script" ] && continue
     if grep -Fq "$needle" "$s"; then
       family_for_basename "$(basename "$s")"
       found=1
@@ -1062,8 +1063,12 @@ families_for_changed_path() {
         || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/assets/*)
-      families_for_test_reference "$path" \
-        || printf '%s\n' "__unmapped__:$path"
+      if [ -e "$path" ]; then
+        # The selector suite embeds asset paths as fixture data; it exercises
+        # this mapping but does not consume those assets.
+        families_for_test_reference "$path" tests/fm-test-run.test.sh \
+          || printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
     tests/fixtures/*/*)
       # A fixture belongs to whichever suite reads its directory, found by the
