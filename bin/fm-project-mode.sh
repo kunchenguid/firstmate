@@ -18,7 +18,7 @@
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
-#   direct-PR              push + PR via gh-axi, no pipeline
+#   direct-PR              push + PR/MR via the repository's forge CLI, no pipeline
 #   local-only             local branch, no remote/PR, guarded local merge
 #   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate
 #                          classifies each task's surface at intake (the
