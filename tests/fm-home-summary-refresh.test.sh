@@ -449,7 +449,7 @@ pass "best-effort refresh logs worker termination"
 
 rm -f "$SIGNAL_MARKER" "$HOME_DIR/state/.home-summary-refresh.log"
 mkdir "$HOME_DIR/state/.home-summary-refresh.log"
-PATH="$SIGNALBIN:$FAKEBIN:$PATH" FM_TEST_REAL_ENV="$REAL_ENV" \
+if ! PATH="$SIGNALBIN:$FAKEBIN:$PATH" FM_TEST_REAL_ENV="$REAL_ENV" \
   FM_TEST_SIGNAL_MARKER="$SIGNAL_MARKER" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" WRITER="$WRITER" python3 - <<'PY'
 import os
@@ -483,5 +483,7 @@ if result.returncode != 0:
 if elapsed >= 6:
     raise SystemExit(f"blocked failure logger exceeded its bound: {elapsed:.2f}s")
 PY
-[ "$?" -eq 0 ] || fail "best-effort failure reporting was not fully bounded"
+then
+  fail "best-effort failure reporting was not fully bounded"
+fi
 pass "best-effort refresh bounds failure reporting fallback"
