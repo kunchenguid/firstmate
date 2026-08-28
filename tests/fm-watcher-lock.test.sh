@@ -51,6 +51,16 @@ wait_for_file_text() {
   return 1
 }
 
+wait_for_glob_absent() {
+  local pattern=$1 i=0
+  while [ "$i" -lt 100 ]; do
+    compgen -G "$pattern" >/dev/null || return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
   dir=$(make_case singleton)
@@ -534,7 +544,7 @@ test_msys_lock_single_winner_under_concurrency() {
     done
     fail "MSYS winner did not publish a directory lock"
   }
-  if compgen -G "$state/.contend.lock.owner.*" >/dev/null; then
+  if ! wait_for_glob_absent "$state/.contend.lock.owner.*"; then
     : > "$release"
     for pid in $pids; do
       wait "$pid" 2>/dev/null || true

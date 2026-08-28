@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-[ "$1" = -s ] || exit 99
-cp -R -- "$2" "$3"
