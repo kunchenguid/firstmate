@@ -1195,6 +1195,47 @@ EOF
   pass "MSYS copied owner directories preserve lock ownership, contention, release, and recovery"
 }
 
+test_msys_contended_publication_cleans_stray_owner_link() {
+  local dir state fakebin lock real_ln rc
+  dir=$(make_case msys-contended-publication)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lock="$state/.fixture.lock"
+  real_ln=$(command -v ln)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ln" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -e "${LN_RACED_ONCE:-}" ]; then
+  : > "$LN_RACED_ONCE" || exit 1
+  mkdir "$3" || exit 1
+  printf '%s\n' "$HOLDER_PID" > "$3/pid" || exit 1
+  "$REAL_LN" -s "$2" "$3/$(basename "$2")" || exit 1
+  exit 0
+fi
+exec "$REAL_LN" "$@"
+EOF
+  chmod +x "$fakebin/ln"
+
+  rc=0
+  PATH="$fakebin:$PATH" TARGET_LOCK="$lock" LN_RACED_ONCE="$dir/ln-raced.once" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    sleep 30 &
+    holder=$!
+    trap '\''kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true'\'' EXIT
+    HOLDER_PID=$holder
+    export HOLDER_PID
+    fm_lock_try_acquire "$lock" && exit 10
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fm_lock_try_acquire "$lock" || exit 11
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || rc=$?
+  [ "$rc" -eq 0 ] || fail "contended MSYS publication left a stray owner entry behind (rc=$rc)"
+  pass "contended MSYS publication cleans stray owner entries before stale recovery"
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -1246,6 +1287,7 @@ test_historical_annotation_skips_announced_status() {
 
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_msys_copied_owner_directory_is_a_valid_lock
+test_msys_contended_publication_cleans_stray_owner_link
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash

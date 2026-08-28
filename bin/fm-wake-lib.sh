@@ -441,9 +441,6 @@ fm_lock_try_create() {
         rm -f "$lockdir" 2>/dev/null || true
       fi
     elif [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
-      # MSYS copied the prepared owner directory into the publication path.
-      # The copied pid makes this the legacy directory lock already supported
-      # by release and stale-owner recovery rather than an ambiguous artifact.
       mypid=${BASHPID:-$$}
       copied_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
       if [ "$copied_pid" = "$mypid" ]; then
@@ -456,6 +453,8 @@ fm_lock_try_create() {
           FM_LOCK_OWNER_DIR=$legacy_owner
           return 0
         fi
+      else
+        fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
       fi
     fi
   else
