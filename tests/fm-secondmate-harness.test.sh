@@ -121,6 +121,39 @@ SH
   pass "fm-harness detects only Cursor Agent CLI's exact invocation marker"
 }
 
+test_codex_pid_one_detection() {
+  local dir fakebin got
+  dir="$TMP_ROOT/codex-pid-one"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  1:comm=) printf '%s\n' codex ;;
+  1:args=) printf '%s\n' 'codex-linux-sandbox --sandbox-policy-cwd /repo' ;;
+  1:ppid=) printf '%s\n' 0 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$got" = codex ] || fail "PID-1 Codex sandbox resolved '$got', expected codex"
+  pass "fm-harness inspects a Codex sandbox process at PID 1 before stopping"
+}
+
 # ===========================================================================
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
 # ===========================================================================
@@ -2549,6 +2582,7 @@ SH
 
 test_harness_resolution
 test_cursor_marker_detection
+test_codex_pid_one_detection
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
