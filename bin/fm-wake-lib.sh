@@ -9,6 +9,22 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+# shellcheck source=bin/fm-record-retire-lib.sh
+if [ -r "$FM_WAKE_LIB_DIR/fm-record-retire-lib.sh" ]; then
+  . "$FM_WAKE_LIB_DIR/fm-record-retire-lib.sh"
+else
+  # Partial-bin fixtures and recovery copies predate record retirement.
+  # Missing marker support must fail toward surfacing work, never abort every
+  # consumer of this core library or leave a fresh incarnation muted.
+  fm_record_retire_wake_muted() { return 1; }
+  fm_record_retire_marker_clear_for_spawn() {
+    local marker="$1/.record-retired-$2"
+    [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+      printf 'error: record-retirement support is unavailable for task %s; refusing spawn\n' "$2" >&2
+      return 1
+    }
+  }
+fi
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -1372,6 +1388,10 @@ fm_wake_append() {
   status=0
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if fm_record_retire_wake_muted "$STATE" "$kind" "$clean_key"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)

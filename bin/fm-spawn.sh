@@ -2691,6 +2691,10 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
+# A fresh incarnation must not inherit an older state-only retirement mute.
+# The task lifecycle locks are already held here, so a validated marker can be
+# removed without racing another spawn or retirement for the same id.
+fm_record_retire_marker_clear_for_spawn "$STATE" "$ID" || exit 1
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
