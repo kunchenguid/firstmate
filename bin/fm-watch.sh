@@ -785,9 +785,11 @@ surface_nonterminal_stale() {  # <window> <hash>
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
 age_of() {  # seconds since file mtime; "due immediately" if missing
-  local f=$1 m
+  local f=$1 m now
   m=$(stat_mtime "$f") || { echo 999999; return; }
-  echo $(( $(date +%s) - m ))
+  now=$(date +%s)
+  [ "$m" -le "$now" ] || { echo 999999; return; }
+  echo $(( now - m ))
 }
 
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is

@@ -171,6 +171,7 @@ EOF
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CADENCE_HOME" \
   FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
   "$WRITER" || fail "could not seed the cadence ledger"
+touch -t 203801010000 "$CADENCE_HOME/state/home-summary.json"
 PATH="$FAKEBIN:$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CADENCE_HOME" \
   FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
@@ -425,20 +426,20 @@ pass "best-effort refresh bounds state initialization"
 
 SIGNALBIN="$TMP_ROOT/signalbin"
 SIGNAL_MARKER="$TMP_ROOT/worker-signaled"
-REAL_PERL=$(command -v perl)
+REAL_ENV=$(command -v env)
 mkdir -p "$SIGNALBIN"
-cat > "$SIGNALBIN/perl" <<'SH'
+cat > "$SIGNALBIN/env" <<'SH'
 #!/usr/bin/env bash
 if [ ! -e "$FM_TEST_SIGNAL_MARKER" ]; then
   : > "$FM_TEST_SIGNAL_MARKER"
   exit 143
 fi
-exec "$FM_TEST_REAL_PERL" "$@"
+exec "$FM_TEST_REAL_ENV" "$@"
 SH
-chmod +x "$SIGNALBIN/perl"
+chmod +x "$SIGNALBIN/env"
 rm -f "$HOME_DIR/state/.home-summary-refresh.log"
-PATH="$SIGNALBIN:$FAKEBIN:$PATH" FM_TEST_REAL_PERL="$REAL_PERL" \
-  FM_TEST_SIGNAL_MARKER="$SIGNAL_MARKER" \
+PATH="$SIGNALBIN:$FAKEBIN:$PATH" FM_TEST_REAL_ENV="$REAL_ENV" \
+  FM_TEST_SIGNAL_MARKER="$SIGNAL_MARKER" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" "$WRITER" --best-effort \
   || fail "worker termination changed the best-effort caller result"
 grep -F 'refresh worker failed with exit 143' \
@@ -448,8 +449,8 @@ pass "best-effort refresh logs worker termination"
 
 rm -f "$SIGNAL_MARKER" "$HOME_DIR/state/.home-summary-refresh.log"
 mkdir "$HOME_DIR/state/.home-summary-refresh.log"
-PATH="$SIGNALBIN:$FAKEBIN:$PATH" FM_TEST_REAL_PERL="$REAL_PERL" \
-  FM_TEST_SIGNAL_MARKER="$SIGNAL_MARKER" \
+PATH="$SIGNALBIN:$FAKEBIN:$PATH" FM_TEST_REAL_ENV="$REAL_ENV" \
+  FM_TEST_SIGNAL_MARKER="$SIGNAL_MARKER" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" WRITER="$WRITER" python3 - <<'PY'
 import os
 import subprocess
