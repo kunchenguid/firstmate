@@ -21,9 +21,10 @@
 # the paths that already proceed to remove the record.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
+# reachable from a branch currently advertised by any configured remote (a fork
+# counts as a remote, so upstream-contribution PRs pushed to a fork satisfy this in
+# any mode), OR - for a normal ship task whose commits are not so reachable - when
+# its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
@@ -1041,23 +1042,24 @@ patch_id_for_commit() {
 }
 
 commits_not_on_configured_remotes() {
-  local format=$1 repo remotes remote refs ref has_exclusion=0
+  local format=$1 repo remotes remote advertised oid ref commit has_exclusion=0
   local -a args
   args=(log "$format" HEAD)
   for repo in "$PROJ" "$WT"; do
     remotes=$(git -C "$repo" remote 2>/dev/null) || return 1
     while IFS= read -r remote; do
       [ -n "$remote" ] || continue
-      refs=$(git -C "$repo" for-each-ref --format='%(refname)' "refs/remotes/$remote/" 2>/dev/null) || return 1
-      while IFS= read -r ref; do
-        [ -n "$ref" ] || continue
+      advertised=$(git -C "$repo" ls-remote --heads "$remote" 2>/dev/null) || continue
+      while read -r oid ref; do
+        [ -n "$oid" ] && [ -n "$ref" ] || continue
+        commit=$(git -C "$WT" rev-parse --verify --quiet "$oid^{commit}" 2>/dev/null) || continue
         if [ "$has_exclusion" = 0 ]; then
           args+=(--not)
           has_exclusion=1
         fi
-        args+=("$ref")
+        args+=("$commit")
       done <<EOF
-$refs
+$advertised
 EOF
     done <<EOF
 $remotes

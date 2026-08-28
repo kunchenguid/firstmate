@@ -759,6 +759,31 @@ test_local_cleanup_refuses_stale_ref_from_removed_remote() {
   pass "local-only teardown trusts only currently configured remote refs"
 }
 
+test_local_cleanup_refuses_stale_ref_deleted_from_configured_remote() {
+  local case_dir rc wt_head
+  case_dir=$(make_case stale-configured-origin-ref)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unlanded work hidden by deleted remote branch"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/fm/task-x1
+  [ "$(git -C "$case_dir/project" rev-parse refs/remotes/origin/fm/task-x1)" = "$wt_head" ] \
+    || fail "stale configured-origin fixture did not retain its tracking ref"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "deleted remote branch should not authorize cleanup through its stale tracking ref"
+  grep -q 'not yet merged into main' "$case_dir/stderr" \
+    || fail "cleanup trusted a stale ref after its configured remote branch was deleted"
+  assert_present "$case_dir/wt" \
+    "cleanup removed unlanded work retained only by a stale configured-remote ref"
+  pass "local-only teardown verifies configured remote containment"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2709,6 +2734,7 @@ test_local_only_merged_to_local_main_allows
 test_remoteless_local_cleanup_ignores_stale_origin_head
 test_remoteless_local_cleanup_refuses_stale_task_ref
 test_local_cleanup_refuses_stale_ref_from_removed_remote
+test_local_cleanup_refuses_stale_ref_deleted_from_configured_remote
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
