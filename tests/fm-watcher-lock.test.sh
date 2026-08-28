@@ -446,7 +446,23 @@ SH
   cat > "$fakebin/ln" <<'SH'
 #!/usr/bin/env bash
 printf 'used\n' > "${FM_TEST_LN_USED:?}"
-exit 97
+[ "${1:-}" = -s ] || exit 97
+[ "$#" -eq 3 ] || exit 98
+cp -R -- "$2" "$3"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ln"
+}
+
+make_fake_mingw_symlink_bin() {
+  local fakebin=$1
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'MINGW64_NT-10.0'
+SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+printf 'used\n' > "${FM_TEST_LN_USED:?}"
+exec "${REAL_LN:?}" "$@"
 SH
   chmod +x "$fakebin/uname" "$fakebin/ln"
 }
@@ -525,12 +541,12 @@ test_msys_lock_single_winner_under_concurrency() {
     done
     fail "MSYS losing contenders left owner directories behind"
   fi
-  [ ! -e "$ln_used" ] || {
+  [ -e "$ln_used" ] || {
     : > "$release"
     for pid in $pids; do
       wait "$pid" 2>/dev/null || true
     done
-    fail "MSYS lock acquisition still invoked ln -s"
+    fail "MSYS copied-directory publication did not invoke ln -s"
   }
   : > "$release"
   rc=0
@@ -546,8 +562,8 @@ test_msys_lock_single_winner_under_concurrency() {
     fm_lock_release "$2"
     [ ! -e "$2" ] && [ ! -L "$2" ] || exit 22
   ' _ "$LIB" "$lockdir" || fail "MSYS directory lock was not reacquirable after release"
-  [ ! -e "$ln_used" ] || fail "MSYS reacquire invoked ln -s"
-  pass "MSYS lock concurrency uses one clean directory winner"
+  [ -e "$ln_used" ] || fail "MSYS reacquire did not invoke the copied-directory ln path"
+  pass "MSYS copied-directory lock publication uses one clean directory winner"
 }
 
 test_msys_lock_steals_abandoned_directory_lock() {
@@ -577,8 +593,8 @@ test_msys_lock_steals_abandoned_directory_lock() {
   [ "$rc" -eq 0 ] || fail "MSYS stale directory lock was not recovered safely (rc=$rc)"
   [ -n "$newpid" ] || fail "recovered MSYS directory lock recorded no pid"
   [ "$newpid" != "$oldpid" ] || fail "MSYS stale directory lock kept the abandoned pid"
-  [ ! -e "$ln_used" ] || fail "MSYS stale recovery invoked ln -s"
-  pass "MSYS abandoned directory locks are reclaimed cleanly"
+  [ -e "$ln_used" ] || fail "MSYS stale recovery did not reuse the copied-directory ln path"
+  pass "MSYS abandoned copied-directory locks are reclaimed cleanly"
 }
 
 test_msys_lock_live_steal_mutex_is_not_reclaimed() {
@@ -621,8 +637,8 @@ test_msys_lock_live_steal_mutex_is_not_reclaimed() {
   stealpid=${out#*stealpid=}; stealpid=${stealpid%% *}
   [ "$lockpid" = "$dead" ] || fail "MSYS primary lock changed while live steal mutex was held: $out"
   [ "$stealpid" = "$(cat "$holder_file")" ] || fail "MSYS live steal mutex owner changed: $out"
-  [ ! -e "$ln_used" ] || fail "MSYS live steal mutex check invoked ln -s"
-  pass "MSYS live steal mutex is not reclaimed"
+  [ -e "$ln_used" ] || fail "MSYS live steal mutex check did not hit the copied-directory ln path"
+  pass "MSYS copied-directory live steal mutex is not reclaimed"
 }
 
 test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
@@ -648,8 +664,8 @@ test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
     [ ! -e "$2" ] && [ ! -L "$2" ] || exit 13
   ' _ "$LIB" "$lockdir" "$nested" || rc=$?
   [ "$rc" -eq 0 ] || fail "corrupted MSYS stale lock did not recover cleanly (rc=$rc)"
-  [ ! -e "$ln_used" ] || fail "MSYS corrupted-lock recovery invoked ln -s"
-  pass "MSYS stale lock recovery removes generated nested owner dirs"
+  [ -e "$ln_used" ] || fail "MSYS corrupted-lock recovery did not use the copied-directory ln path"
+  pass "MSYS copied-directory stale lock recovery removes generated nested owner dirs"
 }
 
 test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
@@ -674,8 +690,30 @@ test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
     [ -f "$3/foreign.txt" ] || exit 13
   ' _ "$LIB" "$lockdir" "$nested" || rc=$?
   [ "$rc" -eq 0 ] || fail "MSYS stale lock with foreign nested content was not refused safely (rc=$rc)"
-  [ ! -e "$ln_used" ] || fail "MSYS foreign-content refusal invoked ln -s"
-  pass "MSYS stale lock recovery refuses foreign nested content"
+  [ -e "$ln_used" ] || fail "MSYS foreign-content refusal did not use the copied-directory ln path"
+  pass "MSYS copied-directory stale lock recovery refuses foreign nested content"
+}
+
+test_mingw_lock_keeps_symlink_publication() {
+  local dir state fakebin lockdir ln_used real_ln rc
+  dir=$(make_case mingw-lock-publication)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  ln_used="$dir/ln-used"
+  real_ln=$(command -v ln)
+  make_fake_mingw_symlink_bin "$fakebin"
+  rc=0
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -L "$2" ] || exit 11
+    [ -e "$3" ] || exit 12
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$ln_used" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MINGW lock publication did not stay symlink-based when ln -s worked (rc=$rc)"
+  pass "MINGW keeps symlink-based lock publication when ln -s really symlinks"
 }
 
 test_cygwin_lock_keeps_symlink_publication() {
@@ -1503,6 +1541,7 @@ test_msys_lock_steals_abandoned_directory_lock
 test_msys_lock_live_steal_mutex_is_not_reclaimed
 test_msys_stale_corrupted_lock_recovers_generated_owner_dir
 test_msys_stale_corrupted_lock_refuses_unknown_nested_content
+test_mingw_lock_keeps_symlink_publication
 test_cygwin_lock_keeps_symlink_publication
 test_symlink_lock_contention_cleans_stray_owner_link
 test_watch_restart_rejects_reused_pid

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+printf '%s\n' 'MINGW64_NT-10.0'
