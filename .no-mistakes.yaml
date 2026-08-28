@@ -27,7 +27,9 @@ document:
 # `bin/fm-lint.sh` owns the complete lint definition, including GitHub workflow
 # lint via pinned actionlint in `bin/fm-lint-workflows.sh`, and
 # `.github/workflows/ci.yml` invokes it directly, with parity asserted by
-# `tests/fm-lint.test.sh` and `tests/fm-lint-workflows.test.sh`.
+# `tests/fm-lint.test.sh` and `tests/fm-lint-workflows.test.sh`. The temporary
+# Git alias gives native Windows Git Bash's shell while executing the same
+# owner unchanged on POSIX.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;
@@ -35,7 +37,7 @@ document:
 # security, Herdr, tmux, and lifecycle coverage). A full-suite override here
 # would duplicate CI and defeat the targeted Test contract.
 commands:
-  lint: 'bin/fm-lint.sh'
+  lint: 'git -c alias.fm-lint=!bin/fm-lint.sh fm-lint'
 
 # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
 # The evidence is not committed to the feature or default branch.
