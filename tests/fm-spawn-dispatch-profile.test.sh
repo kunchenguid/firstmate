@@ -910,6 +910,25 @@ test_cursor_agent_threads_model_variant_and_records_effort() {
   pass "cursor-agent receives the model variant while metadata preserves the selected effort axis"
 }
 
+test_cursor_reader_launch_uses_noninteractive_brief_delivery() {
+  local rec id out status launch
+  id=cursor-reader-consumes-z7c
+  rec=$(make_spawn_case cursor-reader-consumes cursor-agent "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id" "$PROJ_DIR"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --access reader --harness cursor-agent \
+    --model cursor-grok-4.6-xhigh --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "reader Cursor spawn should submit its launch command"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" '--print' \
+    "reader Cursor launch omitted the documented non-interactive brief mode"
+  assert_contains "$launch" 'encode launch-brief' \
+    "reader Cursor launch omitted its typed launch brief"
+  pass "reader Cursor launch uses non-interactive brief delivery through the confined process"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -3540,6 +3559,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_cursor_agent_threads_model_variant_and_records_effort
+test_cursor_reader_launch_uses_noninteractive_brief_delivery
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

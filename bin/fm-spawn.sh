@@ -1767,7 +1767,15 @@ launch_template() {
     # lifecycle and busy integration where it already applies, with foreground
     # checkpoints covering the unverified native seat-start and Stop-hook paths.
     cursor-agent)
-      printf '%s' 'cursor-agent --trust --force __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      # Cursor's interactive TUI opens its empty composer after a confined
+      # reader launch and does not run the positional prompt. Reader scouts
+      # therefore use Cursor's documented non-interactive prompt mode; writer
+      # tasks keep the interactive TUI and their existing handoff unchanged.
+      if [ "$ACCESS" = reader ]; then
+        printf '%s' 'cursor-agent --trust --force __MODELFLAG__--print "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'cursor-agent --trust --force __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
       ;;
     *) return 1 ;;
   esac
