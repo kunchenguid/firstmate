@@ -1755,6 +1755,8 @@ declare -a WORKER_SCRIPTS=()
 declare -a BOUNDED_PIDS=()
 RUN_CLEANED=0
 FINALIZATION_WATCHDOG_PID=
+LAUNCH_CRITICAL=0
+PENDING_SIGNAL=
 
 remove_bounded_pid() {
   local want=$1 slot
@@ -1808,9 +1810,33 @@ signal_exit() {
   exit "$code"
 }
 
+handle_signal() {
+  local code=$1
+  if [ "$LAUNCH_CRITICAL" -eq 1 ]; then
+    [ -n "$PENDING_SIGNAL" ] || PENDING_SIGNAL=$code
+    return 0
+  fi
+  signal_exit "$code"
+}
+
+begin_tracked_launch() {
+  LAUNCH_CRITICAL=1
+}
+
+finish_tracked_launch() {
+  local pending=$PENDING_SIGNAL
+  LAUNCH_CRITICAL=0
+  PENDING_SIGNAL=
+  [ -z "$pending" ] || signal_exit "$pending"
+}
+
 arm_finalization_watchdog() {
-  local monitor_was_on=0 parent=$$ pid release="$RUN_TMP/finalization-watchdog-release"
+  local monitor_was_on=0 parent=$$ pid elapsed remaining release="$RUN_TMP/finalization-watchdog-release"
+  elapsed=$(($(now_ms) - RUN_STARTED_MS))
+  remaining=$((MAX_WALL_MS - elapsed))
+  [ "$remaining" -gt 0 ] || signal_exit 143
   rm -f "$release"
+  begin_tracked_launch
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m
   (
@@ -1818,20 +1844,21 @@ arm_finalization_watchdog() {
     set +m
     while [ ! -e "$release" ]; do sleep 0.01; done
     if command -v python3 >/dev/null 2>&1; then
-      python3 -c 'import sys, time; time.sleep(int(sys.argv[1]) / 1000)' "$MAX_WALL_MS"
+      python3 -c 'import sys, time; time.sleep(int(sys.argv[1]) / 1000)' "$remaining"
     else
-      sleep $(((MAX_WALL_MS + 999) / 1000))
+      sleep $(((remaining + 999) / 1000))
     fi
     kill -TERM "$parent" 2>/dev/null || exit 0
     sleep 1
     kill -KILL "$parent" 2>/dev/null || true
   ) &
   pid=$!
-  [ "$monitor_was_on" -eq 1 ] || set +m
-  tracked_group_is_owned "$pid" || die "finalization watchdog did not lead its process group: $pid"
   FINALIZATION_WATCHDOG_PID=$pid
   BOUNDED_PIDS+=("$pid")
+  [ "$monitor_was_on" -eq 1 ] || set +m
+  tracked_group_is_owned "$pid" || die "finalization watchdog did not lead its process group: $pid"
   : >"$release"
+  finish_tracked_launch
 }
 
 disarm_finalization_watchdog() {
@@ -1845,9 +1872,9 @@ disarm_finalization_watchdog() {
 }
 
 trap cleanup_run EXIT
-trap 'signal_exit 129' HUP
-trap 'signal_exit 130' INT
-trap 'signal_exit 143' TERM
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
@@ -1930,6 +1957,7 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   local rc pid release="$RUN_TMP/group-release.$id" monitor_was_on=0 tracked=0
   rm -f "$release"
   if [ "${FM_TEST_WORKER_GROUP:-0}" -eq 0 ]; then
+    begin_tracked_launch
     case $- in *m*) monitor_was_on=1 ;; esac
     set -m
     tracked=1
@@ -1957,10 +1985,11 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   ) &
   pid=$!
   if [ "$tracked" -eq 1 ]; then
+    BOUNDED_PIDS+=("$pid")
     [ "$monitor_was_on" -eq 1 ] || set +m
     tracked_group_is_owned "$pid" || die "tracked test process did not lead its process group: $pid"
-    BOUNDED_PIDS+=("$pid")
     : >"$release"
+    finish_tracked_launch
   fi
   set +e
   wait "$pid"
@@ -2091,6 +2120,7 @@ else
       "$(now_iso)" "$script" "$family" "$expected"
     worker_release="$RUN_TMP/worker-release.$worker_n"
     rm -f "$worker_release"
+    begin_tracked_launch
     case $- in *m*) worker_monitor_was_on=1 ;; *) worker_monitor_was_on=0 ;; esac
     set -m
     (
@@ -2119,13 +2149,14 @@ else
       exit 0
     ) &
     worker_pid=$!
+    WORKER_PIDS[worker_n]=$worker_pid
     [ "$worker_monitor_was_on" -eq 1 ] || set +m
     tracked_group_is_owned "$worker_pid" || die "worker did not lead its process group: $worker_pid"
-    WORKER_PIDS[worker_n]=$worker_pid
-    : >"$worker_release"
     WORKER_IDX[worker_n]=$worker_n
     WORKER_SCRIPTS[worker_n]=$script
     active_workers=$((active_workers + 1))
+    : >"$worker_release"
+    finish_tracked_launch
   done
   while [ "$active_workers" -gt 0 ]; do
     wait_one_completed_job_worker
@@ -2177,6 +2208,7 @@ if [ -n "$JSON_PATH" ]; then
   json_status="$RUN_TMP/json-status"
   json_release="$RUN_TMP/json-release"
   rm -f "$json_release"
+  begin_tracked_launch
   case $- in *m*) json_monitor_was_on=1 ;; *) json_monitor_was_on=0 ;; esac
   set -m
   (
@@ -2191,10 +2223,11 @@ if [ -n "$JSON_PATH" ]; then
     printf '%s\n' "$?" >"$json_status"
   ) &
   json_pid=$!
+  BOUNDED_PIDS+=("$json_pid")
   [ "$json_monitor_was_on" -eq 1 ] || set +m
   tracked_group_is_owned "$json_pid" || die "timing artifact writer did not lead its process group: $json_pid"
-  BOUNDED_PIDS+=("$json_pid")
   : >"$json_release"
+  finish_tracked_launch
   set +e
   wait "$json_pid" 2>/dev/null
   json_rc=$?

@@ -263,14 +263,8 @@ SH
     >"$tmp/slow-selection.out" 2>"$tmp/slow-selection.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "an empty run whose selection exceeded its budget must fail"
+  [ "$rc" -eq 143 ] || fail "an empty run past its budget must terminate at finalization, got $rc"
   [ -e "$tmp/slow-git" ] || fail "the slow selection fixture did not run"
-  grep -Fq 'FM_TEST_SUMMARY total=0 failed=0' "$tmp/slow-selection.out" \
-    || fail "the over-budget empty run did not report its summary: $(cat "$tmp/slow-selection.out")"
-  grep -Fq 'FM_TEST_BUDGET max_wall_ms=100' "$tmp/slow-selection.out" \
-    || fail "the over-budget empty run did not report its budget: $(cat "$tmp/slow-selection.out")"
-  grep -Fq 'wall-clock budget exceeded' "$tmp/slow-selection.err" \
-    || fail "selection time was omitted from the wall-clock budget: $(cat "$tmp/slow-selection.err")"
   set +e
   (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --max-wall-ms nope) \
     >"$tmp/bad-budget.out" 2>"$tmp/bad-budget.err"
@@ -733,11 +727,7 @@ SH
   "$runner" --max-wall-ms 500 "$fast" >"$tmp/over" 2>"$tmp/over.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "an over-budget run must fail even with every script green: $(cat "$tmp/over")"
-  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/over" \
-    || fail "the over-budget run should still report its green scripts: $(cat "$tmp/over")"
-  grep -Fq 'wall-clock budget exceeded' "$tmp/over.err" \
-    || fail "the over-budget run did not name the budget it missed: $(cat "$tmp/over.err")"
+  [ "$rc" -eq 143 ] || fail "an over-budget run must terminate before finalization, got $rc"
 
   # A malformed budget is refused rather than silently ignored.
   set +e
@@ -755,12 +745,13 @@ SH
   fifo="$tmp/timing.fifo"
   cat >"$repo/$final" <<'SH'
 #!/usr/bin/env bash
+sleep 2
 echo "ok - finalization fixture"
 SH
   chmod +x "$repo/$final"
   mkfifo "$fifo"
   set +e
-  "$runner" --max-wall-ms 2000 --json "$fifo" "$final" \
+  "$runner" --max-wall-ms 3000 --json "$fifo" "$final" \
     >"$tmp/finalization.out" 2>"$tmp/finalization.err" &
   runner_pid=$!
   set -e
@@ -780,9 +771,9 @@ SH
   set -e
   [ "$rc" -eq 143 ] || fail "blocking finalization watchdog exit must be 143, got $rc"
   summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/finalization.out")
-  [ -n "$summary_duration" ] && [ "$summary_duration" -lt 2000 ] \
+  [ -n "$summary_duration" ] && [ "$summary_duration" -lt 3000 ] \
     || fail "suite duration unexpectedly included blocking finalization: $(cat "$tmp/finalization.out")"
-  [ "$waited" -lt 100 ] || fail "blocking finalization was not bounded"
+  [ "$waited" -lt 80 ] || fail "blocking finalization ignored the remaining invocation budget"
 
   rm -rf "$tmp"
   pass "--max-wall-ms fails an over-budget run and refuses a malformed budget"
@@ -919,6 +910,58 @@ SH
 
   rm -rf "$tmp"
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
+}
+
+test_signal_during_launch_reaps_registered_group() {
+  local tmp repo runner fake_bin real_ps runner_pid rc waited group_pid
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-launch-signal.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fake_bin="$tmp/fake-bin"
+  real_ps=$(command -v ps)
+  mkdir -p "$repo/bin" "$repo/tests" "$fake_bin"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/tests/fm-brief.test.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 600
+SH
+  cat >"$fake_bin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "$LAUNCH_MARKER" ]; then
+  printf '%s\n' "${!#}" >"$LAUNCH_GROUP"
+  : >"$LAUNCH_MARKER"
+  sleep 1
+fi
+exec "$REAL_PS" "$@"
+SH
+  chmod +x "$runner" "$repo/tests/fm-brief.test.sh" "$fake_bin/ps"
+  set +e
+  PATH="$fake_bin:$PATH" REAL_PS="$real_ps" LAUNCH_MARKER="$tmp/launching" \
+    LAUNCH_GROUP="$tmp/group" "$runner" tests/fm-brief.test.sh \
+    >"$tmp/out" 2>"$tmp/err" &
+  runner_pid=$!
+  set -e
+  waited=0
+  while [ ! -e "$tmp/launching" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
+  if [ ! -e "$tmp/launching" ]; then
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid" 2>/dev/null || true
+    fail "launch registration fixture did not reach its critical section"
+  fi
+  kill -TERM "$runner_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || fail "signal during launch must exit 143, got $rc"
+  group_pid=$(cat "$tmp/group")
+  kill -0 -- "-$group_pid" 2>/dev/null \
+    && fail "signal during launch left process group $group_pid running"
+  rm -rf "$tmp"
+  pass "signals during launch reap the newly registered process group"
 }
 
 test_signal_cleanup_reaps_concurrent_descendants() {
@@ -1087,6 +1130,7 @@ test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
+test_signal_during_launch_reaps_registered_group
 test_signal_cleanup_reaps_concurrent_descendants
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
