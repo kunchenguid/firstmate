@@ -821,6 +821,41 @@ test_grok_adapter_missing_jq_and_no_supervision_allow() {
   pass "fm-turnend-guard-grok: missing jq and no-supervision-needed stops stay silent and bounded"
 }
 
+test_settings_hook_uses_claude_project_dir() {
+  local settings command autoarm
+  settings="$ROOT/.claude/settings.json"
+  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  autoarm=$(jq -r '.hooks.Stop[0].hooks[1].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .claude/settings.json"
+  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "Stop hook must resolve via CLAUDE_PROJECT_DIR, not a cwd-relative path"
+  assert_contains "$command" 'fm-turnend-guard.sh --claude' "Stop hook must invoke fm-turnend-guard.sh in cooperative --claude mode"
+  assert_contains "$command" 'GROK_AGENT' "Claude blocking Stop hook must stay inert when Grok loads Claude-compatible settings"
+  assert_contains "$autoarm" 'GROK_AGENT' "Claude auto-arm Stop hook must stay inert when Grok loads Claude-compatible settings"
+  case "$command" in
+    bin/fm-turnend-guard.sh|./bin/fm-turnend-guard.sh)
+      fail "Stop hook must not use a bare relative path (cwd-dependent): $command"
+      ;;
+  esac
+  pass ".claude/settings.json: Stop hook uses CLAUDE_PROJECT_DIR-anchored --claude guard command"
+}
+
+test_codex_hook_invokes_shared_guard() {
+  local settings command sessionstart
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  sessionstart=$(jq -r '.hooks.SessionStart[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  [ -n "$sessionstart" ] || fail "SessionStart hook command is missing from .codex/hooks.json"
+  assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
+  assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
+  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
+  assert_contains "$sessionstart" 'fm-sessionstart-run.sh' "codex SessionStart must use the shared session-start adapter"
+  pass ".codex/hooks.json: Stop uses the shared guard and SessionStart uses the shared lifecycle adapter"
+}
+
 # Grok loads Claude-compatible settings, so a TRACKED .claude/settings.json entry
 # that also has a .grok/hooks/ counterpart must refuse to run under Grok, or the
 # home gets a duplicate path. The regression this pins: the guard once tested
@@ -899,11 +934,8 @@ test_traex_hook_invokes_shared_guard() {
   pass ".trae/hooks.json: Stop hook invokes the shared primary guard"
 }
 
-# The traex hooks file is a mechanical copy of the codex one: same three fixed
-# commands (Stop guard + arm/cd PreToolUse seatbelts), differing ONLY in the
-# self-reference path token .codex/hooks.json -> .trae/hooks.json. Pin that so a
-# future edit to one file that forgets the other is caught, and so the traex file
-# can never silently drift into a different (untrusted-hash) command shape.
+# Traex and Codex share SessionStart, the Stop guard, and the PreToolUse
+# seatbelts byte-for-byte apart from their self-reference path.
 test_traex_hooks_mirror_codex_apart_from_path() {
   local codex traex normalized_codex normalized_traex
   codex="$ROOT/.codex/hooks.json"
@@ -917,11 +949,10 @@ test_traex_hooks_mirror_codex_apart_from_path() {
     || fail ".trae/hooks.json is missing the cd-pretool PreToolUse seatbelt"
   jq -e '.hooks.Stop[0].hooks[0].command | contains("fm-turnend-guard.sh")' "$traex" >/dev/null \
     || fail ".trae/hooks.json is missing the Stop guard"
-  # Byte-identical apart from the path token: mask .codex/.trae in both and compare.
   normalized_codex=$(jq -S . "$codex" | sed 's#\.codex/hooks\.json#.HOOKS#g')
   normalized_traex=$(jq -S . "$traex" | sed 's#\.trae/hooks\.json#.HOOKS#g')
   [ "$normalized_codex" = "$normalized_traex" ] \
-    || fail ".trae/hooks.json diverges from .codex/hooks.json beyond the .codex->.trae path token; keep it a mechanical copy"
+    || fail ".trae/hooks.json diverges from Codex beyond the self-reference path"
   pass ".trae/hooks.json mirrors .codex/hooks.json apart from the self-reference path"
 }
 

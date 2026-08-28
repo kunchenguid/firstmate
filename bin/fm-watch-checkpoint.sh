@@ -62,7 +62,7 @@ run_with_perl_timeout() {
       die "exec failed: $!\n";
     }
     local $SIG{ALRM} = sub {
-      kill "TERM", -$pid;
+      kill "USR1", -$pid;
       select undef, undef, undef, 0.2;
       kill "KILL", -$pid;
       exit 124;
@@ -75,13 +75,13 @@ run_with_perl_timeout() {
 
 set +e
 if command -v timeout >/dev/null 2>&1; then
-  timeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+  FM_WATCH_BOUNDED_CHECKPOINT=1 timeout --signal=USR1 "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
   RC=$?
 elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+  FM_WATCH_BOUNDED_CHECKPOINT=1 gtimeout --signal=USR1 "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
   RC=$?
 else
-  run_with_perl_timeout >"$OUT" 2>"$ERR"
+  FM_WATCH_BOUNDED_CHECKPOINT=1 run_with_perl_timeout >"$OUT" 2>"$ERR"
   RC=$?
 fi
 set -e

@@ -8,7 +8,8 @@ Task-specific chronology, temporary paths, run identifiers, and delivery transcr
 
 ## Native session-start delivery
 
-The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
+The original cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
+Codex's native queue-wake evidence was refreshed separately on 2026-08-27 with Codex CLI 0.150.1.
 
 Codex command shape:
 
@@ -63,9 +64,11 @@ The third is recorded below.
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
-Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
+Codex 0.150.1's interactive TUI still fired no project `SessionStart` hook in the same kind of lab where `codex exec` fired it reliably.
 Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
-The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
+The interactive TUI remains an instruction-refresh gap: Firstmate has no tracked session-open, compaction, or re-emit channel there and ships no global hook.
+The queue adapter prefers the `SessionStart` payload UUID where that hook fires and cross-checks it against the native `CODEX_THREAD_ID`; the interactive TUI's required bootstrap binds directly from that shell identity because its tracked hook is absent.
+The adapter validates the binding against the current home, lock generation, PID, and process identity.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -106,7 +109,8 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 This is live coverage only for Pi compaction.
 The portable session-start tests cover continuation classification, baseline immutability, and source-routing behavior.
 Pi compaction is the only supported stale-cache refresh pair.
-Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
+Codex exec exposes only startup and context-preserving resume through tracked registration.
+Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation, while the queue-binding regression separately covers compact-compatible stable identity and authoritative resume replacement.
 
 ### Detached session-open workers survive the hook
 
@@ -435,7 +439,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The native `CODEX_THREAD_ID` from the TUI's shell-tool environment woke that idle existing TUI through `codex queue`, and a second queue call made while a 12-second tool turn was active ran only after that turn, with no terminal keystrokes. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
@@ -465,9 +469,26 @@ Observed output:
 
 ```text
 ok - a resurfacing handling successor stays alive and supervises instead of going blind
+ok - done signal reaches one queue turn, drain/ack, and a stable live successor
 ok - unacknowledged recovery is announced at most once per generation and the successor stays alive
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
+
+Codex's deterministic queue adapter coverage was run on 2026-08-27 with:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-queue-wake.test.sh tests/fm-present-launch.test.sh tests/fm-turnend-guard.test.sh tests/fm-watch-recovery-loop.test.sh
+```
+
+The suites cover authoritative home/lock/process binding, stale and invalid rejection, idle/busy adapter boundaries, burst and ambiguous-acceptance coalescing, missing/unsupported/rejected/timed-out queue fallbacks, composer safety, resume/rebind and compact identity, Stop-loop suppression, and the real watcher row -> doorbell -> drain/report -> acknowledgement -> successor path with a fake CLI.
+The manual live guard is separate because it requires Codex credentials and an interactive TUI.
+Its successful 0.150.1 output is:
+
+```text
+ok - codex-cli 0.150.1 live E2E used the native CODEX_THREAD_ID, woke an idle TUI, and serialized a busy queue turn without terminal keystrokes
+```
+
+An isolated 0.150.1 asynchronous `Stop` hook also completed while the TUI was idle without starting a new turn or rendering its output.
+That negative result remains the boundary: Codex did not gain Claude-style `asyncRewake`; `codex queue` is the enabling primitive, and marked terminal injection plus the bounded foreground checkpoint remain fallbacks.
 
 Deterministic entry points:
 

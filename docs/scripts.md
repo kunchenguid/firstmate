@@ -77,6 +77,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with loud cycle endings and bounded lifecycle ledger |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
+| `fm-codex-primary.sh` | Capture and validate the authoritative Codex primary thread binding for one home and session-lock generation |
+| `fm-codex-queue-wake.sh` | Ring the validated Codex thread with one coalesced drain doorbell without consuming durable wakes |
 | `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes, detect stalled local-secondmate wake queues, and exit on actionable ones |
 | `fm-inactive-reconcile.sh` | Reconcile long-inactive direct crewmate terminal outcomes without forge access |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
