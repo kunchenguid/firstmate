@@ -1257,7 +1257,7 @@ git commit -m "feat(auto-merge): add DynamoDB Local and a local enrollment seed 
 
 ### Task 4: The Auto-Merge page, read-only
 
-The table, the join, the orphan section, and the nav entry. No writes yet.
+The table, the join, the stale-enrollment banner, and the nav entry. No writes yet.
 
 **Files:**
 - Create: `app/Filament/Pages/AutoMerge.php`
@@ -1267,7 +1267,7 @@ The table, the join, the orphan section, and the nav entry. No writes yet.
 
 **Interfaces:**
 - Consumes: `EnrollmentStore::fleet()`, `EnrollmentData` from Task 1.
-- Produces: `AutoMerge::class` with a memoised `enrollments(): Collection` and `orphans(): Collection`; `Repo::scopeFullNameIn`.
+- Produces: `AutoMerge::class` with a memoised `enrollments(): Collection`, `needsAttention(): Collection` (each entry `{record: EnrollmentData, reason: string}`), `enrollmentFor(Repo): ?EnrollmentData` and `refreshEnrollments(): void`; `Repo::scopeFullNameIn(array $names)` and `Repo::$full_name`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1379,7 +1379,7 @@ class AutoMergeTest extends TestCase
     #[Test]
     public function an_enrollment_with_no_inventory_row_is_surfaced_not_hidden(): void
     {
-        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'portkey']);
+        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'portkey', 'archived' => false]);
 
         $this->fleetIs(
             $this->record('bankrate/portkey'),
@@ -1387,12 +1387,46 @@ class AutoMergeTest extends TestCase
         );
         $this->actingAs(User::factory()->create());
 
-        // Hiding it would mean zapp is evaluating something the page says is not
-        // enrolled — the worst available outcome.
+        // A rename leaves Conductor following the new name and the enrollment
+        // stranded on the old one. Hiding it would mean a record counted in
+        // fleetSize that nobody can see.
         Livewire::test(AutoMerge::class)
             ->assertOk()
             ->assertSee('bankrate/deleted-repo')
             ->assertSee('not in Conductor');
+    }
+
+    #[Test]
+    public function an_enrolled_but_archived_repository_is_flagged_and_still_reachable(): void
+    {
+        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
+
+        $this->fleetIs($this->record('bankrate/old-service'));
+        $this->actingAs(User::factory()->create());
+
+        // The regression this pins: a hard `->active()` scope on the query would
+        // exclude this row from the table, and because it HAS a repos row it is
+        // not an orphan either — so it would vanish from the page while zapp
+        // kept counting it in fleetSize.
+        Livewire::test(AutoMerge::class)
+            ->assertOk()
+            ->assertSee('bankrate/old-service')
+            ->assertSee('archived in GitHub');
+    }
+
+    #[Test]
+    public function the_archived_filter_defaults_to_hiding_them_but_can_be_cleared(): void
+    {
+        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'live-service', 'archived' => false]);
+        $archived = Repo::factory()->create(['owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
+
+        $this->fleetIs();
+        $this->actingAs(User::factory()->create());
+
+        Livewire::test(AutoMerge::class)
+            ->assertCanNotSeeTableRecords([$archived])
+            ->filterTable('archived', null)
+            ->assertCanSeeTableRecords([$archived]);
     }
 
     #[Test]
@@ -1534,24 +1568,50 @@ class AutoMerge extends Page implements HasTable
     }
 
     /**
-     * Enrollment records with no row in Conductor's inventory.
+     * Enrollment records that are counted but cannot be acted on from the table.
      *
-     * Happens when a repository is renamed or deleted in GitHub, and on every
-     * fresh local database. These cannot appear in an Eloquent-backed table, so
-     * the view renders them separately — hiding them would mean zapp is
-     * evaluating something this page says is not enrolled.
+     * Two causes, both of which inflate `fleetSize`:
      *
-     * @return Collection<int, EnrollmentData>
+     * - **Not in inventory.** zapp keys enrollment on `owner/repo` from the
+     *   webhook payload, while Conductor's `repos` table syncs by the stable
+     *   `external_id` — so a RENAME leaves Conductor following the new name and
+     *   the enrollment record stranded on the old one. A deleted repository
+     *   does the same (`Repo::deleteByGithubId`). Also every fresh local
+     *   database, before the seed command creates the rows.
+     * - **Archived.** The row exists, so it is not an orphan, but the table's
+     *   `archived` filter defaults to hiding it. Without this it would be
+     *   invisible on the page while zapp still counted it.
+     *
+     * A stale record is inert for EVALUATION — a deleted repo sends no
+     * webhooks, and a renamed one sends them under a name that is not enrolled.
+     * It is not inert for DATA: `fleetSize` counts it, and that is the
+     * denominator behind `minFleetForConfidence`, so stale records make
+     * `internalConfidence` grade on a fleet smaller than it believes it has.
+     *
+     * @return Collection<int, array{record: EnrollmentData, reason: string}>
      */
-    public function orphans(): Collection
+    public function needsAttention(): Collection
     {
-        $known = Repo::query()
+        $rows = Repo::query()
             ->fullNameIn($this->enrollments()->keys()->all())
             ->get()
-            ->map->full_name;
+            ->keyBy->full_name;
 
         return $this->enrollments()
-            ->reject(fn (EnrollmentData $record): bool => $known->contains($record->repo))
+            ->map(function (EnrollmentData $record) use ($rows): ?array {
+                $repo = $rows->get($record->repo);
+
+                if ($repo === null) {
+                    return ['record' => $record, 'reason' => 'not in Conductor\'s inventory'];
+                }
+
+                if ($repo->archived) {
+                    return ['record' => $record, 'reason' => 'archived in GitHub'];
+                }
+
+                return null;
+            })
+            ->filter()
             ->values();
     }
 
@@ -1564,7 +1624,14 @@ class AutoMerge extends Page implements HasTable
     public function table(Table $table): Table
     {
         return $table
-            ->query(Repo::query()->active())
+            // NOT `->active()`. A hard scope would exclude an enrolled
+            // repository that has since been archived — it has a `repos` row, so
+            // it is not an orphan and would not reach the banner either, and it
+            // would vanish from the page while zapp still counted it in
+            // `fleetSize`. `RepoResource` uses a clearable `archived` filter
+            // defaulting to false (RepoResource.php:319) for the same reason;
+            // follow that.
+            ->query(Repo::query())
             ->defaultSort('name')
             ->columns([
                 TextColumn::make('owner')->sortable()->toggleable(),
@@ -1661,10 +1728,18 @@ class AutoMerge extends Page implements HasTable
 
                         return $query->fullNameIn($names);
                     }),
-            ]);
+                // Matches RepoResource.php:319 — a default that can be cleared,
+                // so an enrolled-then-archived repository is reachable.
+                TernaryFilter::make('archived')
+                    ->nullable()
+                    ->boolean()
+                    ->default(false),
+            ], layout: FiltersLayout::AboveContentCollapsible);
     }
 }
 ```
+
+Add `use Filament\Tables\Enums\FiltersLayout;` to the imports.
 
 - [ ] **Step 5: Write the view**
 
@@ -1683,19 +1758,26 @@ Create `resources/views/filament/pages/auto-merge.blade.php`:
         </a>
     </div>
 
-    @if ($this->orphans()->isNotEmpty())
+    @php($stale = $this->needsAttention())
+
+    @if ($stale->isNotEmpty())
         <div class="rounded-lg border border-warning-300 bg-warning-50 p-4 text-sm dark:border-warning-700 dark:bg-warning-950">
             <p class="font-semibold text-warning-800 dark:text-warning-200">
-                {{ $this->orphans()->count() }}
-                {{ \Illuminate\Support\Str::plural('repository', $this->orphans()->count()) }}
-                enrolled but not in Conductor's inventory
+                {{ $stale->count() }}
+                stale {{ \Illuminate\Support\Str::plural('enrollment', $stale->count()) }}
             </p>
             <p class="mt-1 text-warning-700 dark:text-warning-300">
-                zapp is still evaluating these. Usually a rename or a deletion in GitHub.
+                These are counted in <code>fleetSize</code>, which is the denominator behind
+                <code>minFleetForConfidence</code> — so leaving them makes the "taken elsewhere"
+                signal grade against a fleet smaller than it believes it has.
+                Use <strong>Resolve stale enrollments</strong> above to unenroll them.
             </p>
-            <ul class="mt-2 list-inside list-disc font-mono text-warning-800 dark:text-warning-200">
-                @foreach ($this->orphans() as $orphan)
-                    <li>{{ $orphan->repo }} <span class="font-sans text-xs">({{ $orphan->mode }})</span></li>
+            <ul class="mt-2 space-y-1 text-warning-800 dark:text-warning-200">
+                @foreach ($stale as $item)
+                    <li>
+                        <span class="font-mono">{{ $item['record']->repo }}</span>
+                        <span class="text-xs">&mdash; {{ $item['reason'] }} ({{ $item['record']->mode }})</span>
+                    </li>
                 @endforeach
             </ul>
         </div>
@@ -1906,6 +1988,28 @@ Append to `tests/Feature/Filament/Pages/AutoMergeTest.php`:
         Livewire::test(AutoMerge::class)
             ->callTableAction('toggle_mode', $repo)
             ->assertNotified();
+    }
+
+    #[Test]
+    public function a_stale_enrollment_can_be_unenrolled_from_the_header_action(): void
+    {
+        Repo::factory()->create(['owner' => 'bankrate', 'name' => 'old-service', 'archived' => true]);
+
+        $this->mock(EnrollmentStore::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('fleet')->andReturn(collect([
+                'bankrate/old-service' => $this->record('bankrate/old-service', ['version' => 4]),
+            ]));
+            $mock->shouldReceive('delete')->once()->with('bankrate/old-service', 4, \Mockery::type('string'));
+        });
+
+        $this->actingAs($this->permittedUser());
+
+        // A stale record has no usable Eloquent row, so it cannot carry a row
+        // action. Without a header action the only remedy is a CLI delete-item,
+        // and fleetSize stays wrong indefinitely.
+        Livewire::test(AutoMerge::class)
+            ->callAction('resolve_stale', data: ['repo' => 'bankrate/old-service'])
+            ->assertHasNoActionErrors();
     }
 
     #[Test]
@@ -2178,6 +2282,64 @@ In `app/Filament/Pages/AutoMerge.php`, add `->recordActions([...])` to the `tabl
             ]);
 ```
 
+Then add a **page header action** so a stale enrollment can actually be removed.
+A stale record has either no Eloquent row or an archived one, so it cannot carry
+a row action; without this the only remedy is a CLI `delete-item`, and a number
+nobody can fix from the page is a number that stays wrong.
+
+```php
+    /** @return array<int, Action> */
+    protected function getHeaderActions(): array
+    {
+        return [
+            Action::make('resolve_stale')
+                ->label('Resolve stale enrollments')
+                ->icon(Heroicon::OutlinedExclamationTriangle)
+                ->color('warning')
+                ->visible(fn (): bool => $this->canWrite() && $this->needsAttention()->isNotEmpty())
+                ->badge(fn (): int => $this->needsAttention()->count())
+                ->modalHeading('Unenroll a stale repository')
+                ->modalDescription('These repositories are enrolled but were renamed, deleted, or archived. They send zapp no work, but they still count in fleetSize.')
+                ->schema([
+                    Select::make('repo')
+                        ->label('Repository')
+                        ->options(fn (): array => $this->needsAttention()
+                            ->mapWithKeys(fn (array $item): array => [
+                                $item['record']->repo => "{$item['record']->repo} — {$item['reason']}",
+                            ])
+                            ->all())
+                        ->required(),
+                ])
+                ->action(function (array $data): void {
+                    $stale = $this->needsAttention()
+                        ->firstWhere(fn (array $item): bool => $item['record']->repo === $data['repo']);
+
+                    if ($stale === null) {
+                        Notification::make()
+                            ->title('That enrollment is no longer stale')
+                            ->body('Someone else resolved it. Reloading.')
+                            ->warning()
+                            ->send();
+                        $this->refreshEnrollments();
+
+                        return;
+                    }
+
+                    $this->guarded(
+                        fn () => app(EnrollmentStore::class)->delete(
+                            $stale['record']->repo,
+                            $stale['record']->version,
+                            $this->actor(),
+                        ),
+                        "Unenrolled {$stale['record']->repo}",
+                    );
+                }),
+        ];
+    }
+```
+
+Add `use Filament\Forms\Components\Select;` to the page's imports.
+
 and the three helpers on the class:
 
 ```php
@@ -2392,6 +2554,19 @@ Reload `/admin`, open **Inventory → Auto-Merge**, and confirm each of these:
 | Unenroll | confirmation names the repository; row returns to `not enrolled` |
 | Doc link | opens zapp's `docs/policy.md` |
 
+Then exercise the stale path, which the seed does not produce on its own:
+
+```bash
+php artisan tinker --execute="\App\Models\Repo::where('owner','bankrate')->where('name','crank')->update(['archived' => true]);"
+```
+
+| Check | Expected |
+|---|---|
+| Reload | warning banner names `bankrate/crank — archived in GitHub`; `crank` is gone from the table |
+| Clear the `archived` filter | `crank` reappears, still badged `shadow` |
+| **Resolve stale enrollments** | header action visible with badge `1` |
+| Select `crank`, submit | success notification, banner clears, `fleetSize` drops by one |
+
 - [ ] **Step 6: Verify the writes really landed, and that absence was preserved**
 
 ```bash
@@ -2464,7 +2639,11 @@ git commit -m "docs(auto-merge): how to run the enrollment page locally"
 
 **Spec coverage.** The `EnrollmentStore`, `TransactWriteItems`, optimistic concurrency and absent-vs-empty marshalling → Task 1; the permission, its migration and the feature flag → Task 2; DynamoDB Local and the seed → Task 3; the page, the `CONCAT` join and the orphan section → Task 4; the four write actions, the override toggles and the doc links → Task 5; IAM and env vars → Task 6; the log-in-and-click validation → Task 7.
 
-**Two things the spec asked for that landed differently.** The spec said "a header link plus per-field hints"; the hints are `helperText` on each form field in Task 5's `EnrollmentFormSchema` and the header link is in the Blade view, and only the document is deep-linked — no anchors, since anchors outside zapp's own tested `DOC_ANCHORS` set are unverified. The spec also described the orphan section as offering Unenroll; Task 4 renders it as a read-only warning banner, because a Filament Page has one table and an orphan has no Eloquent record to hang a row action on. **Unenrolling an orphan is therefore not possible through the UI** — it needs a CLI `delete-item`. That is a real gap; if it matters, the fix is a page-header action with a Select of orphan names, which is a small follow-up rather than a change to anything here.
+**One thing the spec asked for that landed differently.** The spec said "a header link plus per-field hints"; the hints are `helperText` on each form field in Task 5's `EnrollmentFormSchema` and the header link is in the Blade view, and only the document is deep-linked — no anchors, since anchors outside zapp's own tested `DOC_ANCHORS` set are unverified.
+
+**The spec's "orphan section" grew a second cause.** The spec described orphans as enrollment records with no inventory row. There is a second way a record becomes uneditable from the table, and it is the likelier one: the repository is **archived**. It has a `repos` row, so it is not an orphan, but the table's `archived` filter hides it by default — and an earlier draft of this plan used a hard `Repo::query()->active()` scope, which would have made such a record invisible on the page while zapp kept counting it in `fleetSize`. `RepoResource.php:319` uses a clearable `TernaryFilter` for exactly this reason, and Task 4 now follows it. `needsAttention()` covers both causes with a per-row reason, and Task 5's `resolve_stale` header action makes both removable — a stale record has no usable Eloquent row, so it cannot carry a row action, and without the header action the only remedy would be a CLI `delete-item`.
+
+Why this is worth the ~40 lines: a stale record is inert for *evaluation* (a deleted repo sends no webhooks; a renamed one sends them under a name that is not enrolled, and the worker drops those) but not for *data*. `fleetSize` counts it, and that is the denominator behind `minFleetForConfidence: 5` — so stale records make `internalConfidence` grade against a fleet smaller than it believes it has, instead of correctly reading `unknown`. A wrong number nobody can fix from the page is a number that stays wrong.
 
 **Type consistency.** `EnrollmentData` keeps its field names throughout, and `EnrollmentFormSchema::fill` / `::toData` are exact inverses over the `override{Field}` booleans. `EnrollmentStore::replace` takes `(EnrollmentData, int $expectedVersion, string $actor, string $action)` in Task 1 and is called with exactly that in Task 5. `AutoMergePermission::NAME` is the single source for the permission string, used by the migration, the seeder list and `canWrite()`.
 

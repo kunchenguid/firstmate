@@ -355,17 +355,38 @@ serialises those between requests, which would both bloat the payload and
 reintroduce the staleness the no-cache decision exists to avoid. A protected
 memoised accessor, invalidated after any write action.
 
-### Enrolled but not in inventory
+### Stale enrollments
 
-An enrollment record whose repository has no row in Conductor's `repos` table
-cannot appear in an Eloquent-backed table. That is not a hypothetical: it
-happens when a repository is renamed or deleted in GitHub, and it happens on
-every fresh local database.
+Two ways an enrollment record becomes unreachable from an Eloquent-backed table,
+and neither is hypothetical:
 
-The page renders these in a separate labelled section above the main table —
-"Enrolled, not in Conductor's inventory" — with Unenroll available. Hiding them
-would mean zapp is evaluating something the page claims is not enrolled, which
-is the worst available outcome.
+- **No inventory row.** zapp keys enrollment on `owner/repo` from the webhook
+  payload; Conductor's `repos` table syncs by the stable `external_id`. So a
+  **rename** leaves Conductor following the new name and the enrollment record
+  stranded on the old one. A deletion does the same
+  (`Repo::deleteByGithubId`), as does every fresh local database.
+- **Archived.** The row exists, so it is not an orphan, but the table hides
+  archived repositories by default. This is the likelier of the two — archived
+  repos are common, renames are rare.
+
+The second case is a trap for the implementation: a hard `Repo::query()->active()`
+scope on the table would make such a record invisible on the page *without*
+putting it in the orphan list, while zapp kept counting it. `RepoResource`
+handles archived rows with a **clearable** `TernaryFilter` defaulting to false
+(`RepoResource.php:319`) rather than a scope, and this page must do the same.
+
+Both are surfaced in a labelled section above the table, each with its reason,
+and both are removable through a page **header** action — a stale record has no
+usable Eloquent row, so it cannot carry a row action.
+
+The reason this is worth building rather than deferring: a stale record is inert
+for *evaluation* — a deleted repo sends no webhooks, and a renamed one sends
+them under a name that is not enrolled, so the worker drops them. It is not
+inert for *data*. `fleetSize` counts it, and that is the denominator behind
+`minFleetForConfidence: 5`, so stale records make `internalConfidence` grade
+against a fleet smaller than it believes it has instead of correctly reading
+`unknown`. A wrong number nobody can fix from the page is a number that stays
+wrong.
 
 ### Absent is not empty
 
@@ -606,8 +627,11 @@ which no longer exists — they take a local fixture record),
 
 - The table renders enrolled and unenrolled repositories, joined on
   `CONCAT(owner, '/', name)`.
-- An orphan record — enrolled, no `repos` row — renders in its own section and
-  can be unenrolled.
+- A record with no `repos` row, and a record whose repo is archived, both render
+  in the stale section with their reason, and both can be unenrolled from the
+  header action.
+- The table does **not** use a hard `active()` scope: an enrolled-then-archived
+  repository stays reachable by clearing the `archived` filter.
 - **Toggling the override off writes no `signalChecks` attribute**; toggling it
   on with an empty list writes `[]`. Two tests, because the whole point is that
   these are different writes.
