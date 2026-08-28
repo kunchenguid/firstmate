@@ -29,7 +29,8 @@
 # Isolation contract for each concurrent worker:
 #   - distinct mode-0700 temporary root under a proof-owned parent
 #   - TMPDIR/TMP point only at that root so mktemp/fm_test_tmproot stay private
-#   - ambient FM_HOME / FM_*_OVERRIDE cleared so no shared home is reused
+#   - the ambient fleet environment cleared once for this process, so no worker
+#     can reach a live home (bin/fm-test-env-lib.sh owns that pointer list)
 #   - no global git config mutation (snapshot before/after)
 #   - no production sharding and no retry-until-green
 #
@@ -47,6 +48,16 @@ set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
+
+# Clear the ambient fleet environment once here, so every candidate worker
+# inherits it and no candidate can share a live home.
+# bin/fm-test-env-lib.sh owns the pointer list.
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$ROOT/bin/fm-test-env-lib.sh"
+fm_test_env_isolate || {
+  printf 'fm-isolation-proof: refusing to run: the live fleet home is still reachable\n' >&2
+  exit 2
+}
 
 JOBS=4
 JSON_PATH=
@@ -424,9 +435,6 @@ for script in "${CANDIDATES[@]}"; do
     set +e
     export TMPDIR="$work/tmp"
     export TMP="$work/tmp"
-    # Clear ambient fleet overrides so candidates cannot share a live home.
-    unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
-      FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
     cd "$ROOT" || exit 1
     begin_ms=$(now_ms)
     bash "$script" >"$work/out/stdout" 2>"$work/out/stderr"
