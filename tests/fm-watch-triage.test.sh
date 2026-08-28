@@ -1297,8 +1297,10 @@ test_dead_or_unknown_leftover_stays_silent_when_backoff_due() {
 
 # Once per day the watcher emits one leftover list of long-inactive panes for
 # firstmate, not a per-pane stale wake. Young leftover notes stay off that
-# digest. The payload is one decide-or-discard. A second poll the same day must
-# not scream again. Emitting the list never teardowns unlanded copies.
+# digest and leave the daily marker expired so they are reported as soon as they
+# age in, without waiting another day. The payload is one decide-or-discard. A
+# second poll the same day must not scream again. Emitting the list never
+# teardowns unlanded copies.
 test_daily_leftover_list_emits_once() {
   local dir state fakebin out capture_file window key pane_hash sig pid back note now mt
   dir=$(make_case leftover-list-daily); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1339,10 +1341,9 @@ test_daily_leftover_list_emits_once() {
   grep -F "leftover list" "$out" >/dev/null && { reap "$pid"; fail "a young leftover note was treated as long-inactive: $(cat "$out")"; }
   now=$(date +%s)
   mt=$(file_mtime "$state/.leftover-list")
-  [ -n "$mt" ] && [ $((now - mt)) -lt 60 ] || { reap "$pid"; fail "young leftover notes left the daily leftover-list marker expired"; }
+  [ -n "$mt" ] && [ $((now - mt)) -ge 80000 ] || { reap "$pid"; fail "young leftover notes refreshed the daily leftover-list marker"; }
   reap "$pid"
   set_mtime "$back" "$note"
-  set_mtime "$back" "$state/.leftover-list"
   clear_watcher_cycle "$state"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \

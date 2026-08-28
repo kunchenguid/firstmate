@@ -825,10 +825,11 @@ leftover_idle_backoff_check() {  # <window>
 # One leftover list per day of long-inactive leftover notes.
 # Missing marker starts the clock without waking.
 # Notes younger than LEFTOVER_LIST_SECS stay off the digest so agents can return.
-# Empty ticks still advance the clock; a digest is queued before the clock advances.
+# Young leftover notes leave the marker expired so they enter the digest as soon as they age in.
+# A digest is queued before the clock advances.
 # The digest is one decide-or-discard for firstmate; this path never teardowns.
 leftover_list_tick() {
-  local marker="$STATE/.leftover-list" rows='' f task last sits age reason
+  local marker="$STATE/.leftover-list" rows='' f task last sits age reason any=0
   afk_present && return 0
   if [ ! -e "$marker" ]; then
     touch "$marker"
@@ -846,11 +847,12 @@ leftover_list_tick() {
       rm -f "$f"
       continue
     fi
+    any=1
     [ "$age" -ge "$LEFTOVER_LIST_SECS" ] || continue
     rows="${rows}${task} age=${age}s last-movement=${last:-none} work-sits=${sits:-unknown}"$'\n'
   done
   if [ -z "$rows" ]; then
-    touch "$marker"
+    [ "$any" -eq 0 ] && touch "$marker"
     return 0
   fi
   reason="check: leftover list:"$'\n'"decide-or-discard"$'\n'"$rows"
