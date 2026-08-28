@@ -84,8 +84,16 @@ detect_own() {
     if [ "$pid" -le 1 ]; then
       if [ "$pid" -eq 1 ]; then
         case "$(basename -- "$comm")" in
-          *codex*) echo codex; return ;;
+          codex-linux-sandbox) echo codex; return ;;
         esac
+        # Linux can truncate comm to TASK_COMM_LEN, so confirm the exact
+        # executable from argv[0] before accepting a shortened process name.
+        args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+        if [ -n "$args" ]; then
+          case "$(basename -- "${args%% *}")" in
+            codex-linux-sandbox) echo codex; return ;;
+          esac
+        fi
       fi
       break
     fi

@@ -138,7 +138,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "$pid:$field" in
   1:comm=) printf '%s\n' "${FM_FAKE_PID_ONE_COMM:-codex-linux-sandbox}" ;;
-  1:args=) printf '%s\n' "${FM_FAKE_PID_ONE_COMM:-codex-linux-sandbox}" ;;
+  1:args=) printf '%s\n' "${FM_FAKE_PID_ONE_ARGS:-${FM_FAKE_PID_ONE_COMM:-codex-linux-sandbox}}" ;;
   1:ppid=) printf '%s\n' 0 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' bash ;;
@@ -152,14 +152,21 @@ SH
     "$ROOT/bin/fm-harness.sh")
   [ "$got" = codex ] || fail "PID-1 Codex sandbox resolved '$got', expected codex"
 
-  for other in claude opencode grok kimi muse pi pi-signed cursor-agent; do
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_FAKE_PID_ONE_COMM=codex-linux-san \
+    FM_FAKE_PID_ONE_ARGS='/usr/local/bin/codex-linux-sandbox --sandbox-policy-cwd /repo' \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = codex ] \
+    || fail "truncated PID-1 Codex sandbox command resolved '$got', expected codex"
+
+  for other in codex codex-helper mycodex claude opencode grok kimi muse pi pi-signed cursor-agent; do
     got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_FAKE_PID_ONE_COMM="$other" \
       PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
     [ "$got" = unknown ] \
       || fail "PID-1 $other resolved '$got', expected preserved unknown classification"
   done
-  pass "fm-harness classifies only the verified Codex sandbox signal at PID 1"
+  pass "fm-harness classifies only the verified Codex sandbox identity at PID 1"
 }
 
 # ===========================================================================
