@@ -97,7 +97,7 @@ They establish the worker isolation result, but they did not reproduce the produ
 The current harness consumes the runner's longest-hint-first schedule and reclaims any completed worker, matching the admitted execution condition.
 
 Admission is also supported by three independent runs of the production scheduler using `bin/fm-test-run.sh --changed --max-wall-ms 300000`.
-Each explicitly opted into bounded concurrency at four workers, used longest-first scheduling, selected 19 scripts, completed with 0 failures, and passed the five-minute budget guard in 208s, 216s, and 226s.
+Plain `--changed` automatically selected bounded concurrency at four workers; each run used longest-first scheduling, selected 19 scripts, completed with 0 failures, and passed the five-minute budget guard in 208s, 216s, and 226s.
 Those runs exercised the production path that the family admission enables.
 
 These scripts assert how quickly a real watcher reaches its next poll, so they are sensitive to CPU oversubscription rather than to shared state.
