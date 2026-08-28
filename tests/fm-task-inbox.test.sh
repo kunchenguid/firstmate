@@ -17,12 +17,22 @@
 #   3. Concurrent writers serialize on the sequence lock: no clobbered records.
 #   4. The re-ring ladder: within grace is quiet, past grace rings, ring
 #      spacing holds, a spent budget escalates exactly once, and an
-#      acknowledgement resets the ladder for the next message.
-#   5. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
+#      acknowledgement resets the ladder for the next message. Its two other
+#      stated bounds escalate too: a PROVEN composer block, which no number of
+#      identical skips could ever deliver past, and the ABSOLUTE unhandled
+#      bound, which holds even when nothing was ever due.
+#   5. The acknowledgement-gated decision closure: a parked closure stays
+#      uncommitted while its record is unread (so the decision keeps reading
+#      open, which is the whole point), commits the moment the worker
+#      acknowledges the record, and is then filed beside it.
+#   6. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
 #      aged message on an idle pane WITHOUT waking firstmate, waits on a busy
 #      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
-#      bookkeeping only while its record remains unhandled, and emits exactly
-#      one stale wake once the ring budget is spent.
+#      bookkeeping only while its record remains unhandled, emits exactly
+#      one stale wake once the ring budget is spent, escalates an unread record
+#      past the absolute bound even while the pane reads busy, names the
+#      decision an undelivered answer is holding open, and commits a deferred
+#      closure once the worker acknowledges it.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -101,7 +111,7 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_TASK_INBOX_GRACE_SECS=1 \
+    FM_TASK_INBOX_GRACE_SECS=1 FM_TASK_INBOX_UNHANDLED_MAX_SECS=$FM_TEST_INBOX_BOUND_OFF \
     env "$@" "$WATCH" > "$out" 2>/dev/null &
 }
 
@@ -117,6 +127,26 @@ wait_watcher_gone() {  # <pid> [limit-ticks]
 
 age_path() {  # <path>  (set mtime well past any grace under test)
   touch -t 202001010000 "$1"
+}
+
+# An age_path'd record is years old, so "the absolute bound is not what this
+# case is about" has to mean a bound larger than that, not merely a large
+# number. Kept as one named constant so no case can drift back under it.
+FM_TEST_INBOX_BOUND_OFF=99999999999
+
+# The ladder now has three bounds, and an age_path'd record is past ALL of
+# them. A case about grace, spacing, or the attempt budget therefore has to say
+# it is not the absolute-bound case, or `overdue` would answer first - which is
+# exactly what the absolute bound is for. ladder() is that statement; the
+# absolute-bound cases call fm_task_inbox_due_action directly.
+ladder() {  # <state> [VAR=VALUE...] -- run due_action for t1
+  local state=$1 kv
+  shift
+  (
+    export FM_TASK_INBOX_UNHANDLED_MAX_SECS=$FM_TEST_INBOX_BOUND_OFF
+    for kv in "$@"; do export "${kv?}"; done
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1
+  )
 }
 
 test_write_is_durable_and_exact() {
@@ -283,14 +313,12 @@ test_fire_and_forget_records_never_enter_the_ladder() {
   state="$TMP_ROOT/fire-and-forget/state"; mkdir -p "$state"
   fire=$(inbox_lib "$state" fm_task_inbox_write_idempotent "$state" t1 "one-shot steer" fire-and-forget)
   age_path "$fire"
-  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0 \
-    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0)
   [ "$action" = quiet ] || fail "a fire-and-forget record entered the re-ring ladder: $action"
   tracked=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "tracked steer")
   age_path "$tracked"
-  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0 \
-    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
-  [ "$action" = "escalate $tracked 0" ] \
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0)
+  [ "$action" = "escalate 0 attempts $tracked" ] \
     || fail "a fire-and-forget record hid the later tracked steer: $action"
   [ -f "$fire" ] || fail "excluding fire-and-forget from escalation removed its durable record"
   pass "inbox: fire-and-forget records stay durable and outside the ladder"
@@ -301,38 +329,167 @@ test_ring_ladder_policy() {
   state="$TMP_ROOT/ladder/state"; mkdir -p "$state"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "do the thing")
   # Within grace: quiet.
-  action=$(FM_TASK_INBOX_GRACE_SECS=3600 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=3600)
   [ "$action" = quiet ] || fail "a fresh unhandled message inside grace should be quiet, got: $action"
   # Past grace: one ring is due.
   age_path "$rec"
-  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60)
   [ "$action" = "ring $rec" ] || fail "an aged unhandled message should be due a ring, got: $action"
   # A just-recorded ring holds the spacing: quiet until another grace elapses.
   inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec"
-  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60)
   [ "$action" = quiet ] || fail "a ring within the spacing window should be quiet, got: $action"
   # Backdate the ladder: the next ring becomes due, and at the budget the
-  # action turns into a single escalation.
+  # action turns into a single escalation. The 3-field write is the pre-blocked
+  # -counter ladder shape, so this also pins that a ladder written by an older
+  # build still reads as zero blocked skips instead of a bogus escalation.
   printf '001.msg\t1\t100\n' > "$state/t1.inbox/.ring-state"
-  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3)
   [ "$action" = "ring $rec" ] || fail "an aged ladder should ring again, got: $action"
   printf '001.msg\t3\t100\n' > "$state/t1.inbox/.ring-state"
-  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
-  [ "$action" = "escalate $rec 3" ] || fail "a spent ring budget should escalate, got: $action"
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3)
+  [ "$action" = "escalate 3 attempts $rec" ] || fail "a spent ring budget should escalate, got: $action"
   # Escalation fires at most once per message.
   inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$rec"
-  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3)
   [ "$action" = quiet ] || fail "an escalated message should stay quiet for recovery, got: $action"
   # The acknowledgement resets the ladder: the next message starts fresh.
   mv "$rec" "$state/t1.inbox/handled/"
-  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60)
   [ "$action" = quiet ] || fail "a handled inbox should be quiet, got: $action"
   [ ! -e "$state/t1.inbox/.escalated" ] || fail "the ack should clear the escalation marker"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "next thing")
   age_path "$rec"
-  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3)
   [ "$action" = "ring $rec" ] || fail "the next message should start a fresh ladder, got: $action"
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
+}
+
+# A composer-protected skip cannot deliver anything, and the composer will not
+# clear itself, so burning the rest of the attempt budget on identical skips
+# only buys silence. The blocked counter is what turns that into a named
+# escalation, and it must not be confused with an ordinary attempt.
+test_ladder_escalates_a_proven_composer_block() {
+  local state rec action
+  state="$TMP_ROOT/ladder-blocked/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "clear the composer")
+  age_path "$rec"
+  # A ring that actually landed leaves the ladder ringing, budget permitting.
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" rang
+  printf '001.msg\t1\t100\t0\n' > "$state/t1.inbox/.ring-state"
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3)
+  [ "$action" = "ring $rec" ] \
+    || fail "a delivered ring inside the attempt budget should keep ringing, got: $action"
+  # One PROVEN composer block escalates instead, without touching the budget.
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" blocked
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3)
+  case "$action" in
+    "escalate "*" blocked $rec") : ;;
+    *) fail "a proven composer block should escalate by name, got: $action" ;;
+  esac
+  pass "inbox: a proven composer block escalates instead of spending the budget on identical skips"
+}
+
+# The absolute bound is the one the 2026-08-27 incidents needed: an unread
+# instruction must stop being silent at a stated time even when no delivery
+# attempt was ever due, which is exactly what a permanently busy pane produces.
+test_ladder_absolute_bound_escalates_with_nothing_else_due() {
+  local state rec action
+  state="$TMP_ROOT/ladder-overdue/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "hard stop")
+  age_path "$rec"
+  # Grace far beyond the record's age would leave the ladder quiet forever, and
+  # the attempt budget is untouched: only the absolute bound can speak here.
+  action=$(FM_TASK_INBOX_GRACE_SECS=$FM_TEST_INBOX_BOUND_OFF FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_UNHANDLED_MAX_SECS=900 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate 0 overdue $rec" ] \
+    || fail "an unhandled record past the absolute bound should escalate, got: $action"
+  # Inside the bound, the same record with the same ladder stays quiet.
+  action=$(FM_TASK_INBOX_GRACE_SECS=$FM_TEST_INBOX_BOUND_OFF FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_UNHANDLED_MAX_SECS=$FM_TEST_INBOX_BOUND_OFF \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] \
+    || fail "the absolute bound must be the only thing speaking here, got: $action"
+  pass "inbox: the absolute unhandled bound escalates even when no attempt was ever due"
+}
+
+# --- acknowledgement-gated decision closure ---------------------------------
+
+# The defect this gate exists for: fm-send's doorbell is deliberately skipped
+# when the composer holds pending text, so "durably enqueued" is not "the worker
+# knows". A closure written at enqueue time made every downstream reader report
+# a stopped worker as a moving one. The closure must therefore sit uncommitted
+# until the worker's own acknowledgement, and the decision must keep reading
+# open until then.
+test_deferred_closure_waits_for_the_acknowledgement() {
+  local state rec sidecar closed
+  state="$TMP_ROOT/defer/state"; mkdir -p "$state"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "") \
+    || fail "the closure could not be parked beside its record"
+  [ -f "$sidecar" ] || fail "fm_task_inbox_defer_resolution printed a path that does not exist: $sidecar"
+
+  # Unread: nothing commits, and the decision is still open in the status log.
+  closed=$(inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status") \
+    || fail "committing with nothing acknowledged should be a clean no-op"
+  [ -z "$closed" ] || fail "an unread answer closed a decision: $closed"
+  assert_no_grep 'resolved [key=api-shape]' "$state/t1.status" \
+    "an undelivered answer must not read as resolved in the durable status log"
+  [ -f "$sidecar" ] || fail "the parked closure disappeared while its record was unread"
+  assert_contains "$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)" \
+    "api-shape" "an unread answer should be reportable as pending by key"
+
+  # The worker acknowledges: the closure commits, exactly once, and is filed.
+  mv "$rec" "$state/t1.inbox/handled/"
+  closed=$(inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status") \
+    || fail "the acknowledged closure failed to commit"
+  [ "$closed" = "api-shape" ] || fail "the commit should report the closed key, got: $closed"
+  assert_grep 'resolved [key=api-shape]: answered: go with REST' "$state/t1.status" \
+    "the acknowledged answer should close the decision in the status log"
+  [ ! -e "$sidecar" ] || fail "a committed closure was left in the inbox root"
+  [ -f "$state/t1.inbox/handled/${sidecar##*/}" ] \
+    || fail "a committed closure should be filed beside its acknowledged record"
+  [ -z "$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)" ] \
+    || fail "a committed closure is no longer pending"
+
+  # Re-running is a no-op: no second resolved line.
+  inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null \
+    || fail "a repeated commit should stay clean"
+  [ "$(grep -cF 'resolved [key=api-shape]' "$state/t1.status")" = 1 ] \
+    || fail "the commit is not idempotent:"$'\n'"$(cat "$state/t1.status")"
+  pass "inbox: a parked closure commits only at the worker's acknowledgement, once"
+}
+
+# A record that is in BOTH places is mid-move, not acknowledged. Committing
+# there would close a decision on the strength of a directory race.
+test_deferred_closure_needs_a_complete_acknowledgement() {
+  local state rec sidecar
+  state="$TMP_ROOT/defer-race/state"; mkdir -p "$state"
+  printf 'blocked [key=creds]: which account\n' > "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "use the shared one")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "use the shared one" "creds" "")
+  cp "$rec" "$state/t1.inbox/handled/"
+  inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null \
+    || fail "a half-moved record should be a clean no-op, not an error"
+  assert_no_grep 'resolved [key=creds]' "$state/t1.status" \
+    "a record still present in the inbox root is not an acknowledgement"
+  [ -f "$sidecar" ] || fail "the closure should still be parked"
+  pass "inbox: a record present in both places is not yet an acknowledgement"
+}
+
+# A closure naming nothing would close nothing; refusing to write it keeps a
+# caller's bug loud instead of parking a sidecar that never resolves anything.
+test_deferred_closure_refuses_an_empty_key_set() {
+  local state rec
+  state="$TMP_ROOT/defer-empty/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "just a steer")
+  if inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "note" "" "" 2>/dev/null; then
+    fail "a closure naming no decision should be refused"
+  fi
+  [ ! -e "${rec%.msg}.resolve" ] || fail "a refused closure still wrote a sidecar"
+  pass "inbox: a closure that would close nothing is refused rather than parked"
 }
 
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
@@ -497,6 +654,94 @@ test_watcher_escalates_once_after_budget() {
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
 
+# The absolute bound, end to end through a real watcher: a permanently busy
+# pane must not be able to hold an unread instruction in silence. The doorbell
+# is still never typed into a busy pane - that fail-safe is unchanged.
+test_watcher_escalates_overdue_on_busy_pane() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case busy-overdue)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "unload the model now")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
+    FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_UNHANDLED_MAX_SECS=1
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a busy pane held an unread instruction past the absolute bound in silence"; }
+  [ ! -s "$log" ] || fail "the doorbell must still never be typed into a busy pane:"$'\n'"$(cat "$log")"
+  grep -qF 'unread firstmate instruction' "$state/.wake-queue" \
+    || fail "the absolute bound should queue a stale wake:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF 'has been unhandled for over' "$state/.wake-queue" \
+    || fail "the wake should name the absolute bound it crossed:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a busy pane no longer holds an unread instruction in silence forever"
+}
+
+# The reported incident, end to end: the composer holds pending text, so every
+# doorbell is skipped, and the record carries an answered decision. The stale
+# wake must name BOTH - the fixable condition and the decision it is holding
+# open - because "unread firstmate instruction" alone cost a supervision turn
+# to diagnose twice in one afternoon.
+test_watcher_escalates_blocked_composer_and_names_the_decision() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case blocked-composer)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n' > "$dir/pending.capture"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  # The open decision is pre-existing history here, not a new event: prime its
+  # seen marker so the watcher exits through the escalation under test rather
+  # than through an unrelated signal wake for the fixture's own first line.
+  prime_status_seen "$state" "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "" >/dev/null
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/pending.capture" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a permanently blocked composer never escalated"; }
+  [ ! -s "$log" ] || fail "a visibly pending composer must not be rung:"$'\n'"$(cat "$log")"
+  grep -qF 'composer visibly holds pending text' "$state/.wake-queue" \
+    || fail "the wake should name the composer block and its remedy:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF 'api-shape' "$state/.wake-queue" \
+    || fail "the wake should name the decision the unread answer is holding open:"$'\n'"$(cat "$state/.wake-queue")"
+  assert_no_grep 'resolved [key=api-shape]' "$state/t1.status" \
+    "an escalated, still-unread answer must not have closed its decision"
+  pass "watcher: a blocked doorbell escalates by name and says which decision stays open"
+}
+
+# The other half of the same contract: once the worker acknowledges, the real
+# watcher is what turns the parked closure into the closing resolved line.
+test_watcher_commits_the_closure_on_acknowledgement() {
+  local dir state out log pid rec i=0
+  dir=$(setup_watch_case commit-closure)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/t1.status"
+  prime_status_seen "$state" "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "" >/dev/null
+  age_path "$rec"
+  # The doorbell stub acknowledges the record the moment it is rung.
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_ACK_RECORD="$rec" FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'resolved [key=api-shape]' "$state/t1.status" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  assert_grep 'resolved [key=api-shape]: answered: go with REST' "$state/t1.status" \
+    "the watcher should close the decision once the worker acknowledged the answer"
+  [ ! -e "${rec%.msg}.resolve" ] || fail "the committed closure was left parked in the inbox root"
+  pass "watcher: the worker's acknowledgement is what commits the answered decision"
+}
+
 test_write_is_durable_and_exact
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
@@ -505,9 +750,17 @@ test_concurrent_writers_never_clobber
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
+test_ladder_escalates_a_proven_composer_block
+test_ladder_absolute_bound_escalates_with_nothing_else_due
+test_deferred_closure_waits_for_the_acknowledgement
+test_deferred_closure_needs_a_complete_acknowledgement
+test_deferred_closure_refuses_an_empty_key_set
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
+test_watcher_escalates_overdue_on_busy_pane
+test_watcher_escalates_blocked_composer_and_names_the_decision
+test_watcher_commits_the_closure_on_acknowledgement

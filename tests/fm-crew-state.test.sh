@@ -13,7 +13,10 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
-#   (e) cross-branch attribution: this branch's own run found via list lookup
+#   (e) cross-branch attribution: this branch's own run found via list lookup,
+#       and the 2026-08-27 regression: only a branch's NEWEST run can describe
+#       its current state, so an unbindable newest run reports no attribution
+#       instead of walking back onto an older, superseded FAILED run
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
@@ -736,6 +739,90 @@ EOF
   assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
+}
+
+# The 2026-08-27 incident: a healthy task waiting on a validation round was
+# reported "state: failed - source: run-step - run failed", four times in one
+# afternoon, three of which reached the captain-presentation path.
+#
+# Shape, verified against ~/.no-mistakes/state.sqlite and the no-mistakes repo
+# mirrors: a branch has a LIVE run and an older FAILED one. no-mistakes commits
+# its review fixes inside its OWN bare mirror (~/.no-mistakes/repos/<id>.git
+# plus a gate worktree), so the live run's head is frequently a commit the crew
+# worktree cannot resolve at all - while the older failed run's head is often
+# the crew worktree's own HEAD, which binds perfectly. The coarse fallback
+# skipped the unbindable newest row and walked straight onto the superseded
+# failure. `failed` is terminal in the lifecycle, so live work read as dead.
+#
+# Only a branch's NEWEST run can describe its current state. An unbindable
+# newest run means no attribution, and the pane answers instead.
+test_newest_unbindable_run_never_falls_back_to_an_older_failure() {
+  local d short out
+  reset_fakes
+  d=$(new_case stale-run-match)
+  make_repo_on_branch "$d/wt" fm/switav-mapping-leaf-filter
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/leaf.meta" "window=fm:fm-leaf" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/leaf.status"
+  # The worker is genuinely busy: a live review round with its fix agent up.
+  "$ROOT/bin/fm-busy-event.sh" arm "$d/state" leaf >/dev/null
+  # The repo-wide answer belongs to another crew's branch, so the coarse list
+  # is consulted for this one.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  # Newest-first. Row 1 is this branch's LIVE run at a head that does not exist
+  # in this worktree; row 2 is its OLDER failed run at this worktree's HEAD.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/switav-mapping-leaf-filter 305b0969  2026-08-27 19:02
+  failed     fm/switav-mapping-leaf-filter ${short}  2026-08-27 17:17
+EOF
+)"
+  out=$(run_crew_state "$d" leaf)
+  assert_not_contains "$out" "state: failed" \
+    "a superseded failed run must never be reported as a healthy task's current state"
+  assert_not_contains "$out" "run failed" \
+    "the older run's terminal detail must not leak into the current-state read"
+  assert_contains "$out" "state: working" "the live busy worker should read as working"
+  assert_contains "$out" "source: pane" \
+    "an unbindable newest run means no run attribution, so the pane answers"
+  pass "crew-state: an unbindable newest run never falls back to an older failed run"
+}
+
+# The same rule from the other direction: when `axi status` already answered
+# for THIS branch and its head does not bind, the coarse list cannot improve on
+# that answer - it can only re-find the same run or an older one. Falling
+# through to it is what let a superseded failure win, so it must not happen.
+test_own_branch_head_mismatch_does_not_consult_the_coarse_list() {
+  local d short out
+  reset_fakes
+  d=$(new_case own-branch-mismatch)
+  make_repo_on_branch "$d/wt" fm/feat-mismatch
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mismatch.meta" "window=fm:fm-mismatch" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/mismatch.status"
+  "$ROOT/bin/fm-busy-event.sh" arm "$d/state" mismatch >/dev/null
+  # This branch's own newest run, at a head this worktree cannot resolve.
+  FM_FAKE_AXI_STATUS="$(cat <<'EOF'
+run:
+  id: "01LIVE"
+  branch: fm/feat-mismatch
+  status: running
+  head: "305b0969"
+EOF
+)"
+  # An older failed row for the same branch, at this worktree's HEAD, is the
+  # trap: it binds, and before the fix it won.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-mismatch ${short}  2026-08-27 17:17
+EOF
+)"
+  out=$(run_crew_state "$d" mismatch)
+  assert_not_contains "$out" "state: failed" \
+    "a same-branch head mismatch must not be resolved by an older run from the coarse list"
+  assert_contains "$out" "source: pane" \
+    "an unbindable own-branch run means no attribution at all"
+  pass "crew-state: an own-branch head mismatch never falls through to an older coarse row"
 }
 
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
@@ -1571,6 +1658,8 @@ test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_newest_unbindable_run_never_falls_back_to_an_older_failure
+test_own_branch_head_mismatch_does_not_consult_the_coarse_list
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working

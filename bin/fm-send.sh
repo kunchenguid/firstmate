@@ -23,8 +23,8 @@
 # durably sent (recorded); nonzero = nothing was confirmed delivered and a
 # resend is appropriate (unresolvable target, an endpoint that cannot be
 # locked and revalidated or that retired or changed, an unwritable record, a
-# failed or lost remote transport) or a decision-close append failed after
-# delivery (the error then carries the exact manual close). The remote enqueue
+# failed or lost remote transport) or the answered decision's closure could not
+# be recorded after delivery (the error then carries the exact manual close). The remote enqueue
 # is idempotent: the remote leg deduplicates an exact re-run of the same
 # request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
 # transport (ssh exit 255, completion unknown) fm-send retries the same leg
@@ -46,11 +46,14 @@
 # ordinary record by the worker's acknowledgement move into handled/, with the
 # watcher re-ringing an unacknowledged message and escalating a stuck one. An
 # explicit fire-and-forget record is excluded from that ladder.
-# bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
-# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
-# the composer visibly holds pending text the ring is skipped with a notice and
-# the watcher re-rings an ordinary record later; no composer verdict is
-# delivery proof on this plane, and a failed ring never fails the send.
+# bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, the
+# re-ring ladder, and the deferred decision closure below. The composer
+# pre-check before the ring is ADVISORY only: when the composer visibly holds
+# pending text the ring is skipped with a notice and the watcher takes over -
+# re-ringing an ordinary record, and escalating a proven composer block by name
+# rather than spending the rest of the attempt budget on identical skips. No
+# composer verdict is delivery proof on this plane, and a failed ring never
+# fails the send.
 #
 # TYPED - the LOCAL text that must reach the terminal itself: a harness-native
 # invocation (a leading "/", or a leading "$" to a codex target) must reach
@@ -146,19 +149,41 @@
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
-# blocked: record in the target task's state/<id>.status. fm-send itself
-# appends the closing "resolved [key=<key>]: answered: <capped excerpt>" line
-# to that status file, so the captain-facing OPEN DECISIONS record closes at
-# answer time and never depends on the busy worker writing a matching resolved
-# line. On the inbox plane the close happens at ENQUEUE time, because enqueue
-# is durable delivery to the task's record; the worker reading the answer late
-# is covered by the acknowledgement re-ring ladder. On the typed plane it
-# still waits for the confirmed submit. The close is a LOCAL append for every
-# target kind - crewmate, scout, local secondmate, and remote secondmate alike
-# - because the open-decision ledger fm-wake-drain folds lives in this home's
-# own state dir (a remote mate's escalations reach it through the
-# parent-replies ingest); only the answer message crosses the backend or
+# blocked: record in the target task's state/<id>.status. The closing
+# "resolved [key=<key>]: answered: <capped excerpt>" line is written by the
+# ANSWERING side, so the captain-facing OPEN DECISIONS record never depends on
+# the busy worker writing a matching resolved line. The close is a LOCAL append
+# for every target kind - crewmate, scout, local secondmate, and remote
+# secondmate alike - because the open-decision ledger fm-wake-drain folds lives
+# in this home's own state dir (a remote mate's escalations reach it through
+# the parent-replies ingest); only the answer message crosses the backend or
 # remote transport.
+#
+# WHEN it is written differs by plane, because the planes prove different
+# things:
+#   LOCAL INBOX - at the worker's ACKNOWLEDGEMENT, not at enqueue. Enqueue
+#     proves the answer is stored; it does not prove the worker has seen it,
+#     because the doorbell is deliberately skipped whenever the composer
+#     visibly holds pending text. Closing at enqueue therefore made a stopped
+#     worker read as a moving one: every downstream reader, the OPEN DECISIONS
+#     fold and the session-start digest included, reported the decision
+#     answered while the instruction sat unread. fm-send instead parks the
+#     closure beside its record (bin/fm-task-inbox-lib.sh's deferred closure),
+#     and the watcher commits it the moment the worker moves that record into
+#     handled/. Until then the decision stays open in every durable record -
+#     truthful, and the safe direction, since an open decision re-surfaces.
+#     The same watcher escalates an unacknowledged answer on a stated bound and
+#     names the decision it is holding up.
+#   TYPED - at the confirmed submit, which is delivery INTO the worker's turn:
+#     the harness accepted and submitted the text, and an unconfirmed submit
+#     already refuses to close (exit 3 returns before any closure).
+#   REMOTE INBOX - at the remote enqueue. The parent cannot observe a remote
+#     home's handled/ move without a network round trip per poll, so there is
+#     no acknowledgement to gate on here. That plane is not left without a
+#     backstop: every marked remote request except an explicit
+#     --fire-and-forget carries a durable parent pending-reply expectation
+#     that recovers and escalates on its own, which is exactly what the local
+#     crewmate plane lacked.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
@@ -612,6 +637,28 @@ fm_send_close_resolved_keys() {  # <answer-text>
   done
 }
 
+# Park the answered decision's closure beside its durable inbox record instead
+# of writing it, on the LOCAL inbox plane. Enqueue proves the answer is stored,
+# never that the worker has read it: the doorbell is deliberately skipped when
+# the composer visibly holds pending text, so a closure written at enqueue time
+# would report a stopped worker as a moving one. bin/fm-task-inbox-lib.sh owns
+# the sidecar and commits it the moment the worker acknowledges the record.
+#
+# A sidecar that cannot be written leaves the decision OPEN - the safe
+# direction, since an open decision re-surfaces - so it exits nonzero with the
+# manual close, exactly as a failed direct append does.
+fm_send_defer_resolved_keys() {  # <record-path> <answer-text>
+  local rec=$1 note=$2 keys
+  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  if fm_task_inbox_defer_resolution "$rec" "$note" \
+    "$RESOLVE_STATUS_KEYS" "$RESOLVE_HOLD_KEYS" >/dev/null; then
+    return 0
+  fi
+  keys="$RESOLVE_STATUS_KEYS${RESOLVE_STATUS_KEYS:+ }$RESOLVE_HOLD_KEYS"
+  echo "error: the answer was delivered to $T at $rec, but the acknowledgement-gated close for ${keys% } could not be recorded, so it will never commit. The decision stays OPEN and re-surfaces; do not resend the answer. Close it by hand once the worker has read the record." >&2
+  return 1
+}
+
 # Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed
 # lines, exactly the way every other channel does. fm-send decides nothing here:
 # it does not build a decision record or choose a close path; the keys were
@@ -948,11 +995,12 @@ else
         fi
       fi
     fi
-    # The answer is durably sent: close each answered decision at enqueue time
-    # (answerer-closes; see the header contract).
+    # The answer is durably sent, which is not the same as read: park its
+    # closure on the record so it commits at ACKNOWLEDGEMENT time (see the
+    # header contract). Parked before the ring, so an instant acknowledgement
+    # still finds the closure waiting for it.
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_defer_resolved_keys "$INBOX_RECORD" "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher's re-ring ladder owns loss detection from here.

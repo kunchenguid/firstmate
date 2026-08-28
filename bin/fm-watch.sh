@@ -56,12 +56,21 @@
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
-#                          the steering-inbox ladder spent its delivery-attempt
-#                          budget on an idle pane without an acknowledgement
+#                          a steering-inbox record is unacknowledged past one of
+#                          the ladder's three stated bounds - a spent
+#                          delivery-attempt budget, a proven composer block, or
+#                          the absolute unhandled bound that holds even while
+#                          the pane reads busy. An unread record carrying an
+#                          answered decision names that decision, because the
+#                          decision stays open until the worker acknowledges it.
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
+#   stale: <window> (answered decision could not be closed: ...)
+#                          the worker acknowledged an answer but its deferred
+#                          closure failed to commit, so the decision is still
+#                          open while the worker is already acting on it
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -318,42 +327,83 @@ window_key() {  # <window>
   printf '%s' "${key//./_}"
 }
 
+# Commit every deferred decision closure this task's worker has acknowledged,
+# and surface a commit that fails. A --resolve-key answer on the local inbox
+# plane parks its closure on the record instead of writing it, precisely so a
+# decision cannot read answered while the instruction sits unread
+# (bin/fm-task-inbox-lib.sh owns that contract); this is where the worker's
+# acknowledgement turns it into the closing resolved line. It runs before the
+# ladder and before the busy check, because an acknowledged answer is exactly
+# the case the ladder reports as `quiet`. Cheap when healthy: one glob.
+inbox_answer_commit() {  # <window> <task>
+  local w=$1 task=$2 closed reason
+  # stderr is deliberately NOT swallowed: the library names exactly which
+  # closure failed and why, which the one-line wake reason cannot carry.
+  if closed=$(fm_task_inbox_commit_resolutions "$STATE" "$task" "$STATE/$task.status"); then
+    [ -z "$closed" ] || triage_log "steer-inbox answered decision closed: $task $(printf '%s' "$closed" | tr '\n' ' ')"
+    return 0
+  fi
+  reason="stale: $w (answered decision could not be closed: $task acknowledged a firstmate answer, but its deferred closure did not commit, so the decision is still open while the worker acts on it - inspect $STATE/$task.inbox and close it by hand)"
+  fm_wake_append stale "$w" "$reason" || exit 1
+  wake "$reason"
+}
+
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
-# policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
-# delivery attempt, and a spent attempt budget surfaces as an ordinary stale
-# wake for stuck-crewmate-recovery. If the attempt's ladder write fails while
-# its record remains unhandled, that unwritable state surfaces through the same
-# stale path instead of silently re-ringing forever; acknowledgement or teardown
-# still makes the race quiet. The attempt is data-plane typing or a
-# composer-protected skip, never a wake, so normal retries keep the watcher
-# blocking. Runs for secondmates
+# policy owner) reports a due action, an idle pane gets one delivery attempt,
+# and any of the ladder's three stated escalation bounds surfaces as an
+# ordinary stale wake for stuck-crewmate-recovery. A busy pane still just waits
+# for delivery attempts - the record is durable and the worker will reach a
+# turn boundary - but it no longer suppresses the ladder's ABSOLUTE bound:
+# "busy" must never be able to mean "unread forever", so an `overdue`
+# escalation is surfaced whatever the pane is doing. If the attempt's ladder
+# write fails while its record remains unhandled, that unwritable state
+# surfaces through the same stale path instead of silently re-ringing forever;
+# acknowledgement or teardown still makes the race quiet. The attempt is
+# data-plane typing or a composer-protected skip, never a wake, so normal
+# retries keep the watcher blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc
+  local w=$1 task=$2 action verb rest rec cause count tail40 reason ring_rc
+  local answers='' ring_result
+  inbox_answer_commit "$w" "$task"
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
-  rec=${action#* }
+  cause=
   count=
   case "$verb" in
     escalate)
-      count=${rec##* }
-      rec=${rec% *}
+      rest=${action#escalate }
+      count=${rest%% *}
+      rest=${rest#* }
+      cause=${rest%% *}
+      rec=${rest#* }
+      ;;
+    *)
+      rec=${action#* }
       ;;
   esac
   tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if window_is_busy "$w" "$tail40"; then
-    return 0
+    # A busy worker is between turn boundaries: no doorbell, and no escalation
+    # for an attempt budget it never had the chance to spend. The absolute
+    # bound is the one exception, and it is why an unread instruction cannot
+    # stay silent behind a permanently busy pane.
+    [ "$cause" = overdue ] || return 0
   fi
   case "$verb" in
     ring)
       ring_rc=0
       fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
-      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
+      case "$ring_rc" in
+        1) ring_result=blocked ;;
+        2) ring_result=failed ;;
+        *) ring_result=rang ;;
+      esac
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$ring_result"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
           return 0
@@ -367,11 +417,25 @@ inbox_steer_check() {  # <window> <task>
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
       if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
       fi
+      answers=$(fm_task_inbox_pending_answer_keys "$STATE" "$task" 2>/dev/null | tr '\n' ' ') || answers=
+      answers=${answers% }
+      case "$cause" in
+        blocked)
+          reason="stale: $w (unread firstmate instruction: $rec cannot be delivered because the composer visibly holds pending text, so every doorbell is being skipped; clear the composer, then re-ring)"
+          ;;
+        overdue)
+          reason="stale: $w (unread firstmate instruction: $rec has been unhandled for over $(fm_task_inbox_unhandled_max_secs)s without an acknowledgement; inspect the worker)"
+          ;;
+        *)
+          reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+          ;;
+      esac
+      [ -z "$answers" ] \
+        || reason="${reason%)} - it carries the answer to decision key(s) $answers, which stay OPEN until the worker acknowledges the record)"
       fm_wake_append stale "$w" "$reason" || exit 1
       if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
         echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2

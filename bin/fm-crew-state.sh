@@ -373,9 +373,26 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now.
+#
+# ONLY the branch's NEWEST row can describe its current state, so this stops at
+# that row: it either binds to the worktree's code identity and is reported, or
+# nothing is attributed and the caller falls through to the pane and status log.
+# Walking past it to an older row is what produced the 2026-08-27 false
+# terminal-failure reports (four in one afternoon, three of which reached the
+# captain-presentation path). The live run's head is often a commit the crew
+# worktree cannot resolve at all - no-mistakes commits its review fixes inside
+# its OWN repo mirror under ~/.no-mistakes/repos/<id>.git, so those SHAs need
+# not exist in the crew's worktree - and the previous FAILED run's head is
+# frequently the crew worktree's own HEAD, which binds perfectly. Skipping the
+# unbindable newest row therefore walked straight onto a superseded failure and
+# reported live work as dead. An older run for the same branch is history by
+# construction: a newer run supersedes it whatever its outcome was.
+#
+# Echoes the newest matching row's status word
+# (running/completed/cancelled/failed), or empty when the branch has no run
+# within FM_CREW_STATE_RUNS_LIMIT rows, or when that newest run cannot be bound
+# to the current code.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -391,15 +408,13 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        # An UNRESOLVABLE head is unknown attribution, not a proven
-        # mismatch. Stop instead of surfacing an older, superseded row;
-        # the caller's pane/log fallback can answer without misattribution.
-        fm_nm_head_resolvable "$WT" "$sha" || return 0
-        continue
-      fi
+      # Same code-identity rule as axi status: the branch's NEWEST row either
+      # binds to this worktree or nothing is attributed. Whether its head is
+      # unresolvable here (unknown attribution) or resolvable but not current
+      # (a proven mismatch: the worker moved past it, or rewrote it), an older
+      # row for the same branch is superseded history and must never be
+      # surfaced in its place; the caller's pane/log fallback answers instead.
+      nm_coarse_head_matches_worktree "$sha" || return 0
       printf '%s' "$st"
       return 0
     fi
@@ -440,17 +455,25 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    # Head equality, or the pipeline-owned-active exemption: while the
-    # pipeline owns this branch, the daemon's own branch attribution is
-    # authoritative and the lane head need not be a git object here
-    # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
-      && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
-      HAVE_RUN=1
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      # `axi status` already answered for THIS branch, so the coarse list
+      # cannot improve on it either way: it can only re-find this same run,
+      # or walk onto an older, superseded one. Bind it - on head equality, or
+      # the pipeline-owned-active exemption, where the daemon's own branch
+      # attribution is authoritative while the pipeline owns this branch and
+      # the lane head need not be a git object here
+      # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh) - or
+      # attribute nothing. Never fall through to the coarse list for this
+      # branch: an own-branch head mismatch that is not pipeline-owned-active
+      # is exactly the shape that let a stale coarse row bind as "failed"
+      # over a genuinely live run.
+      if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
+        HAVE_RUN=1
+      fi
     else
-      # The active-or-most-recent run is for another branch, or its same-branch
-      # attribution failed (the CLI is alive and answered) - try the coarse
-      # fallback.
+      # The repo-wide answer belongs to another crew's branch (routine once
+      # several crews validate the same underlying repo). Only then is the
+      # coarse list a better source for THIS branch.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
