@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash bin/fm-codex-hook.sh sessionstart",
+            "command": "bash -l bin/fm-codex-hook.sh sessionstart",
             "commandWindows": "bin\\fm-codex-hook.cmd sessionstart",
             "timeout": 180
           }
@@ -18,13 +18,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash bin/fm-codex-hook.sh arm-pretool",
+            "command": "bash -l bin/fm-codex-hook.sh arm-pretool",
             "commandWindows": "bin\\fm-codex-hook.cmd arm-pretool",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "bash bin/fm-codex-hook.sh cd-pretool",
+            "command": "bash -l bin/fm-codex-hook.sh cd-pretool",
             "commandWindows": "bin\\fm-codex-hook.cmd cd-pretool",
             "timeout": 10
           }
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash bin/fm-codex-hook.sh stop",
+            "command": "bash -l bin/fm-codex-hook.sh stop",
             "commandWindows": "bin\\fm-codex-hook.cmd stop",
             "timeout": 30
           }

@@ -33,11 +33,13 @@ jq -e --arg group "$HOOK_GROUP" --arg event "$EVENT" '
   .hooks[$group] | any(.[]?.hooks[]?.command?;
     type == "string" and contains("fm-codex-hook") and endswith(" " + $event))
 ' "$ROOT/.codex/hooks.json" >/dev/null 2>&1 || exit 0
-# Capture the verified native harness while the stable hook process still has
-# its complete Windows parent chain. Nested startup shells can outlive an
-# intermediate parent before they query the process table.
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$ROOT/bin/fm-session-lock-lib.sh"
-FM_SESSION_HARNESS_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
-export FM_SESSION_HARNESS_PID
+if [ "$EVENT" = sessionstart ]; then
+  # Capture the verified native harness while the stable hook process still has
+  # its complete Windows parent chain. Nested startup shells can outlive an
+  # intermediate parent before they query the process table.
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  FM_SESSION_HARNESS_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
+  export FM_SESSION_HARNESS_PID
+fi
 printf '%s' "$PAYLOAD" | "$ROOT/bin/$TARGET"
