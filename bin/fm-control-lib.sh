@@ -81,6 +81,7 @@ fm_control_harness_family() {  # <recorded-harness>
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
     claude*) printf 'claude' ;;
+    cc-deepseek*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
     grok*) printf 'grok' ;;

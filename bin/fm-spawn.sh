@@ -1112,6 +1112,14 @@ launch_template() {
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # cc-deepseek / cc-deepseek-pro: claude routed through the DeepSeek proxy
+    # aliases (~/.local/bin/cc-deepseek*). The model is owned by the alias
+    # (deepseek-v4-flash[1m] / deepseek-v4-pro[1m]), so __MODELFLAG__ is
+    # deliberately absent: dispatch can never override it. __EFFORTFLAG__
+    # passes through to claude, which encodes it as output_config.effort that
+    # DeepSeek honors. The wrapper itself adds --dangerously-skip-permissions.
+    cc-deepseek) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false cc-deepseek __EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cc-deepseek-pro) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false cc-deepseek-pro __EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1372,6 +1380,14 @@ effort_flag_for_harness() {
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    cc-deepseek|cc-deepseek-pro)
+      # The aliases pass flags straight through to claude, which sends
+      # output_config.effort; DeepSeek honors low/medium/high/max (medium
+      # maps to high; v4-flash has no low tier).
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -2338,7 +2354,10 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*)
+    claude*|cc-deepseek*)
+      # cc-deepseek harnesses run claude under the hood, so they get the
+      # same semantic busy-state hook install (UserPromptSubmit/Stop/
+      # StopFailure/SessionEnd) keyed on the claude adapter.
       # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
       # a turn; Stop (normal completion), StopFailure (API-error turn end),
       # and SessionEnd (process shutdown) all close it, so an abnormal end can
