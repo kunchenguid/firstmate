@@ -494,6 +494,51 @@ test_local_landing_ignores_stale_remote_tracking_default() {
   pass "fm-merge-local: remote-less landing ignores stale remote-tracking defaults"
 }
 
+test_local_landing_requires_current_resolved_base() {
+  local home project worktree origin updater meta out status initial
+  home="$TMP_ROOT/merge-local-current-base/home"
+  project="$TMP_ROOT/merge-local-current-base/project"
+  worktree="$TMP_ROOT/merge-local-current-base/worktree"
+  origin="$TMP_ROOT/merge-local-current-base/origin.git"
+  updater="$TMP_ROOT/merge-local-current-base/updater"
+  mkdir -p "$home/state" "$home/data"
+  printf '%s\n' '- project [local-only] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet -b fm/merge-local-e2 "$worktree" main
+  printf 'task change\n' > "$worktree/task.txt"
+  git -C "$worktree" add task.txt
+  git -C "$worktree" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm task-change
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$origin" symbolic-ref HEAD refs/heads/main
+  git -C "$project" remote add origin "file://$origin"
+  git clone --quiet "file://$origin" "$updater"
+  printf 'upstream change\n' > "$updater/upstream.txt"
+  git -C "$updater" add upstream.txt
+  git -C "$updater" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm upstream-change
+  git -C "$updater" push --quiet origin main
+  meta="$home/state/merge-local-e2.meta"
+  printf 'window=fm-merge-local-e2\nkind=ship\nmode=local-only\nworktree=%s\nproject=%s\n' \
+    "$worktree" "$project" > "$meta"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$MERGE_LOCAL" merge-local-e2 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "local landing should refuse a task behind the resolved origin base"
+  assert_contains "$out" "does not contain the current resolved base refs/remotes/origin/main" \
+    "local landing did not explain its stale resolved base"
+  [ "$(git -C "$project" rev-parse main)" = "$initial" ] \
+    || fail "stale-base refusal moved local main"
+  [ ! -e "$project/task.txt" ] || fail "stale-base refusal landed the task change"
+  pass "fm-merge-local: landing requires the current resolved origin base"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -537,5 +582,6 @@ test_promote_requires_and_records_the_delivery_contract
 test_promotion_delivers_the_real_definition_of_done
 test_promote_requires_origin_for_pr_backed_contracts
 test_local_landing_ignores_stale_remote_tracking_default
+test_local_landing_requires_current_resolved_base
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

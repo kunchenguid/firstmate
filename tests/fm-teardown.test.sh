@@ -733,6 +733,32 @@ test_remoteless_local_cleanup_refuses_stale_task_ref() {
   pass "local-only teardown distrusts stale task refs without remotes"
 }
 
+test_local_cleanup_refuses_stale_ref_from_removed_remote() {
+  local case_dir rc wt_head
+  case_dir=$(make_case stale-removed-origin-ref)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unlanded work hidden by stale origin ref"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/remotes/origin/fm/task-x1 "$wt_head"
+  git -C "$case_dir/project" remote remove origin
+  git init -q --bare "$case_dir/fork.git"
+  git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
+  mkdir -p "$case_dir/home/data"
+  printf '%s\n' '- project [local-only] - fixture (added 2026-01-01)' > "$case_dir/home/data/projects.md"
+
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale removed-origin ref should not authorize cleanup"
+  grep -q 'configured remotes but no origin' "$case_dir/stderr" \
+    || fail "cleanup treated a stale removed-origin ref as current fork containment"
+  assert_present "$case_dir/wt" \
+    "cleanup removed unlanded work hidden by a stale ref from a removed remote"
+  pass "local-only teardown trusts only currently configured remote refs"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2682,6 +2708,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_remoteless_local_cleanup_ignores_stale_origin_head
 test_remoteless_local_cleanup_refuses_stale_task_ref
+test_local_cleanup_refuses_stale_ref_from_removed_remote
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

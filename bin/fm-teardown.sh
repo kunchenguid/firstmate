@@ -1040,6 +1040,33 @@ patch_id_for_commit() {
     | awk 'NR == 1 { print $1 }'
 }
 
+commits_not_on_configured_remotes() {
+  local format=$1 repo remotes remote refs ref has_exclusion=0
+  local -a args
+  args=(log "$format" HEAD)
+  for repo in "$PROJ" "$WT"; do
+    remotes=$(git -C "$repo" remote 2>/dev/null) || return 1
+    while IFS= read -r remote; do
+      [ -n "$remote" ] || continue
+      refs=$(git -C "$repo" for-each-ref --format='%(refname)' "refs/remotes/$remote/" 2>/dev/null) || return 1
+      while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        if [ "$has_exclusion" = 0 ]; then
+          args+=(--not)
+          has_exclusion=1
+        fi
+        args+=("$ref")
+      done <<EOF
+$refs
+EOF
+    done <<EOF
+$remotes
+EOF
+  done
+  args+=(--)
+  git -C "$WT" "${args[@]}" 2>/dev/null
+}
+
 unpushed_patches_are_in_pr_head() {
   local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
@@ -1053,7 +1080,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(commits_not_on_configured_remotes --format=%H) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1396,7 +1423,6 @@ teardown_treehouse_return() {
 
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT default_commit unmerged_raw unmerged branch
-  local project_remotes worktree_remotes require_local_check
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1413,7 +1439,7 @@ validate_worktree_teardown_safety() {
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(commits_not_on_configured_remotes --oneline); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1424,23 +1450,7 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ "$MODE" = local-only ]; then
-    require_local_check=0
     if [ -n "$unpushed" ]; then
-      require_local_check=1
-    else
-      project_remotes=$(git -C "$PROJ" remote 2>/dev/null) || {
-        echo "REFUSED: cannot inspect configured remotes for authoritative project $PROJ." >&2
-        return 1
-      }
-      worktree_remotes=$(git -C "$WT" remote 2>/dev/null) || {
-        echo "REFUSED: cannot inspect configured remotes for task worktree $WT." >&2
-        return 1
-      }
-      if [ -z "$project_remotes" ] && [ -z "$worktree_remotes" ]; then
-        require_local_check=1
-      fi
-    fi
-    if [ "$require_local_check" = 1 ]; then
       if ! fm_project_base_resolve "$PROJ" "$WT" yes no; then
         echo "REFUSED: $FM_PROJECT_BASE_ERROR." >&2
         return 1

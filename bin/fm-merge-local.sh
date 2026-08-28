@@ -45,6 +45,12 @@ if ! fm_project_base_resolve "$PROJ" "$WT" yes no; then
 fi
 DEFAULT=$FM_PROJECT_BASE_BRANCH
 
+if ! git -C "$PROJ" merge-base --is-ancestor "$FM_PROJECT_BASE_COMMIT" "$BRANCH"; then
+  echo "REFUSED: $BRANCH does not contain the current resolved base $FM_PROJECT_BASE_REF." >&2
+  echo "Have the crewmate rebase $BRANCH onto $FM_PROJECT_BASE_REF, then retry." >&2
+  exit 1
+fi
+
 # The project's main checkout must be on its default branch and clean, so the
 # fast-forward lands predictably (firstmate never writes here otherwise).
 cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
