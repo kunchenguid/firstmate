@@ -13,11 +13,16 @@
 #     harnesses, or GUI backends
 #
 # Usage:
-#   fm-test-isolation-proof.sh [--jobs N] [--json path] [--list]
+#   fm-test-isolation-proof.sh [--pool <name>] [--jobs N] [--json path] [--list]
 #   fm-test-isolation-proof.sh --list-exclusions
 #   fm-test-isolation-proof.sh -h | --help
 #
 # Options:
+#   --pool NAME  candidate pool: "portable" (default, this harness's own curated
+#                set) or a bin/fm-test-run.sh family name, to prove a stateful
+#                family that stays serial on CI but may earn bounded local
+#                concurrency. bin/fm-test-run.sh's list_concurrent_safe_families
+#                records which families passed.
 #   --jobs N     max concurrent workers (default: 4; min 1)
 #   --json path  write a machine-readable proof artifact after the run
 #   --list       print the proven candidate paths (one per line) and exit 0
@@ -52,6 +57,7 @@ JOBS=4
 JSON_PATH=
 LIST_ONLY=0
 LIST_EXCLUSIONS=0
+POOL=portable
 
 usage() {
   awk '
@@ -278,6 +284,15 @@ while [ "$#" -gt 0 ]; do
       JSON_PATH=${1#--json=}
       shift
       ;;
+    --pool)
+      [ "$#" -gt 1 ] || die "--pool requires a name (portable, or a family name)"
+      POOL=$2
+      shift 2
+      ;;
+    --pool=*)
+      POOL=${1#--pool=}
+      shift
+      ;;
     --list)
       LIST_ONLY=1
       shift
@@ -309,11 +324,28 @@ if [ "$LIST_EXCLUSIONS" -eq 1 ]; then
   exit 0
 fi
 
+# The portable pool is this harness's own curated set. A family pool proves a
+# stateful family that stays serial on CI but may earn bounded local
+# concurrency; bin/fm-test-run.sh's list_concurrent_safe_families records which
+# families passed. Membership stays empirical: a family that fails here is not
+# admitted, and this harness never retries a failure into green.
+pool_candidates() {
+  case "$POOL" in
+    portable)
+      list_parallel_candidates
+      ;;
+    *)
+      "$ROOT/bin/fm-test-run.sh" --list --family "$POOL" \
+        || die "--pool $POOL is not a known family (see bin/fm-test-run.sh --list-families)"
+      ;;
+  esac
+}
+
 CANDIDATES=()
 while IFS= read -r s; do
   [ -n "$s" ] || continue
   CANDIDATES+=("$s")
-done < <(list_parallel_candidates | LC_ALL=C sort -u)
+done < <(pool_candidates | LC_ALL=C sort -u)
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   for s in "${CANDIDATES[@]+"${CANDIDATES[@]}"}"; do

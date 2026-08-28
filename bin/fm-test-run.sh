@@ -42,6 +42,10 @@
 #                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
+#   --max-wall-ms N fail the run when its wall clock exceeds N milliseconds,
+#                   after reporting the per-script results. Duration is a
+#                   result: a suite that outgrows its caller's invocation budget
+#                   gets killed mid-run and retried invisibly.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -50,6 +54,7 @@
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
+#   FM_TEST_BUDGET max_wall_ms=<n> duration_ms=<n>   (only with --max-wall-ms)
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
@@ -88,6 +93,7 @@ EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+MAX_WALL_MS=
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -1386,6 +1392,15 @@ while [ "$#" -gt 0 ]; do
       JOBS=${1#--jobs=}
       shift
       ;;
+    --max-wall-ms)
+      [ "$#" -gt 1 ] || die "--max-wall-ms requires a positive integer"
+      MAX_WALL_MS=$2
+      shift 2
+      ;;
+    --max-wall-ms=*)
+      MAX_WALL_MS=${1#--max-wall-ms=}
+      shift
+      ;;
     --list)
       LIST_ONLY=1
       shift
@@ -1563,12 +1578,21 @@ for s in "${SCRIPTS[@]}"; do
 done
 
 # --jobs N>1 only for the proven-isolated set. Stateful families stay serial.
+# bin/fm-test-isolation-proof.sh --pool <family> is how a stateful family would
+# earn concurrency; docs/fm-test-isolation-proof.md records which have not.
 if [ "$JOBS" -gt 1 ]; then
   for s in "${SCRIPTS[@]}"; do
     if ! is_proven_isolated_script "$s"; then
       die "--jobs $JOBS refused: $s is not in the proven-isolated set (see bin/fm-test-isolation-proof.sh --list). Stateful families stay serial."
     fi
   done
+fi
+
+if [ -n "$MAX_WALL_MS" ]; then
+  case "$MAX_WALL_MS" in
+    ''|*[!0-9]*) die "--max-wall-ms requires a positive integer" ;;
+  esac
+  [ "$MAX_WALL_MS" -gt 0 ] || die "--max-wall-ms requires a positive integer"
 fi
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
@@ -1803,6 +1827,18 @@ fi
 
 printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s\n' \
   "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION"
+
+# The wall-clock budget is a first-class result, not advice. A suite that still
+# produces green scripts but takes longer than its caller can afford is the
+# regression this guard exists to catch: an agent-invoked verification that
+# outgrows its invocation budget gets killed mid-run and retried invisibly.
+if [ -n "$MAX_WALL_MS" ]; then
+  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$RUN_DURATION"
+  if [ "$RUN_DURATION" -gt "$MAX_WALL_MS" ]; then
+    log "wall-clock budget exceeded: ${RUN_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+    AGG_RC=1
+  fi
+fi
 
 if [ -s "$FAMILIES_TSV" ]; then
   # Stable family summary order by name.

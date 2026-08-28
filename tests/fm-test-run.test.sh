@@ -109,6 +109,7 @@ init_changed_fixture_repo() {
     fm-bearings-snapshot.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
+    fm-control-herdr-smoke.test.sh \
     fm-backend-orca.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
@@ -117,6 +118,15 @@ init_changed_fixture_repo() {
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
+  # A shared helper with no curated family of its own, named by exactly ONE
+  # script of the expensive real-Herdr family and consumed by one curated
+  # watcher script. This is the shape that made a one-line helper change select
+  # every real-Herdr E2E.
+  : >"$repo/bin/shared-probe-lib.sh"
+  printf '# shared-probe-lib.sh\n' >>"$repo/tests/fm-backend-herdr-smoke.test.sh"
+  # shellcheck disable=SC2016  # literal fixture text: the reference must reach
+  # the file verbatim so the changed-file scan can find it, not expand here.
+  printf '. "$ROOT/bin/shared-probe-lib.sh"\n' >"$repo/bin/fm-watch-probe.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
@@ -180,6 +190,37 @@ test_changed_dependency_selection_and_unmapped_failure() {
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
   rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"
+}
+
+# A direct test reference is per-script evidence. Widening it to the referencing
+# test's whole family is what turned a one-line change to a shared helper into
+# every real-Herdr E2E, including scripts with no dependency on it at all.
+# Consumer bin/ scripts must still resolve through the curated map, so recorded
+# family-level coupling is not lost along the way.
+test_changed_bin_reference_selects_per_script_not_per_family() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-scope.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/bin/shared-probe-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+
+  assert_contains "$listed" "tests/fm-backend-herdr-smoke.test.sh" \
+    "the one gated script that names the helper must still be selected"
+  case "$listed" in
+    *tests/fm-control-herdr-smoke.test.sh*)
+      fail "a single gated script's reference dragged in its whole family: $listed"
+      ;;
+  esac
+  # The curated consumer keeps its family-level coupling.
+  assert_contains "$listed" "tests/fm-daemon.test.sh" \
+    "a curated consumer of the helper must still select its whole family"
+  assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" \
+    "a curated consumer of the helper must still select its whole family"
+
+  rm -rf "$tmp"
+  pass "a bin reference selects the referencing scripts, and consumers still select their curated families"
 }
 
 test_empty_selection_emits_summary() {
@@ -494,6 +535,61 @@ test_jobs_requires_proven_isolated() {
   pass "--jobs refuses non-proven / stateful selections"
 }
 
+# The duration regression this guard exists for: a suite whose scripts are all
+# green but whose wall clock outgrew its caller's invocation budget. The caller
+# gets killed mid-run and retries invisibly, so an over-budget run has to be a
+# failure, not a note in the log.
+test_max_wall_ms_is_a_result_not_advice() {
+  local tmp repo runner fast rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fast=tests/fm-budget-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fast" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - budget fixture"
+SH
+  chmod +x "$runner" "$repo/$fast"
+
+  # Comfortably inside budget: the run passes and states the budget it met.
+  set +e
+  "$runner" --max-wall-ms 60000 "$fast" >"$tmp/under" 2>"$tmp/under.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a run inside its budget must pass, got $rc: $(cat "$tmp/under.err")"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=60000 duration_ms=[0-9]+$' "$tmp/under" \
+    || fail "an inside-budget run did not report the budget: $(cat "$tmp/under")"
+
+  # Same green script, budget it cannot meet: the run must FAIL.
+  set +e
+  "$runner" --max-wall-ms 1 "$fast" >"$tmp/over" 2>"$tmp/over.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an over-budget run must fail even with every script green: $(cat "$tmp/over")"
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/over" \
+    || fail "the over-budget run should still report its green scripts: $(cat "$tmp/over")"
+  grep -Fq 'wall-clock budget exceeded' "$tmp/over.err" \
+    || fail "the over-budget run did not name the budget it missed: $(cat "$tmp/over.err")"
+
+  # A malformed budget is refused rather than silently ignored.
+  set +e
+  "$runner" --max-wall-ms 0 "$fast" >"$tmp/bad" 2>"$tmp/bad.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--max-wall-ms 0 must be refused (exit 2), got $rc"
+  set +e
+  "$runner" --max-wall-ms nope "$fast" >"$tmp/bad2" 2>"$tmp/bad2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--max-wall-ms with a non-number must be refused (exit 2), got $rc"
+
+  rm -rf "$tmp"
+  pass "--max-wall-ms fails an over-budget run and refuses a malformed budget"
+}
+
 test_jobs_parallel_scheduler_and_failure_propagation() {
   local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
@@ -708,6 +804,7 @@ test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_bin_reference_selects_per_script_not_per_family
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
@@ -718,6 +815,7 @@ test_portable_shard_union_and_coverage_guard
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
+test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json

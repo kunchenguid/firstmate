@@ -76,6 +76,27 @@ This record is the concurrent isolation proof for the portable parallel candidat
 | 331 | 0 | 20 | `tests/fm-supervision-instructions.test.sh` |
 | 99 | 0 | 23 | `tests/fm-transition-lib.test.sh` |
 
+## Families refused concurrency
+
+`bin/fm-test-isolation-proof.sh --pool <family>` runs the same concurrent proof over a whole `bin/fm-test-run.sh` family, for a stateful family that stays serial on CI but might earn bounded local concurrency.
+A family is admitted only by a passing proof recorded here.
+
+`watcher-wake-lock` was measured and **refused**.
+
+- Date: 2026-08-28
+- Command: `bin/fm-test-run.sh --family watcher-wake-lock --jobs 4`
+- Result: 3 of 18 scripts failed under concurrency that pass serially.
+
+| Script | Failure |
+|---|---|
+| `tests/fm-watch-checkpoint.test.sh` | `watch lock pid survived quiet checkpoint timeout` |
+| `tests/fm-watch-recovery-loop.test.sh` | `handling successor did not surface the crew event within a poll interval or two (waited 4s)` |
+| `tests/fm-watch-arm.test.sh` | `re-arm stayed live instead of surfacing durable wakes and the still-open remote decision` |
+
+These are wall-clock assertions about how quickly a real watcher reaches its next poll, so CPU oversubscription breaks them without any shared-state collision.
+Admitting the family would trade a duration win for a load-dependent flake, so the family stays serial and `--jobs` continues to refuse it.
+Making these assertions event-driven rather than interval-bounded is the prerequisite for re-running this proof.
+
 ## Scope
 
 Each worker used a separate mode-`0700` temporary root and private `TMPDIR` and `TMP`.
@@ -88,4 +109,10 @@ A candidate failure fails the aggregate run and requires investigation rather th
 bin/fm-test-isolation-proof.sh --list
 bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json
 bin/fm-test-run.sh --check-coverage
+```
+
+To re-test a family refused above:
+
+```sh
+bin/fm-test-isolation-proof.sh --pool watcher-wake-lock --jobs 4
 ```
