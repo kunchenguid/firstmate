@@ -293,6 +293,9 @@ family_for_basename() {
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
       printf '%s\n' cmux
       ;;
+    fm-backend-thurbox.test.sh)
+      printf '%s\n' thurbox
+      ;;
     fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
       printf '%s\n' zellij
       ;;
@@ -310,6 +313,11 @@ expected_gate_skip_for_family() {
     real-herdr-gated) printf '%s\n' herdr ;;
     live-harness-optin) printf '%s\n' optin-env ;;
     cmux|zellij|orca) printf '%s\n' optional-binary ;;
+    # thurbox's unit test drives a stubbed thurbox-cli and a stubbed tmux
+    # (FM_THURBOX_BIN plus a PATH shim), so it runs everywhere with no thurbox
+    # installed and no real session ever created - see
+    # tests/thurbox-test-safety.sh for why a real create is forbidden.
+    thurbox) printf '%s\n' none ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
@@ -330,6 +338,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+thurbox
 unclassified
 EOF
 }
@@ -505,6 +514,7 @@ tests/fm-backend-cmux-smoke.test.sh 30
 tests/fm-backend-cmux.test.sh 3351
 tests/fm-backend-herdr-focus-flash-e2e.test.sh 21
 tests/fm-backend-orca.test.sh 14681
+tests/fm-backend-thurbox.test.sh 1152
 tests/fm-backend-tmux-smoke.test.sh 361
 tests/fm-backend-zellij-smoke.test.sh 22
 tests/fm-backend-zellij.test.sh 8297
@@ -1100,6 +1110,10 @@ families_for_changed_path() {
       ;;
     bin/backends/cmux*|tests/cmux-test-safety.sh)
       printf '%s\n' cmux
+      printf '%s\n' backend-dispatch
+      ;;
+    bin/backends/thurbox*|tests/thurbox-test-safety.sh)
+      printf '%s\n' thurbox
       printf '%s\n' backend-dispatch
       ;;
     bin/backends/orca*|bin/backends/tmux.sh)

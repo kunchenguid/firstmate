@@ -3,7 +3,7 @@
 # every shape a verified harness draws, every glyph, every container proof, and
 # the empty|pending|pending-unproven|unknown verdict, shared by every
 # session-provider adapter (tmux via bin/fm-tmux-lib.sh, and
-# bin/backends/{herdr,orca,cmux,zellij}.sh) and by fm-spawn.sh's kimi
+# bin/backends/{herdr,orca,cmux,zellij,thurbox}.sh) and by fm-spawn.sh's kimi
 # launch-readiness check.
 #
 # WHY THIS EXISTS (tasks fm-composer-shellglyph-safety and
@@ -23,12 +23,14 @@
 # judged; they never change what the shapes ARE:
 #   styled=1    the capture preserves ANSI styling, so ghost/placeholder text
 #               is detectable and can be stripped (tmux -e, herdr --format
-#               ansi, zellij dump-screen --ansi). With styled=0 (cmux, orca)
+#               ansi, zellij dump-screen --ansi, thurbox capture-pane -e
+#               against thurbox's own tmux socket). With styled=0 (cmux, orca)
 #               ghost text is unreadable, so a bare glyph row or left-bar row
 #               carrying trailing non-idle text degrades to `unknown` rather
 #               than `pending`: the text may be the harness's own idle
 #               suggestion, and a false `pending` blocks every safe caller.
-#   cursor=1    a cursor row is supplied (tmux #{cursor_y} only). The cursor
+#   cursor=1    a cursor row is supplied (tmux #{cursor_y}, and thurbox's read
+#               of that same primitive on thurbox's socket). The cursor
 #               anchors shape selection: the shape containing the cursor is the
 #               composer. Without it, the bottom-most shape wins.
 #   identity=1  a native agent identity/state probe exists (herdr `agent get`;

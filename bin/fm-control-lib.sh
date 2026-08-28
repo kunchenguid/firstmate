@@ -172,7 +172,7 @@ fm_control_exit_command() {  # <harness>
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
-    tmux|herdr|zellij|cmux)
+    tmux|herdr|zellij|cmux|thurbox)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
@@ -183,8 +183,12 @@ fm_control_backend_supports_key() {  # <backend> <key>
 }
 
 # Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
+# herdr implement fm_backend_agent_state; zellij, orca, cmux, and thurbox
+# report `unverified`, so no reading of theirs can prove an agent stopped.
+# thurbox is unverified only for want of an empirical pass: its panes are tmux
+# panes, so the tmux classifier's process-attribution approach should port
+# directly once run against thurbox's own socket - see
+# docs/thurbox-backend.md "Not yet verified". The control
 # plane refuses a stop-proving verb there instead of reporting an unprovable
 # transition as success.
 fm_control_backend_state_verified() {  # <backend>

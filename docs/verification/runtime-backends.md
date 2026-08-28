@@ -793,6 +793,50 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## thurbox
+
+The current compatibility floor is thurbox 2.9, and the active live evidence uses 2.9.2 (schema 40) on Linux x86_64, 2026-08-28.
+The live pass ran against an instance isolated by `THURBOX_CONFIG_DIR` and `THURBOX_DATA_DIR`, and every session it created was deleted afterwards; the tmux server was diffed against a pre-run baseline to confirm it was left byte-identical.
+No automated test may repeat it: `tests/thurbox-test-safety.sh` fails closed unless the `thurbox-cli` in use lives inside the test's own fixture, because the socket is shared even when the database is not (see below).
+
+```sh
+thurbox-cli version --json
+```
+
+Observed version:
+
+```json
+{"data_dir":"...","schema_version":40,"tmux_socket":"thurbox","version":"2.9.2"}
+```
+
+`version` is used rather than `--version`: thurbox's own help records that clap's implicit `--version` reads a static `0.0.0-dev` marker the project never bumps, so only the subcommand reports the real build.
+
+Current active CLI findings:
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Create | `session create --name <title> --repo-path <dir> --agent <shell> --json` | Created the session synchronously, window live on return, without stealing focus. |
+| Create id gap | the same response | Carried `id` but **no** `backend_id`; the pane needs a second `session get`. |
+| Name uniqueness | `session create` twice with one name | **Both succeeded**, two live windows, different UUIDs - so the duplicate refusal is Firstmate's. |
+| Window naming | `tmux -L thurbox list-panes` | Session `fm-verify-1` produced window `tb-fm-verify-1`; the window name is not the session name. |
+| Liveness | `session get <uuid> --json` | Exit 1 for a missing **and** a malformed UUID; exit 0 with the row otherwise. |
+| Pane identity | `session get --json .backend_id` | `%20` - a tmux pane id on thurbox's own socket, with `backend_type: "local-tmux"`. |
+| Restart churn | `session restart <uuid>` | Pane moved `%23` -> `%24` while the UUID was unchanged. |
+| Literal send | `tmux -L thurbox send-keys -t <pane> -l` | Left text unsubmitted. |
+| CLI send counterexample | `session send <uuid> <text>` | Always appended Enter, so it cannot serve unsubmitted input. |
+| Keys | `tmux -L thurbox send-keys -t <pane> Enter\|Escape\|C-c\|C-u` | All shared key operations worked. |
+| Styled capture | `tmux -L thurbox capture-pane -e -p -t <pane>` | Returned ANSI-preserving output; `#{cursor_y}` returned the cursor row. |
+| Plain capture | `session capture <uuid> --lines N --json` | Payload in `.output`; `--lines` bounded the fetch but did not trim the response. |
+| Nested cwd | `tmux -L thurbox display-message '#{pane_current_path}'` | Tracked the live foreground process - no marker probe needed, unlike zellij and cmux. |
+| Native state | `session signal --state working --session <uuid>` then `session get` | Round-tripped into `hook_state`; null before any agent signals. |
+| Teardown | `session delete <uuid> --force --json` | `"killed_window": true`; the non-forced form only soft-deletes the row. |
+
+A plain `command = "bash"` agent produced a pane that executed sent commands but rendered no prompt and no echo; `args = ["-i"]` was required for the interactive rendering every composer read depends on.
+
+Isolation limit, observed live: `THURBOX_CONFIG_DIR`/`THURBOX_DATA_DIR` relocate the config and database but **not** the tmux socket, and creating the first session in an instance also spawned thurbox's own `automation-heartbeat` window (a `while true; do thurbox-cli automation tick; sleep 60; done` loop) on that shared socket. It is not a session, so no `session delete --force` reclaims it; it was removed by hand.
+
+Not verified here, and therefore declared absent in the adapter: a recovery-grade agent-state classifier, a composer identity probe, and any native event-push reader.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

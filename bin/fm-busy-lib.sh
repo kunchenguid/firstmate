@@ -894,13 +894,23 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
   # unknown here.
-  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
-    if [ "$native" = busy ]; then
-      printf 'busy herdr-native'
-      return 0
-    fi
-  fi
+  # thurbox joins herdr here: its `hook_state` is reported by the agent's own
+  # lifecycle hooks (`thurbox-cli session signal`) and uses herdr's exact
+  # working/blocked/done/idle vocabulary, so a native BUSY verdict carries the
+  # same semantic weight. Native idle stays unknown for both, for the same
+  # reason: idle is narrower than turn state, since a long foreground tool call
+  # reads idle while the turn is still in flight.
+  case "$backend" in
+    herdr|thurbox)
+      if command -v fm_backend_busy_state >/dev/null 2>&1; then
+        native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+        if [ "$native" = busy ]; then
+          printf 'busy %s-native' "$backend"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   case "$harness" in
     muse*)
       # Semantic, on demand: fold this task's bound session log. An open run is

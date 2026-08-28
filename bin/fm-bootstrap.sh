@@ -863,6 +863,7 @@ install_cmd() {
 manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
+    thurbox-cli) echo "https://github.com/Thurbeen/thurbox (ships thurbox and thurbox-cli; self-updates with 'thurbox-cli update')" ;;
     cursor-agent) echo "https://cursor.com/cli" ;;
     *) return 1 ;;
   esac
@@ -880,7 +881,9 @@ missing_tool_diagnostic() {
 # Required-tool detection follows the RESOLVED backend, not a one-size default:
 # a universal toolchain every home needs plus the backend-specific delta owned by
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
-# never told tmux is missing, and only orca drops treehouse. A backend value with
+# never told tmux is missing, and only orca drops treehouse. thurbox is the one
+# backend that needs tmux IN ADDITION to its own CLI, because its sessions are
+# tmux windows on thurbox's own socket. A backend value with
 # no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)

@@ -65,9 +65,14 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# thurbox is EXPERIMENTAL and spawn-capable, session-provider-only like
+# herdr/zellij/cmux - verified against the real 2.9.2 binary
+# (docs/thurbox-backend.md). It is the one backend whose sessions ARE tmux
+# windows (on thurbox's own socket), so it reaches tmux's own composer
+# fidelity and exposes a native hook_state busy primitive like herdr's.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux thurbox"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux thurbox"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -137,9 +142,51 @@ fm_backend_is_known() {  # <name>
 # FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
 FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 
+# fm_backend_detect_thurbox_socket_match: is the tmux server this process is
+# running under THURBOX'S OWN server? Returns 0 when a live thurbox answers
+# AND either $TMUX is unset, or $TMUX's socket path names the socket thurbox
+# itself reports.
+#
+# $TMUX is "<socket-path>,<server-pid>,<session-index>", so the socket path is
+# everything before the first comma. The socket NAME is never hardcoded here -
+# it comes from thurbox's own `version --json` via the adapter, the same single
+# source of truth every pane primitive uses. A thurbox that cannot be queried
+# fails the match, so detection falls through to the ordinary tmux answer
+# rather than claiming a backend whose CLI does not respond.
+fm_backend_detect_thurbox_socket_match() {
+  local sock path
+  fm_backend_source thurbox >/dev/null 2>&1 || return 1
+  sock=$(fm_backend_thurbox_socket 2>/dev/null) || return 1
+  [ -n "$sock" ] || return 1
+  # No $TMUX to compare against: an exported THURBOX_SESSION with no tmux
+  # around it is not a pane thurbox is currently running, but thurbox itself
+  # answered, so the marker is taken at face value. The socket query above is
+  # never skipped, so a stale marker on a machine with no thurbox installed
+  # can never select this backend.
+  [ -n "${TMUX:-}" ] || return 0
+  path=${TMUX%%,*}
+  [ "${path##*/}" = "$sock" ]
+}
+
 fm_backend_detect() {
   FM_BACKEND_DETECTED=""
   FM_BACKEND_DETECT_SIGNAL=""
+  # thurbox is checked BEFORE tmux, the one deliberate exception to the
+  # innermost-first rule below, because thurbox is not a layer running INSIDE
+  # tmux - it IS a tmux server plus a session database. Every thurbox pane
+  # therefore sets $TMUX as a matter of thurbox's own implementation, and
+  # letting $TMUX win would address the task through the raw tmux adapter,
+  # losing the session identity, the native hook_state, and the lifecycle the
+  # thurbox adapter exists to use. The socket match is what keeps this exact:
+  # a nested tmux started INSIDE a thurbox pane inherits THURBOX_SESSION but
+  # runs on a DIFFERENT socket, so the match fails and $TMUX correctly wins as
+  # the genuinely innermost layer.
+  if [ -n "${THURBOX_SESSION:-}" ] && fm_backend_detect_thurbox_socket_match; then
+    FM_BACKEND_DETECTED=thurbox
+    FM_BACKEND_DETECT_SIGNAL=THURBOX_SESSION
+    printf 'thurbox'
+    return 0
+  fi
   if [ -n "${TMUX:-}" ]; then
     FM_BACKEND_DETECTED=tmux
     FM_BACKEND_DETECT_SIGNAL=TMUX
@@ -262,6 +309,9 @@ fm_backend_name() {
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
+    if [ "$detected" = thurbox ]; then
+      echo "NOTICE: auto-detected thurbox runtime (THURBOX_SESSION, on thurbox's own tmux socket) - spawning into the EXPERIMENTAL thurbox backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
     if [ "$detected" = cmux ]; then
       case "$FM_BACKEND_DETECT_SIGNAL" in
         bundle-id) marker="FALLBACK signal __CFBundleIdentifier=$FM_BACKEND_CMUX_BUNDLE_ID; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
@@ -314,6 +364,11 @@ fm_backend_required_tools() {  # <backend>
     herdr)  printf '%s' 'herdr jq treehouse' ;;
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
+    # thurbox needs tmux as well as thurbox-cli: its sessions are tmux windows
+    # on thurbox's own socket, and the adapter's pane primitives (literal
+    # input, named keys, styled capture, cursor row, live cwd) are tmux calls
+    # against that socket. See bin/backends/thurbox.sh's header.
+    thurbox) printf '%s' 'thurbox-cli tmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
   esac
@@ -509,6 +564,26 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       fi
       window=$terminal
       ;;
+    thurbox)
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: thurbox endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      # The session UUID is the durable identity and the pane id is a cache
+      # the adapter re-resolves on every operation (bin/backends/thurbox.sh
+      # "IDENTITY MODEL"). Both are still validated here: a malformed pair
+      # means the record cannot be trusted to name one specific endpoint,
+      # which is what this gate exists to establish before any cleanup.
+      recorded_session=$(fm_backend_meta_exact_value "$meta" thurbox_session_id) || recorded_session=
+      pane=$(fm_backend_meta_exact_value "$meta" thurbox_pane_id) || pane=
+      if [ -z "$recorded_session" ] || [ -z "$pane" ] \
+        || [ "$window" != "$recorded_session:$pane" ] \
+        || ! fm_backend_endpoint_atom_valid "$recorded_session" \
+        || ! fm_backend_endpoint_atom_valid "$pane"; then
+        echo "REFUSED: thurbox endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      ;;
     cmux)
       [ "$binding" = "$id" ] || {
         echo "REFUSED: legacy cmux endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
@@ -631,6 +706,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    thurbox)
+      if [ -z "${_FM_BACKEND_THURBOX_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$FM_BACKEND_LIB_DIR/backends/thurbox.sh" || return 1
+        _FM_BACKEND_THURBOX_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -702,6 +784,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    thurbox) fm_backend_thurbox_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -717,6 +800,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    thurbox) fm_backend_thurbox_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -734,6 +818,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    thurbox) fm_backend_thurbox_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -752,6 +837,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    thurbox) fm_backend_thurbox_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -789,6 +875,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    thurbox) fm_backend_thurbox_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -815,6 +902,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
+    thurbox) fm_backend_thurbox_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -863,6 +951,13 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
     cmux)
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
+      ;;
+    thurbox)
+      # target_ready is already the read-only probe here: it never creates a
+      # session or starts a server, it only reads the session row and asks
+      # thurbox's tmux server whether the pane is still there.
+      fm_backend_source thurbox || return 1
+      fm_backend_thurbox_target_ready "$target" "$expected_label"
       ;;
     *)
       return 1

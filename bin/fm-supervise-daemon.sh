@@ -82,7 +82,7 @@
 #                                   resolves the runtime firstmate itself is
 #                                   executing inside - $TMUX_PANE selects tmux,
 #                                   $HERDR_ENV=1 selects herdr - falling back to
-#                                   tmux). zellij, orca, and cmux are not yet
+#                                   tmux). zellij, orca, cmux, and thurbox are not yet
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
 #                                   tmux primitives against a non-tmux pane.
@@ -188,12 +188,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
-# and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
-# daemon has no verified composer/busy primitives wired up for them yet - see
-# docs/herdr-backend.md and AGENTS.md section 4's
+# cmux, and thurbox are real backends elsewhere in firstmate
+# (bin/fm-backend.sh) but this daemon has no verified composer/busy primitives
+# wired up for them yet - see docs/herdr-backend.md and AGENTS.md section 4's
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
-# pane.
+# pane. thurbox is the interesting near-miss: its panes ARE tmux panes, but on
+# thurbox's OWN socket, so the daemon's bare `tmux` calls would address the
+# wrong server entirely - a refusal, not a silent misread, is still correct
+# until this daemon routes through the adapter (docs/thurbox-backend.md
+# "Not yet verified").
 FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
@@ -1547,7 +1551,7 @@ fm_super_main() {
   local BACKEND="$FM_SUPERVISOR_BACKEND"
 
   # --- refuse an unsupported supervisor backend loudly, before ever trying a
-  # tmux/herdr-specific call against it (zellij, orca, and cmux have no verified
+  # tmux/herdr-specific call against it (zellij, orca, cmux, and thurbox have no verified
   # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4
   # harness-verification discipline). This is the clear refusal the task calls
   # for, instead of a confusing "does not resolve to a tmux pane" error.

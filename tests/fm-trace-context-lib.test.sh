@@ -224,7 +224,7 @@ pass "the resolver has no sleep/timeout/command hang source and always returns s
 # --- harness/backend/kind independence (code only, comments stripped) ---------
 
 LIB_CODE=$(sed 's/#.*$//' "$ROOT/bin/fm-trace-context-lib.sh")
-for tok in harness backend tmux herdr zellij orca cmux claude codex opencode grok kind ship scout secondmate ; do
+for tok in harness backend tmux herdr zellij orca cmux thurbox claude codex opencode grok kind ship scout secondmate ; do
   case "$LIB_CODE" in
     *"$tok"*) fail "trace-context lib code must be harness/backend/kind agnostic, but references '$tok'" ;;
   esac
