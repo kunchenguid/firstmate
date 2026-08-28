@@ -727,6 +727,20 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
+  # A captain-held decision remains an immediate supervision concern while its
+  # endpoint is live; apply that stricter gate before a generic working verdict
+  # can absorb it. Secondmates keep their existing declaration-only carve-out.
+  if ! status_is_paused "$last"; then
+    kind=$(window_kind "$win")
+    if [ "$kind" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" != dead ]; then
+        rm -f "$recheck_file"
+        printf 'none'
+        return
+      fi
+    fi
+  fi
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
     clear_pause_state "$key"
