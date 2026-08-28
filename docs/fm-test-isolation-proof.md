@@ -96,8 +96,8 @@ Those archived harness runs used alphabetical launch order and oldest-worker rec
 They establish the worker isolation result, but they did not reproduce the production scheduler's load profile and are not the sole basis for admission.
 The current harness consumes the runner's longest-hint-first schedule and reclaims any completed worker, matching the admitted execution condition.
 
-Admission is also supported by three independent runs of the production scheduler using `bin/fm-test-run.sh --changed --jobs auto --max-wall-ms 300000`.
-The explicit `--jobs auto` opt-in selected bounded concurrency at four workers; each run used longest-first scheduling, selected 19 scripts, completed with 0 failures, and passed the five-minute budget guard in 208s, 216s, and 226s.
+Admission is also supported by three independent runs of the production scheduler using `bin/fm-test-run.sh --changed --base HEAD`.
+Plain `--changed` automatically selected bounded concurrency at four workers; each run used longest-first scheduling, selected 19 scripts, completed with 0 failures, and finished in 208s, 216s, and 226s.
 Those runs exercised the production path that the family admission enables.
 
 These scripts assert how quickly a real watcher reaches its next poll, so they are sensitive to CPU oversubscription rather than to shared state.

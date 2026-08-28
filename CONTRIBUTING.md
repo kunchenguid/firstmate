@@ -80,9 +80,9 @@ while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-li
 bin/fm-lint.sh   # lint that shell surface plus GitHub workflows via pinned actionlint; the single owner CI and the no-mistakes gate both run
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh --family pure-contract-unit   # ordinary family-scoped local path (serial, timed)
-bin/fm-test-run.sh --changed   # serial changed-file-informed path
-bin/fm-test-run.sh --changed --jobs auto   # normal fast path with explicit bounded-concurrency consent
-bin/fm-test-run.sh --changed --jobs auto --max-wall-ms 300000   # fast path with a post-run five-minute result check
+bin/fm-test-run.sh --changed   # normal changed-file-informed path with automatic bounded concurrency
+bin/fm-test-run.sh --changed --jobs 1   # explicit serial override
+bin/fm-test-run.sh --changed --max-wall-ms 300000   # same automatic path with a post-run five-minute result check
 bin/fm-test-run.sh --proven-isolated --jobs 4   # explicit local parallel of the individually proven set
 bin/fm-test-run.sh --lane portable-serial   # portable serial remainder (watcher/AFK/tmux/stateful)
 bin/fm-test-run.sh --list-lanes   # discover exact lane names, including the current CI serial shards

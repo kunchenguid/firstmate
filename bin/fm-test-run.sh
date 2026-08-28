@@ -42,9 +42,9 @@
 #                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr not found').
 #                   The required Herdr CI lane uses this so a missing pin cannot
 #                   silently pass as a gate skip.
-#   --jobs N|auto   run the selected scripts with up to N concurrent workers.
-#                   With --changed, explicit `--jobs auto` uses min(4, cpus)
-#                   workers when multiple selected scripts are admissible.
+#   --jobs N        run the selected scripts with up to N concurrent workers.
+#                   Plain --changed uses min(4, cpus) workers when multiple
+#                   selected scripts are admissible.
 #                   N>1 is allowed only when every selected script is proven
 #                   safe to run concurrently: individually in the proven-isolated
 #                   set (bin/fm-test-isolation-proof.sh --list), or in a family
@@ -53,9 +53,9 @@
 #                   family proofs may impose a lower cap. Unproven stateful
 #                   scripts stay serial. Concurrent runs are ordered
 #                   longest-hint-first so the slowest script is not stranded
-#                   alone at the tail. Default is 1 (serial); concurrency is
-#                   enabled only by an explicit --jobs value. Any unproven
-#                   remainder under --jobs auto runs serially after that group.
+#                   alone at the tail. Default is 1 (serial) except for plain
+#                   --changed, which uses the bounded automatic scheduler. Any
+#                   unproven remainder runs serially after that group.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
@@ -135,6 +135,7 @@ SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
+JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
@@ -1486,12 +1487,14 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --jobs)
-      [ "$#" -gt 1 ] || die "--jobs requires a positive integer or auto"
+      [ "$#" -gt 1 ] || die "--jobs requires a positive integer"
       JOBS=$2
+      JOBS_EXPLICIT=1
       shift 2
       ;;
     --jobs=*)
       JOBS=${1#--jobs=}
+      JOBS_EXPLICIT=1
       shift
       ;;
     --max-wall-ms)
@@ -1630,13 +1633,10 @@ if [ "${MODE:-}" = "aggregate" ]; then
 fi
 
 case "$JOBS" in
-  auto) ;;
-  ''|*[!0-9]*) die "--jobs must be a positive integer or auto" ;;
-  *)
-    [ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
-    [ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
-    ;;
+  ''|*[!0-9]*) die "--jobs must be a positive integer" ;;
 esac
+[ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
+[ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
 
 if [ -n "$MAX_WALL_MS" ]; then
   case "$MAX_WALL_MS" in
@@ -1691,10 +1691,7 @@ fi
 if [ -n "$FAIL_ON_GATE_SKIP" ]; then
   SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
 fi
-if [ "$JOBS" = auto ] && [ "$MODE" != changed ]; then
-  die "--jobs auto is accepted only with --changed"
-fi
-if [ "$JOBS" = auto ] || [ "$JOBS" -gt 1 ]; then
+if [ "$JOBS" -gt 1 ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
 
@@ -1721,16 +1718,13 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
-# Every changed run gets a generous per-script hang bound. Concurrency remains
-# an explicit opt-in: only --changed --jobs auto invokes the bounded scheduler;
-# numeric --jobs retains the strict all-script admission rule below.
-if [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
-  PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
-fi
-
+# Plain --changed uses the bounded representative-suite scheduler; numeric
+# --jobs retains the strict all-script admission rule below.
 AUTO_CONCURRENCY=0
-if [ "$MODE" = changed ] && [ "$JOBS" = auto ]; then
-  JOBS=1
+if [ "$MODE" = changed ] && [ "$JOBS_EXPLICIT" -eq 0 ]; then
+  if [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
+    PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
+  fi
   auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
     script_allows_concurrency "$s" && auto_admissible=$((auto_admissible + 1))
