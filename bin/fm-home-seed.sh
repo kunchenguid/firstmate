@@ -49,6 +49,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-treehouse-return-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-return-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -517,6 +519,7 @@ seed_exit_cleanup() {
   seed_registry_lock_release
 }
 SEED_HOME=
+SEED_TASK_ID=
 SEED_HOME_ACQUIRED=0
 SEED_HOME_CREATED=0
 SEED_HOME_BACKED_UP=0
@@ -576,13 +579,13 @@ seed_rollback_target() {
 }
 
 seed_return_treehouse_home() {
-  local home=$1 abs_home
+  local task_id=$1 home=$2 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+  ( cd "$FM_ROOT" && fm_treehouse_return "$task_id" "$abs_home" ) || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
@@ -637,7 +640,7 @@ seed_rollback() {
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
-      seed_return_treehouse_home "$SEED_HOME"
+      seed_return_treehouse_home "${SEED_TASK_ID:-}" "$SEED_HOME"
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
@@ -836,6 +839,7 @@ seed_home() {
 
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
+  SEED_TASK_ID=$id
   SEED_HOME=
   SEED_HOME_ACQUIRED=0
   SEED_HOME_CREATED=0

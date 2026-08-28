@@ -285,6 +285,11 @@ A confirmed merge leaves a durable role-routed outcome instead of living only in
 The same emitter handles a merge firstmate performed and one its poll detected, while the watcher immediately delivers the emitter's local actionable poll row.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
+Independently of those proofs, a committed-work guard runs immediately before every pooled worktree or home return and before every outright worktree deletion - Orca's release, and a forced secondmate sweep deleting a child worktree it cannot return - including under `--force`: a worker starts at detached HEAD and can commit before naming a branch, so the guard certifies that HEAD is reachable from a durable local ref, adds `refs/firstmate/rescue/<task-id>/<timestamp>` at HEAD when it is not, and refuses - preserving the worktree and its commits rather than reclaiming the pool slot - when reachability cannot be certified.
+A worktree whose HEAD is provably unborn - nothing ever checked out or committed in it, so its own HEAD reflog is absent in a repository that still keeps reflogs - names no commit and passes through like an ordinary directory; a ref store that cannot answer that question, a repository whose reflogs are disabled and so cannot answer it, or a branch ref that vanished from a worktree that has one, still refuses.
+Rescue refs are additive and never pruned, so recovering or deleting one is a deliberate operator act.
+The pooled-return and Orca-release legs drop the task branch only after that guard has run, and only when another durable local ref already contains its commits, so branch-named work stays durable without minting a rescue ref for it.
+[`bin/fm-treehouse-return-lib.sh`](../bin/fm-treehouse-return-lib.sh)'s header owns the exact durability rule, why remote-tracking refs do not count, and the refusal status callers must honor.
 
 ## Optional Relay
 

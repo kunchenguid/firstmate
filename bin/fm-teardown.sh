@@ -58,6 +58,12 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Separately from those landed-work proofs, every worktree/home return and the
+# Orca worktree removal first run bin/fm-treehouse-return-lib.sh's committed-work
+# guard, which --force does not skip: an unnamed HEAD commit is rescued into
+# refs/firstmate/rescue/<task-id>/<timestamp>, and an uncertifiable reachability
+# check refuses, preserving the worktree instead of reclaiming its pool slot.
+# That library's header owns the durability rule and its refusal status.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -156,6 +162,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-treehouse-return-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-return-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -1235,6 +1243,10 @@ STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 TEARDOWN_PROCEVENT_RESTORE_FAILED=4
+# A committed-work guard refusal (bin/fm-treehouse-return-lib.sh): reachability
+# could not be certified or the rescue ref could not be created, so the worktree
+# still holds the only handle on those commits and must be preserved.
+TEARDOWN_TREEHOUSE_GUARD_REFUSED=5
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
@@ -1295,19 +1307,41 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# One Treehouse return attempt, shared by the first try and every retry branch
+# below. It prints the captured output on the right stream and maps the guard's
+# reserved status onto TEARDOWN_TREEHOUSE_GUARD_REFUSED, so no retry path can
+# forget that uncertified committed work must never be discarded.
+TEARDOWN_TREEHOUSE_RETURN_OUT=
+teardown_treehouse_return_attempt() {  # <dir> <cd_dir> <label> <task-id> [when]
+  local dir=$1 cd_dir=$2 label=$3 task_id=$4 when=${5:-} rc
+
+  TEARDOWN_TREEHOUSE_RETURN_OUT=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ) \
+    && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    [ -n "$TEARDOWN_TREEHOUSE_RETURN_OUT" ] && printf '%s\n' "$TEARDOWN_TREEHOUSE_RETURN_OUT"
+    return 0
+  fi
+  [ -n "$TEARDOWN_TREEHOUSE_RETURN_OUT" ] && printf '%s\n' "$TEARDOWN_TREEHOUSE_RETURN_OUT" >&2
+
+  if [ "$rc" -eq "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ]; then
+    echo "teardown: $label return refused by the committed-work guard$when; preserving $dir and every commit it still holds" >&2
+    return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+  fi
+  return 1
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} task_id=${5:-$ID}
+  local out rc lock attempt=0 max_retries lock_desc
 
-  # Capture stdout+stderr so non-lock failures stay visible and lock failures can
+  # Output is captured so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
-    [ -n "$out" ] && printf '%s\n' "$out"
-    return 0
-  fi
-  [ -n "$out" ] && printf '%s\n' "$out" >&2
+  teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label" "$task_id" && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -ne "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ] || return "$rc"
+  out=$TEARDOWN_TREEHOUSE_RETURN_OUT
 
   if ! treehouse_return_is_index_lock_error "$out"; then
     return 1
@@ -1328,12 +1362,13 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
-      [ -n "$out" ] && printf '%s\n' "$out"
+    teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label" "$task_id" && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
     fi
-    [ -n "$out" ] && printf '%s\n' "$out" >&2
+    [ "$rc" -ne "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ] || return "$rc"
+    out=$TEARDOWN_TREEHOUSE_RETURN_OUT
 
     if ! treehouse_return_is_index_lock_error "$out"; then
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
@@ -1355,12 +1390,13 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
-        [ -n "$out" ] && printf '%s\n' "$out"
+      teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label" "$task_id" \
+        " after stale-lock cleanup" && rc=0 || rc=$?
+      if [ "$rc" -eq 0 ]; then
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       fi
-      [ -n "$out" ] && printf '%s\n' "$out" >&2
+      [ "$rc" -ne "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ] || return "$rc"
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
       return 1
     fi
@@ -1915,6 +1951,23 @@ safe_rm_rf_child_worktree() {
   rm -rf -- "$target"
 }
 
+# Deleting a child worktree destroys the only handle on any commit it holds, so
+# every deletion path runs the committed-work guard first, exactly as a pooled
+# return does: an unreferenced HEAD is rescued into refs/firstmate/rescue, and a
+# reachability check that cannot be completed refuses while the worktree and the
+# child's durable records are still intact. A stranded worktree is recoverable;
+# commits force-deleted with it are not.
+guard_child_worktree_removal() {  # <child-id> <worktree> <label>
+  local child_id=$1 child_wt=$2 label=$3 guard_out
+  if guard_out=$(fm_treehouse_return_guard "$child_id" "$child_wt" 2>&1); then
+    [ -z "$guard_out" ] || printf '%s\n' "$guard_out"
+    return 0
+  fi
+  [ -z "$guard_out" ] || printf '%s\n' "$guard_out" >&2
+  echo "REFUSED: committed work in $label $child_wt for $child_id could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
+  return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+}
+
 validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
@@ -1969,7 +2022,7 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup home_return_rc
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -1985,11 +2038,17 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" "$expected_id" \
+      && home_return_rc=0 || home_return_rc=$?
+    if [ "$home_return_rc" -ne 0 ]; then
+      if [ "$home_return_rc" -eq "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ]; then
+        echo "REFUSED: committed work in $label $abs_home_path could not be certified or rescued; preserving that home - inspect it and recover its commits before retrying teardown" >&2
+      else
+        echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      fi
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
-      return 1
-    }
+      return "$home_return_rc"
+    fi
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -2413,7 +2472,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_orca_resolved child_orca_resolve_rc child_return_rc child_busy_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2463,23 +2522,53 @@ cleanup_firstmate_home_children() {
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
+      # Orca removes by worktree id while the guard below certifies a path, so
+      # the recorded id must be proven to resolve to that same worktree first;
+      # otherwise the guard could certify one worktree and Orca delete another.
+      require_orca_worktree_path_match_if_present "$child_orca_worktree_id" "$child_wt" || return 1
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        # Orca deletes this child worktree instead of returning it to a pool, so
+        # the shared removal guard runs here before anything is destroyed.
+        guard_child_worktree_removal "$child_id" "$child_wt" "child Orca worktree" || return $?
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      else
+        # A stale or empty worktree record still leaves Orca removing whatever
+        # its id resolves to, so certify that worktree instead of skipping the
+        # guard entirely. A resolution that does not answer leaves the worktree
+        # Orca would remove uncertifiable, which is a refusal, not a pass.
+        child_orca_resolved=$(fm_backend_worktree_path orca "$child_orca_worktree_id") \
+          && child_orca_resolve_rc=0 || child_orca_resolve_rc=$?
+        if [ "$child_orca_resolve_rc" -ne 0 ]; then
+          echo "REFUSED: cannot resolve Orca worktree id $child_orca_worktree_id recorded for child $child_id, so the worktree Orca would remove cannot be certified; preserving that child's worktree and records" >&2
+          echo "  If Orca has already removed that worktree, clear orca_worktree_id= (or delete the record) in $child_meta and rerun teardown." >&2
+          return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+        fi
+        if [ -n "$child_orca_resolved" ] && [ -d "$child_orca_resolved" ]; then
+          guard_child_worktree_removal "$child_id" "$child_orca_resolved" "child Orca worktree" || return $?
+        fi
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      # Both legs below end this worktree, so the committed-work guard runs
+      # once here, before any of its contents are touched: a refusal then
+      # preserves the worktree exactly as the worker left it.
+      guard_child_worktree_removal "$child_id" "$child_wt" "child worktree" || return $?
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" "" "$child_id"; then
           :
         else
           child_return_rc=$?
           if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            return "$child_return_rc"
+          fi
+          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ]; then
+            echo "REFUSED: committed work in child worktree $child_wt for $child_id could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
@@ -2671,15 +2760,53 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+# Both destructive legs below may drop the task branch so a shared repo does not
+# accumulate one dead ref per task, and both do it only after the committed-work
+# guard has run: removing the branch before the guard would recreate the
+# detached-HEAD loss this teardown prevents.
+#
+# True when some durable local ref other than the task branch already names this
+# worktree's HEAD, so dropping that branch cannot orphan committed work. A failed
+# probe answers "not droppable": the branch is then kept, which is always safe.
+task_branch_is_droppable() {  # <worktree> <branch>
+  local wt=$1 branch=$2 head ref
+  fm_treehouse_return_git "$wt" rev-parse --verify 'HEAD^{commit}' || return 1
+  head=$FM_TREEHOUSE_RETURN_GIT_OUT
+  fm_treehouse_return_git "$wt" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/heads refs/tags refs/firstmate/rescue || return 1
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    [ "$ref" = "refs/heads/$branch" ] || return 0
+  done <<EOF
+$FM_TREEHOUSE_RETURN_GIT_OUT
+EOF
+  return 1
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
+    # Orca deletes this worktree instead of returning it, so the committed-work
+    # guard runs before anything durable is touched - and specifically before
+    # the task branch drop below, so an attached branch still counts as the
+    # durable ref it is instead of forcing a rescue ref on every Orca teardown.
+    # An unreferenced HEAD is rescued into refs/firstmate/rescue, and a
+    # reachability check that cannot be completed refuses the deletion outright
+    # with the branch intact. A stranded worktree is recoverable; commits
+    # deleted with it are not.
+    if ORCA_GUARD_OUT=$(fm_treehouse_return_guard "$ID" "$WT" 2>&1); then
+      [ -z "$ORCA_GUARD_OUT" ] || printf '%s\n' "$ORCA_GUARD_OUT"
+    else
+      [ -z "$ORCA_GUARD_OUT" ] || printf '%s\n' "$ORCA_GUARD_OUT" >&2
+      echo "REFUSED: the committed-work guard blocked Orca worktree removal for $ID; preserving $WT and every commit it still holds." >&2
+      exit "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+    fi
+
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
+    if [ "$branch" != "HEAD" ] && task_branch_is_droppable "$WT" "$branch"; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
@@ -2691,8 +2818,19 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  # The committed-work guard runs before the hook removal below, so a refusal
+  # preserves this worktree exactly as the worker left it. The return still runs
+  # its own guard; once this one has rescued or certified HEAD, that pass is a
+  # no-op.
+  if POOL_GUARD_OUT=$(fm_treehouse_return_guard "$ID" "$WT" 2>&1); then
+    [ -z "$POOL_GUARD_OUT" ] || printf '%s\n' "$POOL_GUARD_OUT"
+  else
+    [ -z "$POOL_GUARD_OUT" ] || printf '%s\n' "$POOL_GUARD_OUT" >&2
+    echo "REFUSED: committed work in worktree $WT for $ID could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
+    exit "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+  fi
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
+  if [ "$branch" != "HEAD" ] && task_branch_is_droppable "$WT" "$branch"; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
       git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
@@ -2708,10 +2846,16 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
+    && POOL_RETURN_RC=0 || POOL_RETURN_RC=$?
+  if [ "$POOL_RETURN_RC" -ne 0 ]; then
+    if [ "$POOL_RETURN_RC" -eq "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ]; then
+      echo "REFUSED: committed work in worktree $WT for $ID could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
+    else
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    fi
+    exit "$POOL_RETURN_RC"
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

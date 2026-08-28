@@ -109,13 +109,16 @@ init_changed_fixture_repo() {
     fm-bearings-snapshot.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
-    fm-backend-orca.test.sh; do
+    fm-backend-orca.test.sh \
+    fm-treehouse-return.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-teardown.sh"
+  : >"$repo/bin/fm-check-doctor.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -180,6 +183,35 @@ test_changed_dependency_selection_and_unmapped_failure() {
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
   rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"
+}
+
+test_changed_selection_scopes_the_gated_herdr_family() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-gated.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  # bin/fm-teardown.sh owns tests/fm-treehouse-return.test.sh, so it must reach
+  # the gated Herdr family as well as pr-forge.
+  printf '\n' >>"$repo/bin/fm-teardown.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" "teardown does not select pr-forge coverage"
+  assert_contains "$listed" "tests/fm-treehouse-return.test.sh" \
+    "teardown does not select the treehouse return coverage it owns"
+  git -C "$repo" add bin/fm-teardown.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm teardown-change
+
+  # A sibling pr-forge script owns none of it, so it must not drag the pinned
+  # Herdr runtime family into a --changed run.
+  printf '\n' >>"$repo/bin/fm-check-doctor.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" "check script does not select pr-forge coverage"
+  assert_not_contains "$listed" "tests/fm-treehouse-return.test.sh" \
+    "check script pulled the gated Herdr family it cannot reach"
+  assert_not_contains "$listed" "tests/fm-afk-pi-herdr-return-e2e.test.sh" \
+    "check script pulled the pinned Herdr e2e family it cannot reach"
+  rm -rf "$tmp"
+  pass "changed selection scopes the gated Herdr family to the scripts that own it"
 }
 
 test_empty_selection_emits_summary() {
@@ -708,6 +740,7 @@ test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_selection_scopes_the_gated_herdr_family
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
