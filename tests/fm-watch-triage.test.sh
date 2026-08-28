@@ -177,6 +177,50 @@ assert_idle_does_not_requeue_on_25s() {  # <state> <fakebin> <out> <window> <key
   reap "$pid"
 }
 
+assert_idle_does_not_requeue_when_backoff_due() {  # <state> <fakebin> <out> <window> <key> <capture-file> <fail-label>
+  local state=$1 fakebin=$2 out=$3 window=$4 key=$5 capture_file=$6 label=$7 pid wakes back
+  clear_watcher_cycle "$state"
+  [ -e "$state/.idle-last-$key" ] || date +%s > "$state/.idle-last-$key"
+  back=$(( $(date +%s) - 5 ))
+  set_mtime "$back" "$state/.idle-last-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=1 FM_IDLE_BACKOFF_SECS=1 FM_IDLE_BACKOFF_CAP_SECS=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "$label re-queued a stale wake when leftover-idle backoff was due: $(cat "$out")"
+  fi
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "$label re-queued a stale wake on a leftover-idle backoff poll: $(cat "$out")"
+  fi
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "$label watcher exited when leftover-idle backoff was due: $(cat "$out")"; }
+  grep -F "possible wedge" "$out" >/dev/null && { reap "$pid"; fail "$label wedge-escalated when leftover-idle backoff was due: $(cat "$out")"; }
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || { reap "$pid"; fail "$label re-queued $wakes stale wakes when leftover-idle backoff was due"; }
+  reap "$pid"
+}
+
+assert_live_idle_backoff_wakes() {  # <state> <fakebin> <out> <window> <key> <capture-file> <fail-label>
+  local state=$1 fakebin=$2 out=$3 window=$4 key=$5 capture_file=$6 label=$7 pid back
+  clear_watcher_cycle "$state"
+  [ -e "$state/.idle-last-$key" ] || date +%s > "$state/.idle-last-$key"
+  back=$(( $(date +%s) - 5 ))
+  set_mtime "$back" "$state/.idle-last-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_IDLE_BACKOFF_SECS=1 FM_IDLE_BACKOFF_CAP_SECS=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "$label live leftover idle did not re-queue when leftover-idle backoff was due"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "$label live leftover idle did not print a stale wake at the backoff cap: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "$label live leftover idle was mislabeled a wedge at the backoff cap: $(cat "$out")"
+}
+
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
   while [ "$i" -lt "$limit" ]; do
@@ -1138,6 +1182,119 @@ test_inspected_idle_does_not_requeue_stale_wakes() {
   pass "an already-inspected leftover idle, dead pane, or leftover done/held window stays quiet on the same hash"
 }
 
+test_leftover_idle_old_wedge_markers_do_not_escalate() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wakes
+  dir=$(make_case leftover-idle-old-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-old-wedge"
+  printf 'idle leftover after inspect' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/old-wedge.meta"
+  printf 'working: leftover quiet\n' > "$state/old-wedge.status"
+  sig=$(seen_sig "$state/old-wedge.status"); printf '%s' "$sig" > "$state/.seen-old-wedge_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle leftover after inspect")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  date +%s > "$state/.idle-last-$key"
+  echo 0 > "$state/.idle-n-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · leftover idle'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 \
+    FM_IDLE_BACKOFF_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "leftover idle with old wedge markers re-queued a stale wake: $(cat "$out")"
+  fi
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "leftover idle with old wedge markers wedge-escalated: $(cat "$out")"
+  fi
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "leftover idle with old wedge markers exited the watcher: $(cat "$out")"; }
+  grep -F "possible wedge" "$out" >/dev/null && { reap "$pid"; fail "leftover idle with old ssf/ewf still wedge-escalated: $(cat "$out")"; }
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || { reap "$pid"; fail "leftover idle with old wedge markers re-queued $wakes stale wakes"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "leftover idle kept its old wedge timer"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "leftover idle kept its old escalation count"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "leftover idle planted with old wedge markers does not escalate"
+}
+
+test_dead_or_unknown_leftover_stays_silent_when_backoff_due() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+
+  dir=$(make_case leftover-dead-backoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-dead-backoff"
+  printf 'empty leftover shell' > "$capture_file"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/dead-backoff.meta"
+  printf 'working: last known progress\n' > "$state/dead-backoff.status"
+  sig=$(seen_sig "$state/dead-backoff.status"); printf '%s' "$sig" > "$state/.seen-dead-backoff_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "empty leftover shell")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · harness unknown'
+  export FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "dead leftover did not surface on first inspect"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the dead leftover inspect"
+  assert_idle_does_not_requeue_when_backoff_due "$state" "$fakebin" "$out" "$window" "$key" "$capture_file" \
+    "dead leftover with shell current command"
+  unset FM_FAKE_TMUX_CURRENT_COMMAND
+
+  dir=$(make_case leftover-unknown-backoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-unknown-backoff"
+  printf 'unreadable leftover pane' > "$capture_file"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/unknown-backoff.meta"
+  printf 'working: last known progress\n' > "$state/unknown-backoff.status"
+  sig=$(seen_sig "$state/unknown-backoff.status"); printf '%s' "$sig" > "$state/.seen-unknown-backoff_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "unreadable leftover pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "unknown leftover did not surface on first inspect"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unknown leftover inspect"
+  assert_idle_does_not_requeue_when_backoff_due "$state" "$fakebin" "$out" "$window" "$key" "$capture_file" \
+    "unknown leftover with empty current command"
+
+  dir=$(make_case leftover-live-backoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-live-backoff"
+  printf 'idle leftover agent pane' > "$capture_file"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/live-backoff.meta"
+  printf 'working: leftover quiet\n' > "$state/live-backoff.status"
+  sig=$(seen_sig "$state/live-backoff.status"); printf '%s' "$sig" > "$state/.seen-live-backoff_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle leftover agent pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_TMUX_CURRENT_COMMAND=grok
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "live leftover idle did not surface on first inspect"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live leftover idle inspect"
+  assert_live_idle_backoff_wakes "$state" "$fakebin" "$out" "$window" "$key" "$capture_file" \
+    "live leftover with agent current command"
+  unset FM_FAKE_CREW_STATE
+  unset FM_FAKE_TMUX_CURRENT_COMMAND
+  pass "dead or unknown leftover stays silent when backoff is due; live idle may still fire"
+}
+
 # Once per day the watcher emits one leftover list of long-inactive panes for
 # firstmate, not a per-pane stale wake. Young leftover notes stay off that
 # digest. The payload is one decide-or-discard. A second poll the same day must
@@ -1213,6 +1370,32 @@ test_daily_leftover_list_emits_once() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "once per day the watcher emits one leftover list of long-inactive panes for a decide-or-discard"
+}
+
+test_daily_leftover_list_skips_discarded_task() {
+  local dir state fakebin out pid back note
+  dir=$(make_case leftover-list-ghost); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mkdir -p "$dir/wt"
+  printf 'keep-me\n' > "$dir/wt/keep-me"
+  note="$state/.leftover-task-ghost"
+  printf 'task=ghost\nlast-movement=done: leftover\nwork-sits=%s\n' "$dir/wt" > "$note"
+  touch "$state/.leftover-list"
+  back=$(( $(date +%s) - 90000 ))
+  set_mtime "$back" "$state/.leftover-list"
+  set_mtime "$back" "$note"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "a discarded leftover note re-woke the daily leftover list: $(cat "$out")"
+  fi
+  grep -F "leftover list" "$out" >/dev/null && { reap "$pid"; fail "a discarded pane re-woke the daily leftover list: $(cat "$out")"; }
+  [ ! -e "$note" ] || { reap "$pid"; fail "a leftover note for a missing meta was kept"; }
+  [ -f "$dir/wt/keep-me" ] || { reap "$pid"; fail "discarded leftover-list cleanup deleted unlanded copies"; }
+  reap "$pid"
+  pass "a leftover note whose task meta is gone does not re-wake the daily digest"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -2299,6 +2482,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.working-$key"
   # Missing timer after an escalation count is the frozen-run ladder restarting
   # between inspect and the next poll. Leftover idle with no escalation count
   # must not grow a timer; that contract is test_inspected_idle_does_not_requeue_stale_wakes.
@@ -2365,6 +2549,7 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   # path never re-reads crew state, so the worktree evidence is the only input
   # that can change the outcome).
   printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.working-$key"
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
   set_mtime "$back" "$state/.stale-since-$key"
@@ -2429,6 +2614,7 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.working-$key"
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
   set_mtime "$back" "$state/.stale-since-$key"
@@ -2524,6 +2710,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.working-$key"
   # A deferral chain left over from an earlier quiet stretch, already well past the
   # bounded re-surface window.
   back=$(( $(date +%s) - 5000 ))
@@ -3123,7 +3310,10 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_inspected_idle_does_not_requeue_stale_wakes
+test_leftover_idle_old_wedge_markers_do_not_escalate
+test_dead_or_unknown_leftover_stays_silent_when_backoff_due
 test_daily_leftover_list_emits_once
+test_daily_leftover_list_skips_discarded_task
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
