@@ -533,14 +533,31 @@ classify_stale() {  # <window> <state>
   printf 'self|transient stale (%s): %s' "$(daemon_window_human_ref "$win" "$state")" "${last:-no status}"
 }
 
-classify_check() {  # <full reason>  — check scripts print only when firstmate should wake
-  printf 'escalate|%s' "$1"
+classify_check() {  # <full reason> <state>
+  local reason=$1 state=$2 source id display
+  case "$reason" in
+    "check: $state/"*.check.sh:*)
+      source=${reason#"check: $state/"}
+      id=${source%%.check.sh:*}
+      case "$id" in ''|*[!A-Za-z0-9._-]*) printf 'escalate|State check: a registered check produced a new result. Action required: inspect and handle the result.'; return ;; esac
+      if [ "$id" = x-watch ]; then
+        display=Relay
+      elif [ -f "$state/$id.meta" ]; then
+        display=$(fm_display_name_for_meta "$state/$id.meta" "$id")
+      else
+        display=$(fm_display_name_fallback "$id")
+      fi
+      printf 'escalate|%s: an authenticated state check produced a new result now. Action required: inspect the result and handle its reported outcome.' "$display"
+      ;;
+    *) printf 'escalate|%s' "$reason" ;;
+  esac
 }
 
-classify_heartbeat() {
-  # The wake itself is routine; the catch-all scan runs separately in
-  # housekeeping on the HEARTBEAT_SCAN_SECS cadence.
-  printf 'self|heartbeat (catch-all scan runs in housekeeping)'
+classify_heartbeat() {  # <full reason>
+  case "$1" in
+    'heartbeat: '*) printf 'escalate|%s' "${1#heartbeat: }" ;;
+    *) printf 'self|heartbeat (catch-all scan runs in housekeeping)' ;;
+  esac
 }
 
 # Anything unrecognized is escalated (fail-safe).
@@ -1419,8 +1436,8 @@ handle_wake() {  # <reason> <state>
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
                   decision="escalate|$(daemon_window_human_ref "$arg" "$state") (${stale_detail}" ;;
               esac ;;
-    check:*)  decision=$(classify_check "$reason") ;;
-    heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
+    check:*)  decision=$(classify_check "$reason" "$state") ;;
+    heartbeat|heartbeat:*) decision=$(classify_heartbeat "$reason") ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
   action=${decision%%|*}

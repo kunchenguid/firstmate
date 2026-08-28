@@ -271,3 +271,22 @@ fm_human_notify_pr_observation_record "$CURRENT" c OPEN \
 fm_human_notify_pending "$CURRENT" c "$REVIEW" \
   || fail "shared pending boundary rejected an open green review target"
 pass "all watcher paths share durable PR currentness gating"
+
+fm_human_notify_record "$CURRENT" c "$REVIEW" || fail "could not seed delivered green readiness"
+GREEN_OBSERVATION=$(cat "$CURRENT/c.pr-observation")
+for transition in 'CLOSED COMPLETED SUCCESS' 'OPEN COMPLETED FAILURE'; do
+  read -r obs_state obs_checks obs_conclusion <<< "$transition"
+  (
+    export FM_STATE_OVERRIDE="$CURRENT" FM_ROOT_OVERRIDE="$ROOT"
+    # shellcheck source=bin/fm-watch.sh
+    . "$ROOT/bin/fm-watch.sh"
+    pr_observation_handle c "$obs_state" "$CURRENT_HEAD" "$obs_checks" "$obs_conclusion"
+    [ "$PR_OBSERVATION_COMMIT" -eq 1 ] && [ "$PR_OBSERVATION_CLEAR_REVIEW" -eq 1 ]
+  ) || fail "PR transition was not prepared for publication: $transition"
+  [ "$(cat "$CURRENT/c.pr-observation")" = "$GREEN_OBSERVATION" ] \
+    || fail "PR transition committed observation before durable publication: $transition"
+  if fm_human_notify_pending "$CURRENT" c "$REVIEW"; then
+    fail "PR transition cleared readiness before durable publication: $transition"
+  fi
+done
+pass "red and closed PR transitions defer state changes until publication"

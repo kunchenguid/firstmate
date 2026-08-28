@@ -135,14 +135,23 @@ test_classify_buried_open_decision_escalates() {
 }
 
 test_classify_check_and_unknown_escalate() {
-  local out
-  out=$(classify_check "check: /s/c.check.sh: merged: https://x")
-  case "$out" in escalate\|*) ;; *) fail "check did not escalate: $out" ;; esac
+  local dir state out
+  dir=$(make_supercase classify-check)
+  state="$dir/state"
+  printf 'display_name=Harbor · Check\nproject=/repo/harbor\nbranch=fm/check\n' > "$state/c.meta"
+  out=$(classify_check "check: $state/c.check.sh: private result from /secret/source" "$state")
+  case "$out" in
+    escalate\|*'Harbor · Check: an authenticated state check produced a new result now.'*'Action required:'*) ;;
+    *) fail "check did not produce a readable actionable escalation: $out" ;;
+  esac
+  case "$out" in *'/secret/'*|*'.check.sh'*) fail "check escalation exposed private evidence: $out" ;; esac
   out=$(classify_unknown "frobnicate: weird")
   case "$out" in escalate\|*) ;; *) fail "unknown did not fail-safe escalate: $out" ;; esac
-  out=$(classify_heartbeat)
-  case "$out" in self\|*) ;; *) fail "heartbeat did not self-handle: $out" ;; esac
-  pass "check + unknown escalate; heartbeat self-handles"
+  out=$(classify_heartbeat heartbeat)
+  case "$out" in self\|*) ;; *) fail "routine heartbeat did not self-handle: $out" ;; esac
+  out=$(classify_heartbeat 'heartbeat: Harbor: a new failure surfaced. Action required: inspect it.')
+  case "$out" in escalate\|'Harbor: a new failure surfaced. Action required: inspect it.'*) ;; *) fail "actionable heartbeat did not preserve its presentation: $out" ;; esac
+  pass "checks stay private and actionable heartbeat summaries survive replay"
 }
 
 test_stale_transient_self_records_marker() {
@@ -1308,7 +1317,7 @@ test_afk_genuine_done_still_terminal_stale() {
     > "$state/stage1-w2.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-stage1-w2" "$state")
   case "$out" in escalate\|*) ;; *) fail "genuine done: stale did not escalate: $out" ;; esac
-  out=$(classify_check "check: /s/t.check.sh: merged")
+  out=$(classify_check "check: Task: the review target merged. Action required: record the delivered result." "$state")
   case "$out" in escalate\|*) ;; *) fail "validated merge-check did not escalate: $out" ;; esac
   pass "genuine done: and merge-check events still escalate"
 }

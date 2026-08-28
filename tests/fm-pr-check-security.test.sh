@@ -690,6 +690,14 @@ test_pr_arm_preserves_notification_edges() {
     || fail "could not arm first readiness fixture"
   fm_human_notify_pending "$state" task-a "$ready" \
     || fail "arming suppressed the first undelivered review-ready edge"
+  FM_TEST_GH_LOG="$dir/gh.log" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" \
+    || fail "initial green observation watcher failed: $(cat "$dir/watch.err")"
+  grep -F 'the review-ready result changed' "$dir/watch.out" >/dev/null \
+    || fail "initial green observation suppressed first readiness"
+  if fm_human_notify_pending "$state" task-a "$ready"; then
+    fail "published first readiness did not record its observation-bound receipt"
+  fi
 
   dir=$(make_case delivered-ready-edge)
   state="$dir/home/state"
@@ -3379,7 +3387,13 @@ test_retirement_queue_failure_and_receipt_tampering() {
   dir=$(make_case retirement-queue-failure)
   state="$dir/home/state"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/8
+  printf 'done: PR https://github.com/o/r/pull/8 ready for review\n' > "$state/task-a.status"
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/8
+  fm_human_notify_pr_observation_record "$state" task-a OPEN \
+    0123456789abcdef0123456789abcdef01234567 COMPLETED SUCCESS \
+    || fail "could not seed pre-merge observation"
+  fm_human_notify_record "$state" task-a "$(cat "$state/task-a.status")" \
+    || fail "could not seed delivered readiness receipt"
   # Fail sequence publication without making the queue itself look non-empty:
   # a directory at .wake-queue would now (correctly) trigger re-arm recovery
   # before the poll runs, so it no longer exercises the terminal append path.
@@ -3394,6 +3408,11 @@ test_retirement_queue_failure_and_receipt_tampering() {
   [ -s "$dir/gh.log" ] || fail "queue failure fixture did not reach the authenticated poll"
   [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "queue failure changed poll artifacts"
   [ ! -e "$state/task-a.pr-poll-retirement" ] || fail "queue failure published a receipt"
+  grep -qx 'state=OPEN' "$state/task-a.pr-observation" \
+    || fail "merge observation committed before durable publication"
+  if fm_human_notify_pending "$state" task-a "$(cat "$state/task-a.status")"; then
+    fail "merge cleared readiness before durable publication"
+  fi
 
   dir=$(make_case retirement-receipt-tamper)
   state="$dir/home/state"

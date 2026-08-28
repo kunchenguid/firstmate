@@ -1074,11 +1074,13 @@ fm_active_check_stop() {
 PR_OBSERVATION_REASON=
 PR_OBSERVATION_RECORD=0
 PR_OBSERVATION_COMMIT=0
+PR_OBSERVATION_CLEAR_REVIEW=0
 pr_observation_handle() {  # <task> <state> <head> <checks> <conclusion>
   local task=$1 pr_state=$2 head=$3 checks=$4 conclusion=$5 file old_state='' old_head='' old_checks='' old_conclusion=''
-  local status_line class display red=0 old_red=0 changed_head=0 red_evidence
+  local status_line class display red=0 old_red=0 changed_head=0 red_evidence had_observation=0
   file="$STATE/$task.pr-observation"
   if [ -f "$file" ] && [ ! -L "$file" ]; then
+    had_observation=1
     old_state=$(sed -n 's/^state=//p' "$file" | head -1)
     old_head=$(sed -n 's/^head=//p' "$file" | head -1)
     old_checks=$(sed -n 's/^checks=//p' "$file" | head -1)
@@ -1101,24 +1103,28 @@ pr_observation_handle() {  # <task> <state> <head> <checks> <conclusion>
   PR_OBSERVATION_REASON=
   PR_OBSERVATION_RECORD=0
   PR_OBSERVATION_COMMIT=0
+  PR_OBSERVATION_CLEAR_REVIEW=0
   case "$pr_state" in
     CLOSED|closed)
-      fm_human_notify_clear_review "$STATE" "$task"
       if [ "$old_state" != "$pr_state" ] || [ "$changed_head" -eq 1 ]; then
+        PR_OBSERVATION_CLEAR_REVIEW=1
         PR_OBSERVATION_REASON="$display: the review target closed or changed head. Action required: inspect the closure and choose whether to reopen or replace it."
       fi
       ;;
     *)
       if [ "$red" -eq 1 ]; then
-        fm_human_notify_clear_review "$STATE" "$task"
         if [ "$old_checks|$old_conclusion" != "$checks|$conclusion" ] || [ "$changed_head" -eq 1 ]; then
+          PR_OBSERVATION_CLEAR_REVIEW=1
           PR_OBSERVATION_REASON="$display: review checks turned red - $red_evidence. Action required: inspect and repair the failing checks."
         fi
       elif [ "$class" != review-ready ]; then
         fm_human_notify_pr_observation_record "$STATE" "$task" "$pr_state" "$head" "$checks" "$conclusion" || return 2
         return 1
       elif [ "$changed_head" -eq 1 ] || [ "$old_red" -eq 1 ] || { [ "$old_state" = CLOSED ] || [ "$old_state" = closed ]; }; then
-        fm_human_notify_clear_review "$STATE" "$task"
+        PR_OBSERVATION_CLEAR_REVIEW=1
+        PR_OBSERVATION_REASON=$(fm_human_notify_summary "$STATE" "$task" "$status_line")
+        PR_OBSERVATION_RECORD=1
+      elif [ "$had_observation" -eq 0 ] && fm_human_notify_pending "$STATE" "$task" "$status_line"; then
         PR_OBSERVATION_REASON=$(fm_human_notify_summary "$STATE" "$task" "$status_line")
         PR_OBSERVATION_RECORD=1
       fi
@@ -1176,27 +1182,32 @@ mark_all_captain_relevant_surfaced() {
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
-# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
-# any captain-relevant status has NOT already been surfaced to firstmate (its
-# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
-# effects: the caller enqueues first, then marks surfaced. Because every
-# captain-relevant signal/stale already marks itself surfaced when it wakes
-# firstmate, this normally finds nothing and the heartbeat is absorbed; it
-# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
-# the fail-safe backstop.
-heartbeat_scan_finds_actionable() {
-  local f task last surfaced class
+# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all).
+# Print readable summaries for captain-relevant statuses not already surfaced.
+# Detection has no side effects: the caller enqueues first, then marks surfaced.
+heartbeat_actionable_reason() {
+  local f task last surfaced class summary display reason=''
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     if class=$(fm_human_notify_class "$last"); then
-      fm_human_notify_pending "$STATE" "$task" "$last" && return 0
+      if fm_human_notify_pending "$STATE" "$task" "$last"; then
+        summary=$(fm_human_notify_summary "$STATE" "$task" "$last") || summary=''
+        [ -z "$summary" ] || reason="$reason${reason:+ | }$summary"
+      fi
       continue
     fi
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
-    return 0
+    if [ -f "$STATE/$task.meta" ]; then
+      display=$(fm_display_name_for_meta "$STATE/$task.meta" "$task")
+    else
+      display=$(fm_display_name_fallback "$task")
+    fi
+    summary="$display: a durable outcome was not surfaced. Action required: inspect the worker outcome and respond if needed."
+    reason="$reason${reason:+ | }$summary"
   done < <(scan_captain_relevant_statuses "$STATE")
-  return 1
+  [ -n "$reason" ] || return 1
+  printf '%s' "$reason"
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -1560,10 +1571,10 @@ $out
 EOF
             [ "$observation_tag" = observed ] && [ -z "${pr_extra:-}" ] || continue
             if [ "$pr_state" = MERGED ] || [ "$pr_state" = merged ]; then
-              fm_human_notify_clear_review "$STATE" "$id"
               reason="check: $(fm_display_name_for_meta "$STATE/$id.meta" "$id"): the review target merged. Action required: record the delivered result."
               fm_wake_append check "$c" "$reason" || exit 1
               fm_human_notify_pr_observation_record "$STATE" "$id" "$pr_state" "$pr_head" "$pr_checks" "$pr_conclusion" || exit 1
+              fm_human_notify_clear_review "$STATE" "$id"
               if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
                 fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
                   || triage_log "merged PR poll retirement remains recoverable for $id"
@@ -1576,11 +1587,15 @@ EOF
             PR_OBSERVATION_REASON=
             PR_OBSERVATION_RECORD=0
             PR_OBSERVATION_COMMIT=0
+            PR_OBSERVATION_CLEAR_REVIEW=0
             if pr_observation_handle "$id" "$pr_state" "$pr_head" "$pr_checks" "$pr_conclusion"; then
               reason="check: $PR_OBSERVATION_REASON"
               fm_wake_append check "$c" "$reason" || exit 1
               if [ "$PR_OBSERVATION_COMMIT" -eq 1 ]; then
                 fm_human_notify_pr_observation_record "$STATE" "$id" "$pr_state" "$pr_head" "$pr_checks" "$pr_conclusion" || exit 1
+              fi
+              if [ "$PR_OBSERVATION_CLEAR_REVIEW" -eq 1 ]; then
+                fm_human_notify_clear_review "$STATE" "$id"
               fi
               if [ "$PR_OBSERVATION_RECORD" -eq 1 ]; then
                 ready_line=$(last_status_line "$STATE/$id.status")
@@ -1919,14 +1934,15 @@ EOF
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
-    elif heartbeat_scan_finds_actionable; then
+    elif heartbeat_reason=$(heartbeat_actionable_reason); then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
       # Enqueue first, then mark every captain-relevant status surfaced so the next
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      reason="heartbeat: $heartbeat_reason"
+      fm_wake_append heartbeat heartbeat "$reason" || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
-      wake "heartbeat"
+      wake "$reason"
     else
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"

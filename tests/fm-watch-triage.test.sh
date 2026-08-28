@@ -2900,12 +2900,18 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
-  grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
+  grep -F 'Miss: the review-ready result changed' "$out" >/dev/null \
+    || fail "backstop omitted the readable worker outcome: $(cat "$out")"
+  grep -F 'Action required:' "$out" >/dev/null \
+    || fail "backstop omitted the exact action: $(cat "$out")"
+  ! grep -F 'done:' "$out" >/dev/null || fail "backstop exposed a private status prefix"
   [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "done: PR https://example.test/pr/5" ] \
     || fail "backstop did not record the status as surfaced (would re-fire next heartbeat)"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
-  pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
+  grep -F 'Miss: the review-ready result changed' "$drain_out" >/dev/null \
+    || fail "durable backstop wake lost its readable presentation"
+  pass "heartbeat backstop durably presents the missed worker outcome and action"
 }
 
 # --- beacon stays fresh while absorbing -------------------------------------
