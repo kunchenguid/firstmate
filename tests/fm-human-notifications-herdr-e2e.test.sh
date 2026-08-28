@@ -81,7 +81,7 @@ if ! wait_for '[ "$(wc -l < "$CAPTURE" 2>/dev/null || echo 0)" -eq 1 ]' "the fir
 fi
 FIRST=$(jq -r '.prompt' "$CAPTURE")
 printf '%s' "$FIRST" | grep -F 'CRM · API Shape' >/dev/null || fail "first Pi notification omitted the readable label"
-printf '%s' "$FIRST" | grep -F 'Action required: answer the question' >/dev/null || fail "first Pi notification omitted the action"
+printf '%s' "$FIRST" | grep -F 'Action required: inspect the private task record and answer the question' >/dev/null || fail "first Pi notification omitted the action"
 
 # Consume the durable wake exactly as a completed handling turn would.
 FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-wake-drain.sh" \

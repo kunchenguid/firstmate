@@ -209,6 +209,7 @@ if [ "$#" -gt 0 ]; then
   exit 0
 fi
 if [ ! -e "$FM_TEST_ACK" ]; then
+  printf '1700000000\t3\tstale\tworker\t%s\n' 'stale: sess:fm-stalled-w8 (idle 500s, possible wedge, escalation 3, demand-deep-inspection: inspect the worker)'
   printf '1700000000\t4\tcheck\t%s\t%s\n' "$FM_TEST_KEY" "$FM_TEST_PAYLOAD"
 fi
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 4 --recovery-generation fixture\n' >&2
@@ -226,6 +227,8 @@ SH
   if grep -F 'private-request-7' "$state/.subsuper-escalations" >/dev/null; then
     fail "away presentation exposed the private check correlation"
   fi
+  [ "$(grep -c 'possible wedge' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "away daemon did not hand off the retained sibling wake exactly once"
   replay=$(FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
     "$fakebin/fm-wake-drain.sh" 2>/dev/null)
   case "$replay" in *'x-mention private-request-7'*) ;;
@@ -236,6 +239,8 @@ SH
     || fail "away check replay routing failed"
   [ "$(grep -c 'Relay: an authenticated state check' "$state/.subsuper-escalations")" -eq 1 ] \
     || fail "away daemon handed off the same retained check more than once"
+  [ "$(grep -c 'possible wedge' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "away daemon replayed a sibling wake retained with the check"
   FM_TEST_ACK="$ack" "$fakebin/fm-wake-drain.sh" --ack-through 4 --recovery-generation fixture
   FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
     FM_ESCALATE_BATCH_SECS=90 handle_durable_wakes heartbeat "$state" \
@@ -1399,6 +1404,8 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
     || fail "housekeeping did not re-escalate aged nonterminal working: wedge"
   grep -q 'possible wedge' "$state/.subsuper-escalations" \
     || fail "housekeeping escalate was not a possible-wedge: $(cat "$state/.subsuper-escalations")"
+  grep -F 'Action required: inspect the worker and restart or recover it.' "$state/.subsuper-escalations" >/dev/null \
+    || fail "housekeeping wedge presentation omitted its recovery action"
   pass "AFK nonterminal working:+merged keeps wedge aging and re-escalates at bound"
 }
 

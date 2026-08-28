@@ -1221,7 +1221,7 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $(daemon_window_human_ref "$win" "$state")"
+      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $(daemon_window_human_ref "$win" "$state"). Action required: inspect the worker and restart or recover it."
          stale_marker_remove "$win" "$state" ;;
     esac
   done
@@ -1449,7 +1449,7 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_stale "$arg" "$state")
               case "$stale_detail" in
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
-                  decision="escalate|$(daemon_window_human_ref "$arg" "$state") (${stale_detail}" ;;
+                  decision="escalate|$(daemon_window_human_ref "$arg" "$state") (${stale_detail} Action required: inspect the worker and restart or recover it." ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason" "$state") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat "$reason") ;;
@@ -1544,9 +1544,16 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   while IFS="$tab" read -r epoch sequence kind key payload rest; do
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
     case "$sequence" in ''|*[!0-9]*) continue ;; esac
+    [ "$kind" = check ] || continue
+    defer_ack=1
+    break
+  done < "$out"
+
+  while IFS="$tab" read -r epoch sequence kind key payload rest; do
+    case "$epoch" in ''|*[!0-9]*) continue ;; esac
+    case "$sequence" in ''|*[!0-9]*) continue ;; esac
     case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
-    if [ "$kind" = check ]; then
-      defer_ack=1
+    if [ "$defer_ack" -eq 1 ]; then
       marker=$(check_handoff_marker "$state" "$epoch" "$sequence")
       marker_id="$epoch-$sequence"
       active_check_handoffs="$active_check_handoffs$marker_id "
@@ -1566,7 +1573,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   done < "$out"
   if [ "$handoff_failed" -eq 1 ]; then
     rm -f "$out" "$err"
-    log "check handoff marker could not be persisted; retaining durable wakes"
+    log "wake handoff marker could not be persisted; retaining durable wakes"
     return 1
   fi
   for marker in "$state"/.subsuper-check-handoff-*; do
