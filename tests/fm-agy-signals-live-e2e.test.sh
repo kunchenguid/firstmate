@@ -198,6 +198,37 @@ done
   || fail "the classifier did not report idle agy-steps after a real agy turn settled"
 pass "agy's real conversation database settles to idle after the turn"
 
+# --- interrupt: a cancelled step must still settle to the finished status ----
+# The fold treats any status other than 3 as a turn in flight, so a step that
+# settled to some OTHER terminal value after an interrupt would read busy
+# forever. Interrupt is a first-class verb for agy, so that assumption is
+# exercised here rather than assumed.
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" \
+  'Write an extremely long detailed essay, at least 4000 words, about the history of maritime navigation. Do not use any tools.' Enter \
+  || fail "could not submit the interrupt-path turn to the live agy pane"
+
+RUN_STATE=
+for _ in $(seq 1 200); do
+  RUN_STATE=$(fm_busy_agy_run_state "$DB" 2>/dev/null || true)
+  [ "$RUN_STATE" = busy ] && break
+  sleep 0.2
+done
+[ "$RUN_STATE" = busy ] \
+  || fail "the interrupt-path turn never read busy, so the interrupt assertion below would be vacuous"
+
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Escape \
+  || fail "could not deliver Escape to the live agy pane"
+
+RUN_STATE=
+for _ in $(seq 1 150); do
+  RUN_STATE=$(fm_busy_agy_run_state "$DB" 2>/dev/null || true)
+  [ "$RUN_STATE" = settled ] && break
+  sleep 0.2
+done
+[ "$RUN_STATE" = settled ] \
+  || fail "an INTERRUPTED agy step did not settle to the finished status; fm_busy_agy_run_state would read busy forever after every interrupt"
+pass "an interrupted agy turn still settles the conversation database to idle"
+
 # --- effort/model axes: the launch flags this adapter passes still parse ------
 "$AGY_BIN" --dangerously-skip-permissions --model gemini-3.6-flash --effort low \
   -p 'Reply with exactly: ok' >/dev/null 2>"$LAB/effort.err" \

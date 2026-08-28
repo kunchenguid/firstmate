@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # $p and $parent are jq variables bound with --arg, never shell expansions.
 # Behavior tests for the verified Antigravity CLI (agy) crewmate adapter.
 #
 # Every check here is portable: it runs against real processes, real SQLite
@@ -387,6 +388,23 @@ test_agy_control_mechanics_are_declared() {
   pass "control: agy's verified interrupt, exit, and kind support are declared"
 }
 
+test_agy_secondmate_is_refused_before_anything_is_stopped() {
+  # This gate is asked BEFORE the control plane stops the running agent, so an
+  # adapter the launch owner will refuse must be refused HERE too. Missing it
+  # stops a live secondmate and only then fails the relaunch, leaving the task
+  # with no agent at all.
+  fm_control_harness_supports_kind agy secondmate \
+    && fail "agy must be refused for kind=secondmate on the pre-stop side of a relaunch"
+  # muse is the established precedent for the same rule; assert it too so a
+  # future edit cannot quietly drop either name.
+  fm_control_harness_supports_kind muse secondmate \
+    && fail "muse must be refused for kind=secondmate"
+  # The refusal is kind-scoped, not a blanket rejection of the adapter.
+  fm_control_harness_supports_kind agy ship \
+    || fail "the secondmate refusal must not also block an agy ship task"
+  pass "control: agy is refused for a secondmate before the running agent is stopped"
+}
+
 test_agy_wiring_paths_are_retired_on_relaunch() {
   local out
   out=$(fm_control_harness_wiring_paths agy /wt /state task1)
@@ -563,6 +581,7 @@ EOF
 
 test_agy_detection_survives_losing_either_signal
 test_agy_ancestry_match_is_anchored
+test_agy_secondmate_is_refused_before_anything_is_stopped
 test_agy_busy_uses_every_step_not_the_last_one
 test_agy_busy_settles_and_refuses_to_guess
 test_agy_conversation_binding_ignores_unrelated_uuids
@@ -576,3 +595,108 @@ test_agy_wiring_paths_are_retired_on_relaunch
 test_agy_spawn_pre_trusts_the_worktree_without_disturbing_settings
 test_agy_spawn_refuses_to_rewrite_unparseable_settings
 test_agy_spawn_trust_write_is_idempotent
+
+test_agy_trust_write_preserves_order_and_duplicates() {
+  local id rec case_dir home proj wt fakebin settings before after wt_abs
+  id="agy-order-$$"
+  rec=$(make_agy_spawn_case order "$id")
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  settings="$case_dir/settings.json"
+  # Deliberately UNSORTED, WITH a duplicate: jq's `unique` would sort this array
+  # and drop the repeat, which is exactly what the captain's constraint forbids
+  # for a file he also edits by hand.
+  "$JQ_BIN" -n '{
+    allowNonWorkspaceAccess: true,
+    trustedWorkspaces: ["/z/one", "/a/two", "/a/two", "/m/three"],
+    model: "Gemini 3.6 Flash (High)"
+  }' > "$settings"
+  before=$("$JQ_BIN" -c '.trustedWorkspaces' "$settings")
+
+  run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings" >/dev/null 2>&1
+  wt_abs=$(sed -n 's/^worktree=//p' "$home/state/$id.meta" | head -1)
+  [ -n "$wt_abs" ] || fail "the spawn recorded no worktree"
+
+  # The grant is APPENDED and everything that was there keeps its exact position.
+  after=$("$JQ_BIN" -c --arg p "$wt_abs" '.trustedWorkspaces | map(select(. != $p))' "$settings")
+  [ "$after" = "$before" ] \
+    || fail "the trust write reordered or dropped existing entries: $before -> $after"
+  "$JQ_BIN" -e --arg p "$wt_abs" '.trustedWorkspaces[-1] == $p' "$settings" >/dev/null \
+    || fail "the new grant was not appended at the end"
+  "$JQ_BIN" -e '[.trustedWorkspaces[] | select(. == "/a/two")] | length == 2' \
+    "$settings" >/dev/null || fail "the trust write de-duplicated an existing repeated entry"
+  pass "spawn: the trust write appends without reordering or de-duplicating"
+}
+
+test_agy_teardown_retires_only_the_grant_it_added() {
+  local id rec case_dir home proj wt fakebin settings wt_abs
+  id="agy-retire-$$"
+  rec=$(make_agy_spawn_case retire "$id")
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  settings="$case_dir/settings.json"
+  "$JQ_BIN" -n '{trustedWorkspaces: ["/z/keep", "/a/keep"], other: 1}' > "$settings"
+
+  run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings" >/dev/null 2>&1 \
+    || fail "the agy spawn should succeed before teardown"
+  wt_abs=$(sed -n 's/^worktree=//p' "$home/state/$id.meta" | head -1)
+  [ -n "$wt_abs" ] || fail "the spawn recorded no worktree"
+  "$JQ_BIN" -e --arg p "$wt_abs" '(.trustedWorkspaces | index($p)) != null' "$settings" >/dev/null \
+    || fail "the spawn did not add the grant this case is about to retire"
+
+  HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_AGY_SETTINGS_OVERRIDE="$settings" \
+    PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1 \
+    || fail "the agy teardown failed"
+
+  # The task's own grant is reclaimed, so a recreated worktree path does not
+  # inherit trust, and nothing else in the file is disturbed.
+  "$JQ_BIN" -e --arg p "$wt_abs" '(.trustedWorkspaces | index($p)) == null' "$settings" >/dev/null \
+    || fail "teardown did not reclaim the trust grant the spawn added"
+  "$JQ_BIN" -e '.trustedWorkspaces == ["/z/keep", "/a/keep"] and .other == 1' "$settings" >/dev/null \
+    || fail "teardown disturbed entries or keys it did not add"
+  assert_absent "$home/state/$id.agy-session" "the agy sidecar survived teardown"
+  assert_absent "$home/state/$id.agy-log" "the agy log survived teardown"
+  pass "teardown: the task's trust grant is reclaimed and nothing else is touched"
+}
+
+test_agy_teardown_keeps_a_grant_the_operator_already_had() {
+  local id rec case_dir home proj wt fakebin settings wt_abs
+  id="agy-preowned-$$"
+  rec=$(make_agy_spawn_case preowned "$id")
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  settings="$case_dir/settings.json"
+  # Pre-trust the exact worktree, so the spawn's write is a no-op and the grant
+  # belongs to the operator rather than to firstmate.
+  "$JQ_BIN" -n --arg p "$wt" '{trustedWorkspaces: [$p]}' > "$settings"
+
+  run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings" >/dev/null 2>&1 \
+    || fail "the agy spawn should succeed before teardown"
+  wt_abs=$(sed -n 's/^worktree=//p' "$home/state/$id.meta" | head -1)
+  [ -n "$wt_abs" ] || fail "the spawn recorded no worktree"
+  assert_grep 'trust_added=0' "$home/state/$id.agy-session" \
+    "the spawn should record that it added no grant for an already-trusted worktree"
+
+  HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_AGY_SETTINGS_OVERRIDE="$settings" \
+    PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1 \
+    || fail "the agy teardown failed"
+
+  "$JQ_BIN" -e --arg p "$wt_abs" '(.trustedWorkspaces | index($p)) != null' "$settings" >/dev/null \
+    || fail "teardown revoked a workspace the operator had trusted themselves"
+  pass "teardown: a grant firstmate did not add is left alone"
+}
+
+test_agy_trust_write_preserves_order_and_duplicates
+test_agy_teardown_retires_only_the_grant_it_added
+test_agy_teardown_keeps_a_grant_the_operator_already_had
