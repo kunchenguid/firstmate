@@ -1689,6 +1689,15 @@ export default function (pi: ExtensionAPI): void {
     }
   });
 
+  pi.on("agent_settled", (_event, ctx) => {
+    if (phase === "monitor" && label) {
+      ctx.ui.setStatus(
+        "followup-e2e-settled",
+        `FOLLOWUP_SETTLED_${label}`,
+      );
+    }
+  });
+
   pi.registerProvider("followup-e2e", {
     baseUrl: "http://127.0.0.1/unused",
     apiKey: "test-only",
@@ -1816,11 +1825,23 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+    # Persistence precedes terminal repaint. The generated extension publishes a
+    # status token from Pi's agent_settled event after queued continuations drain;
+    # seeing it acknowledges a post-settle renderer frame.
+    i=0
+    while [ "$i" -lt 120 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq "FOLLOWUP_SETTLED_$label" && break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    assert_contains "$pane" "FOLLOWUP_SETTLED_$label" "Pi follow-up $label case never reached a settled renderer frame"
+    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" 2>/dev/null || true)
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+      || fail "Pi follow-up $label case did not render the captain answer exactly once"
+    [ "$(printf '%s\n' "$pane" | grep -Fc "MONITOR_HANDLED_${label}_ONE" || true)" -eq 1 ] \
+      || fail "Pi follow-up $label case did not render the monitoring answer exactly once"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
-    assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
       assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi follow-up $label case rendered a Calm-hidden operational user row"
       if [ "$label" = exact_watcher ]; then
@@ -3086,6 +3107,7 @@ test_interactive_terminal_e2e() {
   fi
   version=$(pi --version 2>/dev/null || true)
   record_pi_version_evidence "$version" "Pi calm interactive E2E"
+  chrome=$(find_chrome) || fail "Chrome or Chromium is required for Pi calm interactive E2E"
 
   project="$TMP_ROOT/e2e-project"
   config="$TMP_ROOT/e2e-config"
@@ -3523,7 +3545,6 @@ if (!serialized.includes("firstmate-synthetic-input") || !serialized.includes("/
 const synthetic = entries.find((entry) => entry.type === "custom_message" && entry.customType === "firstmate-synthetic-input");
 if (!synthetic || synthetic.display) process.exit(1);
 JS
-  chrome=$(find_chrome) || fail "Chrome or Chromium is required for rendered export DOM assertions"
   "$chrome" \
     --headless=new \
     --disable-gpu \

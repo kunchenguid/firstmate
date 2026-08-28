@@ -23,7 +23,11 @@ fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+command -v mkfifo >/dev/null 2>&1 \
+  || { echo "not ok - mkfifo is required for process-readiness fixtures" >&2; exit 1; }
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+[ -n "$CC_BIN" ] \
+  || { echo "not ok - a C compiler is required for real process-identity fixtures" >&2; exit 1; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -47,24 +51,47 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
-# and is killed on macOS arm64. The symlink name is what the kernel records as
-# the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
-ln -s "$SLEEP_BIN" "$LAB/bin/pi"
-ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+# Stand-in harnesses are real compiled processes. Each writes `ready` to the
+# FIFO passed as argv[1] only after its executable has started, then blocks in
+# pause(2). That gives both tmux and ps a genuine executable identity and gives
+# the test a condition to synchronize on without polling process state.
+cat > "$LAB/blocker.c" <<'C'
+#include <fcntl.h>
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+  int fd;
+  const char ready[] = "ready\n";
+  if (argc != 2) return 2;
+  fd = open(argv[1], O_WRONLY);
+  if (fd < 0) return 3;
+  if (write(fd, ready, strlen(ready)) != (ssize_t)strlen(ready)) return 4;
+  close(fd);
+  for (;;) pause();
+}
+C
+compile_named_blocker() {  # <path>
+  "$CC_BIN" -o "$1" "$LAB/blocker.c" \
+    || fail "could not compile process fixture ${1##*/}"
+}
+
+compile_named_blocker "$LAB/bin/claude-link"
+compile_named_blocker "$LAB/bin/claud-link"
+compile_named_blocker "$LAB/bin/pi"
+compile_named_blocker "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
-ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
-ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+compile_named_blocker "$LAB/bin/muse-bin-0.1.0-R708.1"
+compile_named_blocker "$LAB/bin/musescore"
+compile_named_blocker "$LAB/bin/amuse"
+compile_named_blocker "$LAB/bin/muse-binary"
+compile_named_blocker "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -72,7 +99,7 @@ ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
 # false `dead`.
 cat > "$LAB/bin/agent-launcher" <<SH
 #!/bin/sh
-"$LAB/bin/pi" 900 &
+"$LAB/bin/pi" "\$1" &
 wait
 SH
 chmod +x "$LAB/bin/agent-launcher"
@@ -81,32 +108,63 @@ chmod +x "$LAB/bin/agent-launcher"
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n idle -c "$LAB/wt" \
-  || fail "could not start the private tmux server"
-
 # Run the pane's process DIRECTLY as the window command rather than typing into
 # a shell, so no case depends on interactive shell readiness.
 new_window() {  # <name> <cmd...>
-  local name=$1
+  local name=$1 window_id
   shift
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$name" -c "$LAB/wt" -- "$@" \
+  window_id=$("$REAL_TMUX" -L "$SOCKET" new-window -dP -F '#{window_id}' \
+    -t "$SESSION:" -n "$name" -c "$LAB/wt" -- "$@") \
     || fail "could not create window $name"
+  # Pin the semantic name before any lookup. Otherwise tmux may automatically
+  # rename a fast-starting window, after which a name lookup silently falls
+  # back to an unrelated active pane.
+  "$REAL_TMUX" -L "$SOCKET" set-window-option -t "$window_id" automatic-rename off >/dev/null \
+    || fail "could not disable automatic rename for $name"
+  "$REAL_TMUX" -L "$SOCKET" set-window-option -t "$window_id" allow-rename off >/dev/null \
+    || fail "could not disable process rename for $name"
+  "$REAL_TMUX" -L "$SOCKET" rename-window -t "$window_id" "$name" \
+    || fail "could not pin window name $name"
 }
 
-wait_for_state() {  # <target> <expected> [tries]
-  local target=$1 expected=$2 tries=${3:-100} got i=0
-  while [ "$i" -lt "$tries" ]; do
-    got=$(fm_backend_agent_state tmux "$target")
-    [ "$got" = "$expected" ] && return 0
-    sleep 0.1
-    i=$((i + 1))
-  done
-  printf 'last verdict for %s was %s (expected %s); title=%s comms=[%s]\n' \
-    "$target" "${got:-<none>}" "$expected" \
-    "$(fm_backend_tmux_current_command "$target")" \
-    "$(fm_backend_tmux_foreground_comms "$target" | tr '\n' ' ')" >&2
-  return 1
+open_ready_fifo() {  # <label>
+  READY_FIFO="$LAB/ready-$1.fifo"
+  rm -f "$READY_FIFO"
+  mkfifo "$READY_FIFO" || fail "could not create readiness FIFO for $1"
+  exec 9<>"$READY_FIFO" || fail "could not open readiness FIFO for $1"
 }
+
+await_ready_fifo() {  # <label>
+  local label=$1 signal=
+  if ! IFS= read -r -t 10 signal <&9 || [ "$signal" != ready ]; then
+    exec 9>&-
+    fail "$label did not signal process readiness"
+  fi
+  exec 9>&-
+  rm -f "$READY_FIFO"
+}
+
+new_blocker_window() {  # <window> <binary>
+  local window=$1 binary=$2
+  open_ready_fifo "$window"
+  new_window "$window" "$binary" "$READY_FIFO"
+  await_ready_fifo "$window"
+}
+
+assert_state() {  # <target> <expected> <message>
+  local target=$1 expected=$2 message=$3 got
+  got=$(fm_backend_agent_state tmux "$target")
+  [ "$got" = "$expected" ] || fail \
+    "$message (got $got; title=$(fm_backend_tmux_current_command "$target"); comms=[$(fm_backend_tmux_foreground_comms "$target" | tr '\n' ' ')])"
+}
+
+# The initial idle pane has its own handshake too, so even the negative shell
+# assertion later observes a shell that has definitely exec'd, not tmux startup.
+open_ready_fifo idle
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n idle -c "$LAB/wt" -- \
+  bash -c "printf 'ready\\n' > '$READY_FIFO'; exec bash" \
+  || fail "could not start the private tmux server"
+await_ready_fifo idle
 
 # Does the tmux current-command source, on its own, name a verified harness?
 title_classifies_agent() {  # <target>
@@ -145,30 +203,34 @@ assert_sources_disagree() {  # <target> <label>
 }
 
 # --- a harness-named foreground process -------------------------------------
-# Invoking the symlink by its harness name proves the ordinary positive path
-# with a real process. macOS exposes different names for the symlink through
-# tmux and ps, while Linux can expose the symlink name through both, so the
-# version-string case below owns the cross-platform divergence assertion.
+# Invoking the compiled fixture by its harness name proves the ordinary positive
+# path with a real process. The version-string case below owns the deliberate
+# cross-platform divergence assertion.
 
-new_window agent "$LAB/bin/claude-link" 900
-wait_for_state "$SESSION:agent" alive \
-  || fail "a running harness-named foreground process must classify alive"
+new_blocker_window agent "$LAB/bin/claude-link"
+assert_state "$SESSION:agent" alive \
+  "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+new_blocker_window near-miss "$LAB/bin/claud-link"
+assert_state "$SESSION:near-miss" ambiguous \
+  "a near-miss executable name must not spoof a harness identity"
+pass "tmux liveness: a near-miss executable name stays ambiguous"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
 # worker would be torn down or relaunched. The decoys below are what keep the
 # fix from being a substring match that claims unrelated programs.
 
-new_window muse "$LAB/bin/muse-bin-0.1.0-R708.1" 900
-wait_for_state "$SESSION:muse" alive \
-  || fail "muse's version-suffixed binary name must classify alive"
+new_blocker_window muse "$LAB/bin/muse-bin-0.1.0-R708.1"
+assert_state "$SESSION:muse" alive \
+  "muse's version-suffixed binary name must classify alive"
 pass "tmux liveness: muse's version-suffixed muse-bin-<version> classifies alive"
 
 for decoy in musescore amuse muse-binary muse-bind; do
-  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
-  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
-    || fail "'$decoy' merely contains 'muse' and must not classify as a live agent pane"
+  new_blocker_window "decoy-$decoy" "$LAB/bin/$decoy"
+  assert_state "$SESSION:decoy-$decoy" ambiguous \
+    "'$decoy' merely contains 'muse' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 
@@ -176,50 +238,44 @@ pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 # Giving a genuine harness-named executable the version-string argv[0] that
 # Claude Code 2.1.220 reports drives the two sources apart on both supported
 # platforms and proves the surviving source carries the verdict. This needs a
-# real executable file rather than a symlink, because macOS takes the title
-# from the resolved target's name, so it is skipped where no C compiler exists.
+# real executable file because macOS takes the title from the resolved target's
+# name.
 
-CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
-if [ -n "$CC_BIN" ] &&
-  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
-  "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
-  "$CC_BIN" -o "$LAB/bin/decoy/2.1.220" "$LAB/spin.c" 2>/dev/null; then
-  new_window titled "$LAB/bin/claude/2.1.220"
-  wait_for_state "$SESSION:titled" alive \
-    || fail "a version-named executable under a harness install path must classify alive"
-  assert_sources_disagree "$SESSION:titled" "version-string process name"
-  pass "tmux liveness: a version-named executable under a harness install path classifies alive"
+compile_named_blocker "$LAB/bin/claude/2.1.220"
+compile_named_blocker "$LAB/bin/decoy/2.1.220"
+new_blocker_window titled "$LAB/bin/claude/2.1.220"
+assert_state "$SESSION:titled" alive \
+  "a version-named executable under a harness install path must classify alive"
+assert_sources_disagree "$SESSION:titled" "version-string process name"
+pass "tmux liveness: a version-named executable under a harness install path classifies alive"
 
-  new_window path-decoy "$LAB/bin/decoy/2.1.220"
-  wait_for_state "$SESSION:path-decoy" ambiguous \
-    || fail "a version-named executable without a whole harness path component must stay ambiguous"
-  pass "tmux liveness: a version-named executable under a decoy path stays ambiguous"
-else
-  echo "skip: no C compiler, so the version-string process-name case cannot build its executable"
-fi
+new_blocker_window path-decoy "$LAB/bin/decoy/2.1.220"
+assert_state "$SESSION:path-decoy" ambiguous \
+  "a version-named executable without a whole harness path component must stay ambiguous"
+pass "tmux liveness: a version-named executable under a decoy path stays ambiguous"
 
 # --- neither source names a harness: no invented agent ----------------------
 
-new_window unknown bash -c "exec -a 2.1.220 '$LAB/bin/notaharness' 900"
-wait_for_state "$SESSION:unknown" ambiguous \
-  || fail "a foreground process no name source attributes must stay ambiguous"
+new_blocker_window unknown "$LAB/bin/notaharness"
+assert_state "$SESSION:unknown" ambiguous \
+  "a foreground process no name source attributes must stay ambiguous"
 pass "tmux liveness: a process neither name source attributes stays ambiguous rather than inventing an agent"
 
 # --- a launcher whose own identity reads as a bare shell --------------------
 # The single-source classifier would read this pane as an idle shell and call
 # it dead - the one verdict that can start a duplicate agent on a live worktree.
 
-new_window launcher "$LAB/bin/agent-launcher"
-wait_for_state "$SESSION:launcher" alive \
-  || fail "a launcher running a harness child must classify alive, never dead"
+new_blocker_window launcher "$LAB/bin/agent-launcher"
+assert_state "$SESSION:launcher" alive \
+  "a launcher running a harness child must classify alive, never dead"
 comms_classify_agent "$SESSION:launcher" \
   || fail "the launcher's harness child must be visible in the foreground process group"
 pass "tmux liveness: a launcher whose own identity reads as a bare shell classifies alive from its harness child"
 
 # --- an idle shell is still confidently dead --------------------------------
 
-wait_for_state "$SESSION:idle" dead \
-  || fail "an idle shell pane must classify dead"
+assert_state "$SESSION:idle" dead \
+  "an idle shell pane must classify dead"
 pass "tmux liveness: an idle shell pane classifies dead"
 
 # --- a harness-named BACKGROUND process must not fake an agent --------------
@@ -228,17 +284,16 @@ pass "tmux liveness: an idle shell pane classifies dead"
 # `set -m` gives the background job its own process group, which is what an
 # interactive shell does for a job an exited agent left behind.
 
-new_window background bash -c "set -m; '$LAB/bin/claude-link' 900 & printf '%s\n' \"\$!\" > '$LAB/bg.pid'; exec /bin/sh"
-bg_pid=
-for _ in $(seq 1 100); do
-  [ -s "$LAB/bg.pid" ] && bg_pid=$(cat "$LAB/bg.pid") && break
-  sleep 0.1
-done
-[ -n "$bg_pid" ] || fail "the background harness-named process never started"
+open_ready_fifo background
+mkfifo "$LAB/background-child-ready.fifo" || fail "could not create child readiness FIFO"
+new_window background bash -c "set -m; '$LAB/bin/claude-link' '$LAB/background-child-ready.fifo' & bg=\$!; printf '%s\n' \"\$bg\" > '$LAB/bg.pid'; IFS= read -r child_ready < '$LAB/background-child-ready.fifo'; [ \"\$child_ready\" = ready ] || exit 4; printf 'ready\n' > '$READY_FIFO'; exec /bin/sh"
+await_ready_fifo background
+bg_pid=$(cat "$LAB/bg.pid")
+[ -n "$bg_pid" ] || fail "the background harness-named process did not record its pid"
 kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process is not running, so this case would prove nothing"
-wait_for_state "$SESSION:background" dead \
-  || fail "a pane whose only harness-named process is backgrounded must classify dead"
+assert_state "$SESSION:background" dead \
+  "a pane whose only harness-named process is backgrounded must classify dead"
 kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process died during the check, so this case proves nothing"
 pass "tmux liveness: a harness-named background process in an idle pane still classifies dead"
@@ -268,8 +323,8 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
-ln -s "$SLEEP_BIN" "$LAB/bin/cursor-agent"
-ln -s "$SLEEP_BIN" "$LAB/bin/notcursor"
+compile_named_blocker "$LAB/bin/cursor-agent"
+compile_named_blocker "$LAB/bin/notcursor"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the
@@ -289,16 +344,13 @@ cursor_screen() {  # <composer-text> <ghost 0|1>
 
 open_composer_pane() {  # <window> <binary> <composer-text> <ghost 0|1>
   local window=$1 binary=$2 text=$3 ghost=$4
-  new_window "$window" bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen '$text' '$ghost'; exec '$binary' 900"
-  local i=0
-  while [ "$i" -lt 100 ]; do
-    case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
-      *"$text"*) return 0 ;;
-    esac
-    sleep 0.1
-    i=$((i + 1))
-  done
-  fail "pane $window never rendered its composer"
+  open_ready_fifo "$window"
+  new_window "$window" bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen '$text' '$ghost'; exec '$binary' '$READY_FIFO'"
+  await_ready_fifo "$window"
+  case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
+    *"$text"*) return 0 ;;
+  esac
+  fail "pane $window did not preserve its rendered composer"
 }
 
 cursor_anchored_verdict() {  # <target>
@@ -336,13 +388,9 @@ pass "cursor composer: an identical screen stays unknown when the pane is not Cu
 # A Cursor agent that exited leaves its rendered composer on screen while the
 # foreground process becomes a plain shell. Typing an escalation there would run
 # it as a shell command, so this must never read empty.
-new_window cursor-exited bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen 'Plan, search, build anything' 1; exec /bin/sh"
-for _ in $(seq 1 100); do
-  case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:cursor-exited" 2>/dev/null)" in
-    *'Plan, search, build anything'*) break ;;
-  esac
-  sleep 0.1
-done
+open_ready_fifo cursor-exited
+new_window cursor-exited bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen 'Plan, search, build anything' 1; printf 'ready\\n' > '$READY_FIFO'; exec /bin/sh"
+await_ready_fifo cursor-exited
 if fm_tmux_pane_is_cursor "$SESSION:cursor-exited"; then
   fail "a pane whose Cursor process exited must not still identify as Cursor"
 fi

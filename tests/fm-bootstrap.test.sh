@@ -140,6 +140,17 @@ SH
   chmod +x "$fakebin/jq"
 }
 
+
+add_real_dispatch_policy_dependencies() {
+  local fakebin=$1 real_node
+  add_real_jq "$fakebin"
+  real_node=$(command -v node 2>/dev/null) || fail "node is required for dispatch profile validation tests"
+  cat > "$fakebin/node" <<SH
+#!/usr/bin/env bash
+exec '$real_node' "\$@"
+SH
+  chmod +x "$fakebin/node"
+}
 make_fake_fleet_sync_root() {
   local dir=$1 fake_root
   fake_root="$dir/fake-root"
@@ -835,7 +846,7 @@ make_routine_bootstrap_fixture() {
     printf 'home=%s\n' "$sm"
   } > "$home/state/sm.meta"
   fakebin=$(make_fake_toolchain "$case_dir")
-  add_real_jq "$fakebin"
+  add_real_dispatch_policy_dependencies "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -887,7 +898,7 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
 # split is a PARTITION: `skip` plus `only` together do exactly what `all` does,
 # with no step dropped and no step run twice.
 test_network_phase_partitions_the_run() {
-  local case_dir fakebin all_out skip_out only_out combined
+  local case_dir fakebin hermetic_path all_out skip_out only_out combined
   case_dir="$TMP_ROOT/network-phase"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
@@ -900,18 +911,19 @@ test_network_phase_partitions_the_run() {
 exit 1
 SH
   chmod +x "$fakebin/gh"
+  hermetic_path=$(fm_test_path_without "$case_dir/system-bin" node)
 
-  all_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  all_out=$(PATH="$fakebin:$hermetic_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
-  skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  skip_out=$(PATH="$fakebin:$hermetic_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
-  only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  only_out=$(PATH="$fakebin:$hermetic_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
   assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
@@ -922,7 +934,7 @@ SH
 
   # A typo must never silently drop a safety sweep, so anything unrecognized
   # resolves to the complete run.
-  [ "$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  [ "$(PATH="$fakebin:$hermetic_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=sikp "$ROOT/bin/fm-bootstrap.sh")" = "$all_out" ] \
     || fail "an unrecognized FM_BOOTSTRAP_NETWORK value did not fall back to the complete run"
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
@@ -1079,7 +1091,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
-  add_real_jq "$fakebin"
+  add_real_dispatch_policy_dependencies "$fakebin"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
@@ -1104,7 +1116,7 @@ test_crew_dispatch_validation() {
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
-    add_real_jq "$fakebin"
+    add_real_dispatch_policy_dependencies "$fakebin"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
@@ -1153,7 +1165,7 @@ ROWS
     '{schemaVersion:2,profiles:{safe:{harness:$hostile,model:"model",provider:"provider",lane:"lane",reasoningClass:"strong",workTypes:["implementation"],prompt:"PROMPT_MARKER",rawOutput:"RAW_MARKER"}}}' \
     > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
-  add_real_jq "$fakebin"
+  add_real_dispatch_policy_dependencies "$fakebin"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - invalid dispatch policy' ] \

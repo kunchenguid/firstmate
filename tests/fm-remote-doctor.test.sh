@@ -29,7 +29,9 @@ TOOLS="$TMP_ROOT/tools"
 mkdir -p "$TOOLS"
 ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
-BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
+SYSTEM_PATH=$(fm_test_path_without "$TMP_ROOT/system-bin" \
+  herdr tasks-axi treehouse claude codex opencode pi pi-signed grok kimi cursor muse)
+BASE_PATH="$TOOLS:$SYSTEM_PATH"
 
 # new_case <Darwin|Linux> [with-herdr] [gui]
 # Builds one isolated account fixture and points the module-level CASE_*

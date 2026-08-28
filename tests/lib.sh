@@ -354,3 +354,31 @@ fm_test_reserve_bound() {
     --request "$evidence/request.json" --candidates "$evidence/candidates.json" --decision "$evidence/decision.json" \
     --now "$now" "$@"
 }
+# fm_test_path_without <dir> <name...>: build a private PATH directory that
+# exposes the host's ordinary executables except for explicitly absent tools.
+# Missing-tool fixtures use this instead of appending /usr/bin or /bin, where a
+# developer workstation may have the very dependency the fixture removes.
+fm_test_path_without() {
+  local target=$1 source_path=${FM_TEST_BASE_PATH:-$PATH} dir candidate name excluded excluded_name
+  shift
+  mkdir -p "$target"
+  while IFS= read -r dir; do
+    [ -d "$dir" ] || continue
+    for candidate in "$dir"/*; do
+      [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+      name=${candidate##*/}
+      excluded=0
+      for excluded_name in "$@"; do
+        if [ "$name" = "$excluded_name" ]; then
+          excluded=1
+          break
+        fi
+      done
+      [ "$excluded" -eq 0 ] || continue
+      [ -e "$target/$name" ] || ln -s "$candidate" "$target/$name"
+    done
+  done <<EOF
+$(printf '%s' "$source_path" | tr ':' '\n')
+EOF
+  printf '%s\n' "$target"
+}
