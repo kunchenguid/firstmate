@@ -39,6 +39,13 @@
 #   <task>.inbox/.commit-escalated
 #                              closure names whose failed commit was already
 #                              surfaced, so later polls retry them quietly
+#   <task>.inbox/.commit-failed
+#                              the closure names the LAST commit pass failed
+#                              on for the first time; the caller folds exactly
+#                              these into .commit-escalated after queuing its
+#                              wake, so a closure acknowledged after that pass
+#                              is never marked surfaced before its own first
+#                              attempt
 #   <task>.inbox/.NNN.resolve.committed
 #                              per-sidecar ledger of the decision identities
 #                              that sidecar has already durably closed, so a
@@ -503,12 +510,17 @@ fm_task_inbox_is_acknowledged() {  # <record-path>
 # under handled/orphaned/ (fm_task_inbox_record_orphan_escalated) so a closure
 # firstmate then settles by hand cannot keep feeding
 # fm_task_inbox_pending_answer_keys and mislabel the same key, reopened later,
-# as already answered. Oldest by sequence; empty when none.
+# as already answered. A sidecar already named in .orphan-escalated is skipped
+# here, in the scan itself: an orphan whose marker was written but whose
+# retirement into handled/orphaned/ failed would otherwise stay the oldest
+# match forever and hide every later orphan behind it. Oldest by sequence;
+# empty when none.
 _fm_task_inbox_orphaned_sidecar() {  # <state-dir> <task-id>
   local dir f rec best='' best_n=0 n
   dir=$(fm_task_inbox_dir "$1" "$2")
   for f in "$dir"/.*.resolve; do
     [ -e "$f" ] || continue
+    ! grep -Fxq -- "${f##*/}" "$dir/.orphan-escalated" 2>/dev/null || continue
     rec=$(fm_task_inbox_resolution_record "$f")
     [ ! -e "$rec" ] || continue
     [ ! -f "$dir/handled/${rec##*/}" ] || continue
@@ -585,13 +597,17 @@ EOF
 # Prints one "<key>" line per closed decision identity so a caller can log or
 # surface it. Returns nonzero after naming on stderr every closure it could NOT
 # commit for the first time; the sidecar is left in place so the next poll
-# retries. A sidecar whose failure the caller already surfaced
+# retries, and exactly those first-time names are handed back through
+# .commit-failed for fm_task_inbox_record_commit_escalated - never recomputed
+# from whatever is acknowledged later, because a closure acknowledged between
+# this pass and the caller's marker write has not had its first attempt yet.
+# A sidecar whose failure the caller already surfaced
 # (fm_task_inbox_record_commit_escalated) is retried quietly: it neither fails
 # the call nor repeats its diagnostic, which is what bounds a permanently
 # failing close to one wake. A missing inbox is a quiet no-op.
 fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
   local state=$1 task=$2 status_file=$3
-  local dir f rec note keys holds k line rc=0 failed append_rc surfaced quiet unresolved ident
+  local dir f rec note keys holds k line rc=0 failed append_rc surfaced quiet unresolved ident newly_failed=''
   dir=$(fm_task_inbox_dir "$state" "$task")
   [ -d "$dir" ] || return 0
   surfaced=$(cat "$dir/.commit-escalated" 2>/dev/null || true)
@@ -634,18 +650,23 @@ fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
       fi
     fi
     if [ "$failed" = 1 ]; then
-      [ "$quiet" = 1 ] || rc=1
+      [ "$quiet" = 1 ] || { rc=1; newly_failed="${newly_failed}${f##*/}"$'\n'; }
       continue
     fi
     if ! mv "$f" "$dir/handled/${f##*/}" 2>/dev/null; then
       [ "$quiet" = 1 ] \
-        || { echo "error: $task closed the answered decision in ${f##*/}, but the committed closure could not be filed under $dir/handled" >&2; rc=1; }
+        || { echo "error: $task closed the answered decision in ${f##*/}, but the committed closure could not be filed under $dir/handled" >&2; rc=1; newly_failed="${newly_failed}${f##*/}"$'\n'; }
     else
       rm -f "$(_fm_task_inbox_resolution_committed_path "$f")" 2>/dev/null || true
     fi
   done <<EOF
 $(fm_task_inbox_acknowledged_resolutions "$state" "$task")
 EOF
+  if [ -n "$newly_failed" ]; then
+    printf '%s' "$newly_failed" > "$dir/.commit-failed" 2>/dev/null || true
+  else
+    rm -f "$dir/.commit-failed" 2>/dev/null || true
+  fi
   return "$rc"
 }
 
@@ -675,21 +696,29 @@ _fm_task_inbox_feed_holds() {  # <task-id> <note> <hold-ids>
   [ -z "$unresolved" ] || { printf '%s' "$unresolved"; return 1; }
 }
 
-# Mark every acknowledged closure still parked in the inbox root - by
-# construction, exactly the ones whose commit just failed - as surfaced, after
-# the caller has durably queued its wake. Later polls retry them quietly. The
-# same wake-before-marker ordering as fm_task_inbox_record_escalated: a crash
-# in between can cost a rare duplicate wake, never a lost one. A concurrently
-# removed inbox is a successful no-op.
+# Mark the closures the last commit pass failed on for the first time - the
+# names it left in .commit-failed, and only those - as surfaced, after the
+# caller has durably queued its wake. Later polls retry them quietly. Scoped to
+# that pass's own failures on purpose: a closure the worker acknowledged after
+# the pass returned is still owed its own first, loud attempt, so recomputing
+# the set from what is acknowledged now would silence it before it ever ran.
+# Append-with-dedupe, since sequence names are never reused within a task.
+# The same wake-before-marker ordering as fm_task_inbox_record_escalated: a
+# crash in between can cost a rare duplicate wake, never a lost one. A
+# concurrently removed inbox is a successful no-op.
 fm_task_inbox_record_commit_escalated() {  # <state-dir> <task-id>
-  local dir names
+  local dir name
   dir=$(fm_task_inbox_dir "$1" "$2")
   [ -d "$dir" ] || return 0
-  names=$(fm_task_inbox_acknowledged_resolutions "$1" "$2" | sed 's|.*/||')
-  if ! { printf '%s\n' "$names" > "$dir/.commit-escalated"; } 2>/dev/null; then
-    [ -d "$dir" ] || return 0
-    return 1
-  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    grep -Fxq -- "$name" "$dir/.commit-escalated" 2>/dev/null && continue
+    if ! { printf '%s\n' "$name" >> "$dir/.commit-escalated"; } 2>/dev/null; then
+      [ -d "$dir" ] || return 0
+      return 1
+    fi
+  done < <(cat "$dir/.commit-failed" 2>/dev/null || true)
+  rm -f "$dir/.commit-failed" 2>/dev/null || true
 }
 
 # Oldest escalation-tracked unhandled record, or fail when none is due.
@@ -729,10 +758,8 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   # (see _fm_task_inbox_orphaned_sidecar's header for why that would otherwise
   # go quiet forever).
   if orphan=$(_fm_task_inbox_orphaned_sidecar "$1" "$2"); then
-    if ! grep -Fxq -- "${orphan##*/}" "$dir/.orphan-escalated" 2>/dev/null; then
-      printf 'escalate 0 orphaned %s' "$orphan"
-      return 0
-    fi
+    printf 'escalate 0 orphaned %s' "$orphan"
+    return 0
   fi
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true

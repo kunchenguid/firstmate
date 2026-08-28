@@ -38,6 +38,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z) parked steering-inbox decision closures                 -> ALLOW; the acknowledged
+#       closure lands its resolved line first, the unacknowledged one is named
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -1308,6 +1310,62 @@ test_local_only_force_overrides_unpushed() {
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
+}
+
+# The steering inbox goes with the task, but a parked decision closure in it
+# (bin/fm-task-inbox-lib.sh) is the only evidence an answer was delivered:
+# teardown runs the watcher's own commit pass first, so an acknowledged answer
+# lands its resolved line in the status log, and a closure the worker never
+# acknowledged is named as undelivered at cleanup without refusing.
+test_teardown_commits_acknowledged_closure_and_names_undelivered_one() {
+  local case_dir rc state rec_ack rec_pending wt_head
+  case_dir=$(make_case inbox-closures)
+  state="$case_dir/state"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\nneeds-decision [key=deploy-window]: pick a window\n' \
+    > "$state/task-x1.status"
+  rec_ack=$(teardown_inbox_lib "$state" fm_task_inbox_write "$state" task-x1 "go with REST")
+  teardown_inbox_lib "$state" fm_task_inbox_defer_resolution "$rec_ack" "go with REST" "api-shape" "" >/dev/null \
+    || fail "inbox-closures: could not park the acknowledged closure"
+  mv "$rec_ack" "$state/task-x1.inbox/handled/"
+  rec_pending=$(teardown_inbox_lib "$state" fm_task_inbox_write "$state" task-x1 "ship tonight")
+  teardown_inbox_lib "$state" fm_task_inbox_defer_resolution "$rec_pending" "ship tonight" "deploy-window" "" >/dev/null \
+    || fail "inbox-closures: could not park the pending closure"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "inbox-closures: teardown should still succeed with closures parked in the inbox"
+  assert_grep 'resolved [key=api-shape]: answered: go with REST' "$state/task-x1.status" \
+    "inbox-closures: the acknowledged answer must close its decision before the inbox is removed"
+  assert_no_grep 'resolved [key=deploy-window]' "$state/task-x1.status" \
+    "inbox-closures: an unacknowledged answer must not close its decision"
+  assert_grep 'undelivered at cleanup: task-x1 never acknowledged the answer to decision key(s) deploy-window' "$case_dir/stdout" \
+    "inbox-closures: the unacknowledged answer should be named as undelivered"
+  assert_grep "record ${rec_pending##*/}" "$case_dir/stdout" \
+    "inbox-closures: the undelivered line should name the record"
+  assert_no_grep 'undelivered at cleanup: .*api-shape' "$case_dir/stdout" \
+    "inbox-closures: the acknowledged answer must not read as undelivered"
+  [ ! -e "$state/task-x1.inbox" ] || fail "inbox-closures: the inbox should be removed with the task"
+  pass "teardown commits an acknowledged decision closure and names an undelivered one before removing the inbox"
+}
+
+# Run one steering-inbox library function against a state dir through the
+# production library, so the fixture is written by the executable surface.
+teardown_inbox_lib() {  # <state> <function> [args...]
+  local state=$1
+  shift
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fn=$2
+    shift 2
+    "$fn" "$@"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$@"
 }
 
 test_teardown_missing_busy_sidecar_completes() {
@@ -2605,6 +2663,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_commits_acknowledged_closure_and_names_undelivered_one
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

@@ -174,12 +174,36 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
 ID=$1
 FORCE=${2:-}
+
+# Run the same closure-commit pass the watcher runs (bin/fm-task-inbox-lib.sh,
+# fm_task_inbox_commit_resolutions) as the last act before the inbox is
+# removed: every closure the worker acknowledged lands its resolved line in
+# the task's status log, and every closure still unacknowledged is named as
+# undelivered at cleanup so the decision it carries is not mistaken for one
+# nobody answered. Never refuses: cleanup already means the work landed.
+teardown_inbox_closures() {  # <state> <id>
+  local state=$1 id=$2 closed rc=0 sidecar keys
+  closed=$(fm_task_inbox_commit_resolutions "$state" "$id" "$state/$id.status") || rc=$?
+  [ -z "$closed" ] || echo "closed the acknowledged answer at cleanup: $(printf '%s' "$closed" | tr '\n' ' ')"
+  [ "$rc" -eq 0 ] \
+    || echo "warning: an acknowledged answer for $id could not be closed before its inbox is removed; close that decision by hand" >&2
+  while IFS= read -r sidecar; do
+    [ -n "$sidecar" ] || continue
+    keys=$({ fm_task_inbox_resolution_values "$sidecar" status-key; fm_task_inbox_resolution_values "$sidecar" hold-id; } 2>/dev/null \
+      | awk 'NF && !seen[$0]++' | tr '\n' ' ') || keys=
+    echo "undelivered at cleanup: $id never acknowledged the answer to decision key(s) ${keys% } (record $(fm_task_inbox_resolution_record "$sidecar" | sed 's|.*/||')); that decision stays open"
+  done <<EOF
+$(fm_task_inbox_pending_resolutions "$state" "$id")
+EOF
+}
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
@@ -2823,7 +2847,11 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.reconcile-nudged"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
-# leftover unhandled steer here is moot rather than unlanded work.
+# leftover unhandled steer here is moot rather than unlanded work. A parked
+# decision closure is not: an answer the worker acknowledged is owed its
+# closing line before the only evidence of that answer goes with the inbox,
+# and one the worker never acknowledged is named as undelivered, not refused.
+teardown_inbox_closures "$STATE" "$ID"
 rm -rf "$STATE/$ID.inbox"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0

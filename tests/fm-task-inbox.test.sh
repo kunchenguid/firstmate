@@ -26,7 +26,9 @@
 #      open, which is the whole point), commits the moment the worker
 #      acknowledges the record, and is then filed beside it. The sidecar
 #      survives a sloppy glob sweep of the inbox root, a commit that partly
-#      fails closes each key at most once when retried, a captain-held task
+#      fails closes each key at most once when retried, the surfaced marker
+#      names only the closures a pass actually failed on, a surfaced orphan
+#      that could not be retired never hides a newer one, a captain-held task
 #      settled through another channel counts as closed, and a hold-id
 #      closure actually closes its captain-held task with the acknowledging
 #      task's provenance when the real watcher commits it.
@@ -575,6 +577,65 @@ test_commit_retries_close_each_key_once_and_surface_once() {
   pass "inbox: a partly failed commit closes each key once and is surfaced once"
 }
 
+# THE REGRESSION for the surfaced-marker overmark: the marker must name only
+# the closures the commit pass actually failed on, never every closure that
+# happens to be acknowledged by the time the caller writes it. A worker that
+# acknowledges a second answer in the window between the pass returning and
+# the marker write has not had that closure's first attempt yet; marking it
+# surfaced then would retry it quietly forever, with no wake, if it then
+# failed. Both hold ids name no task in an isolated home, so each commit
+# refuses deterministically.
+test_commit_escalation_marks_only_the_closures_that_failed() {
+  local home state rec1 rec2 sidecar1 sidecar2 err rc marker
+  home="$TMP_ROOT/overmark"; state="$home/state"; mkdir -p "$state" "$home/data"
+  err="$home/commit.err"
+  : > "$state/t1.status"
+  rec1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "first answer")
+  sidecar1=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec1" "first answer" "" "no-such-hold-a")
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "second answer")
+  sidecar2=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec2" "second answer" "" "no-such-hold-b")
+  mv "$rec1" "$state/t1.inbox/handled/"
+
+  rc=0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the first closure's failed hold close should report the failure"
+  assert_contains "$(cat "$err")" "${rec1##*/}" "the first pass should name the first closure's record"
+
+  # The window: the worker acknowledges the second answer AFTER the pass
+  # returned and BEFORE the caller records what was surfaced.
+  mv "$rec2" "$state/t1.inbox/handled/"
+  inbox_lib "$state" fm_task_inbox_record_commit_escalated "$state" t1 \
+    || fail "could not record the surfaced closure"
+  marker="$state/t1.inbox/.commit-escalated"
+  grep -Fxq -- "${sidecar1##*/}" "$marker" \
+    || fail "the closure that failed should be marked as surfaced:"$'\n'"$(cat "$marker" 2>/dev/null)"
+  if grep -Fxq -- "${sidecar2##*/}" "$marker"; then
+    fail "a closure acknowledged after the pass was marked surfaced before its own first attempt:"$'\n'"$(cat "$marker")"
+  fi
+
+  # The second closure's first attempt is still loud; the first stays quiet.
+  rc=0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the second closure's first failed attempt must still surface"
+  assert_contains "$(cat "$err")" "${rec2##*/}" "the second pass should name the second closure's record"
+  if grep -qF -- "${rec1##*/}" "$err"; then
+    fail "an already surfaced closure repeated its diagnostic:"$'\n'"$(cat "$err")"
+  fi
+  inbox_lib "$state" fm_task_inbox_record_commit_escalated "$state" t1 \
+    || fail "could not record the second surfaced closure"
+  if ! grep -Fxq -- "${sidecar1##*/}" "$marker" || ! grep -Fxq -- "${sidecar2##*/}" "$marker"; then
+    fail "both surfaced closures should now be marked:"$'\n'"$(cat "$marker")"
+  fi
+  rc=0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "two surfaced failures must both retry quietly:"$'\n'"$(cat "$err")"
+  [ ! -s "$err" ] || fail "a quiet retry repeated a diagnostic:"$'\n'"$(cat "$err")"
+  pass "inbox: the surfaced-closure marker names only the closures the pass failed on"
+}
+
 # The filing step is the third place a commit can fail, and it is bounded the
 # same way as the other two: an acknowledged closure whose status key closed
 # but which cannot be filed under handled/ (the directory stopped being
@@ -737,6 +798,31 @@ test_orphaned_sidecar_escalates_instead_of_going_silent() {
   pending=$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)
   [ -z "$pending" ] || fail "a reopened key was wrongly reported as already answered by a retired orphan: $pending"
   pass "inbox: an orphaned sidecar (record rm'd instead of moved) escalates once, is retired, and never shadows a reopened key"
+}
+
+# THE REGRESSION for a surfaced orphan that could not be retired: its marker
+# is written first, and if the move into handled/orphaned/ then fails the
+# sidecar stays in the inbox root. The scan must skip it by its marker, so it
+# neither re-escalates nor hides a newer orphan behind it on every later poll.
+test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan() {
+  local home state rec1 rec2 sidecar1 sidecar2 out
+  home="$TMP_ROOT/orphan-shadow"; state="$home/state"; mkdir -p "$state" "$home/data"
+  printf 'needs-decision [key=first]: pick\nneeds-decision [key=second]: pick\n' > "$state/t1.status"
+  rec1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer one")
+  sidecar1=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec1" "answer one" "first" "")
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer two")
+  sidecar2=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec2" "answer two" "second" "")
+  rm -f "$rec1"
+  # Marker written, retirement failed: the surfaced orphan is still in the root.
+  printf '%s\n' "${sidecar1##*/}" > "$state/t1.inbox/.orphan-escalated"
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" = quiet ] || fail "a surfaced orphan must not re-escalate while it waits for retirement: $out"
+
+  rm -f "$rec2"
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" = "escalate 0 orphaned $sidecar2" ] \
+    || fail "a newer orphan was hidden behind a surfaced one still in the root: $out"
+  pass "inbox: a surfaced orphan that could not be retired never shadows a newer orphan"
 }
 
 # A captain-held task the sidecar answers, driven through the REAL watcher in
@@ -1207,10 +1293,12 @@ test_deferred_closure_needs_a_complete_acknowledgement
 test_deferred_closure_refuses_an_empty_key_set
 test_deferred_closure_survives_a_glob_sweep
 test_commit_retries_close_each_key_once_and_surface_once
+test_commit_escalation_marks_only_the_closures_that_failed
 test_commit_files_quietly_when_handled_is_unwritable
 test_reopened_key_with_identical_answer_closes_again
 test_blocked_escalation_fires_one_poll_after_first_skip
 test_orphaned_sidecar_escalates_instead_of_going_silent
+test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan
 test_watcher_closes_the_captain_held_task_with_its_provenance
 test_commit_treats_a_hold_settled_elsewhere_as_closed
 test_watcher_rerings_idle_pane_quietly
