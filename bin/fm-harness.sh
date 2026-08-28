@@ -27,8 +27,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# The session-lock library owns cross-platform process-table access and the
-# verified harness process classifier used by lock ownership.
+# The session-lock library owns cross-platform process-table access.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
@@ -79,22 +78,34 @@ detect_own() {
   rows=$(fm_process_ancestry_rows 8 2>/dev/null || true)
   while IFS=$'\t' read -r pid ppid comm argv0 args; do
     [ -n "$pid" ] || continue
-    if fm_harness_process_matches "$comm" "$args" "$argv0"; then
-      case "$FM_HARNESS_MATCH_NAME" in
-        pi-signed) echo pi ;;
-        *) echo "$FM_HARNESS_MATCH_NAME" ;;
-      esac
+    if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+      echo cursor
       return
     fi
     base=${comm//\\//}
     base=$(basename -- "$base")
     case "$base" in
+      *claude*) echo claude; return ;;
+      *codex*) echo codex; return ;;
+      *opencode*) echo opencode; return ;;
+      *grok*) echo grok; return ;;
+      kimi|kimi.exe) echo kimi; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
+      pi-signed|pi-signed.exe) echo pi; return ;;
+      pi|pi.exe) echo pi; return ;;
+      node*|python*)
+        case "$args" in
+          *claude*) echo claude; return ;;
+          *codex*) echo codex; return ;;
+          *opencode*) echo opencode; return ;;
+          *grok*) echo grok; return ;;
+          *" pi "*|*/pi) echo pi; return ;;
+        esac ;;
     esac
   done <<EOF
 $rows

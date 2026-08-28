@@ -20,6 +20,8 @@ TMP_ROOT=$(fm_test_tmproot fm-session-lock-ancestry)
 fm_git_identity fmtest fmtest@example.invalid
 
 LIB="$ROOT/bin/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$LIB"
 
 # Claude Code's native installer names the per-session executable by its version,
 # so the harness identity has to survive a basename that says nothing.
@@ -247,6 +249,8 @@ case "$pid:$field:${FM_TEST_HARNESS_SHAPE:-kimi}" in
   850:args=:kimi-exe) printf '%s\n' 'C:\Tools\kimi.exe' ;;
   850:comm=:kimi-helper) printf '%s\n' kimi-helper ;;
   850:args=:kimi-helper) printf '%s\n' kimi-helper ;;
+  850:comm=:codex-path) printf '%s\n' runner ;;
+  850:args=:codex-path) printf '%s\n' "$FM_TEST_CODEX_RUNNER" ;;
   850:comm=:cursor) printf '%s\n' MainThread ;;
   850:args=:cursor) printf '%s\n' "$FM_TEST_CURSOR_BIN --resume" ;;
   850:ppid=:*) printf '%s\n' 1 ;;
@@ -257,18 +261,55 @@ esac
 SH
   chmod +x "$fakebin/ps"
 
-  for shape in kimi kimi-exe kimi-helper cursor; do
+  mkdir -p "$dir/codex"
+  : > "$dir/codex/runner"
+  for shape in kimi kimi-exe kimi-helper codex-path cursor; do
+    case "$shape" in
+      codex-path) printf '%s\0' "$dir/codex/runner" > "$proc_root/850/cmdline" ;;
+      cursor) printf '%s\0--resume\0' "$cursor_bin" > "$proc_root/850/cmdline" ;;
+      *) rm -f "$proc_root/850/cmdline" ;;
+    esac
     got=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       -u PI_CODING_AGENT -u GROK_AGENT \
       PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
       FM_TEST_HARNESS_SHAPE="$shape" FM_TEST_CURSOR_BIN="$cursor_bin" \
+      FM_TEST_CODEX_RUNNER="$dir/codex/runner" \
       "$ROOT/bin/fm-harness.sh")
     case "$shape:$got" in
-      kimi:kimi|kimi-exe:kimi|kimi-helper:unknown|cursor:cursor) ;;
+      kimi:kimi|kimi-exe:kimi|kimi-helper:unknown|codex-path:unknown|cursor:cursor) ;;
       *) fail "$shape ancestry classified as '$got'" ;;
     esac
   done
-  pass "harness detection: Kimi stays exact and Cursor keeps structured argv0"
+  pass "harness detection: prior name evidence survives shared structured process rows"
+}
+
+test_real_windows_process_helper_contract() {
+  local winpid row pid ppid comm argv0 args
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *)
+      pass "session-lock: real Windows process helper skipped on a non-Windows host"
+      return
+      ;;
+  esac
+  command -v powershell.exe >/dev/null 2>&1 \
+    || fail "native Windows process helper requires powershell.exe"
+  winpid=$(fm_windows_current_pid) \
+    || fail "native Windows pid could not be resolved"
+  row=$(fm_windows_process_rows "$winpid" 1) \
+    || fail "real native Windows process helper failed"
+  [ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "real native Windows process helper ignored its one-row limit"
+  printf '%s\n' "$row" | awk -F '\t' 'NF == 5 { valid = 1 } END { exit valid ? 0 : 1 }' \
+    || fail "real native Windows process helper did not emit five fields"
+  IFS=$'\t' read -r pid ppid comm argv0 args <<EOF
+$row
+EOF
+  [ "$pid" = "$winpid" ] || fail "real native Windows helper returned pid '$pid', expected '$winpid'"
+  case "$ppid" in ''|*[!0-9]*) fail "real native Windows helper returned invalid parent pid '$ppid'" ;; esac
+  [ -n "$comm" ] && [ -n "$argv0" ] && [ -n "$args" ] \
+    || fail "real native Windows helper returned an empty process identity field"
+  pass "session-lock: real Windows process helper emits its ancestry-row contract"
 }
 
 test_native_windows_process_table_identifies_codex() {
@@ -478,6 +519,7 @@ test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_harness_detection_preserves_kimi_and_cursor_identity
+test_real_windows_process_helper_contract
 test_native_windows_process_table_identifies_codex
 if ps -o comm= -p "$$" >/dev/null 2>&1; then
   test_e2e_version_named_session_claims_the_home
