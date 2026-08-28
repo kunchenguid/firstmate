@@ -367,7 +367,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and, when available, the forge's `pr_head=` and the pull request's `pr_dest=` in the task's meta and arms the watcher's merge poll.
+Run `bin/fm-pr-check.sh <id> <PR url> [dest-branch]` - it records `pr=` and, when available, the forge's `pr_head=` and the pull request's `pr_dest=` in the task's meta and arms the watcher's merge poll. GitHub auto-derives `pr_dest` and GitLab falls back safely through its own forge API, but Bitbucket has no CLI to derive it and no forge API fallback here at all: pass the pull request's actual destination branch as `[dest-branch]` whenever it targets anything other than the repository's default branch, or the poll will judge the wrong branch and silently never report the merge.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
