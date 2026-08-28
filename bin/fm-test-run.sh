@@ -1054,9 +1054,6 @@ families_for_unmapped_bin() {
 families_for_changed_path() {
   local path=$1 fixture_ref
   case "$path" in
-    tests/fm-test-run.test.sh)
-      printf '%s\n' pure-contract-unit
-      ;;
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
@@ -1066,8 +1063,15 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
-      printf '%s\n' pure-contract-unit
+    bin/fm-test-run.sh)
+      # The runner and proof contract tests directly exercise this interface.
+      # Selecting their whole family would run unrelated product contracts.
+      printf '%s\n' __script__:fm-test-run.test.sh
+      printf '%s\n' __script__:fm-test-isolation-proof.test.sh
+      ;;
+    bin/fm-test-isolation-proof.sh)
+      printf '%s\n' __script__:fm-test-isolation-proof.test.sh
+      printf '%s\n' __script__:fm-test-run.test.sh
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
@@ -1205,9 +1209,14 @@ families_for_changed_path() {
       ;;
     docs/fm-test-portable-shards.md|docs/fm-test-isolation-proof.md|\
     docs/fm-test-isolation-proof.json)
-      printf '%s\n' pure-contract-unit
+      printf '%s\n' __script__:fm-test-run.test.sh
+      printf '%s\n' __script__:fm-test-isolation-proof.test.sh
+      printf '%s\n' __script__:fm-documentation-audiences.test.sh
       ;;
-    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    CONTRIBUTING.md)
+      printf '%s\n' __script__:fm-documentation-audiences.test.sh
+      ;;
+    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;

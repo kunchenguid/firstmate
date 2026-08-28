@@ -96,6 +96,9 @@ init_changed_fixture_repo() {
   for script in \
     fm-brief.test.sh \
     fm-ask-user-authority.test.sh \
+    fm-documentation-audiences.test.sh \
+    fm-test-isolation-proof.test.sh \
+    fm-test-run.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
@@ -130,15 +133,47 @@ init_changed_fixture_repo() {
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
-  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  : >"$repo/docs/fm-test-isolation-proof.md"
+  : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+}
+
+test_changed_runner_surfaces_select_contract_owners() {
+  local tmp repo listed expected
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-owner-scope.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/bin/fm-test-run.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
+  expected=$(printf '%s\n' \
+    tests/fm-test-isolation-proof.test.sh \
+    tests/fm-test-run.test.sh | LC_ALL=C sort)
+  [ "$listed" = "$expected" ] \
+    || fail "runner change must select only its executable contract owners: $listed"
+  git -C "$repo" add bin/fm-test-run.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm runner-change
+
+  printf '\n' >>"$repo/docs/fm-test-isolation-proof.md"
+  printf '\n' >>"$repo/CONTRIBUTING.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
+  expected=$(printf '%s\n' \
+    tests/fm-documentation-audiences.test.sh \
+    tests/fm-test-isolation-proof.test.sh \
+    tests/fm-test-run.test.sh | LC_ALL=C sort)
+  [ "$listed" = "$expected" ] \
+    || fail "runner documentation must select only its contract owners: $listed"
+
+  rm -rf "$tmp"
+  pass "runner surfaces select their executable contract owners"
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
@@ -1055,6 +1090,7 @@ test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
+test_changed_runner_surfaces_select_contract_owners
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
