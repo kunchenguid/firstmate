@@ -27,13 +27,6 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      # Base-branch checkout on purpose. The gate judges a PR without ever
-      # running code from its head, so this brings in only the settle script as
-      # the branch being merged into has it, never as the PR rewrote it.
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.base.ref }}
-          persist-credentials: false
       # GitHub snapshots the PR body into the event payload when the event
       # fires. no-mistakes pushes the branch first and rewrites the body with
       # the attestation for the new head a couple of minutes later, so the
@@ -41,6 +34,15 @@ jobs:
       # failed on every no-mistakes push before the following `edited` run
       # passed. Judge the live body instead, once it binds to the pushed head.
       # A push that no-mistakes never attested never binds and still fails.
+      #
+      # This settles from the workflow file alone and checks out no repository.
+      # A helper under bin/ could not settle the pull request that introduces
+      # it: the gate would have to read that helper either from the base branch,
+      # which does not carry it yet, or from the head, which is the very code
+      # the gate is judging. Reading it from the base left this gate judging the
+      # stale event-payload snapshot on every PR raised before the helper
+      # merged, its own included. Owning no checked-out code keeps the gate off
+      # both horns.
       - name: Settle the PR body against the pushed head
         id: pr-body
         env:
@@ -49,19 +51,81 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
-          # Only the base branch is checked out, so a base that predates the
-          # settle script has nothing to settle with - every PR raised before
-          # it reaches the base, the one adding it included. Leave the gate on
-          # its event-payload default there, exactly as an unreadable body
-          # does, instead of failing the check on a missing helper.
-          if [ ! -f bin/fm-attestation-settle.sh ]; then
-            echo "bin/fm-attestation-settle.sh is not on ${GITHUB_BASE_REF:-the base branch}; leaving the gate on its event-payload default." >&2
-            exit 0
+          # About five minutes of reads; no-mistakes rewrites the body roughly a
+          # minute after the push. Overridable so the regression suite can drive
+          # this same step body without waiting.
+          attempts=${SETTLE_ATTEMPTS:-31}
+          interval=${SETTLE_INTERVAL_SECONDS:-10}
+          prefix='<!-- no-mistakes-pipeline-attestation:v1 '
+          closing=' -->'
+
+          # Echo the head_sha the body's v1 attestation binds to, or fail when
+          # the body carries no parseable attestation. Deliberately narrow: this
+          # decides only when to stop waiting, never whether the body is
+          # compliant. The pinned action below stays the only thing that can
+          # pass or fail the gate.
+          attested_head() {
+            local body=$1 payload rest
+            case "$body" in *"$prefix"*) ;; *) return 1 ;; esac
+            payload=${body#*"$prefix"}
+            case "$payload" in *"$closing"*) ;; *) return 1 ;; esac
+            payload=${payload%%"$closing"*}
+            case "$payload" in *'"head_sha"'*) ;; *) return 1 ;; esac
+            rest=${payload#*'"head_sha"'}
+            rest=${rest#*:}
+            rest=${rest#"${rest%%[![:space:]]*}"}
+            case "$rest" in '"'*) ;; *) return 1 ;; esac
+            rest=${rest#'"'}
+            printf '%s\n' "${rest%%'"'*}"
+          }
+
+          body=
+          read_any=0
+          settled=0
+          attempt=1
+          gh_missing=0
+          if ! command -v gh >/dev/null 2>&1; then
+            # Nothing to read the live body with; do not burn the whole wait
+            # rediscovering that on every attempt.
+            gh_missing=1
+            attempts=0
           fi
-          bin/fm-attestation-settle.sh \
-            --repo "$GITHUB_REPOSITORY" \
-            --pr "$PR_NUMBER" \
-            --head "$PR_HEAD_SHA" >/dev/null
+          while [ "$attempt" -le "$attempts" ]; do
+            if current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""' 2>/dev/null); then
+              body=$current
+              read_any=1
+              if bound=$(attested_head "$body") && [ "$bound" = "$PR_HEAD_SHA" ]; then
+                settled=1
+                break
+              fi
+            fi
+            attempt=$((attempt + 1))
+            [ "$attempt" -le "$attempts" ] || break
+            [ "$interval" -eq 0 ] || sleep "$interval"
+          done
+
+          if [ "$settled" -eq 1 ]; then
+            echo "PR #$PR_NUMBER body attestation binds to $PR_HEAD_SHA after $attempt read(s)." >&2
+          elif [ "$read_any" -eq 1 ]; then
+            echo "PR #$PR_NUMBER body attestation still does not bind to $PR_HEAD_SHA after $attempts read(s); judging the body as it stands." >&2
+          elif [ "$gh_missing" -eq 1 ]; then
+            echo "gh is not installed; leaving the gate on its event-payload default." >&2
+          else
+            echo "could not read the PR #$PR_NUMBER body; leaving the gate on its event-payload default." >&2
+          fi
+
+          # The body is author-controlled, so the heredoc delimiter must be one
+          # it cannot contain: draw a random one and redraw until the body does
+          # not carry it.
+          while :; do
+            delim="FM_ATTESTATION_BODY_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+            case "$body" in *"$delim"*) continue ;; *) break ;; esac
+          done
+          {
+            printf 'body<<%s\n' "$delim"
+            printf '%s\n' "$body"
+            printf '%s\n' "$delim"
+          } >>"$GITHUB_OUTPUT"
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
         with:
