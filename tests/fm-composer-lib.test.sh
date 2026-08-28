@@ -62,6 +62,69 @@ test_bare_shell_prompt_with_command_is_not_empty() {
   pass "fm_composer_classify_content: a bare shell prompt carrying a command is not empty"
 }
 
+# --- fm_composer_trailing_shell_glyph_only: a caller's narrower positive proof
+# that the generic `unknown` verdict for a bare dead-shell prompt (see above -
+# a real PS1's user/host/cwd prefix never matches this library's
+# glyph-ANCHORED shapes, so it always reads `unknown`, typed content or not)
+# holds no unsubmitted typed text. Task fm-close-exited-panes review.
+
+test_trailing_shell_glyph_only_matches_a_real_ps1_prompt() {
+  local prompt
+  for prompt in 'user@host:~$' 'user@host:~ %' 'root@host:/etc #' 'C:\Users\me>'; do
+    fm_composer_trailing_shell_glyph_only "$prompt" \
+      || fail "a real PS1 prompt '$prompt' ending in a bare glyph must read true, did not"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: a real PS1 prompt ending bare is true"
+}
+
+test_trailing_shell_glyph_only_rejects_typed_content() {
+  local line
+  for line in 'user@host:~$ rm -rf /tmp/x' 'user@host:~$ ls -la' '  $ echo hi  '; do
+    ! fm_composer_trailing_shell_glyph_only "$line" \
+      || fail "a prompt with typed content after it '$line' must read false, read true"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: typed content after the prompt is false"
+}
+
+test_trailing_shell_glyph_only_rejects_typed_content_ending_in_a_glyph() {
+  local line
+  # Unsubmitted typed text that itself ends in a prompt-glyph character (a
+  # redirection `cat >`, a bare `echo $`) appended after a real PS1 must never
+  # read true just because the LINE happens to end in a glyph: the real
+  # prompt's own glyph plus the typed one is a second occurrence, proof that
+  # something was typed. Greptile P1: bin/fm-composer-lib.sh#477.
+  for line in 'user@host:~$ cat >' 'user@host:~$ echo $' 'root@host:/etc # cat >'; do
+    ! fm_composer_trailing_shell_glyph_only "$line" \
+      || fail "typed text ending in a glyph after a real prompt '$line' must read false, read true"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: typed content that itself ends in a glyph is false"
+}
+
+test_trailing_shell_glyph_only_rejects_blank_or_glyphless() {
+  local line
+  for line in '' '   ' 'no glyph here'; do
+    ! fm_composer_trailing_shell_glyph_only "$line" \
+      || fail "a blank or glyph-less line '$line' must read false, read true"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: blank or glyph-less input is false"
+}
+
+test_trailing_shell_glyph_only_rejects_bare_continuation_prompt() {
+  local line
+  # bash/zsh/dash all default PS2 (the secondary prompt shown mid an
+  # incomplete multiline command - unclosed quote, heredoc, or paren) to
+  # exactly `> `, which trims to a lone `>` indistinguishable from a real
+  # idle PS1 that happens to draw nothing before its own glyph. Trusting
+  # that shape as proof of an empty prompt would let pane-close cleanup
+  # discard a still-pending multiline command. Greptile P1: task
+  # fm-close-exited-panes review.
+  for line in '>' '  >  '; do
+    ! fm_composer_trailing_shell_glyph_only "$line" \
+      || fail "a bare continuation prompt '$line' must read false, read true"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: a bare continuation prompt is false"
+}
+
 # --- Preserved: shell glyph inside a composer box is the harness prompt ------
 
 test_bordered_shell_glyph_is_empty() {
@@ -606,6 +669,11 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
+test_trailing_shell_glyph_only_matches_a_real_ps1_prompt
+test_trailing_shell_glyph_only_rejects_typed_content
+test_trailing_shell_glyph_only_rejects_typed_content_ending_in_a_glyph
+test_trailing_shell_glyph_only_rejects_blank_or_glyphless
+test_trailing_shell_glyph_only_rejects_bare_continuation_prompt
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty

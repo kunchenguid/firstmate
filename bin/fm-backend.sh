@@ -706,6 +706,44 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   esac
 }
 
+# fm_backend_capture_joined: like fm_backend_capture, but soft-wrapped rows
+# come back joined into one logical line where the backend supports it (tmux
+# `-J`), instead of split across several physical rows. For a caller that
+# must prove something about one FULL logical line - e.g. --close-pane's
+# trailing-shell-glyph-only proof (fm-teardown.sh) - inspecting only the last
+# physical row of a wrapped line can find a lone trailing prompt glyph and
+# wrongly treat unsubmitted typed text as an empty prompt (Greptile P1: task
+# fm-close-exited-panes review). Backends without a documented join primitive
+# fall back to fm_backend_capture unchanged.
+fm_backend_capture_joined() {  # <backend> <target> <lines> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_capture_joined "$@" ;;
+    *) fm_backend_capture "$backend" "$@" ;;
+  esac
+}
+
+# fm_backend_capture_joined_reliable: 0 only for a backend whose
+# fm_backend_capture_joined performs genuine logical-line joining of
+# soft-wrapped rows (tmux -J). Every other backend's arm above silently falls
+# back to the row-oriented fm_backend_capture, so its "joined" output still
+# splits a long unsubmitted command across physical rows. A caller proving a
+# full logical line is empty before an irreversible action (fm-teardown.sh's
+# --close-pane composer-emptiness fallback proof) must not trust that
+# fallback capture on a backend where this returns non-zero - inspecting only
+# the last physical row of a wrapped line can find a lone trailing prompt
+# glyph and wrongly treat unsubmitted typed text as an empty prompt (Greptile
+# P1: task fm-close-exited-panes review - Herdr reaches the same close logic
+# through an unchanged row-oriented capture).
+fm_backend_capture_joined_reliable() {  # <backend>
+  case "$1" in
+    tmux) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_send_key: one backend-supported named special key.
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   local backend=$1

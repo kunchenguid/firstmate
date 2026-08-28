@@ -454,6 +454,55 @@ EOF
   return 1
 }
 
+# fm_composer_trailing_shell_glyph_only: true when <line>, trimmed, ENDS in
+# one of the shell prompt glyphs (FM_COMPOSER_SHELL_PROMPT_GLYPHS) with
+# nothing after it. A real interactive shell's PS1 draws arbitrary text
+# BEFORE the glyph (user, host, cwd, git branch, ...), unlike an agent CLI's
+# minimal glyph-anchored composer, so a live PS1 never matches this library's
+# glyph-ANCHORED shapes above and the screen classifier always reads
+# `unknown` for it - whether or not anything was typed after the prompt. A
+# caller that must positively rule out unsubmitted typed text before trusting
+# that `unknown` (e.g. pane-close cleanup, task fm-close-exited-panes) uses
+# this instead: unlike fm_composer_leading_shell_glyph_var, the glyph need not
+# lead the row, only trail it, so `user@host:~$` reads true and
+# `user@host:~$ rm -rf` reads false.
+#
+# A trailing glyph alone is NOT sufficient proof: a real idle PS1 draws
+# exactly one prompt glyph (its own, trailing), but unsubmitted typed text
+# ending in a prompt-glyph character - `cat >`, `echo $` - reads as a SECOND
+# occurrence once appended after that real prompt (`user@host:~$ cat >`,
+# `user@host:~$ echo $`), and a suffix-only check would wrongly call that an
+# empty prompt (task fm-close-exited-panes review). So this also requires the
+# trailing glyph to be the ONLY prompt-glyph character anywhere in the line;
+# two or more occurrences means typed text follows the real prompt and reads
+# false.
+#
+# A bare `>` with NOTHING else on the line is still not proof, even as the
+# sole occurrence: bash/zsh/dash all default PS2 (the secondary prompt shown
+# mid multiline input - an unclosed quote, heredoc, or paren) to exactly
+# `> ` with no host/path/branch prefix, which trims to the same lone `>` a
+# real idle PS1 would never draw on its own. A `>` preceded by other prompt
+# content (`user@host:~>`) is unambiguous and still accepted (Greptile P1:
+# task fm-close-exited-panes review).
+fm_composer_trailing_shell_glyph_only() {  # <line>
+  local __fmtg_trimmed=$1 __fmtg_glyph __fmtg_matched='' __fmtg_class __fmtg_count
+  fm_composer_normalize_trim_var __fmtg_trimmed
+  [ -n "$__fmtg_trimmed" ] || return 1
+  while IFS= read -r __fmtg_glyph; do
+    [ -n "$__fmtg_glyph" ] || continue
+    case "$__fmtg_trimmed" in
+      *"$__fmtg_glyph") __fmtg_matched=$__fmtg_glyph; break ;;
+    esac
+  done <<EOF
+$FM_COMPOSER_SHELL_PROMPT_GLYPHS
+EOF
+  [ -n "$__fmtg_matched" ] || return 1
+  [ "$__fmtg_matched" = '>' ] && [ "$__fmtg_trimmed" = '>' ] && return 1
+  __fmtg_class=$(printf '%s' "$FM_COMPOSER_SHELL_PROMPT_GLYPHS" | tr -d '\n')
+  __fmtg_count=$(printf '%s' "$__fmtg_trimmed" | tr -dc "$__fmtg_class" | wc -c)
+  [ "$__fmtg_count" -eq 1 ]
+}
+
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
   [ -n "$idle_re" ] || return 1

@@ -133,6 +133,8 @@ A metadata-routed selector returns the recorded backend target (`terminal=` for 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
+`--close-pane` is owned by that script's header: it closes a confirmed-exited finished ship or scout pane, records `pane_closed=1`, and leaves the isolated copy and task records in place until landed teardown.
+`bin/fm-watch.sh` only calls `--close-pane` on its own once the captain opts in: `config/close-exited-panes` (any content, mere presence is the grant) or `FM_CLOSE_EXITED_PANES=1`; `FM_CLOSE_EXITED_PANES=0` forces it off even when the config file exists.
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
 Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
 `FM_HOME` determines Herdr's home label: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.

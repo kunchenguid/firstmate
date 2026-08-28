@@ -27,6 +27,7 @@ For a REMOTE secondmate, `fm-crew-state` and `fm-peek` read the actual remote en
 Recover a genuinely stuck remote mate only through `bin/fm-spawn.sh <id> --secondmate`, never raw herdr pane close/kill surgery, which strands the endpoint binding.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
+A digest line of `endpoint: closed` means the finished worker's pane was retired on purpose while the isolated copy is still retained for landing; do not relaunch that worker.
 Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
 

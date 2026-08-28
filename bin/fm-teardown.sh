@@ -58,10 +58,22 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force|--close-pane]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --close-pane is ordinary finished-worker cleanup, not landing and not discard.
+#     It closes a ship or scout backend pane only when the recovery-grade
+#     classifier reports the agent gone (dead, or already missing), the task is
+#     finished (a recorded pr=, a scout report, or a done:/failed: status), and
+#     the composer is not pending. It never returns the isolated copy, never
+#     removes task records, and never discards unlanded work. A live agent, an
+#     idle live agent, a pending composer, a secondmate, an unverified backend
+#     (zellij, orca, cmux), or a Herdr pane that is the captain's active tab is
+#     refused and the pane is kept. After a confirmed close it records
+#     pane_closed=1 so supervision does not treat the leftover husk as stale or
+#     as a missing-endpoint recovery. Full teardown after landing still returns
+#     the copy. --close-pane and --force cannot be combined.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -179,7 +191,23 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   exit 2
 fi
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=
+CLOSE_PANE=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=--force ;;
+    --close-pane) CLOSE_PANE=1 ;;
+    *)
+      echo "error: invalid teardown option: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+if [ "$CLOSE_PANE" = 1 ] && [ "$FORCE" = --force ]; then
+  echo "error: --close-pane cannot be combined with --force" >&2
+  exit 2
+fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
@@ -658,12 +686,14 @@ remote_secondmate_teardown_locked() {
   return "$rc"
 }
 
-if remote_secondmate_teardown_locked; then
-  exit 0
-else
-  remote_teardown_rc=$?
+if [ "$CLOSE_PANE" != 1 ]; then
+  if remote_secondmate_teardown_locked; then
+    exit 0
+  else
+    remote_teardown_rc=$?
+  fi
+  [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 fi
-[ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
@@ -2388,6 +2418,221 @@ $session	$lock_path"
   return 1
 }
 
+teardown_status_is_terminal_outcome() {
+  local last
+  last=$(tail -n 1 "$STATE/$ID.status" 2>/dev/null || true)
+  case "$last" in
+    done:*|failed:*) return 0 ;;
+  esac
+  return 1
+}
+
+# A pane close is ordinary finished-worker cleanup, never a substitute for
+# landed teardown. Crash husks without a finish signal stay so recovery can
+# still see them.
+teardown_task_finished_for_pane_close() {
+  case "$KIND" in
+    secondmate) return 1 ;;
+    scout)
+      if [ -f "$DATA/$ID/report.md" ] && [ ! -L "$DATA/$ID/report.md" ]; then
+        return 0
+      fi
+      ;;
+  esac
+  [ -n "$PR_URL" ] && return 0
+  teardown_status_is_terminal_outcome
+}
+
+teardown_composer_blocks_pane_close() {
+  local verdict cap line last=''
+  # A dead agent's shell prompt reads `unknown` by the fleet-wide dead-shell
+  # safety rule (bin/fm-composer-lib.sh) even with no typed content, so
+  # requiring the proven `empty` verdict here would refuse every ordinary
+  # exit. Real unsent input is positively detected as pending/pending-unproven
+  # and still blocks. A composer-inspection FAILURE (the classifier itself
+  # erroring) blocks too, defaulting to safe.
+  verdict=$(fm_backend_composer_state "$BACKEND" "$T" "fm-$ID" 2>/dev/null) || return 0
+  case "$verdict" in
+    empty) return 1 ;;
+    pending|pending-unproven) return 0 ;;
+  esac
+  # verdict is `unknown`. A real shell PS1 (user/host/cwd/branch drawn before
+  # the prompt glyph) never matches fm-composer-lib.sh's glyph-anchored
+  # composer shapes, so an ordinary dead-shell exit always reads `unknown`
+  # here regardless of whether something was typed after the prompt -
+  # trusting `unknown` alone would not establish that pending text is absent
+  # (task fm-close-exited-panes review). Prove it directly instead: only a
+  # capture whose bottom-most non-blank row ends in a bare prompt glyph, with
+  # nothing after it, is safe. A capture failure or any other trailing
+  # content blocks.
+  # A joined capture, not the plain capture, so a long unsubmitted command
+  # that soft-wrapped across the terminal width is inspected as ONE logical
+  # line rather than just its last physical fragment - a lone trailing
+  # prompt glyph on that fragment alone is not proof the composer is empty
+  # (Greptile P1: task fm-close-exited-panes review). Only trust this on a
+  # backend where fm_backend_capture_joined actually performs that join
+  # (fm_backend_capture_joined_reliable): every other backend's "joined"
+  # capture silently falls back to the row-oriented plain capture, so a
+  # wrapped command would still reach this proof one physical fragment at a
+  # time and could pass it wrongly (Greptile P1: task fm-close-exited-panes
+  # review - Herdr reaches this same fallback through an unjoined capture).
+  fm_backend_capture_joined_reliable "$BACKEND" || return 0
+  cap=$(fm_backend_capture_joined "$BACKEND" "$T" "${FM_COMPOSER_CAPTURE_LINES:-20}" 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    fm_composer_normalize_trim_var line
+    [ -n "$line" ] && last=$line
+  done <<EOF
+$cap
+EOF
+  fm_composer_trailing_shell_glyph_only "$last" || return 0
+  return 1
+}
+
+teardown_mark_pane_closed() {
+  local tmp
+  tmp=$(mktemp "$META.tmp.XXXXXX") || return 1
+  if ! { grep -vE '^pane_closed=' "$META" || true; } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  printf 'pane_closed=1\n' >> "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$META"
+}
+
+teardown_endpoint_confirmed_absent() {
+  case "$BACKEND" in
+    herdr)
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_endpoint_confirmed_gone "$T"
+      ;;
+    *)
+      [ "$(fm_backend_agent_state "$BACKEND" "$T")" = missing ]
+      ;;
+  esac
+}
+
+teardown_herdr_pane_is_captain_active_tab() {
+  local session=$1 pane=$2 before focused_tab info tab_id
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 0
+  focused_tab=${before#*$'\t'}
+  [ -n "$focused_tab" ] || return 0
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 0
+  tab_id=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null) || tab_id=
+  [ -n "$tab_id" ] || return 0
+  [ "$tab_id" = "$focused_tab" ]
+}
+
+teardown_close_herdr_task_pane() {
+  local session pane journal retire=0
+  teardown_herdr_preflight_target "$T" "$ID" || return 1
+  fm_backend_herdr_parse_target "$T" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  if teardown_herdr_pane_is_captain_active_tab "$session" "$pane"; then
+    echo "REFUSED: herdr pane $T for $ID is the captain's active tab; keeping the pane." >&2
+    return 1
+  fi
+  journal="$STATE/$ID.herdr-presentation"
+  if { [ -e "$journal" ] || [ -L "$journal" ]; } \
+     && [ "$(meta_value "$META" herdr_session)" = "$session" ] \
+     && [ "$(meta_value "$META" herdr_pane_id)" = "$pane" ] \
+     && [ "$T" = "$session:$pane" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$session" "$(meta_value "$META" herdr_workspace_id)" "$journal" "$ID"; then
+    retire=1
+    if teardown_herdr_session_lock_held "$session"; then
+      fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane" || true
+    else
+      echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
+      return 1
+    fi
+  elif teardown_herdr_session_lock_held "$session"; then
+    fm_backend_herdr_kill_serialized "$session" "$pane" 2>/dev/null || true
+  else
+    echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
+    return 1
+  fi
+  if ! teardown_endpoint_confirmed_absent; then
+    echo "error: herdr pane $T for $ID is not confirmed gone after close; keeping the pane and every durable record" >&2
+    return 1
+  fi
+  if [ "$retire" = 1 ]; then
+    rm -f "$journal"
+  fi
+  return 0
+}
+
+teardown_close_recorded_endpoint() {
+  case "$BACKEND" in
+    herdr)
+      teardown_close_herdr_task_pane
+      ;;
+    orca)
+      echo "REFUSED: backend $BACKEND has no recovery-grade agent-state classifier; keeping the pane." >&2
+      return 1
+      ;;
+    *)
+      fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+      teardown_endpoint_confirmed_absent
+      ;;
+  esac
+}
+
+teardown_close_exited_pane() {
+  local agent_state already
+  if [ "$KIND" = secondmate ]; then
+    echo "REFUSED: --close-pane does not apply to a secondmate; its idle pane is healthy." >&2
+    return 1
+  fi
+  case "$KIND" in
+    ship|scout) ;;
+    *)
+      echo "REFUSED: --close-pane applies only to ship or scout workers." >&2
+      return 1
+      ;;
+  esac
+  if ! teardown_task_finished_for_pane_close; then
+    echo "REFUSED: task $ID is not a finished ship or scout; keeping the pane so an unfinished exit can still be recovered." >&2
+    return 1
+  fi
+  already=$(fm_meta_get "$META" pane_closed)
+  agent_state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf 'unreadable')
+  if [ "$already" = 1 ] && [ "$agent_state" = missing ]; then
+    echo "close-pane $ID complete (endpoint already gone, copy retained at $WT)"
+    return 0
+  fi
+  case "$agent_state" in
+    missing)
+      teardown_mark_pane_closed || return 1
+      echo "close-pane $ID complete (endpoint already gone, copy retained at $WT)"
+      return 0
+      ;;
+    dead) ;;
+    alive)
+      echo "REFUSED: task $ID still has a live agent; keeping the pane." >&2
+      return 1
+      ;;
+    *)
+      echo "REFUSED: cannot prove the agent for $ID has exited (state $agent_state); keeping the pane." >&2
+      return 1
+      ;;
+  esac
+  if teardown_composer_blocks_pane_close; then
+    echo "REFUSED: task $ID still has pending composer text; keeping the pane." >&2
+    return 1
+  fi
+  teardown_close_recorded_endpoint || {
+    echo "error: could not close the exited pane for $ID; keeping the pane and the isolated copy" >&2
+    return 1
+  }
+  if ! teardown_endpoint_confirmed_absent; then
+    echo "error: pane $T for $ID is still present after close; keeping the pane and the isolated copy" >&2
+    return 1
+  fi
+  teardown_mark_pane_closed || return 1
+  echo "close-pane $ID complete (window $T closed, copy retained at $WT)"
+}
+
 preflight_firstmate_home_herdr_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
   sub_state="$home/state"
@@ -2521,6 +2766,11 @@ remove_secondmate_registry_entry() {
 }
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
+
+if [ "$CLOSE_PANE" = 1 ]; then
+  teardown_close_exited_pane
+  exit $?
+fi
 
 if [ "$KIND" = secondmate ]; then
   LOCAL_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
