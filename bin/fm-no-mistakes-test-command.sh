@@ -26,7 +26,9 @@ run_azure_worker_required() {
   }
   printf 'no-mistakes: Azure worker focused suite files=%s; CI owns broader repository coverage\n' \
     "${#tests[@]}"
-  FM_NO_MISTAKES_AZURE_WORKER=0 "$ROOT/tests/run.sh" "${tests[@]}"
+  FM_NO_MISTAKES_AZURE_WORKER=0 \
+    FM_TEST_HOST_CAPABILITIES_ABSENT=passwordless-root-escalation \
+    "$ROOT/tests/run.sh" "${tests[@]}"
 }
 
 case "${FM_NO_MISTAKES_AZURE_WORKER:-0}" in

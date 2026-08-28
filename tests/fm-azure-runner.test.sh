@@ -1105,6 +1105,7 @@ fi
   for arg do printf '\t%s' "\$arg"; done
   printf '\n'
 } >>"$root/local-runs"
+printf '%s\n' "\${FM_TEST_HOST_CAPABILITIES_ABSENT:-}" >"$root/local-capabilities"
 if [ "\${1:-}" = --skip-herdr ]; then
   [ "\${FM_TEST_HOST_CAPABILITIES_ABSENT:-}" = real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress ] || exit 96
   printf 'FM_HOST_CAPABILITY_DECLARATION absent=%s\n' "\$FM_TEST_HOST_CAPABILITIES_ABSENT" >>"$root/remote-runs"
@@ -1377,9 +1378,9 @@ PY
   # A no-mistakes Azure guest is already the isolated execution boundary.
   # It runs only the service transport/lifecycle regression set in that worker
   # and must never recurse through the general Azure dispatcher or Herdr lane.
-  rm -f "$fixture/captured" "$fixture/local-runs"
+  rm -f "$fixture/captured" "$fixture/local-runs" "$fixture/local-capabilities"
   out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
-    FM_NO_MISTAKES_AZURE_WORKER=1 \
+    FM_NO_MISTAKES_AZURE_WORKER=1 FM_TEST_HOST_CAPABILITIES_ABSENT=must-not-pass \
     "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
     || fail "the no-mistakes Azure worker focused suite failed"
   [ ! -e "$fixture/captured" ] \
@@ -1388,6 +1389,8 @@ PY
     "the no-mistakes Azure worker did not identify its focused suite"
   [ "$(wc -l < "$fixture/local-runs" | tr -d ' ')" -eq 1 ] \
     || fail "the no-mistakes Azure worker did not run one focused suite invocation"
+  [ "$(cat "$fixture/local-capabilities")" = passwordless-root-escalation ] \
+    || fail "the no-mistakes Azure worker did not bind its exact absent host capability"
   for required in \
     fm-azure-pilot.test.sh fm-azure-runner.test.sh fm-cloud-provider-seal.test.sh \
     fm-no-mistakes-reattach.test.sh fm-no-mistakes-runtime.test.sh \
@@ -2282,9 +2285,21 @@ no_mistakes_yaml_test_route_contract() {
   local_marker="$tmp/local-route"
   shard_marker="$tmp/shard-route"
   mkdir -p "$fixture/bin"
-  command=$(ruby -e \
-    'require "yaml"; puts YAML.safe_load_file(ARGV.fetch(0)).fetch("commands").fetch("test")' \
-    "$ROOT/.no-mistakes.yaml") \
+  command=$(python3 - "$ROOT/.no-mistakes.yaml" <<'PY'
+from pathlib import Path
+import sys
+
+prefix = "  test: '"
+values = [
+    line[len(prefix):-1].replace("''", "'")
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.startswith(prefix) and line.endswith("'")
+]
+if len(values) != 1:
+    raise SystemExit("expected one single-line commands.test scalar")
+print(values[0])
+PY
+  ) \
     || fail "the no-mistakes test command could not be loaded from YAML"
   [ -n "$command" ] || fail "the no-mistakes YAML has no test command"
 
