@@ -3613,9 +3613,9 @@ if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$KIND" != secondmate ] && [ -d "$WT"
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
+# them). Fix 1 (see script header) runs here, unconditionally on --force, and
+# before ANY destructive step below - a still-parked run can own live work in
+# this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
@@ -3623,16 +3623,15 @@ if [ "$KIND" != secondmate ] && [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
   teardown_revalidate_worktree_occupancy || exit 1
   conclude_task_no_mistakes_run "$WT"
   teardown_revalidate_worktree_occupancy || exit 1
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (worktree return, pane close, record removal)
-# runs under the named-session presentation lock, acquired BEFORE anything is
-# returned or erased: a contended lock refuses here while the isolated copy,
-# every durable record, and the endpoint are all still intact for a plain
-# rerun. An unresolvable lock path (for example an unreachable server) also
-# refuses before any destructive step.
+# destructive sequence below (process reaping, worktree return, pane close,
+# record removal) runs under the named-session presentation lock, acquired
+# BEFORE anything is returned or erased: a contended lock refuses here while
+# the isolated copy, every durable record, and the endpoint are all still
+# intact for a plain rerun. An unresolvable lock path (for example an
+# unreachable server) also refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
 if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = herdr ]; then
@@ -3641,6 +3640,39 @@ if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
+
+# Capture a live projection's exact journal-to-endpoint binding before process
+# reaping can make its pane and last-workspace disappear. This snapshot grants
+# only candidate status: journal retirement below still requires the exact pane
+# to be confirmed dead under the same session lock.
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
+   && [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+
+# Fix 2 (see script header) reaps leaked worktree processes only after the
+# Herdr endpoint lock and any live journal binding have been captured.
+if [ "$KIND" != secondmate ] && [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+fi
+
 if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
   require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
@@ -3825,28 +3857,6 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$ACCESS" = reader ]; then
   teardown_before_worktree_removal
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   :
-fi
-
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
-   && [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
 fi
 
 if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then

@@ -2,8 +2,8 @@
 # Isolated real-Herdr E2E coverage for the default-on disposable single-task
 # presentation projection, its explicit opt-out, and its best-effort
 # owning-parent ordering across primary and secondmate homes.
-# The test drives the real spawn and teardown scripts, a real Treehouse pool,
-# and the guarded named-session lab helper.
+# The test drives the real spawn and teardown scripts, a hermetic Treehouse
+# lease fixture, and the guarded named-session lab helper.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,7 +18,6 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit
 [ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
 
 REAL_HERDR=$(command -v herdr)
-REAL_TREEHOUSE=$(command -v treehouse)
 REAL_SLEEP=$(command -v sleep)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
@@ -30,14 +29,17 @@ FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 RECOVERY_LOCK_CONTROL="$TMP_ROOT/recovery-lock-control"
+TREEHOUSE_FIXTURE_ROOT="$TMP_ROOT/treehouse-fixture"
+TREEHOUSE_FIXTURE_PROJECT="$TMP_ROOT/project"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_SLEEP REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export REAL_HERDR REAL_SLEEP REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+export TREEHOUSE_FIXTURE_ROOT TREEHOUSE_FIXTURE_PROJECT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -177,11 +179,25 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       ;;
   esac
 fi
-if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
   for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
     [ -d "$task_dir" ] || continue
     [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
-    out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    if [ -e "$task_dir/allocation-returned" ]; then
+      count=$(cat "$task_dir/pane-get-count" 2>/dev/null || printf '0')
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$task_dir/pane-get-count"
+      if [ "$count" -eq 3 ]; then
+        printf 'abort-cleanup-probe\t-\t-\t%s\n' "${3:-}" >> "$FOCUS_AUDIT_LOG"
+      fi
+    fi
+    if [ "$status" -eq 0 ]; then
+      out=$(printf '%s' "$out" | jq --arg cwd "$task_dir/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    elif printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1 \
+         && [ ! -e "$task_dir/dead-observed" ]; then
+      : > "$task_dir/dead-observed"
+      printf 'pane-dead\t-\t-\t%s\n' "${3:-}" >> "$FOCUS_AUDIT_LOG"
+    fi
     break
   done
 fi
@@ -216,10 +232,170 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
+
+case "${1:-} ${2:-}" in
+  "get --help")
+    printf '%s\n' 'Usage: treehouse get [--lease] [--json] [--lease-holder <id>]'
+    exit 0
+    ;;
+  "return --help")
+    printf '%s\n' 'Usage: treehouse return [--if-lease-id <id>] [--if-lease-holder <id>] <path>'
+    exit 0
+    ;;
+esac
+
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+  holder=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --lease-holder ]; then
+      holder=${2:-}
+      shift
+    fi
+    shift
+  done
+  case "$holder" in
+    abort-a|abort-b) ;;
+    *) exit 1 ;;
+  esac
+  : > "$POST_CREATE_ABORT_CONTROL/$holder/allocation-returned"
+  rm -f "$POST_CREATE_ABORT_CONTROL/$holder/pane-get-count"
+  jq -cn --arg path "$POST_CREATE_ABORT_CONTROL/$holder/not-a-worktree" \
+    --arg holder "$holder" \
+    '{name:("slot-" + $holder),path:$path,lease_id:("lease-" + $holder),lease_holder:$holder}'
   exit 0
 fi
-exec "$REAL_TREEHOUSE" "$@"
+if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = return ]; then
+  exit 0
+fi
+
+fixture_lock_acquire() {
+  local attempts=0
+  mkdir -p "$TREEHOUSE_FIXTURE_ROOT"
+  while ! mkdir "$TREEHOUSE_FIXTURE_ROOT/lock" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 3000 ] || {
+      echo "treehouse fixture lock timed out" >&2
+      exit 1
+    }
+    "$REAL_SLEEP" 0.01
+  done
+  trap 'rmdir "$TREEHOUSE_FIXTURE_ROOT/lock" 2>/dev/null || true' EXIT HUP INT TERM
+}
+
+fixture_lock_release() {
+  rmdir "$TREEHOUSE_FIXTURE_ROOT/lock"
+  trap - EXIT HUP INT TERM
+}
+
+fixture_record_key() {
+  printf '%s' "$1" | sha256sum | cut -c1-16
+}
+
+fixture_get() {
+  local holder= key record path slot generation lease tmp
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --lease-holder) shift; holder=${1:-} ;;
+      --lease-holder=*) holder=${1#--lease-holder=} ;;
+    esac
+    shift
+  done
+  [ -n "$holder" ] || { echo "treehouse fixture requires --lease-holder" >&2; exit 1; }
+  key=$(fixture_record_key "$holder")
+  record="$TREEHOUSE_FIXTURE_ROOT/$key.json"
+  path="$TREEHOUSE_FIXTURE_ROOT/worktrees/$key"
+  slot="slot-$key"
+
+  fixture_lock_acquire
+  generation=1
+  if [ -f "$record" ]; then
+    generation=$(jq -r '(.generation // 0) + 1' "$record")
+    if [ "$(jq -r '.status' "$record")" = leased ]; then
+      jq -c . "$record"
+      fixture_lock_release
+      return 0
+    fi
+  fi
+  mkdir -p "${path%/*}"
+  if [ -e "$path" ]; then
+    git -C "$TREEHOUSE_FIXTURE_PROJECT" worktree remove --force "$path" >/dev/null 2>&1 || true
+    rm -rf "$path"
+  fi
+  git -C "$TREEHOUSE_FIXTURE_PROJECT" worktree add --detach "$path" HEAD >/dev/null
+  lease="lease-$key-$generation"
+  tmp="$record.tmp.$$"
+  jq -cn --arg name "$slot" --arg path "$path" --arg lease "$lease" \
+    --arg holder "$holder" --argjson generation "$generation" \
+    '{name:$name,path:$path,status:"leased",lease_id:$lease,lease_holder:$holder,generation:$generation}' > "$tmp"
+  mv "$tmp" "$record"
+  jq -c . "$record"
+  fixture_lock_release
+}
+
+fixture_status() {
+  local separator= record
+  fixture_lock_acquire
+  printf '['
+  for record in "$TREEHOUSE_FIXTURE_ROOT"/*.json; do
+    [ -f "$record" ] || continue
+    printf '%s' "$separator"
+    jq -c . "$record"
+    separator=,
+  done
+  printf ']\n'
+  fixture_lock_release
+}
+
+fixture_return() {
+  local expected_lease= expected_holder= path= record entry record_path tmp
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force) ;;
+      --if-lease-id) shift; expected_lease=${1:-} ;;
+      --if-lease-id=*) expected_lease=${1#--if-lease-id=} ;;
+      --if-lease-holder) shift; expected_holder=${1:-} ;;
+      --if-lease-holder=*) expected_holder=${1#--if-lease-holder=} ;;
+      *) path=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$path" ] || { echo "treehouse fixture return requires a path" >&2; exit 1; }
+
+  fixture_lock_acquire
+  record=
+  for entry in "$TREEHOUSE_FIXTURE_ROOT"/*.json; do
+    [ -f "$entry" ] || continue
+    record_path=$(jq -r '.path' "$entry")
+    if [ "$record_path" = "$path" ]; then
+      record=$entry
+      break
+    fi
+  done
+  [ -n "$record" ] || { echo "treehouse fixture found no lease for $path" >&2; exit 1; }
+  if [ -n "$expected_lease" ] && [ "$(jq -r '.lease_id // empty' "$record")" != "$expected_lease" ]; then
+    echo "treehouse fixture lease mismatch" >&2
+    exit 1
+  fi
+  if [ -n "$expected_holder" ] && [ "$(jq -r '.lease_holder // empty' "$record")" != "$expected_holder" ]; then
+    echo "treehouse fixture holder mismatch" >&2
+    exit 1
+  fi
+  git -C "$TREEHOUSE_FIXTURE_PROJECT" worktree remove --force "$path" >/dev/null 2>&1 || true
+  rm -rf "$path"
+  tmp="$record.tmp.$$"
+  jq '.status="available" | .lease_id=null | .lease_holder=null' "$record" > "$tmp"
+  mv "$tmp" "$record"
+  fixture_lock_release
+}
+
+case "${1:-}" in
+  get) fixture_get "$@" ;;
+  status) fixture_status ;;
+  return) fixture_return "$@" ;;
+  *) exit 1 ;;
+esac
 SH
 
 cat > "$FAKEBIN/herdr-workspace-mover" <<'SH'
@@ -292,7 +468,7 @@ cleanup_all() {
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
     [ -d "$wt" ] || continue
-    "$REAL_TREEHOUSE" return --force "$wt" >/dev/null 2>&1 || true
+    treehouse return --force "$wt" >/dev/null 2>&1 || true
   done <<EOF
 $RECORDED_WORKTREES
 EOF
@@ -469,28 +645,36 @@ assert_no_projection_mutation_since() {  # <line-count> <case-name>
 }
 
 HOME_DIR="$TMP_ROOT/home"
+PARALLEL_HOME_A="$TMP_ROOT/home-parallel-a"
+PARALLEL_HOME_B="$TMP_ROOT/home-parallel-b"
 PROJECT_DIR="$TMP_ROOT/project"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/anchor" "$HOME_DIR/data/shape" \
-  "$HOME_DIR/data/order-a" "$HOME_DIR/data/order-b" \
   "$HOME_DIR/data/order-fail" "$HOME_DIR/data/fm-hibit-resume-r1" \
   "$HOME_DIR/data/wheelhouse-healing-r1"
-mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b" \
+mkdir -p "$HOME_DIR/data/active-seeded" \
   "$HOME_DIR/data/lock-contended" "$HOME_DIR/data/default-on"
+mkdir -p "$PARALLEL_HOME_A/state" "$PARALLEL_HOME_A/config" \
+  "$PARALLEL_HOME_A/data/order-a" "$PARALLEL_HOME_A/data/abort-a"
+mkdir -p "$PARALLEL_HOME_B/state" "$PARALLEL_HOME_B/config" \
+  "$PARALLEL_HOME_B/data/order-b" "$PARALLEL_HOME_B/data/abort-b"
 touch "$HOME_DIR/state/.last-watcher-beat"
+touch "$PARALLEL_HOME_A/state/.last-watcher-beat" "$PARALLEL_HOME_B/state/.last-watcher-beat"
 # Presentation spaces are on by default, so the flat baseline below opts out
 # explicitly; the projected cases each restate the setting they exercise.
 printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+printf 'on\n' > "$PARALLEL_HOME_A/config/herdr-presentation-spaces"
+printf 'on\n' > "$PARALLEL_HOME_B/config/herdr-presentation-spaces"
 printf 'Projection anchor fixture.\n' > "$HOME_DIR/data/anchor/brief.md"
 printf 'Projection E2E fixture.\n' > "$HOME_DIR/data/shape/brief.md"
-printf 'Projection ordering fixture A.\n' > "$HOME_DIR/data/order-a/brief.md"
-printf 'Projection ordering fixture B.\n' > "$HOME_DIR/data/order-b/brief.md"
+printf 'Projection ordering fixture A.\n' > "$PARALLEL_HOME_A/data/order-a/brief.md"
+printf 'Projection ordering fixture B.\n' > "$PARALLEL_HOME_B/data/order-b/brief.md"
 printf 'Projection ordering failure fixture.\n' > "$HOME_DIR/data/order-fail/brief.md"
 printf 'Hi Bit-style projection restart fixture.\n' > "$HOME_DIR/data/fm-hibit-resume-r1/brief.md"
 printf 'Wheelhouse-style projection restart fixture.\n' > "$HOME_DIR/data/wheelhouse-healing-r1/brief.md"
 printf 'Projection active seeded fixture.\n' > "$HOME_DIR/data/active-seeded/brief.md"
-printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
-printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
+printf 'Projection abort fixture A.\n' > "$PARALLEL_HOME_A/data/abort-a/brief.md"
+printf 'Projection abort fixture B.\n' > "$PARALLEL_HOME_B/data/abort-b/brief.md"
 printf 'Projection lock contention fixture.\n' > "$HOME_DIR/data/lock-contended/brief.md"
 printf 'Projection default-on fixture.\n' > "$HOME_DIR/data/default-on/brief.md"
 make_project "$PROJECT_DIR"
@@ -715,20 +899,21 @@ normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr container IDs and per-acquisition IDs between opted-out and projected paths"
 
-# Two real concurrent primary spawns share the bounded presentation-order lock.
+# Two real concurrent primary spawns from distinct homes share the bounded
+# presentation-order lock without racing the per-home task-set safety guard.
 # Their final relative order must match Herdr's actual serialized create order,
 # rather than a task-name or priority guess.
 CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
-spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
+spawn_task order-a "$PARALLEL_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
 ORDER_A_PID=$!
-spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
+spawn_task order-b "$PARALLEL_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
 ORDER_B_PID=$!
 wait "$ORDER_A_PID" || fail "concurrent projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
 wait "$ORDER_B_PID" || fail "concurrent projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected spawns"
 assert_raw_presentation_mutations_preserved_since "$CONCURRENT_FOCUS_AUDIT_START" "concurrent projected spawns"
-ORDER_A_META="$HOME_DIR/state/order-a.meta"
-ORDER_B_META="$HOME_DIR/state/order-b.meta"
+ORDER_A_META="$PARALLEL_HOME_A/state/order-a.meta"
+ORDER_B_META="$PARALLEL_HOME_B/state/order-b.meta"
 remember_meta_worktree "$ORDER_A_META" >/dev/null
 remember_meta_worktree "$ORDER_B_META" >/dev/null
 
@@ -794,9 +979,9 @@ pass "real Herdr lab: forced workspace.move failure leaves a successful worker i
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
-spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
+spawn_task abort-a "$PARALLEL_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
 ABORT_A_PID=$!
-spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
+spawn_task abort-b "$PARALLEL_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
 ABORT_B_PID=$!
 if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succeeded"; fi
 if wait "$ABORT_B_PID"; then fail "post-create abort fixture B unexpectedly succeeded"; fi
@@ -809,12 +994,12 @@ ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  $1 == "abort-cleanup-probe" && $4 == a { print "cleanup-a" }
+  $1 == "abort-cleanup-probe" && $4 == b { print "cleanup-b" }
 ')
 case "$ABORT_SEQUENCE" in
-  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
-  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
+  $'create-a\ncleanup-a\ncreate-b\ncleanup-b'|$'create-b\ncleanup-b\ncreate-a\ncleanup-a') ;;
+  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE; A: $(cat "$TMP_ROOT/abort-a.err"); B: $(cat "$TMP_ROOT/abort-b.err")" ;;
 esac
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
@@ -830,10 +1015,10 @@ for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
     fail "serialized post-create abort cleanup left exact task pane $ABORT_PANE alive"
   fi
 done
-[ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
+[ ! -e "$PARALLEL_HOME_A/state/abort-a.meta" ] && [ ! -e "$PARALLEL_HOME_B/state/abort-b.meta" ] \
   || fail "post-create abort fixtures published task metadata before launch"
 rm -rf "$POST_CREATE_ABORT_CONTROL"
-rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
+rm -f "$PARALLEL_HOME_A/state/abort-a.herdr-presentation" "$PARALLEL_HOME_B/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
@@ -847,12 +1032,13 @@ if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
 fi
 lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
   || fail "projected teardown affected the focused secondmate workspace"
-[ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
+[ ! -e "$JOURNAL" ] \
+  || fail "confirmed projected teardown did not retire its presentation journal: $(cat "$TMP_ROOT/on-teardown.err")"
 pass "real Herdr lab: exact task-pane close removes the projected workspace with no unrestored wrong-focus interval"
 
-teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" &
+teardown_task order-a "$PARALLEL_HOME_A" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" &
 ORDER_A_TEARDOWN_PID=$!
-teardown_task order-b "$HOME_DIR" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" &
+teardown_task order-b "$PARALLEL_HOME_B" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" &
 ORDER_B_TEARDOWN_PID=$!
 wait "$ORDER_A_TEARDOWN_PID" || fail "projected ordering fixture A teardown failed"
 wait "$ORDER_B_TEARDOWN_PID" || fail "projected ordering fixture B teardown failed"
@@ -866,19 +1052,19 @@ pass "real Herdr lab: concurrent projected cleanup is serialized and leaves acti
 # This exercises the focus guard after the original regression sequence and
 # proves the shared presentation lock keeps concurrent operations composable.
 for ROUND in 1 2 3; do
-  mkdir -p "$HOME_DIR/data/focus-$ROUND-a" "$HOME_DIR/data/focus-$ROUND-b"
-  printf 'Projection focus wave %s fixture A.\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-a/brief.md"
-  printf 'Projection focus wave %s fixture B.\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-b/brief.md"
+  mkdir -p "$PARALLEL_HOME_A/data/focus-$ROUND-a" "$PARALLEL_HOME_B/data/focus-$ROUND-b"
+  printf 'Projection focus wave %s fixture A.\n' "$ROUND" > "$PARALLEL_HOME_A/data/focus-$ROUND-a/brief.md"
+  printf 'Projection focus wave %s fixture B.\n' "$ROUND" > "$PARALLEL_HOME_B/data/focus-$ROUND-b/brief.md"
   WAVE_LOG_START=$(log_line_count)
   WAVE_FOCUS_START=$(focus_audit_line_count)
-  spawn_task "focus-$ROUND-a" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-a.out" 2> "$TMP_ROOT/focus-$ROUND-a.err" &
+  spawn_task "focus-$ROUND-a" "$PARALLEL_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-a.out" 2> "$TMP_ROOT/focus-$ROUND-a.err" &
   WAVE_A_PID=$!
-  spawn_task "focus-$ROUND-b" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-b.out" 2> "$TMP_ROOT/focus-$ROUND-b.err" &
+  spawn_task "focus-$ROUND-b" "$PARALLEL_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-b.out" 2> "$TMP_ROOT/focus-$ROUND-b.err" &
   WAVE_B_PID=$!
   wait "$WAVE_A_PID" || fail "focus wave $ROUND spawn A failed: $(cat "$TMP_ROOT/focus-$ROUND-a.err")"
   wait "$WAVE_B_PID" || fail "focus wave $ROUND spawn B failed: $(cat "$TMP_ROOT/focus-$ROUND-b.err")"
-  remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-a.meta" >/dev/null
-  remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-b.meta" >/dev/null
+  remember_meta_worktree "$PARALLEL_HOME_A/state/focus-$ROUND-a.meta" >/dev/null
+  remember_meta_worktree "$PARALLEL_HOME_B/state/focus-$ROUND-b.meta" >/dev/null
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent spawns"
   assert_raw_presentation_mutations_preserved_since "$WAVE_FOCUS_START" "focus wave $ROUND concurrent spawns"
   WAVE_LABELS=$(projection_labels_from_log "$WAVE_LOG_START")
@@ -890,9 +1076,9 @@ for ROUND in 1 2 3; do
   [ "$WAVE_SECOND_ORDER" = "$SECOND_ORDER_BEFORE" ] \
     || fail "focus wave $ROUND changed secondmate relative order"
 
-  teardown_task "focus-$ROUND-a" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-a-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-a-teardown.err" &
+  teardown_task "focus-$ROUND-a" "$PARALLEL_HOME_A" > "$TMP_ROOT/focus-$ROUND-a-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-a-teardown.err" &
   WAVE_A_TEARDOWN_PID=$!
-  teardown_task "focus-$ROUND-b" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-b-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-b-teardown.err" &
+  teardown_task "focus-$ROUND-b" "$PARALLEL_HOME_B" > "$TMP_ROOT/focus-$ROUND-b-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-b-teardown.err" &
   WAVE_B_TEARDOWN_PID=$!
   wait "$WAVE_A_TEARDOWN_PID" || fail "focus wave $ROUND teardown A failed"
   wait "$WAVE_B_TEARDOWN_PID" || fail "focus wave $ROUND teardown B failed"
@@ -1177,15 +1363,15 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
-    "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    treehouse return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
   fi
 
   teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
     || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
-  "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
-  "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
+  treehouse return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
+  treehouse return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
 
@@ -1220,8 +1406,8 @@ CROSS_NEW_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
   || fail "cross-home reclaim changed the secondmate child's presentation label"
 teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-teardown.out" 2> "$TMP_ROOT/cross-restart-teardown.err" \
   || fail "cross-home reclaimed teardown failed: $(cat "$TMP_ROOT/cross-restart-teardown.err")"
-"$REAL_TREEHOUSE" return --force "$CROSS_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
+treehouse return --force "$CROSS_OLD_WT" >/dev/null 2>&1 || true
+treehouse return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
 
 # Two homes recovering concurrently serialize on the named session lock and
@@ -1290,10 +1476,10 @@ teardown_task "$PRIMARY_WAVE_ID" "$HOME_DIR" > "$TMP_ROOT/primary-wave-teardown.
   || fail "concurrent primary recovery teardown failed"
 teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown.out" 2> "$TMP_ROOT/bravo-wave-teardown.err" \
   || fail "concurrent secondmate recovery teardown failed"
-"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_NEW_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_NEW_WT" >/dev/null 2>&1 || true
+treehouse return --force "$PRIMARY_WAVE_OLD_WT" >/dev/null 2>&1 || true
+treehouse return --force "$BRAVO_WAVE_OLD_WT" >/dev/null 2>&1 || true
+treehouse return --force "$PRIMARY_WAVE_NEW_WT" >/dev/null 2>&1 || true
+treehouse return --force "$BRAVO_WAVE_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift"
 
 # Seed a legacy old-format primary projection and a flat secondmate tab; correction must not migrate them.
