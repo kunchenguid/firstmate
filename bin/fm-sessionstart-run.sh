@@ -52,6 +52,8 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 SOURCE=
+unset SESSION_HARNESS_PID FM_SESSION_HARNESS_PID
+SESSION_HARNESS_PID=
 while [ $# -gt 0 ]; do
   case "$1" in
     --source)
@@ -61,9 +63,16 @@ while [ $# -gt 0 ]; do
       if [ $# -ge 2 ]; then shift 2; else shift; fi
       ;;
     --source=*) SOURCE=${1#--source=}; shift ;;
+    --session-harness-pid)
+      SESSION_HARNESS_PID=${2:-}
+      if [ $# -ge 2 ]; then shift 2; else shift; fi
+      ;;
+    --session-harness-pid=*) SESSION_HARNESS_PID=${1#--session-harness-pid=}; shift ;;
     *) shift ;;
   esac
 done
+case "$SESSION_HARNESS_PID" in ''|*[!0-9]*) SESSION_HARNESS_PID= ;; esac
+FM_SESSION_HARNESS_PID=$SESSION_HARNESS_PID
 
 # The same two eligibility owners the nudge wrapper uses, so a no-mistakes gate
 # agent and an unmarked task worktree can never run a session start for a home
@@ -111,17 +120,21 @@ fi
 
 case "$SOURCE" in
   resume|reload|fork)
+    unset SESSION_HARNESS_PID FM_SESSION_HARNESS_PID
     exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
     ;;
   clear|compact)
     if session_start_completed; then
-      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true
+      "$SCRIPT_DIR/fm-session-start.sh" --session-harness-pid "$SESSION_HARNESS_PID" \
+        --reemit --source "$SOURCE" || true
     else
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+      "$SCRIPT_DIR/fm-session-start.sh" --session-harness-pid "$SESSION_HARNESS_PID" \
+        --source "$SOURCE" || true
     fi
     ;;
   *)
-    "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+    "$SCRIPT_DIR/fm-session-start.sh" --session-harness-pid "$SESSION_HARNESS_PID" \
+      --source "$SOURCE" || true
     ;;
 esac
 exit 0

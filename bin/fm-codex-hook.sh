@@ -40,7 +40,13 @@ if [ "$EVENT" = sessionstart ]; then
   # intermediate parent before they query the process table.
   # shellcheck source=bin/fm-session-lock-lib.sh
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  FM_SESSION_HARNESS_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
-  export FM_SESSION_HARNESS_PID
+  unset SESSION_HARNESS_PID FM_SESSION_HARNESS_PID
+  SESSION_HARNESS_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
+  if [ -n "$SESSION_HARNESS_PID" ]; then
+    printf '%s' "$PAYLOAD" | "$ROOT/bin/$TARGET" --session-harness-pid "$SESSION_HARNESS_PID"
+  else
+    printf '%s' "$PAYLOAD" | "$ROOT/bin/$TARGET"
+  fi
+else
+  printf '%s' "$PAYLOAD" | "$ROOT/bin/$TARGET"
 fi
-printf '%s' "$PAYLOAD" | "$ROOT/bin/$TARGET"

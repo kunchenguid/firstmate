@@ -31,6 +31,9 @@ for target in fm-sessionstart-run.sh fm-arm-pretool-check.sh fm-cd-pretool-check
 #!/usr/bin/env bash
 printf 'target=%s\n' "$(basename "$0")"
 printf 'session_pid=%s\n' "${FM_SESSION_HARNESS_PID:-}"
+printf 'session_args=%s\n' "$*"
+child_pid=$(bash -c 'sleep 0.01; printf "%s" "${FM_SESSION_HARNESS_PID:-}"')
+printf 'persistent_session_pid=%s\n' "$child_pid"
 cat
 SH
   chmod +x "$FIXTURE/bin/$target"
@@ -52,10 +55,19 @@ exercise_hook() {  # <jq-path> <command-field> <expected-target> [cwd]
   assert_contains "$out" "target=$expected" "$field did not dispatch to $expected"
   assert_contains "$out" "$payload" "$field did not preserve stdin for $expected"
   case "$expected" in
-    fm-sessionstart-run.sh) assert_contains "$out" "session_pid=610" "$field did not export SessionStart ownership" ;;
+    fm-sessionstart-run.sh)
+      assert_contains "$out" "session_args=--session-harness-pid 610" \
+        "$field did not pass SessionStart ownership explicitly"
+      printf '%s\n' "$out" | grep -Fxq 'session_pid=' || \
+        fail "$field exported SessionStart ownership to its target"
+      printf '%s\n' "$out" | grep -Fxq 'persistent_session_pid=' || \
+        fail "$field leaked SessionStart ownership to a persistent child"
+      ;;
     *)
       case "$out" in
-        *session_pid=610*) fail "$field resolved SessionStart ownership for $expected" ;;
+        *session_pid=610*|*session_args=*610*|*persistent_session_pid=610*)
+          fail "$field resolved SessionStart ownership for $expected"
+          ;;
       esac
       ;;
   esac
