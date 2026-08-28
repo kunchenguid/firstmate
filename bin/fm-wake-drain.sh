@@ -483,43 +483,23 @@ if [ -n "$ACK_THROUGH" ]; then
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   {
-    SESSION_ACK_BINDING=$("$SCRIPT_DIR/fm-codex-primary.sh" validate 2>/dev/null || true)
+    SESSION_ACK_BINDING=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-codex-primary.sh" validate 2>/dev/null || true)
     case "$SESSION_ACK_BINDING" in
       *$'\t'*)
-        "$SCRIPT_DIR/fm-codex-queue-wake.sh" acknowledge "$ACK_GENERATION" "${SESSION_ACK_BINDING#*$'\t'}" >/dev/null 2>&1 || true
-        ;;
-      *)
-        "$SCRIPT_DIR/fm-codex-queue-wake.sh" acknowledge "$ACK_GENERATION" >/dev/null 2>&1 || true
+        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          "$SCRIPT_DIR/fm-codex-queue-wake.sh" acknowledge "$ACK_THROUGH" \
+          "${SESSION_ACK_BINDING%%$'\t'*}" "${SESSION_ACK_BINDING#*$'\t'}" \
+          "$ACK_GENERATION" >/dev/null 2>&1 || true
+        if [ -s "$FM_WAKE_QUEUE" ] && [ "$RECOVERY_ACK_MOVED" != true ]; then
+          FM_HOME="$FM_HOME" FM_DAEMON_PRIMARY_HARNESS=codex FM_SUPERVISE_PRESENT=1 \
+            FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-supervise-daemon.sh" \
+            --present-wake-once \
+            "successor: acknowledged recovery=$ACK_GENERATION but newer rows remain" \
+            >/dev/null 2>&1 || true
+        fi
         ;;
     esac
-    if [ -s "$FM_WAKE_QUEUE" ] && [ "$RECOVERY_ACK_MOVED" != true ]; then
-      case "$SESSION_ACK_BINDING" in
-        *$'\t'*)
-          if [ "${FM_CODEX_QUEUE_ONLY:-0}" != 1 ]; then
-            (
-              unset LOG
-              FM_DAEMON_PRIMARY_HARNESS=codex
-              FM_SUPERVISOR_BACKEND=queue_successor
-              FM_SUPERVISOR_TARGET=successor_wake
-              FM_SUPERVISE_PRESENT=1
-              export FM_CODEX_TESTING="${FM_CODEX_TESTING:-0}" \
-                FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
-                FM_STATE_OVERRIDE="$STATE" \
-                FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
-              fm_backend_target_exists() { return 0; }
-              fm_backend_busy_state() { printf 'idle'; }
-              fm_backend_capture() { printf 'idle prompt\n'; }
-              fm_backend_composer_state() { printf 'empty'; }
-              supervisor_target_home_ok() { return 0; }
-              supervisor_target_login_shell() { return 1; }
-              fm_backend_send_text_submit() { printf 'empty'; }
-              . "$SCRIPT_DIR/fm-supervise-daemon.sh"
-              present_handle_wake "successor: acknowledged recovery=$ACK_GENERATION but newer rows remain" "$STATE"
-            ) >/dev/null 2>&1 || true
-          fi
-          ;;
-      esac
-    fi
   }
   if [ "$RECOVERY_ACK_MOVED" = true ]; then
     printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
