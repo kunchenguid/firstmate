@@ -34,7 +34,7 @@ Verify setup by spawning a small task and confirming metadata contains `backend=
 ### Windows without WSL
 
 Native Windows operation is experimental.
-Use Windows Terminal with a Git Bash profile for the Firstmate shell and Zellij interface; Windows PowerShell remains useful for installation and diagnostics, but Firstmate's scripts are Bash entrypoints.
+Use Windows Terminal with a Git Bash profile for the Firstmate shell and Zellij interface; Windows PowerShell is required for native process ancestry and remains useful for installation and diagnostics, but Firstmate's scripts are Bash entrypoints.
 Keep Firstmate at an ordinary Windows path such as `D:\git\firstmate`, select `zellij` in `config/backend`, and launch Codex from that repository.
 Git for Windows supplies Bash and the Unix command-line tools Firstmate expects, while Codex's tracked lifecycle hooks cross `cmd.exe` through `bin/fm-codex-hook.cmd` and return to the tracked Bash dispatcher.
 The session lock resolves native Codex ownership through the Windows process table because Git Bash's MSYS `ps` cannot see a native parent chain.

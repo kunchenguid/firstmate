@@ -17,6 +17,9 @@
 #             treated as `startup`, because taking the helm redundantly is
 #             cheap and idempotent while not taking it is the whole bug.
 #
+# The Codex dispatcher may also supply the internal `--session-harness-pid`
+# handoff; `fm-session-start.sh` owns its scope and clearing contract.
+#
 # Source routing (see docs/sessionstart-nudge.md for the per-harness names):
 #   startup, new            full digest - this process has not taken the helm
 #   clear, compact          `--reemit` digest only when this lock owner recorded

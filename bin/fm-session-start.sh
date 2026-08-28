@@ -210,6 +210,11 @@
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
 #             again, while an equal baseline emits no instruction refresh.
+#
+# The run wrapper may also pass its verified native harness pid through the
+# internal `--session-harness-pid` handoff. It is consulted only for the current
+# startup's harness detection, lock ownership, and instruction baseline, then
+# cleared before bootstrap can start persistent backends or agents.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

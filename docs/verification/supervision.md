@@ -13,6 +13,24 @@ The tracked `commandWindows` entries survived real `cmd.exe` parsing for Session
 The Windows process-table helper resolved a live native Codex ancestor across the `bash.exe` and `cmd.exe` hook bridge, and the session-lock behavior test pins the same process shape deterministically.
 The observed interactive Codex TUI fired the tracked project SessionStart registration; context-reset and re-emit delivery remain outside this evidence until the live reset guard records them.
 
+The repeatable regression entry points are:
+
+```sh
+tests/fm-codex-hook.test.sh
+tests/fm-session-lock-ancestry.test.sh
+tests/fm-watcher-lock.test.sh
+```
+
+Their native Windows success lines are:
+
+```text
+ok - Codex hook transport: native Windows commands dispatch from repository subdirectories
+ok - Codex hook transport: autocrlf checkout dispatches LF shell hooks through cmd.exe
+ok - session-lock: real Windows process helper emits its ancestry-row contract
+ok - session-lock: captured native Windows Codex identity survives bridge loss
+ok - MSYS publishes and releases an atomic directory lock when symlinks are unavailable
+```
+
 ## Native session-start delivery
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
