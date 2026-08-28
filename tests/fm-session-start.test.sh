@@ -1913,6 +1913,48 @@ EOF
   pass "a session start inside its budget prints no truncation banner"
 }
 
+test_codex_pid_one_acquires_lock_and_selects_supervision() {
+  local rec root home fakebin out
+  rec=$(new_world codex-pid-one)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  1:comm=) printf '%s\n' codex ;;
+  1:args=) printf '%s\n' 'codex-linux-sandbox --sandbox-policy-cwd /repo' ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    "$SESSION_START")
+
+  assert_contains "$out" "lock acquired: harness pid 1" \
+    "session start did not acquire the lock from its PID-1 Codex harness"
+  assert_not_contains "$out" "READ-ONLY SESSION" \
+    "session start became read-only under its PID-1 Codex harness"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" \
+    "session start lost Codex supervision under its PID-1 harness"
+  pass "a session under a PID-1 Codex harness acquires the lock and selects Codex supervision"
+}
+
 test_runtime_bound_leaves_harness_ancestry_headroom() {
   local rec root home fakebin nest out
   rec=$(new_world runtime-bound-ancestry)
@@ -2507,6 +2549,7 @@ test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
+test_codex_pid_one_acquires_lock_and_selects_supervision
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
