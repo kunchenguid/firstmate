@@ -12,6 +12,7 @@ SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-home-summary-refresh)
 HOME_DIR="$TMP_ROOT/mate-home"
+CADENCE_HOME="$TMP_ROOT/cadence-home"
 PARENT_HOME="$TMP_ROOT/parent-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
@@ -152,28 +153,55 @@ cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
   || fail "the status-triggered ledger differed from the real fresh producer"
 pass "watcher-carried status append publishes the real home summary"
 
-python3 - "$HOME_DIR/data/backlog.md" <<'PY'
+mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
+  "$CADENCE_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$CADENCE_HOME/AGENTS.md"
+printf 'cadence\n' > "$CADENCE_HOME/.fm-secondmate-home"
+cat > "$CADENCE_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CADENCE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
+  "$WRITER" || fail "could not seed the cadence ledger"
+PATH="$FAKEBIN:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CADENCE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=1 FM_SIGNAL_GRACE=0 \
+  FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
+  "$WATCH" > "$TMP_ROOT/cadence-watch.out" 2> "$TMP_ROOT/cadence-watch.err" &
+WATCH_PID=$!
+i=0
+while [ ! -e "$CADENCE_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$CADENCE_HOME/state/.last-watcher-beat" ] \
+  || fail "the cadence watcher did not complete its initial cycle"
+python3 - "$CADENCE_HOME/data/backlog.md" <<'PY'
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 text = path.read_text()
 path.write_text(text.replace("## Queued\n\n## Done", "## Queued\n- [ ] cadence-task - Publish without a status signal (repo: firstmate) (kind: ship)\n\n## Done"))
 PY
-sleep 1
-PATH="$FAKEBIN:$PATH" \
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
-  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=1 FM_SIGNAL_GRACE=0 \
-  FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
-  "$WATCH" > "$TMP_ROOT/cadence-watch.out" 2> "$TMP_ROOT/cadence-watch.err" &
-WATCH_PID=$!
-wait_for_ledger_generation "$NOW_THREE" 50 \
-  || fail "a backlog-only change did not refresh within the configured watcher cadence"
+i=0
+while ! jq -e 'any(.queued[]; .id == "cadence-task")' \
+  "$CADENCE_HOME/state/home-summary.json" >/dev/null 2>&1; do
+  kill -0 "$WATCH_PID" 2>/dev/null \
+    || fail "the cadence watcher exited before publishing the backlog-only change"
+  [ "$i" -lt 80 ] \
+    || fail "a backlog-only change did not refresh within the configured watcher cadence"
+  sleep 0.1
+  i=$((i + 1))
+done
 kill "$WATCH_PID" >/dev/null 2>&1 || true
 wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
-jq -e 'any(.queued[]; .id == "cadence-task")' "$HOME_DIR/state/home-summary.json" >/dev/null \
-  || fail "the cadence refresh did not publish the backlog-only change"
 pass "live watcher cadence bounds publication staleness without signals"
 
 # Publication-only boundary: poison the ledger with a structurally complete but
