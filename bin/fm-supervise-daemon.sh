@@ -389,7 +389,7 @@ daemon_terminal_summary() {  # <task> <state> <status-line>
 
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen class summary open key verb note line
-  local unread_file unread unread_had_last fingerprints=""
+  local unread_file unread unread_had_last fingerprints="" legacy_fingerprint
   for f in $reason; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
@@ -413,8 +413,13 @@ classify_signal() {  # <reason-after-colon> <state>
           summary=$(fm_human_notify_summary "$state" "$task" "$line") || summary=''
           distilled="${distilled}${summary} | "
         fi
-      elif status_is_captain_relevant "$line"; then
+      elif status_captain_relevant_is_current "$f" "$line"; then
         rel=1
+        legacy_fingerprint=$(printf 'legacy\t%s\t%s' "$task" "$line" | _fm_human_notify_sha256)
+        case "$fingerprints" in
+          *"|$legacy_fingerprint|"*) continue ;;
+        esac
+        fingerprints="$fingerprints|$legacy_fingerprint|"
         all_seen=0
         distilled="${distilled}$(daemon_terminal_summary "$task" "$state" "$line") | "
       fi

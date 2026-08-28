@@ -139,6 +139,15 @@ test_classify_buried_open_decision_escalates() {
     *) fail "legacy actionable status did not produce a readable generic escalation: $out" ;;
   esac
   case "$out" in *'/home/private/'*|*'internal.example'*) fail "legacy actionable status exposed private evidence: $out" ;; esac
+  printf 'PR ready: prior result\nworking: revising the result\n' > "$state/t.status"
+  cp "$state/t.status" "$state/t.away-unread"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in self\|*) ;; *) fail "resolved legacy readiness remained actionable: $out" ;; esac
+  printf 'PR ready: same result\nPR ready: same result\n' > "$state/t.status"
+  cp "$state/t.status" "$state/t.away-unread"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  [ "$(printf '%s' "$out" | awk -F 'new actionable update surfaced' '{ print NF - 1 }')" -eq 1 ] \
+    || fail "away signal repeated one legacy condition in its digest: $out"
   pass "away signal classification folds, deduplicates, and sanitizes unread conditions"
 }
 

@@ -333,7 +333,7 @@ signal_human_reason() {  # stdin: scan_signals rows
         continue
       fi
       [ "$(status_line_verb "$line")" = resolved ] && continue
-      if status_is_captain_relevant "$line" || [ "$kind" = secondmate ]; then
+      if [ "$kind" = secondmate ] || status_captain_relevant_is_current "$f" "$line"; then
         file_has_unclassified_actionable=1
       fi
     done <<EOF
@@ -864,7 +864,7 @@ status_unread_range_is_actionable() {  # <file> <seen-signature> <captured-signa
       continue
     fi
     [ "$(status_line_verb "$line")" = resolved ] && continue
-    status_is_captain_relevant "$line" && return 0
+    status_captain_relevant_is_current "$f" "$line" && return 0
     [ "$kind" = secondmate ] && return 0
   done <<EOF
 $unread

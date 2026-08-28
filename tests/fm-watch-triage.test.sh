@@ -673,6 +673,24 @@ test_working_note_not_working_absorbed() {
   pass "a routine working note with no captain-relevant outcome is absorbed before model invocation"
 }
 
+test_resolved_legacy_readiness_is_absorbed() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case resolved-legacy-readiness); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'PR ready: prior result\nworking: revising the result\n' > "$status_file"
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · revising the result'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher surfaced resolved legacy readiness: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "resolved legacy readiness printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "resolved legacy readiness enqueued a durable wake"
+  [ -s "$state/.seen-task_status" ] || fail "absorbed legacy history did not advance its suppressor"
+  reap "$pid"
+  pass "legacy readiness superseded by current work is absorbed"
+}
+
 test_secondmate_status_note_surfaced_despite_busy_agent() {
   local dir state fakebin out drain_out pid
   dir=$(make_case secondmate-note-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3023,6 +3041,7 @@ test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_absorbed
 test_working_note_not_working_absorbed
+test_resolved_legacy_readiness_is_absorbed
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced

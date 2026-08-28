@@ -437,6 +437,11 @@ status_is_captain_relevant() {
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
+status_captain_relevant_is_current() {  # <status-file> <status-line>
+  [ "$(last_status_line "$1")" = "$2" ] || return 1
+  status_is_captain_relevant "$2"
+}
+
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
 # read of the line itself, so the daemon's classify_stale can reuse the last line
 # it already read without a fm-crew-state.sh call. Matches only the verb before the
