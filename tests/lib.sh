@@ -187,6 +187,36 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm_fake_treehouse_lease <fakebin>: drop a treehouse stub implementing the
+# durable-lease acquire surface bin/fm-spawn.sh depends on. `treehouse get
+# --lease --lease-holder <id>` prints ${FM_FAKE_LEASE_PATH} - falling back to
+# ${FM_FAKE_PANE_PATH}, which every spawn fixture already aims at its fake
+# worktree - to stdout and exits 0; with FM_FAKE_LEASE_GET_STATUS set nonzero
+# it exits with that status and prints nothing, modeling an allocator refusal.
+# Every other invocation exits 0. The leased path must equal the path the fake
+# pane reports, so the spawn's settle loop can confirm the pane at it.
+fm_fake_treehouse_lease() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  get)
+    shift
+    [ "${1:-}" = --lease ] || exit 0
+    if [ -n "${FM_FAKE_LEASE_GET_STATUS:-}" ] && [ "$FM_FAKE_LEASE_GET_STATUS" != 0 ]; then
+      echo "fake treehouse: lease refused" >&2
+      exit "$FM_FAKE_LEASE_GET_STATUS"
+    fi
+    printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
