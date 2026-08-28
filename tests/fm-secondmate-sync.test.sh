@@ -360,10 +360,7 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
-elif [ "${1:-} ${2:-}" = 'watch --help' ]; then
-  printf '%s\n' '      --pr string'
-elif [ "${1:-} ${2:-} ${3:-}" = 'axi run --help' ]; then
-  printf '%s\n' '      --intent string'
+  exit 0
 fi
 exit 0
 SH
