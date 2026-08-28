@@ -73,11 +73,13 @@
 #    its from-firstmate marker and corr token verbatim in this body>
 #
 # Sequence numbers are never reused within a task: allocation scans every
-# place a sequence can still be occupied from - the inbox root, handled/, and
-# handled/orphaned/, where a retired closure outlives the record a worker
-# removed instead of acknowledging - so a message is processed at most once per
-# worker lifetime even if every doorbell is duplicated, and a reissued sequence
-# can never bind a fresh closure to an already-surfaced orphan's name.
+# place a sequence can still be occupied from - the inbox root's records and
+# its parked .NNN.resolve sidecars, handled/, and handled/orphaned/, the last
+# two of which hold a closure that outlives the record a worker removed
+# instead of acknowledging - so a message is processed at most once per worker
+# lifetime even if every doorbell is duplicated, and a reissued sequence can
+# never adopt a stranded closure nor bind a fresh one to an already-surfaced
+# orphan's name.
 # Concurrent writers serialize on .seq.lock; the worst racing outcome is
 # ordering, never loss.
 #
@@ -218,11 +220,10 @@ fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox/handled' "$1" "$2"
 }
 
-# Numeric sequence of one record basename (NNN.msg) or one retired orphan
-# closure basename (NNN.resolve, the name handled/orphaned/ files it under), or
-# fail for any other name. A sidecar still in the inbox root (.NNN.resolve) is
-# deliberately not a match: its leading dot leaves a non-numeric stem, and the
-# record it is bound to already carries that sequence.
+# Numeric sequence of one record basename (NNN.msg) or one closure basename
+# (NNN.resolve, the name handled/orphaned/ files a retired orphan under), or
+# fail for any other name. A sidecar still in the inbox root carries a leading
+# dot (.NNN.resolve); strip it before asking, as fm_task_inbox_next_seq does.
 fm_task_inbox_seq_of() {  # <basename>
   local n=$1
   case "$n" in
@@ -235,15 +236,19 @@ fm_task_inbox_seq_of() {  # <basename>
 }
 
 # Next unused sequence, scanning EVERY location a sequence can still be
-# occupied from: the inbox root, handled/, and handled/orphaned/. The last one
-# is not optional. A retired orphan closure is the only surviving trace of a
-# record the worker removed instead of acknowledging, so counting only the two
-# .msg locations would reissue that sequence, and the fresh sidecar bound to it
-# would carry a name .orphan-escalated already lists - retiring an answer that
-# was never surfaced and never closing its decision. Caller must hold
-# .seq.lock.
+# occupied from: the inbox root's records AND its parked .NNN.resolve
+# sidecars, handled/, and handled/orphaned/. None of them is optional. A
+# closure is the only surviving trace of a record the worker removed instead
+# of acknowledging - parked in the root until the ladder surfaces it, retired
+# under handled/orphaned/ afterwards - so counting only the .msg locations
+# would reissue that sequence. A fresh record on a reissued sequence adopts the
+# stranded sidecar as its own (making the orphan invisible to the ladder), and
+# the next answer on it overwrites that parked closure outright, destroying an
+# already-delivered answer with no escalation; after retirement it would
+# instead carry a name .orphan-escalated already lists, retiring an answer that
+# was never surfaced. Caller must hold .seq.lock.
 fm_task_inbox_next_seq() {  # <inbox-dir>
-  local dir=$1 max=0 d f n
+  local dir=$1 max=0 d f n base
   for d in "$dir" "$dir/handled"; do
     for f in "$d"/*.msg; do
       [ -e "$f" ] || continue
@@ -254,6 +259,18 @@ fm_task_inbox_next_seq() {  # <inbox-dir>
   for f in "$dir/handled/orphaned"/*.resolve; do
     [ -e "$f" ] || continue
     n=$(fm_task_inbox_seq_of "${f##*/}") || continue
+    [ "$n" -le "$max" ] || max=$n
+  done
+  # Regular files only, unlike the loops above: a parked closure is always one
+  # (fm_task_inbox_defer_resolution renames a temp file into place and verifies
+  # it), so this counts every real one. A NON-file squatting on a sidecar path
+  # is not a closure and holds no sequence - skipping its name here is what
+  # keeps it colliding with the next record, where defer_resolution refuses it
+  # loudly, instead of being quietly allocated around forever.
+  for f in "$dir"/.*.resolve; do
+    [ -f "$f" ] || continue
+    base=${f##*/}
+    n=$(fm_task_inbox_seq_of "${base#.}") || continue
     [ "$n" -le "$max" ] || max=$n
   done
   printf '%03d' "$((max + 1))"

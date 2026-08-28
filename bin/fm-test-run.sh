@@ -1174,12 +1174,16 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-task-inbox-lib.sh)
-      # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
-      # (backend-dispatch), the watcher's re-ring check (watcher-wake-lock),
-      # and the live doorbell guard against real harnesses.
+      # The steering-inbox record/doorbell/ladder/closure owner: fm-send's data
+      # plane (backend-dispatch), the watcher's re-ring check
+      # (watcher-wake-lock), the live doorbell guard against real harnesses,
+      # teardown's pending-closure commit (pr-forge), and the wake drain's
+      # delivered-but-unread annotation, whose suite has no family of its own.
       printf '%s\n' backend-dispatch
       printf '%s\n' watcher-wake-lock
       printf '%s\n' live-harness-optin
+      printf '%s\n' pr-forge
+      printf '%s\n' __script__:fm-wake-drain-open-decisions.test.sh
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|\
     bin/fm-home-summary-refresh.sh)

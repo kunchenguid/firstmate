@@ -28,8 +28,9 @@
 #      survives a sloppy glob sweep of the inbox root, a commit that partly
 #      fails closes each key at most once when retried, the surfaced marker
 #      names only the closures a pass actually failed on, a surfaced orphan
-#      that could not be retired never hides a newer one, a retired orphan's
-#      sequence is never reissued to a later answer, a captain-held task
+#      that could not be retired never hides a newer one, a stranded closure's
+#      sequence is never reissued to a later answer whether it is still parked
+#      in the inbox root or already retired, a captain-held task
 #      settled through another channel counts as closed, and a hold-id
 #      closure actually closes its captain-held task with the acknowledging
 #      task's provenance when the real watcher commits it.
@@ -923,6 +924,61 @@ test_a_retired_orphan_sequence_is_never_reissued() {
   pass "inbox: a sequence whose record survives only as a retired orphan closure is never reissued"
 }
 
+# The SAME rule one poll earlier, and the wider half of it: between the moment
+# the worker removes its record and the moment the ladder retires the stranded
+# closure, that closure sits in the inbox ROOT as .NNN.resolve. Nothing has
+# failed and nobody has been slow - a steer arriving before the next poll is
+# ordinary. An allocator that counted only the .msg locations would hand that
+# sequence straight back, and the reissued record would ADOPT the stranded
+# closure as its own: the orphan becomes invisible to the ladder (its record
+# exists again, so it never escalates) and the next answer on that sequence
+# overwrites the parked closure outright, destroying an answer already
+# delivered to the captain with no escalation and no path back. So the parked
+# sidecars count too.
+test_a_parked_closure_holds_its_sequence_before_retirement() {
+  local state rec1 rec2 sidecar1 sidecar2 out pending
+  state="$TMP_ROOT/parked-seq-reuse/state"; mkdir -p "$state"
+  printf 'needs-decision [key=first]: pick\nneeds-decision [key=second]: pick\n' > "$state/t1.status"
+  rec1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer one")
+  sidecar1=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec1" "answer one" "first" "")
+  [ "${rec1##*/}" = 001.msg ] || fail "fixture: the first record should be 001.msg, got ${rec1##*/}"
+  # The contract violation, with the ladder not yet run: the closure is still
+  # parked in the root and nothing has been surfaced or retired.
+  rm -f "$rec1"
+  [ "$sidecar1" = "$state/t1.inbox/.001.resolve" ] \
+    || fail "fixture: the closure should be parked in the inbox root, got $sidecar1"
+
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "answer two")
+  [ "${rec2##*/}" != 001.msg ] \
+    || fail "a sequence whose only surviving trace is a closure still parked in the inbox root was reissued, so the fresh record would adopt that stranded closure"
+
+  # The stranded closure must still be the orphan the ladder escalates, and
+  # the fresh answer must park on its own name instead of overwriting it.
+  out=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$out" = "escalate 0 orphaned $sidecar1" ] \
+    || fail "the stranded closure stopped reading as an orphan: $out"
+  sidecar2=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec2" "answer two" "second" "")
+  [ "$sidecar2" != "$sidecar1" ] \
+    || fail "the fresh answer was parked onto the stranded closure's own name"
+  grep -q '^status-key=first$' "$sidecar1" \
+    || fail "the already-delivered answer was destroyed:"$'\n'"$(cat "$sidecar1")"
+
+  pending=$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)
+  [ "$pending" = "first
+second" ] || fail "both answers should still read as delivered-but-unread: $pending"
+
+  # And the fresh one still closes normally once its record is acknowledged.
+  mv "$rec2" "$state/t1.inbox/handled/"
+  inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null \
+    || fail "the fresh closure should commit on acknowledgement"
+  grep -q '^resolved \[key=second\]: answered: answer two$' "$state/t1.status" \
+    || fail "the fresh answer never closed its decision:"$'\n'"$(cat "$state/t1.status")"
+  if grep -q '^resolved \[key=first\]' "$state/t1.status"; then
+    fail "the stranded answer must stay open until it is surfaced, not close on another record's acknowledgement"
+  fi
+  pass "inbox: a sequence whose closure is still parked in the inbox root is never reissued"
+}
+
 # A captain-held task the sidecar answers, driven through the REAL watcher in
 # the environment it runs under (an FM_HOME with its own backlog): the
 # acknowledgement must close the task through the one keyed-answer intake,
@@ -1466,6 +1522,7 @@ test_blocked_escalation_fires_one_poll_after_first_skip
 test_orphaned_sidecar_escalates_instead_of_going_silent
 test_surfaced_orphan_left_in_root_never_shadows_a_newer_orphan
 test_a_retired_orphan_sequence_is_never_reissued
+test_a_parked_closure_holds_its_sequence_before_retirement
 test_watcher_closes_the_captain_held_task_with_its_provenance
 test_commit_treats_a_hold_settled_elsewhere_as_closed
 test_watcher_rerings_idle_pane_quietly
