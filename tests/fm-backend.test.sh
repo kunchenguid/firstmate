@@ -350,6 +350,40 @@ test_backend_detect_cmux_fallback_ancestry_stops_at_launchd() {
 # The auto-detect NOTICE must say when cmux was selected via a fallback
 # signal, so a captain can tell a wrapper-stripped claude-under-cmux spawn
 # apart from the primary-marker case.
+test_validate_task_endpoint_orca_compound_worktree_id() {
+  local state=$TMP_ROOT/orca-endpoint-state
+  local id=orca-endpoint-task
+  mkdir -p "$state"
+  make_orca_endpoint_meta() {  # <worktree-id-value> <meta-name>
+    fm_write_meta "$state/$2" \
+      "window=fm-$id" \
+      "worktree=$TMP_ROOT/worktree" \
+      "project=$TMP_ROOT/project" \
+      "backend=orca" \
+      "endpoint_task_id=$id" \
+      "terminal=term-1536ad4b" \
+      "orca_worktree_id=$1"
+  }
+  make_orca_endpoint_meta '7e6db6af-ad90-4e6a-85a7-e94929440dd4::/home/shiv/orca/workspaces/firstmate/fm-some-task' compound.meta
+  make_orca_endpoint_meta '7e6db6af-ad90-4e6a-85a7-e94929440dd4' plain-atom.meta
+
+  fm_backend_validate_task_endpoint "$state/compound.meta" "$id" \
+    || fail "compound <repoId>::<path> orca_worktree_id should validate"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term-1536ad4b ] \
+    || fail "compound validation should set the terminal as the target"
+  fm_backend_validate_task_endpoint "$state/plain-atom.meta" "$id" \
+    || fail "plain atom orca_worktree_id should still validate"
+
+  local bad
+  for bad in '' '::/no/repo/side' 'repo-id::' 'repo-id::path::again' 'bad repo::/path' 'repo-id::/pa th'; do
+    make_orca_endpoint_meta "$bad" bad.meta
+    if fm_backend_validate_task_endpoint "$state/bad.meta" "$id" 2> /dev/null; then
+      fail "malformed orca_worktree_id '$bad' should refuse"
+    fi
+  done
+  pass "orca endpoint validation accepts Orca's compound worktree id and refuses malformed values"
+}
+
 test_backend_name_cmux_fallback_notice() {
   local dir cfg fb out errfile
   dir="$TMP_ROOT/name-fallback-notice"; cfg="$dir/config-empty"; mkdir -p "$cfg"
@@ -1127,6 +1161,7 @@ test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
+  test_validate_task_endpoint_orca_compound_worktree_id
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta

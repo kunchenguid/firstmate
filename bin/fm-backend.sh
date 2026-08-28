@@ -383,6 +383,27 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# fm_backend_endpoint_orca_worktree_id_valid: Orca's canonical worktree id is
+# the compound form `<repoId>::<worktreePath>` (bin/backends/orca.sh spawn
+# records the repo id joined to the managed worktree path), so the repo side
+# must be a strict atom while the path side may contain '/'. A plain atom
+# (for example a bare worktree uuid) stays valid; empty, ambiguous, or
+# multi-compound values refuse.
+fm_backend_endpoint_orca_worktree_id_valid() {  # <value>
+  local repo_id path
+  case "$1" in
+    *::*)
+      repo_id=${1%%::*}
+      path=${1#*::}
+      case "$path" in ''|*::*|*[!A-Za-z0-9._@%+/-]*) return 1 ;; esac
+      fm_backend_endpoint_atom_valid "$repo_id"
+      ;;
+    *)
+      fm_backend_endpoint_atom_valid "$1"
+      ;;
+  esac
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -503,7 +524,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_endpoint_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
