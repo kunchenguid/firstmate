@@ -1300,7 +1300,7 @@ test_dead_or_unknown_leftover_stays_silent_when_backoff_due() {
 # digest. The payload is one decide-or-discard. A second poll the same day must
 # not scream again. Emitting the list never teardowns unlanded copies.
 test_daily_leftover_list_emits_once() {
-  local dir state fakebin out capture_file window key pane_hash sig pid back note
+  local dir state fakebin out capture_file window key pane_hash sig pid back note now mt
   dir=$(make_case leftover-list-daily); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-leftover-list"
@@ -1337,8 +1337,12 @@ test_daily_leftover_list_emits_once() {
     fail "a young leftover note woke the daily leftover list: $(cat "$out")"
   fi
   grep -F "leftover list" "$out" >/dev/null && { reap "$pid"; fail "a young leftover note was treated as long-inactive: $(cat "$out")"; }
+  now=$(date +%s)
+  mt=$(file_mtime "$state/.leftover-list")
+  [ -n "$mt" ] && [ $((now - mt)) -lt 60 ] || { reap "$pid"; fail "young leftover notes left the daily leftover-list marker expired"; }
   reap "$pid"
   set_mtime "$back" "$note"
+  set_mtime "$back" "$state/.leftover-list"
   clear_watcher_cycle "$state"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1396,6 +1400,47 @@ test_daily_leftover_list_skips_discarded_task() {
   [ -f "$dir/wt/keep-me" ] || { reap "$pid"; fail "discarded leftover-list cleanup deleted unlanded copies"; }
   reap "$pid"
   pass "a leftover note whose task meta is gone does not re-wake the daily digest"
+}
+
+# A failed leftover-list enqueue must leave the daily marker expired so the
+# next poll retries. Advancing first would hide long-inactive work for a day.
+test_daily_leftover_list_retries_when_wake_fails() {
+  local dir state fakebin out pid back note now mt st
+  dir=$(make_case leftover-list-retry); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mkdir -p "$dir/wt"
+  printf 'keep-me\n' > "$dir/wt/keep-me"
+  printf 'kind=ship\nworktree=%s\n' "$dir/wt" > "$state/retry.meta"
+  note="$state/.leftover-task-retry"
+  printf 'task=retry\nlast-movement=working: leftover quiet\nwork-sits=%s\n' "$dir/wt" > "$note"
+  touch "$state/.leftover-list"
+  : > "$state/.wake-queue"
+  chmod a-w "$state/.wake-queue"
+  back=$(( $(date +%s) - 90000 ))
+  set_mtime "$back" "$state/.leftover-list"
+  set_mtime "$back" "$note"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100
+  st=$?
+  chmod u+w "$state/.wake-queue" 2>/dev/null || true
+  [ "$st" -ne 124 ] || fail "watcher did not exit when leftover-list enqueue failed"
+  grep -F "leftover list" "$out" >/dev/null && fail "leftover list printed after a failed enqueue: $(cat "$out")"
+  now=$(date +%s)
+  mt=$(file_mtime "$state/.leftover-list")
+  [ -n "$mt" ] && [ $((now - mt)) -ge 80000 ] || fail "daily leftover-list marker advanced before the digest was queued"
+  : > "$state/.wake-queue"
+  clear_watcher_cycle "$state"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "leftover list did not retry after enqueue failed"
+  grep -F "check: leftover list:" "$out" >/dev/null || fail "leftover list retry did not print the digest: $(cat "$out")"
+  grep -Fx "decide-or-discard" "$out" >/dev/null || fail "leftover list retry omitted decide-or-discard: $(cat "$out")"
+  [ -f "$dir/wt/keep-me" ] || fail "leftover list retry deleted unlanded copies"
+  pass "a leftover list retries the same day when enqueue fails before the marker advances"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -3314,6 +3359,7 @@ test_leftover_idle_old_wedge_markers_do_not_escalate
 test_dead_or_unknown_leftover_stays_silent_when_backoff_due
 test_daily_leftover_list_emits_once
 test_daily_leftover_list_skips_discarded_task
+test_daily_leftover_list_retries_when_wake_fails
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
