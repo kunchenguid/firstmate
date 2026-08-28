@@ -106,7 +106,7 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 case " $* " in
   *" --output json "*)
-    printf '{"state":"%s","sha":"%s","head_pipeline":{"status":"%s"}}\n' \
+    printf '{"state":"%s","sha":"%s","head_pipeline":{"status":"%s"},"reviewer":{"state":"active"}}\n' \
       "${FM_TEST_GLAB_STATE:-opened}" \
       "${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
       "${FM_TEST_GLAB_CHECKS:-success}"
@@ -2848,7 +2848,7 @@ group/subgroup/project
     PATH="$dir/fakebin:$BASE_PATH" \
     "$POLL" --observe-validated gitlab "$url" gitlab.example group/subgroup/project 7)
   [ "$out" = 'observed|opened|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|FAILED|FAILED' ] \
-    || fail "GitLab observation omitted head or check evidence: $out"
+    || fail "GitLab observation confused nested state or omitted head/check evidence: $out"
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git

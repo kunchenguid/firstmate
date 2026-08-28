@@ -22,7 +22,10 @@
 #   fm_human_notify_apply_transition <state> <task-id> <status-line>
 #   fm_human_notify_resolve_line <state> <task-id> <status-line>
 #   fm_human_notify_clear_hold <state> <task-id>
+#   fm_human_notify_reopen_blocker <state> <task-id>
 #   fm_human_notify_clear_review <state> <task-id>
+#   fm_human_notify_pr_evidence_is_red <checks> <conclusion>
+#   fm_human_notify_review_current <state> <task-id>
 #   fm_human_notify_pr_observation_record <state> <task-id> <state> <head> <checks> <conclusion>
 #   fm_human_notify_clear_task <state> <task-id>
 #   fm_human_notify_summary <state> <task-id> <status-line>
@@ -228,6 +231,7 @@ fm_human_notify_apply_transition() {  # <state> <task> <status-line>
       _fm_human_notify_remove_task_class "$state" "$task" failure
       ;;
     working)
+      _fm_human_notify_remove_task_class "$state" "$task" blocker
       _fm_human_notify_remove_task_class "$state" "$task" failure
       _fm_human_notify_remove_task_class "$state" "$task" result
       _fm_human_notify_remove_task_class "$state" "$task" review-ready
@@ -243,8 +247,34 @@ fm_human_notify_clear_hold() {  # <state> <captain-held-task-id>
   _fm_human_notify_remove_class_key "$1" "$2" captain-hold "$2"
 }
 
+fm_human_notify_reopen_blocker() {  # <state> <task-id>
+  local state=$1 task=$2 legacy_key
+  _fm_human_notify_remove_task_class "$state" "$task" blocker
+  legacy_key=$(printf '%s' "$task" | tr ':/.' '___')
+  rm -f -- "$state/.hb-surfaced-$legacy_key" "$state/.subsuper-seen-status-$legacy_key"
+}
+
 fm_human_notify_clear_review() {  # <state> <task-id>
   _fm_human_notify_remove_class_key "$1" "$2" review-ready ready
+}
+
+fm_human_notify_pr_evidence_is_red() {  # <checks> <conclusion>
+  case ",$(printf '%s,%s' "$1" "$2" | tr '[:lower:]' '[:upper:]')," in
+    *,FAILURE,*|*,FAILED,*|*,ERROR,*|*,CANCELLED,*|*,CANCELED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_human_notify_review_current() {  # <state> <task-id>
+  local file state checks conclusion
+  file="$1/$2.pr-observation"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  state=$(sed -n 's/^state=//p' "$file" | head -1)
+  checks=$(sed -n 's/^checks=//p' "$file" | head -1)
+  conclusion=$(sed -n 's/^conclusion=//p' "$file" | head -1)
+  case "$state" in CLOSED|closed|MERGED|merged) return 1 ;; esac
+  fm_human_notify_pr_evidence_is_red "$checks" "$conclusion" && return 1
+  return 0
 }
 
 fm_human_notify_pr_observation_record() {  # <state> <task> <pr-state> <head> <checks> <conclusion>

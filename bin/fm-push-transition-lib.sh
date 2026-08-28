@@ -166,13 +166,18 @@ mark_surfaced() {  # <status-file>
 
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason last
+  local backend=$1 session=$2 record=$3 pane_id to window task reason last display
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
   window="$session:$pane_id"
   task=$(window_to_task "$window" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
+  if [ -f "$STATE/$task.meta" ]; then
+    display=$(fm_display_name_for_meta "$STATE/$task.meta" "$task")
+  else
+    display=$(fm_display_name_fallback "$task")
+  fi
   # External waits retain their bounded cadence. Captain-owned waits remain
   # silent until evidence changes or the captain answers.
   if status_is_paused "$last" || status_is_captain_held "$last"; then
@@ -181,14 +186,17 @@ handle_push_transition() {  # <backend> <session> <record>
     return
   fi
   if fm_human_notify_class "$last" >/dev/null 2>&1; then
+    if fm_backend_transition_reopened "$backend" "$STATE" "$session" "$record"; then
+      fm_human_notify_reopen_blocker "$STATE" "$task"
+    fi
     if ! fm_human_notify_pending "$STATE" "$task" "$last"; then
       triage_log "absorbed push $to (unchanged human-owned condition): $window"
       fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
       return
     fi
-    reason="stale: $window (herdr: agent $to - $(fm_human_notify_summary "$STATE" "$task" "$last"))"
+    reason="stale: $(fm_human_notify_summary "$STATE" "$task" "$last")"
   else
-    reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
+    reason="stale: $display: live supervision reported the worker $to without a declared wait. Action required: inspect the worker and choose recovery."
   fi
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1

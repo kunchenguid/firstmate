@@ -193,3 +193,37 @@ wait "$WATCH_PID" 2>/dev/null || true
 assert_contains "$(cat "$TMP_ROOT/reopen.out")" 'new failure evidence surfaced' \
   "reopened failure did not surface after its lifecycle clear"
 pass "coalesced resolution and reopening is actionable before receipt recording"
+
+CURRENT="$TMP_ROOT/currentness"
+mkdir -p "$CURRENT"
+printf 'display_name=CRM · Current State\nbusy_gen=current-1\nkind=ship\nproject=firstmate\n' > "$CURRENT/c.meta"
+printf '%s\n%s\n' "$FAILURE" 'working: recovery completed' > "$CURRENT/c.status"
+(
+  export FM_STATE_OVERRIDE="$CURRENT" FM_ROOT_OVERRIDE="$ROOT"
+  # shellcheck source=bin/fm-watch.sh
+  . "$ROOT/bin/fm-watch.sh"
+  ! status_human_condition_is_current "$CURRENT/c.status" "$FAILURE"
+) || fail "a resolved historical failure remained current"
+
+printf '%s\n' "$REVIEW" > "$CURRENT/c.status"
+CURRENT_HEAD=$(printf 'c%.0s' {1..40})
+for observation in 'CLOSED COMPLETED SUCCESS' 'MERGED COMPLETED SUCCESS' 'OPEN COMPLETED FAILURE'; do
+  read -r obs_state obs_checks obs_conclusion <<< "$observation"
+  fm_human_notify_pr_observation_record "$CURRENT" c "$obs_state" \
+    "$CURRENT_HEAD" "$obs_checks" "$obs_conclusion"
+  (
+    export FM_STATE_OVERRIDE="$CURRENT" FM_ROOT_OVERRIDE="$ROOT"
+    # shellcheck source=bin/fm-watch.sh
+    . "$ROOT/bin/fm-watch.sh"
+    ! status_human_condition_is_current "$CURRENT/c.status" "$REVIEW"
+  ) || fail "a closed, merged, or red review target resurfaced as review-ready: $observation"
+done
+fm_human_notify_pr_observation_record "$CURRENT" c OPEN \
+  "$CURRENT_HEAD" COMPLETED SUCCESS
+(
+  export FM_STATE_OVERRIDE="$CURRENT" FM_ROOT_OVERRIDE="$ROOT"
+  # shellcheck source=bin/fm-watch.sh
+  . "$ROOT/bin/fm-watch.sh"
+  status_human_condition_is_current "$CURRENT/c.status" "$REVIEW"
+) || fail "an open green review target was not current"
+pass "only final active terminal conditions and reviewable PR states can surface"

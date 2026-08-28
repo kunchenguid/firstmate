@@ -34,7 +34,9 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+    "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.herdr-working-* \
+    "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+  rm -rf "$STATE_DIR/human-notifications"
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -54,10 +56,26 @@ handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
 [ -e "$STATE_DIR/.wake-queue" ] || fail "handle_push_transition should enqueue a wake for a blocked crew"
 grep -q 'stale' "$STATE_DIR/.wake-queue" || fail "the enqueued wake must be a stale record: $(cat "$STATE_DIR/.wake-queue")"
 grep -q 'default:wG:pQ' "$STATE_DIR/.wake-queue" || fail "the stale record must name the crew's window"
-grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
+grep -q 'live supervision reported the worker blocked' "$STATE_DIR/.wake-queue" || fail "the stale payload must explain the live blocked transition"
 [ -s "$WAKE_LOG" ] || fail "handle_push_transition must wake the supervisor for a blocked crew"
+! grep -q 'default:wG:pQ' "$WAKE_LOG" || fail "the surfaced push reason leaked its private endpoint"
 [ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "handle_push_transition must commit dedupe only after enqueue"
-pass "handle_push_transition: a blocked crew enqueues a stale wake naming its window and wakes the supervisor"
+pass "handle_push_transition: a blocked crew routes privately and wakes with a readable outcome"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "display_name=CRM · Import"
+printf 'blocked [key=access]: credential remains unavailable\n' > "$STATE_DIR/tk1.status"
+fm_human_notify_record "$STATE_DIR" tk1 'blocked [key=access]: credential remains unavailable'
+if fm_backend_herdr_apply_transition "$STATE_DIR" default "$(mkrec wG:pQ working)"; then
+  fail "a working transition became actionable"
+fi
+fm_human_notify_pending "$STATE_DIR" tk1 'blocked [key=access]: credential remains unavailable' \
+  || fail "the working transition did not clear the prior human receipt"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+grep -q 'CRM · Import: blocker evidence changed' "$WAKE_LOG" \
+  || fail "a genuinely reopened blocked edge did not surface readably"
+! grep -q 'default:wG:pQ' "$WAKE_LOG" || fail "the reopened blocked reason leaked its private endpoint"
+pass "handle_push_transition: working clears the receipt before a reopened blocked edge"
 
 reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"

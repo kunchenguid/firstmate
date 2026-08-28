@@ -116,16 +116,30 @@ EOF
     # comes from the validated record rather than glab's configured default.
     # It cannot take a merge request URL the way gh does: that form shells out
     # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
+    # The legacy merge-only interface reads glab's field output. Observation
+    # mode parses glab's JSON structurally with Perl's core JSON module so nested
+    # state and status fields cannot replace the merge request's top-level data.
+    # An unreadable or changed response stays silent instead of reporting a merge.
     if [ "$mode" = observe ]; then
       raw=$(glab mr view "$number" -R "https://$host/$path" --output json 2>/dev/null) || exit 0
-      compact=$(printf '%s' "$raw" | tr -d '\n\r\t ')
-      state=$(printf '%s' "$compact" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
-      head=$(printf '%s' "$compact" | sed -n 's/.*"sha":"\([0-9a-f]*\)".*/\1/p')
-      checks=$(printf '%s' "$compact" | sed -n 's/.*"status":"\([A-Za-z_]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')
+      parsed=$(printf '%s' "$raw" | perl -MJSON::PP -0777 -e '
+        my $raw = <STDIN>;
+        my $value = eval { JSON::PP::decode_json($raw) };
+        exit 1 unless ref($value) eq "HASH";
+        my $state = $value->{state};
+        my $head = $value->{sha};
+        $head = $value->{diff_refs}{head_sha}
+          if (!defined($head) || ref($head)) && ref($value->{diff_refs}) eq "HASH";
+        my $checks = "";
+        $checks = $value->{head_pipeline}{status}
+          if ref($value->{head_pipeline}) eq "HASH" && defined($value->{head_pipeline}{status});
+        exit 1 if !defined($state) || ref($state) || !defined($head) || ref($head) || ref($checks);
+        print join("|", $state, $head, uc($checks));
+      ' 2>/dev/null) || exit 0
+      IFS='|' read -r state head checks extra <<EOF
+$parsed
+EOF
+      [ -z "${extra:-}" ] || exit 0
       case "$state" in opened|closed|merged) ;; *) exit 0 ;; esac
       case "$head" in ''|*[!0-9a-f]*) exit 0 ;; esac
       [ "${#head}" -eq 40 ] || [ "${#head}" -eq 64 ] || exit 0

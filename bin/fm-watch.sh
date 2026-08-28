@@ -796,7 +796,7 @@ status_unread_range() {  # <file> <seen-signature> <captured-signature>
 }
 
 status_human_condition_is_current() {  # <status-file> <line>
-  local f=$1 line=$2 class key verb note open okey overb onote
+  local f=$1 line=$2 class key verb note open okey overb onote task
   class=$(fm_human_notify_class "$line") || return 1
   case "$class" in
     decision|blocker)
@@ -811,7 +811,14 @@ $open
 EOF
       return 1
       ;;
-    *) return 0 ;;
+    *)
+      [ "$(last_status_line "$f")" = "$line" ] || return 1
+      if [ "$class" = review-ready ]; then
+        task=$(basename "$f"); task=${task%.status}
+        fm_human_notify_review_current "$STATE" "$task" || return 1
+      fi
+      return 0
+      ;;
   esac
 }
 
@@ -1021,12 +1028,8 @@ pr_observation_handle() {  # <task> <state> <head> <checks> <conclusion>
     old_head=$(grep '^pr_head=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   fi
   [ -z "$old_head" ] || [ "$old_head" = "$head" ] || changed_head=1
-  case ",$(printf '%s,%s' "$checks" "$conclusion" | tr '[:lower:]' '[:upper:]')," in
-    *,FAILURE,*|*,FAILED,*|*,ERROR,*|*,CANCELLED,*|*,CANCELED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) red=1 ;;
-  esac
-  case ",$(printf '%s,%s' "$old_checks" "$old_conclusion" | tr '[:lower:]' '[:upper:]')," in
-    *,FAILURE,*|*,FAILED,*|*,ERROR,*|*,CANCELLED,*|*,CANCELED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) old_red=1 ;;
-  esac
+  fm_human_notify_pr_evidence_is_red "$checks" "$conclusion" && red=1
+  fm_human_notify_pr_evidence_is_red "$old_checks" "$old_conclusion" && old_red=1
   red_evidence=${conclusion:-$checks}
   status_line=$(last_status_line "$STATE/$task.status")
   class=$(fm_human_notify_class "$status_line" 2>/dev/null || true)
@@ -1049,7 +1052,7 @@ pr_observation_handle() {  # <task> <state> <head> <checks> <conclusion>
       if [ "$red" -eq 1 ]; then
         fm_human_notify_clear_review "$STATE" "$task"
         if [ "$old_checks|$old_conclusion" != "$checks|$conclusion" ] || [ "$changed_head" -eq 1 ]; then
-          PR_OBSERVATION_REASON="$display: review checks are red after meaningful evidence changed - $red_evidence. Action required: inspect and repair the failing checks."
+          PR_OBSERVATION_REASON="$display: review checks turned red - $red_evidence. Action required: inspect and repair the failing checks."
         fi
       elif [ "$class" != review-ready ]; then
         fm_human_notify_pr_observation_record "$STATE" "$task" "$pr_state" "$head" "$checks" "$conclusion" || return 2
@@ -1495,6 +1498,7 @@ EOF
               fm_human_notify_clear_review "$STATE" "$id"
               reason="check: $(fm_display_name_for_meta "$STATE/$id.meta" "$id"): the review target merged. Action required: record the delivered result."
               fm_wake_append check "$c" "$reason" || exit 1
+              fm_human_notify_pr_observation_record "$STATE" "$id" "$pr_state" "$pr_head" "$pr_checks" "$pr_conclusion" || exit 1
               if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
                 fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
                   || triage_log "merged PR poll retirement remains recoverable for $id"
