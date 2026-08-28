@@ -2174,7 +2174,8 @@ SH
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
+  # Allow slow filesystems enough time to reach the controlled delivery rendezvous.
+  for _ in $(seq 1 300); do
     [ -e "$entered" ] && break
     sleep 0.02
   done
