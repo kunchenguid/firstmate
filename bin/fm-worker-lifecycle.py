@@ -1465,6 +1465,28 @@ def inventory_by_slot(inventory):
     return {worker["slot"]: worker for worker in inventory["workers"]}
 
 
+def inventory_conflict_slots(inventory):
+    """Return conflicts that the provider bound to one exact worker slot.
+
+    A conflict in one disposable compartment must not freeze unrelated slots.
+    An unscoped or malformed conflict still refuses globally because there is
+    no exact boundary within which the controller can safely contain it.
+    """
+    slots = set()
+    for conflict in inventory.get("conflicts", []):
+        slot = conflict.get("slot") if isinstance(conflict, dict) else None
+        if (
+            not isinstance(slot, int)
+            or isinstance(slot, bool)
+            or not 1 <= slot <= MAX_WORKERS
+        ):
+            raise LifecycleError(
+                "provider conflict is not bound to one exact worker slot"
+            )
+        slots.add(slot)
+    return slots
+
+
 def resource_identity(resource):
     return {
         "id": resource.get("id"),
@@ -2545,6 +2567,7 @@ def refresh_classifications(state, inventory, now=None):
 def choose_free_slot(env, state, inventory):
     occupied = set(int(slot) for slot in state["workers"])
     occupied.update(worker["slot"] for worker in inventory["workers"])
+    occupied.update(inventory_conflict_slots(inventory))
     for slot in range(1, env["max_workers"] + 1):
         if slot not in occupied:
             return slot
@@ -2605,9 +2628,7 @@ def service_worker_for_key(state, key):
 def next_reconcile_action(env, state, inventory, now=None):
     now = now or now_utc()
     cloud = inventory_by_slot(inventory)
-    conflicts = inventory.get("conflicts", [])
-    if conflicts:
-        raise LifecycleError("provider found same-fleet worker-name conflicts; unrelated resources were not adopted")
+    conflicted_slots = inventory_conflict_slots(inventory)
     # The first planning pass of a new UTC day snapshots the day's spend
     # baseline, whether or not any new compute is wanted; the caller's save
     # makes it durable.
@@ -2627,6 +2648,12 @@ def next_reconcile_action(env, state, inventory, now=None):
             # shield, and the post-convergence drain owns the replay.
             continue
         worker = state["workers"][slot_key]
+        if worker["slot"] in conflicted_slots:
+            worker["last_classification"] = "retained-for-investigation"
+            worker["classification_note"] = (
+                "provider reported a conflict inside this exact worker slot"
+            )
+            continue
         current = cloud.get(worker["slot"])
         classification, note = classify_worker(worker, current, now=now)
         worker["last_classification"] = classification
@@ -2686,10 +2713,7 @@ def next_service_reconcile_action(env, state, inventory, task, generation, now=N
     provider action must never become work the caller synchronously owns.
     """
     now = now or now_utc()
-    if inventory.get("conflicts"):
-        raise LifecycleError(
-            "provider found same-fleet worker-name conflicts; unrelated resources were not adopted"
-        )
+    conflicted_slots = inventory_conflict_slots(inventory)
     key = request_key(task, generation)
     item = state["queue"].get(key)
     if item is None or item.get("role") != "no-mistakes":
@@ -2714,6 +2738,12 @@ def next_service_reconcile_action(env, state, inventory, task, generation, now=N
         raise LifecycleError("service reconcile task has no exact durable worker owner")
     if worker.get("role") != "no-mistakes":
         raise LifecycleError("service reconcile worker role differs")
+    if worker["slot"] in conflicted_slots:
+        raise LifecycleError(
+            "provider found a conflict inside service worker slot {}; the exact slot was not adopted".format(
+                worker["slot"]
+            )
+        )
     if slot_key in (state.get("pending_actions") or {}):
         # The command drains this exact claim before planning. Seeing it here
         # means another process still owns the slot lease; wait without

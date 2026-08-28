@@ -58,7 +58,10 @@ env = {
     "max_workers": 4, "deployment_generation": "dep", "owner": "owner",
     "subscription": "subscription",
 }
-inventory = {"metrics": {}, "workers": [], "capacity_reservations": [], "conflicts": []}
+inventory = {
+    "metrics": {}, "workers": [], "capacity_reservations": [],
+    "conflicts": [{"slot": 1, "kind": "run-command", "reason": "unrelated"}],
+}
 module.roll_daily_baseline = lambda *_args, **_kwargs: None
 module.active_count = lambda *_args, **_kwargs: 1
 module.choose_free_slot = lambda *_args, **_kwargs: 2
@@ -88,6 +91,18 @@ action = module.next_service_reconcile_action(
     env, state, inventory, "service", "generation"
 )
 assert action["type"] == "create" and admitted == [("service", "generation", 2)], action
+
+# Conflict isolation is exact. A malformed provider conflict with no slot
+# remains a global refusal because the controller cannot contain it safely.
+try:
+    module.next_service_reconcile_action(
+        env, state, dict(inventory, conflicts=[{"kind": "run-command"}]),
+        "service", "generation",
+    )
+except module.LifecycleError as exc:
+    assert "not bound to one exact worker slot" in str(exc), exc
+else:
+    raise AssertionError("an unscoped provider conflict was treated as isolated")
 
 def worker(task, generation, slot, status):
     key = module.request_key(task, generation)
@@ -208,6 +223,18 @@ action = module.next_service_reconcile_action(
 )
 assert action["type"] == "deallocate" and action["slot"] == 2, action
 
+# A conflict on the target slot still refuses that exact service mutation.
+try:
+    module.next_service_reconcile_action(
+        env, state,
+        dict(inventory, conflicts=[{"slot": 2, "kind": "run-command"}]),
+        "service", "generation",
+    )
+except module.LifecycleError as exc:
+    assert "inside service worker slot 2" in str(exc), exc
+else:
+    raise AssertionError("a conflicted service slot was adopted")
+
 # The operator's ordinary reconciler keeps its existing fleet-wide policy.
 # It still selects a released ordinary worker before queued admission.
 ordinary = dict(target)
@@ -226,7 +253,11 @@ ordinary_state = {
     "workers": {"1": ordinary}, "pending_actions": {},
 }
 module.classify_worker = lambda *_args, **_kwargs: ("assigned", "released ordinary")
-action = module.next_reconcile_action(env, ordinary_state, inventory)
+ordinary_inventory = dict(
+    inventory,
+    conflicts=[{"slot": 2, "kind": "run-command", "reason": "unrelated"}],
+)
+action = module.next_reconcile_action(env, ordinary_state, ordinary_inventory)
 assert action["type"] == "deallocate" and action["slot"] == 1, action
 PY
   pass "exact service admission, recovery, and cleanup ignore unrelated slow fleet work"
@@ -8325,6 +8356,26 @@ def build_assigned(slot):
         "workers": [cloud], "capacity_reservations": [], "conflicts": [],
     }
     return build_state, worker, item, cloud, inventory
+
+# --- one exact conflicted compartment cannot freeze unrelated cleanup or be
+# selected for fresh admission. The conflicting slot itself stays parked.
+cstate, cworker, citem, ccloud, cinventory = build_assigned(2)
+cworker["release_proof"] = {"proof_digest": "c" * 64}
+cinventory["conflicts"] = [
+    {"slot": 1, "kind": "run-command", "reason": "undeclared child"}
+]
+action = module.next_reconcile_action(penv, cstate, cinventory, now=T0)
+assert action["type"] == "deallocate" and action["slot"] == 2, action
+assert module.choose_free_slot(
+    dict(penv, max_workers=4), {"workers": {"1": {}}},
+    {"workers": [], "conflicts": [{"slot": 2}]},
+) == 3
+cinventory["conflicts"] = [
+    {"slot": 2, "kind": "run-command", "reason": "undeclared child"}
+]
+assert module.next_reconcile_action(penv, cstate, cinventory, now=T0) is None
+assert cworker["last_classification"] == "retained-for-investigation"
+assert "inside this exact worker slot" in cworker["classification_note"]
 
 # --- idle deallocate: provable end-of-task signals only, at the threshold and
 # never before, never with a claim, never on already-dark compute.
