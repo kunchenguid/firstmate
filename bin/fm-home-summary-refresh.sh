@@ -47,9 +47,6 @@ HOME_SUMMARY_LOCK_HELD=0
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
@@ -72,6 +69,12 @@ esac
 case "$HOME_SUMMARY_TIMEOUT" in
   ''|*[!0-9]*|0) HOME_SUMMARY_TIMEOUT=60 ;;
 esac
+
+if [ "$HOME_SUMMARY_MODE" != parent ]; then
+  # shellcheck source=bin/fm-wake-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+fi
 
 # shellcheck disable=SC2329 # Invoked by the signal and EXIT traps below.
 home_summary_cleanup() {

@@ -398,3 +398,27 @@ grep -F 'refresh exceeded its 1-second deadline' \
   "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "publication validation timeout was not logged"
 pass "best-effort refresh bounds validation and publication"
+
+MKBIN="$TMP_ROOT/mkdir-hangbin"
+REAL_MKDIR=$(command -v mkdir)
+mkdir -p "$MKBIN"
+cat > "$MKBIN/mkdir" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "$FM_TEST_STALLED_STATE" ]; then
+    sleep 30
+  fi
+done
+exec "$FM_TEST_REAL_MKDIR" "$@"
+SH
+chmod +x "$MKBIN/mkdir"
+started=$(date +%s)
+PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
+  FM_TEST_STALLED_STATE="$HOME_DIR/state" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 \
+  "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
+  || fail "state initialization timeout changed the best-effort caller result"
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 6 ] \
+  || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
+pass "best-effort refresh bounds state initialization"
