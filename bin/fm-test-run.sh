@@ -1691,10 +1691,6 @@ fi
 if [ -n "$FAIL_ON_GATE_SKIP" ]; then
   SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
 fi
-if [ "$JOBS" -gt 1 ]; then
-  SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
-fi
-
 if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
   if [ "$LIST_SCHEDULED" -eq 1 ]; then
     for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
@@ -1735,6 +1731,9 @@ if [ "$MODE" = changed ] && [ "$JOBS_EXPLICIT" -eq 0 ]; then
     [ "$JOBS" -ge 1 ] || JOBS=1
     [ "$JOBS" -eq 1 ] || AUTO_CONCURRENCY=1
   fi
+fi
+if [ "$JOBS" -gt 1 ] || [ "$MODE" = changed ]; then
+  SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
 
 # An explicit --jobs names a concurrency for exactly the selection given, so an

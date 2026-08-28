@@ -261,7 +261,7 @@ test_changed_bin_reference_selects_per_script_not_per_family() {
 # Exercise begin/end markers from real fixture processes to prove the automatic
 # changed-suite default and its explicit serial override.
 test_changed_uses_bounded_automatic_concurrency() {
-  local tmp repo script serial_shape parallel_shape timeout_repo timeout_script rc
+  local tmp repo script serial_shape parallel_shape timeout_repo timeout_script expected_jobs rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-consent.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
@@ -278,19 +278,34 @@ SH
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixtures
   printf '\n' >>"$repo/bin/shared-probe-lib.sh"
 
-  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD) \
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/parallel.json") \
     >"$tmp/parallel.out" 2>"$tmp/parallel.err" \
     || fail "default changed fixture run failed: $(cat "$tmp/parallel.err")"
   parallel_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/parallel.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
   [ "$parallel_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
     || fail "plain --changed did not use bounded concurrent scheduling: $parallel_shape"
 
-  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs 1) \
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs 1 --json "$tmp/serial.json") \
     >"$tmp/serial.out" 2>"$tmp/serial.err" \
     || fail "explicit serial changed fixture run failed: $(cat "$tmp/serial.err")"
   serial_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/serial.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
   [ "$serial_shape" = FM_TEST_BEGIN,FM_TEST_END ] \
     || fail "explicit --jobs 1 did not force serial execution: $serial_shape"
+  expected_jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+  case "$expected_jobs" in
+    ''|*[!0-9]*) expected_jobs=1 ;;
+  esac
+  [ "$expected_jobs" -le 4 ] || expected_jobs=4
+  [ "$expected_jobs" -ge 1 ] || expected_jobs=1
+  python3 - "$tmp/parallel.json" "$tmp/serial.json" "$expected_jobs" <<'PY' \
+    || fail "changed timing artifacts did not record their resolved worker counts"
+import json, sys
+automatic = json.load(open(sys.argv[1], encoding="utf-8"))
+serial = json.load(open(sys.argv[2], encoding="utf-8"))
+expected = int(sys.argv[3])
+assert automatic["selection"].split(";")[-1] == f"jobs={expected}"
+assert serial["selection"].split(";")[-1] == "jobs=1"
+PY
 
   timeout_repo="$tmp/timeout-repo"
   timeout_script=tests/fm-calm-pi-extension.test.sh
