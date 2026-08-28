@@ -447,7 +447,7 @@ forge_zero_check_verdict() {  # <pr-url> <expected-head> -> verdict[ <detail>]
   forge_snapshot_cleanup "$snapshot_dir"
   case "$suites_rc:$combined_rc" in
     0:0) ;;
-    *124*|*:124) printf 'unknown forge evidence deadline expired'; return ;;
+    124:*|*:124) printf 'unknown forge evidence deadline expired'; return ;;
     *) printf 'unknown forge could not read complete CI evidence'; return ;;
   esac
   remaining=$(forge_deadline_remaining "$deadline") \
