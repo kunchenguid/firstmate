@@ -88,6 +88,10 @@ make_fake_root() {
   # requires the marker helper even for this ordinary-task teardown fixture.
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
+  # fm-env-local-lib.sh: teardown sources it to decide whether an untracked
+  # .env.local is the copy firstmate seeded. Inert in this fixture, whose
+  # worktree does not exist, but a real sibling teardown requires.
+  ln -s "$ROOT/bin/fm-env-local-lib.sh" "$fake/bin/fm-env-local-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'

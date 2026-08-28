@@ -542,26 +542,106 @@ test_unanswerable_filesystem_question_still_refuses() {
 # copy becomes firstmate's own untracked artifact and the next acquisition's clean
 # check refuses the slot. Byte-identity to the current source proves authorship, so
 # retiring it destroys nothing; anything that differs is the task's work and stays.
+# Give this slot a second acquisition to run. The record that proves authorship
+# lives with the slot, so a case about retiring a copy must establish it the way
+# the field does - by actually seeding it in an earlier acquisition - rather than
+# by dropping a file into the slot and asserting the outcome that follows.
+prepare_second_acquisition() {  # <id>
+  local id=$1
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+}
+
 test_unignored_copy_matching_the_source_is_retired() {
-  local rec id out status
+  local rec id second out status
   id='pool-env-local-r8'
+  second='pool-env-local-r8b'
   rec=$(make_case env-local-unignored-match "$id")
   read_case_record "$rec"
 
-  # No .gitignore publish, so the path is not ignored. The slot holds a copy that is
-  # byte-identical to the clone's current source: this seeding's own earlier work.
+  # First acquisition seeds the slot while the project still ignores the file, so
+  # the record naming that exact copy exists. The project then stops ignoring it,
+  # which is what turns firstmate's own artifact into untracked work.
+  ignore_local_env_file
   printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
-  cp -p "$PROJECT_DIR/.env.local" "$POOL_DIR/.env.local"
-
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the fixture's first acquisition should seed the slot"
+  [ -f "$POOL_DIR/.env.local" ] || fail "the fixture never got a seeded .env.local"
+  unignore_local_env_file
+  prepare_second_acquisition "$second"
+
+  out=$(run_spawn "$second" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should retire its own unignored copy and continue"
   [ ! -e "$POOL_DIR/.env.local" ] \
     || fail "spawn left its own unignored copy wedging the pool slot"
   assert_contains "$out" "no longer ignores .env.local" \
     "spawn did not explain why it removed its own unignored copy"
-  pass "an unignored copy identical to the current source is retired so the slot stays usable"
+  pass "an unignored copy this seeding recorded writing is retired so the slot stays usable"
+}
+
+# The half that content alone cannot decide. A task can legitimately author a
+# .env.local whose bytes equal the project checkout's, and deleting that would tear
+# down unlanded work with no discard authority. Nothing seeded this slot, so there
+# is no record, and the copy must survive whatever its content is.
+test_unignored_copy_matching_the_source_without_a_record_is_kept() {
+  local rec id out status before after
+  id='pool-env-local-r13'
+  rec=$(make_case env-local-unignored-match-no-record "$id")
+  read_case_record "$rec"
+
+  # No .gitignore publish, so nothing is ever seeded into this slot.
+  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  cp -p "$PROJECT_DIR/.env.local" "$POOL_DIR/.env.local"
+  before=$(cksum < "$POOL_DIR/.env.local")
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn deleted a file whose only evidence of authorship was its content"
+  [ -f "$POOL_DIR/.env.local" ] \
+    || fail "spawn removed an unignored file this seeding never recorded writing"
+  after=$(cksum < "$POOL_DIR/.env.local")
+  [ "$after" = "$before" ] || fail "spawn modified a file it did not author"
+  assert_contains "$out" "no record of writing that exact file" \
+    "the refusal did not say why content alone is not authorship"
+  pass "an unignored copy matching the source is still kept when nothing recorded seeding it"
+}
+
+# The record names one exact file. A task that rewrites the seeded copy owns it
+# from then on, so the record must stop authorizing its removal.
+test_unignored_copy_a_task_rewrote_after_seeding_is_kept() {
+  local rec id second out status before after
+  id='pool-env-local-r14'
+  second='pool-env-local-r14b'
+  rec=$(make_case env-local-unignored-rewritten "$id")
+  read_case_record "$rec"
+
+  ignore_local_env_file
+  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the fixture's first acquisition should seed the slot"
+  unignore_local_env_file
+  # The task's own edit lands on top of the seeded copy.
+  printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  before=$(cksum < "$POOL_DIR/.env.local")
+  prepare_second_acquisition "$second"
+
+  out=$(run_spawn "$second" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn deleted a seeded copy the task had since rewritten"
+  [ -f "$POOL_DIR/.env.local" ] || fail "spawn removed the task's own rewrite"
+  after=$(cksum < "$POOL_DIR/.env.local")
+  [ "$after" = "$before" ] || fail "spawn modified the task's own rewrite"
+  assert_contains "$out" "remove it by hand" \
+    "the refusal did not tell the operator how to clear the slot"
+  pass "a seeded copy the task rewrote is kept, because the record names one exact file"
 }
 
 test_unignored_copy_differing_from_the_source_is_kept() {
@@ -997,6 +1077,17 @@ run_teardown() {  # <id>
 # The task's own committed change is what turns the seeded copy into untracked
 # work. Landing that branch on origin leaves the uncommitted-work check as the only
 # thing that can refuse the teardown that follows.
+# Land the task's branch on origin without touching the ignore rule, so the
+# uncommitted-work check is the only thing that can refuse the teardown.
+land_task_branch() {  # <id>
+  local id=$1
+  git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -q --allow-empty -m 'task work'
+  git -C "$POOL_DIR" push --quiet origin "fm/$id"
+  git -C "$POOL_DIR" fetch --quiet origin
+}
+
 land_task_branch_without_the_ignore_rule() {  # <id>
   local id=$1
   git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
@@ -1070,6 +1161,78 @@ test_teardown_still_refuses_a_task_authored_local_env_file() {
   pass "teardown still refuses a local environment file the task itself authored"
 }
 
+# Content is not authorship, on teardown's side too. Nothing seeded this slot, so a
+# .env.local the task wrote is the task's - even when its bytes happen to equal the
+# project checkout's - and teardown must refuse it rather than discard unlanded work.
+test_teardown_refuses_a_task_authored_copy_matching_the_source() {
+  local rec id out status before after
+  id='pool-env-local-r15'
+  rec=$(make_case env-local-teardown-match-no-record "$id")
+  read_case_record "$rec"
+  add_teardown_stubs "$FAKEBIN_DIR"
+
+  # No .gitignore publish, so spawn seeds nothing and records nothing.
+  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch while declining to seed an unignored file"
+  [ ! -e "$POOL_DIR/.env.local" ] || fail "the fixture unexpectedly got a seeded copy"
+
+  land_task_branch "$id"
+  # The task authors its own file whose content matches the project checkout's.
+  cp "$PROJECT_DIR/.env.local" "$POOL_DIR/.env.local"
+  before=$(cksum < "$POOL_DIR/.env.local")
+
+  out=$(run_teardown "$id")
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "teardown discarded a task-authored file whose only evidence was its content"
+  [ -f "$POOL_DIR/.env.local" ] || fail "teardown deleted the task's own file"
+  after=$(cksum < "$POOL_DIR/.env.local")
+  [ "$after" = "$before" ] || fail "teardown modified the task's own file"
+  assert_contains "$out" "uncommitted changes" \
+    "teardown did not refuse the task's own file as uncommitted work"
+  pass "teardown refuses a task-authored local environment file even when it matches the source"
+}
+
+# The retirement runs only AFTER every work-preservation check has passed. When one
+# of them refuses, firstmate's own seeded copy must still be sitting there: a file
+# removed ahead of a refusal is a deletion no check ever authorized.
+test_teardown_keeps_its_seeded_copy_when_another_check_refuses() {
+  local rec id out status
+  id='pool-env-local-r16'
+  rec=$(make_case env-local-teardown-refusal-order "$id")
+  read_case_record "$rec"
+  add_teardown_stubs "$FAKEBIN_DIR"
+
+  ignore_local_env_file
+  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should seed the slot"
+  [ -f "$POOL_DIR/.env.local" ] || fail "the fixture never got a seeded .env.local"
+
+  # Drop the ignore rule, and leave the task's commit unlanded so the landed-work
+  # check is what refuses. The task's own file below makes the dirty check refuse
+  # first, which is the check whose verdict the seeded copy must not pre-empt.
+  git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+  git -C "$POOL_DIR" rm --quiet .gitignore >/dev/null
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm 'drop the local env ignore rule'
+  printf 'notes the task still wants\n' > "$POOL_DIR/zz-task-notes.txt"
+
+  out=$(run_teardown "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "teardown returned a slot holding the task's own uncommitted work"
+  [ -f "$POOL_DIR/.env.local" ] \
+    || fail "teardown removed its seeded copy before a refusing check had run"
+  assert_grep 'notes the task still wants' "$POOL_DIR/zz-task-notes.txt" \
+    "teardown discarded the task's own untracked work"
+  pass "a refused teardown leaves firstmate's own seeded copy in place"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -1086,9 +1249,13 @@ test_cross_filesystem_layout_degrades_to_a_loud_skip
 test_unanswerable_filesystem_question_still_refuses
 test_unignored_local_env_file_is_not_seeded
 test_unignored_copy_matching_the_source_is_retired
+test_unignored_copy_matching_the_source_without_a_record_is_kept
+test_unignored_copy_a_task_rewrote_after_seeding_is_kept
 test_unignored_copy_differing_from_the_source_is_kept
 test_teardown_returns_a_slot_whose_task_dropped_the_ignore_rule
 test_teardown_still_refuses_a_task_authored_local_env_file
+test_teardown_refuses_a_task_authored_copy_matching_the_source
+test_teardown_keeps_its_seeded_copy_when_another_check_refuses
 test_tracked_local_env_file_is_never_touched
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work

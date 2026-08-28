@@ -26,9 +26,19 @@
 #
 # Seeding applies while, and only while, the project git-ignores .env.local: a copy
 # the project does not ignore is untracked work, and every step that inspects the
-# working tree refuses it. Because a task can drop that ignore rule mid-flight, the
-# retire phase runs from the acquisition AND from teardown, so an artifact this
-# seeding authored can never be the reason a slot never returns to the pool.
+# working tree refuses it. Because a task can drop that ignore rule mid-flight, an
+# artifact this seeding authored can become the reason a slot never returns to the
+# pool, so the acquisition and teardown both retire such a copy - each only after
+# the check that protects unlanded work has already passed on it.
+#
+# Authorship is proved by a record, never by content. When the seed phase publishes
+# a copy it records that copy's digest in the worktree's own git directory, and a
+# retire happens only when that record exists and the file still matches it. Bytes
+# alone prove nothing: a task can legitimately author a .env.local whose content
+# equals the project checkout's, and deleting that without the captain's explicit
+# discard authority would tear down unlanded work. No record, or a file that no
+# longer matches one, means the file is the task's and is left for the caller's own
+# uncommitted-work check to refuse.
 
 # Firstmate authors a file inside a worktree it does not own, so every edge of that
 # ownership is settled deliberately here rather than falling out of branch order.
@@ -40,11 +50,10 @@
 #   tracked question unresolvable      treated as tracked: no-op, warns
 #   ignore check unresolvable          refuse (cannot establish, never assume benign)
 #   not ignored + target absent        warn, skip
-#   not ignored + target present       retire only if byte-identical to the current
-#                                      source, else refuse with the manual cleanup;
-#                                      runs in the retire phase, since the base
-#                                      refresh's clean check and teardown's
-#                                      uncommitted-work check both refuse it first
+#   not ignored + target present       retire only if the seed record proves this
+#                                      library wrote that exact file and nothing
+#                                      changed it since, else refuse with the
+#                                      manual cleanup
 #   target is a directory              refuse
 #   source absent + clone searchable   retire (a revoked credential must not persist)
 #   source absent + clone unsearchable refuse (deletion not positively established)
@@ -116,40 +125,84 @@ fm_env_local_ignored_verdict() {  # <worktree> <target> <refused-action>
   return "$ignored"
 }
 
+# Where the seed record lives, and what it holds. The worktree's own git directory
+# is git's private storage for that worktree: git never reports it as working-tree
+# content, it travels with a pooled slot across a return and a reissue, and it is
+# already where this library stages its copy. The record holds a digest and never
+# the seeded bytes, so it cannot outlive a revoked credential the way a kept copy
+# would. The name deliberately sits outside the fm-env-local.* scratch glob the
+# seed phase sweeps, because that sweep must not destroy the evidence teardown
+# needs.
+fm_env_local_seed_record_path() {  # <worktree>
+  local gitdir
+  gitdir=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  [ -n "$gitdir" ] || return 1
+  printf '%s\n' "$gitdir/fm-env-local-seed-record"
+}
+
+fm_env_local_digest() {  # <file>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# The single authorship question, asked read-only: is the worktree's .env.local
+# exactly the file this library seeded into that worktree, untouched since? Every
+# unresolvable answer is a no, because the permissive answer here would delete a
+# task's own unlanded work.
+fm_env_local_seeded_copy_intact() {  # <worktree>
+  local worktree=$1 record recorded current target="$1/.env.local"
+  record=$(fm_env_local_seed_record_path "$worktree") || return 1
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  recorded=$(sed -n 's/^sha256=//p' "$record" 2>/dev/null | head -1)
+  [ -n "$recorded" ] || return 1
+  [ -f "$target" ] && [ ! -L "$target" ] || return 1
+  current=$(fm_env_local_digest "$target") || return 1
+  [ -n "$current" ] && [ "$current" = "$recorded" ]
+}
+
+# Publish the record for a copy just seeded, or drop it because this call leaves no
+# copy of this library's own behind. A record that cannot be written is dropped
+# rather than left stale: without it a later retire refuses, which is the safe
+# direction, while a stale one would authorize deleting a file this library did not
+# write.
+fm_env_local_write_seed_record() {  # <worktree> <seeded-file>
+  local record digest
+  record=$(fm_env_local_seed_record_path "$1") || return 0
+  digest=$(fm_env_local_digest "$2") || digest=""
+  if [ -z "$digest" ]; then
+    rm -f "$record" 2>/dev/null || true
+    return 0
+  fi
+  ( umask 077; printf 'sha256=%s\n' "$digest" > "$record" ) 2>/dev/null \
+    || rm -f "$record" 2>/dev/null || true
+}
+
+fm_env_local_drop_seed_record() {  # <worktree>
+  local record
+  record=$(fm_env_local_seed_record_path "$1") || return 0
+  rm -f "$record" 2>/dev/null || true
+}
+
 # The one owner of the decision to delete an unignored copy. Both phases reach the
 # identical decision and differ only in which step would refuse the slot next, so
 # the decision is spelled out once: a second copy of a credential deletion is how a
 # guard added to one phase silently leaves the other making the old decision.
 #
-# Retire only when the copy is byte-identical to the clone's CURRENT source:
-# matching bytes prove it is this seeding's copy rather than the task's work, and
-# deleting it destroys nothing because that exact content still exists in the clone.
-# Current is the only sound referent - a name, size, or timestamp check would pass
-# for a file a task wrote itself, and an older revision would authorize deleting
-# content the clone no longer has. Anything that cannot be positively compared is
-# refused, and every refusal names the file and the cleanup that clears the slot.
-# Bytes are compared, never printed.
-fm_env_local_retire_unignored_copy() {  # <worktree> <source> <target> <refusing-step>
-  local worktree=$1 source=$2 target=$3 refuser=$4 cmp_status
-  if [ -L "$target" ] || [ ! -f "$target" ]; then
-    echo "error: '$target' is not ignored by the project and is not a regular file, so it cannot be proven to be this seeding's own copy" >&2
-    echo "error: $refuser will refuse it as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
-    return 1
-  fi
-  if [ ! -f "$source" ]; then
-    echo "error: '$target' is not ignored by the project and '$source' is missing, so it cannot be proven to be this seeding's own copy rather than the task's own work" >&2
-    echo "error: $refuser will refuse it as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
-    return 1
-  fi
-  cmp_status=0
-  cmp -s "$source" "$target" || cmp_status=$?
-  if [ "$cmp_status" -gt 1 ]; then
-    echo "error: could not compare '$target' against '$source' to tell this seeding's own copy from the task's work; cmp exited $cmp_status" >&2
-    echo "error: $refuser will refuse it as uncommitted work; inspect '$target' and remove it by hand once you know it holds no work worth keeping" >&2
-    return 1
-  fi
-  if [ "$cmp_status" -ne 0 ]; then
-    echo "error: '$target' is not ignored by the project and differs from '$source', so it is the task's own work and this seeding will not remove it" >&2
+# Retire only what the seed record proves this library wrote and nothing changed
+# since. Content is not evidence: a task can author a .env.local whose bytes equal
+# the project checkout's, and deleting that would tear down unlanded work without
+# the captain's explicit discard authority. Anything the record cannot account for
+# is refused, and every refusal names the file and the cleanup that clears the slot.
+# Digests are compared, never printed, and the file's own bytes are never read out.
+fm_env_local_retire_unignored_copy() {  # <worktree> <target> <refusing-step>
+  local worktree=$1 target=$2 refuser=$3
+  if ! fm_env_local_seeded_copy_intact "$worktree"; then
+    echo "error: '$target' is not ignored by the project and this seeding has no record of writing that exact file, so it is the task's own work and will not be removed" >&2
     echo "error: $refuser will refuse it as uncommitted work; save anything worth keeping out of '$target', then remove it by hand" >&2
     return 1
   fi
@@ -157,7 +210,19 @@ fm_env_local_retire_unignored_copy() {  # <worktree> <source> <target> <refusing
     echo "error: could not retire this seeding's own unignored copy at '$target'; remove it by hand so $refuser does not refuse it as uncommitted work" >&2
     return 1
   fi
+  fm_env_local_drop_seed_record "$worktree"
   echo "warning: removed this seeding's own copy at '$target' because the project no longer ignores .env.local; restore that ignore rule so crew worktrees can carry it again" >&2
+}
+
+# Remove the copy this library seeded, once the caller's own work-preservation
+# checks have already passed on it. It re-asks the authorship question rather than
+# trusting the caller's earlier answer, so a file that changed in between is never
+# deleted on a stale verdict.
+fm_env_local_retire_seeded_copy() {  # <worktree>
+  local worktree=$1
+  fm_env_local_seeded_copy_intact "$worktree" || return 1
+  rm -f "$worktree/.env.local" || return 1
+  fm_env_local_drop_seed_record "$worktree"
 }
 
 fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
@@ -177,6 +242,14 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
   # harmless and must never become a refusal of its own.
   gitdir=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || gitdir=""
   [ -z "$gitdir" ] || rm -f "$gitdir"/fm-env-local.* 2>/dev/null || true
+  # Every seed-phase path that returns below leaves no copy of this library's own
+  # in the worktree except the one published at the very end, so the record is
+  # dropped once here and written once there. That keeps it describing the current
+  # acquisition and nothing older, without a removal on each of a dozen returns -
+  # one of which would eventually be missed, and a stale record is precisely what
+  # would authorize deleting a file this library did not write. The retire phase
+  # must NOT drop it here: that phase exists to read this evidence.
+  [ "$phase" != seed ] || fm_env_local_drop_seed_record "$worktree"
   # Gates both halves of the contract, in both phases, from one place.
   if fm_env_local_is_tracked "$worktree" "$announce"; then
     return 0
@@ -194,7 +267,7 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
     fm_env_local_ignored_verdict "$worktree" "$target" retire || ignored=$?
     [ "$ignored" -ne 2 ] || return 1
     [ "$ignored" -eq 1 ] || return 0
-    fm_env_local_retire_unignored_copy "$worktree" "$source" "$target" "$refuser" || return 1
+    fm_env_local_retire_unignored_copy "$worktree" "$target" "$refuser" || return 1
     return 0
   fi
   # Nothing to carry in, and no earlier task's copy left to retire.
@@ -221,7 +294,7 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
     # unattended; whenever the rule disappears over a copy that cannot be proven to
     # be this seeding's own, the slot needs human attention, which is what every
     # refusal below asks for by name.
-    fm_env_local_retire_unignored_copy "$worktree" "$source" "$target" "$refuser" || return 1
+    fm_env_local_retire_unignored_copy "$worktree" "$target" "$refuser" || return 1
     return 0
   fi
   if [ -d "$target" ]; then
@@ -304,4 +377,5 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
     echo "error: could not publish the seeded .env.local in '$worktree'" >&2
     return 1
   fi
+  fm_env_local_write_seed_record "$worktree" "$target"
 }

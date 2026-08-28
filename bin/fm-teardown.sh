@@ -1377,25 +1377,13 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty dirty_ignorable env_local_seeded
+  local unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
-
-  # Retire firstmate's own seeded .env.local before asking git what is dirty. That
-  # file is seeded only while the project ignores it, but a task can drop the ignore
-  # rule mid-flight, and the copy then shows up as untracked work here. Refusing it
-  # would strand the worktree for good: the acquisition path that retires such a
-  # copy only runs once the slot is back in the pool, which this very refusal
-  # prevents. bin/fm-env-local-lib.sh owns the decision and removes the copy only
-  # when it is provably firstmate's own - byte-identical to the project checkout's
-  # current .env.local - so a task's own work still reaches the check below and is
-  # still refused. The retire is advisory: whatever it cannot prove it owns stays
-  # put, and the uncommitted-work check below remains the only authority on what
-  # teardown refuses.
-  fm_env_local_apply "$WT" "$PROJ" retire "teardown of '$WT'" || true
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -1405,7 +1393,26 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  # A .env.local seeded by firstmate is normally invisible here, because it is
+  # seeded only while the project ignores it. A task that drops that ignore rule
+  # mid-flight makes firstmate's own artifact surface as untracked work, and
+  # refusing it would strand the slot for good: the acquisition path that retires
+  # such a copy runs only once the slot is back in the pool, which this very
+  # refusal prevents. bin/fm-env-local-lib.sh answers, read-only and without
+  # deleting anything, whether this exact file is the copy it seeded and nothing
+  # has changed it since. Only then is that one path left out of the dirty set,
+  # and the file itself is removed further down, after every work-preservation
+  # check below has passed - never before one, because a file this check would
+  # have refused must not already be gone by the time it runs.
+  env_local_seeded=0
+  if printf '%s\n' "$dirty_raw" | grep -qx '?? .env.local' \
+    && fm_env_local_seeded_copy_intact "$WT"; then
+    env_local_seeded=1
+    dirty_ignorable='^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$|\.env\.local$)'
+  else
+    dirty_ignorable='^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)'
+  fi
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE "$dirty_ignorable" | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1452,6 +1459,20 @@ validate_worktree_teardown_safety() {
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
+  fi
+
+  # Every work-preservation check above has passed, so nothing here can be the
+  # reason this worktree keeps unlanded work. Only now is firstmate's own seeded
+  # copy removed, so the slot returns clean instead of being refused forever for a
+  # file firstmate wrote. If it cannot be removed, say so and refuse: leaving it
+  # would silently hand back a slot whose next acquisition refuses too.
+  if [ "$env_local_seeded" = 1 ]; then
+    if ! fm_env_local_retire_seeded_copy "$WT"; then
+      echo "REFUSED: could not remove firstmate's own seeded .env.local in $WT." >&2
+      echo "Remove $WT/.env.local by hand once you know it holds no work worth keeping, then retry." >&2
+      return 1
+    fi
+    echo "teardown: removed firstmate's own seeded copy at $WT/.env.local because the project no longer ignores .env.local; restore that ignore rule so crew worktrees can carry it again" >&2
   fi
 }
 
