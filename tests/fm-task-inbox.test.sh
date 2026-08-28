@@ -691,6 +691,33 @@ test_commit_files_quietly_when_handled_is_unwritable() {
   pass "inbox: a closure that cannot be filed under handled/ surfaces once, retries quietly, then files"
 }
 
+# The .commit-failed handoff is what lets the caller mark a failed closure as
+# surfaced. A handoff that could not be written while the inbox still existed
+# used to be swallowed: the caller then found no names, marked nothing, and
+# re-woke firstmate on every poll - the exact unbounded behaviour the marker
+# exists to prevent. It is now the same distinct stop as any other unwritable
+# marker (rc 2, named on stderr).
+test_commit_surfaces_an_unwritable_failure_handoff() {
+  local home state rec sidecar err rc
+  home="$TMP_ROOT/handoff-unwritable"; state="$home/state"; mkdir -p "$state" "$home/data"
+  err="$home/commit.err"
+  : > "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "first answer")
+  sidecar=$(inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "first answer" "" "no-such-hold")
+  mv "$rec" "$state/t1.inbox/handled/"
+  # A directory squatting on the handoff path makes every write to it fail.
+  mkdir "$state/t1.inbox/.commit-failed"
+
+  rc=0
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" t1 "$state/t1.status" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "an unwritable failure handoff should return 2, got $rc:"$'\n'"$(cat "$err")"
+  assert_contains "$(cat "$err")" ".commit-failed could not be written" \
+    "the failure should name the handoff it could not write"
+  [ -f "$sidecar" ] || fail "the closure must stay parked"
+  pass "inbox: a failure handoff that cannot be written is a distinct failure, never a swallowed one"
+}
+
 # THE REGRESSION for a global-text dedupe: the idempotence check must be
 # scoped to THIS sidecar's own identity, never to whether matching text
 # already exists anywhere in the status log. A key legitimately reopened
@@ -1233,6 +1260,36 @@ test_watcher_commits_the_closure_on_acknowledgement() {
 # the status log at one closing line, and leave the closure parked as
 # evidence. Without that bound a permanently failing close woke firstmate on
 # every poll and appended the same resolved line each time.
+# The watcher's side of an unwritable failure handoff: with nothing it can
+# fold into the surfaced marker, it queues the stale wake and stops with an
+# error, exactly as it does for any other unwritable marker, instead of
+# exiting clean and re-queuing the same wake on every later poll.
+test_watcher_stops_on_an_unwritable_failure_handoff() {
+  local dir home state out log pid rec rc=0
+  dir=$(setup_watch_case commit-handoff)
+  home="$dir/home"; state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  mkdir -p "$home/data"
+  : > "$state/t1.status"
+  prime_status_seen "$state" "$state/t1.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "" "no-such-hold" >/dev/null
+  mv "$rec" "$state/t1.inbox/handled/"
+  mkdir "$state/t1.inbox/.commit-failed"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data"
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a closure that cannot commit never surfaced"; }
+  wait "$pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the watcher exited clean with no way to mark the failed closure surfaced, so it would re-wake on every poll"
+  [ "$(grep -cF 'answered decision could not be closed' "$state/.wake-queue")" = 1 ] \
+    || fail "the failed commit should queue exactly one stale wake:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  [ ! -e "$state/t1.inbox/.commit-escalated" ] \
+    || fail "nothing could have been marked surfaced:"$'\n'"$(cat "$state/t1.inbox/.commit-escalated")"
+  pass "watcher: an unwritable failure handoff stops the watcher instead of re-waking on every poll"
+}
+
 test_watcher_surfaces_a_failed_closure_once() {
   local dir home state out log pid rec sidecar queue_after_ack
   dir=$(setup_watch_case commit-fail)
@@ -1295,6 +1352,7 @@ test_deferred_closure_survives_a_glob_sweep
 test_commit_retries_close_each_key_once_and_surface_once
 test_commit_escalation_marks_only_the_closures_that_failed
 test_commit_files_quietly_when_handled_is_unwritable
+test_commit_surfaces_an_unwritable_failure_handoff
 test_reopened_key_with_identical_answer_closes_again
 test_blocked_escalation_fires_one_poll_after_first_skip
 test_orphaned_sidecar_escalates_instead_of_going_silent
@@ -1313,3 +1371,4 @@ test_watcher_escalates_blocked_composer_and_names_the_decision
 test_watcher_escalates_an_orphan_for_hand_closure
 test_watcher_commits_the_closure_on_acknowledgement
 test_watcher_surfaces_a_failed_closure_once
+test_watcher_stops_on_an_unwritable_failure_handoff

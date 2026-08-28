@@ -350,16 +350,17 @@ window_key() {  # <window>
 # parked closure is marked as surfaced - and retried quietly on later polls,
 # so a permanently failing close cannot wake firstmate on every poll.
 inbox_answer_commit() {  # <window> <task>
-  local w=$1 task=$2 closed reason
+  local w=$1 task=$2 closed reason rc=0
   # stderr is deliberately NOT swallowed: the library names exactly which
   # closure failed and why, which the one-line wake reason cannot carry.
-  if closed=$(fm_task_inbox_commit_resolutions "$STATE" "$task" "$STATE/$task.status"); then
+  closed=$(fm_task_inbox_commit_resolutions "$STATE" "$task" "$STATE/$task.status") || rc=$?
+  if [ "$rc" -eq 0 ]; then
     [ -z "$closed" ] || triage_log "steer-inbox answered decision closed: $task $(printf '%s' "$closed" | tr '\n' ' ')"
     return 0
   fi
   reason="stale: $w (answered decision could not be closed: $task acknowledged a firstmate answer, but its deferred closure did not commit, so the decision is still open while the worker acts on it - inspect $STATE/$task.inbox and close it by hand; the parked closure is retried quietly and files itself once the close succeeds)"
   fm_wake_append stale "$w" "$reason" || exit 1
-  if ! fm_task_inbox_record_commit_escalated "$STATE" "$task"; then
+  if [ "$rc" -eq 2 ] || ! fm_task_inbox_record_commit_escalated "$STATE" "$task"; then
     echo "error: stale wake was queued for $task but its closure escalation marker could not be written" >&2
     exit 1
   fi

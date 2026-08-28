@@ -604,7 +604,11 @@ EOF
 # A sidecar whose failure the caller already surfaced
 # (fm_task_inbox_record_commit_escalated) is retried quietly: it neither fails
 # the call nor repeats its diagnostic, which is what bounds a permanently
-# failing close to one wake. A missing inbox is a quiet no-op.
+# failing close to one wake. Returns 2 when that .commit-failed handoff itself
+# cannot be written while the inbox still exists: the caller then has no way
+# to mark anything surfaced, so it must treat the pass like any other marker
+# write failure and stop rather than re-wake on every poll. A missing inbox is
+# a quiet no-op.
 fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
   local state=$1 task=$2 status_file=$3
   local dir f rec note keys holds k line rc=0 failed append_rc surfaced quiet unresolved ident newly_failed=''
@@ -663,7 +667,11 @@ fm_task_inbox_commit_resolutions() {  # <state-dir> <task-id> <status-file>
 $(fm_task_inbox_acknowledged_resolutions "$state" "$task")
 EOF
   if [ -n "$newly_failed" ]; then
-    printf '%s' "$newly_failed" > "$dir/.commit-failed" 2>/dev/null || true
+    if ! { printf '%s' "$newly_failed" > "$dir/.commit-failed"; } 2>/dev/null; then
+      [ -d "$dir" ] || return 0
+      echo "error: $task has closures that failed to commit, but their escalation handoff $dir/.commit-failed could not be written" >&2
+      return 2
+    fi
   else
     rm -f "$dir/.commit-failed" 2>/dev/null || true
   fi

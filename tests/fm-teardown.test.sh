@@ -1314,11 +1314,16 @@ test_local_only_force_overrides_unpushed() {
 
 # The steering inbox goes with the task, but a parked decision closure in it
 # (bin/fm-task-inbox-lib.sh) is the only evidence an answer was delivered:
-# teardown runs the watcher's own commit pass first, so an acknowledged answer
-# lands its resolved line in the status log, and a closure the worker never
-# acknowledged is named as undelivered at cleanup without refusing.
+# teardown runs the watcher's own commit pass first, while the status log is
+# still live, so an acknowledged answer lands its resolved line beside the
+# decision it closes rather than in a stray log recreated after retirement;
+# prints that closure with its answer for the backlog Done note, the one
+# record that outlives cleanup; and names a closure the worker never
+# acknowledged as undelivered without refusing. The status log is hard-linked
+# to a mirror before teardown: an append to the live log shows in the mirror,
+# while a log recreated after the rm would be a new file the mirror never sees.
 test_teardown_commits_acknowledged_closure_and_names_undelivered_one() {
-  local case_dir rc state rec_ack rec_pending wt_head
+  local case_dir rc state rec_ack rec_pending wt_head mirror
   case_dir=$(make_case inbox-closures)
   state="$case_dir/state"
   write_meta "$case_dir" local-only ship
@@ -1327,6 +1332,8 @@ test_teardown_commits_acknowledged_closure_and_names_undelivered_one() {
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
   printf 'needs-decision [key=api-shape]: pick REST or RPC\nneeds-decision [key=deploy-window]: pick a window\n' \
     > "$state/task-x1.status"
+  mirror="$case_dir/status-mirror"
+  ln "$state/task-x1.status" "$mirror"
   rec_ack=$(teardown_inbox_lib "$state" fm_task_inbox_write "$state" task-x1 "go with REST")
   teardown_inbox_lib "$state" fm_task_inbox_defer_resolution "$rec_ack" "go with REST" "api-shape" "" >/dev/null \
     || fail "inbox-closures: could not park the acknowledged closure"
@@ -1341,10 +1348,18 @@ test_teardown_commits_acknowledged_closure_and_names_undelivered_one() {
   set -e
 
   expect_code 0 "$rc" "inbox-closures: teardown should still succeed with closures parked in the inbox"
-  assert_grep 'resolved [key=api-shape]: answered: go with REST' "$state/task-x1.status" \
-    "inbox-closures: the acknowledged answer must close its decision before the inbox is removed"
-  assert_no_grep 'resolved [key=deploy-window]' "$state/task-x1.status" \
+  assert_grep 'resolved [key=api-shape]: answered: go with REST' "$mirror" \
+    "inbox-closures: the acknowledged answer must close its decision in the live status log"
+  assert_grep 'needs-decision [key=api-shape]: pick REST or RPC' "$mirror" \
+    "inbox-closures: the closing line must land beside the decision it closes, not in a recreated log"
+  assert_no_grep 'resolved [key=deploy-window]' "$mirror" \
     "inbox-closures: an unacknowledged answer must not close its decision"
+  assert_absent "$state/task-x1.status" \
+    "inbox-closures: no status log may survive teardown as a stray orphan"
+  assert_grep 'closed the acknowledged answer at cleanup: resolved [key=api-shape]: answered: go with REST' "$case_dir/stdout" \
+    "inbox-closures: the closed answer must be printed with its key and answer for the done note"
+  assert_grep "include each 'closed the acknowledged answer at cleanup' line above in that done note" "$case_dir/stdout" \
+    "inbox-closures: the backlog hint must route the closed answer into the done note"
   assert_grep 'undelivered at cleanup: task-x1 never acknowledged the answer to decision key(s) deploy-window' "$case_dir/stdout" \
     "inbox-closures: the unacknowledged answer should be named as undelivered"
   assert_grep "record ${rec_pending##*/}" "$case_dir/stdout" \
@@ -1353,6 +1368,41 @@ test_teardown_commits_acknowledged_closure_and_names_undelivered_one() {
     "inbox-closures: the acknowledged answer must not read as undelivered"
   [ ! -e "$state/task-x1.inbox" ] || fail "inbox-closures: the inbox should be removed with the task"
   pass "teardown commits an acknowledged decision closure and names an undelivered one before removing the inbox"
+}
+
+# A closure whose failure the watcher already surfaced is retried quietly by
+# the commit pass (rc 0, no diagnostic). Teardown is that closure's last retry
+# before the sidecar goes with the inbox, so it must be named at cleanup on
+# its own evidence, never skipped because the pass's return code reads clean.
+test_teardown_names_a_quietly_retried_closure_it_cannot_commit() {
+  local case_dir rc state rec sidecar wt_head
+  case_dir=$(make_case inbox-closure-unclosable)
+  state="$case_dir/state"
+  mkdir -p "$case_dir/data"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  : > "$state/task-x1.status"
+  rec=$(teardown_inbox_lib "$state" fm_task_inbox_write "$state" task-x1 "go with REST")
+  sidecar=$(teardown_inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "" "no-such-hold") \
+    || fail "inbox-closure-unclosable: could not park the closure"
+  mv "$rec" "$state/task-x1.inbox/handled/"
+  printf '%s\n' "${sidecar##*/}" > "$state/task-x1.inbox/.commit-escalated"
+
+  set +e
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "inbox-closure-unclosable: teardown never refuses over a closure it cannot commit"
+  assert_grep "warning: task-x1 acknowledged the answer to decision key(s) no-such-hold (closure ${sidecar##*/}), but that closure could not be committed before its inbox is removed; close that decision by hand" "$case_dir/stdout" \
+    "inbox-closure-unclosable: a quietly retried closure must still be named at cleanup"
+  assert_no_grep 'closed the acknowledged answer at cleanup' "$case_dir/stdout" \
+    "inbox-closure-unclosable: an uncommitted closure must not read as closed"
+  [ ! -e "$state/task-x1.inbox" ] || fail "inbox-closure-unclosable: the inbox should be removed with the task"
+  pass "teardown names a closure it cannot commit even after the watcher already surfaced that failure"
 }
 
 # Run one steering-inbox library function against a state dir through the
@@ -2664,6 +2714,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_teardown_commits_acknowledged_closure_and_names_undelivered_one
+test_teardown_names_a_quietly_retried_closure_it_cannot_commit
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

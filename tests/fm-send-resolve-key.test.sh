@@ -257,6 +257,8 @@ test_unparkable_closure_fails_loudly() {
     "the error must say the answer WAS delivered"
   assert_contains "$(cat "$err")" "stays OPEN" \
     "the error must say which way the decision fails"
+  assert_contains "$(cat "$err")" "echo 'resolved [key=api-shape]: <how it was answered>' >> $home/state/t1.status" \
+    "the error must carry the exact manual close command, as a failed direct append does"
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null \
     || fail "an unparkable closure silently closed the decision: $out"

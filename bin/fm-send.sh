@@ -646,16 +646,25 @@ fm_send_close_resolved_keys() {  # <answer-text>
 #
 # A sidecar that cannot be written leaves the decision OPEN - the safe
 # direction, since an open decision re-surfaces - so it exits nonzero with the
-# manual close, exactly as a failed direct append does.
+# same exact manual close commands a failed direct append prints: one status
+# append per status key and one captain-hold answer per held task.
 fm_send_defer_resolved_keys() {  # <record-path> <answer-text>
-  local rec=$1 note=$2 keys
+  local rec=$1 note=$2 keys k
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   if fm_task_inbox_defer_resolution "$rec" "$note" \
     "$RESOLVE_STATUS_KEYS" "$RESOLVE_HOLD_KEYS" >/dev/null; then
     return 0
   fi
   keys="$RESOLVE_STATUS_KEYS${RESOLVE_STATUS_KEYS:+ }$RESOLVE_HOLD_KEYS"
-  echo "error: the answer was delivered to $T at $rec, but the acknowledgement-gated close for ${keys% } could not be recorded, so it will never commit. The decision stays OPEN and re-surfaces; do not resend the answer. Close it by hand once the worker has read the record." >&2
+  {
+    echo "error: the answer was delivered to $T at $rec, but the acknowledgement-gated close for ${keys% } could not be recorded, so it will never commit. The decision stays OPEN and re-surfaces; do not resend the answer. Once the worker has read the record, close it by hand with:"
+    for k in $RESOLVE_STATUS_KEYS; do
+      echo "  echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE"
+    done
+    for k in $RESOLVE_HOLD_KEYS; do
+      echo "  $SCRIPT_DIR/fm-captain-hold.sh answer $k --decision-file <file holding the answer>"
+    done
+  } >&2
   return 1
 }
 
