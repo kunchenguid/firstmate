@@ -37,8 +37,10 @@
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
 #     After a watcher cycle, the daemon handles every durable row through that
-#     drain and acknowledges it only after routing completes. Intentional daemon
-#     shutdown publishes an identity-bound child-retirement marker before TERM,
+#     drain. It acknowledges self-handled rows after routing, while actionable
+#     checks remain queued until the handling turn consumes their private evidence.
+#     Intentional daemon shutdown publishes an identity-bound child-retirement
+#     marker before TERM,
 #     so return releases the exact watcher without a false downtime recovery;
 #     an unmarked crash retains ordinary recovery publication.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
@@ -534,8 +536,17 @@ classify_stale() {  # <window> <state>
 }
 
 classify_check() {  # <full reason> <state>
-  local reason=$1 state=$2 source id display
+  local reason=$1 state=$2 source id display payload adapter sequence extra
   case "$reason" in
+    "check: procevent "*)
+      payload=${reason#"check: procevent "}
+      read -r adapter source sequence extra <<<"$payload"
+      if [ -z "$extra" ] && display=$(fm_human_notify_procevent_label "$state" "$source" "$sequence" "$adapter"); then
+        printf 'escalate|%s: a captured result is ready now. Action required: inspect the pending result and run its registered handler.' "$display"
+      else
+        printf 'escalate|Background process: result authentication failed now. Action required: inspect the pending process results and repair the invalid registration.'
+      fi
+      ;;
     "check: $state/"*.check.sh:*)
       source=${reason#"check: $state/"}
       id=${source%%.check.sh:*}
@@ -1511,7 +1522,7 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 ack_through ack_generation
+  local handled=0 defer_ack=0 ack_through ack_generation
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1526,6 +1537,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     case "$sequence" in ''|*[!0-9]*) continue ;; esac
     case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
     handle_wake "$payload" "$state"
+    [ "$kind" = check ] && defer_ack=1
     handled=$((handled + 1))
   done < "$out"
   [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
@@ -1534,6 +1546,10 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
   rm -f "$out" "$err"
+  if [ "$defer_ack" -eq 1 ]; then
+    log "actionable check routed; retaining durable wake evidence until the handling turn acknowledges it"
+    return 0
+  fi
   if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
     log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
     return 1

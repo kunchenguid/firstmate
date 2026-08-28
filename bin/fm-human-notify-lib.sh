@@ -29,6 +29,7 @@
 #   fm_human_notify_pr_observation_record <state> <task-id> <state> <head> <checks> <conclusion>
 #   fm_human_notify_clear_task <state> <task-id>
 #   fm_human_notify_summary <state> <task-id> <status-line>
+#   fm_human_notify_procevent_label <state> <source-id> <sequence> [expected-adapter]
 #
 # Return convention: fm_human_notify_pending returns 0 only for a recognized
 # human-owned condition whose current fingerprint has not been recorded, 1 for an
@@ -63,6 +64,25 @@ _fm_human_notify_safe() {
 
 _fm_human_notify_key() {
   _fm_decision_key "$1" 2>/dev/null || printf 'default'
+}
+
+fm_human_notify_procevent_label() {  # <state> <source-id> <sequence> [expected-adapter]
+  local state=$1 source=$2 sequence=$3 expected=${4:-} adapter_file adapter label
+  case "$source" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
+  case "$expected" in *[!a-z0-9-]*) return 1 ;; esac
+  adapter_file="$state/procevent-inbox/$source.$sequence.adapter"
+  [ -f "$adapter_file" ] && [ ! -L "$adapter_file" ] || return 1
+  IFS= read -r adapter < "$adapter_file" || return 1
+  case "$adapter" in ''|*[!a-z0-9-]*) return 1 ;; esac
+  [ -z "$expected" ] || [ "$adapter" = "$expected" ] || return 1
+  case "$adapter" in
+    lavish) label='Lavish review' ;;
+    remote-reply) label='Remote reply' ;;
+    when) label='Condition watch' ;;
+    *) label="$(fm_display_name_fallback "$adapter") process" ;;
+  esac
+  printf '%s' "$label"
 }
 
 # Review-ready includes both delivery paths: a PR with green checks and a direct

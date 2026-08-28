@@ -145,6 +145,19 @@ test_classify_check_and_unknown_escalate() {
     *) fail "check did not produce a readable actionable escalation: $out" ;;
   esac
   case "$out" in *'/secret/'*|*'.check.sh'*) fail "check escalation exposed private evidence: $out" ;; esac
+  mkdir -p "$state/procevent-inbox"
+  printf 'lavish\n' > "$state/procevent-inbox/private-source.7.adapter"
+  out=$(classify_check "check: procevent lavish private-source 7" "$state")
+  case "$out" in
+    escalate\|*'Lavish review: a captured result is ready now.'*'run its registered handler.'*) ;;
+    *) fail "process event did not produce an authenticated presentation: $out" ;;
+  esac
+  case "$out" in *procevent*|*private-source*|*' 7'*) fail "process event exposed private routing evidence: $out" ;; esac
+  out=$(classify_check "check: procevent lavish private-source 8" "$state")
+  case "$out" in escalate\|'Background process: result authentication failed now.'*) ;;
+    *) fail "unauthenticated process event did not fail safely: $out" ;;
+  esac
+  case "$out" in *private-source*|*' 8'*) fail "invalid process event exposed private routing evidence: $out" ;; esac
   out=$(classify_unknown "frobnicate: weird")
   case "$out" in escalate\|*) ;; *) fail "unknown did not fail-safe escalate: $out" ;; esac
   out=$(classify_heartbeat heartbeat)
@@ -152,6 +165,44 @@ test_classify_check_and_unknown_escalate() {
   out=$(classify_heartbeat 'heartbeat: Harbor: a new failure surfaced. Action required: inspect it.')
   case "$out" in escalate\|'Harbor: a new failure surfaced. Action required: inspect it.'*) ;; *) fail "actionable heartbeat did not preserve its presentation: $out" ;; esac
   pass "checks stay private and actionable heartbeat summaries survive replay"
+}
+
+test_away_check_retains_private_wake_until_handling() {
+  local dir state fakebin ack payload old_daemon_dir replay
+  dir=$(make_supercase away-check-durable)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ack="$dir/acked"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -gt 0 ]; then
+  : > "$FM_TEST_ACK"
+  exit 0
+fi
+printf '1700000000\t4\tcheck\t%s\t%s\n' "$FM_TEST_KEY" "$FM_TEST_PAYLOAD"
+printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 4 --recovery-generation fixture\n' >&2
+SH
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  payload="check: $state/x-watch.check.sh: x-mention private-request-7"
+  old_daemon_dir=$FM_DAEMON_DIR
+  FM_DAEMON_DIR=$fakebin
+  FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
+    FM_ESCALATE_BATCH_SECS=90 handle_durable_wakes "$payload" "$state" \
+    || fail "away check routing failed"
+  FM_DAEMON_DIR=$old_daemon_dir
+  [ ! -e "$ack" ] || fail "away daemon acknowledged private check evidence before its handling turn"
+  grep -F 'Relay: an authenticated state check produced a new result now.' "$state/.subsuper-escalations" >/dev/null \
+    || fail "away daemon did not publish a readable Relay presentation"
+  if grep -F 'private-request-7' "$state/.subsuper-escalations" >/dev/null; then
+    fail "away presentation exposed the private check correlation"
+  fi
+  replay=$(FM_TEST_ACK="$ack" FM_TEST_KEY="$state/x-watch.check.sh" FM_TEST_PAYLOAD="$payload" \
+    "$fakebin/fm-wake-drain.sh" 2>/dev/null)
+  case "$replay" in *'x-mention private-request-7'*) ;;
+    *) fail "private check result was unavailable to the handling turn: $replay" ;;
+  esac
+  pass "away checks retain private evidence until the handling turn"
 }
 
 test_stale_transient_self_records_marker() {
@@ -2111,6 +2162,7 @@ test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_buried_open_decision_escalates
 test_classify_check_and_unknown_escalate
+test_away_check_retains_private_wake_until_handling
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates

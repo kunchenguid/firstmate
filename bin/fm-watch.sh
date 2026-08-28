@@ -952,24 +952,12 @@ EOF
 }
 
 procevent_display_label() {  # <private-queue-key>
-  local key=$1 rest source sequence adapter_file adapter label
+  local key=$1 rest source sequence
   case "$key" in procevent:*:*) ;; *) return 1 ;; esac
   rest=${key#procevent:}
   source=${rest%:*}
   sequence=${rest##*:}
-  fm_task_id_path_safe "$source" || return 1
-  case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
-  adapter_file="$STATE/procevent-inbox/$source.$sequence.adapter"
-  [ -f "$adapter_file" ] && [ ! -L "$adapter_file" ] || return 1
-  IFS= read -r adapter < "$adapter_file" || return 1
-  case "$adapter" in ''|*[!a-z0-9-]*) return 1 ;; esac
-  case "$adapter" in
-    lavish) label='Lavish review' ;;
-    remote-reply) label='Remote reply' ;;
-    when) label='Condition watch' ;;
-    *) label="$(fm_display_name_fallback "$adapter") process" ;;
-  esac
-  printf '%s' "$label"
+  fm_human_notify_procevent_label "$STATE" "$source" "$sequence"
 }
 
 procevent_surface_queued() {
