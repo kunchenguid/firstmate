@@ -1385,7 +1385,7 @@ PY
     || fail "the no-mistakes Azure worker focused suite failed"
   [ ! -e "$fixture/captured" ] \
     || fail "the no-mistakes Azure worker recursively dispatched another Azure runner"
-  assert_contains "$out" "Azure worker focused suite files=10" \
+  assert_contains "$out" "Azure worker focused suite files=11" \
     "the no-mistakes Azure worker did not identify its focused suite"
   [ "$(wc -l < "$fixture/local-runs" | tr -d ' ')" -eq 1 ] \
     || fail "the no-mistakes Azure worker did not run one focused suite invocation"

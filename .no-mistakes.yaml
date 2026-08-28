@@ -11,13 +11,13 @@ disable_project_settings: true
 
 # Pin lint and test to the SAME deterministic commands CI runs, instead of
 # leaving them to no-mistakes' default handling. Without a configured
-# commands.lint, the gate's lint step never ran the deterministic
-# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` that CI runs, so info-level
-# ShellCheck findings (e.g. SC2015) were not surfaced locally before CI rejected
-# them. commands.lint delegates the shell definition to bin/fm-lint.sh and runs
-# the locked Agent Fleet ruff check that .github/workflows/ci.yml also invokes.
-# The shell definition stays single-owned, so local and CI cannot diverge
-# (parity asserted by tests/fm-lint.test.sh).
+# commands.lint, the gate's lint step never ran the deterministic ShellCheck
+# CI runs, so info-level findings were not surfaced locally before CI rejected
+# them. The scoped owner below uses the same reviewed Azure-service selector as
+# CI: focused diffs lint only changed shell files, while mixed or unknown diffs
+# run the complete canonical set. Both modes delegate to bin/fm-lint.sh and
+# always run the locked Agent Fleet ruff check. The shell definition remains
+# single-owned (parity asserted by tests/fm-lint.test.sh).
 # The ordinary local test command derives every herdr-lab and herdr-mixed file
 # from tests/test-capabilities.tsv, admits those files through tests/run.sh's
 # sealed safety and lab-ownership boundary, and runs them serially on the
@@ -43,7 +43,7 @@ disable_project_settings: true
 # tests/fm-azure-runner.test.sh executes this test command in an isolated fixture
 # and proves that its two branches exclusively reach those respective owners.
 commands:
-  lint: 'if [ "${FM_AZURE_VALIDATION_CELL:-0}" = 1 ]; then exec "$FM_AZURE_VALIDATION_SHARD_BRIDGE" lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .''; else exec bin/fm-azure-runner-dispatch.sh lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .''; fi'
+  lint: 'if [ "${FM_AZURE_VALIDATION_CELL:-0}" = 1 ]; then exec "$FM_AZURE_VALIDATION_SHARD_BRIDGE" lint -- bin/fm-azure-runner-command.sh bin/fm-no-mistakes-lint-command.sh; else exec bin/fm-azure-runner-dispatch.sh lint -- bin/fm-azure-runner-command.sh bin/fm-no-mistakes-lint-command.sh; fi'
   test: 'if [ "${FM_AZURE_VALIDATION_CELL:-0}" = 1 ]; then exec "$FM_AZURE_VALIDATION_SHARD_BRIDGE" behavior --count "${FM_AZURE_VALIDATION_SHARD_COUNT:-8}"; else exec bin/fm-no-mistakes-test-command.sh; fi'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.

@@ -75,7 +75,7 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
-- Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
+- Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned ShellCheck version) that CI and the no-mistakes pre-push gate use with the same full-or-focused Azure-service scope, and it refuses to run under any other ShellCheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - `bin/*.py` runs under whichever `python3` is first on the invoking shell's `PATH`, which is often older than the version CI pins, so a newer-only API fails at runtime rather than in CI.
 - Prefer the idiom already used across `bin/`: `os.stat(path, follow_symlinks=...)`, not the Python 3.10+ `Path.stat(follow_symlinks=...)`.

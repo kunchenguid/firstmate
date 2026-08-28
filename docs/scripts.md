@@ -117,8 +117,9 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-harness.sh`          | Detect the running harness and resolve crewmate or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-session-lock-lib.sh` | Shared session-lock format, holder liveness, and home-bound supervisor route proof    |
-| `fm-lint.sh`             | Single owner of the shell-lint definition that CI and the no-mistakes gate both run  |
+| `fm-lint.sh`             | Single owner of the shell-lint definition used by CI and the no-mistakes gate       |
 | `fm-install-shellcheck.sh` | Install CI's pinned, checksum-verified ShellCheck build                            |
+| `fm-no-mistakes-lint-command.sh` | Match CI's full-or-focused shell scope, fail closed to full lint, and always run locked Agent Fleet lint |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash pending mentions, print `x-mention <request_id>`     |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed X-mode reply or follow-up                         |

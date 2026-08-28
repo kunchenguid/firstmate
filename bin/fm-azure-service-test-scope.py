@@ -13,6 +13,7 @@ FOCUSED_TESTS = (
     "tests/fm-azure-pilot.test.sh",
     "tests/fm-azure-runner.test.sh",
     "tests/fm-cloud-provider-seal.test.sh",
+    "tests/fm-lint.test.sh",
     "tests/fm-no-mistakes-reattach.test.sh",
     "tests/fm-no-mistakes-runtime.test.sh",
     "tests/fm-no-mistakes-worker.test.sh",
@@ -29,6 +30,7 @@ FOCUSED_SOURCES = frozenset(
         "bin/fm-azure-runner-dispatch.sh",
         "bin/fm-azure-worker-provider.py",
         "bin/fm-no-mistakes-reattach.sh",
+        "bin/fm-no-mistakes-lint-command.sh",
         "bin/fm-no-mistakes-runtime.py",
         "bin/fm-no-mistakes-test-command.sh",
         "bin/fm-no-mistakes-worker",
@@ -54,7 +56,16 @@ def git(*args):
 def changed_paths(base, head):
     if not SHA.fullmatch(base) or not SHA.fullmatch(head):
         raise ValueError("base and head must be exact 40-character lowercase SHAs")
-    body = git("diff", "--name-only", "-z", base, head, "--")
+    # GitHub's pull_request.base.sha is the current base tip when the workflow
+    # is dispatched. A long pre-push gate can let main advance after the
+    # feature was rebased, so a direct base..head comparison invents the newer
+    # base-only files as PR changes and needlessly expands focused CI. The PR
+    # diff begins at the exact common ancestor; absence of one remains a hard
+    # git failure and therefore fails closed.
+    merge_base = git("merge-base", base, head).decode("ascii").strip()
+    if not SHA.fullmatch(merge_base):
+        raise ValueError("base and head do not resolve one exact merge base")
+    body = git("diff", "--name-only", "-z", merge_base, head, "--")
     return tuple(item.decode("utf-8") for item in body.split(b"\0") if item)
 
 

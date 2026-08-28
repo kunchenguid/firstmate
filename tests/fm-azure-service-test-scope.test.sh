@@ -12,7 +12,7 @@ focused_inventory_contract() {
   local listed count path
   listed=$($SCOPE list) || fail "focused Azure service inventory was unreadable"
   count=$(printf '%s\n' "$listed" | grep -c .)
-  [ "$count" -eq 10 ] || fail "focused Azure service inventory did not contain 10 tests"
+  [ "$count" -eq 11 ] || fail "focused Azure service inventory did not contain 11 tests"
   [ "$(printf '%s\n' "$listed" | sort -u | grep -c .)" -eq "$count" ] \
     || fail "focused Azure service inventory contains duplicates"
   while IFS= read -r path; do
@@ -22,11 +22,11 @@ focused_inventory_contract() {
   done <<EOF
 $listed
 EOF
-  pass "focused Azure service inventory contains only ten executable hermetic contracts"
+  pass "focused Azure service inventory contains only eleven executable hermetic contracts"
 }
 
 mode_falls_back_contract() {
-  local tmp repo base focused template_head shell_head broad out rc
+  local tmp repo base focused template_head lint_head shell_head advanced_base broad out rc
   fm_test_tmproot_into tmp fm-azure-service-test-scope
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
@@ -39,6 +39,7 @@ mode_falls_back_contract() {
   git -C "$repo" add bin/fm-no-mistakes-worker
   git -C "$repo" commit -qm base
   base=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -qb feature
   printf 'focused\n' >> "$repo/bin/fm-no-mistakes-worker"
   git -C "$repo" commit -qam focused
   focused=$(git -C "$repo" rev-parse HEAD)
@@ -54,14 +55,30 @@ mode_falls_back_contract() {
   template_head=$(git -C "$repo" rev-parse HEAD)
   [ "$($repo/bin/fm-azure-service-test-scope.py mode "$base" "$template_head")" = focused ] \
     || fail "the authoritative Azure template did not select focused mode"
+  cp "$ROOT/bin/fm-no-mistakes-lint-command.sh" "$repo/bin/fm-no-mistakes-lint-command.sh"
+  git -C "$repo" add bin/fm-no-mistakes-lint-command.sh
+  git -C "$repo" commit -qm scoped-lint
+  lint_head=$(git -C "$repo" rev-parse HEAD)
+  [ "$($repo/bin/fm-azure-service-test-scope.py mode "$template_head" "$lint_head")" = focused ] \
+    || fail "the no-mistakes lint owner did not retain focused Azure CI"
   printf '#!/bin/sh\n' > "$repo/bin/fm-worker-lifecycle.sh"
   git -C "$repo" add bin/fm-worker-lifecycle.sh
   git -C "$repo" commit -qm focused-shell
   shell_head=$(git -C "$repo" rev-parse HEAD)
-  [ "$($repo/bin/fm-azure-service-test-scope.py mode "$base" "$shell_head")" = focused ] \
+  [ "$($repo/bin/fm-azure-service-test-scope.py mode "$lint_head" "$shell_head")" = focused ] \
     || fail "an owned shell change did not preserve focused mode"
-  [ "$($repo/bin/fm-azure-service-test-scope.py shell "$base" "$shell_head")" = bin/fm-worker-lifecycle.sh ] \
+  [ "$($repo/bin/fm-azure-service-test-scope.py shell "$lint_head" "$shell_head")" = bin/fm-worker-lifecycle.sh ] \
     || fail "focused lint did not select the exact changed shell file"
+  git -C "$repo" checkout -q main
+  printf 'unrelated base advance\n' > "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -qm base-advance
+  advanced_base=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q feature
+  [ "$($repo/bin/fm-azure-service-test-scope.py mode "$advanced_base" "$shell_head")" = focused ] \
+    || fail "an unrelated advancing base tip expanded focused CI"
+  [ "$($repo/bin/fm-azure-service-test-scope.py shell "$advanced_base" "$shell_head")" = "$(printf '%s\n' bin/fm-no-mistakes-lint-command.sh bin/fm-worker-lifecycle.sh)" ] \
+    || fail "an unrelated advancing base tip changed the focused lint target"
   printf 'broad\n' > "$repo/bin/fm-spawn.sh"
   git -C "$repo" add bin/fm-spawn.sh
   git -C "$repo" commit -qm broad
@@ -74,7 +91,7 @@ mode_falls_back_contract() {
   rc=0
   $repo/bin/fm-azure-service-test-scope.py mode not-a-sha "$broad" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail "a malformed comparison identity selected a test mode"
-  pass "only an exact owned Azure service diff selects focused mode; everything else runs full"
+  pass "only the merge-base-owned Azure service diff selects focused mode; everything else runs full"
 }
 
 workflow_contract() {
