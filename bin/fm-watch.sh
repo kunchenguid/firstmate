@@ -2,22 +2,22 @@
 # Firstmate watcher.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
-# The no-verb signal and stale path is absorb-only-when-provably-working: a wake
-# is absorbed only when the crew shows POSITIVE evidence it is still working (an
-# actively-running no-mistakes step, or a backend busy signal), and surfaced
-# otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared wait, either a paused:
+# A status or turn-completion signal is transport, not current-state truth.
+# Normal mode absorbs it unless its newly changed status carries a captain-relevant
+# verb or belongs to a secondmate's parent-directed reply stream; the independent
+# stale-pane path still detects a worker that actually stopped and uses positive
+# current-state evidence before suppressing that condition. A declared wait,
+# either a paused:
 # external wait or a verified captain-held transfer, is the separate idle absorb
 # case and re-surfaces only on its long bounded, backing-off cadence
 # (FM_PAUSE_RESURFACE_SECS, FM_PAUSE_RESURFACE_MAX_SECS; waits that come due in
 # the same poll are batched into one wake and their backoff records published
-# through state/.paused-recheck-publish), although its initial
-# no-verb status signal still surfaces in normal mode.
+# through state/.paused-recheck-publish).
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
-#   signal: <file>...      status/turn-end signals, surfaced when a listed status
-#                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#   signal: <file>...      status/turn-end signals, surfaced when a newly changed
+#                          status has a captain-relevant verb or is a secondmate's
+#                          parent-directed reply, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -148,24 +148,19 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
-# Always-on wake triage: most wakes during a long crew validation are benign (a
-# working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
-# than wake firstmate's LLM for each, this watcher classifies every wake in bash
-# and ABSORBS the benign majority - it advances the suppression marker, logs to a
-# debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
-# / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
-# while the crew shows positive evidence it is still working (an actively-running
-# no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
-# busy pane is SURFACED, so a finish reported only through interactive pane menus
-# (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
-# signal, a no-verb signal whose crew is not provably working, any check, a stale
-# pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
-# is what wakes the LLM through the background-task completion. The same classifier
+# Always-on wake triage absorbs routine transport notifications and no-change
+# heartbeats in bash: it advances the suppression marker, logs to a debug log, and
+# keeps blocking without enqueuing or exiting. A signal is actionable only when
+# newly unread status carries a captain-relevant verb or belongs to a secondmate's
+# parent-directed reply stream; bare turn completion and routine progress never
+# consult stale status or current-state proof. The independent stale-pane path
+# detects stopped or wedged workers and uses crew_is_provably_working over
+# fm-crew-state.sh before suppressing that current condition. Any actionable
+# signal, check, stale condition, heartbeat, or unknown wake is written to the
+# durable queue before this cycle exits. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
+# wake) and never double-triages.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
@@ -701,22 +696,54 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # compared against a persisted size:mtime signature (.seen-*) rather than
 # mtime-vs-a-startup-touch, so signals that land while no watcher is running
 # are caught by the next one, and same-second writes cannot slip through a
-# strict -nt comparison. Pure read: prints one "<seen-file>\t<sig>\t<file>"
-# line per changed file. .seen-* is updated only after the wake is either
+# strict -nt comparison. Pure read: prints one
+# "<seen-file>\t<sig>\t<file>\t<prior-sig>" line per changed file. .seen-* is updated only after the wake is either
 # surfaced or intentionally absorbed, so a watcher killed mid-cycle never
 # swallows a signal.
 scan_signals() {
-  local f sig sf
+  local f sig sf seen
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
-    if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
-      printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
+    seen=$(cat "$sf" 2>/dev/null || true)
+    if [ "$sig" != "$seen" ]; then
+      printf '%s\t%s\t%s\t%s\n' "$sf" "$sig" "$f" "$seen"
     fi
   done
   return 0
+}
+
+status_unread_range_is_actionable() {  # <file> <seen-signature> <captured-signature>
+  local f=$1 seen=$2 captured=$3 start=0 end unread line
+  end=${captured%%:*}
+  case "$end" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -n "$seen" ]; then
+    start=${seen%%:*}
+    case "$start" in ''|*[!0-9]*) start=0 ;; esac
+    [ "$end" -ge "$start" ] || start=0
+  fi
+  if [ "$end" -eq "$start" ]; then
+    start=0
+  fi
+  unread=$(dd if="$f" bs=1 skip="$start" count="$((end - start))" 2>/dev/null) || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_is_captain_relevant "$line" && return 0
+  done <<EOF
+$unread
+EOF
+  return 1
+}
+
+pending_signal_is_actionable() {  # stdin: scan_signals rows
+  local sf sig f seen
+  while IFS=$(printf '\t') read -r sf sig f seen; do
+    [ -n "$sf" ] || continue
+    case "$f" in *.status) ;; *) continue ;; esac
+    status_unread_range_is_actionable "$f" "$seen" "$sig" && return 0
+  done
+  return 1
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -750,20 +777,37 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason
+  local sequence key payload reason selected_sequence='' selected_payload=''
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  while IFS= read -r key; do
-    case "$key" in procevent:*) ;; *) continue ;; esac
+  while IFS=$(printf '\t') read -r sequence key payload; do
+    [ -n "$key" ] || continue
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
-  done < <(fm_wake_queued_keys_locked check)
+    if [ -z "$selected_sequence" ] || [ "$sequence" -gt "$selected_sequence" ]; then
+      selected_sequence=$sequence
+      selected_payload=$payload
+    fi
+  done < <(awk -F '\t' '
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $3 == "check" && $4 ~ /^procevent:/ {
+      if (!seen[$4]++) order[++count]=$4
+      sequence[$4]=$2
+      payload[$4]=$5
+    }
+    END {
+      for (i=1; i<=count; i++) print sequence[order[i]] "\t" order[i] "\t" payload[order[i]]
+    }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null)
   if [ -z "$PROCEVENT_SURFACED" ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
   reason="check: process-event result captured:$PROCEVENT_SURFACED"
+  watch_delivery_preselect "$selected_sequence" "$selected_payload" || {
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  }
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
   wake "$reason"
@@ -1012,8 +1056,56 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+FM_INTENTIONAL_RETIRE_MARKER=
+intentional_pi_away_retirement() {
+  local marker="$STATE/.pi-watch-away-retire" expected_version marker_version extension_pid generation watcher_pid count
+  [ -e "$STATE/.afk" ] && [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  count=$(wc -l < "$marker" 2>/dev/null | tr -d '[:space:]')
+  [ "$count" = 4 ] || return 1
+  marker_version=$(sed -n '1p' "$marker")
+  extension_pid=$(sed -n '2p' "$marker")
+  generation=$(sed -n '3p' "$marker")
+  watcher_pid=$(sed -n '4p' "$marker")
+  expected_version=$(fm_pi_extension_version "$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts") || return 1
+  case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "$marker_version" = "$expected_version" ] \
+    && [ "$watcher_pid" = "$WATCHER_PID" ] \
+    && fm_pi_extension_loaded "$STATE/.pi-watch-extension-loaded" "$expected_version" "$STATE/.lock" \
+    && [ "$(sed -n '1p' "$STATE/.lock" 2>/dev/null)" = "$extension_pid" ] \
+    && fm_pid_alive "$extension_pid" \
+    || return 1
+  FM_INTENTIONAL_RETIRE_MARKER=$marker
+}
+
+intentional_away_daemon_retirement() {
+  local marker="$STATE/.away-daemon-watcher-retire" schema daemon_pid daemon_identity watcher_pid lock_pid lock_identity current_identity count
+  [ -e "$STATE/.afk" ] && [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  count=$(wc -l < "$marker" 2>/dev/null | tr -d '[:space:]')
+  [ "$count" = 4 ] || return 1
+  schema=$(sed -n '1p' "$marker")
+  daemon_pid=$(sed -n '2p' "$marker")
+  daemon_identity=$(sed -n '3p' "$marker")
+  watcher_pid=$(sed -n '4p' "$marker")
+  lock_pid=$(cat "$STATE/.supervise-daemon.lock/pid" 2>/dev/null || true)
+  lock_identity=$(cat "$STATE/.supervise-daemon.lock/pid-identity" 2>/dev/null || true)
+  current_identity=$(fm_pid_identity "$daemon_pid" 2>/dev/null || true)
+  [ "$schema" = away-daemon-retire-v1 ] \
+    && [ "$watcher_pid" = "$WATCHER_PID" ] \
+    && [ "$daemon_pid" = "$lock_pid" ] \
+    && [ -n "$daemon_identity" ] \
+    && [ "$daemon_identity" = "$lock_identity" ] \
+    && [ "$daemon_identity" = "$current_identity" ] \
+    || return 1
+  FM_INTENTIONAL_RETIRE_MARKER=$marker
+}
+
+intentional_watcher_retirement() {
+  FM_INTENTIONAL_RETIRE_MARKER=
+  intentional_pi_away_retirement || intentional_away_daemon_retirement
+}
+
 watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock
+  local cleanup_status=0 owns_lock=0 transition=release-lock intentional_away=0
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
@@ -1024,10 +1116,19 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
-  if [ "$owns_lock" -eq 1 ] \
+  if [ "$owns_lock" -eq 1 ] && intentional_watcher_retirement; then
+    intentional_away=1
+    if ! fm_lock_release "$WATCH_LOCK"; then
+      echo "watcher: intentional away retirement could not release its exact lock" >&2
+      cleanup_status=1
+    fi
+  elif [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
+  fi
+  if [ "$intentional_away" -eq 1 ] && [ "$cleanup_status" -eq 0 ]; then
+    rm -f "$FM_INTENTIONAL_RETIRE_MARKER" 2>/dev/null || true
   fi
   return "$cleanup_status"
 }
@@ -1207,35 +1308,35 @@ while :; do
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
-    while IFS=$(printf '\t') read -r sf sig f; do
+    while IFS=$(printf '\t') read -r sf sig f seen; do
       [ -n "$sf" ] || continue
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
     done <<EOF
 $pending
 EOF
     reason="signal:$files"
-    # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
-    #   - the away-mode daemon owns triage (afk) and wants every wake;
-    #   - any status file carries a captain-relevant verb;
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
-    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run a bounded no-mistakes call), so the ||
-    # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    # Triage: the away daemon receives every signal; normal mode surfaces only
+    # newly changed captain-relevant status or a secondmate's parent-directed
+    # status stream. Bare turn completion and routine working notes advance their
+    # exact suppressors and stay silent. They are notifications, not current-state
+    # evidence; stopped-worker detection remains with the independent stale path.
+    actionable=0
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
-      while IFS=$(printf '\t') read -r sf sig f; do
+    if afk_present; then
+      actionable=1
+    elif pending_signal_is_actionable <<< "$pending"; then
+      actionable=1
+    elif signal_has_parent_directed_status $files; then
+      actionable=1
+    fi
+    if [ "$actionable" -eq 1 ]; then
+      while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
       done <<EOF
 $pending
 EOF
-      while IFS=$(printf '\t') read -r sf sig f; do
+      while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
         mark_surfaced "$f"
@@ -1244,7 +1345,7 @@ $pending
 EOF
       wake "$reason"
     else
-      while IFS=$(printf '\t') read -r sf sig f; do
+      while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
       done <<EOF

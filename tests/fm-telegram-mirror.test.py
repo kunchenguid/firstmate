@@ -919,7 +919,7 @@ class MirrorTestCase(unittest.TestCase):
             {"t": "hello"},
             {"t": "terminal", "text": worker_leak},
             {"t": "reply", "text": "Confirmed, captain. Starting the investigation."},
-            {"t": "reply", "text": "Captain, shipshape."},
+            {"t": "reply", "text": "Worker-only internal reply."},
             {"t": "command", "id": 99, "command": "off"},
         ):
             try:
@@ -936,7 +936,7 @@ class MirrorTestCase(unittest.TestCase):
             pass
         chat = " ".join(self.telegram.sent_texts())
         for leaked in ("Definition of done", "scout brief", "Confirmed, captain",
-                       "Captain, shipshape.", "Implement the captain-approved"):
+                       "Worker-only internal reply.", "Implement the captain-approved"):
             self.assertNotIn(leaked, chat, f"a worker session leaked {leaked!r} into the chat")
 
         # The captain's own session still owns the mirror, unchanged.

@@ -53,7 +53,17 @@
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
-# wins the singleton while the duplicate child stands down. It
+# wins the singleton while the duplicate child stands down.
+# --handling-delivered confirms that the exact successor watcher and recovery
+# generation still own delivery and that the exact queue sequence captured for
+# the delivered wake is still pending with its durable payload. Exit 3 means the
+# row was already acknowledged, so a persistent adapter must absorb the late
+# callback without starting a model turn.
+# --retire-away is the authenticated Pi producer transition: only the current
+# extension process may mark and stop its exact healthy watcher while .afk exists.
+# The watcher's cleanup consumes that marker and releases its singleton without
+# publishing downtime, so intentional handoff cannot produce rearm-resurface.
+# It
 # resolves and signals exactly that pid, so it can never touch another home's
 # watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
@@ -276,8 +286,30 @@ fail_unexplained_cycle() {
 
 # Close a cycle whose reason line this arm could not read against the bounded
 # terminal-delivery ledger the watcher publishes before releasing its lock.
+print_cycle_delivery_identity() {
+  local clean_identity record_pid record_identity record_reason record_sequence record_payload sequence='' payload=''
+  clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
+  fm_lock_acquire_wait "$WATCH_DELIVERY_LOCK" || return 0
+  if [ -f "$WATCH_DELIVERY_LOG" ]; then
+    while IFS=$'\t' read -r record_pid record_identity record_reason record_sequence record_payload; do
+      if [ "$record_pid" = "$cycle_watcher_pid" ] && [ "$record_identity" = "$clean_identity" ]; then
+        sequence=$record_sequence
+        payload=$record_payload
+      fi
+    done < "$WATCH_DELIVERY_LOG"
+  fi
+  fm_lock_release "$WATCH_DELIVERY_LOCK"
+  case "$sequence" in
+    ''|*[!0-9]*) ;;
+    *)
+      printf 'watcher: delivery-sequence=%s\n' "$sequence"
+      printf 'watcher: delivery-payload=%s\n' "$payload"
+      ;;
+  esac
+}
+
 close_unobserved_cycle() {
-  local i reason clean_identity record_pid record_identity record_reason
+  local i reason sequence payload clean_identity record_pid record_identity record_reason record_sequence record_payload
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
@@ -290,15 +322,24 @@ close_unobserved_cycle() {
   done
   reason=
   if [ -f "$WATCH_DELIVERY_LOG" ]; then
-    while IFS=$'\t' read -r record_pid record_identity record_reason; do
+    while IFS=$'\t' read -r record_pid record_identity record_reason record_sequence record_payload; do
       if [ "$record_pid" = "$cycle_watcher_pid" ] && [ "$record_identity" = "$clean_identity" ]; then
         reason=$record_reason
+        sequence=$record_sequence
+        payload=$record_payload
       fi
     done < "$WATCH_DELIVERY_LOG"
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
   if [ -n "$reason" ]; then
     printf '%s\n' "$reason"
+    case "$sequence" in
+      ''|*[!0-9]*) ;;
+      *)
+        printf 'watcher: delivery-sequence=%s\n' "$sequence"
+        printf 'watcher: delivery-payload=%s\n' "$payload"
+        ;;
+    esac
     return 0
   fi
   fail_unexplained_cycle
@@ -385,6 +426,11 @@ handling_successor_generation() {
 mode=arm
 handling_generation=
 handling_watcher_pid=
+handling_reason=
+handling_sequence=
+away_generation=
+away_extension_pid=
+away_arm_pid=
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
@@ -393,18 +439,84 @@ case "${1:-}" in
     handling_generation=${2:-}
     [ "${3:-}" = --watcher-pid ] || { echo "watcher: invalid handling delivery confirmation" >&2; exit 2; }
     handling_watcher_pid=${4:-}
+    [ "${5:-}" = --reason ] || { echo "watcher: missing handling delivery reason" >&2; exit 2; }
+    handling_reason=${6:-}
+    [ "${7:-}" = --sequence ] || { echo "watcher: missing handling delivery sequence" >&2; exit 2; }
+    handling_sequence=${8:-}
     case "$handling_generation" in ''|*[!A-Za-z0-9._-]*) echo "watcher: invalid recovery generation" >&2; exit 2 ;; esac
     case "$handling_watcher_pid" in ''|*[!0-9]*) echo "watcher: invalid successor watcher pid" >&2; exit 2 ;; esac
-    [ "$#" -eq 4 ] || { echo "watcher: unexpected handling delivery arguments" >&2; exit 2; }
+    case "$handling_sequence" in ''|*[!0-9]*) echo "watcher: invalid handling delivery sequence" >&2; exit 2 ;; esac
+    [ -n "$handling_reason" ] || { echo "watcher: empty handling delivery reason" >&2; exit 2; }
+    [ "$#" -eq 8 ] || { echo "watcher: unexpected handling delivery arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: $(basename "$0") [--restart | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
+  --retire-away)
+    mode=retire-away
+    away_generation=${2:-}
+    [ "${3:-}" = --extension-pid ] || { echo "watcher: invalid away retirement extension identity" >&2; exit 2; }
+    away_extension_pid=${4:-}
+    [ "${5:-}" = --arm-pid ] || { echo "watcher: invalid away retirement arm identity" >&2; exit 2; }
+    away_arm_pid=${6:-}
+    case "$away_generation" in ''|*[!A-Za-z0-9._-]*) echo "watcher: invalid away retirement generation" >&2; exit 2 ;; esac
+    case "$away_extension_pid" in ''|*[!0-9]*) echo "watcher: invalid away retirement extension pid" >&2; exit 2 ;; esac
+    case "$away_arm_pid" in ''|*[!0-9]*) echo "watcher: invalid away retirement arm pid" >&2; exit 2 ;; esac
+    [ "$#" -eq 6 ] || { echo "watcher: unexpected away retirement arguments" >&2; exit 2; }
+    ;;
+  *) echo "usage: $(basename "$0") [--restart | --handling-delivered GENERATION --watcher-pid PID --reason REASON --sequence SEQUENCE | --retire-away GENERATION --extension-pid PID --arm-pid PID]" >&2; exit 2 ;;
 esac
+
+if [ "$mode" = retire-away ]; then
+  away_marker="$STATE/.pi-watch-away-retire"
+  expected_version=$(fm_pi_extension_version "$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts") || exit 1
+  [ -e "$STATE/.afk" ] \
+    && fm_pi_extension_loaded "$STATE/.pi-watch-extension-loaded" "$expected_version" "$STATE/.lock" \
+    && [ "$(sed -n '1p' "$STATE/.lock" 2>/dev/null)" = "$away_extension_pid" ] \
+    && fm_pid_alive "$away_extension_pid" \
+    && fm_pid_alive "$away_arm_pid" \
+    || exit 1
+  if ! healthy_watcher; then
+    wait_for_healthy_successor || exit 1
+  fi
+  watcher_parent=$(ps -o ppid= -p "$HEALTHY_PID" 2>/dev/null | tr -d '[:space:]')
+  [ "$watcher_parent" = "$away_arm_pid" ] || exit 1
+  away_tmp=$(mktemp "$STATE/.pi-watch-away-retire.tmp.XXXXXX") || exit 1
+  if ! {
+    printf '%s\n' "$expected_version"
+    printf '%s\n' "$away_extension_pid"
+    printf '%s\n' "$away_generation"
+    printf '%s\n' "$HEALTHY_PID"
+  } > "$away_tmp" || ! mv -f -- "$away_tmp" "$away_marker"; then
+    rm -f "$away_tmp"
+    exit 1
+  fi
+  kill -TERM "$HEALTHY_PID" 2>/dev/null || { rm -f "$away_marker"; exit 1; }
+  away_deadline=$(( $(date +%s) + ${FM_PI_AWAY_RETIRE_TIMEOUT:-5} + 1 ))
+  while fm_pid_alive "$HEALTHY_PID"; do
+    if [ "$(date +%s)" -ge "$away_deadline" ]; then
+      rm -f "$away_marker"
+      exit 1
+    fi
+    sleep 0.05
+  done
+  rm -f "$away_marker" 2>/dev/null || true
+  exit 0
+fi
 
 if [ "$mode" = handling-delivered ]; then
   fm_pid_alive "$handling_watcher_pid" \
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
-    && fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
-  exit $?
+    || exit 1
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+  if ! FM_HANDLING_REASON=$handling_reason FM_HANDLING_SEQUENCE=$handling_sequence awk -F '\t' '
+      NF >= 5 && $2 == ENVIRON["FM_HANDLING_SEQUENCE"] && $5 == ENVIRON["FM_HANDLING_REASON"] { found=1; exit }
+      END { exit !found }
+    ' "$FM_WAKE_QUEUE" 2>/dev/null; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    exit 3
+  fi
+  fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
+  status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  exit "$status"
 fi
 
 if [ "$mode" = restart ]; then
@@ -494,6 +606,7 @@ owned_child_finished() {
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
+    print_cycle_delivery_identity
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=

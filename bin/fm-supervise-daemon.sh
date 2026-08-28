@@ -38,7 +38,10 @@
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
 #     After a watcher cycle, the daemon handles every durable row through that
-#     drain and acknowledges it only after routing completes.
+#     drain and acknowledges it only after routing completes. Intentional daemon
+#     shutdown publishes an identity-bound child-retirement marker before TERM,
+#     so return releases the exact watcher without a false downtime recovery;
+#     an unmarked crash retains ordinary recovery publication.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared wait is escalated
@@ -1513,12 +1516,25 @@ fm_super_main() {
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
+    local retire_marker retire_tmp daemon_identity
     trap - TERM INT
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then
+      retire_marker="$STATE/.away-daemon-watcher-retire"
+      retire_tmp="$retire_marker.tmp.$$"
+      daemon_identity=$(fm_pid_identity "$$" 2>/dev/null || true)
+      if afk_active "$STATE" && [ -n "$daemon_identity" ]; then
+        {
+          printf 'away-daemon-retire-v1\n'
+          printf '%s\n' "$$"
+          printf '%s\n' "$daemon_identity"
+          printf '%s\n' "$WATCHER_PID"
+        } > "$retire_tmp" 2>/dev/null && mv -f "$retire_tmp" "$retire_marker" 2>/dev/null || true
+      fi
       kill "$WATCHER_PID" 2>/dev/null || true
       wait "$WATCHER_PID" 2>/dev/null || true
+      rm -f "$retire_tmp" "$retire_marker" 2>/dev/null || true
     fi
     if [ -n "${CUR_TMP:-}" ]; then
       rm -f "$CUR_TMP" 2>/dev/null || true

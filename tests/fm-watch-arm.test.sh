@@ -297,6 +297,8 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   expect_code 0 "$status" "re-arm re-surface wake must close successfully"
   grep -F 'check: rearm-resurface' "$armout" >/dev/null \
     || fail "re-arm did not report the durable recovery wake: $(cat "$armout")"
+  grep -F 'watcher: delivery-payload=check: startup-network' "$armout" >/dev/null \
+    || fail "re-arm did not bind its presentation reason to the selected durable payload: $(cat "$armout")"
 
   # The normal wake-handling drain is the one owner of both queue consumption
   # and the cursor-backed fold. It must expose every queued record and the
@@ -436,7 +438,7 @@ test_delivery_gap_wake_is_recovered_once() {
 }
 
 test_interrupted_handling_is_redrained_on_rearm() {
-  local dir home state fakebin first_arm recovery_arm sequence generation handling_watcher_pid handling_generation generation_replay
+  local dir home state fakebin first_arm recovery_arm sequence generation handling_watcher_pid handling_generation handling_sequence generation_replay
   dir=$(make_case interrupted-handling-redrain)
   home="$dir/home"
   state="$dir/state"
@@ -485,8 +487,21 @@ test_interrupted_handling_is_redrained_on_rearm() {
   esac
   handling_generation=$(recovery_marker_generation "$state/.watcher-down")
   handling_watcher_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).* recovery-generation=.*$/\1/p' "$dir/handling-successor-arm.out")
+  handling_sequence=$(awk -F '\t' -v reason="signal: $state/interrupted.status" '$5 == reason { print $2; exit }' "$state/.wake-queue")
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append signal interrupted.status "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "signal: $state/interrupted.status" \
+    || fail "could not append the same-reason successor row"
+  awk -F '\t' -v sequence="$handling_sequence" '$2 != sequence' "$state/.wake-queue" > "$state/.wake-queue.tmp"
+  mv "$state/.wake-queue.tmp" "$state/.wake-queue"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$handling_generation" \
+    --watcher-pid "$handling_watcher_pid" --reason "signal: $state/interrupted.status" --sequence "$handling_sequence"; then
+    fail "an acknowledged row was confused with a later row carrying the same reason"
+  else
+    [ "$?" -eq 3 ] || fail "an acknowledged exact row was not classified as superseded"
+  fi
+  handling_sequence=$(awk -F '\t' -v reason="signal: $state/interrupted.status" '$5 == reason { print $2; exit }' "$state/.wake-queue")
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$handling_generation" \
-    --watcher-pid "$handling_watcher_pid" \
+    --watcher-pid "$handling_watcher_pid" --reason "signal: $state/interrupted.status" --sequence "$handling_sequence" \
     || fail "confirmed prompt delivery did not begin handling"
   case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
     pending:handling:"$handling_generation"|announced:handling:"$handling_generation") ;;
@@ -776,6 +791,66 @@ test_moved_generation_acknowledgement_is_self_healing() {
   pass "watch-arm: a moved recovery generation consumes handled rows and names its remedy"
 }
 
+test_intentional_away_retirement_is_distinct_from_unintended_close() {
+  local dir home state fakebin version watcher_pid intentional_out failure_out old_root_override=${FM_ROOT_OVERRIDE-}
+
+  export FM_ROOT_OVERRIDE="$ROOT"
+  dir=$(make_case intentional-away-retirement)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/ordinary-arm.out"
+  is_live_non_zombie "$ARM_PID" || fail "intentional-away fixture arm did not stay live"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  version="sha256:$(sha256_file "$ROOT/.pi/extensions/fm-primary-pi-watch.ts")" \
+    || fail "could not compute the Pi watcher extension version"
+  printf '%s\n' "$$" > "$state/.lock"
+  printf '%s\n%s\n' "$version" "$$" > "$state/.pi-watch-extension-loaded"
+  : > "$state/.afk"
+  [ "$(ps -o ppid= -p "$watcher_pid" 2>/dev/null | tr -d '[:space:]')" = "$ARM_PID" ] \
+    || fail "intentional-away fixture watcher is not owned by its arm (watcher=$watcher_pid arm=$ARM_PID parent=$(ps -o ppid= -p "$watcher_pid" 2>/dev/null | tr -d '[:space:]'))"
+  intentional_out="$dir/intentional-retire.out"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --retire-away fixture-generation \
+    --extension-pid "$$" --arm-pid "$ARM_PID" > "$intentional_out" 2>&1 \
+    || fail "authenticated intentional away retirement was rejected: $(cat "$intentional_out")"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  is_live_non_zombie "$ARM_PID" && fail "intentional away retirement left its arm process live"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    pending:*|announced:*) fail "intentional away retirement published actionable recovery" ;;
+  esac
+  rm -f "$state/.afk"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/after-away-arm.out"
+  sleep 2
+  is_live_non_zombie "$ARM_PID" || fail "ordinary return arm exited after intentional away retirement: $(cat "$dir/after-away-arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/after-away-arm.out" >/dev/null \
+    || fail "intentional away retirement emitted rearm-resurface"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+
+  dir=$(make_case unintended-close-recovery)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/unintended-arm.out"
+  is_live_non_zombie "$ARM_PID" || fail "unintended-close fixture arm did not stay live"
+  kill -TERM "$ARM_PID" 2>/dev/null || fail "could not stop the unintended-close arm"
+  wait "$ARM_PID" 2>/dev/null || true
+  failure_out="$dir/unintended-recovery.out"
+  start_rearm_arm "$home" "$state" "$fakebin" "$failure_out"
+  wait_for_exit "$ARM_PID" 120 || fail "unintended close did not surface recovery"
+  grep -F 'check: rearm-resurface' "$failure_out" >/dev/null \
+    || fail "unintended close lost its actionable rearm-resurface: $(cat "$failure_out")"
+  if [ -n "$old_root_override" ]; then
+    export FM_ROOT_OVERRIDE="$old_root_override"
+  else
+    unset FM_ROOT_OVERRIDE
+  fi
+  pass "watch-arm: intentional away retirement is silent while an unintended close still re-surfaces"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -814,4 +889,5 @@ test_restart_preserves_recovery_across_reused_pid_lock
 test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
+test_intentional_away_retirement_is_distinct_from_unintended_close
 test_downtime_marker_does_not_follow_symlink

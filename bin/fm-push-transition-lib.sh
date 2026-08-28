@@ -40,8 +40,12 @@ watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
 }
 
+watch_delivery_clean_payload() {
+  printf '%s' "$1" | tr '\t\r\n' '   '
+}
+
 watch_delivery_publish() {
-  local reason=$1 i size tmp raw
+  local reason=$1 sequence=$2 payload=$3 i size tmp raw
   [ -n "$FM_WATCH_DELIVERY_PID" ] || return 0
   [ -n "$FM_WATCH_DELIVERY_IDENTITY" ] || return 0
   i=0
@@ -50,10 +54,12 @@ watch_delivery_publish() {
     sleep 0.02
     i=$((i + 1))
   done
-  printf '%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\n' \
     "$FM_WATCH_DELIVERY_PID" \
     "$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")" \
-    "$(watch_delivery_clean_reason "$reason")" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
+    "$(watch_delivery_clean_reason "$reason")" \
+    "$sequence" \
+    "$(watch_delivery_clean_payload "$payload")" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
   size=$(wc -c < "$WATCH_DELIVERY_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$size" in
     ''|*[!0-9]*) ;;
@@ -84,6 +90,37 @@ triage_log() {
   fi
 }
 
+FM_WATCH_DELIVERY_SEQUENCE=
+FM_WATCH_DELIVERY_PAYLOAD=
+FM_WATCH_DELIVERY_PRESELECTED=
+watch_delivery_preselect() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  FM_WATCH_DELIVERY_SEQUENCE=$1
+  FM_WATCH_DELIVERY_PAYLOAD=$2
+  FM_WATCH_DELIVERY_PRESELECTED=1
+}
+
+watch_delivery_select() {
+  local requested=${FM_WAKE_APPENDED_SEQUENCE:-} selected
+  FM_WATCH_DELIVERY_SEQUENCE=
+  FM_WATCH_DELIVERY_PAYLOAD=
+  FM_WATCH_DELIVERY_PRESELECTED=
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ -n "$requested" ]; then
+    selected=$(awk -F '\t' -v sequence="$requested" 'NF >= 5 && $2 == sequence { print $2 "\t" $5; exit }' "$FM_WAKE_QUEUE" 2>/dev/null)
+  else
+    selected=$(awk -F '\t' 'NF >= 5 && $2 ~ /^[0-9]+$/ { value=$2 "\t" $5 } END { print value }' "$FM_WAKE_QUEUE" 2>/dev/null)
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  if [ -z "$selected" ] && [ -n "$requested" ]; then
+    selected="$requested$(printf '\t')$FM_WAKE_APPENDED_PAYLOAD"
+  fi
+  FM_WATCH_DELIVERY_SEQUENCE=${selected%%"$(printf '\t')"*}
+  [ "$FM_WATCH_DELIVERY_SEQUENCE" != "$selected" ] || FM_WATCH_DELIVERY_SEQUENCE=
+  FM_WATCH_DELIVERY_PAYLOAD=${selected#*"$(printf '\t')"}
+  case "$FM_WATCH_DELIVERY_SEQUENCE" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
   local output_status=0
@@ -93,9 +130,12 @@ wake() {
   esac
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
+  if [ "$FM_WATCH_DELIVERY_PRESELECTED" != 1 ]; then
+    watch_delivery_select || true
+  fi
   if echo "$1"; then
     output_status=0
-    watch_delivery_publish "$1" || true
+    watch_delivery_publish "$1" "$FM_WATCH_DELIVERY_SEQUENCE" "$FM_WATCH_DELIVERY_PAYLOAD" || true
     # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
     FM_WATCH_DELIVERED_REASON=$1
   else

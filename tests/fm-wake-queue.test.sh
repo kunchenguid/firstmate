@@ -61,10 +61,9 @@ test_signal_catchup_without_running_watcher() {
   drain_out="$dir/drain.out"
   drain_err="$dir/drain.err"
   status_file="$state/task.status"
-  # The durable-queue catch-up contract applies to ACTIONABLE wakes (the always-on
-  # watcher can absorb no-verb working: notes when the crew is provably working).
-  # Use a captain-relevant verb so the wake is surfaced and the catch-up path is
-  # tested.
+  # The durable-queue catch-up contract applies to actionable wakes, while routine
+  # working notes stay silent. Use a captain-relevant verb so the wake is surfaced
+  # and the catch-up path is tested.
   printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
@@ -115,10 +114,9 @@ test_stale_enqueue_before_suppressor() {
   pass "stale wake is queued before suppressor state is advanced"
 }
 
-# Absorb-only-when-provably-working adds a new actionable wake: a non-terminal stale
-# whose crew is NOT provably working is surfaced immediately. That new path must keep
-# the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
-# suppressor - so a watcher killed between the two never swallows the surfaced finish.
+# A non-terminal stale whose crew is not provably working surfaces immediately.
+# That path must enqueue the stale wake before advancing the .stale-* suppressor,
+# so a watcher killed between the two never swallows the surfaced condition.
 test_not_working_stale_enqueue_before_suppressor() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig
   dir=$(make_case stale-stopped)

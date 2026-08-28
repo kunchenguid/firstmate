@@ -64,6 +64,10 @@ trap cleanup EXIT
 
 mkdir -p "$HOME_DIR"/{state,data,config,projects} "$PROJECT" "$PI_DIR" "$FAKEBIN"
 printf '# Synthetic isolated Firstmate primary\n' > "$PROJECT/AGENTS.md"
+# Linux has no automatic OS alert channel. Select one explicit channel so the
+# FM_WEDGE_ALARM_EXEC recorder seam is exercised instead of correctly reporting
+# that only the durable marker is available; the seam prevents a real alert.
+printf 'herdr\n' > "$HOME_DIR/config/wedge-alarm"
 
 # A task-local extension grants session-only trust, captures exact prompt bytes,
 # and aborts before provider work. No production supervision extension is loaded
@@ -73,10 +77,59 @@ printf '# Synthetic isolated Firstmate primary\n' > "$PROJECT/AGENTS.md"
 CAPTURE_EXT="$TMP_ROOT/capture-extension.ts"
 cat > "$CAPTURE_EXT" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  createAssistantMessageEventStream,
+  type AssistantMessage,
+} from "@earendil-works/pi-ai";
 import { appendFileSync } from "node:fs";
 const capturePath = process.env.FM_PI_CAPTURE_PATH!;
 export default function (pi: ExtensionAPI) {
+  pi.registerProvider("capture-e2e", {
+    name: "Capture-only E2E model",
+    baseUrl: "http://127.0.0.1/unused",
+    apiKey: "test-only",
+    api: "capture-e2e-api",
+    models: [{
+      id: "capture-only",
+      name: "Capture-only E2E model",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    }],
+    streamSimple(model) {
+      const stream = createAssistantMessageEventStream();
+      const output: AssistantMessage = {
+        role: "assistant",
+        content: [],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      };
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: output });
+        stream.push({ type: "done", reason: "stop", message: output });
+        stream.end();
+      });
+      return stream;
+    },
+  });
   pi.on("project_trust", () => ({ trusted: "yes", remember: false }));
+  pi.on("session_start", async (_event, ctx) => {
+    const model = ctx.modelRegistry.find("capture-e2e", "capture-only");
+    if (!model || !(await pi.setModel(model))) throw new Error("capture-only E2E model unavailable");
+  });
   pi.on("before_agent_start", (event, ctx) => {
     appendFileSync(capturePath, `${JSON.stringify({ prompt: event.prompt, hex: Buffer.from(event.prompt, "utf8").toString("hex") })}\n`);
     ctx.abort();
@@ -133,7 +186,7 @@ WORKSPACE=$(printf '%s' "$PRIMARY_OUT" | jq -r '.result.workspace.workspace_id')
 PRIMARY_PANE=$(printf '%s' "$PRIMARY_OUT" | jq -r '.result.root_pane.pane_id')
 PRIMARY_TARGET="$SESSION:$PRIMARY_PANE"
 EXT="$CAPTURE_EXT"
-PI_CMD=$(printf 'exec env PI_CODING_AGENT_DIR=%q FM_HOME=%q FM_PI_CAPTURE_PATH=%q pi -e %q --no-context-files --no-session' "$PI_DIR" "$HOME_DIR" "$CAPTURE" "$EXT")
+PI_CMD=$(printf 'exec env PI_CODING_AGENT_DIR=%q FM_HOME=%q FM_PI_CAPTURE_PATH=%q pi -e %q --provider capture-e2e --model capture-only --no-context-files --no-session' "$PI_DIR" "$HOME_DIR" "$CAPTURE" "$EXT")
 "$LAB_HELPER" run "$SESSION" pane run "$PRIMARY_PANE" "$PI_CMD" >/dev/null
 
 wait_for_idle() {
@@ -227,16 +280,16 @@ for _ in $(seq 1 80); do
   sleep 0.1
 done
 [ "$composer" = empty ] || fail "genuinely idle Pi separator composer did not classify empty (got $composer)"
-wait_for_prompt 'any(.[]; .prompt | startswith("\u2063Supervisor escalate"))' \
+wait_for_prompt 'any(.[]; .prompt | startswith("\u2063FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate"))' \
   || fail "real Pi did not receive the buffered escalation after becoming safely idle"
-INJECT_HEX=$(jq -r 'select(.prompt | startswith("\u2063Supervisor escalate")) | .hex' "$CAPTURE" | tail -1)
+INJECT_HEX=$(jq -r 'select(.prompt | startswith("\u2063FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate")) | .hex' "$CAPTURE" | tail -1)
 case "$INJECT_HEX" in e281a3*) ;; *) fail "real Pi escalation lost the terminal-safe marker: $INJECT_HEX" ;; esac
 for _ in $(seq 1 80); do [ ! -s "$STATE/.subsuper-escalations" ] && break; sleep 0.1; done
 [ ! -s "$STATE/.subsuper-escalations" ] || fail "confirmed real Pi delivery did not clear the escalation buffer"
 [ ! -e "$STATE/.subsuper-inject-wedged" ] || fail "confirmed real Pi delivery did not clear the old wedge marker"
 sleep 4
 [ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "successful delivery emitted a duplicate wedge alert"
-INJECT_PROMPT=$(jq -r 'select(.prompt | startswith("\u2063Supervisor escalate")) | .prompt' "$CAPTURE" | tail -1)
+INJECT_PROMPT=$(jq -r 'select(.prompt | startswith("\u2063FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate")) | .prompt' "$CAPTURE" | tail -1)
 message_is_injection "$INJECT_PROMPT" || fail "terminal-delivered Pi escalation was not recognized as an internal marker"
 assert_blocker_open 'after successful marked injection'
 pass "real idle Pi/Herdr accepts one marked escalation promptly, verifies submit, clears wedge state, and emits no duplicate alert"

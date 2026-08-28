@@ -49,8 +49,9 @@ batched digest rather than per-wake injections.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
-3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
-   its child; the singleton lock no-ops a stray arm harmlessly.
+3. **Do not separately arm `fm-watch.sh`.** The daemon must be the only watcher
+   owner while away.
+   The Pi launcher enforces the ownership transfer and return ordering defined in [`watcher-continuity.md`](../../../docs/watcher-continuity.md); other primary integrations retain their existing away gates.
 
 4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 

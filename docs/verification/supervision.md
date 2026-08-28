@@ -434,6 +434,46 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
+Pi 0.84.3 away takeover and return were verified on 2026-08-27 against a real interactive primary in a guarded Herdr 0.7.3 named non-default lab.
+The ordinary watcher was live before entry, the launcher waited for the extension's generation-bound standdown receipt, the daemon then held the only watcher, and return restored one ordinary watcher without a direct watcher follow-up.
+A redundant arm command preserved that returned singleton.
+
+```sh
+export HERDR_LAB_HELPER=/home/reneg/kun-agent-workspace/bin/fm-herdr-lab.sh
+export HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name firstmate-silent-routine-notifications-v1)
+FM_PI_AWAY_TAKEOVER_HERDR_E2E=1 tests/fm-pi-away-takeover-herdr-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Pi ordinary supervision retires before the away daemon becomes sole owner
+ok - real Pi away return restores exactly one ordinary cycle with no replayed turn
+evidence: herdr-session=fm-lab-firstmate-silent-3156876-7501 pi=0.84.3 ordinary=3157217 away=3158062 returned=3158629
+```
+
+Portable A/B coverage on the same date proved the intentional producer transition suppresses only its own recovery publication, while an unmarked close still emits `check: rearm-resurface`.
+The Pi and OpenCode persistent adapters both pass the exact pending reason to the shared delivery confirmation, so a consumed late callback returns the dedicated superseded result without a model turn.
+Plain Pi and pi-signed share the tracked extension.
+Claude and Cursor retain their existing `.afk` checks before committing a turn-end continuation, Codex has no detached extension child, and Grok retains its native background-task protocol; the watcher-side no-action signal absorption applies to every harness and tmux or Herdr session provider.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-watch-extension.test.sh tests/fm-watch-arm.test.sh tests/fm-daemon.test.sh tests/fm-afk-launch.test.sh tests/fm-afk-return.test.sh tests/fm-wake-queue.test.sh
+bin/fm-test-run.sh tests/fm-watch-triage.test.sh
+bin/fm-test-run.sh tests/fm-watcher-lock.test.sh tests/fm-watch-recovery-loop.test.sh
+bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-cursor-primary.test.sh
+```
+
+Observed guarantees:
+
+```text
+ok - Pi acknowledged late close is absorbed before model invocation
+ok - Pi away takeover retires an in-flight ordinary cycle and return restores exactly one
+ok - watch-arm: intentional away retirement is silent while an unintended close still re-surfaces
+ok - a bare turn-end with no new captain-relevant status is absorbed before model invocation
+ok - a routine working note with no captain-relevant outcome is absorbed before model invocation
+```
+
 Pi same-process session-transition ownership was verified on 2026-07-27 against the tracked extension with a faithful in-process factory rebind (module cache retained, real arm children):
 
 ```sh

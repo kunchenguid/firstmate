@@ -483,6 +483,89 @@ unit_tmux_absence_distinguishes_probe_failure() {
   rm -rf "$st"
 }
 
+unit_fresh_entry_rejects_stale_pi_handoff() {
+  local st state watch_version turnend_version publisher status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stale-handoff.XXXXXX")
+  state="$st/state"
+  mkdir -p "$state"
+  watch_version=$(bash -c '. "$1"; fm_pi_extension_version "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$ROOT/.pi/extensions/fm-primary-pi-watch.ts")
+  turnend_version=$(bash -c '. "$1"; fm_pi_extension_version "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts")
+  printf '%s\n%s\n' "$watch_version" "$$" > "$state/.pi-watch-extension-loaded"
+  printf '%s\n%s\n' "$turnend_version" "$$" > "$state/.pi-turnend-extension-loaded"
+  printf '%s\n' "$$" > "$state/.lock"
+  printf '%s\n%s\nold-generation\n' "$watch_version" "$$" > "$state/.pi-watch-away-standdown"
+  (
+    for _ in $(seq 1 100); do
+      [ ! -e "$state/.pi-watch-away-standdown" ] && break
+      sleep 0.02
+    done
+    [ ! -e "$state/.pi-watch-away-standdown" ] || exit 1
+    : > "$st/stale-receipt-invalidated"
+    for _ in $(seq 1 100); do
+      [ -e "$state/.afk" ] && break
+      sleep 0.02
+    done
+    [ -e "$state/.afk" ] || exit 1
+    printf '%s\n%s\nfresh-generation\n' "$watch_version" "$$" \
+      > "$state/.pi-watch-away-standdown.pending"
+    mv "$state/.pi-watch-away-standdown.pending" "$state/.pi-watch-away-standdown"
+  ) &
+  publisher=$!
+  FM_HOME="$st" FM_STATE_OVERRIDE="$state" FM_PI_AWAY_HANDOFF_TIMEOUT=2 \
+    "$LAUNCH" start-native >/dev/null 2>&1
+  status=$?
+  wait "$publisher"
+  if [ "$status" -eq 0 ] \
+    && [ -e "$st/stale-receipt-invalidated" ] \
+    && [ "$(sed -n '3p' "$state/.pi-watch-away-standdown" 2>/dev/null)" = fresh-generation ]; then
+    pass "Pi handoff: fresh entry waits for a newly published standdown receipt"
+  else
+    fail "Pi handoff: fresh entry accepted the prior away cycle's standdown receipt"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$state" "$LAUNCH" stop >/dev/null 2>&1 || true
+  rm -rf "$st"
+}
+
+unit_failed_live_daemon_handoff_restores_flag() {
+  local st entry prior status buffered
+  for entry in fm_afk_launch_start fm_afk_launch_start_native; do
+    for prior in absent present; do
+      st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-handoff.XXXXXX")
+      mkdir -p "$st/state"
+      buffered="buffered-$entry-$prior"
+      printf '%s\n' "$buffered" > "$st/state/.subsuper-escalations"
+      if [ "$prior" = present ]; then
+        printf 'original-%s\n' "$entry" > "$st/state/.afk"
+      fi
+      FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+        . "$1"
+        daemon_lock_held_by_live_daemon() { return 0; }
+        fm_afk_launch_record_validate_if_present() { return 0; }
+        discover_supervisor_target() { printf "captain"; }
+        discover_supervisor_backend() { printf "tmux"; }
+        fm_afk_launch_wait_pi_handoff() { return 1; }
+        "$2"
+      ' _ "$LAUNCH" "$entry" >/dev/null 2>&1
+      status=$?
+      if [ "$status" -eq 0 ]; then
+        fail "failed handoff: $entry accepted missing Pi standdown with prior flag $prior"
+      elif [ "$prior" = present ] \
+        && [ "$(cat "$st/state/.afk" 2>/dev/null)" != "original-$entry" ]; then
+        fail "failed handoff: $entry did not restore the prior away flag"
+      elif [ "$prior" = absent ] && [ -e "$st/state/.afk" ]; then
+        fail "failed handoff: $entry left away mode enabled after rollback"
+      elif [ "$(cat "$st/state/.subsuper-escalations" 2>/dev/null)" != "$buffered" ]; then
+        fail "failed handoff: $entry damaged the live daemon buffer during rollback"
+      else
+        pass "failed handoff: $entry restores prior-$prior live-daemon state"
+      fi
+      rm -rf "$st"
+    done
+  done
+}
+
 unit_native_lifecycle() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
@@ -939,6 +1022,8 @@ unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
+unit_fresh_entry_rejects_stale_pi_handoff
+unit_failed_live_daemon_handoff_restores_flag
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record

@@ -39,6 +39,10 @@
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
 #
+# Pi ownership handoff: after state/.afk is written and before the daemon starts,
+# a live current Pi extension must publish state/.pi-watch-away-standdown after
+# retiring its ordinary arm child. A bounded missing receipt aborts launch and
+# rollback clears .afk, which lets the extension restore one ordinary cycle.
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
@@ -73,6 +77,7 @@ fi
 FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
+FM_AFK_PI_HANDOFF_RECEIPT="$FM_AFK_LAUNCH_STATE/.pi-watch-away-standdown"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 
 # shellcheck source=bin/fm-backend.sh
@@ -88,6 +93,53 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 set +e
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+FM_AFK_PI_HANDOFF_TIMEOUT=${FM_PI_AWAY_HANDOFF_TIMEOUT:-5}
+case "$FM_AFK_PI_HANDOFF_TIMEOUT" in ''|*[!0-9]*|0) FM_AFK_PI_HANDOFF_TIMEOUT=5 ;; esac
+
+fm_afk_launch_invalidate_pi_handoff() {
+  rm -f "$FM_AFK_PI_HANDOFF_RECEIPT" 2>/dev/null || return 1
+  [ ! -e "$FM_AFK_PI_HANDOFF_RECEIPT" ]
+}
+
+fm_afk_launch_wait_pi_handoff() {
+  local receipt marker lock expected_version expected_pid marker_version marker_pid receipt_version receipt_pid receipt_generation deadline
+  receipt=$FM_AFK_PI_HANDOFF_RECEIPT
+  marker="$FM_AFK_LAUNCH_STATE/.pi-watch-extension-loaded"
+  lock="$FM_AFK_LAUNCH_STATE/.lock"
+  marker_version=$(sed -n '1p' "$marker" 2>/dev/null)
+  marker_pid=$(sed -n '2p' "$marker" 2>/dev/null)
+  expected_pid=$(sed -n '1p' "$lock" 2>/dev/null)
+  if ! command -v fm_pi_extension_owns_supervision >/dev/null 2>&1 \
+    || ! fm_pi_extension_owns_supervision "$FM_AFK_LAUNCH_STATE" "$FM_ROOT"; then
+    rm -f "$receipt" 2>/dev/null || true
+    if [ -n "$marker_pid" ] && [ "$marker_pid" = "$expected_pid" ] && fm_pid_alive "$marker_pid"; then
+      fm_afk_launch_log "live Pi session has an outdated or incomplete supervision extension; restart Pi before entering away mode"
+      return 1
+    fi
+    return 0
+  fi
+  expected_version=$marker_version
+  [ -n "$expected_version" ] && [ -n "$expected_pid" ] || return 1
+  deadline=$(( $(date +%s) + FM_AFK_PI_HANDOFF_TIMEOUT + 1 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    receipt_version=$(sed -n '1p' "$receipt" 2>/dev/null)
+    receipt_pid=$(sed -n '2p' "$receipt" 2>/dev/null)
+    receipt_generation=$(sed -n '3p' "$receipt" 2>/dev/null)
+    if [ "$receipt_version" = "$expected_version" ] \
+      && [ "$receipt_pid" = "$expected_pid" ] \
+      && [ -n "$receipt_generation" ]; then
+      return 0
+    fi
+    if ! fm_pid_alive "$expected_pid"; then
+      rm -f "$receipt" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.05
+  done
+  fm_afk_launch_log "live Pi extension did not confirm ordinary supervision standdown within ${FM_AFK_PI_HANDOFF_TIMEOUT}s"
+  return 1
+}
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -377,6 +429,35 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   return "$result"
 }
 
+fm_afk_launch_refresh_live_daemon() {
+  local backup artifact had_afk=0 result=0
+  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
+  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    had_afk=1
+    cp -p "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
+  fi
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
+      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
+    fi
+  done
+  if [ "$had_afk" -eq 0 ] && ! fm_afk_launch_invalidate_pi_handoff; then
+    fm_afk_launch_log "failed to invalidate the prior Pi standdown receipt"
+    result=1
+  elif ! fm_afk_launch_flag_write; then
+    fm_afk_launch_log "failed to refresh away-mode flag"
+    result=1
+  elif ! fm_afk_launch_wait_pi_handoff; then
+    result=1
+  fi
+  if [ "$result" -ne 0 ]; then
+    fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
+  else
+    rm -rf "$backup" || result=1
+  fi
+  return "$result"
+}
+
 # Launch the daemon in a non-visible herdr terminal in the CAPTAIN's session
 # (so the daemon can inject into the captain pane, which lives there). A
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
@@ -474,10 +555,7 @@ fm_afk_launch_start() {
 
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
-    if ! fm_afk_launch_flag_write; then
-      fm_afk_launch_log "failed to refresh away-mode flag"
-      return 1
-    fi
+    fm_afk_launch_refresh_live_daemon || return 1
     fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
     return 0
   fi
@@ -503,10 +581,17 @@ fm_afk_launch_start() {
     fi
   fi
   if [ "$result" -eq 0 ]; then
-    if ! fm_afk_launch_flag_write; then
+    if ! fm_afk_launch_invalidate_pi_handoff; then
+      fm_afk_launch_log "failed to invalidate the prior Pi standdown receipt"
+      result=1
+    elif ! fm_afk_launch_flag_write; then
       fm_afk_launch_log "failed to write away-mode flag"
       result=1
     fi
+  fi
+
+  if [ "$result" -eq 0 ]; then
+    fm_afk_launch_wait_pi_handoff || result=1
   fi
 
   if [ "$result" -eq 0 ]; then
@@ -536,7 +621,7 @@ fm_afk_launch_start_native() {
   fi
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
-    fm_afk_launch_flag_write || return 1
+    fm_afk_launch_refresh_live_daemon || return 1
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
     return 0
   fi
@@ -555,9 +640,15 @@ fm_afk_launch_start_native() {
     if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
       result=1
+    elif ! fm_afk_launch_invalidate_pi_handoff; then
+      fm_afk_launch_log "failed to invalidate the prior Pi standdown receipt"
+      result=1
     elif ! fm_afk_launch_flag_write; then
       result=1
     fi
+  fi
+  if [ "$result" -eq 0 ]; then
+    fm_afk_launch_wait_pi_handoff || result=1
   fi
   if [ "$result" -eq 0 ]; then
     fm_afk_launch_record_write none - native || result=1
