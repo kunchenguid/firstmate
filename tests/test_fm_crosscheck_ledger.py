@@ -189,7 +189,10 @@ class CrosscheckLedgerValidationTests(unittest.TestCase):
                     "title": "Semantic defect",
                     "citations": [{"path": "source.py", "line": 1}],
                     "explanation": "The exact-head implementation has a release blocker.",
-                }, {"admitted": True}),
+                }, {
+                    "admitted": True,
+                    "provisional_id": "provisional-finding-0001",
+                }),
                 event(2, "finish_review", {
                     "verdict": "BLOCKING",
                     "summary": "One release blocker remains.",
