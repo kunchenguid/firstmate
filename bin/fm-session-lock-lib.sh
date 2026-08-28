@@ -119,11 +119,8 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    if [ "$pid" -le 1 ]; then
-      break
-    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] || break
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
   [ "$printed" -eq 1 ]
 }

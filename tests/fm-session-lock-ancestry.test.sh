@@ -134,41 +134,6 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
-test_pid_one_codex_acquires_session_lock() {
-  local dir fakebin out
-  dir="$TMP_ROOT/pid-one-codex"
-  fakebin=$(fm_fakebin "$dir")
-  mkdir -p "$dir/state"
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-set -u
-field= pid=
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o) field=$2; shift 2 ;;
-    -p) pid=$2; shift 2 ;;
-    *) shift ;;
-  esac
-done
-case "$pid:$field" in
-  1:comm=) printf '%s\n' codex ;;
-  1:args=) printf '%s\n' 'codex-linux-sandbox --sandbox-policy-cwd /repo' ;;
-  *:comm=) printf '%s\n' bash ;;
-  *:args=) printf '%s\n' bash ;;
-  *:ppid=) printf '%s\n' 1 ;;
-esac
-SH
-  chmod +x "$fakebin/ps"
-
-  out=$(FM_HOME="$dir" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) \
-    || fail "a Codex harness at PID 1 did not acquire the session lock: $out"
-  assert_contains "$out" "lock acquired: harness pid 1" \
-    "the session lock did not resolve the PID-1 Codex harness"
-  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = 1 ] \
-    || fail "the session lock did not record the PID-1 Codex harness"
-  pass "session-lock: a Codex harness at PID 1 acquires the home"
-}
-
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -393,7 +358,6 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
-test_pid_one_codex_acquires_session_lock
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
