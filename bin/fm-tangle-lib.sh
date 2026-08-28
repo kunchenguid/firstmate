@@ -154,14 +154,19 @@ fm_project_base_resolve() {
       return 1
     }
     commit=$(git -C "$worktree" rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null) || {
+      # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
       FM_PROJECT_BASE_ERROR="'origin/$default' is not a commit for task worktree '$worktree'"
       return 1
     }
+    # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
     FM_PROJECT_BASE_KIND=origin
   fi
 
+  # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
   FM_PROJECT_BASE_BRANCH=$default
+  # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
   FM_PROJECT_BASE_REF=$ref
+  # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
   FM_PROJECT_BASE_COMMIT=$commit
 }
 

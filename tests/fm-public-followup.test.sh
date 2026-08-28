@@ -100,7 +100,7 @@ register_local_only_project() {
 }
 
 make_local_only_project() {
-  local home=$1 name=$2 project="$1/projects/$2" worktree="$1/projects/$2-worktree"
+  local home=$1 project="$1/projects/$2" worktree="$1/projects/$2-worktree"
   git init --quiet -b main "$project"
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit --quiet --allow-empty -m fixture
