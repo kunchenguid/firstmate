@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# Its legacy/default interface emits exactly one merged line for a merged PR or
+# MR and stays silent otherwise. The authenticated watcher interface emits one
+# validated observation of state, head, check states, and check conclusions.
+# Every error stays silent, so a failed lookup can never be read as a transition.
+# The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
@@ -10,7 +12,9 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+mode=terminal
+if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --observe-validated ]; }; then
+  [ "$1" = --validated ] || mode=observe
   provider=$2
   url=$3
   host=$4
@@ -62,8 +66,23 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    if [ "$mode" = observe ]; then
+      observation=$(gh pr view "$url" --json state,headRefOid,statusCheckRollup --jq \
+        '[.state, .headRefOid, ([.statusCheckRollup[]? | (.status // .state // "")] | sort | join(",")), ([.statusCheckRollup[]? | (.conclusion // "")] | sort | join(","))] | join("|")' 2>/dev/null) || exit 0
+      case "$observation" in *$'\n'*|*$'\r'*|*$'\t'*) exit 0 ;; esac
+      IFS='|' read -r state head checks conclusion extra <<EOF
+$observation
+EOF
+      [ -z "${extra:-}" ] || exit 0
+      case "$state" in OPEN|CLOSED|MERGED) ;; *) exit 0 ;; esac
+      case "$head" in ''|*[!0-9a-f]*) exit 0 ;; esac
+      [ "${#head}" -eq 40 ] || [ "${#head}" -eq 64 ] || exit 0
+      case "$checks$conclusion" in *[!A-Za-z0-9_,.-]*) exit 0 ;; esac
+      printf 'observed|%s|%s|%s|%s\n' "$state" "$head" "$checks" "$conclusion"
+    else
+      state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+      [ "$state" = MERGED ] && printf '%s\n' merged
+    fi
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -103,7 +122,11 @@ case "$provider" in
     # unreadable merge request stays silent instead of reporting a merge.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    [ "$state" = merged ] && printf '%s\n' merged
+    if [ "$mode" = observe ]; then
+      case "$state" in opened|closed|merged) printf 'observed|%s|||\n' "$state" ;; esac
+    else
+      [ "$state" = merged ] && printf '%s\n' merged
+    fi
     ;;
   *) exit 0 ;;
 esac

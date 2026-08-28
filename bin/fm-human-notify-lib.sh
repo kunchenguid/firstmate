@@ -19,9 +19,11 @@
 #   fm_human_notify_class <status-line>
 #   fm_human_notify_pending <state> <task-id> <status-line>
 #   fm_human_notify_record <state> <task-id> <status-line>
+#   fm_human_notify_apply_transition <state> <task-id> <status-line>
 #   fm_human_notify_resolve_line <state> <task-id> <status-line>
 #   fm_human_notify_clear_hold <state> <task-id>
 #   fm_human_notify_clear_review <state> <task-id>
+#   fm_human_notify_pr_observation_record <state> <task-id> <state> <head> <checks> <conclusion>
 #   fm_human_notify_clear_task <state> <task-id>
 #   fm_human_notify_summary <state> <task-id> <status-line>
 #
@@ -125,9 +127,16 @@ _fm_human_notify_derive() {  # <state> <task> <line>
   if [ "$class" = review-ready ] && [ -f "$state/$task.meta" ]; then
     pr=$(grep '^pr=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     pr_head=$(grep '^pr_head=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    pr_state=$(grep '^pr_state=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    pr_checks=$(grep '^pr_checks=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    pr_conclusion=$(grep '^pr_conclusion=' "$state/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ -f "$state/$task.pr-observation" ] && [ ! -L "$state/$task.pr-observation" ]; then
+      pr_state=$(sed -n 's/^state=//p' "$state/$task.pr-observation" | head -1)
+      pr_checks=$(sed -n 's/^checks=//p' "$state/$task.pr-observation" | head -1)
+      pr_conclusion=$(sed -n 's/^conclusion=//p' "$state/$task.pr-observation" | head -1)
+      pr_head=$(sed -n 's/^head=//p' "$state/$task.pr-observation" | head -1)
+    else
+      pr_state=
+      pr_checks=
+      pr_conclusion=
+    fi
     evidence="$evidence|pr=$pr|head=$pr_head|state=$pr_state|checks=$pr_checks|conclusion=$pr_conclusion"
     key=ready
   fi
@@ -182,6 +191,18 @@ _fm_human_notify_remove_class_key() {  # <state> <task> <class> <key>
   rm -f -- "$state/human-notifications/$marker_id"
 }
 
+_fm_human_notify_remove_task_class() {  # <state> <task> <class>
+  local state=$1 task=$2 class=$3 f recorded_task recorded_class
+  [ -d "$state/human-notifications" ] || return 0
+  for f in "$state"/human-notifications/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    recorded_task=$(sed -n 's/^task=//p' "$f" 2>/dev/null | head -1 || true)
+    recorded_class=$(sed -n 's/^class=//p' "$f" 2>/dev/null | head -1 || true)
+    [ "$recorded_task" = "$task" ] && [ "$recorded_class" = "$class" ] && rm -f -- "$f"
+  done
+  return 0
+}
+
 fm_human_notify_resolve_line() {  # <state> <task> <status-line>
   local state=$1 task=$2 line=$3 verb key
   verb=$(status_line_verb "$line")
@@ -192,6 +213,32 @@ fm_human_notify_resolve_line() {  # <state> <task> <status-line>
   _fm_human_notify_remove_class_key "$state" "$task" captain-hold "$key"
 }
 
+fm_human_notify_apply_transition() {  # <state> <task> <status-line>
+  local state=$1 task=$2 line=$3 verb
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    resolved)
+      fm_human_notify_resolve_line "$state" "$task" "$line"
+      ;;
+    failed)
+      _fm_human_notify_remove_task_class "$state" "$task" result
+      _fm_human_notify_remove_task_class "$state" "$task" review-ready
+      ;;
+    done)
+      _fm_human_notify_remove_task_class "$state" "$task" failure
+      ;;
+    working)
+      _fm_human_notify_remove_task_class "$state" "$task" failure
+      _fm_human_notify_remove_task_class "$state" "$task" result
+      _fm_human_notify_remove_task_class "$state" "$task" review-ready
+      ;;
+    needs-decision|blocked|captain-held|paused)
+      _fm_human_notify_remove_task_class "$state" "$task" failure
+      _fm_human_notify_remove_task_class "$state" "$task" result
+      ;;
+  esac
+}
+
 fm_human_notify_clear_hold() {  # <state> <captain-held-task-id>
   _fm_human_notify_remove_class_key "$1" "$2" captain-hold "$2"
 }
@@ -200,8 +247,26 @@ fm_human_notify_clear_review() {  # <state> <task-id>
   _fm_human_notify_remove_class_key "$1" "$2" review-ready ready
 }
 
+fm_human_notify_pr_observation_record() {  # <state> <task> <pr-state> <head> <checks> <conclusion>
+  local state=$1 task=$2 pr_state=$3 head=$4 checks=$5 conclusion=$6 path tmp
+  case "$task" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$pr_state" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  [ -z "$head" ] || [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || return 1
+  case "$checks$conclusion" in *[!A-Za-z0-9_,.-]*) return 1 ;; esac
+  path="$state/$task.pr-observation"
+  [ ! -L "$path" ] || return 1
+  tmp=$(umask 077; mktemp "$state/.pr-observation.XXXXXX") || return 1
+  if ! printf 'state=%s\nhead=%s\nchecks=%s\nconclusion=%s\n' \
+      "$pr_state" "$head" "$checks" "$conclusion" > "$tmp" \
+    || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 fm_human_notify_clear_task() {  # <state> <task>
   local state=$1 task=$2 f recorded
+  rm -f -- "$state/$task.pr-observation"
   [ -d "$state/human-notifications" ] || return 0
   for f in "$state"/human-notifications/*; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue

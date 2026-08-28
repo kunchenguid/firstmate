@@ -848,8 +848,25 @@ pending_signal_is_actionable() {  # stdin: scan_signals rows
   return 1
 }
 
-apply_human_signal_transitions() {  # stdin: scan_signals rows
-  local sf sig f seen task unread line
+publish_away_signal_ranges() {  # stdin: scan_signals rows
+  local sf sig f seen task unread path tmp
+  while IFS=$(printf '\t') read -r sf sig f seen; do
+    [ -n "$sf" ] || continue
+    case "$f" in *.status) ;; *) continue ;; esac
+    task=$(basename "$f"); task=${task%.status}
+    unread=$(status_unread_range "$f" "$seen" "$sig") || continue
+    path="$STATE/$task.away-unread"
+    [ ! -L "$path" ] || return 1
+    tmp=$(umask 077; mktemp "$STATE/.away-unread.XXXXXX") || return 1
+    if ! printf '%s' "$unread" > "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$path"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  done
+}
+
+apply_human_signal_transitions() {  # [record-open-conditions], stdin: scan_signals rows
+  local record_open=${1:-1} sf sig f seen task unread line
   while IFS=$(printf '\t') read -r sf sig f seen; do
     [ -n "$sf" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
@@ -857,9 +874,8 @@ apply_human_signal_transitions() {  # stdin: scan_signals rows
     unread=$(status_unread_range "$f" "$seen" "$sig") || continue
     while IFS= read -r line || [ -n "$line" ]; do
       [ -n "$line" ] || continue
-      if [ "$(status_line_verb "$line")" = resolved ]; then
-        fm_human_notify_resolve_line "$STATE" "$task" "$line" || true
-      elif status_human_condition_is_current "$f" "$line"; then
+      fm_human_notify_apply_transition "$STATE" "$task" "$line" || true
+      if [ "$record_open" -eq 1 ] && status_human_condition_is_current "$f" "$line"; then
         fm_human_notify_record "$STATE" "$task" "$line" || return 1
       fi
     done <<EOF
@@ -986,6 +1002,60 @@ fm_active_check_stop() {
   fi
   FM_ACTIVE_CHECK_PID=
   FM_ACTIVE_CHECK_PGID=
+}
+
+PR_OBSERVATION_REASON=
+PR_OBSERVATION_RECORD=0
+pr_observation_handle() {  # <task> <state> <head> <checks> <conclusion>
+  local task=$1 pr_state=$2 head=$3 checks=$4 conclusion=$5 file old_state='' old_head='' old_conclusion=''
+  local status_line class display red=0 old_red=0 changed_head=0
+  file="$STATE/$task.pr-observation"
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    old_state=$(sed -n 's/^state=//p' "$file" | head -1)
+    old_head=$(sed -n 's/^head=//p' "$file" | head -1)
+    old_conclusion=$(sed -n 's/^conclusion=//p' "$file" | head -1)
+  fi
+  if [ -z "$old_head" ]; then
+    old_head=$(grep '^pr_head=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  fi
+  [ -z "$old_head" ] || [ "$old_head" = "$head" ] || changed_head=1
+  case ",$conclusion," in *,FAILURE,*|*,CANCELLED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) red=1 ;; esac
+  case ",$old_conclusion," in *,FAILURE,*|*,CANCELLED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) old_red=1 ;; esac
+  fm_human_notify_pr_observation_record "$STATE" "$task" "$pr_state" "$head" "$checks" "$conclusion" || return 2
+  status_line=$(last_status_line "$STATE/$task.status")
+  class=$(fm_human_notify_class "$status_line" 2>/dev/null || true)
+  if [ -f "$STATE/$task.meta" ]; then
+    display=$(fm_display_name_for_meta "$STATE/$task.meta" "$task")
+  else
+    display=$(fm_display_name_fallback "$task")
+  fi
+  PR_OBSERVATION_REASON=
+  PR_OBSERVATION_RECORD=0
+  case "$pr_state" in
+    CLOSED|closed)
+      fm_human_notify_clear_review "$STATE" "$task"
+      [ "$old_state" = "$pr_state" ] || PR_OBSERVATION_REASON="$display: the review target closed. Action required: inspect the closure and choose whether to reopen or replace it."
+      ;;
+    *)
+      if [ "$red" -eq 1 ]; then
+        fm_human_notify_clear_review "$STATE" "$task"
+        [ "$old_conclusion" = "$conclusion" ] || PR_OBSERVATION_REASON="$display: review checks turned red - $conclusion. Action required: inspect and repair the failing checks."
+      elif [ "$class" != review-ready ]; then
+        return 1
+      elif [ "$changed_head" -eq 1 ] || [ "$old_red" -eq 1 ] || { [ "$old_state" = CLOSED ] || [ "$old_state" = closed ]; }; then
+        if fm_human_notify_pending "$STATE" "$task" "$status_line"; then
+          PR_OBSERVATION_REASON=$(fm_human_notify_summary "$STATE" "$task" "$status_line")
+          PR_OBSERVATION_RECORD=1
+        fi
+      fi
+      ;;
+  esac
+  if [ -n "$PR_OBSERVATION_REASON" ]; then
+    return 0
+  fi
+  [ "$class" = review-ready ] || return 1
+  fm_human_notify_record "$STATE" "$task" "$status_line" || return 2
+  return 1
 }
 
 run_check_capture() {
@@ -1387,7 +1457,7 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
@@ -1401,18 +1471,48 @@ while :; do
           continue
         fi
       fi
+      if [ "$is_pr_poll" -eq 1 ]; then
+        case "$out" in
+          observed\|*)
+            IFS='|' read -r observation_tag pr_state pr_head pr_checks pr_conclusion pr_extra <<EOF
+$out
+EOF
+            [ "$observation_tag" = observed ] && [ -z "${pr_extra:-}" ] || continue
+            if [ "$pr_state" = MERGED ] || [ "$pr_state" = merged ]; then
+              fm_human_notify_clear_review "$STATE" "$id"
+              reason="check: $(fm_display_name_for_meta "$STATE/$id.meta" "$id"): the review target merged. Action required: record the delivered result."
+              fm_wake_append check "$c" "$reason" || exit 1
+              if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
+                fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+                  || triage_log "merged PR poll retirement remains recoverable for $id"
+              else
+                triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+              fi
+              touch "$STATE/.last-check"
+              wake "$reason"
+            fi
+            PR_OBSERVATION_REASON=
+            PR_OBSERVATION_RECORD=0
+            if pr_observation_handle "$id" "$pr_state" "$pr_head" "$pr_checks" "$pr_conclusion"; then
+              reason="check: $PR_OBSERVATION_REASON"
+              fm_wake_append check "$c" "$reason" || exit 1
+              if [ "$PR_OBSERVATION_RECORD" -eq 1 ]; then
+                ready_line=$(last_status_line "$STATE/$id.status")
+                fm_human_notify_record "$STATE" "$id" "$ready_line" || exit 1
+              fi
+              touch "$STATE/.last-check"
+              wake "$reason"
+            else
+              observation_rc=$?
+              [ "$observation_rc" -ne 2 ] || exit 1
+            fi
+            continue
+            ;;
+        esac
+      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
-        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
-          fm_human_notify_clear_review "$STATE" "$id"
-          if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
-            fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-              || triage_log "merged PR poll retirement remains recoverable for $id"
-          else
-            triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
-          fi
-        fi
         touch "$STATE/.last-check"
         wake "$reason"
       fi
@@ -1455,15 +1555,19 @@ EOF
     # exact suppressors and stay silent. They are notifications, not current-state
     # evidence; stopped-worker detection remains with the independent stale path.
     actionable=0
+    record_open=1
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present; then
       actionable=1
+      record_open=0
     elif pending_signal_is_actionable <<< "$pending"; then
       actionable=1
     fi
     if [ "$actionable" -eq 1 ]; then
       if ! afk_present; then
         reason=$(signal_human_reason <<< "$pending")
+      else
+        publish_away_signal_ranges <<< "$pending" || exit 1
       fi
       while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
@@ -1471,11 +1575,11 @@ EOF
       done <<EOF
 $pending
 EOF
-      apply_human_signal_transitions <<< "$pending" || exit 1
+      apply_human_signal_transitions "$record_open" <<< "$pending" || exit 1
       while IFS=$(printf '\t') read -r sf sig f seen; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
-        mark_surfaced "$f"
+        [ "$record_open" -eq 0 ] || mark_surfaced "$f"
       done <<EOF
 $pending
 EOF

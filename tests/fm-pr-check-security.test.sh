@@ -77,6 +77,13 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *" state,headRefOid,statusCheckRollup "*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+    printf '%s|%s|%s|%s\n' "${FM_TEST_GH_STATE:-OPEN}" \
+      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
+      "${FM_TEST_GH_CHECKS:-COMPLETED}" "${FM_TEST_GH_CONCLUSION:-SUCCESS}"
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -771,7 +778,7 @@ test_static_poll_contract() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
-  [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
+  [ "$(grep -c '^check: .*: the review target merged\.' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one readable wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
@@ -831,7 +838,7 @@ SH
     set -e
     wait "$direct_pid" || fail "concurrent direct arming failed"
     [ "$rc" -eq 0 ] || fail "concurrent watcher did not complete"
-    grep -q '^check: .*: merged$' "$dir/watch.out" || fail "concurrent watcher never saw complete poll"
+    grep -q '^check: .*: the review target merged\.' "$dir/watch.out" || fail "concurrent watcher never saw complete poll"
     [ ! -s "$dir/watch.err" ] || fail "concurrent watcher observed a partial artifact error"
     if [ -e "$dir/home/state/task-a.check.sh" ]; then
       cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "concurrent publication check bytes changed"
@@ -2404,7 +2411,7 @@ SH
   [ -e "$x_poll_marker" ] || fail "watcher did not continue X mention polling after isolated migration failure"
   assert_no_grep 'replacement-ran' "$dir/watch.out" \
     "watcher executed an unauthenticated check created after scan completion"
-  assert_grep "check: $state/z-healthy.check.sh: merged" "$dir/watch.out" \
+  assert_grep "the review target merged. Action required: record the delivered result." "$dir/watch.out" \
     "watcher did not continue the healthy authenticated poll"
   ack_watcher_cycle "$state" || fail "healthy authenticated poll wake acknowledgement failed"
   [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
@@ -2963,7 +2970,7 @@ test_merged_poll_retires_once() {
   set -e
   [ "$rc" -eq 0 ] || fail "merged retirement watcher failed: $(cat "$dir/watch-1.err")"
   first=$(cat "$dir/watch-1.out")
-  case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merged notification was not preserved: $first" ;; esac
+  case "$first" in check:*'Task · A: the review target merged.'*) ;; *) fail "first merged notification was not preserved: $first" ;; esac
   ack_watcher_cycle "$state" || fail "first merged notification handling acknowledgement failed"
   assert_poll_absent "$state" task-a
   [ "$(cat "$state/task-a.meta")" = "$meta_before" ] || fail "merged retirement changed canonical metadata"
@@ -3159,8 +3166,12 @@ test_external_merge_transition_retires_only_terminal_poll() {
     rm -f "$state/.last-check"
     set +e
     case "$label" in
-      open-green|open-red)
+      open-green)
         FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
+        ;;
+      open-red)
+        FM_TEST_GH_STATE=OPEN FM_TEST_GH_CONCLUSION=FAILURE \
+          run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
         ;;
       closed-unmerged)
         FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
@@ -3175,9 +3186,13 @@ test_external_merge_transition_retires_only_terminal_poll() {
     rc=$?
     set -e
     [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
-    case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac
+    case "$label" in
+      open-red) grep -F 'review checks turned red - FAILURE' "$dir/$label.out" >/dev/null || fail "$label did not surface changed checks" ;;
+      closed-unmerged) grep -F 'the review target closed' "$dir/$label.out" >/dev/null || fail "$label did not surface closure" ;;
+      *) case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac ;;
+    esac
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
-    ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
+    ack_watcher_cycle "$state" || fail "$label wake acknowledgement failed"
   done
 
   rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
@@ -3186,7 +3201,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
-  case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
+  case "$(cat "$dir/merged.out")" in check:*'Task · A: the review target merged.'*) ;; *) fail "external merge did not preserve its notification" ;; esac
   assert_poll_absent "$state" task-a
   pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
 }
@@ -3350,7 +3365,7 @@ test_gitlab_merged_poll_retires() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "GitLab merged retirement watcher failed: $(cat "$dir/watch.err")"
-  case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "GitLab merged wake was missing" ;; esac
+  case "$(cat "$dir/watch.out")" in check:*'Task · A: the review target merged.'*) ;; *) fail "GitLab merged wake was missing" ;; esac
   assert_poll_absent "$state" task-a
   grep -qxF "pr=$url" "$state/task-a.meta" || fail "GitLab retirement removed canonical metadata"
   pass "GitHub and GitLab exact merged results share one retirement path"

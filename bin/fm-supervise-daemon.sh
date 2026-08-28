@@ -387,17 +387,51 @@ daemon_terminal_summary() {  # <task> <state> <status-line>
 }
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen class summary
+  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen class summary open key verb note line
+  local unread_file unread unread_had_last
   for f in $reason; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    if [ "$(status_line_verb "$last")" = resolved ]; then
-      fm_human_notify_resolve_line "$state" "$task" "$last" || true
-    fi
+    last=$(last_status_line "$f")
+    unread_had_last=0
+    unread_file="$state/$task.away-unread"
+    unread=$(cat "$unread_file" 2>/dev/null || true)
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      [ "$line" != "$last" ] || unread_had_last=1
+      if class=$(fm_human_notify_class "$line"); then
+        case "$class" in decision|blocker|captain-hold) continue ;; esac
+        rel=1
+        if fm_human_notify_pending "$state" "$task" "$line"; then
+          all_seen=0
+          summary=$(fm_human_notify_summary "$state" "$task" "$line") || summary=''
+          distilled="${distilled}${summary} | "
+        fi
+      elif status_is_captain_relevant "$line"; then
+        rel=1
+        all_seen=0
+        distilled="${distilled}$(daemon_terminal_summary "$task" "$state" "$line") | "
+      fi
+    done <<EOF
+$unread
+EOF
+    open=$(status_open_decisions "$f")
+    while IFS=$(printf '\t') read -r key verb note; do
+      [ -n "$key" ] || continue
+      line="$verb [key=$key]: $note"
+      rel=1
+      if fm_human_notify_pending "$state" "$task" "$line"; then
+        all_seen=0
+        summary=$(fm_human_notify_summary "$state" "$task" "$line") || summary=''
+        distilled="${distilled}${summary} | "
+      fi
+    done <<EOF
+$open
+EOF
+    [ -n "$last" ] || continue
+    [ "$unread_had_last" -eq 0 ] || continue
     if class=$(fm_human_notify_class "$last"); then
-      [ "$class" != captain-hold ] || continue
+      case "$class" in decision|blocker|captain-hold) continue ;; esac
       rel=1
       if fm_human_notify_pending "$state" "$task" "$last"; then
         seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
@@ -414,7 +448,6 @@ classify_signal() {  # <reason-after-colon> <state>
     status_is_captain_relevant "$last" || continue
     distilled="${distilled}$(daemon_terminal_summary "$task" "$state" "$last") | "
     rel=1
-    # Non-human terminal compatibility keeps the older catch-all receipt.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
@@ -637,15 +670,30 @@ mark_status_seen() {  # <state> <task> <last-line>
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
 mark_escalated_seen() {  # <kind> <arg> <state>
-  local kind=$1 arg=$2 state=$3 f last task
+  local kind=$1 arg=$2 state=$3 f last task open key verb note line unread
   case "$kind" in
     signal)
       for f in $arg; do
         [ -e "$f" ] || continue
+        task=$(basename "$f"); task="${task%.status}"
+        unread=$(cat "$state/$task.away-unread" 2>/dev/null || true)
+        while IFS= read -r line || [ -n "$line" ]; do
+          [ -n "$line" ] || continue
+          fm_human_notify_record "$state" "$task" "$line" 2>/dev/null || true
+        done <<EOF
+$unread
+EOF
+        open=$(status_open_decisions "$f")
+        while IFS=$(printf '\t') read -r key verb note; do
+          [ -n "$key" ] || continue
+          line="$verb [key=$key]: $note"
+          fm_human_notify_record "$state" "$task" "$line" || true
+        done <<EOF
+$open
+EOF
         last=$(last_status_line "$f")
         [ -n "$last" ] || continue
         status_is_captain_relevant "$last" || continue
-        task=$(basename "$f"); task="${task%.status}"
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
@@ -1424,6 +1472,12 @@ handle_wake() {  # <reason> <state>
       log "self-handle: $reason -> $distilled"
       ;;
   esac
+  if [ "$kind" = signal ]; then
+    for f in $arg; do
+      task=$(basename "$f"); task="${task%.status}"
+      rm -f -- "$state/$task.away-unread"
+    done
+  fi
 }
 
 handle_durable_wakes() {  # <watcher-reason> <state>

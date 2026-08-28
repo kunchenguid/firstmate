@@ -62,6 +62,14 @@ fm_human_notify_record "$STATE" decision-task "$DECISION"
 assert_absorbed decision-task "$DECISION"
 pass "resolution clears the receipt so a genuinely reopened decision notifies"
 
+fm_human_notify_record "$STATE" decision-task "$FAILURE"
+fm_human_notify_apply_transition "$STATE" decision-task 'working: recovering the failed run'
+assert_pending decision-task "$FAILURE"
+fm_human_notify_record "$STATE" decision-task "$REVIEW"
+fm_human_notify_apply_transition "$STATE" decision-task 'working: revising after review'
+assert_pending decision-task "$REVIEW"
+pass "recovery and rework clear terminal receipts so identical evidence can reopen"
+
 # Receipts are durable across a new shell process.
 FM_STATE_OVERRIDE="$STATE" bash -c '
   . "$1/bin/fm-human-notify-lib.sh"
@@ -91,6 +99,16 @@ fm_human_notify_record "$STATE" decision-task "$REVIEW"
 printf 'display_name=CRM · Data Shape\nbusy_gen=gen-2\nkind=ship\nproject=firstmate\npr=https://github.com/example/repo/pull/7\npr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$STATE/decision-task.meta"
 assert_pending decision-task "$REVIEW"
 pass "changed PR head evidence and a new task incarnation create new edges"
+
+fm_human_notify_record "$STATE" decision-task "$REVIEW"
+fm_human_notify_pr_observation_record "$STATE" decision-task OPEN \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb COMPLETED SUCCESS
+assert_pending decision-task "$REVIEW"
+fm_human_notify_record "$STATE" decision-task "$REVIEW"
+fm_human_notify_pr_observation_record "$STATE" decision-task OPEN \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb COMPLETED FAILURE
+assert_pending decision-task "$REVIEW"
+pass "durable PR head and check observations feed review-ready fingerprints"
 
 SUMMARY=$(fm_human_notify_summary "$STATE" decision-task "$BLOCKER")
 assert_contains "$SUMMARY" 'CRM · Data Shape' "summary omitted the readable label"

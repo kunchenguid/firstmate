@@ -116,6 +116,26 @@ test_classify_terminal_signal_escalates() {
   pass "captain-relevant status verbs escalate"
 }
 
+test_classify_buried_open_decision_escalates() {
+  local dir state out
+  dir=$(make_supercase classify-buried-decision)
+  state="$dir/state"
+  printf 'needs-decision [key=route]: choose north or south\nworking: preparing both routes\n' > "$state/t.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in
+    escalate\|*'choose north or south'*) ;;
+    *) fail "buried open decision did not escalate: $out" ;;
+  esac
+  printf 'failed: compiler crashed\nworking: retrying compilation\n' > "$state/t.status"
+  printf 'failed: compiler crashed\nworking: retrying compilation' > "$state/t.away-unread"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in
+    escalate\|*'compiler crashed'*) ;;
+    *) fail "buried unread failure did not escalate: $out" ;;
+  esac
+  pass "away signal classification folds unread transitions and buried open decisions"
+}
+
 test_classify_check_and_unknown_escalate() {
   local out
   out=$(classify_check "check: /s/c.check.sh: merged: https://x")
@@ -2082,6 +2102,7 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
+test_classify_buried_open_decision_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
