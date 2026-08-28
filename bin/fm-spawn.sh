@@ -1166,7 +1166,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1296,6 +1296,14 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy (Antigravity CLI / Gemini harness): -i prompt-interactive with --model.
+    # Herdr already detects kind agy (herdr:antigravity_cli). Brief is delivered
+    # via a space-free TASK_TMP copy (HOME has spaces: "⭐️ Jala-firstmate") so the
+    # quoted "$(cat __AGY_BRIEF__)" never carries a spaced path. Verified live
+    # 2026-08-28 on agy 1.1.22 in isolated Herdr lab: starts, accepts input,
+    # exits cleanly with /exit (Ctrl-C not needed). --dangerously-skip-*
+    # parallels claude/grok unattended. Model gemini family; --effort low/med/high.
+    agy) printf '%s' 'agy __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions -i "$(__OPINPUT__ encode launch-brief < __AGY_BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1344,6 +1352,10 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = agy ]; then
+  echo "error: agy is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1481,7 +1493,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1532,6 +1544,12 @@ effort_flag_for_harness() {
       case "$effort" in
         low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+      esac
+      ;;
+    agy)
+      # agy 1.1.22 --effort low|medium|high (verified via agy --help and agy models).
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
@@ -2948,7 +2966,15 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# agy brief staging: HOME holds a space ("⭐️ Jala-firstmate"), so the launch
+# must not quote a spaced DATA path inside "$(__OPINPUT__ encode ...)";
+# TASK_TMP (/tmp/fm-<id>) is space-free. Stage a copy for agy.
+if [ "$HARNESS" = agy ]; then
+  mkdir -p "$TASK_TMP"
+  cp -f "$BRIEF" "$TASK_TMP/brief.md" || { echo "error: could not stage agy brief to $TASK_TMP/brief.md" >&2; exit 1; }
+fi
 sq_brief=$(shell_quote "$BRIEF")
+sq_agy_brief=$(shell_quote "$TASK_TMP/brief.md")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
@@ -2960,6 +2986,7 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
+LAUNCH=${LAUNCH//__AGY_BRIEF__/$sq_agy_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
