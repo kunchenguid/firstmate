@@ -10,7 +10,8 @@
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) PR-backed task with no origin -> refuse the unverified base
 #   (e) remote-less local-only task with stale origin/HEAD -> compare against local main
-#   (f) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
+#   (f) scout with origin only in the authoritative checkout -> review from that origin
+#   (g) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
 set -u
 
@@ -203,9 +204,33 @@ test_remoteless_review_ignores_stale_origin_head() {
   pass "fm-review-diff uses the local default when stale remote refs remain"
 }
 
+test_scout_review_uses_authoritative_project_origin() {
+  local case_dir out origin_url
+  case_dir=$(make_case scout-project-origin)
+  printf 'scout change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm scout-change
+  origin_url=$(git -C "$case_dir/project" remote get-url origin)
+  git -C "$case_dir/project" remote remove origin
+  git -C "$case_dir/project" config extensions.worktreeConfig true
+  git -C "$case_dir/project" config --worktree remote.origin.url "$origin_url"
+  [ "$(git -C "$case_dir/project" remote)" = origin ] \
+    || fail "scout fixture did not retain origin in the authoritative project"
+  [ -z "$(git -C "$case_dir/wt" remote)" ] \
+    || fail "scout fixture leaked project-only origin into the task worktree"
+  write_task_meta "$case_dir" "kind=scout"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr") \
+    || fail "scout review rejected the authoritative project origin: $(cat "$case_dir/stderr")"
+  assert_contains "$out" '+scout change' \
+    "scout review did not compare the local branch from the authoritative origin base"
+  pass "fm-review-diff lets scouts use the authoritative project origin"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_pr_backed_review_refuses_without_origin
 test_remoteless_review_ignores_stale_origin_head
+test_scout_review_uses_authoritative_project_origin

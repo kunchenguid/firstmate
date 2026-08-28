@@ -51,9 +51,21 @@ FM_PROJECT_BASE_REF=
 FM_PROJECT_BASE_COMMIT=
 FM_PROJECT_BASE_ERROR=
 
+fm_registered_project_posture() {
+  local project=$1 script_dir line posture
+  script_dir=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
+  line=$("$script_dir/fm-project-mode.sh" --raw "$(basename "$project")" 2>/dev/null) || return 1
+  posture=${line%% *}
+  case "$posture" in
+    no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$posture"
+}
+
 fm_project_base_resolve() {
   local project=$1 worktree=$2 allow_remoteless=${3:-no} require_task_origin=${4:-no}
-  local project_remotes worktree_remotes remote_dir remote_head default ref commit
+  local project_remotes worktree_remotes remote_dir remote_head default ref commit posture
   FM_PROJECT_BASE_KIND=
   FM_PROJECT_BASE_BRANCH=
   FM_PROJECT_BASE_REF=
@@ -72,6 +84,14 @@ fm_project_base_resolve() {
   if [ -z "$worktree_remotes" ] && [ -z "$project_remotes" ]; then
     if [ "$allow_remoteless" != yes ]; then
       FM_PROJECT_BASE_ERROR="task worktree '$worktree' has no origin remote; this lifecycle requires a valid origin"
+      return 1
+    fi
+    posture=$(fm_registered_project_posture "$project") || {
+      FM_PROJECT_BASE_ERROR="could not resolve the registered posture for project '$(basename "$project")'"
+      return 1
+    }
+    if [ "$posture" != local-only ]; then
+      FM_PROJECT_BASE_ERROR="registered $posture project '$(basename "$project")' requires a valid origin"
       return 1
     fi
     default=$(fm_local_default_branch "$project") || {

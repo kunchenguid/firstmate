@@ -56,11 +56,12 @@ TASK_KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 TASK_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 ALLOW_REMOTELESS=no
 if [ "$TASK_KIND" = scout ] || [ "$TASK_MODE" = local-only ]; then
-  PROJECT_POSTURE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$(basename "$PROJ")" 2>/dev/null | cut -d' ' -f1) || PROJECT_POSTURE=
-  [ "$PROJECT_POSTURE" != local-only ] || ALLOW_REMOTELESS=yes
+  ALLOW_REMOTELESS=yes
 fi
-REQUIRE_TASK_ORIGIN=yes
-[ "$TASK_MODE" != local-only ] || REQUIRE_TASK_ORIGIN=no
+REQUIRE_TASK_ORIGIN=no
+case "$TASK_MODE" in
+  no-mistakes|direct-PR) REQUIRE_TASK_ORIGIN=yes ;;
+esac
 if ! fm_project_base_resolve "$PROJ" "$WT" "$ALLOW_REMOTELESS" "$REQUIRE_TASK_ORIGIN"; then
   echo "error: $FM_PROJECT_BASE_ERROR; refusing to review against an unverified base" >&2
   exit 1

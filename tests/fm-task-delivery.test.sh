@@ -374,7 +374,8 @@ test_promote_requires_origin_for_pr_backed_contracts() {
   home="$TMP_ROOT/promote-origin/home"
   project="$TMP_ROOT/promote-origin/project"
   worktree="$TMP_ROOT/promote-origin/worktree"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/data"
+  printf '%s\n' '- project [local-only] - fixture (added 2026-01-01)' > "$home/data/projects.md"
   git init --quiet -b main "$project"
   printf 'base\n' > "$project/README.md"
   git -C "$project" add README.md
@@ -439,6 +440,16 @@ test_promote_requires_origin_for_pr_backed_contracts() {
   assert_grep 'kind=scout' "$meta" "project-remote refusal changed the scout contract"
   git -C "$project" config --worktree --remove-section remote.backup
 
+  printf '%s\n' '- project [no-mistakes] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-origin-d2 --mode local-only --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "no-mistakes project promoted through the remote-less local-only path"
+  assert_contains "$out" "registered no-mistakes project 'project' requires a valid origin" \
+    "promotion did not gate remote-less fallback on the registered project posture"
+  assert_grep 'kind=scout' "$meta" "posture-gated refusal changed the scout contract"
+
+  printf '%s\n' '- project [local-only] - fixture (added 2026-01-01)' > "$home/data/projects.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$PROMOTE" promote-origin-d2 --mode local-only --yolo off 2>&1)
   status=$?
@@ -453,7 +464,8 @@ test_local_landing_ignores_stale_remote_tracking_default() {
   home="$TMP_ROOT/merge-local/home"
   project="$TMP_ROOT/merge-local/project"
   worktree="$TMP_ROOT/merge-local/worktree"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/data"
+  printf '%s\n' '- project [local-only] - fixture (added 2026-01-01)' > "$home/data/projects.md"
   git init --quiet -b main "$project"
   printf 'base\n' > "$project/README.md"
   git -C "$project" add README.md
