@@ -31,6 +31,11 @@
 
 # Machine-wide claim root. Homes can share one underlying source store, so the
 # "one owner per canonical source" rule cannot live inside a single home.
+FM_PROCEVENT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || FM_PROCEVENT_LIB_DIR="."
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$FM_PROCEVENT_LIB_DIR/fm-classify-lib.sh"
+
 fm_procevent_claim_root() {
   printf '%s\n' "${FM_PROCEVENT_CLAIM_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/procevent-claims}"
 }
@@ -55,6 +60,41 @@ fm_procevent_adapter_valid() {
   [ "${#a}" -le 32 ]
 }
 
+fm_procevent_registration_parse() {  # <registration> <source-id>
+  local file=$1 id=$2 line adapter argc i=0 extra
+  local -a argv=()
+  FM_PROCEVENT_REG_ADAPTER=
+  FM_PROCEVENT_REG_ARGV=()
+  FM_PROCEVENT_REG_FAILURE=invalid
+  fm_procevent_source_id_valid "$id" || return 1
+  case "$file" in */"$id.source") ;; *) return 1 ;; esac
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  if [ ! -r "$file" ]; then
+    FM_PROCEVENT_REG_FAILURE=unreadable
+    return 1
+  fi
+  {
+    IFS= read -r line || return 1
+    case "$line" in adapter=*) adapter=${line#adapter=} ;; *) return 1 ;; esac
+    fm_procevent_adapter_valid "$adapter" || return 1
+    IFS= read -r line || return 1
+    case "$line" in argc=*) argc=${line#argc=} ;; *) return 1 ;; esac
+    case "$argc" in ''|*[!0-9]*|0) return 1 ;; esac
+    IFS= read -r line || return 1
+    [ "$line" = "argv:" ] || return 1
+    while [ "$i" -lt "$argc" ]; do
+      IFS= read -r line || return 1
+      argv+=("$line")
+      i=$((i + 1))
+    done
+    ! IFS= read -r extra || return 1
+  } < "$file"
+  FM_PROCEVENT_REG_ADAPTER=$adapter
+  # shellcheck disable=SC2034 # Read by callers after the function returns.
+  FM_PROCEVENT_REG_ARGV=("${argv[@]}")
+  FM_PROCEVENT_REG_FAILURE=
+}
+
 # fm_procevent_any_registered <state>
 fm_procevent_any_registered() {
   local reg rec
@@ -65,6 +105,77 @@ fm_procevent_any_registered() {
     return 0
   done
   return 1
+}
+
+# Read-only registered-source inventory for health checks.
+# Does not acquire source locks, start runners, or mark results handled.
+# owner is live, missing, stale, orphaned, uncertain, or terminal.
+fm_procevent_listeners_json() {  # <state>
+  local state=$1 reg root rec id adapter owner status records='[]' available=true
+  local registration_readable registration_valid classification
+  reg=$(fm_procevent_registry_dir "$state")
+  if [ ! -e "$reg" ] && [ ! -L "$reg" ]; then
+    classification=$(fm_evidence_classify true true)
+    jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,records:[]}'
+    return 0
+  fi
+  if [ ! -d "$reg" ] || [ ! -r "$reg" ] || [ ! -x "$reg" ]; then
+    classification=$(fm_evidence_classify false false)
+    jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,records:[]}'
+    return 0
+  fi
+  root=$(fm_procevent_claim_root)
+  if { [ -L "$root" ] && [ ! -e "$root" ]; } || { [ -e "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; }; then
+    classification=$(fm_evidence_classify false false)
+    jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,records:[]}'
+    return 0
+  fi
+  for rec in "$reg"/*.source; do
+    [ -e "$rec" ] || [ -L "$rec" ] || continue
+    id=${rec##*/}; id=${id%.source}
+    registration_readable=false
+    [ -f "$rec" ] && [ ! -L "$rec" ] && [ -r "$rec" ] && registration_readable=true
+    registration_valid=false
+    FM_PROCEVENT_REG_FAILURE=invalid
+    if [ "$registration_readable" = true ]; then
+      fm_procevent_registration_parse "$rec" "$id" && registration_valid=true
+    elif [ -f "$rec" ] && [ ! -L "$rec" ]; then
+      FM_PROCEVENT_REG_FAILURE=unreadable
+    fi
+    classification=$(fm_evidence_classify "$registration_readable" "$registration_valid")
+    if [ "$classification" = available ]; then
+      adapter=$FM_PROCEVENT_REG_ADAPTER
+      fm_procevent_claim_state_locked "$id"
+      status=$?
+      case "$status" in
+        0) owner=live ;;
+        1) owner=missing ;;
+        2) owner=uncertain ;;
+        3) owner=orphaned ;;
+        4) owner=terminal ;;
+        *) owner=uncertain ;;
+      esac
+    else
+      adapter=
+      case "$FM_PROCEVENT_REG_FAILURE" in
+        unreadable) owner=unreadable ;;
+        *) owner=invalid ;;
+      esac
+    fi
+    records=$(jq -n \
+      --argjson records "$records" \
+      --arg id "$id" \
+      --arg adapter "$adapter" \
+      --arg owner "$owner" \
+      --arg classification "$classification" \
+      '$records + [{id:$id,adapter:$adapter,owner:$owner,classification:$classification}]')
+  done
+  classification=$(fm_evidence_classify "$available" true)
+  jq -n --argjson available "$( [ "$classification" = available ] && printf true || printf false )" --argjson records "$records" \
+    '{available:$available,records:$records}'
 }
 
 # --- ownership --------------------------------------------------------------
@@ -189,6 +300,7 @@ fm_procevent_pid_state() {
 fm_procevent_claim_state_locked() {
   local claim registration current_identity
   claim=$(fm_procevent_claim_path "$1")
+  [ -L "$claim" ] && [ ! -e "$claim" ] && return 2
   [ -e "$claim" ] || return 1
   fm_procevent_claim_load_locked "$1" || return 2
   if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ] && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ]; then

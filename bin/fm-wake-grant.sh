@@ -22,6 +22,12 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+ensure_state_dir() {
+  [ ! -L "$STATE" ] || return 1
+  mkdir -p "$STATE" || return 1
+  [ -d "$STATE" ]
+}
+
 rows_valid() {
   [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
 }
@@ -52,6 +58,7 @@ case "${1:-}" in
     [ "$#" -eq 3 ] || exit 2
     case "$pid" in ''|*[!0-9]*|1) exit 2 ;; esac
     case "$generation" in ''|*[!A-Za-z0-9._-]*) exit 2 ;; esac
+    ensure_state_dir || exit 1
     identity=$(fm_pid_identity "$pid" 2>/dev/null) || exit 1
     [ -n "$identity" ] || exit 1
     TMP=$(mktemp "$STATE/.branch-eligible-owner.tmp.XXXXXX") || exit 1
@@ -68,6 +75,7 @@ case "${1:-}" in
     generation=${2:-}
     [ "$#" -gt 2 ] || exit 2
     case "$generation" in ''|*[!A-Za-z0-9._-]*) exit 2 ;; esac
+    ensure_state_dir || exit 1
     shift 2
     TMP=$(mktemp "$STATE/.branch-eligible-rows.tmp.XXXXXX") || exit 1
     printf '%s\n' "$@" > "$TMP" || exit 1
@@ -102,6 +110,7 @@ case "${1:-}" in
   release)
     generation=${2:-}
     [ "$#" -eq 2 ] || exit 2
+    ensure_state_dir || exit 1
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
     owner_matches '' "$generation" || exit 1
@@ -111,6 +120,7 @@ case "${1:-}" in
     pid=${2:-}
     generation=${3:-}
     [ "$#" -eq 3 ] || exit 2
+    ensure_state_dir || exit 1
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
     owner_matches "$pid" "$generation" || exit 1

@@ -58,6 +58,12 @@ SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 
+ensure_state_dir() {
+  [ ! -L "$STATE" ] || return 1
+  mkdir -p "$STATE" || return 1
+  [ -d "$STATE" ] && [ ! -L "$STATE" ]
+}
+
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -504,18 +510,21 @@ case "$mode" in
     ;;
   _scan-locked)
     [ "$#" -eq 2 ] || exit 2
+    ensure_state_dir || exit 1
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     scan "$2"
     ;;
   acknowledge)
     [ "$#" -eq 2 ] || { printf 'usage: fm-inactive-reconcile.sh acknowledge <fingerprint>\n' >&2; exit 2; }
+    ensure_state_dir || exit 1
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     acknowledge "$2"
     ;;
   acknowledge-notice)
     [ "$#" -eq 2 ] || exit 2
+    ensure_state_dir || exit 1
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     acknowledge_notice "$2"

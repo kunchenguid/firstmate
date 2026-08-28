@@ -17,6 +17,37 @@ GRANT="$ROOT/bin/fm-wake-grant.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
+test_missing_state_drain_initializes_writer_boundary() {
+  local dir state rc=0
+  dir="$TMP_ROOT/missing-state-drain"
+  state="$dir/state"
+  mkdir -p "$dir"
+  fm_run_timed 3 env FM_STATE_OVERRIDE="$state" "$DRAIN" \
+    > "$dir/drain.out" 2> "$dir/drain.err" || rc=$?
+  [ "$rc" -ne 124 ] || fail "wake drain hung while acquiring a lock below a missing state directory"
+  [ "$rc" -eq 0 ] || fail "wake drain failed to initialize missing state: $(cat "$dir/drain.err")"
+  [ -d "$state" ] || fail "wake drain did not create state at its mutating entrypoint"
+  pass "wake drain initializes missing state before locking"
+}
+
+test_missing_state_grant_initializes_writer_boundary() {
+  local dir state rc=0
+  dir="$TMP_ROOT/missing-state-grant"
+  state="$dir/state"
+  mkdir -p "$dir"
+  fm_run_timed 3 env FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" fresh-grant \
+    > "$dir/grant.out" 2> "$dir/grant.err" || rc=$?
+  [ "$rc" -ne 124 ] || fail "wake grant hung while acquiring a lock below a missing state directory"
+  [ "$rc" -eq 0 ] || fail "wake grant failed to initialize missing state: $(cat "$dir/grant.err")"
+  [ -d "$state" ] || fail "wake grant did not create state at its mutating entrypoint"
+  FM_STATE_OVERRIDE="$state" "$GRANT" deactivate "$$" fresh-grant \
+    >/dev/null 2> "$dir/deactivate.err" || fail "wake grant cleanup failed"
+  pass "wake grant initializes missing state before locking"
+}
+
 
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
@@ -522,7 +553,7 @@ SH
 }
 
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
-  local dir state out i raw_count expected
+  local dir state out i raw_count expected actual
   dir=$(make_case complete-enrichment)
   state="$dir/state"
   out="$dir/drain.out"
@@ -548,8 +579,12 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
-  expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
+  expected="$dir/huge.expected"
+  actual="$dir/huge.actual"
+  printf 'wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: ' > "$expected"
+  cat "$state/huge.status" >> "$expected"
+  awk '/^wake annotation: latest wake-EVENT observed at drain, not current state: huge\.status: /' "$out" > "$actual"
+  cmp -s "$expected" "$actual" \
     || fail "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
@@ -1199,6 +1234,8 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_missing_state_drain_initializes_writer_boundary
+test_missing_state_grant_initializes_writer_boundary
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash

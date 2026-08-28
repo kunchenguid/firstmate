@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -463,6 +465,23 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
+test_missing_state_is_initialized_before_locks() {
+  local home rc=0
+  home="$TMP_ROOT/missing-state-ack"
+  mkdir -p "$home"
+  fm_run_timed 2 env FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$RECON" acknowledge deadbeef || rc=$?
+  [ "$rc" -ne 124 ] || fail "acknowledge hung while acquiring a lock without state"
+  [ -d "$home/state" ] || fail "acknowledge did not initialize state before locking"
+
+  home="$TMP_ROOT/missing-state-scan"
+  mkdir -p "$home"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    "$RECON" scan --startup
+  [ -d "$home/state" ] || fail "scan did not initialize state before locking"
+  pass "inactive reconciliation initializes missing state before locks"
+}
+
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
@@ -480,5 +499,6 @@ test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
 test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
+test_missing_state_is_initialized_before_locks
 
 echo "all inactive reconciliation tests passed"

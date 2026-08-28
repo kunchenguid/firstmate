@@ -217,25 +217,8 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file>
 }
 
 read_adapter() {  # <source-id>
-  local f; f=$(source_file "$1")
-  [ -f "$f" ] && [ ! -L "$f" ] || return 1
-  sed -n 's/^adapter=//p' "$f" | head -1
-}
-
-# Read the stored argv into the ARGV array. One argument per line after the
-# argv= count, so an argument containing spaces is not re-split.
-read_argv() {  # <source-id>
-  local f n; f=$(source_file "$1")
-  ARGV=()
-  [ -f "$f" ] && [ ! -L "$f" ] || return 1
-  n=$(sed -n 's/^argc=//p' "$f" | head -1)
-  case "$n" in ''|*[!0-9]*) return 1 ;; esac
-  local i=0 line
-  while IFS= read -r line; do
-    i=$((i + 1))
-    [ "$i" -le "$n" ] && ARGV+=("$line")
-  done < <(sed -n '/^argv:$/,$p' "$f" | tail -n +2)
-  [ "${#ARGV[@]}" -eq "$n" ]
+  fm_procevent_registration_parse "$(source_file "$1")" "$1" || return 1
+  printf '%s\n' "$FM_PROCEVENT_REG_ADAPTER"
 }
 
 cmd_register() {
@@ -359,17 +342,15 @@ cmd_start() {
     fm_procevent_source_lock_release "$id"
     die "source is not registered: $id"
   fi
-  if ! adapter=$(read_adapter "$id"); then
+  if ! fm_procevent_registration_parse "$(source_file "$id")" "$id"; then
     fm_procevent_source_lock_release "$id"
     die "registration is unreadable: $id"
   fi
+  adapter=$FM_PROCEVENT_REG_ADAPTER
+  ARGV=("${FM_PROCEVENT_REG_ARGV[@]}")
   if ! fm_procevent_adapter_valid "$adapter"; then
     fm_procevent_source_lock_release "$id"
     die "registration names an invalid adapter"
-  fi
-  if ! read_argv "$id"; then
-    fm_procevent_source_lock_release "$id"
-    die "registration argv is unreadable: $id"
   fi
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")"
   claimed=$?

@@ -11,6 +11,8 @@
 #   generated: UTC observation time for this fresh command execution.
 #   fm_home: resolved operational home.
 #   roots: resolved root/config/data/state/projects directories.
+#   collection.state: whether the state inventory was absent or fully accessible,
+#     plus invalid metadata entries that could not produce task rows.
 #   backlog: {path,present,records[]} where records are ordered as written in
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
@@ -40,8 +42,19 @@
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
 #     endpoint.exists is the cheap backend endpoint-presence read.
-#     endpoint.agent_alive is populated for secondmates only, where it is useful
-#     return-channel supervision data; other tasks use "not_checked".
+#     endpoint.agent_state preserves the recovery-grade backend verdict for
+#     every local task with a recorded target; endpoint.agent_alive is its
+#     backward-compatible three-state projection.
+#     endpoint.probe names how liveness was observed: local, remote, skipped, or
+#     none. Remote tasks never treat a local placeholder window as remote
+#     liveness. FM_SNAPSHOT_REMOTE_PROBES=0 skips SSH probes and records
+#     agent_alive=not_collected with probe=skipped instead.
+#     endpoint.codex_session is collected only for local in-flight Codex tasks
+#     whose agent is not already proven dead: resume_banner is true when the
+#     bounded backend pane capture contains the exact Codex exit banner.
+#     paths.status_log.available preserves invalid or unreadable log evidence;
+#     last_event.mtime_epoch is the status-file mtime, and handoff_required marks
+#     a scaffold-declared stop state that awaits Firstmate.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -147,6 +160,14 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
+FM_SNAPSHOT_REMOTE_PROBES=${FM_SNAPSHOT_REMOTE_PROBES:-1}
+case "$FM_SNAPSHOT_REMOTE_PROBES" in
+  0|1) ;;
+  *)
+    echo "fm-fleet-snapshot: FM_SNAPSHOT_REMOTE_PROBES must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -188,6 +209,11 @@ FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT, with truncation disclosed in the result.
 The registered secondmate table uses FM_SNAPSHOT_REGISTRY_LINES,
 FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
 FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
+FM_SNAPSHOT_REMOTE_PROBES=0 skips SSH probes for remote endpoint liveness and
+remote home summaries; those surfaces are then marked not-collected.
+Local in-flight Codex pane capture uses the same terminal-line/byte/timeout
+bounds and never stores pane text; it records only whether the exact resume
+banner was present.
 EOF
 }
 
@@ -210,6 +236,35 @@ path_present_json() {  # <path>
   [ -e "$1" ] && present=1
   jq -n --arg path "$1" --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present}'
+}
+
+state_collection_json() {
+  local meta id reason invalid='[]'
+  if [ -L "$STATE" ] && [ ! -e "$STATE" ]; then
+    jq -n '{present:true,available:false,reason:"state path is a dangling symlink",invalid_metadata_count:0,invalid_metadata:[]}'
+  elif [ ! -e "$STATE" ]; then
+    jq -n '{present:false,available:true,reason:null,invalid_metadata_count:0,invalid_metadata:[]}'
+  elif [ ! -d "$STATE" ] || [ ! -r "$STATE" ] || [ ! -x "$STATE" ]; then
+    jq -n '{present:true,available:false,reason:"state directory is not readable and searchable",invalid_metadata_count:0,invalid_metadata:[]}'
+  else
+    for meta in "$STATE"/*.meta; do
+      [ -e "$meta" ] || [ -L "$meta" ] || continue
+      reason=
+      if [ -L "$meta" ]; then
+        reason="metadata entry is a symlink"
+      elif [ ! -f "$meta" ]; then
+        reason="metadata entry is not a regular file"
+      elif [ ! -r "$meta" ]; then
+        reason="metadata entry is unreadable"
+      fi
+      [ -n "$reason" ] || continue
+      id=$(basename "$meta" .meta)
+      invalid=$(jq -n --argjson invalid "$invalid" --arg id "$id" --arg reason "$reason" \
+        '$invalid + [{id:$id,reason:$reason}]')
+    done
+    jq -n --argjson invalid "$invalid" \
+      '{present:true,available:true,reason:null,invalid_metadata_count:($invalid | length),invalid_metadata:$invalid}'
+  fi
 }
 
 meta_value() {  # <meta-file> <key>
@@ -252,21 +307,102 @@ crew_state_json() {  # <id>
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
 
+snapshot_file_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
 status_event_json() {  # <status-log>
-  local log=$1 present=0 raw='' verb='' note=''
+  local log=$1 present=0 available=1 reason='' raw='' verb='' note='' mtime_json=null handoff_required=0
+  if { [ -L "$log" ] && [ ! -e "$log" ]; } || { [ -e "$log" ] && { [ ! -f "$log" ] || [ ! -r "$log" ]; }; }; then
+    available=0
+    reason='status log is invalid or unreadable'
+  fi
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
+    case "$verb" in
+      done|blocked) handoff_required=1 ;;
+    esac
+    mtime_json=$(snapshot_file_mtime "$log" || true)
+    case "$mtime_json" in
+      ''|*[!0-9]*) mtime_json=null ;;
+    esac
   fi
   jq -n \
     --arg path "$log" \
     --arg raw "$raw" \
     --arg verb "$verb" \
     --arg note "$note" \
+    --arg reason "$reason" \
     --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+    --argjson available "$(bool_json "$available")" \
+    --argjson mtime_epoch "$mtime_json" \
+    --argjson handoff_required "$(bool_json "$handoff_required")" \
+    '{path:$path,present:$present,available:$available,reason:(if $reason == "" then null else $reason end),kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,mtime_epoch:$mtime_epoch,handoff_required:$handoff_required}}'
+}
+
+# Exact Codex-cli exit banner. Health treats this as one of two independent
+# dead-session signals; the other is a proven bare-shell foreground.
+CODEX_RESUME_BANNER='To continue this session, run codex resume'
+
+codex_session_evidence_json() {  # <harness> <remote-host> <backend> <target> <id> <exists> <agent-state> <current-state>
+  local harness=$1 remote_host=$2 backend=$3 target=$4 id=$5 exists=$6 agent_state=$7 current_state=$8
+  local expected out rc clean reason='' resume=false
+  case "$harness" in
+    codex|codex-*) ;;
+    *)
+      jq -n '{collected:false,reason:"not_applicable",resume_banner:null}'
+      return 0
+      ;;
+  esac
+  if [ -n "$remote_host" ]; then
+    jq -n '{collected:false,reason:"remote pane capture was not collected",resume_banner:null}'
+    return 0
+  fi
+  case "$current_state" in
+    done|failed)
+      jq -n '{collected:false,reason:"task is terminal",resume_banner:null}'
+      return 0
+      ;;
+  esac
+  case "$agent_state" in
+    dead|missing)
+      jq -n '{collected:false,reason:"foreground already proved agent-free",resume_banner:null}'
+      return 0
+      ;;
+  esac
+  if [ -z "$target" ] || [ "$exists" = false ]; then
+    [ "$exists" = false ] && reason="recorded endpoint is absent" || reason="no recorded endpoint"
+    jq -n --arg reason "$reason" '{collected:false,reason:$reason,resume_banner:null}'
+    return 0
+  fi
+  expected="fm-$id"
+  # shellcheck disable=SC2016
+  out=$(fm_run_timed "$FM_SNAPSHOT_TERMINAL_TIMEOUT" bash -c \
+    '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5" | LC_ALL=C head -c "$6"; rc=${PIPESTATUS[0]}; [ "$rc" -eq 141 ] && rc=0; exit "$rc"' \
+    fm-codex-pane-capture "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$FM_SNAPSHOT_TERMINAL_LINES" "$expected" "$FM_SNAPSHOT_TERMINAL_BYTES" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 124 ] && reason="pane capture timed out" || reason="pane capture unavailable"
+    jq -n --arg reason "$reason" '{collected:false,reason:$reason,resume_banner:null}'
+    return 0
+  fi
+  clean=$(printf '%s' "$out" | tail -n "$FM_SNAPSHOT_TERMINAL_LINES" | LC_ALL=C head -c "$FM_SNAPSHOT_TERMINAL_BYTES")
+  if command -v perl >/dev/null 2>&1; then
+    clean=$(printf '%s' "$clean" | perl -pe 's/\e\[[0-?]*[ -\/]*[@-~]//g; s/[^\x09\x0A\x0D\x20-\x7E]//g')
+  else
+    clean=$(printf '%s' "$clean" | LC_ALL=C tr -cd '\11\12\15\40-\176')
+  fi
+  case "$clean" in
+    *"$CODEX_RESUME_BANNER"*) resume=true ;;
+  esac
+  jq -n --argjson resume "$resume" '{collected:true,reason:null,resume_banner:$resume}'
 }
 
 first_pr_url_in_file() {  # <file>
@@ -431,13 +567,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local remote_host remote_root remote_state remote_home_present
+  local pr pr_source event_json current_json endpoint_exists agent_state agent_alive probe meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json codex_session_json
 
   for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || continue
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
@@ -473,7 +609,11 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
+    if [ -n "$remote_host" ] && [ "$FM_SNAPSHOT_REMOTE_PROBES" = 0 ]; then
+      current_json=$(jq -n '{state:"unknown",source:"remote-not-collected",raw:""}')
+    else
+      current_json=$(crew_state_json "$id")
+    fi
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
@@ -511,39 +651,54 @@ task_json_lines() {
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
+    agent_state=not_checked
     agent_alive=not_checked
+    probe=none
     if [ -n "$remote_host" ]; then
-      if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+      probe=remote
+      if [ "$FM_SNAPSHOT_REMOTE_PROBES" = 0 ]; then
+        probe=skipped
+        endpoint_exists=null
+        agent_state=not_collected
+        agent_alive=not_collected
+        remote_home_present=null
+      elif remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
         "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
-        remote_rc=0
-      else
-        remote_rc=$?
-      fi
-      if [ "$remote_rc" -eq 0 ]; then
         remote_home_present=true
         remote_state=$(printf '%s\n' "$remote_state" | tail -1)
         case "$remote_state" in
-          alive) endpoint_exists=true; agent_alive=alive ;;
-          dead) endpoint_exists=true; agent_alive=dead ;;
-          missing) endpoint_exists=false; agent_alive=dead ;;
-          *) endpoint_exists=null; agent_alive=unknown ;;
+          alive) endpoint_exists=true; agent_state=alive; agent_alive=alive ;;
+          dead) endpoint_exists=true; agent_state=dead; agent_alive=dead ;;
+          missing) endpoint_exists=false; agent_state=missing; agent_alive=dead ;;
+          *) endpoint_exists=null; agent_state=unreadable; agent_alive=unknown ;;
         esac
       else
         endpoint_exists=null
+        agent_state=unreadable
         agent_alive=unknown
       fi
     else
       if [ -n "$target" ]; then
+        probe=local
         if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
           endpoint_exists=true
         else
           endpoint_exists=false
         fi
       fi
-      if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+      if [ -n "$target" ]; then
+        agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable)
+        case "$agent_state" in
+          alive) agent_alive=alive ;;
+          dead|missing) agent_alive=dead ;;
+          *) agent_alive=unknown ;;
+        esac
       fi
     fi
+    codex_session_json=$(codex_session_evidence_json \
+      "$harness" "$remote_host" "$backend" "$target" "$id" \
+      "$endpoint_exists" "$agent_state" "$current_state") \
+      || codex_session_json='{"collected":false,"reason":"codex session evidence failed","resume_banner":null}'
 
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$meta")
@@ -575,7 +730,9 @@ task_json_lines() {
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
+      --arg agent_state "$agent_state" \
       --arg agent_alive "$agent_alive" \
+      --arg probe "$probe" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
@@ -585,6 +742,7 @@ task_json_lines() {
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
+      --argjson codex_session "$codex_session_json" \
       --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
@@ -608,11 +766,14 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
-        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
-          status:(if $endpoint_exists == false then "absent"
+        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_state:$agent_state,agent_alive:$agent_alive,
+          probe:$probe,
+          status:(if $probe == "skipped" or $agent_alive == "not_collected" then "not_collected"
+                  elif $endpoint_exists == false and $agent_state == "missing" then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
-          observed_at:$observed_at,freshness:"fresh"},
+          observed_at:$observed_at,freshness:(if $probe == "skipped" then "not_collected" else "fresh" end),
+          codex_session:$codex_session},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
         hints:{
           pending_decision:$pending_decision,
@@ -842,9 +1003,19 @@ fi
 
 registry_secondmates_json() {
   local reg="$DATA/secondmates.md" out rc reason mode script parse_filter output_filter
-  if [ ! -f "$reg" ]; then
+  if [ ! -e "$reg" ] && [ ! -L "$reg" ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
       '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
+    return 0
+  fi
+  if [ -L "$reg" ] && [ ! -e "$reg" ]; then
+    reason="registered secondmate table is dangling"
+  elif [ ! -f "$reg" ]; then
+    reason="registered secondmate table is not a regular file"
+  fi
+  if [ -n "${reason:-}" ]; then
+    jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" --arg reason "$reason" \
+      '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
     return 0
   fi
   mode=$(file_mode_octal "$reg")
@@ -915,9 +1086,10 @@ BASH
         | (($local == null) and ($remote != null)) as $is_remote
         | {id:$id.id,home:($route.home // null),host:(if $is_remote then $remote.host else null end),root:(if $is_remote then $remote.root else null end),
            remote:$is_remote,registered:true,
-           registry_error:(if $route == null or ($route.home | length) == 0 then "registry entry has no home" else null end)} ]
+           registry_error:(if $route == null or ($route.home | length) == 0 then "registry entry has no home" else null end),
+           registry_failure_kind:(if $route == null or ($route.home | length) == 0 then "invalid" else null end)} ]
       | group_by(.id)
-      | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
+      | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry",registry_failure_kind:"invalid"} else .[0] end)
 JQ
   )
   output_filter=$(cat <<'JQ'
@@ -1152,8 +1324,8 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
-  local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local row id home host remote registered registry_error registry_failure_kind task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
+  local activity_scan activities decisions reconciliation provenance freshness reason failure_kind summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -1168,6 +1340,7 @@ secondmate_current_json() {  # <parent-tasks-json>
               registry_error:(if $registry.complete == true
                               then "secondmate metadata is not registered"
                               else "secondmate registration is unknown because the registry read is incomplete or unavailable" end),
+              registry_failure_kind:(if $registry.complete == true then "invalid" else "registry_incomplete" end),
               parent_task:$t} ])
     | sort_by(.id)
     | {registry:$registry,records:.}') || return 1
@@ -1185,6 +1358,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     remote=$(printf '%s' "$row" | jq -r '.remote // false')
     registered=$(printf '%s' "$row" | jq -r '.registered')
     registry_error=$(printf '%s' "$row" | jq -r '.registry_error // ""')
+    registry_failure_kind=$(printf '%s' "$row" | jq -r '.registry_failure_kind // ""')
     task=$(printf '%s' "$row" | jq -c '.parent_task // {}')
     sampled_spawn_gen=$(printf '%s' "$task" | jq -r '.spawn_gen // ""')
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
@@ -1201,38 +1375,50 @@ secondmate_current_json() {  # <parent-tasks-json>
     fi
 
     reason=$registry_error
+    failure_kind=
+    if [ -n "$reason" ]; then
+      failure_kind=${registry_failure_kind:-invalid}
+    fi
     summary='{}'
     summary_sampled=false
     summary_valid=false
-    if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
+    if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; failure_kind=invalid; fi
     if [ -z "$reason" ]; then
       case "$home" in
         /*) : ;;
-        *) reason="invalid home: registered path is not absolute" ;;
+        *) reason="invalid home: registered path is not absolute"; failure_kind=invalid ;;
       esac
     fi
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        [ -n "$host" ] || reason="invalid remote route: missing SSH host"
+        if [ -z "$host" ]; then reason="invalid remote route: missing SSH host"; failure_kind=invalid; fi
         case " $seen_homes " in
-          *" $host:$home "*) reason="invalid home: duplicate resolved remote route" ;;
+          *" $host:$home "*) reason="invalid home: duplicate resolved remote route"; failure_kind=invalid ;;
           *) seen_homes="$seen_homes $host:$home" ;;
         esac
       elif ! validate_secondmate_home "$id" "$home" 2>/dev/null; then
         reason="invalid home: $VALIDATION_ERROR"
+        failure_kind=invalid
       else
         home=$VALIDATED_HOME
         case " $seen_homes " in
-          *" local:$home "*) reason="invalid home: duplicate resolved home route" ;;
+          *" local:$home "*) reason="invalid home: duplicate resolved home route"; failure_kind=invalid ;;
           *) seen_homes="$seen_homes local:$home" ;;
         esac
       fi
     fi
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
-        summary_rc=$?
+        if [ "$FM_SNAPSHOT_REMOTE_PROBES" = 0 ]; then
+          summary=''
+          summary_rc=1
+          reason="remote structured home snapshot was not collected"
+          failure_kind=not_collected
+        else
+          summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+            "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
+          summary_rc=$?
+        fi
       else
         summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
           FM_ROOT_OVERRIDE="$FM_ROOT" \
@@ -1252,11 +1438,20 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       if [ "$summary_rc" -ne 0 ]; then
         summary='{}'
-        [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
+        if [ -z "$reason" ]; then
+          if [ "$summary_rc" -eq 124 ]; then
+            reason="structured home snapshot timed out"
+            failure_kind=timeout
+          else
+            reason="structured home snapshot failed"
+            failure_kind=unavailable
+          fi
+        fi
       else
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
         if [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
           reason="structured home snapshot exceeded byte limit"
+          failure_kind=unavailable
         elif ! printf '%s' "$summary" | jq -e --arg home "$home" --arg generated "$SNAPSHOT_NOW" --argjson remote "$remote" '
           .schema == "fm-secondmate-home-summary.v1" and .home == $home
           and (($remote == true) or .generated == $generated)
@@ -1268,6 +1463,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           and (.counts | type) == "object" and (.omitted | type) == "array"
         ' >/dev/null 2>&1; then
           reason="structured home snapshot was malformed or stale"
+          failure_kind=invalid
         else
           summary_sampled=true
           summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
@@ -1276,7 +1472,7 @@ secondmate_current_json() {  # <parent-tasks-json>
             summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
             case "$summary_invalidity" in
               child_current_unavailable|orphan_in_flight|unowned_current|terminal_in_flight) : ;;
-              *) reason="structured home state invalid: $summary_reason" ;;
+              *) reason="structured home state invalid: $summary_reason"; failure_kind=invalid ;;
             esac
           fi
         fi
@@ -1288,6 +1484,7 @@ secondmate_current_json() {  # <parent-tasks-json>
       current_reason=
       if [ "$summary_valid" != true ]; then
         current_reason="structured home state invalid: $(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')"
+        failure_kind=child_unavailable
       fi
       reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
@@ -1303,13 +1500,14 @@ secondmate_current_json() {  # <parent-tasks-json>
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
+        --arg failure_kind "$failure_kind" \
         --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
-         current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
+         current:{state:$state,reason:($current_reason | if . == "" then null else . end),failure_kind:($failure_kind | if . == "" then null else . end)},invalidity:$summary.invalidity,
          reconcile_inventory:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
@@ -1336,12 +1534,13 @@ secondmate_current_json() {  # <parent-tasks-json>
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
+        --arg failure_kind "$failure_kind" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" --argjson summary "$summary" --argjson summary_sampled "$summary_sampled" '
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
-         current:{state:"unknown",reason:$reason},invalidity:null,
+         current:{state:"unknown",reason:$reason,failure_kind:$failure_kind},invalidity:null,
          reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
@@ -1397,6 +1596,7 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+STATE_COLLECTION_JSON=$(state_collection_json) || { echo "fm-fleet-snapshot: state collection check failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
@@ -1422,6 +1622,7 @@ jq -n \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
   --argjson backlog "$BACKLOG_JSON" \
+  --argjson state_collection "$STATE_COLLECTION_JSON" \
   --argjson tasks "$TASKS_JSON" \
   --argjson main_inventory "$MAIN_INVENTORY_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
@@ -1435,6 +1636,7 @@ jq -n \
      generated:$generated,
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
+     collection:{state:$state_collection},
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,

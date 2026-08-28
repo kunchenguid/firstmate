@@ -9,11 +9,14 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+_FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_WAKE_LIB_DIR="."
+# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_WAKE_LIB_DIR/fm-classify-lib.sh"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
-mkdir -p "$STATE"
 
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
@@ -126,6 +129,60 @@ fm_watcher_healthy() {
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_IDENTITY=$identity
   return 0
+}
+
+fm_watcher_lock_evidence_unreadable() {  # <state> <watch-path> [home]
+  local state=$1 watch_path=$2 home=${3:-$FM_HOME} lockdir file pid value classification
+  lockdir="$state/.watch.lock"
+  [ -e "$lockdir" ] || [ -L "$lockdir" ] || return 1
+  if ! [ -d "$lockdir" ] || ! [ -r "$lockdir" ] || ! [ -x "$lockdir" ]; then
+    classification=$(fm_evidence_classify false false)
+    [ "$classification" = inconclusive ] && return 0
+  fi
+  [ -e "$lockdir/pid" ] || [ -L "$lockdir/pid" ] || return 1
+  if ! [ -f "$lockdir/pid" ] || [ -L "$lockdir/pid" ] || ! [ -r "$lockdir/pid" ]; then
+    classification=$(fm_evidence_classify false false)
+    [ "$classification" = inconclusive ] && return 0
+  fi
+  if ! pid=$(cat "$lockdir/pid" 2>/dev/null); then
+    classification=$(fm_evidence_classify false false)
+    [ "$classification" = inconclusive ] && return 0
+  fi
+  case "$pid" in
+    ''|*[!0-9]*)
+      classification=$(fm_evidence_classify false false)
+      [ "$classification" = inconclusive ] && return 0
+      ;;
+  esac
+  fm_pid_alive "$pid" || return 1
+  for file in fm-home watcher-path pid-identity; do
+    if [ ! -e "$lockdir/$file" ] && [ ! -L "$lockdir/$file" ]; then
+      classification=$(fm_evidence_classify false false)
+      [ "$classification" = inconclusive ] && return 0
+    fi
+    if ! [ -f "$lockdir/$file" ] || [ -L "$lockdir/$file" ] || ! [ -r "$lockdir/$file" ]; then
+      classification=$(fm_evidence_classify false false)
+      [ "$classification" = inconclusive ] && return 0
+    fi
+    if ! value=$(cat "$lockdir/$file" 2>/dev/null); then
+      classification=$(fm_evidence_classify false false)
+      [ "$classification" = inconclusive ] && return 0
+    fi
+    case "$value" in
+      ''|*$'\n'*)
+        classification=$(fm_evidence_classify false false)
+        [ "$classification" = inconclusive ] && return 0
+        ;;
+    esac
+  done
+  classification=$(fm_evidence_classify true true)
+  [ "$classification" = available ] || return 0
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" && return 1
+  if ! fm_pid_identity "$pid" >/dev/null 2>&1; then
+    classification=$(fm_evidence_classify false false)
+    [ "$classification" = inconclusive ] && { fm_pid_alive "$pid" && return 0; }
+  fi
+  return 1
 }
 
 # fm_watcher_healthy above is the PID-STRICT primitive: true only when a live,
@@ -251,15 +308,36 @@ fm_pi_extension_owns_supervision() {
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_AVAILABLE=true
+# shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_REASON=stale-beacon
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
-  local beat age fresh=false model
+  local beat age fresh=false model beacon_exists=false beacon_readable=false beacon_valid=false beacon_mtime classification
   FM_WATCHER_VERDICT_OK=false
+  FM_WATCHER_VERDICT_AVAILABLE=true
   FM_WATCHER_VERDICT_REASON=stale-beacon
   beat="$state/.last-watcher-beat"
-  age=$(fm_path_age "$beat")
+  if [ -e "$beat" ] || [ -L "$beat" ]; then
+    beacon_exists=true
+  fi
+  if [ -f "$beat" ] && [ ! -L "$beat" ] && [ -r "$beat" ]; then
+    beacon_readable=true
+    beacon_mtime=$(fm_path_mtime "$beat") || beacon_readable=false
+  fi
+  [ "$beacon_readable" = true ] && beacon_valid=true
+  classification=$(fm_evidence_classify "$beacon_readable" "$beacon_valid")
+  if [ "$beacon_exists" = true ] && [ "$classification" != available ]; then
+    FM_WATCHER_VERDICT_AVAILABLE=false
+    FM_WATCHER_VERDICT_REASON=unreadable-beacon
+    return 0
+  fi
+  if [ "$classification" = available ]; then
+    age=$(( $(date +%s) - beacon_mtime ))
+  else
+    age=999999
+  fi
   case "$age" in
     ''|*[!0-9]*) ;;
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
@@ -273,7 +351,11 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
+    if fm_watcher_lock_evidence_unreadable "$state" "$watch" "$home"; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_AVAILABLE=false
+      FM_WATCHER_VERDICT_REASON=no-watcher
+    elif [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
       && fm_pi_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
@@ -1367,6 +1449,7 @@ fm_wake_append() {
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
   epoch=$(date +%s)
+  mkdir -p "$STATE" || return 1
   seq_file="$STATE/.wake-queue.seq"
   recovery_marker="$STATE/.watcher-down"
   status=0

@@ -38,6 +38,39 @@ TMP_ROOT=$(fm_test_tmproot fm-pending-reply)
 export FM_PENDING_REPLY_GRACE_SECS=0
 export FM_SEND_SETTLE=0
 
+test_created_pending_reply_is_valid() {
+  local home state corr
+  home="$TMP_ROOT/pending-reply-created"
+  state="$home/state"
+  mkdir -p "$state"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "created record") \
+    || fail "pending-reply creation failed"
+  fm_pending_reply_record_valid "$state/pending-replies/$corr" \
+    || fail "pending-reply create emitted a record rejected by its validator"
+  pass "created pending-reply records satisfy the validator"
+}
+
+test_recovery_phase_requires_matching_outcome() {
+  local home state corr rec
+  home="$TMP_ROOT/recovery-phase-outcome"
+  state="$home/state"
+  mkdir -p "$state"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "recovery invariant") \
+    || fail "pending-reply creation failed"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" recovery_attempted_epoch 1000 || fail "recovery attempt setup failed"
+  fm_pending_reply_set "$rec" recovery_sender_pid "$$" || fail "recovery sender setup failed"
+  fm_pending_reply_set "$rec" recovery_sender_identity sender || fail "recovery identity setup failed"
+  fm_pending_reply_set "$rec" phase recovery_sending || fail "recovery phase setup failed"
+  fm_pending_reply_set "$rec" recovery_delivery_outcome confirmed || fail "recovery outcome setup failed"
+  fm_pending_reply_record_valid "$rec" \
+    || fail "recovery_sending with a just-committed outcome should remain valid"
+  fm_pending_reply_set "$rec" phase recovery_sent || fail "recovery sent setup failed"
+  fm_pending_reply_record_valid "$rec" \
+    || fail "recovery_sent with confirmed outcome should be valid"
+  pass "recovery phases accept the writer's observable commit transition"
+}
+
 # --- fixtures ---------------------------------------------------------------
 
 make_stubs() {  # <dir> -> fakebin
@@ -1253,6 +1286,8 @@ test_failed_send_discards_undelivered_expectation() {
 
 # --- run --------------------------------------------------------------------
 
+test_created_pending_reply_is_valid
+test_recovery_phase_requires_matching_outcome
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected

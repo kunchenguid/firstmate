@@ -177,6 +177,63 @@ fm_pending_reply_get() {  # <record-path> <key>
   grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+fm_pending_reply_record_valid() {  # <record-path>
+  local rec=$1 base schema corr task phase outcome key count value
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  for key in schema corr_id task_id parent_home parent_status parent_status_scan_signature request_summary \
+    created_epoch delivered_epoch phase turn_seen_busy request_turn_completed_epoch \
+    recovery_attempted_epoch recovery_sender_pid recovery_sender_identity recovery_sent_epoch \
+    recovery_delivery_outcome recovery_turn_seen_busy recovery_turn_completed_epoch \
+    escalated_epoch escalation_closed_epoch resolved_epoch resolved_via wrong_home_hits \
+    wrong_home_sightings wrong_home_scan_signature grace_secs; do
+    count=$(grep -c "^${key}=" "$rec" 2>/dev/null || true)
+    [ "$count" -eq 1 ] || return 1
+  done
+  schema=$(fm_pending_reply_get "$rec" schema)
+  [ "$schema" = "$FM_PENDING_REPLY_SCHEMA" ] || return 1
+  corr=$(fm_pending_reply_get "$rec" corr_id)
+  base=$(basename "$rec")
+  [ "$corr" = "$base" ] || return 1
+  case "$corr" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]) ;;
+    *) return 1 ;;
+  esac
+  task=$(fm_pending_reply_get "$rec" task_id)
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  value=$(fm_pending_reply_get "$rec" parent_home)
+  case "$value" in /*) ;; *) return 1 ;; esac
+  value=$(fm_pending_reply_get "$rec" parent_status)
+  case "$value" in /*) ;; *) return 1 ;; esac
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report|delivery_unknown|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved) ;;
+    *) return 1 ;;
+  esac
+  for key in created_epoch grace_secs wrong_home_hits; do
+    value=$(fm_pending_reply_get "$rec" "$key")
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  for key in delivered_epoch request_turn_completed_epoch recovery_attempted_epoch recovery_sender_pid \
+    recovery_sent_epoch recovery_turn_completed_epoch escalated_epoch escalation_closed_epoch resolved_epoch; do
+    value=$(fm_pending_reply_get "$rec" "$key")
+    case "$value" in *[!0-9]*) return 1 ;; esac
+  done
+  for key in turn_seen_busy recovery_turn_seen_busy; do
+    value=$(fm_pending_reply_get "$rec" "$key")
+    case "$value" in 0|1) ;; *) return 1 ;; esac
+  done
+  outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
+  case "$outcome" in ''|confirmed|failed|unknown) ;; *) return 1 ;; esac
+  case "$phase:$outcome" in
+    awaiting_report:|delivery_unknown:|recovery_sending:|recovery_sending:confirmed|recovery_sent:confirmed|recovery_failed:failed|recovery_unknown:unknown) ;;
+    escalated:|escalated:confirmed|escalated:failed|escalated:unknown) ;;
+    resolved:|resolved:confirmed|resolved:failed|resolved:unknown) ;;
+    *) return 1 ;;
+  esac
+  value=$(fm_pending_reply_get "$rec" resolved_via)
+  case "$value" in ''|status|document|helper) ;; *) return 1 ;; esac
+}
+
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase delivered
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
@@ -288,6 +345,7 @@ recovery_delivery_outcome=
 recovery_turn_seen_busy=0
 recovery_turn_completed_epoch=
 escalated_epoch=
+escalation_closed_epoch=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0
@@ -927,12 +985,42 @@ fm_pending_reply_pid_identity() {  # <pid>
 }
 
 fm_pending_reply_sender_alive() {  # <record-path>
+  [ "$(fm_pending_reply_sender_state "$1")" = alive ]
+}
+
+fm_pending_reply_sender_state() {  # <record-path>
   local rec=$1 pid expected actual
   pid=$(fm_pending_reply_get "$rec" recovery_sender_pid)
   expected=$(fm_pending_reply_get "$rec" recovery_sender_identity)
-  [ -n "$expected" ] || return 1
-  actual=$(fm_pending_reply_pid_identity "$pid") || return 1
-  [ "$actual" = "$expected" ]
+  case "$pid" in ''|*[!0-9]*) printf 'unreadable\n'; return 0 ;; esac
+  [ -n "$expected" ] || { printf 'unreadable\n'; return 0; }
+  if ! fm_pid_alive "$pid"; then
+    printf 'orphaned\n'
+    return 0
+  fi
+  if ! actual=$(fm_pending_reply_pid_identity "$pid"); then
+    if fm_pid_alive "$pid"; then printf 'unreadable\n'; else printf 'orphaned\n'; fi
+    return 0
+  fi
+  if [ "$actual" = "$expected" ]; then printf 'alive\n'; else printf 'orphaned\n'; fi
+}
+
+fm_pending_reply_recovery_verdict() {  # <record-path>
+  local rec=$1 phase outcome
+  phase=$(fm_pending_reply_get "$rec" phase)
+  [ "$phase" = recovery_sending ] || { printf 'none\n'; return 0; }
+  outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
+  case "$outcome" in
+    confirmed|failed|unknown) printf '%s\n' "$outcome" ;;
+    '')
+      case "$(fm_pending_reply_sender_state "$rec")" in
+        alive) printf 'sending\n' ;;
+        orphaned) printf 'orphaned\n' ;;
+        *) printf 'unreadable\n' ;;
+      esac
+      ;;
+    *) printf 'unreadable\n' ;;
+  esac
 }
 
 fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed>
@@ -1406,4 +1494,95 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
     return 0
   done
   return 1
+}
+
+# Read-only list of open (non-resolved) pending-reply records.
+# Does not tick, recover, escalate, or otherwise mutate records.
+fm_pending_reply_open_json() {  # <state-dir>
+  local state=$1 dir rec corr phase task_id created delivered completed recovery_completed grace
+  local now age recovery_verdict row records='[]' invalid_count=0 unreadable_count=0
+  local record_readable record_valid classification available=true
+  dir=$(fm_pending_reply_dir "$state")
+  now=$(fm_pending_reply_now)
+  if [ -L "$dir" ] && [ ! -e "$dir" ]; then
+    classification=$(fm_evidence_classify false false)
+    jq -n --argjson now "$now" --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,now_epoch:$now,invalid_count:0,unreadable_count:0,records:[]}'
+    return 0
+  fi
+  if [ ! -e "$dir" ]; then
+    classification=$(fm_evidence_classify true true)
+    jq -n --argjson now "$now" --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,now_epoch:$now,invalid_count:0,unreadable_count:0,records:[]}'
+    return 0
+  fi
+  if [ ! -d "$dir" ] || [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+    classification=$(fm_evidence_classify false false)
+    jq -n --argjson now "$now" --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+      '{available:$available,now_epoch:$now,invalid_count:0,unreadable_count:0,records:[]}'
+    return 0
+  fi
+  for rec in "$dir"/*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      case "$(basename "$rec")" in .*) continue ;; esac
+      record_readable=false
+      [ -f "$rec" ] && [ ! -L "$rec" ] && [ -r "$rec" ] && record_readable=true
+      record_valid=false
+      [ "$record_readable" = true ] && fm_pending_reply_record_valid "$rec" && record_valid=true
+      classification=$(fm_evidence_classify "$record_readable" "$record_valid")
+      if [ "$classification" != available ]; then
+        available=false
+        if [ "$record_readable" = true ]; then
+          invalid_count=$((invalid_count + 1))
+        else
+          unreadable_count=$((unreadable_count + 1))
+        fi
+        continue
+      fi
+      corr=$(fm_pending_reply_get "$rec" corr_id)
+      phase=$(fm_pending_reply_get "$rec" phase)
+      [ "$phase" != resolved ] || continue
+      task_id=$(fm_pending_reply_get "$rec" task_id)
+      created=$(fm_pending_reply_get "$rec" created_epoch)
+      delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+      completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
+      recovery_completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
+      recovery_verdict=$(fm_pending_reply_recovery_verdict "$rec")
+      grace=$(fm_pending_reply_get "$rec" grace_secs)
+      case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
+      age=null
+      case "$created" in
+        ''|*[!0-9]*) ;;
+        *) age=$((now - created)); [ "$age" -lt 0 ] && age=0 ;;
+      esac
+      row=$(jq -n \
+        --arg corr "$corr" \
+        --arg task "$task_id" \
+        --arg phase "$phase" \
+        --arg created "$created" \
+        --arg delivered "$delivered" \
+        --arg completed "$completed" \
+        --arg recovery_completed "$recovery_completed" \
+        --arg recovery_verdict "$recovery_verdict" \
+        --arg grace "$grace" \
+        --argjson age "$age" \
+        '{
+          corr_id:$corr,
+          task_id:$task,
+          phase:$phase,
+          created_epoch:(if $created == "" then null else (try ($created | tonumber) catch null) end),
+          delivered_epoch:(if $delivered == "" then null else (try ($delivered | tonumber) catch null) end),
+          request_turn_completed_epoch:(if $completed == "" then null else (try ($completed | tonumber) catch null) end),
+          recovery_turn_completed_epoch:(if $recovery_completed == "" then null else (try ($recovery_completed | tonumber) catch null) end),
+          recovery_verdict:(if $recovery_verdict == "none" then null else $recovery_verdict end),
+          grace_secs:($grace | tonumber),
+          age_seconds:$age
+        }') || return 1
+      records=$(jq -n --argjson records "$records" --argjson row "$row" '$records + [$row]') || return 1
+  done
+  classification=$(fm_evidence_classify "$available" true)
+  jq -n --argjson now "$now" \
+    --argjson available "$( [ "$classification" = available ] && printf true || printf false )" \
+    --argjson invalid "$invalid_count" --argjson unreadable "$unreadable_count" --argjson records "$records" \
+    '{available:$available,now_epoch:$now,invalid_count:$invalid,unreadable_count:$unreadable,records:$records}'
 }
