@@ -18,8 +18,8 @@
 # `timings` is the read-only C1 breakdown: it prints the per-phase duration
 # table every recorded run carries, takes no lock, and changes nothing.
 # `economics` is the read-only per-run token, cost, outcome, and finding view.
-# `status` is the read-only R6 family view: it prints the serving roster family,
-# same-model relaxation, and latest durable review family without taking a lock.
+# `status` is the read-only R6 family view: it prints the serving roster family
+# and latest durable review family without taking a lock.
 # `merge` repeats that verification and is the sole entrypoint to the private
 # exact-SHA GitHub merge or merge-queue primitive.
 #

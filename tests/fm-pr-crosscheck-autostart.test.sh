@@ -679,14 +679,43 @@ PYHOOK
   pass "status cannot replace concurrent worker completion with a stale failure"
 }
 
+test_repeated_pr_registration_replaces_metadata() {
+  local case_dir task=longlived meta state_file
+  case_dir=$(make_case repeated-pr)
+  seed_task "$case_dir" "$task"
+  meta="$case_dir/home/state/$task.meta"
+  printf '%s\n' \
+    'pr=https://github.com/example/repo/pull/90' \
+    'pr_head=9090909090909090909090909090909090909090' \
+    'pr=https://github.com/example/repo/pull/91' \
+    'pr_head=9191919191919191919191919191919191919191' >> "$meta"
+  set_head "$case_dir" 10 "$HEAD_ONE"
+  run_pr_check "$case_dir" "$task" 10 >/dev/null \
+    || fail "first long-lived-task PR registration failed"
+  set_head "$case_dir" 11 "$HEAD_TWO"
+  run_pr_check "$case_dir" "$task" 11 >/dev/null \
+    || fail "later long-lived-task PR registration failed"
+  expect_code 1 "$(grep -c '^pr=' "$meta")" "registered PR metadata count"
+  expect_code 1 "$(grep -c '^pr_head=' "$meta")" "registered PR head metadata count"
+  grep -qxF 'pr=https://github.com/example/repo/pull/11' "$meta" \
+    || fail "later PR URL did not replace earlier registrations"
+  grep -qxF "pr_head=$HEAD_TWO" "$meta" \
+    || fail "later live head did not replace earlier registrations"
+  state_file="$case_dir/home/state/$task.crosscheck-autostart.json"
+  wait_for_state "$state_file" clear "$HEAD_TWO" 2 \
+    || fail "later PR registration did not reach exact-head CLEAR"
+  pass "a later PR atomically replaces all earlier PR metadata for one task"
+}
+
 case "${FM_TEST_AUTOSTART_CASE:-all}" in
   retirement) test_retirement_handoff ;;
-  registration) test_registration_capture_order ;;
+  registration) test_registration_capture_order; test_repeated_pr_registration_replaces_metadata ;;
   status) test_status_completion_race ;;
   consumer) test_configuration_failures_are_visible_and_retryable ;;
   all)
     test_retirement_handoff
     test_registration_capture_order
+    test_repeated_pr_registration_replaces_metadata
     test_status_completion_race
     test_prompt_return_active_and_clear_dedupe
     test_configuration_failures_are_visible_and_retryable

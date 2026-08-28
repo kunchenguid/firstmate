@@ -17,10 +17,11 @@ FM_HOME=/Users/dongkeun/firstmate-home \
   https://github.com/OWNER/REPO/pull/NUMBER
 ```
 
-Registration records the live PR head, arms the merge poll, durably requests Crosscheck, starts one task-local coordinator, and returns without waiting for the review.
+Registration atomically replaces the task's recorded PR URL and live head, arms the merge poll, durably requests Crosscheck, starts one task-local coordinator, and returns without waiting for the review.
+Authorship, account, model, branch, worktree, checkout, and launch records are not registration or reviewer-admission inputs.
 A matching active request is reused, and a matching exact-head and exact-claims `CLEAR` result is verified without another review.
 Registering a new head replaces the queued request so the coordinator reviews that head next.
-Registration holds the task metadata lock from head capture through poll emission and request publication, so an older capture cannot replace a newer registration.
+Registration locking and task-generation checks are owned by the header of `bin/fm-pr-check.sh`.
 A short task-local handoff lock couples request publication, status reconciliation, and coordinator retirement; it is never held during review execution.
 A dead or failed coordinator releases its task-local lock and retries when the same registration command runs again.
 The merge poll observes live GitHub merge state before reporting launcher failures, so manual completion and merge still trigger cleanup without granting merge authorization.
@@ -114,6 +115,9 @@ close it as equivalent to a fixed finding. Moving the PR head requires a fresh
 review; an old clear result never clears a new SHA.
 
 ## Reviewer harness
+
+Independence is structural: the dedicated reviewer roster and credential homes select the reviewer without comparing author identity or model family.
+The retired `config/crosscheck-same-model` setting is ignored.
 
 The primary reviewer is Pi running regular GLM 5.2 through the pinned
 `fireworks-glm` provider lane. The supported selector is:

@@ -77,7 +77,21 @@ REACTS="$TMP_ROOT/reacts.jsonl"
 FIXTURE_LOG="$TMP_ROOT/fixture-invocations.log"
 DRIVER="$TMP_ROOT/driver.py"
 FIXTURE="$TMP_ROOT/fake-crosscheck.sh"
-mkdir -p "$HOMEDIR/config" "$HOMEDIR/state" "$HOMEDIR/data" "$OUTDIR"
+REVIEWER_CONFIG="$HOMEDIR/config/crosscheck-reviewer.json"
+REVIEWER_HOME="$TMP_ROOT/reviewer-home"
+mkdir -p "$HOMEDIR/config" "$HOMEDIR/state" "$HOMEDIR/data" "$OUTDIR" "$REVIEWER_HOME"
+cat > "$REVIEWER_CONFIG" <<JSON
+{
+  "reviewers": [
+    {
+      "harness": "codex",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "account_home": "$REVIEWER_HOME"
+    }
+  ]
+}
+JSON
 : > "$POSTS"
 : > "$REACTS"
 : > "$FIXTURE_LOG"
@@ -87,10 +101,6 @@ mkdir -p "$HOMEDIR/config" "$HOMEDIR/state" "$HOMEDIR/data" "$OUTDIR"
 APP_TOKEN='xapp-1-SECRETAPP-cafef00dcafef00d'
 BOT_TOKEN='xoxb-SECRETBOT-deadbeefdeadbeef'
 GH_TOKEN_VALUE='ghp_SECRETGITHUB0123456789abcdef'
-PROVENANCE_KEY_FILE="$HOMEDIR/config/crosscheck-slack-provenance.key"
-printf '%s\n' '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
-  > "$PROVENANCE_KEY_FILE"
-chmod 600 "$PROVENANCE_KEY_FILE"
 
 CONFIG_MAIN="$TMP_ROOT/config-main.json"
 CONFIG_BUDGET="$TMP_ROOT/config-budget.json"
@@ -107,7 +117,6 @@ write_config() { # <path> <daily_budget_usd-json> <daily_request_cap-json>
   "github_token_env": "FM_TEST_GITHUB_READ_TOKEN",
   "daily_budget_usd": $2,
   "daily_request_cap": $3,
-  "provenance_key_file": "\$FM_HOME/config/crosscheck-slack-provenance.key",
   "state_dir": "\$FM_HOME/state/crosscheck-slack"
 }
 JSON
@@ -119,7 +128,7 @@ write_config "$CONFIG_TINYBUDGET" 0.01 null
 
 # The fixture crosscheck binary: records every invocation, refuses if a Slack
 # token leaked into its environment, verifies the bot staged real task
-# metadata for the gate, and writes a real ledger + report shape.
+# author-free exact-head admission, and writes a real ledger + report shape.
 cat > "$FIXTURE" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -132,9 +141,13 @@ fi
 task=$2
 url=$3
 meta="$FM_HOME/state/$task.meta"
-if ! grep -q '^harness=pi$' "$meta" || ! grep -q '^model=openai-codex-8/gpt-5.6-sol$' "$meta"; then
-  echo "fixture: task metadata missing or wrong at $meta" >&2
+[ ! -e "$meta" ] || {
+  echo "fixture: Slack admission produced forbidden author metadata at $meta" >&2
   exit 67
+}
+if find "$FM_HOME/data/$task" -maxdepth 1 -type f -iname '*attestation*' | grep -q .; then
+  echo "fixture: Slack admission produced a forbidden authorship artifact" >&2
+  exit 68
 fi
 mode=${FM_FIXTURE_MODE:-clear}
 if [ "$mode" = fail ]; then
@@ -285,82 +298,17 @@ if command == "mention":
         )
 
     config.state_dir.mkdir(parents=True, exist_ok=True)
-    provenance_key = mod.load_provenance_key(config.provenance_key_file)
-    links = mod.extract_pr_links(str(event.get("text") or ""))
-    if (
-        len(links) == 1
-        and mod.repo_of(links[0]) in config.repo_allowlist
-        and os.environ.get("FMT_PROVENANCE_MODE", "valid") != "missing"
-        and head_sha != "ERROR"
-        and not (
-            config.state_dir / "events" / f"{os.environ['FMT_EVENT_ID']}.claimed"
-        ).exists()
-    ):
-        source_task = os.environ.get("FMT_SOURCE_TASK") or "source-task"
-        source_generation = os.environ.get("FMT_SOURCE_GENERATION") or "spawn:test-generation"
-        source_harness = os.environ.get("FMT_SOURCE_HARNESS") or "pi"
-        source_model = os.environ.get("FMT_SOURCE_MODEL") or "openai-codex-8/gpt-5.6-sol"
-        source_worktree = Path(os.environ["FM_HOME"]) / "source-worktrees" / source_task
-        source_worktree.mkdir(parents=True, exist_ok=True)
-        account_home = Path(os.environ["FM_HOME"]) / "source-accounts" / source_task
-        account_home.mkdir(parents=True, exist_ok=True)
-        (account_home / "auth.json").write_text(json.dumps({
-            "openai-codex": {"accountId": "fixture-author-account"}
-        }))
-        worktree_identity = {
-            "worktree": str(source_worktree.resolve()),
-            "head": head_sha,
-            "ref": "refs/heads/codex/fixture",
-            "git_dir_identity": f"fixture:{source_task}",
-            "tracked_status": "",
-        }
-        mod.git_inspect_worktree = lambda _worktree: dict(worktree_identity)
-        mod.git_head_descends_from = lambda _worktree, _ancestor: True
-        mod.issue_launch_attestation(
-            config,
-            provenance_key,
-            source_task,
-            source_generation,
-            source_worktree,
-            source_harness,
-            source_model,
-            account_home,
-        )
-        source_meta = Path(os.environ["FM_HOME"]) / "state" / f"{source_task}.meta"
-        source_meta.write_text(
-            "\n".join(
-                [
-                    f"harness={source_harness}",
-                    f"model={source_model}",
-                    f"generation_id={source_generation}",
-                    f"worktree={source_worktree.resolve()}",
-                    f"pr={links[0]}",
-                    f"pr_head={head_sha}",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        path = mod.issue_task_attestation(
-            config, provenance_key, source_task, links[0], head_sha
-        )
-        if os.environ.get("FMT_PROVENANCE_MODE") == "tampered":
-            value = json.loads(path.read_text(encoding="utf-8"))
-            value["payload"]["author"]["model"] = "claude-opus-5"
-            path.write_text(json.dumps(value) + "\n", encoding="utf-8")
     ctx = mod.MentionContext(
         config=config,
         meter=mod.DailyMeter(config.state_dir / "meter"),
         deduper=mod.EventDeduper(config.state_dir / "events"),
         post=post,
         react=react,
+        reviewer_preflight=mod.make_reviewer_preflight(),
         run_review=mod.make_run_review(
             config, github_token, current_snapshot=current_snapshot
         ),
         pr_snapshot=pr_snapshot,
-        provenance=lambda snapshot: mod.verify_attestation(
-            config, provenance_key, snapshot
-        ),
     )
     action = mod.handle_mention(os.environ["FMT_EVENT_ID"], event, ctx)
     print(f"action: {action}")
@@ -541,6 +489,7 @@ run_mention() { # <event-id> <config> <event-file> <out-name>
       FM_TEST_GITHUB_READ_TOKEN="$GH_TOKEN_VALUE" \
       FM_CROSSCHECK_SLACK_CONFIG="$2" \
       FM_CROSSCHECK_SLACK_CROSSCHECK_BIN="$FIXTURE" \
+      FM_CROSSCHECK_REVIEWER_CONFIG="${FMT_REVIEWER_CONFIG:-$REVIEWER_CONFIG}" \
       FM_FIXTURE_LOG="$FIXTURE_LOG" \
       FM_FIXTURE_MODE="${FM_FIXTURE_MODE:-clear}" \
       FM_FIXTURE_REVIEWER_JSON="${FM_FIXTURE_REVIEWER_JSON:-}" \
@@ -553,11 +502,6 @@ run_mention() { # <event-id> <config> <event-file> <out-name>
       FMT_EVENT_ID="$1" \
       FMT_HEAD_SHA="${FMT_HEAD_SHA:-}" \
       FMT_HEAD_AFTER="${FMT_HEAD_AFTER:-}" \
-      FMT_PROVENANCE_MODE="${FMT_PROVENANCE_MODE:-}" \
-      FMT_SOURCE_TASK="${FMT_SOURCE_TASK:-}" \
-      FMT_SOURCE_HARNESS="${FMT_SOURCE_HARNESS:-}" \
-      FMT_SOURCE_MODEL="${FMT_SOURCE_MODEL:-}" \
-      FMT_SOURCE_GENERATION="${FMT_SOURCE_GENERATION:-}" \
       FMT_FAIL_VERDICT_POST="${FMT_FAIL_VERDICT_POST:-}" \
       "$PYTHON" "$DRIVER" mention "$3" > "$out" 2>&1
   local code=$?
@@ -567,6 +511,15 @@ run_mention() { # <event-id> <config> <event-file> <out-name>
 
 fixture_run_count() {
   grep -c . "$FIXTURE_LOG" || true
+}
+
+meter_request_count() {
+  "$PYTHON" -c 'import json, pathlib, sys
+count = 0
+for path in pathlib.Path(sys.argv[1]).glob("*.json"):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    count += len(value.get("requests", []))
+print(count)' "$HOMEDIR/state/crosscheck-slack/meter"
 }
 
 last_post_text() {
@@ -598,10 +551,20 @@ test_selftest_validates_config_shape() {
     "selftest did not explain the null budget"
   assert_contains "$output" "daily_request_cap: null (uncapped" \
     "selftest did not report the null request cap"
-  assert_contains "$output" "provenance_key_file:" \
-    "selftest did not validate the provenance key"
+  assert_contains "$output" "authorship ignored" \
+    "selftest did not report exact-head-only admission"
   assert_contains "$output" "review_workers: 4" \
     "selftest did not report four shared-capacity workers"
+
+  legacy="$TMP_ROOT/config-legacy-provenance.json"
+  "$PYTHON" -c 'import json, sys
+value = json.load(open(sys.argv[1]))
+value["provenance_key_file"] = "/historical/nonexistent/key"
+json.dump(value, open(sys.argv[2], "w"))' "$CONFIG_MAIN" "$legacy"
+  output=$(env FM_HOME="$HOMEDIR" "$BOT_SH" --selftest "$legacy" 2>&1) \
+    || fail "selftest stopped reading a historical config: $output"
+  assert_contains "$output" "schema: valid" \
+    "historical provenance config was not accepted and ignored"
 
   bad="$TMP_ROOT/config-bad.json"
   "$PYTHON" -c 'import json, sys
@@ -686,77 +649,6 @@ test_missing_token_env_refuses_start() {
   pass "a missing token environment variable refuses startup naming the exact variable"
 }
 
-test_attestation_cli_derives_and_signs_author_identity() {
-  agent_task=attest-agent-task
-  agent_pr=https://github.com/Ruby-Labs/goodrepo/pull/77
-  agent_worktree="$TMP_ROOT/attest-agent-worktree"
-  agent_account="$TMP_ROOT/attest-agent-account"
-  mkdir -p "$agent_worktree" "$agent_account"
-  git -C "$agent_worktree" init -q
-  git -C "$agent_worktree" config user.email fixture@example.com
-  git -C "$agent_worktree" config user.name Fixture
-  printf 'launch\n' > "$agent_worktree/value.txt"
-  git -C "$agent_worktree" add value.txt
-  git -C "$agent_worktree" commit -qm 'fixture launch'
-  agent_head=$(git -C "$agent_worktree" rev-parse HEAD)
-  printf '%s\n' '{"openai-codex":{"accountId":"fixture-author-account"}}' \
-    > "$agent_account/auth.json"
-  output=$(perl -e 'alarm 60; exec @ARGV' -- \
-    env FM_HOME="$HOMEDIR" "$BOT_SH" attest-launch \
-      "$agent_task" spawn:attest-agent "$agent_worktree" pi \
-      openai-codex-8/gpt-5.6-sol --account-home "$agent_account" \
-      --config "$CONFIG_MAIN" 2>&1) \
-    || fail "agent launch attestation command failed: $output"
-  assert_contains "$output" "launch-attested:" \
-    "agent launch attestation was not written"
-  cat > "$HOMEDIR/state/$agent_task.meta" <<EOF
-harness=pi
-model=openai-codex-8/gpt-5.6-sol
-generation_id=spawn:attest-agent
-worktree=$agent_worktree
-pr=$agent_pr
-pr_head=$agent_head
-EOF
-  output=$(perl -e 'alarm 60; exec @ARGV' -- \
-    env FM_HOME="$HOMEDIR" "$BOT_SH" attest-task \
-      "$agent_task" "$agent_pr" "$agent_head" --config "$CONFIG_MAIN" 2>&1) \
-    || fail "agent attestation command failed: $output"
-  agent_path=${output#attested: }
-  assert_present "$agent_path" "agent attestation was not written"
-  shape=$($PYTHON -c 'import json, sys
-value=json.load(open(sys.argv[1]))
-author=value["payload"]["author"]
-print(author["kind"], author["harness"], author["model_family"], author["task_id"])' \
-    "$agent_path")
-  [ "$shape" = "agent pi openai $agent_task" ] \
-    || fail "agent provenance fields were not derived correctly: $shape"
-  origin_shape=$($PYTHON -c 'import json, sys
-value=json.load(open(sys.argv[1]))
-print(value["schema"], value["payload"]["origin"]["schema"])' "$agent_path")
-  [ "$origin_shape" = "firstmate.crosscheck-authorship.v2 firstmate.crosscheck-author-launch.v1" ] \
-    || fail "exact-head attestation did not bind launch provenance: $origin_shape"
-
-  human_task=attest-human-task
-  human_pr=https://github.com/Ruby-Labs/goodrepo/pull/78
-  human_head=$agent_head
-  cat > "$HOMEDIR/state/$human_task.meta" <<EOF
-harness=human
-model=human-authored
-generation_id=no-mistakes:human-run-1
-worktree=$agent_worktree
-pr=$human_pr
-pr_head=$human_head
-EOF
-  if output=$(perl -e 'alarm 60; exec @ARGV' -- \
-    env FM_HOME="$HOMEDIR" "$BOT_SH" attest-task \
-      "$human_task" "$human_pr" "$human_head" --config "$CONFIG_MAIN" 2>&1); then
-    fail "unsigned human task metadata was accepted as trusted provenance"
-  fi
-  assert_contains "$output" "cannot establish human authorship" \
-    "human provenance refusal did not name the missing trusted producer"
-  pass "the attestation CLI binds agent identity to launch evidence and refuses unsigned human classification"
-}
-
 test_mention_without_link_gets_usage_reply() {
   event="$TMP_ROOT/event-nolink.json"
   write_event "$event" C0TESTCHAN U0ALICE 1755640000.000100 '<@U0BOT> hello there'
@@ -812,6 +704,38 @@ test_channel_outside_allowlist_is_refused() {
   pass "a mention outside the channel allowlist is refused without a review"
 }
 
+test_missing_configured_reviewer_is_refused_before_admission() {
+  before_runs=$(fixture_run_count)
+  before_requests=$(meter_request_count)
+  before_starts=$(grep -c "Review started" "$POSTS" || true)
+  before_reacts=$(wc -l < "$REACTS" | tr -d ' ')
+  event="$TMP_ROOT/event-no-reviewer.json"
+  write_event "$event" C0TESTCHAN U0ALICE 1755640003.500100 "$GOOD_PR_TEXT"
+  FMT_REVIEWER_CONFIG="$TMP_ROOT/missing-reviewer.json" \
+    run_mention ev-no-reviewer-1 "$CONFIG_MAIN" "$event" no-reviewer \
+    || fail "missing-reviewer mention errored: $RUN_MENTION_OUTPUT"
+  assert_contains "$RUN_MENTION_OUTPUT" "action: reviewer-refused" \
+    "missing reviewer was not refused at Slack admission"
+  reply=$(last_post_text)
+  assert_contains "$reply" "no configured Crosscheck reviewer is available" \
+    "reviewer refusal did not name the unavailable configuration"
+  assert_contains "$reply" "No review started" \
+    "reviewer refusal did not state that no review started"
+  after_runs=$(fixture_run_count)
+  after_requests=$(meter_request_count)
+  after_starts=$(grep -c "Review started" "$POSTS" || true)
+  after_reacts=$(wc -l < "$REACTS" | tr -d ' ')
+  [ "$after_runs" = "$before_runs" ] \
+    || fail "missing reviewer reached the Crosscheck CLI"
+  [ "$after_requests" = "$before_requests" ] \
+    || fail "missing reviewer consumed the submitter request meter"
+  [ "$after_starts" = "$before_starts" ] \
+    || fail "missing reviewer posted a review-start acknowledgement"
+  [ "$after_reacts" = "$before_reacts" ] \
+    || fail "missing reviewer posted a review-start reaction"
+  pass "a missing configured reviewer is refused before metering or review startup"
+}
+
 test_completed_review_names_lane_head_task_and_artifact() {
   before=$(fixture_run_count)
   event="$TMP_ROOT/event-clear.json"
@@ -835,7 +759,7 @@ test_completed_review_names_lane_head_task_and_artifact() {
   [ "$after" = $((before + 1)) ] || fail "expected exactly one crosscheck invocation"
   assert_grep "Review started" "$POSTS" "review start ack missing"
   assert_grep "hourglass" "$REACTS" "ack reaction missing"
-  pass "a completed review posts threaded findings naming the cross-family lane (fixture verified gate metadata)"
+  pass "an allowlisted exact head starts review without author metadata or attestation artifacts"
 }
 
 test_lane_naming_covers_fallback_and_explicit_marker() {
@@ -990,46 +914,11 @@ test_request_cap_binds_today() {
   pass "the per-submitter daily request cap binds today with no cost data and is announced in thread"
 }
 
-test_missing_or_tampered_provenance_fails_closed() {
-  before=$(fixture_run_count)
-  event="$TMP_ROOT/event-provenance-missing.json"
-  write_event "$event" C0TESTCHAN U0ALICE 1755640040.000100 "$GOOD_PR_TEXT"
-  FMT_HEAD_SHA="2222222222222222222222222222222222222222" \
-  FMT_PROVENANCE_MODE=missing \
-    run_mention ev-provenance-missing "$CONFIG_MAIN" "$event" provenance-missing \
-    || fail "missing-provenance mention errored: $RUN_MENTION_OUTPUT"
-  assert_contains "$RUN_MENTION_OUTPUT" "action: provenance-refused" \
-    "missing provenance was not refused"
-  reply=$(last_post_text)
-  assert_contains "$reply" "no trustworthy Firstmate/no-mistakes authorship attestation" \
-    "missing provenance refusal did not name the trust requirement"
-  assert_contains "$reply" "Branch names, Slack identity, and message text cannot assert" \
-    "refusal did not reject caller-controlled authorship signals"
-  after=$(fixture_run_count)
-  [ "$after" = "$before" ] || fail "a PR without provenance reached the crosscheck CLI"
-
-  event="$TMP_ROOT/event-provenance-tampered.json"
-  write_event "$event" C0TESTCHAN U0ALICE 1755640041.000100 "$GOOD_PR_TEXT"
-  FMT_HEAD_SHA="3333333333333333333333333333333333333333" \
-  FMT_PROVENANCE_MODE=tampered \
-  FMT_SOURCE_TASK=source-tampered \
-    run_mention ev-provenance-tampered "$CONFIG_MAIN" "$event" provenance-tampered \
-    || fail "tampered-provenance mention errored: $RUN_MENTION_OUTPUT"
-  assert_contains "$RUN_MENTION_OUTPUT" "action: provenance-refused" \
-    "tampered provenance was not refused"
-  assert_contains "$(last_post_text)" "signature verification failed" \
-    "tampered provenance refusal did not name signature verification"
-  after=$(fixture_run_count)
-  [ "$after" = "$before" ] || fail "a PR with tampered provenance reached the crosscheck CLI"
-  pass "missing and tampered exact-head provenance fail closed without a review"
-}
-
 test_head_change_invalidates_the_verdict() {
   event="$TMP_ROOT/event-stale.json"
   write_event "$event" C0TESTCHAN U0ALICE 1755640042.000100 "$GOOD_PR_TEXT"
   FMT_HEAD_SHA="4444444444444444444444444444444444444444" \
   FMT_HEAD_AFTER="5555555555555555555555555555555555555555" \
-  FMT_SOURCE_TASK=source-stale \
     run_mention ev-stale-1 "$CONFIG_MAIN" "$event" stale \
     || fail "head-change mention errored: $RUN_MENTION_OUTPUT"
   assert_contains "$RUN_MENTION_OUTPUT" "action: failed" \
@@ -1107,153 +996,6 @@ test_redelivery_revalidates_head() {
     [ "$(fixture_run_count)" = $((before + 1)) ] || fail "redelivery started another review"
   done
   pass "redelivery checks current head and never translates lookup failure to CLEAR"
-}
-
-test_agent_account_is_required() {
-  output=$(env FM_HOME="$HOMEDIR" FMT_BOT_PY="$BOT_PY" \
-    FM_CROSSCHECK_SLACK_CONFIG="$CONFIG_MAIN" "$PYTHON" - <<'PYTEST'
-import importlib.util
-import os
-import sys
-from pathlib import Path
-spec = importlib.util.spec_from_file_location("slack_account_test", os.environ["FMT_BOT_PY"])
-mod = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mod
-spec.loader.exec_module(mod)
-config = mod.load_config(Path(os.environ["FM_CROSSCHECK_SLACK_CONFIG"]))
-key = mod.load_provenance_key(config.provenance_key_file)
-url = "https://github.com/Ruby-Labs/goodrepo/pull/91"
-head = "9" * 40
-task = "account-required"
-generation = "spawn:account"
-worktree = Path(os.environ["FM_HOME"]) / "account-required-worktree"
-worktree.mkdir()
-account_home = Path(os.environ["FM_HOME"]) / "account-required-home"
-account_home.mkdir()
-identity = {
-    "worktree": str(worktree.resolve()),
-    "head": head,
-    "ref": "refs/heads/codex/account-required",
-    "git_dir_identity": "fixture:account-required",
-    "tracked_status": "",
-}
-mod.git_inspect_worktree = lambda _worktree: dict(identity)
-mod.git_head_descends_from = lambda _worktree, _ancestor: True
-try:
-    mod.issue_launch_attestation(
-        config, key, task, generation, worktree, "pi",
-        "openai-codex-8/gpt-5.6-sol", None,
-    )
-except mod.SlackExposureError:
-    pass
-else:
-    raise AssertionError("launch issuer accepted absent account identity")
-(account_home / "auth.json").write_text(
-    '{"openai-codex":{"accountId":"fixture-author-account"}}'
-)
-mod.issue_launch_attestation(
-    config, key, task, generation, worktree, "pi",
-    "openai-codex-8/gpt-5.6-sol", account_home,
-)
-meta = Path(os.environ["FM_HOME"]) / "state" / f"{task}.meta"
-meta.write_text(
-    f"harness=pi\nmodel=openai-codex-8/gpt-5.6-sol\n"
-    f"generation_id={generation}\nworktree={worktree.resolve()}\n"
-    f"pr={url}\npr_head={head}\n"
-)
-path = mod.issue_task_attestation(config, key, task, url, head)
-import json
-payload = json.loads(path.read_text())["payload"]
-payload["author"]["account_identity"] = None
-path.write_text(json.dumps(mod.signed_attestation(payload, key)))
-snapshot = mod.PrSnapshot(url, mod.repo_of(url), 91, head)
-try:
-    mod.verify_attestation(config, key, snapshot)
-except mod.SlackExposureError:
-    pass
-else:
-    raise AssertionError("verifier accepted signed null account identity")
-PYTEST
-  ) || fail "required account regression failed: $output"
-  pass "issuer and verifier reject missing agent account identity"
-}
-
-test_exact_head_cannot_be_rebound_to_another_worktree() {
-  output=$(env FM_HOME="$HOMEDIR" FMT_BOT_PY="$BOT_PY" \
-    FM_CROSSCHECK_SLACK_CONFIG="$CONFIG_MAIN" "$PYTHON" - <<'PYTEST'
-import importlib.util
-import json
-import os
-from pathlib import Path
-import subprocess
-import sys
-
-spec = importlib.util.spec_from_file_location("slack_worktree_test", os.environ["FMT_BOT_PY"])
-mod = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mod
-spec.loader.exec_module(mod)
-config = mod.load_config(Path(os.environ["FM_CROSSCHECK_SLACK_CONFIG"]))
-key = mod.load_provenance_key(config.provenance_key_file)
-root = Path(os.environ["FM_HOME"]) / "worktree-binding"
-root.mkdir(exist_ok=True)
-
-def repository(name, value):
-    path = root / name
-    path.mkdir()
-    subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.email", "fixture@example.com"], check=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.name", "Fixture"], check=True)
-    (path / "value.txt").write_text(value)
-    subprocess.run(["git", "-C", str(path), "add", "value.txt"], check=True)
-    subprocess.run(["git", "-C", str(path), "commit", "-qm", f"fixture {name}"], check=True)
-    head = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
-    return path.resolve(), head
-
-author_worktree, author_head = repository("author", "author\n")
-other_worktree, other_head = repository("other", "other\n")
-account_home = root / "account"
-account_home.mkdir()
-(account_home / "auth.json").write_text(json.dumps({
-    "openai-codex": {"accountId": "fixture-author-account"}
-}))
-task = "worktree-bound"
-generation = "spawn:worktree-bound"
-url = "https://github.com/Ruby-Labs/goodrepo/pull/92"
-mod.issue_launch_attestation(
-    config, key, task, generation, author_worktree, "pi",
-    "openai-codex-8/gpt-5.6-sol", account_home,
-)
-meta = Path(os.environ["FM_HOME"]) / "state" / f"{task}.meta"
-
-def write_meta(worktree, head):
-    meta.write_text(
-        "harness=pi\nmodel=openai-codex-8/gpt-5.6-sol\n"
-        f"generation_id={generation}\nworktree={worktree}\n"
-        f"pr={url}\npr_head={head}\n"
-    )
-
-write_meta(other_worktree, other_head)
-try:
-    mod.issue_task_attestation(config, key, task, url, other_head)
-except mod.SlackExposureError as exc:
-    assert "worktree conflicts" in str(exc)
-else:
-    raise AssertionError("another worktree was rebound to the original task")
-
-write_meta(author_worktree, other_head)
-try:
-    mod.issue_task_attestation(config, key, task, url, other_head)
-except mod.SlackExposureError as exc:
-    assert "does not equal the live PR head" in str(exc)
-else:
-    raise AssertionError("another head was attributed to the original task worktree")
-
-write_meta(author_worktree, author_head)
-path = mod.issue_task_attestation(config, key, task, url, author_head)
-assert path.is_file()
-PYTEST
-  ) || fail "worktree-bound provenance regression failed: $output"
-  pass "launch provenance cannot be rebound to a head produced in another worktree"
 }
 
 test_retention_sweep_removes_only_aged_state() {
@@ -1495,24 +1237,21 @@ UNITS=(
   test_selftest_validates_config_shape
   test_slack_app_manifest_is_minimal_and_socket_only
   test_missing_token_env_refuses_start
-  test_attestation_cli_derives_and_signs_author_identity
   test_mention_without_link_gets_usage_reply
   test_multiple_links_are_refused
   test_out_of_allowlist_repo_is_refused
   test_channel_outside_allowlist_is_refused
+  test_missing_configured_reviewer_is_refused_before_admission
   test_completed_review_names_lane_head_task_and_artifact
   test_lane_naming_covers_fallback_and_explicit_marker
   test_duplicate_event_id_starts_one_review
   test_usd_meter_forward_contract_with_fixture_injected_usage
   test_production_shaped_ledger_never_trips_usd_bound
   test_request_cap_binds_today
-  test_missing_or_tampered_provenance_fails_closed
   test_head_change_invalidates_the_verdict
   test_day_rollover_finalizes_the_origin_day
   test_undelivered_verdict_is_reposted_on_redelivery
   test_redelivery_revalidates_head
-  test_agent_account_is_required
-  test_exact_head_cannot_be_rebound_to_another_worktree
   test_retention_sweep_removes_only_aged_state
   test_posts_disable_mrkdwn
   test_four_workers_and_concurrent_cap_are_binding
@@ -1524,8 +1263,8 @@ UNITS=(
 
 case "${FM_SLACK_TEST_GROUP:-all}" in
   service-repair) UNITS=(test_service_install_contains_no_credentials) ;;
-  repair) UNITS=(test_agent_account_is_required test_exact_head_cannot_be_rebound_to_another_worktree test_redelivery_revalidates_head test_service_install_contains_no_credentials) ;;
-  compatibility) UNITS=(test_attestation_cli_derives_and_signs_author_identity test_exact_head_cannot_be_rebound_to_another_worktree test_completed_review_names_lane_head_task_and_artifact test_undelivered_verdict_is_reposted_on_redelivery test_head_change_invalidates_the_verdict test_four_workers_and_concurrent_cap_are_binding) ;;
+  repair) UNITS=(test_completed_review_names_lane_head_task_and_artifact test_redelivery_revalidates_head test_service_install_contains_no_credentials) ;;
+  compatibility) UNITS=(test_missing_configured_reviewer_is_refused_before_admission test_completed_review_names_lane_head_task_and_artifact test_undelivered_verdict_is_reposted_on_redelivery test_head_change_invalidates_the_verdict test_four_workers_and_concurrent_cap_are_binding) ;;
   all) ;;
   *) fail "unknown Slack test group" ;;
 esac

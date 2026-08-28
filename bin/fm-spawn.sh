@@ -3849,25 +3849,6 @@ finally:
 fi
 
 PI_AUTHOR_ACCOUNT_HOME=
-CLOUD_AUTHOR_ACCOUNT_HOME=
-
-capture_crosscheck_author_launch() {
-  local slack_config account_home='' args
-  [ "$KIND" != secondmate ] || return 0
-  [ "$RAW_LAUNCH" != 1 ] || return 0
-  slack_config=${FM_CROSSCHECK_SLACK_CONFIG:-$FM_HOME/config/crosscheck-slack.json}
-  [ -f "$slack_config" ] || return 0
-  case "$HARNESS" in
-    pi) account_home=${CLOUD_AUTHOR_ACCOUNT_HOME:-$PI_AUTHOR_ACCOUNT_HOME} ;;
-    codex) account_home=${DIRECT_ACCOUNT_HOME:-${CODEX_HOME:-$HOME/.codex}} ;;
-  esac
-  args=(attest-launch "$ID" "$SPAWN_GENERATION_ID" "$WT" "$HARNESS" "${MODEL:-default}" --config "$slack_config")
-  [ -z "$account_home" ] || args+=(--account-home "$account_home")
-  "$FM_ROOT/bin/fm-crosscheck-slack.sh" "${args[@]}" >/dev/null || {
-    echo "error: could not capture launch-bound Crosscheck authorship provenance for $ID" >&2
-    exit 1
-  }
-}
 
 # prepare_launch_environment: every step the launch-command construction below
 # The PATH a crewmate's tool commands run with. A harness executes tool commands
@@ -4124,9 +4105,6 @@ if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ]; then
       exit 1
     }
   fi
-fi
-if [ "$SPAWN_CLOUD" != azure ]; then
-  capture_crosscheck_author_launch
 fi
 }
 
@@ -4642,7 +4620,6 @@ spawn_cloud_bind_account_snapshot() {  # <request-stdout-file>
     echo "error: the controller named no assignment-private provider-account home for $ID; refusing to stage a pooled credential" >&2
     return 1
   }
-  CLOUD_AUTHOR_ACCOUNT_HOME=$leased
   [ -d "$leased" ] && [ -f "$leased/auth.json" ] || {
     echo "error: provider-account snapshot home '$leased' holds no credential for $ID" >&2
     return 1
@@ -4959,7 +4936,6 @@ spawn_cloud_dispatch() {
     echo "error: cloud placement for $ID could not stage its provider-account snapshot" >&2
     return 1
   }
-  capture_crosscheck_author_launch
   if ! spawn_cloud_lifecycle reconcile --apply \
     --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" --json \
     > "$STATE/$ID.worker-reconcile.json" 2>&1; then

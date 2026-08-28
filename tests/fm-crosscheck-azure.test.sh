@@ -2029,7 +2029,7 @@ with tempfile.TemporaryDirectory() as temporary:
             "base_repo": "example/repo", "head_repo": "example/repo",
         },
         ledger={"findings": [], "runs": []},
-        config={"harness": "pi"}, author_account_identity="author",
+        config={"harness": "pi"},
         phase_timer=None, persist_result=None,
         repository_snapshot={"manifest": {}}, guidance={},
     )
@@ -2061,7 +2061,7 @@ try:
             "base_repo": "example/repo", "head_repo": "example/repo",
         },
         ledger={"findings": [], "runs": []}, config=failure_config,
-        author_account_identity="author", phase_timer=None,
+        phase_timer=None,
         persist_result=None, repository_snapshot={"manifest": {}}, guidance={},
     )
 except core.CrosscheckToolError as exc:
@@ -2103,7 +2103,7 @@ try:
             "base_repo": "example/repo", "head_repo": "example/repo",
         },
         ledger={"findings": [], "runs": []}, config={"harness": "pi"},
-        author_account_identity="author", phase_timer=None,
+        phase_timer=None,
         persist_result=None, repository_snapshot={"manifest": {}}, guidance={},
     )
 except core.CrosscheckToolError as exc:
@@ -2598,7 +2598,7 @@ with tempfile.TemporaryDirectory() as temporary:
             pr_url="https://github.com/example/repo/pull/1",
             review_dir=repo, proof_root=root,
             snapshot_value={"base_sha": base, "head_sha": head},
-            ledger={}, config={}, author_account_identity="",
+            ledger={}, config={},
         )
     except Core.CrosscheckToolError as exc:
         assert "repository snapshot preflight failed" in str(exc)
@@ -3244,7 +3244,7 @@ try:
         snapshot_value=dict(snapshot),
         ledger={"findings":[],"runs":[]},
         config=dict(config),
-        author_account_identity="",
+
         lane=0,
     )
 except core.CrosscheckToolError as exc:
@@ -3296,7 +3296,7 @@ try:
         core=core,root=root,home=home,task_id="task-expired",
         pr_url="https://github.com/ruby-dlee/firstmate/pull/302",
         review_dir=review,proof_root=proof,snapshot_value=dict(snapshot),
-        ledger={"findings":[],"runs":[]},config=dict(config),author_account_identity="",lane=0,
+        ledger={"findings":[],"runs":[]},config=dict(config),lane=0,
     )
 except core.CrosscheckToolError as exc:
     assert "expired while capacity waited" in str(exc)
@@ -3489,7 +3489,7 @@ try:
         snapshot_value=snapshot,
         ledger={"findings": [], "runs": []},
         config=config,
-        author_account_identity="",
+
         lane=0,
         persist_result=persist_result,
     )
@@ -3523,7 +3523,7 @@ working, identity_run = adapter._run_azure_review_in_lane(
     snapshot_value=snapshot,
     ledger={"findings": [], "runs": []},
     config=identity_config,
-    author_account_identity="",
+
     lane=0,
     persist_result=persist_result,
 )
@@ -3555,7 +3555,7 @@ try:
         snapshot_value=snapshot,
         ledger={"findings": [], "runs": []},
         config=failed_config,
-        author_account_identity="",
+
         lane=0,
         persist_result=persist_result,
     )
@@ -3620,7 +3620,7 @@ try:
         snapshot_value=snapshot,
         ledger={"findings": [], "runs": []},
         config=dict(config),
-        author_account_identity="",
+
         lane=0,
         persist_result=persist_result,
     )

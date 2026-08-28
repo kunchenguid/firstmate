@@ -1265,7 +1265,7 @@ PY
 }
 
 test_status_reports_serving_family_relaxation_and_latest_run() {
-  local primary fallback primary_out fallback_out flipped_out state_path
+  local primary fallback primary_out fallback_out state_path
   primary="$TMP_ROOT/status-primary"
   fallback="$TMP_ROOT/status-fallback"
   # Durable task ids survive historical directory renames. Status reads the
@@ -1286,8 +1286,6 @@ EOF
   {"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"$fallback/lane-home"}
 ]}
 EOF
-  printf 'off\n' > "$primary/home/config/crosscheck-same-model"
-  printf 'on\n' > "$fallback/home/config/crosscheck-same-model"
   "$CROSSCHECK_PYTHON" - \
     "$primary/data/historical-directory-name/crosscheck-ledger.json" task-primary \
     2026-08-21T10:00:00Z accounts/fireworks/models/glm-5p2 cross-family-primary \
@@ -1330,7 +1328,6 @@ PY
     "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" status) \
     || fail "status refused the cross-family-serving fixture"
   [ "$primary_out" = "crosscheck lane: cross-family serving (pi accounts/fireworks/models/glm-5p2, roster entry 1)
-crosscheck same-model relaxation: off
 crosscheck last review family: cross-family-primary (task-primary at 2026-08-21T10:00:00Z)" ] \
     || fail "cross-family-serving status was unexpected: $primary_out"
   assert_absent "$state_path" "the read-only status command created its state root"
@@ -1340,26 +1337,17 @@ crosscheck last review family: cross-family-primary (task-primary at 2026-08-21T
     "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" status) \
     || fail "status refused the fallback-active fixture"
   [ "$fallback_out" = "crosscheck lane: codex fallback active (codex gpt-5.6-sol, roster entry 1)
-crosscheck same-model relaxation: on
 crosscheck last review family: codex-fallback (task-fallback at 2026-08-21T11:00:00Z)" ] \
     || fail "fallback-active status was unexpected: $fallback_out"
   assert_absent "$fallback/read-only-state" \
     "the fallback status read created its state root"
 
-  printf 'on\n' > "$primary/home/config/crosscheck-same-model"
-  flipped_out=$(FM_HOME="$primary/home" FM_DATA_OVERRIDE="$primary/data" \
-    "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" status) \
-    || fail "status refused the flipped same-model setting"
-  assert_contains "$flipped_out" 'crosscheck same-model relaxation: on' \
-    "flipping same-model did not flip the status read"
-  [ "${flipped_out/crosscheck same-model relaxation: on/crosscheck same-model relaxation: off}" = "$primary_out" ] \
-    || fail "flipping same-model changed more than the status policy line"
-  pass "status reads the roster family, same-model policy, and latest durable run without a lock"
+  pass "status reads the configured roster family and latest durable run without a lock"
 }
 
 test_reviewer_policy_profiles_and_independence() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "reviewer policy profiles or independence validation regressed"
+    || fail "reviewer policy profiles or author-independent admission regressed"
 import importlib.util
 import json
 import os
@@ -1373,381 +1361,41 @@ spec.loader.exec_module(module)
 
 root = Path(sys.argv[2]) / "reviewer-policy-profiles"
 root.mkdir()
-homes = {
-    name: root / name
-    for name in ("author-home", "codex-home", "lane-home", "pi-home")
-}
-for account_home in homes.values():
-    account_home.mkdir()
+for name in ("lane-home", "codex-home", "pi-home"):
+    (root / name).mkdir()
 config_path = root / "reviewer.json"
 os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
-
-profiles = [
-    ("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home"),
-    ("codex", "gpt-5.6-sol", "xhigh", "codex-home"),
-    ("pi", "gpt-5.6-sol", "xhigh", "pi-home"),
+reviewers = [
+    {"harness": "pi", "model": "accounts/fireworks/models/glm-5p2", "effort": "xhigh", "account_home": str(root / "lane-home")},
+    {"harness": "codex", "model": "gpt-5.6-sol", "effort": "xhigh", "account_home": str(root / "codex-home")},
 ]
-
-
-def reviewer(harness, model, effort, home_name):
-    return {
-        "harness": harness,
-        "model": model,
-        "effort": effort,
-        "account_home": str(homes[home_name]),
-    }
-
-
-def write_config(reviewers):
-    config_path.write_text(json.dumps({"reviewers": reviewers}), encoding="utf-8")
-
-
-def expect_refused(meta, expected):
-    try:
-        module.reviewer_candidates(root, meta)
-    except module.CrosscheckError as exc:
-        message = str(exc)
-        assert expected in message, message
-        return message
-    raise AssertionError("reviewer_candidates unexpectedly returned a reviewer")
-
-
-validation_author = {
-    "harness": "validation-author",
-    "model": "validation-author-model",
-    "account_home": str(homes["author-home"]),
+config_path.write_text(json.dumps({"reviewers": reviewers}), encoding="utf-8")
+from_other_checkout = {
+    "harness": "unknown-author", "model": "same-as-reviewer",
+    "author_account_identity": "same-account", "branch": "some/other/branch",
+    "worktree": "/another/checkout", "launch_record": "missing",
 }
-expected_family = {
-    "accounts/fireworks/models/glm-5p2": "cross-family-primary",
-    "gpt-5.6-sol": "codex-fallback",
-}
-for harness, model, effort, home_name in profiles:
-    candidate = reviewer(harness, model, effort, home_name)
-    write_config([candidate])
-    selected = module.reviewer_candidates(root, validation_author)[0]
-    assert selected == {
-        **candidate,
-        "review_family_mode": expected_family[model],
-    }, selected
-    print(f"VALID harness={harness} model={model} effort={effort}")
+selected = module.reviewer_candidates(root, from_other_checkout)
+baseline = module.reviewer_candidates(root, None)
+assert selected == baseline, (selected, baseline)
+assert [entry["model"] for entry in selected] == [
+    "accounts/fireworks/models/glm-5p2", "gpt-5.6-sol"
+]
+assert all("model_independence" not in entry for entry in selected)
+print("SELECTED configured roster without author-origin comparison")
 
-write_config(
-    [
-        {
-            "harness": "pi",
-            "model": "unlisted-model",
-            "effort": "xhigh",
-            "account_home": str(homes["pi-home"]),
-        }
-    ]
-)
-unlisted = expect_refused(validation_author, "must be")
-for accepted in (
-    "codex gpt-5.6-sol xhigh",
-    "pi accounts/fireworks/models/glm-5p2 xhigh",
-    "pi gpt-5.6-sol xhigh",
-):
-    assert accepted in unlisted, unlisted
-assert "claude" not in unlisted, unlisted
-print(f"REFUSED unlisted-profile: {unlisted}")
-
-# R6 artifact retirement: the interim claude reviewer profile is no longer
-# an accepted profile at all; it is refused by the exact-profile message
-# before any reviewer machinery runs.
-write_config(
-    [
-        {
-            "harness": "claude",
-            "model": "claude-opus-5",
-            "effort": "xhigh",
-            "account_home": str(homes["lane-home"]),
-        }
-    ]
-)
-retired = expect_refused(
-    validation_author,
-    "must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/models/glm-5p2 xhigh or pi gpt-5.6-sol xhigh",
-)
-print(f"REFUSED retired claude profile: {retired}")
-
-# The serving-path reversal does not change the model family. The former Fast
-# selector remains readable in durable ledgers but must not launch a new run;
-# otherwise an operator roster left behind during rollout silently keeps using
-# the path the reviewed policy retired while still claiming the primary family.
-write_config(
-    [
-        reviewer(
-            "pi",
-            "accounts/fireworks/routers/glm-5p2-fast",
-            "xhigh",
-            "lane-home",
-        )
-    ]
-)
-fast_path = expect_refused(validation_author, "must be")
-assert "accounts/fireworks/models/glm-5p2" in fast_path, fast_path
-print(f"REFUSED retired Fast serving path: {fast_path}")
-
-claude_author = {
-    "harness": "claude",
-    "model": "claude-opus-5",
-    "account_home": str(homes["author-home"]),
-}
-codex_author = {
-    "harness": "codex",
-    "model": "gpt-5.6-sol",
-    "account_home": str(homes["author-home"]),
-}
-# Every registered cross-family reviewer is family-separate from every
-# author family, and each records the durable primary provenance.
-for lane in module.CROSS_FAMILY_LANES.values():
-    write_config([reviewer("pi", lane["model"], "xhigh", "lane-home")])
-    for author in (codex_author, claude_author):
-        selected = module.reviewer_candidates(root, author)[0]
-        assert selected["model"] == lane["model"], selected
-        assert selected["review_family_mode"] == "cross-family-primary", selected
-    print(f"SELECTED {lane['model']} primary reviewer for codex and claude authors")
-
-# A cross-family author (hypothetical same-model roster) still trips the
-# family screen, and the provider-slot prefix pi records does not hide it.
-lane_author = {
-    "harness": "pi",
-    "model": "fireworks-glm/accounts/fireworks/models/glm-5p2",
-    "account_home": str(homes["author-home"]),
-}
-write_config([reviewer("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home")])
-lane_same_model = expect_refused(lane_author, "outside the model family")
-print(f"REFUSED same-family cross-family reviewer: {lane_same_model}")
-
-# cc-4dcd7873f71a: independence is a FAMILY property, not a version string.
-# A gpt-5.5 author must NOT be admitted a gpt-5.6-sol codex reviewer just
-# because the ids differ.
-older_codex_author = {
-    "harness": "codex",
-    "model": "gpt-5.5",
-    "account_home": str(homes["author-home"]),
-}
-write_config([reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home")])
-codex_family = expect_refused(older_codex_author, "outside the model family")
-print(f"REFUSED codex-family reviewer for a differently versioned codex author: {codex_family}")
-# The same author is admitted the cross-family lane, with no same-model mark.
-write_config([reviewer("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home")])
-selected = module.reviewer_candidates(root, older_codex_author)[0]
-assert "model_independence" not in selected, selected
-assert selected["review_family_mode"] == "cross-family-primary", selected
-print("SELECTED cross-family reviewer for a gpt-5.5 author with no relaxation")
-# cc-5ec330d3c74d: pi records a model as <provider-slot>/<model>, so the SAME
-# lane model reached through some OTHER author-side slot must not read as a
-# different family. Matching only the registry's own slot admitted exactly
-# that reviewer with no relaxation and no degraded marker.
-LANE = next(iter(module.CROSS_FAMILY_LANES.values()))
-for disguise in (
-    LANE["model"],
-    LANE["slot"] + "/" + LANE["model"],
-    "some-other-slot/" + LANE["model"],
-    "author-side-slot/glm-5p2",
-    "glm-5p2",
-):
-    assert module.model_family(disguise) == "cross-family:" + LANE["slot"], disguise
-for slot_prefix in ("some-other-slot/", "author-side-slot/"):
-    disguised_author = {
-        "harness": "pi",
-        "model": slot_prefix + LANE["model"],
-        "account_home": str(homes["author-home"]),
-    }
-    write_config([reviewer("pi", LANE["model"], "xhigh", "lane-home")])
-    bypass = expect_refused(disguised_author, "outside the model family")
-    print(f"REFUSED provider-qualified same-model author {slot_prefix}: {bypass}")
-# The looser family rule must NOT loosen lane/credential selection, which
-# still has to match exactly or refuse.
-assert module.cross_family_lane_for_model("some-other-slot/" + LANE["model"]) is None
-assert module.cross_family_lane_for_model("glm-5p2") is None
-
-# And an unrecognized author model stays its own family, so nothing that used
-# to pass silently starts failing.
-assert module.model_family("mystery-1") != module.model_family("mystery-2")
-assert module.model_family("gpt-5.5") == module.model_family("gpt-5.6-sol") == "openai"
-assert module.model_family("claude-opus-5") == "anthropic"
-assert module.model_family("openai-codex-2/gpt-5.6-sol") == "openai"
-# The family screen must not depend on a literal separator: `gpt5.6-sol`
-# read as its own family and would have been admitted a `gpt-5.6-sol`
-# reviewer, which is cc-4dcd7873f71a one alias away.
-for spelling in ("gpt5.6-sol", "GPT-5.6-SOL", "gpt_5.6_sol", "Codex-Mini"):
-    assert module.model_family(spelling) == "openai", spelling
-assert module.model_family("CLAUDE-OPUS-5") == "anthropic"
-# And a lane model reached under ANY vendor alias is the lane's family, so an
-# author on GLM-5.2 via a non-Fireworks id cannot take the GLM reviewer with
-# no same-model marker.
-for alias in ("z-ai/glm-5.2", "GLM-5.2", "glm_5.2", "glm-5p2"):
-    assert module.model_family(alias) == "cross-family:" + LANE["slot"], alias
-    # Lane SELECTION stays exact - the alias must not pick a credential.
-    assert module.cross_family_lane_for_model(alias) is None, alias
-aliased_author = {
-    "harness": "pi",
-    "model": "z-ai/glm-5.2",
-    "account_home": str(homes["author-home"]),
-}
-write_config([reviewer("pi", LANE["model"], "xhigh", "lane-home")])
-aliased = expect_refused(aliased_author, "outside the model family")
-print(f"REFUSED aliased same-model author: {aliased}")
-
-write_config([reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home")])
-selected = module.reviewer_candidates(root, claude_author)[0]
-assert selected["harness"] == "pi", selected
-assert selected["review_family_mode"] == "codex-fallback", selected
-print(f"SELECTED fallback reviewer after Claude author: {selected['harness']}")
-
-same_model_author = {
-    "harness": "codex",
-    "model": "gpt-5.6-sol",
-    "account_home": str(homes["author-home"]),
-}
-write_config([reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home")])
-same_model = expect_refused(same_model_author, "outside the model family")
-print(f"REFUSED shared-family: {same_model}")
-
-write_config(
-    [
-        {
-            "harness": "pi",
-            "model": "gpt-5.6-sol",
-            "effort": "xhigh",
-            "account_home": str(homes["author-home"]),
-        }
-    ]
-)
-selected = module.reviewer_candidates(root, claude_author)[0]
-assert selected["account_home"] == str(homes["author-home"].resolve()), selected
-assert set(selected) == {
-    "harness", "model", "effort", "account_home", "review_family_mode",
-}, selected
-print("SELECTED without author account comparison")
+config_path.write_text(json.dumps({"reviewers": [{
+    "harness": "pi", "model": "unlisted-model", "effort": "xhigh",
+    "account_home": str(root / "pi-home"),
+}]}), encoding="utf-8")
+try:
+    module.reviewer_candidates(root, from_other_checkout)
+except module.CrosscheckError as exc:
+    assert "must be" in str(exc), str(exc)
+else:
+    raise AssertionError("unconfigured reviewer profile was accepted")
 PY
-  pass "supported profiles enforce the model policy, record review families, and refuse the retired claude lane"
-}
-
-test_same_model_relaxation_does_not_require_author_identity() {
-  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "same-model relaxation depended on author identity or weakened its safe default"
-import importlib.util
-import json
-import os
-from pathlib import Path
-import sys
-
-spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-
-home = Path(sys.argv[2]) / "same-model-relaxation-policy"
-home.mkdir()
-(home / "config").mkdir()
-config_path = home / "reviewer.json"
-os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
-
-
-def pi_home(name, account_id):
-    account_home = home / name
-    account_home.mkdir()
-    (account_home / "auth.json").write_text(
-        json.dumps(
-            {
-                "openai-codex-5": {
-                    "type": "oauth",
-                    "access": "a",
-                    "refresh": "r",
-                    "accountId": account_id,
-                    "expires": 1,
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    return account_home
-
-
-def codex_home(name, account_id):
-    account_home = home / name
-    account_home.mkdir()
-    if account_id is not None:
-        (account_home / "auth.json").write_text(
-            json.dumps({"tokens": {"account_id": account_id}}),
-            encoding="utf-8",
-        )
-    return account_home
-
-
-author = pi_home("pi-author", "openai-account-B")
-aliased = codex_home("codex-same-account", "openai-account-A")
-distinct = codex_home("codex-distinct-account", "openai-account-B")
-opaque = codex_home("codex-unreadable-account", None)
-meta = {
-    "harness": "pi",
-    "model": "openai-codex-5/gpt-5.6-sol",
-}
-os.environ["PI_CODING_AGENT_DIR"] = str(author)
-mode_path = home / "config" / "crosscheck-same-model"
-
-
-def write_reviewer(account_home):
-    config_path.write_text(
-        json.dumps(
-            {
-                "reviewers": [
-                    {
-                        "harness": "codex",
-                        "model": "gpt-5.6-sol",
-                        "effort": "xhigh",
-                        "account_home": str(account_home),
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def expect_refused(account_home, expected, label):
-    write_reviewer(account_home)
-    try:
-        module.reviewer_candidates(home, meta)
-    except module.CrosscheckError as exc:
-        assert expected in str(exc), str(exc)
-        print(f"REFUSED {label}")
-        return
-    raise AssertionError(f"{label} was accepted")
-
-
-def expect_refused_exact(account_home, expected, label):
-    write_reviewer(account_home)
-    try:
-        module.reviewer_candidates(home, meta)
-    except module.CrosscheckError as exc:
-        assert str(exc) == expected, str(exc)
-        print(f"REFUSED {label}")
-        return
-    raise AssertionError(f"{label} was accepted")
-
-
-# Absent and explicit-off configuration preserve the shipped cross-model rule.
-expect_refused(distinct, "outside the model family", "same-model-default-off")
-mode_path.write_text("off\n", encoding="utf-8")
-expect_refused(distinct, "outside the model family", "same-model-explicit-off")
-
-mode_path.write_text("on\n", encoding="utf-8")
-for account_home in (aliased, opaque, distinct):
-    write_reviewer(account_home)
-    selected = module.reviewer_candidates(home, meta)[0]
-    assert selected["account_home"] == str(account_home.resolve()), selected
-    assert selected["model_independence"] == "same-model", selected
-    assert "author_account_identity" not in selected, selected
-print("SELECTED same-model reviewers without author identity")
-
-mode_path.write_text("enabled\n", encoding="utf-8")
-expect_refused(distinct, "must contain exactly 'on' or 'off'", "invalid-mode")
-PY
-  pass "same-model opt-in is explicit and does not consult author identity"
+  pass "configured reviewer selection ignores author model, account, branch, worktree, and launch origin"
 }
 
 test_reviewer_binary_never_resolves_from_working_directory() {
@@ -2761,8 +2409,6 @@ legacy_model = "accounts/fireworks/routers/glm-5p2-fast"
 assert module.cross_family_lane_for_model(legacy_model) is None
 assert module.recorded_cross_family_lane_for_model(legacy_model) is LANE
 assert module.recorded_cross_family_lane_for_model(SLOT + "/" + legacy_model) is LANE
-assert module.model_family(legacy_model) == "cross-family:" + SLOT
-assert module.model_family(MODEL) == "cross-family:" + SLOT
 
 # Two credentials differing ONLY in api key must expose the identical
 # non-secret identifier: the binding is provider+model+endpoint and is
@@ -3047,7 +2693,7 @@ test_codex_fallback_family_is_loud_and_recorded() {
     || fail "fallback reviewer did not complete"
   assert_contains "$output" 'crosscheck clear' \
     "fallback reviewer did not produce a verdict"
-  assert_grep 'CROSSCHECK DEGRADED: codex-family fallback reviewer pi gpt-5.6-sol is standing in for the cross-family primary lane; crosscheck-same-model relaxation was not required' \
+  assert_grep 'CROSSCHECK DEGRADED: codex-family fallback reviewer pi gpt-5.6-sol is standing in for the cross-family primary lane' \
     "$case_dir/err" \
     "the codex-family fallback did not announce itself with the exact degraded warning"
   python3 -c '
@@ -3061,34 +2707,6 @@ assert "model_independence" not in reviewer, reviewer
   assert_grep 'Review family: **CODEX FALLBACK**' \
     "$case_dir/data/task-x1/crosscheck.md" \
     "the readable report did not render the degraded fallback marker"
-
-  # A codex-family author under the crosscheck-same-model flip: the warning
-  # must record that the relaxation was required.
-  record=$(make_case fallback-same-model-loud)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  mkdir -p "$case_dir/home/config"
-  printf 'on\n' > "$case_dir/home/config/crosscheck-same-model"
-  sed -i.bak \
-    -e 's/harness=claude/harness=pi/' \
-    -e 's#model=claude-opus-5#model=openai-codex-5/gpt-5.6-sol#' \
-    -e '/^account_home=/d' \
-    "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  output=$(run_case "$case_dir" "$base" "$head" clear run 2> "$case_dir/err") \
-    || fail "same-model fallback reviewer did not complete"
-  assert_contains "$output" 'crosscheck clear' \
-    "same-model fallback reviewer did not produce a verdict"
-  assert_grep 'CROSSCHECK DEGRADED: codex-family fallback reviewer codex gpt-5.6-sol is standing in for the cross-family primary lane; crosscheck-same-model relaxation was required' \
-    "$case_dir/err" \
-    "the same-model fallback did not name the required relaxation in its warning"
-  python3 -c '
-import json, sys
-value = json.load(open(sys.argv[1]))
-reviewer = value["runs"][-1]["reviewer"]
-assert reviewer["review_family_mode"] == "codex-fallback", reviewer
-assert reviewer["model_independence"] == "same-model", reviewer
-' "$case_dir/data/task-x1/crosscheck-ledger.json" \
-    || fail "the same-model fallback run did not record both degraded markers"
 
   # A forged ledger cannot claim the wrong family: the marker is bound to the
   # reviewer model at validation, both directions.
@@ -3172,61 +2790,7 @@ for model, family in (
     else:
         raise AssertionError(f"forged family {family} for {model} validated")
 PY
-  pass "the codex-family fallback is loud, names the relaxation state, and records a model-bound durable marker"
-}
-
-test_same_model_review_is_adversarial_and_durable() {
-  local record case_dir base head output
-  record=$(make_case same-model-adversarial-evidence)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  mkdir -p "$case_dir/home/config"
-  printf 'on\n' > "$case_dir/home/config/crosscheck-same-model"
-  sed -i.bak \
-    -e 's/harness=claude/harness=pi/' \
-    -e 's#model=claude-opus-5#model=openai-codex-5/gpt-5.6-sol#' \
-    -e '/^account_home=/d' \
-    "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-
-  printf '%s\n' \
-    '{"openai-codex-5":{"type":"oauth","access":"test-access","refresh":"test-refresh","expires":4102444800000,"accountId":"test-reviewer-account"}}' \
-    > "$case_dir/pi-home/auth.json"
-  output=$(PI_CODING_AGENT_DIR="$case_dir/pi-home" run_case "$case_dir" "$base" "$head" clear run) \
-    || fail "same-model reviewer on a different account did not complete"
-  assert_contains "$output" 'crosscheck clear' \
-    "same-model reviewer did not produce a verdict"
-  assert_grep 'SAME-MODEL REVIEW - REDUCED MODEL INDEPENDENCE' \
-    "$case_dir/prompt.log" \
-    "same-model review did not visibly announce reduced model independence"
-  assert_grep "may share the author's blind spots and priors" \
-    "$case_dir/prompt.log" \
-    "same-model review did not name the shared-blind-spot risk"
-  assert_grep 'attack the change adversarially, try to falsify' \
-    "$case_dir/prompt.log" \
-    "same-model review was not directed to falsify the author"
-  assert_grep 'default to reporting a finding when uncertain' \
-    "$case_dir/prompt.log" \
-    "same-model review was not biased toward reporting uncertainty"
-  "$CROSSCHECK_PYTHON" - \
-    "$case_dir/data/task-x1/crosscheck-ledger.json" \
-    "$case_dir/data/task-x1/crosscheck.md" <<'PY' \
-    || fail "same-model evidence did not remain explicit in both durable surfaces"
-import json
-from pathlib import Path
-import sys
-
-ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-run = ledger["runs"][-1]
-assert run["state"] == "clear", run
-assert run["reviewer"]["harness"] == "codex", run["reviewer"]
-assert run["reviewer"]["model"] == "gpt-5.6-sol", run["reviewer"]
-assert run["reviewer"]["model_independence"] == "same-model", run["reviewer"]
-report = Path(sys.argv[2]).read_text(encoding="utf-8")
-assert "Review mode: **SAME-MODEL**" in report, report
-assert "reduced model independence" in report, report
-assert "account separation" not in report, report
-PY
-  pass "same-model review uses an adversarial prompt without consulting author identity"
+  pass "the codex-family fallback is loud and records a model-bound durable marker"
 }
 
 test_empty_runtime_overrides_use_home_defaults() {
@@ -3414,27 +2978,22 @@ test_missing_metadata_for_existing_task_fails_closed() {
   pass "existing durable Crosscheck state requires task metadata before dispatch"
 }
 
-test_existing_task_metadata_identity_collision_fails_closed() {
-  local record case_dir base head rc
-  record=$(make_case existing-task-identity-collision)
+test_existing_task_author_identity_is_ignored() {
+  local record case_dir base head output
+  record=$(make_case existing-task-author-identity)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   sed -i.bak \
     -e 's/harness=claude/harness=codex/' \
     -e 's/model=claude-opus-5/model=gpt-5.6-sol/' \
     "$case_dir/state/task-x1.meta"
   rm "$case_dir/state/task-x1.meta.bak"
-  set +e
-  run_case "$case_dir" "$base" "$head" clear run \
-    > "$case_dir/out" 2> "$case_dir/err"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "existing task identity collision"
-  assert_grep "reviewer model policy found no configured reviewer outside the model family" \
-    "$case_dir/err" \
-    "existing model identity stopped governing reviewer separation"
-  assert_absent "$case_dir/codex.log" \
-    "reviewer launched despite an existing author/reviewer model collision"
-  pass "existing task identity collisions remain fail-closed before dispatch"
+  output=$(run_case "$case_dir" "$base" "$head" clear run) \
+    || fail "historical task author identity blocked exact-head review"
+  assert_contains "$output" 'crosscheck clear' \
+    "historical task author identity prevented a normal verdict"
+  assert_present "$case_dir/codex.log" \
+    "configured reviewer did not launch independently of historical task author identity"
+  pass "historical task author identity is ignored before reviewer dispatch"
 }
 
 test_review_fetches_exact_pr_head_when_author_worktree_is_behind() {
@@ -5261,32 +4820,24 @@ test_claims_lookup_error_never_reaches_reviewer() {
   pass "PR claims lookup errors are tool failures and never become a review run"
 }
 
-test_reviewer_configuration_failures_are_tool_failures() {
-  local mode record case_dir base head rc
-  for mode in absent same-model; do
-    record=$(make_case "reviewer-$mode")
-    IFS=$'\t' read -r case_dir base head <<< "$record"
-    case "$mode" in
-      absent) rm "$case_dir/reviewer.json" ;;
-      same-model)
-        sed -i.bak -e 's/harness=claude/harness=codex/' -e 's/model=claude-opus-5/model=gpt-5.6-sol/' "$case_dir/state/task-x1.meta"
-        rm "$case_dir/state/task-x1.meta.bak"
-        ;;
-    esac
-    set +e
-    run_case "$case_dir" "$base" "$head" clear run > "$case_dir/out" 2> "$case_dir/err"
-    rc=$?
-    set -e
-    expect_code 1 "$rc" "$mode reviewer"
-    assert_grep 'CROSSCHECK TOOL-FAILURE: reviewer preflight failed:' "$case_dir/err" \
-      "$mode reviewer configuration did not fail as a named tool preflight"
-    assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
-      "$mode reviewer configuration collapsed into a review verdict"
-    assert_no_grep 'CROSSCHECK BLOCKING' "$case_dir/err" \
-      "$mode reviewer configuration collapsed into a blocking verdict"
-    assert_absent "$case_dir/codex.log" "$mode reviewer still launched"
-  done
-  pass "absent reviewer configuration and default same-model review fail closed"
+test_missing_reviewer_configuration_is_tool_failure() {
+  local record case_dir base head rc
+  record=$(make_case reviewer-absent)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  rm "$case_dir/reviewer.json"
+  set +e
+  run_case "$case_dir" "$base" "$head" clear run > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "absent reviewer"
+  assert_grep 'CROSSCHECK TOOL-FAILURE: reviewer preflight failed:' "$case_dir/err" \
+    "absent reviewer configuration did not fail as a named tool preflight"
+  assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
+    "absent reviewer configuration collapsed into a review verdict"
+  assert_no_grep 'CROSSCHECK BLOCKING' "$case_dir/err" \
+    "absent reviewer configuration collapsed into a blocking verdict"
+  assert_absent "$case_dir/codex.log" "absent reviewer still launched"
+  pass "absent reviewer configuration fails closed"
 }
 
 test_stopped_reviewer_and_wrong_head_are_unreviewed() {
@@ -7000,7 +6551,6 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_one_shot_verdict_needs_no_verdict_level_reproduction|\
     test_status_reports_serving_family_relaxation_and_latest_run|\
     test_reviewer_policy_profiles_and_independence|\
-    test_same_model_relaxation_does_not_require_author_identity|\
     test_reviewer_binary_never_resolves_from_working_directory|\
     test_gate_refuses_an_unsupported_interpreter|\
     test_pi_reviewer_accepts_only_successful_terminal_turn|\
@@ -7019,7 +6569,6 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_cross_family_credential_binding_is_key_independent|\
     test_cross_family_family_marker_is_bound_to_the_reviewer_model|\
     test_codex_fallback_family_is_loud_and_recorded|\
-    test_same_model_review_is_adversarial_and_durable|\
     test_empty_runtime_overrides_use_home_defaults|\
     test_empty_environment_fallback_is_generic|\
     test_set_runtime_overrides_remain_authoritative|\
@@ -7027,7 +6576,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_missing_default_state_directory_starts_new_dispatch|\
     test_mismatched_state_without_metadata_fails_closed|\
     test_missing_metadata_for_existing_task_fails_closed|\
-    test_existing_task_metadata_identity_collision_fails_closed|\
+    test_existing_task_author_identity_is_ignored|\
     test_review_fetches_exact_pr_head_when_author_worktree_is_behind|\
     test_registered_expected_head_refuses_a_moved_head_before_spend|\
     test_missing_pr_head_ref_fails_closed|\
@@ -7089,7 +6638,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_artifacts_cannot_escape_designated_subtrees|\
     test_prompt_uses_only_bounded_ledger_projection|\
     test_claims_lookup_error_never_reaches_reviewer|\
-    test_reviewer_configuration_failures_are_tool_failures|\
+    test_missing_reviewer_configuration_is_tool_failure|\
     test_stopped_reviewer_and_wrong_head_are_unreviewed|\
     test_pytest_runner_resolves_through_a_uv_aware_ladder|\
     test_moved_default_branch_stays_reviewable|\
@@ -7120,10 +6669,8 @@ if [ "${FM_TEST_FOCUSED:-}" = review-safety-findings ]; then
     || fail "Pi launch identity capture introduced invalid spawn syntax"
   FM_TEST_FOCUSED=pi-author-snapshot "$ROOT/tests/fm-spawn-dispatch-profile.test.sh" \
     || fail "Pi launch identity snapshot regressions failed"
-  test_same_model_relaxation_does_not_require_author_identity
   test_missing_author_identity_reaches_normal_verdict
   test_claude_reviewer_profile_is_retired
-  test_same_model_review_is_adversarial_and_durable
   test_typescript_jest_mutation_proof_can_clear
   test_preexisting_jest_runner_stays_blocking
   test_local_fake_jest_package_stays_blocking
@@ -7157,7 +6704,6 @@ test_conditional_prompt_is_one_shot_and_model_neutral
 test_one_shot_verdict_needs_no_verdict_level_reproduction
 test_status_reports_serving_family_relaxation_and_latest_run
 test_reviewer_policy_profiles_and_independence
-test_same_model_relaxation_does_not_require_author_identity
 test_reviewer_binary_never_resolves_from_working_directory
 test_gate_refuses_an_unsupported_interpreter
 test_pi_reviewer_accepts_only_successful_terminal_turn
@@ -7176,7 +6722,6 @@ test_truncated_cross_family_verdict_is_never_a_verdict
 test_cross_family_credential_binding_is_key_independent
 test_cross_family_family_marker_is_bound_to_the_reviewer_model
 test_codex_fallback_family_is_loud_and_recorded
-test_same_model_review_is_adversarial_and_durable
 test_empty_runtime_overrides_use_home_defaults
 test_empty_environment_fallback_is_generic
 test_set_runtime_overrides_remain_authoritative
@@ -7184,14 +6729,14 @@ test_missing_task_metadata_starts_new_dispatch
 test_missing_default_state_directory_starts_new_dispatch
 test_mismatched_state_without_metadata_fails_closed
 test_missing_metadata_for_existing_task_fails_closed
-test_existing_task_metadata_identity_collision_fails_closed
+test_existing_task_author_identity_is_ignored
 test_review_fetches_exact_pr_head_when_author_worktree_is_behind
 test_registered_expected_head_refuses_a_moved_head_before_spend
 test_missing_pr_head_ref_fails_closed
 test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials
 test_null_ledger_fails_without_normalization
 test_claims_lookup_error_never_reaches_reviewer
-test_reviewer_configuration_failures_are_tool_failures
+test_missing_reviewer_configuration_is_tool_failure
 test_stopped_reviewer_and_wrong_head_are_unreviewed
 test_completed_reviewer_suspicion_is_blocking
 test_reading_only_suspicion_is_identity_only_blocking

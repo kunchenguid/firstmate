@@ -30,10 +30,7 @@ make_case() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes" \
-    "harness=codex" \
-    "model=gpt-5.5" \
-    "account_home=$case_dir/author-home"
+    "mode=no-mistakes"
   install_gh_axi_fake "$case_dir"
   seed_clear_ledger "$case_dir"
   printf '%s\n' "$case_dir"

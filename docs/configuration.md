@@ -113,11 +113,7 @@ The current schema has one nonempty `reviewers` array, whose entries require exa
 The accepted policy profiles are Pi at `xhigh` effort on every registered cross-family model (today the regular selector `accounts/fireworks/models/glm-5p2`; the primary review family, R6) plus Codex `gpt-5.6-sol` and Pi `gpt-5.6-sol` at `xhigh` effort as the loud degraded fallback family; Claude is never an eligible Crosscheck reviewer (the interim claude lane is retired).
 Every reviewer `account_home` must be an existing absolute directory.
 
-[`crosscheck.md`](crosscheck.md) owns the reviewer-independence policy, including the removal of author-identity checks and the legacy admission workaround.
-
-The optional local, gitignored `config/crosscheck-same-model` file contains exactly `on` or `off`, defaults to `off` when absent, and is read fresh for every reviewer selection.
-`on` relaxes only the default model-FAMILY separation screen and makes the weaker mode explicit in the prompt and durable evidence. Independence is a family comparison: `gpt-5.5` and `gpt-5.6-sol` are one family, so a version bump never buys independence.
-Invalid values and unsafe file shapes fail closed.
+[`crosscheck.md`](crosscheck.md#reviewer-harness) owns reviewer independence and the retired `config/crosscheck-same-model` setting.
 Crosscheck runs eligible entries in configured order, advancing to the next only when a reviewer could not reach its provider.
 List more than one entry per supported client so a single unavailable account cannot block the gate.
 Codex binds both `CODEX_HOME` and `HOME` to the selected reviewer path and sets `project_doc_max_bytes=0` so reviewed-repository `AGENTS.md` files cannot supply reviewer instructions.

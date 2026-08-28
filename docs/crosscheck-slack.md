@@ -28,7 +28,7 @@ In an approved Slack channel:
 Use one pull request URL per mention.
 No Firstmate checkout, `FM_HOME`, Azure configuration, GitHub login, or provider credential is needed on the engineer's machine.
 
-The coordinator owns Slack Socket Mode, the exact channel and repository allowlists, the GitHub read credential, signed authorship provenance, the reviewer roster, Azure access, queueing, metering, reports, and restarts.
+The coordinator owns Slack Socket Mode, the exact channel and repository allowlists, the GitHub read credential, the independent reviewer roster, Azure access, queueing, metering, reports, and restarts.
 
 ## Network and capacity shape
 
@@ -43,51 +43,21 @@ When that queue is full, the bot posts a visible refusal in the request thread.
 
 The listener never translates a queue, GitHub, reviewer, Azure, cleanup, ledger, or Slack delivery failure into CLEAR.
 
-## Authorship provenance
+## Exact-head admission
 
-The old R10 build inferred authorship from branch prefixes and staged every request as `model=human-authored`.
-That was unsafe and is retired.
+The listener admits one allowlisted PR URL only after its read-only GitHub credential resolves a live 40-character head SHA and Crosscheck validates a nonempty configured reviewer roster.
+That reviewer preflight happens before the submitter request meter, start acknowledgement, reaction, or review process, so a broken roster is a visible refusal rather than an admitted request.
+Draft status is deliberately not a review-admission input; review clearance does not authorize a merge (see [the merge lifecycle](architecture.md#project-modes-are-explicit)).
+Authorship, model family, account identity, branch, worktree, checkout state, task metadata, and launch records are not admission inputs.
+A revision produced in another checkout therefore follows the same review path as any other revision.
 
-The active Firstmate producer uses two coordinator-signed records.
-`fm-spawn` writes `firstmate.crosscheck-author-launch.v1` before the agent process starts.
-That immutable launch record binds:
-
-- Originating Firstmate task ID and task generation.
-- Exact task worktree, Git directory identity, branch ref, and launch head.
-- Author harness, exact model, model family, and required captured account identity for OpenAI-family agents.
-
-`fm-pr-check` later writes `firstmate.crosscheck-authorship.v2` only when the same worktree and Git identity remain, the current head descends from the launch head, tracked files are clean, and current HEAD equals the live PR head.
-That exact-head record binds:
-
-- Exact repository and pull request number.
-- Exact 40-character head SHA.
-- The complete launch-bound author identity.
-- The SHA-256 digest of the signed launch record.
-
-Both records authenticate their schema and payload with the coordinator provenance key.
-Mutable task metadata can only agree with the signed launch identity; it cannot replace it.
-A head produced in another worktree, a changed branch identity, or uncommitted tracked source is refused.
-
-`bin/fm-spawn.sh` creates the launch record automatically for a managed task when central Slack configuration is installed, and `bin/fm-pr-check.sh` emits the exact-head record after it resolves the live PR head.
-The exact-head command below is a pipeline interface, not a way for a caller to claim a model:
-
-```sh
-bin/fm-crosscheck-slack.sh attest-task <task-id> <pr-url> <head-sha> --config <config-path>
-```
-
-The Slack listener fetches the live PR head with its read-only GitHub credential, verifies the exact-head signature, recomputes the model family through Crosscheck's own classifier, and stages the verified harness and model for the core family-separation screen.
-Both signed attestations are copied into the review's durable artifact directory.
-Agent attestations require a captured author account identity, which also arms the Azure adapter's same-account refusal.
-
-Slack identity, branch names, PR text, and caller-supplied free text carry no authorship authority.
-Missing, malformed, tampered, conflicting, or wrong-head provenance gets a clear threaded refusal and starts no review.
-Firstmate launch records deliberately cannot claim human authorship.
-A human-authored PR may be classified as human only after a separate trusted producer, such as no-mistakes, supplies verifiable exact-head evidence from its own author boundary.
-No such human producer is inferred from commit metadata, Slack identity, an unsigned PR-body marker, or absence of a Firstmate record; without it, the request fails closed as unclassified.
+The concrete enemies stopped at admission are a request aimed outside the operator-approved repositories, a request whose live revision cannot be bound exactly, and a request that cannot reach the configured independent reviewer roster.
+The listener passes the admitted URL to the independent roster described in [Crosscheck's reviewer contract](crosscheck.md#reviewer-harness); the response checks below bind the verdict to that revision.
+No authorship artifact is produced or copied into the review data directory.
 
 ## Exact-head response contract
 
-The listener resolves the current PR head before admission and binds provenance to it.
+The listener resolves the current PR head before admission.
 After Crosscheck returns, it requires the ledger's reviewed head to equal the admitted head.
 It then fetches the live head again.
 
@@ -124,7 +94,6 @@ The default path is `$FM_HOME/config/crosscheck-slack.json`.
   },
   "daily_budget_usd": null,
   "daily_request_cap": 10,
-  "provenance_key_file": "$FM_HOME/config/crosscheck-slack-provenance.key",
   "state_dir": "$FM_HOME/state/crosscheck-slack"
 }
 ```
@@ -143,9 +112,8 @@ The central macOS service requires all three `keychain_services`; environment-on
 Only Keychain service names appear in config or launchd state.
 Credential values never appear there.
 
-The provenance key is a 32-byte random key encoded as 64 lowercase hex characters in an owner-only regular file.
-It must not be a symlink and must have no group or other permission bits.
-The listener logs only its nonsecret key ID.
+Legacy configurations may still contain `provenance_key_file`; the listener accepts and ignores that field so an existing operator config remains readable.
+No signing key is required.
 
 ## Credentials and app permissions
 
@@ -192,22 +160,22 @@ Per-engineer request records live under `<state_dir>/meter/<YYYY-MM-DD>.json`.
 Each record includes the Slack user ID, PR URL, event ID, start and finish times, state, lane, available token data, and available cost data.
 Request records stay bound to the UTC day on which they started, including reviews that cross midnight.
 
-Signed launch records live under `<state_dir>/launch-provenance`, and exact-head records live under `<state_dir>/provenance`.
-Review reports and both copied attestations live under `$FM_HOME/data/<task-id>`.
+Review reports live under `$FM_HOME/data/<task-id>`.
+Historical launch and exact-head attestation files may remain on disk, but new requests neither read nor produce them.
 
 Event artifacts expire after 14 days and meter files after 90 days.
 Review artifacts follow the central Crosscheck retention owner.
 
 ## Install, restart, and inspect
 
-Validate central configuration and the provenance key without contacting Slack:
+Validate central configuration without contacting Slack:
 
 ```sh
 FM_HOME=/Users/dongkeun/firstmate-home \
   bin/fm-crosscheck-slack.sh --selftest
 ```
 
-Check that all three central credentials can be loaded without printing them (this does not authenticate against Slack or GitHub):
+Check that all three central credentials and the configured Crosscheck reviewer roster can be loaded without printing them (this does not authenticate against Slack or GitHub):
 
 ```sh
 FM_HOME=/Users/dongkeun/firstmate-home \
@@ -244,9 +212,8 @@ Reinstall the launch agent after moving the interpreter or changing tool locatio
 ## Activation and live acceptance
 
 Before activation, supply the coordinator inputs in [Central configuration](#central-configuration) and satisfy [Credentials and app permissions](#credentials-and-app-permissions).
-Install the central configuration before spawning an agent whose PR must be reviewable, because provenance begins at agent launch and cannot be reconstructed later.
 The launchd credential checks and lifecycle are owned by [Install, restart, and inspect](#install-restart-and-inspect).
 
 The live acceptance request must come from an internal engineer other than Dongkeun in an approved channel.
-Record the request thread, exact admitted and returned SHA, provenance task, reviewer lane, Slack task ID, durable artifact, meter row, dedupe result, and service status in the R10 evidence directory.
+Record the request thread, exact admitted and returned SHA, reviewer lane, Slack task ID, durable artifact, meter row, dedupe result, and service status in the R10 evidence directory.
 Never copy credential values into that evidence.

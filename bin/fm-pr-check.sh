@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Register a PR-ready task: append pr=<url> and GitHub's pr_head=<sha> to
-# state/<id>.meta, arm the watcher's merge poll, and asynchronously start the
-# independent exact-head Crosscheck review. Registration returns after the
-# task-local coordinator is requested; review latency never parks the caller.
-# Matching active or CLEAR heads deduplicate, failed/dead coordinators remain
-# visible and retryable, and unrelated tasks never share a launcher lock.
-# A task-local registration lock orders head capture and publication without
-# holding the account metadata lock across the remote lookup.
-# With central Slack config installed, binds the live PR head to the signed
-# launch record created before the task agent started before requesting review.
-# Issuance failure exits nonzero after poll setup.
+# Register a PR-ready task: atomically replace pr=<url> and GitHub's
+# pr_head=<sha> in state/<id>.meta, arm the watcher's merge poll, and
+# asynchronously start the independent exact-head Crosscheck review.
+# Registration returns after the task-local coordinator is requested; review
+# latency never parks the caller. Matching active or CLEAR heads deduplicate,
+# failed/dead coordinators remain visible and retryable, and unrelated tasks
+# never share a launcher lock. A task-local registration lock orders head
+# capture and publication without holding the account metadata lock across the
+# remote lookup. The task generation protects a reused task ID from a stale
+# lookup result; authorship, branch, account, model, worktree, and launch state
+# are deliberately not registration inputs.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -27,7 +27,6 @@ ID=$1
 URL=$2
 
 META="$STATE/$ID.meta"
-LOOKUP_WT=
 LOOKUP_GENERATION=
 PR_HEAD=
 CROSSCHECK_AUTOSTART="$SCRIPT_DIR/fm-crosscheck-autostart.py"
@@ -62,7 +61,6 @@ if [ ! -f "$META" ]; then
   echo "error: no task metadata for $ID" >&2
   exit 1
 fi
-LOOKUP_WT=$(fm_account_meta_value "$META" worktree)
 LOOKUP_GENERATION=$(fm_account_meta_value "$META" generation_id)
 if [ -z "$LOOKUP_GENERATION" ]; then
   LEGACY_ATTEMPT=$(fm_account_attempt_id "$FM_HOME" "$ID") || {
@@ -96,17 +94,19 @@ fi
 PR_HEAD=$PR_HEAD_LOOKUP
 META_LOCK=$(fm_account_meta_lock_acquire "$STATE" "$ID") || exit 1
 if [ -f "$META" ]; then
-  CURRENT_WT=$(fm_account_meta_value "$META" worktree)
   CURRENT_GENERATION=$(fm_account_meta_value "$META" generation_id)
-  if [ "$CURRENT_GENERATION" != "$LOOKUP_GENERATION" ] || [ "$CURRENT_WT" != "$LOOKUP_WT" ]; then
+  if [ "$CURRENT_GENERATION" != "$LOOKUP_GENERATION" ]; then
     echo "error: task generation changed while resolving PR state for $ID" >&2
     exit 1
   fi
-  if ! grep -qxF "pr=$URL" "$META"; then
-    echo "pr=$URL" >> "$META"
-  fi
-  if [ "$CURRENT_WT" = "$LOOKUP_WT" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
-    echo "pr_head=$PR_HEAD" >> "$META"
+  META_TMP=$(mktemp "$STATE/.$ID.meta.pr.XXXXXX") || exit 1
+  if ! awk '$0 !~ /^pr(_head)?=/' "$META" > "$META_TMP" \
+    || ! printf 'pr=%s\npr_head=%s\n' "$URL" "$PR_HEAD" >> "$META_TMP" \
+    || ! fm_account_safe_file_destination "$META" \
+    || ! mv "$META_TMP" "$META"; then
+    rm -f "$META_TMP"
+    echo "error: could not atomically record live PR identity for $ID" >&2
+    exit 1
   fi
 else
   echo "error: task metadata disappeared while resolving PR state for $ID" >&2
@@ -142,14 +142,6 @@ esac
 EOF
 chmod +x "$CHECK_TMP"
 mv "$CHECK_TMP" "$STATE/$ID.check.sh"
-SLACK_CONFIG=${FM_CROSSCHECK_SLACK_CONFIG:-$FM_HOME/config/crosscheck-slack.json}
-if [ -f "$SLACK_CONFIG" ]; then
-  "$FM_ROOT/bin/fm-crosscheck-slack.sh" attest-task \
-    "$ID" "$URL" "$PR_HEAD" --config "$SLACK_CONFIG" || {
-      echo "error: could not issue exact-head Crosscheck authorship provenance for $ID" >&2
-      exit 1
-    }
-fi
 echo "armed: state/$ID.check.sh polls $URL"
 if [ "$CROSSCHECK_AUTOSTART_ENABLED" = 1 ]; then
   if CROSSCHECK_AUTOSTART_OUT=$("$CROSSCHECK_AUTOSTART" start \

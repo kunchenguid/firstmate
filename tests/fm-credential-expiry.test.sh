@@ -300,7 +300,6 @@ def review(profile, harness):
         review_dir=home, proof_root=home, snapshot_value={}, ledger={},
         config={"harness": harness, "account_home": str(profile),
                 "model": "m", "effort": "xhigh"},
-        author_account_identity="",
         phase_timer=None, persist_result=None, repository_snapshot={}, guidance={},
     )
 

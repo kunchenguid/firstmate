@@ -77,16 +77,10 @@ FINDING_ID_RE = re.compile(r"^cc-[0-9a-f]{12}$")
 ACTIVE_LIFECYCLES = {"open", "claimed-fixed"}
 ALL_LIFECYCLES = ACTIVE_LIFECYCLES | {"verified-fixed", "closed-equivalent"}
 SEVERITIES = {"blocking", "high", "medium", "low"}
-# Legacy author-admission sentinel: the Azure adapter re-verifies a
-# legacy-admitted reviewer account only when a future authorship record
-# opts in with this exact mode; current task metadata never sets it.
-LEGACY_AUTHOR_ADMISSION_MODE = "legacy-author-admission"
-
-# R6 (docs/azure-requirements.md): the primary Crosscheck reviewer family is a
-# NAMED cross-family lane served by the direct Fireworks endpoint and driven by
-# Pi through a custom provider. Authors run on the OpenAI family,
-# so any lane below is outside it, which is what R6 actually requires; no
-# single partner model is baked into the gate.
+# R6 (docs/azure-requirements.md): the primary Crosscheck reviewer is a
+# dedicated named lane served by the direct Fireworks endpoint and driven by
+# Pi through a custom provider. The configured roster is the independence
+# boundary; no author model or origin is compared with it.
 #
 # Every registered lane is a complete, code-reviewed ENDPOINT ALLOWLIST entry:
 # the model selector, the Pi provider slot, the chat-completions api surface,
@@ -134,24 +128,6 @@ CROSS_FAMILY_LANES = {
         },
         "host": "api.fireworks.ai",
         "base_url": "https://api.fireworks.ai/inference/v1",
-        # Every spelling of THIS MODEL that an author could be recorded under,
-        # normalized. The family screen keys on the final path segment, so
-        # `z-ai/glm-5.2` or a bare `GLM-5.2` would otherwise read as a
-        # different family and take the GLM reviewer with no same-model
-        # marker - the original bug reached through a vendor alias. Aliases
-        # are used ONLY by `model_family`; lane selection stays exact.
-        #
-        # An alias list is inherently INCOMPLETE and is not a security
-        # boundary. Sibling and successor ids - `glm-5.2-flash`, `glm-4.6`,
-        # and likewise `chatgpt-4o-latest` or `sonnet-5` for the prefix
-        # families - remain their own family, as does any id normalizing to
-        # the empty string. Every one of those is refused at ADMISSION today,
-        # because `allowed_profiles` accepts only registered models, so the
-        # gap costs a refusal rather than a same-family review. Extend the set
-        # when a lane's model gains a spelling the fleet actually authors on.
-        "family_aliases": frozenset(
-            {"glm5p2", "glm52", "glm5point2", "glm5p2fast"}
-        ),
     },
 }
 # Durable records made while the Fast serving path was active remain readable,
@@ -186,14 +162,6 @@ PI_MODEL_PROVIDERS = {
     **{lane["model"]: lane["slot"] for lane in CROSS_FAMILY_LANES.values()},
     "gpt-5.6-sol": "openai-codex",
 }
-# Model-family classification for the reviewer independence screen. Comparing
-# exact model IDs was not enough: a `gpt-5.5` author admitted a `gpt-5.6-sol`
-# codex fallback with no same-model marker, which is same-family review of the
-# kind R6 exists to prevent (crosscheck finding cc-4dcd7873f71a, reproduced
-# 2026-08-21). A registered cross-family lane is its own family; the prefixes
-# below name the families the fleet actually authors on. An unrecognized model
-# stays its own family, which preserves the previous behavior for anything not
-# listed while strictly tightening it for everything that is.
 # Allowlisted credential shape for a cross-family lane's models.json. Pi
 # composes an effective model from the provider layer, the model entry, and a
 # `modelOverrides` layer, and several composed fields (`compat`, `headers`,
@@ -210,30 +178,6 @@ PI_MODEL_ALLOWED_KEYS = {
     "maxTokens",
     "compat",
 }
-# Prefixes are matched against a NORMALIZED identity (lowercased, separators
-# removed), so they carry no separator of their own. Requiring a literal dash
-# meant `gpt5.6-sol` read as its own family and would have been admitted a
-# `gpt-5.6-sol` reviewer - the same defect as cc-4dcd7873f71a, one alias away.
-AUTHOR_MODEL_FAMILY_PREFIXES = (
-    ("gpt", "openai"),
-    ("o1", "openai"),
-    ("o3", "openai"),
-    ("o4", "openai"),
-    ("codex", "openai"),
-    ("claude", "anthropic"),
-)
-
-
-def normalize_model_identity(identity: str) -> str:
-    """Fold a model id to the form the FAMILY screen compares.
-
-    Lowercased with separators removed, so `GLM-5.2`, `glm 5.2` and `glm_5.2`
-    are one string. Used ONLY by `model_family`, never by lane selection: the
-    safe error differs between them, and folding two ids together is safe only
-    where the consequence is refusing a reviewer.
-    """
-
-    return re.sub(r"[^a-z0-9]", "", identity.lower())
 # Review family provenance recorded in every run's ledger reviewer record.
 REVIEW_FAMILY_CROSS_FAMILY_PRIMARY = "cross-family-primary"
 # Legacy provenance value: runs recorded before the lane registry landed named
@@ -272,7 +216,6 @@ MAX_LEDGER_BYTES = 16 * 1024 * 1024
 # output-limit error. Overflow remains a refusal.
 REVIEW_STATUS_MAX_BYTES = 4 * 1024 * 1024
 MAX_REVIEWER_CONFIG_BYTES = 64 * 1024
-MAX_SAME_MODEL_CONFIG_BYTES = 16
 MAX_LEDGER_PROMPT_BYTES = 64_000
 MAX_PROJECTED_FINDINGS = 512
 MAX_PROJECTED_EVENTS = 8
@@ -834,41 +777,6 @@ def environment_value(name: str, default: str) -> str:
     return default if value is None or value == "" else value
 
 
-def same_model_review_enabled(home: Path) -> bool:
-    """Read the home-local same-model relaxation, defaulting safely to off."""
-
-    path = home / "config" / "crosscheck-same-model"
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        metadata = os.fstat(descriptor)
-        require(
-            stat.S_ISREG(metadata.st_mode),
-            f"config/crosscheck-same-model must be a regular non-symlink file at {path}",
-        )
-        with os.fdopen(descriptor, "rb") as handle:
-            descriptor = None
-            raw = handle.read(MAX_SAME_MODEL_CONFIG_BYTES + 1)
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        fail(f"config/crosscheck-same-model inspection failed at {path}: {exc}")
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    require(
-        len(raw) <= MAX_SAME_MODEL_CONFIG_BYTES,
-        "config/crosscheck-same-model must contain exactly 'on' or 'off'",
-    )
-    try:
-        value = raw.decode("utf-8").strip()
-    except UnicodeError:
-        fail("config/crosscheck-same-model must be valid UTF-8 containing 'on' or 'off'")
-    require(
-        value in {"on", "off"},
-        "config/crosscheck-same-model must contain exactly 'on' or 'off'",
-    )
-    return value == "on"
 
 
 def prepare_pi_execution_home(protocol_dir: Path, account_home: Path) -> Path:
@@ -1088,7 +996,7 @@ def recorded_cross_family_lane_for_model(model: Any) -> dict[str, str] | None:
 
     New reviewer selection must use `cross_family_lane_for_model`, which
     recognizes only the current regular selector. This compatibility reader is
-    deliberately limited to model-family and ledger validation so an accepted
+    deliberately limited to durable reviewer and ledger validation so an accepted
     Fast-path record stays readable without making that path launchable.
     """
 
@@ -1102,41 +1010,6 @@ def recorded_cross_family_lane_for_model(model: Any) -> dict[str, str] | None:
     return None
 
 
-def model_family(model: Any) -> str:
-    """Classify one model into the family the independence screen compares.
-
-    Reviewer independence is a FAMILY property, not a version-string one.
-    Comparing exact ids let a `gpt-5.5` author be reviewed by `gpt-5.6-sol`
-    with no same-model marker recorded (cc-4dcd7873f71a).
-
-    Lane membership is judged MORE loosely here than in
-    `cross_family_lane_for_model`, and deliberately in the opposite direction.
-    That function picks a credential and a provider, so it must match exactly
-    or refuse. This one decides whether two models are the same family, where
-    the safe error is to say yes: pi records a model as
-    `<provider-slot>/<model>`, so the SAME lane model reached through some
-    other author-side slot must not read as a different family. Matching only
-    the registry's own slot let exactly that through - a
-    `some-slot/accounts/fireworks/models/glm-5p2` author was admitted the
-    `fireworks-glm` reviewer with no relaxation and no degraded marker
-    (cc-5ec330d3c74d). Any model whose final segment matches a lane's final
-    segment is now that lane's family. An unrelated model that happens to end
-    the same way is classified together with the lane and refused, which is
-    the direction that fails closed.
-    """
-
-    exact = recorded_cross_family_lane_for_model(model)
-    if exact is not None:
-        return "cross-family:" + exact["slot"]
-    identity = model_identity(model if isinstance(model, str) else "")
-    normalized = normalize_model_identity(identity)
-    for lane in CROSS_FAMILY_LANES.values():
-        if normalized in lane["family_aliases"]:
-            return "cross-family:" + lane["slot"]
-    for prefix, family in AUTHOR_MODEL_FAMILY_PREFIXES:
-        if normalized.startswith(prefix):
-            return family
-    return "model:" + normalized
 
 
 def cross_family_account_identity(lane: dict[str, str]) -> str:
@@ -1567,33 +1440,20 @@ def git(cwd: Path, *arguments: str, timeout: float = 60) -> str:
 
 
 def parse_meta(path: Path) -> dict[str, str] | None:
+    """Report task metadata presence without reading author declarations.
+
+    Existing task metadata still distinguishes a managed task from a new
+    on-demand Crosscheck identity. Its harness, model, account, branch, and
+    checkout fields are deliberately not review-admission inputs.
+    """
+
     try:
         path.lstat()
     except FileNotFoundError:
         return None
     except OSError as exc:
         fail(f"task metadata inspection failed at {path}: {exc}")
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as exc:
-        fail(f"task metadata inspection failed at {path}: {exc}")
-    result: dict[str, str] = {}
-    for line_number, line in enumerate(lines, start=1):
-        if not line or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        if key in {"harness", "model", "author_account_identity"}:
-            require(
-                key not in result,
-                f"task metadata at {path} duplicates {key} at line {line_number}",
-            )
-            result[key] = value
-    for key in ("harness", "model"):
-        require(
-            result.get(key, "") != "",
-            f"task metadata at {path} is missing {key}",
-        )
-    return result
+    return {}
 
 
 def require_new_task_if_meta_missing(
@@ -3916,38 +3776,16 @@ def load_ledger(path: Path, task_id: str, url: str) -> dict[str, Any]:
 
 def reviewer_candidates(
     home: Path,
-    meta: dict[str, str] | None,
+    _historical_author_metadata: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
-    """Return every policy-eligible reviewer in configured order.
+    """Return every configured reviewer in serving order.
 
-    Reviewer independence is structural: reviewer homes come from the dedicated
-    Crosscheck account pool, and model separation is screened here. Author
-    account identity is deliberately outside this gate.
+    Independence is structural: the dedicated Crosscheck roster and credential
+    homes select the reviewer. Historical author metadata is accepted by this
+    internal call shape for compatibility but is never inspected or compared.
     """
 
-    allow_same_model = same_model_review_enabled(home)
-    validated = reviewer_roster(home)
-    # Independence is compared on the model FAMILY, not the exact id: a
-    # `gpt-5.5` author admitting a `gpt-5.6-sol` reviewer is the same-family
-    # review this requirement exists to prevent (cc-4dcd7873f71a). The durable
-    # ledger marker keeps its `same-model` spelling, which older records
-    # already carry; it now means "shares the author's model family".
-    author_model = meta["model"] if meta is not None else ""
-    author_family = model_family(author_model)
-    eligible: list[dict[str, str]] = []
-    for roster_entry in validated:
-        reviewer = dict(roster_entry)
-        model_is_separate = model_family(reviewer["model"]) != author_family
-        if model_is_separate or allow_same_model:
-            if not model_is_separate:
-                reviewer["model_independence"] = "same-model"
-            eligible.append(reviewer)
-    if eligible:
-        return eligible
-    fail(
-        "reviewer model policy found no configured reviewer outside the model "
-        f"family of {author_model!r}"
-    )
+    return reviewer_roster(home)
 
 
 def reviewer_roster(home: Path) -> list[dict[str, str]]:
@@ -7150,19 +6988,12 @@ def run_crosscheck(
                     config.get("review_family_mode")
                     == REVIEW_FAMILY_CODEX_FALLBACK
                 ):
-                    # Flipping to the dormant codex-family fallback must be
-                    # LOUD: firstmate authors also run on codex-family
-                    # models, so this lane usually needs the recorded
-                    # crosscheck-same-model degraded state.
-                    relaxation = (
-                        "crosscheck-same-model relaxation was required"
-                        if config.get("model_independence") == "same-model"
-                        else "crosscheck-same-model relaxation was not required"
-                    )
+                    # A non-primary reviewer remains loud because provider
+                    # degradation matters even though author origin does not.
                     print(
                         "CROSSCHECK DEGRADED: codex-family fallback reviewer "
                         f"{config['harness']} {config['model']} is standing in "
-                        f"for the cross-family primary lane; {relaxation}",
+                        "for the cross-family primary lane",
                         file=sys.stderr,
                     )
                 remaining = len(candidates) - position - 1
@@ -7237,15 +7068,6 @@ def run_crosscheck(
                             snapshot_value=snapshot_value,
                             ledger=ledger,
                             config=config,
-                            # Direct tasks may not carry an upstream author
-                            # account identity. Signed Slack provenance does,
-                            # when Firstmate captured one, which arms the
-                            # Azure adapter's same-account refusal.
-                            author_account_identity=(
-                                meta.get("author_account_identity", "")
-                                if meta is not None
-                                else ""
-                            ),
                             # The compartment lane owns create/stage/boot/
                             # collect; it measures them into this same timer
                             # so one run record carries the whole clock.
@@ -7787,7 +7609,6 @@ def status_crosscheck(home: Path) -> int:
 
     try:
         roster = reviewer_roster(home)
-        relaxation = "on" if same_model_review_enabled(home) else "off"
         data = Path(environment_value("FM_DATA_OVERRIDE", str(home / "data")))
         latest = latest_review_family(data)
     except CrosscheckError as exc:
@@ -7801,7 +7622,6 @@ def status_crosscheck(home: Path) -> int:
         f"crosscheck lane: {lane} "
         f"({serving['harness']} {serving['model']}, roster entry 1)"
     )
-    print(f"crosscheck same-model relaxation: {relaxation}")
     if latest is None:
         print("crosscheck last review family: none")
     else:

@@ -955,9 +955,6 @@ CROSS_FAMILY_LANES = {
         },
         "host": "api.fireworks.ai",
         "base_url": "https://api.fireworks.ai/inference/v1",
-        "family_aliases": frozenset(
-            {"glm5p2", "glm52", "glm5point2", "glm5p2fast"}
-        ),
     },
 }
 LEGACY_CROSS_FAMILY_MODELS = {
@@ -2271,7 +2268,6 @@ def run_azure_review(
     snapshot_value: dict[str, Any],
     ledger: dict[str, Any],
     config: dict[str, str],
-    author_account_identity: str,
     phase_timer: Any = None,
     persist_result: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2316,7 +2312,6 @@ def run_azure_review(
             snapshot_value=snapshot_value,
             ledger=ledger,
             config=config,
-            author_account_identity=author_account_identity,
             phase_timer=phase_timer,
             persist_result=persist_result,
             repository_snapshot=repository_snapshot,
@@ -2336,7 +2331,6 @@ def _run_azure_review_after_snapshot(
     snapshot_value: dict[str, Any],
     ledger: dict[str, Any],
     config: dict[str, str],
-    author_account_identity: str,
     phase_timer: Any,
     persist_result: Callable[[dict[str, Any], dict[str, Any]], None] | None,
     repository_snapshot: dict[str, Any],
@@ -2367,8 +2361,7 @@ def _run_azure_review_after_snapshot(
                     core=core, root=root, home=home, task_id=task_id, pr_url=pr_url,
                     review_dir=review_dir, proof_root=proof_root,
                     snapshot_value=snapshot_value, ledger=ledger, config=config,
-                    author_account_identity=author_account_identity, lane=lane,
-                    phase_timer=phase_timer,
+                    lane=lane, phase_timer=phase_timer,
                     persist_result=persist_result,
                     repository_snapshot=repository_snapshot,
                     guidance=guidance,
@@ -2432,7 +2425,6 @@ def _run_azure_review_in_lane(
     snapshot_value: dict[str, Any],
     ledger: dict[str, Any],
     config: dict[str, str],
-    author_account_identity: str,
     lane: int,
     phase_timer: Any = None,
     persist_result: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
@@ -2461,18 +2453,6 @@ def _run_azure_review_in_lane(
     credential, source, identifier, reviewer_account_identity = inspect_reviewer_credential(
         core, config
     )
-    if author_account_identity and reviewer_account_identity == author_account_identity:
-        raise core.CrosscheckToolError(
-            "Azure reviewer executing account is the same upstream account as the author"
-        )
-    if config.get("author_account_independence") == core.LEGACY_AUTHOR_ADMISSION_MODE:
-        reviewer_digest = hashlib.sha256(
-            reviewer_account_identity.encode("utf-8")
-        ).hexdigest()
-        if reviewer_digest != config.get("reviewer_account_identity_sha256"):
-            raise core.CrosscheckToolError(
-                "Azure legacy-admitted reviewer account changed after selection"
-            )
     config["reviewer_account_identity_sha256"] = hashlib.sha256(
         reviewer_account_identity.encode("utf-8")
     ).hexdigest()
