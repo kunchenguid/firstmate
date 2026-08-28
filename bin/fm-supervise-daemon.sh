@@ -401,6 +401,7 @@ classify_signal() {  # <reason-after-colon> <state>
       [ "$line" != "$last" ] || unread_had_last=1
       if class=$(fm_human_notify_class "$line"); then
         case "$class" in decision|blocker|captain-hold) continue ;; esac
+        [ "$line" = "$last" ] || continue
         rel=1
         if fm_human_notify_pending "$state" "$task" "$line"; then
           all_seen=0
@@ -670,7 +671,7 @@ mark_status_seen() {  # <state> <task> <last-line>
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
 mark_escalated_seen() {  # <kind> <arg> <state>
-  local kind=$1 arg=$2 state=$3 f last task open key verb note line unread
+  local kind=$1 arg=$2 state=$3 f last task open key verb note line unread class
   case "$kind" in
     signal)
       for f in $arg; do
@@ -679,7 +680,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         unread=$(cat "$state/$task.away-unread" 2>/dev/null || true)
         while IFS= read -r line || [ -n "$line" ]; do
           [ -n "$line" ] || continue
-          fm_human_notify_record "$state" "$task" "$line" 2>/dev/null || true
+          fm_human_notify_apply_transition "$state" "$task" "$line" 2>/dev/null || true
         done <<EOF
 $unread
 EOF
@@ -693,8 +694,11 @@ $open
 EOF
         last=$(last_status_line "$f")
         [ -n "$last" ] || continue
-        status_is_captain_relevant "$last" || continue
-        mark_status_seen "$state" "$task" "$last"
+        if class=$(fm_human_notify_class "$last"); then
+          case "$class" in decision|blocker|captain-hold) ;; *) mark_status_seen "$state" "$task" "$last" ;; esac
+        elif status_is_captain_relevant "$last"; then
+          mark_status_seen "$state" "$task" "$last"
+        fi
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")

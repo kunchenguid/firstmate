@@ -120,11 +120,20 @@ EOF
     # because plain glab has no field selector and firstmate does not require a
     # JSON processor; only an exact "merged" wakes, so a changed format or an
     # unreadable merge request stays silent instead of reporting a merge.
-    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     if [ "$mode" = observe ]; then
-      case "$state" in opened|closed|merged) printf 'observed|%s|||\n' "$state" ;; esac
+      raw=$(glab mr view "$number" -R "https://$host/$path" --output json 2>/dev/null) || exit 0
+      compact=$(printf '%s' "$raw" | tr -d '\n\r\t ')
+      state=$(printf '%s' "$compact" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+      head=$(printf '%s' "$compact" | sed -n 's/.*"sha":"\([0-9a-f]*\)".*/\1/p')
+      checks=$(printf '%s' "$compact" | sed -n 's/.*"status":"\([A-Za-z_]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')
+      case "$state" in opened|closed|merged) ;; *) exit 0 ;; esac
+      case "$head" in ''|*[!0-9a-f]*) exit 0 ;; esac
+      [ "${#head}" -eq 40 ] || [ "${#head}" -eq 64 ] || exit 0
+      case "$checks" in *[!A-Z_]*) exit 0 ;; esac
+      printf 'observed|%s|%s|%s|%s\n' "$state" "$head" "$checks" "$checks"
     else
+      raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
+      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
       [ "$state" = merged ] && printf '%s\n' merged
     fi
     ;;

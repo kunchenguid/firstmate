@@ -51,7 +51,7 @@ TS
 
 OUT=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace create --cwd "$PROJECT" --label one-shot-human-waits --no-focus)
 PANE=$(printf '%s' "$OUT" | jq -r '.result.root_pane.pane_id')
-PI_CMD=$(printf 'exec env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_PI_CAPTURE_PATH=%q FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 pi -e %q -e %q -e %q --model github-copilot/gpt-5.6-sol --thinking low --no-context-files --no-session' \
+PI_CMD=$(printf 'exec env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_PI_CAPTURE_PATH=%q FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 pi -e %q -e %q -e %q --model github-copilot/gpt-5.6-sol --thinking medium --no-context-files --no-session' \
   "$HOME_DIR" "$ROOT" "$CAPTURE" "$CAPTURE_EXT" \
   "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ROOT/.pi/extensions/fm-primary-pi-watch.ts")
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$PANE" "$PI_CMD" >/dev/null

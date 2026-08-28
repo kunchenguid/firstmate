@@ -104,7 +104,15 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+case " $* " in
+  *" --output json "*)
+    printf '{"state":"%s","sha":"%s","head_pipeline":{"status":"%s"}}\n' \
+      "${FM_TEST_GLAB_STATE:-opened}" \
+      "${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
+      "${FM_TEST_GLAB_CHECKS:-success}"
+    ;;
+  *) printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}" ;;
+esac
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
   : > "$dir/gh.log"
@@ -2834,6 +2842,13 @@ group/subgroup/project
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
+
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    FM_TEST_GLAB_CHECKS=failed FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    "$POLL" --observe-validated gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = 'observed|opened|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|FAILED|FAILED' ] \
+    || fail "GitLab observation omitted head or check evidence: $out"
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git

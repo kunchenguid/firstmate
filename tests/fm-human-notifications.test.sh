@@ -70,6 +70,19 @@ fm_human_notify_apply_transition "$STATE" decision-task 'working: revising after
 assert_pending decision-task "$REVIEW"
 pass "recovery and rework clear terminal receipts so identical evidence can reopen"
 
+printf '%s\n%s\n' "$FAILURE" 'working: recovery completed' > "$STATE/decision-task.status"
+printf '%s\n%s\n' "$FAILURE" 'working: recovery completed' > "$STATE/decision-task.away-unread"
+fm_human_notify_record "$STATE" decision-task "$FAILURE"
+(
+  export FM_STATE_OVERRIDE="$STATE" FM_ROOT_OVERRIDE="$ROOT"
+  # shellcheck source=bin/fm-supervise-daemon.sh
+  . "$ROOT/bin/fm-supervise-daemon.sh"
+  case "$(classify_signal "$STATE/decision-task.status" "$STATE")" in self\|*) ;; *) exit 21 ;; esac
+  mark_escalated_seen signal "$STATE/decision-task.status" "$STATE"
+  fm_human_notify_pending "$STATE" decision-task "$FAILURE"
+) || fail "away replay restored a receipt after recovery resolved the failure"
+pass "away classification and replay retain only conditions that remain open"
+
 # Receipts are durable across a new shell process.
 FM_STATE_OVERRIDE="$STATE" bash -c '
   . "$1/bin/fm-human-notify-lib.sh"
@@ -154,3 +167,29 @@ wait "$WATCH_PID" 2>/dev/null || true
 [ ! -s "$TMP_ROOT/watch.out" ] || fail "unchanged decision printed a delivery: $(cat "$TMP_ROOT/watch.out")"
 [ ! -s "$QUIET/.wake-queue" ] || fail "unchanged decision queued a model turn"
 pass "unchanged human-owned evidence is absorbed before persistent Pi or OpenCode delivery"
+
+REOPEN="$TMP_ROOT/reopen"
+mkdir -p "$REOPEN"
+printf 'display_name=CRM · Recovery\nbusy_gen=reopen-1\nkind=ship\nproject=firstmate\n' > "$REOPEN/r.meta"
+printf '%s\n' "$FAILURE" > "$REOPEN/r.status"
+fm_human_notify_record "$REOPEN" r "$FAILURE"
+printf '%s\n%s\n%s\n' "$FAILURE" 'working: recovered the prior attempt' "$FAILURE" > "$REOPEN/r.status"
+touch "$REOPEN/.last-heartbeat" "$REOPEN/.last-check"
+FM_STATE_OVERRIDE="$REOPEN" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TMP_ROOT" \
+  FM_POLL=0.05 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 \
+  "$ROOT/bin/fm-watch.sh" > "$TMP_ROOT/reopen.out" 2> "$TMP_ROOT/reopen.err" &
+WATCH_PID=$!
+for _ in $(seq 1 100); do
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$WATCH_PID" 2>/dev/null; then
+  kill "$WATCH_PID" 2>/dev/null || true
+  wait "$WATCH_PID" 2>/dev/null || true
+  fail "coalesced recovery and reopened failure remained suppressed"
+fi
+wait "$WATCH_PID" 2>/dev/null || true
+[ -s "$REOPEN/.wake-queue" ] || fail "reopened failure did not publish a durable wake"
+assert_contains "$(cat "$TMP_ROOT/reopen.out")" 'new failure evidence surfaced' \
+  "reopened failure did not surface after its lifecycle clear"
+pass "coalesced resolution and reopening is actionable before receipt recording"

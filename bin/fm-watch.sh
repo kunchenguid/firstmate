@@ -1006,22 +1006,28 @@ fm_active_check_stop() {
 
 PR_OBSERVATION_REASON=
 PR_OBSERVATION_RECORD=0
+PR_OBSERVATION_COMMIT=0
 pr_observation_handle() {  # <task> <state> <head> <checks> <conclusion>
-  local task=$1 pr_state=$2 head=$3 checks=$4 conclusion=$5 file old_state='' old_head='' old_conclusion=''
-  local status_line class display red=0 old_red=0 changed_head=0
+  local task=$1 pr_state=$2 head=$3 checks=$4 conclusion=$5 file old_state='' old_head='' old_checks='' old_conclusion=''
+  local status_line class display red=0 old_red=0 changed_head=0 red_evidence
   file="$STATE/$task.pr-observation"
   if [ -f "$file" ] && [ ! -L "$file" ]; then
     old_state=$(sed -n 's/^state=//p' "$file" | head -1)
     old_head=$(sed -n 's/^head=//p' "$file" | head -1)
+    old_checks=$(sed -n 's/^checks=//p' "$file" | head -1)
     old_conclusion=$(sed -n 's/^conclusion=//p' "$file" | head -1)
   fi
   if [ -z "$old_head" ]; then
     old_head=$(grep '^pr_head=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   fi
   [ -z "$old_head" ] || [ "$old_head" = "$head" ] || changed_head=1
-  case ",$conclusion," in *,FAILURE,*|*,CANCELLED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) red=1 ;; esac
-  case ",$old_conclusion," in *,FAILURE,*|*,CANCELLED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) old_red=1 ;; esac
-  fm_human_notify_pr_observation_record "$STATE" "$task" "$pr_state" "$head" "$checks" "$conclusion" || return 2
+  case ",$(printf '%s,%s' "$checks" "$conclusion" | tr '[:lower:]' '[:upper:]')," in
+    *,FAILURE,*|*,FAILED,*|*,ERROR,*|*,CANCELLED,*|*,CANCELED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) red=1 ;;
+  esac
+  case ",$(printf '%s,%s' "$old_checks" "$old_conclusion" | tr '[:lower:]' '[:upper:]')," in
+    *,FAILURE,*|*,FAILED,*|*,ERROR,*|*,CANCELLED,*|*,CANCELED,*|*,TIMED_OUT,*|*,ACTION_REQUIRED,*|*,STARTUP_FAILURE,*) old_red=1 ;;
+  esac
+  red_evidence=${conclusion:-$checks}
   status_line=$(last_status_line "$STATE/$task.status")
   class=$(fm_human_notify_class "$status_line" 2>/dev/null || true)
   if [ -f "$STATE/$task.meta" ]; then
@@ -1031,28 +1037,35 @@ pr_observation_handle() {  # <task> <state> <head> <checks> <conclusion>
   fi
   PR_OBSERVATION_REASON=
   PR_OBSERVATION_RECORD=0
+  PR_OBSERVATION_COMMIT=0
   case "$pr_state" in
     CLOSED|closed)
       fm_human_notify_clear_review "$STATE" "$task"
-      [ "$old_state" = "$pr_state" ] || PR_OBSERVATION_REASON="$display: the review target closed. Action required: inspect the closure and choose whether to reopen or replace it."
+      if [ "$old_state" != "$pr_state" ] || [ "$changed_head" -eq 1 ]; then
+        PR_OBSERVATION_REASON="$display: the review target closed or changed head. Action required: inspect the closure and choose whether to reopen or replace it."
+      fi
       ;;
     *)
       if [ "$red" -eq 1 ]; then
         fm_human_notify_clear_review "$STATE" "$task"
-        [ "$old_conclusion" = "$conclusion" ] || PR_OBSERVATION_REASON="$display: review checks turned red - $conclusion. Action required: inspect and repair the failing checks."
+        if [ "$old_checks|$old_conclusion" != "$checks|$conclusion" ] || [ "$changed_head" -eq 1 ]; then
+          PR_OBSERVATION_REASON="$display: review checks are red after meaningful evidence changed - $red_evidence. Action required: inspect and repair the failing checks."
+        fi
       elif [ "$class" != review-ready ]; then
+        fm_human_notify_pr_observation_record "$STATE" "$task" "$pr_state" "$head" "$checks" "$conclusion" || return 2
         return 1
       elif [ "$changed_head" -eq 1 ] || [ "$old_red" -eq 1 ] || { [ "$old_state" = CLOSED ] || [ "$old_state" = closed ]; }; then
-        if fm_human_notify_pending "$STATE" "$task" "$status_line"; then
-          PR_OBSERVATION_REASON=$(fm_human_notify_summary "$STATE" "$task" "$status_line")
-          PR_OBSERVATION_RECORD=1
-        fi
+        fm_human_notify_clear_review "$STATE" "$task"
+        PR_OBSERVATION_REASON=$(fm_human_notify_summary "$STATE" "$task" "$status_line")
+        PR_OBSERVATION_RECORD=1
       fi
       ;;
   esac
   if [ -n "$PR_OBSERVATION_REASON" ]; then
+    PR_OBSERVATION_COMMIT=1
     return 0
   fi
+  fm_human_notify_pr_observation_record "$STATE" "$task" "$pr_state" "$head" "$checks" "$conclusion" || return 2
   [ "$class" = review-ready ] || return 1
   fm_human_notify_record "$STATE" "$task" "$status_line" || return 2
   return 1
@@ -1493,9 +1506,13 @@ EOF
             fi
             PR_OBSERVATION_REASON=
             PR_OBSERVATION_RECORD=0
+            PR_OBSERVATION_COMMIT=0
             if pr_observation_handle "$id" "$pr_state" "$pr_head" "$pr_checks" "$pr_conclusion"; then
               reason="check: $PR_OBSERVATION_REASON"
               fm_wake_append check "$c" "$reason" || exit 1
+              if [ "$PR_OBSERVATION_COMMIT" -eq 1 ]; then
+                fm_human_notify_pr_observation_record "$STATE" "$id" "$pr_state" "$pr_head" "$pr_checks" "$pr_conclusion" || exit 1
+              fi
               if [ "$PR_OBSERVATION_RECORD" -eq 1 ]; then
                 ready_line=$(last_status_line "$STATE/$id.status")
                 fm_human_notify_record "$STATE" "$id" "$ready_line" || exit 1
@@ -1556,6 +1573,7 @@ EOF
     # evidence; stopped-worker detection remains with the independent stale path.
     actionable=0
     record_open=1
+    apply_human_signal_transitions 0 <<< "$pending" || exit 1
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present; then
       actionable=1
