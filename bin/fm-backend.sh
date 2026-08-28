@@ -382,7 +382,10 @@ fm_backend_target_of_meta() {  # <meta-file>
 # The validation binds the exact task id, selected backend, target, project,
 # and worktree. New non-tmux records carry endpoint_task_id because their
 # opaque runtime ids do not encode the task label. Legacy tmux records remain
-# valid only when their window name itself is exactly fm-<task-id>.
+# valid only when their window name itself is exactly fm-<task-id>. A legacy
+# Herdr record with no endpoint_task_id at all also validates, but only when
+# fm_backend_agent_state authoritatively proves the recorded pane itself is
+# already gone (missing) - there is nothing left to bind an identity to.
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
@@ -468,6 +471,22 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       ;;
     herdr)
       [ "$binding" = "$id" ] || {
+        # Pre-endpoint_task_id Herdr records carry no exact task binding, so
+        # their window field alone cannot prove which task the pane belongs
+        # to. Never widen this into an identity match: only proceed when the
+        # backend itself authoritatively proves the recorded pane is gone
+        # (fm_backend_agent_state reports "missing"), which needs no
+        # binding to trust because there is nothing left to touch. Anything
+        # else - present, dead-but-present, ambiguous, or unreadable - stays
+        # a hard refusal, and --force does not change this call.
+        if [ "$(fm_backend_agent_state herdr "$window")" = missing ]; then
+          echo "INFO: legacy Herdr endpoint metadata for task $id lacks an exact task binding, but the recorded pane $window is confirmed already gone; treating its close as already complete." >&2
+          # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+          FM_BACKEND_VALIDATED_BACKEND=$backend
+          # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+          FM_BACKEND_VALIDATED_TARGET=$window
+          return 0
+        fi
         echo "REFUSED: legacy Herdr endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
         return 1
       }
