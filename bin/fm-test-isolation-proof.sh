@@ -24,7 +24,9 @@
 #                concurrency. bin/fm-test-run.sh's list_concurrent_safe_families
 #                records which families passed.
 #   --jobs N     max concurrent workers (default: 4; min 1)
-#   --json path  write a machine-readable proof artifact after the run
+#   --json path  write a pool-scoped machine-readable proof artifact after the
+#                run; fm_test_run_jobs_enabled is true only for a successful
+#                concurrent run within that pool's recorded admission cap
 #   --list       print the proven candidate paths (one per line) and exit 0
 #   --list-exclusions
 #                print basename + reason for scripts deliberately kept serial
@@ -45,9 +47,11 @@
 #   FM_ISOLATION_SUMMARY total=<n> failed=<n> concurrency=<n> duration_ms=<n>
 #
 # Exit status is the aggregate of candidate exits: non-zero if any candidate
-# fails, if isolation checks fail, or if the candidate set is empty. A script
-# that fails only under concurrency must be removed from the candidate set and
-# investigated; this harness never retries a failure into green.
+# fails, gate-skips (first meaningful line matching ^skip:), if isolation checks
+# fail, or if the candidate set is empty. A gate skip names the pool, candidate,
+# and missing prerequisite and cannot admit concurrency. A script that fails
+# only under concurrency must be removed from the candidate set and investigated;
+# this harness never retries a failure into green.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
