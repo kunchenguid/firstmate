@@ -17,7 +17,7 @@ Nothing is always-on: a brief names exactly the plays that job needs, and an unn
 
 Each play is a small internal skill under `.agents/skills/`, one principle each:
 
-- [play-subtract-first](../.agents/skills/play-subtract-first/SKILL.md) - smallest logical change, blast radius named, removal sequenced before construction.
+- [play-subtract-first](../.agents/skills/play-subtract-first/SKILL.md) - task-level anti-overengineering: trace the real flow and callers, plan the smallest scope, remove before adding, fix the root cause once, test only changed uncovered behavior, and prove the final diff.
 - [play-walk-if-needed](../.agents/skills/play-walk-if-needed/SKILL.md) - walk the system only when the change crosses into unfamiliar areas or shared boundaries; otherwise write one line saying why you skipped it.
 - [play-prove-the-artifact](../.agents/skills/play-prove-the-artifact/SKILL.md) - prove with a live command, flow, record, or local verifier; tests existing is not done.
 - [play-no-comments](../.agents/skills/play-no-comments/SKILL.md) - strip AI-tell comments from your own diff before review.
