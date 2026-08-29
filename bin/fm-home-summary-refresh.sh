@@ -10,8 +10,8 @@
 #
 # Publication is atomic: the producer writes and validates a unique mode-0600
 # temporary file on the state directory's filesystem, then renames it over the
-# ledger. A failed, interrupted, or killed producer therefore leaves the prior
-# complete ledger in place and never exposes partial JSON at the ledger path.
+# ledger. After a failed, interrupted, or killed refresh, the ledger path holds
+# either the prior complete document or the new complete document, never torn output.
 # A home-local refresh lock serializes concurrent triggers so an older in-flight
 # summary cannot overwrite one computed after a later status change. The shared
 # timeout owner bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT
