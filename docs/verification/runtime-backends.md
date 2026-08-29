@@ -604,24 +604,42 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)).
+The production stale-registration recovery was reverified on 2026-08-24 with Herdr 0.8.0 on macOS arm64:
 
 ```sh
-tests/fm-control-herdr-smoke.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-control-herdr-smoke.test.sh
 ```
 
 Observed output:
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
-ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
-ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
-ok - real herdr: no control verb removed the endpoint or the task's local copy
-ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
+ok - real herdr: interrupt refuses when Herdr has no registered agent
+ok - real herdr: stale idle registration over a login shell is agent-free for exit
+ok - real herdr: stale idle process-kill recovery relaunches Codex in the same pane and worktree
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
-That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+The smoke starts a real OpenCode process in a helper-isolated lab pane and kills it with `SIGKILL`, so its stop hook cannot retract Herdr's registration.
+Herdr retains `agent_status=idle` while `pane process-info` reports the login shell.
+The lifecycle classifier treats that positive shell evidence as agent-free for `exit` and relaunch, while `fm_backend_herdr_tab_is_husk` retains its registration-only refusal path for destructive close-and-replace.
+No registration status alone proves a pane agent-free: Herdr's `done` is a per-turn status of a still-attached agent, so terminal and non-terminal registrations alike are resolved against `pane process-info`, and only an ambiguous group that still contains a recognized shell - the transient prompt-helper shape - is resampled over a bounded settle window before it refuses as unknown; every other multi-process group refuses on the first sample.
+The agent-free verdict carries the full agent-absence proof: the pane's own shell must hold the foreground (`shell_pid == foreground_process_group_id == foreground_processes[0].pid`) AND the operating-system process table must show that shell alone and childless.
+The childless half is what excludes a SUSPENDED agent - job control hands the terminal back to the pane's own login shell while the stopped harness remains its child - so a merely suspended agent reads `unknown` and refuses both the already-stopped exit report and a relaunch.
+A lifecycle `dead` verdict means only that no agent process is running; it is never permission to close a pane.
+Recovery callers that would destroy an endpoint ask `fm_backend_endpoint_closeable`, which Herdr answers from the registration-only husk view.
+A still-registered stale endpoint is therefore neither closed nor auto-respawned: a fresh `--secondmate` spawn would be refused by that same registration view (the tab label is still taken), so the session-start sweep and the remote launch path escalate to the operator with the exact endpoint and one runnable `fm-spawn --relaunch` command, which is the path the smoke above proves end to end.
+That predicate also reports WHY it refused (`FM_BACKEND_ENDPOINT_CLOSEABLE_REASON`), so a registration nobody could read escalates as unreadable rather than as a stale record, and no `--relaunch` command is handed out that would refuse for the same unreachable-server reason.
+Known follow-up: an automatic in-place recovery flow for a stale registered secondmate is deliberately out of scope here; today it is operator-driven.
+
+Live evidence scope. The primary live signal is exact equality between Herdr's registered `agent` value and a foreground process name or `argv0`; that is what the OpenCode and Codex runs above measure on Herdr 0.8.0.
+Harnesses whose process name does not carry their registered identity are recognized through the repository's shared harness process matcher (`fm_harness_process_matches`, also used by the tmux recovery classifier) plus the same anchored `muse-bin-<version>` arm the tmux classifier carries, consulted only as a second route to `live` — a version-named Claude Code executable, a harness running under a bare interpreter, and a version-named Muse binary are covered by the portable falsifiers in `tests/fm-backend-herdr.test.sh` rather than by a live Herdr run.
+The matcher can only add `live`; it never participates in the agent-free decision, so an unrecognized process stays `unknown` and refuses.
+The shell vocabulary the agent-free decision reads is the same list the tmux classifier recognizes, so a host whose pane login shell is `ash`, `mksh`, `tcsh`, or `csh` is not silently excluded from stale-registration recovery.
+
+Superseded acceptance clause. An earlier acceptance text asked for `done` to be agent-free on registration alone; that clause was superseded during review, and the governing rule is now that NO registration status alone decides agent-free. `done` is therefore resolved against `pane process-info` exactly as `idle` is, because Herdr's `done` is a per-turn status of a still-attached agent, and registration-only agent-free would license a second harness into a pane that still holds a live one.
+`fm-control relaunch` is unaffected either way — it runs its own exit phase first — so only a direct `bin/fm-spawn.sh <id> --relaunch` against a done-but-still-running agent refuses, which is the intended fail-closed outcome.
+Run this guard after every Herdr upgrade rather than trusting the version above.
 
 ### Away-mode transport
 

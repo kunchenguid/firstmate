@@ -756,6 +756,30 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# fm_backend_endpoint_closeable: may a recovery caller DESTROY this endpoint?
+# A lifecycle `dead` verdict from fm_backend_agent_state proves only that no
+# agent PROCESS is running; on Herdr that verdict can rest on foreground-shell
+# evidence while the pane still carries a registered agent record, and such a
+# pane must never be closed. Backends with a separate conservative
+# registration view answer from it; every other backend, whose lifecycle
+# verdict IS its only endpoint evidence, keeps its existing behavior.
+# On return, FM_BACKEND_ENDPOINT_CLOSEABLE_REASON names WHY, so a caller that
+# refuses can tell an operator whether the endpoint still holds an agent record
+# or whether nothing could be read at all - two situations with different
+# remedies that a bare boolean collapses into one misleading message.
+FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=
+fm_backend_endpoint_closeable() {  # <backend> <target>
+  local backend=$1 target=$2
+  FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=unreadable
+  [ -n "$target" ] || { FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=malformed-target; return 1; }
+  fm_backend_source "$backend" || return 1
+  # shellcheck disable=SC2034 # Output global is consumed by sourcing callers.
+  case "$backend" in
+    herdr) fm_backend_herdr_endpoint_closeable "$target" ;;
+    *) FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=no-registration-view; return 0 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift
@@ -879,12 +903,16 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
 #   unverified - this backend has no recovery classifier.
-# Only `dead` and `missing` license recovery. The tmux adapter requires a
+# Only `dead` and `missing` license recovery, and recovery means relaunching
+# into the endpoint, never destroying it: a caller that would close the
+# endpoint must additionally clear fm_backend_endpoint_closeable. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
+# exact window; the Herdr adapter returns `dead` only when the pane's own
+# foreground process group proves no registered agent is running, while its
+# separate registration-only husk classifier still refuses to close it. Zellij
+# remains unverified because its secondmate ghost-tab and agent-process recovery
+# path has not been empirically validated. Orca and cmux do not support
+# secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }

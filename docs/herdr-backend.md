@@ -260,15 +260,21 @@ No Herdr-specific copy of that protocol exists.
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
+Two separate classifiers read the same pane, because destroying a pane and relaunching into it need different proof.
+
+The husk classifier reads Herdr's agent registration alone.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
-Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
+Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live, done, or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
+Every caller outside the adapter that would destroy an endpoint asks `fm_backend_endpoint_closeable`, which answers from this registration-only view and names why it refused, so no process-level evidence can license a `pane close`.
 
-The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
+The generic Herdr agent-liveness probe is process-grounded instead, because a registration can outlive the process it names.
+No registration status alone proves a pane agent-free - Herdr's `done` is a per-turn status of a still-attached agent, exactly as `idle` is - so both terminal and non-terminal registrations are resolved against `pane process-info`.
+A structurally gone pane becomes `missing`, a pane whose own login shell provably holds the foreground alone and childless becomes `dead`, a registration whose executable is confirmed in the foreground process group becomes `alive`, and every unreadable, malformed, child-only, suspended, or mismatched shape becomes `unreadable` and refuses.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#agent-lifecycle-control) owns the version-scoped live evidence for that process grounding.
 
-The session-start sweep uses this probe.
+The session-start sweep uses this probe, but a `dead` verdict authorizes only relaunching into the endpoint: when the pane still carries a registration, the sweep neither closes nor respawns it and escalates to the operator with one runnable `fm-spawn --relaunch` command instead.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
 ## Push events and polling fallback

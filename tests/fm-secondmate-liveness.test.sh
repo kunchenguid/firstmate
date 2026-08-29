@@ -370,6 +370,162 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
+# make_liveness_herdr: a stateless `herdr` stub for the ONE endpoint shape the
+# destructive-path regression needs - a stale idle registration whose pane has
+# returned to its own login shell. Every call is logged. Only the three reads
+# the lifecycle classifier makes succeed; anything else fails, so any call
+# beyond those three is itself evidence the sweep went further than it should.
+make_liveness_herdr() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/herdrbin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_HERDR_CALL_LOG:?}"
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.8.0","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = get ]; then
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = agent ] && [ "${2:-}" = get ]; then
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ]; then
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"zsh"}]}}}\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# make_liveness_herdr_restarting <dir>: the same stub, except the SECOND
+# `pane get` fails - the Herdr server going away between the lifecycle probe
+# and the registration probe, which is what makes the closeable answer
+# unreadable rather than registered.
+make_liveness_herdr_restarting() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/herdrbin-restarting"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_HERDR_CALL_LOG:?}"
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.8.0","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = get ]; then
+  seen=$(( $(cat "${FM_HERDR_PANE_GET_COUNT:?}" 2>/dev/null || echo 0) + 1 ))
+  echo "$seen" > "$FM_HERDR_PANE_GET_COUNT"
+  [ "$seen" -ge 2 ] && exit 1
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = agent ] && [ "${2:-}" = get ]; then
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ]; then
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"zsh"}]}}}\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_sweep_reports_an_unreadable_registration_as_unreadable() {
+  local w fb herdrfb log out
+
+  # The closeable probe refuses for more than one reason. When the Herdr
+  # server is momentarily unreachable, nothing proves the pane still holds a
+  # registration, so the sweep must not tell the operator it does - and must
+  # not hand out a --relaunch command that will refuse for the same reason.
+  w=$(new_world sweep-herdr-unreadable)
+  add_sm_home "$w" sm1 fmtest:w1:p2 opencode
+  printf 'backend=herdr\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr_restarting "$w")
+  log="$w/herdr-calls.log"; : > "$log"
+  cat > "$w/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=") printf '1 0\n4242 1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$w/ps"
+
+  out=$(PATH="$herdrfb:$fb:$BASE_PATH" TMUX='' FM_HOME="$w/home" \
+    FM_HERDR_PS_BIN="$w/ps" FM_HERDR_CALL_LOG="$log" \
+    FM_HERDR_PANE_GET_COUNT="$w/pane-get.count" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "an unreadable registration must never license a close"
+  assert_contains "$out" "registration is unreadable" \
+    "the sweep should report an unreadable registration honestly"
+  assert_not_contains "$out" "stale registered agent record" \
+    "the sweep must not claim a stale registration it could not read"
+  pass "sweep: a refusal caused by an unreadable registration is reported as unreadable, not as a stale record"
+}
+
+test_sweep_never_closes_a_registered_herdr_endpoint() {
+  local w fb herdrfb log out
+
+  # The exact scenario this branch targets: OpenCode was SIGKILLed without its
+  # stop hook, so Herdr still reports agent_status=idle while the pane has
+  # returned to its login shell. Lifecycle now reads `dead` (no agent PROCESS),
+  # which must NOT become permission to close a pane Herdr still has an agent
+  # registered in.
+  w=$(new_world sweep-herdr-registered)
+  add_sm_home "$w" sm1 fmtest:w1:p2 opencode
+  printf 'backend=herdr\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr "$w")
+  log="$w/herdr-calls.log"; : > "$log"
+
+  # The pane's own login shell is lone and childless, which is what makes the
+  # lifecycle verdict `dead` in the first place.
+  cat > "$w/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=") printf '1 0\n4242 1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$w/ps"
+
+  out=$(PATH="$herdrfb:$fb:$BASE_PATH" TMUX='' FM_HOME="$w/home" \
+    FM_HERDR_PS_BIN="$w/ps" FM_HERDR_CALL_LOG="$log" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "a dead-classified but still-registered Herdr pane must never be closed"
+  assert_not_contains "$(cat "$log")" "tab close" \
+    "a dead-classified but still-registered Herdr tab must never be closed"
+  # fm_backend_herdr_kill's very first act is to resolve the session it would
+  # close in, so the endpoint teardown path must never even be entered.
+  assert_not_contains "$(cat "$log")" "session list" \
+    "the sweep must not enter the Herdr endpoint teardown path at all"
+  # A fresh --secondmate respawn is refused by the very same registration view
+  # that just blocked the close (the label is still taken), so the sweep must
+  # escalate to the operator instead of looping on a respawn that cannot work.
+  assert_not_contains "$(cat "$log")" "tab list" \
+    "the sweep must not attempt a fresh spawn into a still-registered label"
+  assert_contains "$out" "stale registered agent record" \
+    "the sweep should name the stale registration as the blocker"
+  assert_contains "$out" "fmtest:w1:p2" \
+    "the escalation should name the exact endpoint"
+  assert_contains "$out" "bin/fm-spawn.sh sm1 --relaunch" \
+    "the escalation should hand the operator one runnable recovery command"
+  assert_not_contains "$out" "respawn failed" \
+    "the sweep must escalate instead of reporting a respawn it never should have tried"
+  pass "sweep: a dead-classified Herdr secondmate pane with a live registration is escalated, never killed or respawned"
+}
+
 test_sweep_leaves_alive_secondmate_untouched() {
   local w fb tmuxfb log out
   w=$(new_world sweep-alive)
@@ -545,6 +701,8 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_never_closes_a_registered_herdr_endpoint
+test_sweep_reports_an_unreadable_registration_as_unreadable
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

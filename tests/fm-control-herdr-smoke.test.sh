@@ -5,17 +5,20 @@
 # tmux is the control plane's reference backend and is covered hermetically in
 # tests/fm-control.test.sh. herdr is the OTHER backend whose recovery-grade
 # agent-state classifier the control plane is allowed to trust, so its
-# behavior is pinned here against the REAL binary rather than a stub: whether
-# an agent is running, and therefore whether a lifecycle verb may act at all,
-# comes from herdr's own agent registry.
+# behavior is pinned here against the REAL binary rather than a stub.
 #
-# No real agent is launched. herdr's `pane report-agent` is the same registry
-# the adapter reads, so registering and not registering an agent on a plain
-# shell pane exercises exactly the classification the control plane gates on.
+# A real OpenCode process is started and killed without its stop hook. Herdr
+# retains its idle registration because OpenCode has lifecycle-hook authority,
+# while the pane has returned to its login shell. The test proves that the
+# control plane trusts the foreground process for non-destructive relaunch
+# liveness, while the portable backend test separately proves that this does
+# not make the pane a close-and-replace husk.
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
-# when herdr or jq is missing.
+# when herdr or jq is missing; the OpenCode and Codex binaries are required
+# only from the stale-registration section down, so the agent-free
+# registration gate still runs on a host without them.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,15 +33,28 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 . "$ROOT/tests/herdr-test-safety.sh"
 herdr_forget_inherited_pane
 
-SESSION="fm-lab-control-smoke-$$"
-export HERDR_SESSION="$SESSION"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-"$ROOT/bin/fm-herdr-lab.sh"}
+[ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-control-exit-postcondition) || {
+  echo "skip: could not create an isolated Herdr lab session name"
+  exit 0
+}
+export HERDR_LAB_HELPER HERDR_LAB_SESSION
+export HERDR_SESSION="$HERDR_LAB_SESSION"
 SCRATCH=
+CLEANED=0
 cleanup_all() {
+  local status=0
+  [ "$CLEANED" = 0 ] || return 0
+  CLEANED=1
+  "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
-  herdr_safe_stop_and_delete "$SESSION"
+  return "$status"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab session"
+
+lab() { "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
@@ -72,27 +88,67 @@ EOF
 [ -n "$TAB_ID" ] && [ -n "$PANE_ID" ] || fail "create_task did not return tab/pane ids"
 
 {
-  echo "window=$SESSION:$PANE_ID"
+  echo "window=$HERDR_LAB_SESSION:$PANE_ID"
   echo "endpoint_task_id=hsmoke"
   echo "worktree=$WT"
   echo "project=$PROJ"
-  echo "harness=claude"
+  echo "harness=opencode"
   echo "kind=ship"
   echo "mode=no-mistakes"
   echo "yolo=off"
   echo "model=default"
   echo "effort=default"
   echo "backend=herdr"
-  echo "herdr_session=$SESSION"
+  echo "herdr_session=$HERDR_LAB_SESSION"
   echo "herdr_workspace_id=$WORKSPACE_ID"
   echo "herdr_tab_id=$TAB_ID"
   echo "herdr_pane_id=$PANE_ID"
 } > "$HOME_DIR/state/hsmoke.meta"
 
 run_control() {
-  env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" \
-    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 \
+  env FM_HOME="$HOME_DIR" HERDR_SESSION="$HERDR_LAB_SESSION" \
+    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=3 FM_CONTROL_LAUNCH_WAIT=30 \
     "$ROOT/bin/fm-control.sh" "$@" 2>&1
+}
+
+wait_for() {  # <description> <command...>
+  local description=$1 attempt
+  shift
+  attempt=0
+  while [ "$attempt" -lt 100 ]; do
+    "$@" && return 0
+    sleep 0.2
+    attempt=$((attempt + 1))
+  done
+  fail "timed out waiting for $description"
+}
+
+agent_is_idle() {
+  lab agent get "$PANE_ID" 2>/dev/null \
+    | jq -e '.result.agent.agent == "opencode" and .result.agent.agent_status == "idle"' >/dev/null
+}
+
+foreground_is_opencode() {
+  lab pane process-info --pane "$PANE_ID" 2>/dev/null \
+    | jq -e '
+        .result.type == "pane_process_info"
+        and (.result.process_info.foreground_processes | length) == 1
+        and (.result.process_info.foreground_processes[0].name | sub("\\.exe$"; "")) == "opencode"
+      ' >/dev/null
+}
+
+stale_idle_over_shell() {
+  local agent_info process_info
+  agent_info=$(lab agent get "$PANE_ID" 2>/dev/null) || return 1
+  process_info=$(lab pane process-info --pane "$PANE_ID" 2>/dev/null) || return 1
+  printf '%s' "$agent_info" | jq -e \
+    '.result.agent.agent == "opencode" and .result.agent.agent_status == "idle"' >/dev/null \
+    && printf '%s' "$process_info" | jq -e '
+      .result.type == "pane_process_info"
+      and (.result.process_info.foreground_processes | length) == 1
+      and ((.result.process_info.foreground_processes[0].name | sub("\\.exe$"; "")) as $name
+        | ["sh", "bash", "zsh", "dash", "ksh", "fish"] | index($name) != null)
+    ' >/dev/null
 }
 
 # --- no registered agent: the endpoint exists but hosts no agent ------------
@@ -111,39 +167,57 @@ case "$OUT" in
   *"nothing to interrupt"*) : ;;
   *) fail "the interrupt refusal should say there is no agent, got: $OUT" ;;
 esac
-pass "real herdr: interrupt refuses when herdr's own agent registry reports no agent"
+pass "real herdr: interrupt refuses when Herdr has no registered agent"
 
-# --- a registered agent: classification flips, and the verbs follow ---------
+# --- stale idle registration: a dead agent must not wedge relaunch ----------
+#
+# Only the remaining cases need real agent binaries, so the agent-free
+# registration gate above still runs on a host that has Herdr but neither CLI.
 
-herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
-  --state idle --session "$SESSION" >/dev/null 2>&1 \
-  || fail "could not register a live agent on the task pane"
+command -v opencode >/dev/null 2>&1 || { echo "skip: opencode not found (agent-free registration cases already ran)"; exit 0; }
+command -v codex >/dev/null 2>&1 || { echo "skip: codex not found (agent-free registration cases already ran)"; exit 0; }
 
-STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
-[ "$STATE" = alive ] || fail "herdr should classify a registered agent as alive, got '$STATE'"
 
-OUT=$(run_control hsmoke interrupt) || fail "interrupt against a registered agent should succeed: $OUT"
-case "$OUT" in
-  *"interrupt-delivered hsmoke harness=claude backend=herdr verified=agent-alive cancel=unconfirmed"*) : ;;
-  *) fail "interrupt should report the agent-alive proof on herdr, got: $OUT" ;;
+lab pane run "$PANE_ID" 'opencode --mini' >/dev/null \
+  || fail "could not start real OpenCode in the task pane"
+wait_for "OpenCode to register as idle" agent_is_idle
+wait_for "OpenCode to own the foreground process" foreground_is_opencode
+
+PROCESS_INFO=$(lab pane process-info --pane "$PANE_ID") \
+  || fail "could not read OpenCode foreground process"
+OPEN_CODE_PID=$(printf '%s' "$PROCESS_INFO" | jq -r '.result.process_info.foreground_processes[0].pid // empty')
+case "$OPEN_CODE_PID" in
+  ''|*[!0-9]*) fail "OpenCode foreground process had no numeric pid: $PROCESS_INFO" ;;
 esac
-pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
+kill -KILL "$OPEN_CODE_PID" || fail "could not kill OpenCode process $OPEN_CODE_PID"
 
-herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
-  || fail "the control plane must never remove the endpoint it was operating on"
-[ -d "$WT" ] || fail "the control plane must never remove the task's local copy"
-pass "real herdr: no control verb removed the endpoint or the task's local copy"
+wait_for "Herdr's stale idle registration over the login shell" stale_idle_over_shell
+STATE=$(fm_backend_agent_state herdr "$HERDR_LAB_SESSION:$PANE_ID")
+[ "$STATE" = dead ] || fail "a stale idle registration over a shell must be agent-free, got '$STATE'"
 
-# Last, because it deliberately types a harness command into a pane that hosts
-# a plain shell: the registered agent cannot actually be stopped that way, and
-# the control plane must say so rather than report a stop it did not achieve.
-if OUT=$(run_control hsmoke exit 2>&1); then
-  fail "exit should fail closed when the agent does not stop: $OUT"
-fi
+OUT=$(run_control hsmoke exit) || fail "exit against a stale idle registration should be idempotent success: $OUT"
 case "$OUT" in
-  *"did not stop"*) : ;;
-  *) fail "the exit failure should say the agent did not stop, got: $OUT" ;;
+  "already-stopped hsmoke"*) : ;;
+  *) fail "a stale idle registration should report already-stopped, got: $OUT" ;;
 esac
-pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
+pass "real herdr: stale idle registration over a login shell is agent-free for exit"
 
-fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true
+OUT=$(run_control hsmoke relaunch --harness codex --note 'process-kill recovery validation') \
+  || fail "relaunch after stale idle registration should succeed: $OUT"
+case "$OUT" in
+  *"relaunched hsmoke harness=codex from=opencode"*) : ;;
+  *) fail "relaunch should report the OpenCode-to-Codex handoff, got: $OUT" ;;
+esac
+
+grep -Fx "worktree=$WT" "$HOME_DIR/state/hsmoke.meta" >/dev/null \
+  || fail "relaunch did not preserve the task worktree"
+grep -Fx "herdr_pane_id=$PANE_ID" "$HOME_DIR/state/hsmoke.meta" >/dev/null \
+  || fail "relaunch did not preserve the task pane"
+grep -Fx 'harness=codex' "$HOME_DIR/state/hsmoke.meta" >/dev/null \
+  || fail "relaunch did not record the replacement harness"
+grep -F 'process-kill recovery validation' "$HOME_DIR/data/hsmoke/brief.md" >/dev/null \
+  || fail "relaunch did not preserve the progress note"
+lab pane get "$PANE_ID" >/dev/null 2>&1 \
+  || fail "relaunch removed the endpoint it was meant to reuse"
+[ -d "$WT" ] || fail "relaunch removed the task's local copy"
+pass "real herdr: stale idle process-kill recovery relaunches Codex in the same pane and worktree"

@@ -193,7 +193,7 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
     and .result.panes[0].tab_id == $tab
     and .result.panes[0].pane_id == $pane
   ' >/dev/null 2>&1 || return 1
-  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = no-agent ] || return 1
+  [ "$(fm_backend_herdr_pane_registration_state "$session" "$pane")" = no-agent ] || return 1
   fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null || return 1
   focus=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
   [ "${focus#*$'\t'}" != "$tab" ]
@@ -247,7 +247,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   fi
   tab=$FM_HERDR_CLEANUP_TAB
   pane=$FM_HERDR_CLEANUP_PANE
-  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" != no-agent ] \
+  if [ "$(fm_backend_herdr_pane_registration_state "$session" "$pane")" != no-agent ] \
     || ! fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null; then
     fm_herdr_cleanup_warn "$id preserved because its pane is not a provably idle childless shell"
     fm_lock_release "$presentation_lock" || true
@@ -267,7 +267,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   # with the presentation floor ownership in bin/backends/herdr.sh.
   fm_backend_herdr_projection_close_pane_focus_preserving \
     "$session" "$pane" no-agent || close_status=$?
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  state=$(fm_backend_herdr_pane_registration_state "$session" "$pane")
   if [ "$state" = dead ]; then
     if [ -f "$journal" ] && [ ! -L "$journal" ] \
       && fm_herdr_cleanup_unique_match "$title" "$session" "$home_real" \
