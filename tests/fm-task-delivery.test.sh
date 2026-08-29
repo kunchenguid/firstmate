@@ -18,6 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+BRIEF="$ROOT/bin/fm-brief.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
@@ -268,7 +269,7 @@ test_promote_requires_and_records_the_delivery_contract() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id
+  local home meta out sendroot payload mode id brief_dod delivered_dod
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -307,6 +308,18 @@ STUB
       "$mode: promoted worker was not told to stop when isolation fails"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
+
+    # Compare the public outputs of both real generation paths. The promoted
+    # payload ends at its Definition of done, as does an ordinary generated
+    # brief, so identical suffixes prove both workers receive the same contract.
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: ordinary ship brief generation should succeed"
+    brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
+    delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
+    awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
+    awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
+    cmp -s "$brief_dod" "$delivered_dod" \
+      || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
