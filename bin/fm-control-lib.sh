@@ -188,7 +188,7 @@ fm_control_backend_supports_key() {  # <backend> <key>
 # thurbox is unverified only for want of an empirical pass: its panes are tmux
 # panes, so the tmux classifier's process-attribution approach should port
 # directly once run against thurbox's own socket - see
-# docs/thurbox-backend.md "Not yet verified". The control
+# docs/thurbox-backend.md "Active limits". The control
 # plane refuses a stop-proving verb there instead of reporting an unprovable
 # transition as success.
 fm_control_backend_state_verified() {  # <backend>

@@ -19,6 +19,8 @@ The payoff is real. thurbox is the **first non-tmux backend to reach the default
 
 `cursor=1` also inherits tmux's **Cursor Agent CLI hazard**, so the adapter takes tmux's mitigation with it. Cursor parks its terminal cursor *outside* its composer, below the footer, so on a Cursor pane the cursor row is not a composer locator and the cursor-anchored read can only ever answer `unknown` - which would make every steer to a Cursor task read unverified, permanently. `fm_backend_thurbox_composer_state` therefore reclassifies a Cursor pane cursorlessly, letting the bottom-most shape win, exactly as `bin/fm-tmux-lib.sh` does. The only socket-specific part is reading `#{pane_tty}` through thurbox's own socket; Cursor's process identity stays owned by `bin/fm-cursor-lib.sh`, and the reclassification is gated on that structural identity rather than on the verdict, so the strict blank-row posture that owns `unknown` for every other harness is untouched.
 
+The pane the probe reads is re-resolved from the session UUID inside that same call and passed to the probe as an argument, per the identity model above. The two reads that precede it are command substitutions, so the pane each resolved dies with its subshell; a probe that read it back from the adapter's globals would query whichever pane the *caller* last resolved, and in the `set -u` command-substitution call sites the watcher and the steering-inbox doorbell use, would abort on an unbound variable and drop the reclassification silently.
+
 ## Setup
 
 1. **Install thurbox** so `thurbox-cli` is on `PATH` (it self-updates with `thurbox-cli update`). `tmux` and `jq` are required too; `bin/fm-bootstrap.sh` checks all three when thurbox is the resolved backend.

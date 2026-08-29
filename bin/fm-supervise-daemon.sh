@@ -197,7 +197,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # thurbox's OWN socket, so the daemon's bare `tmux` calls would address the
 # wrong server entirely - a refusal, not a silent misread, is still correct
 # until this daemon routes through the adapter (docs/thurbox-backend.md
-# "Not yet verified").
+# "Active limits").
 FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
@@ -1527,9 +1527,13 @@ fm_super_main() {
   echo "$$" > "$PIDFILE"
   fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
 
-  # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
-  # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
-  # (herdr) > tmux fallback. Resolved before the target below, since target
+  # --- auto-discover the supervisor BACKEND first ---------------------------
+  # Priority: FM_SUPERVISOR_BACKEND override > THURBOX_SESSION on thurbox's own
+  # socket (thurbox) > $TMUX_PANE (tmux) > $HERDR_ENV=1 (herdr) > tmux fallback.
+  # thurbox sits ahead of $TMUX_PANE because a thurbox pane IS a tmux pane on
+  # thurbox's own socket, so answering tmux would run this daemon's bare tmux
+  # primitives against the wrong server; the refusal below is what that arm
+  # makes reachable. Resolved before the target below, since target
   # discovery composes a herdr "<session>:<pane-id>" string using the same
   # $HERDR_PANE_ID/$HERDR_SESSION markers this checks. Exporting the result
   # into FM_SUPERVISOR_BACKEND makes inject_msg/pane_is_busy/pane_input_pending

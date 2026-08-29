@@ -425,8 +425,8 @@ fm_backend_thurbox_parse_target() {  # <target>
 # A remote session (`session create --host`, `backend_type` other than
 # "local-tmux") has NO pane on this machine's thurbox socket, so every pane
 # primitive here would silently address nothing. Those are refused explicitly
-# rather than half-working; docs/thurbox-backend.md "Remote sessions" records
-# that boundary.
+# rather than half-working; docs/thurbox-backend.md "Current operation and
+# safety" records that boundary under its Refusals paragraph.
 # fm_backend_thurbox_resolve_row: steps 1 and 3 of that order of authority, and
 # the single owner of "which session row IS this task's". Sets
 # FM_BACKEND_THURBOX_ROW_UUID and FM_BACKEND_THURBOX_ROW on success and touches
@@ -603,6 +603,11 @@ fm_backend_thurbox_composer_caps() {
 # fm_backend_thurbox_pane_is_cursor: the Cursor-pane probe of
 # bin/fm-tmux-lib.sh's fm_tmux_pane_is_cursor, against THURBOX's socket.
 #
+# Takes a RESOLVED pane id, like fm_backend_thurbox_pane_exists above and
+# unlike the target-taking operations: the caller owns resolution, so this
+# reads no adapter global and cannot be handed a pane some other call site
+# happened to leave behind.
+#
 # Only the #{pane_tty} read is server-specific, and it is the one thing done
 # here; Cursor's process identity stays owned by bin/fm-cursor-lib.sh
 # (fm_cursor_tty_has_cursor), so this adapter re-derives none of it.
@@ -622,7 +627,7 @@ fm_backend_thurbox_pane_is_cursor() {  # <pane-id>
 # lives in bin/fm-composer-lib.sh, so a new harness shape is taught there once
 # and never here.
 fm_backend_thurbox_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
-  local target=$1 expected_label=${2:-} cy pane verdict
+  local target=$1 expected_label=${2:-} cy pane verdict pane_id
   cy=$(fm_backend_thurbox_composer_cursor_row "$target" "$expected_label") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(fm_backend_thurbox_composer_capture "$target" "$expected_label") || { printf 'unknown'; return 0; }
@@ -637,8 +642,21 @@ fm_backend_thurbox_composer_state() {  # <target> [expected-label] -> empty|pend
   # cursorless backend already classifies it. Gated on Cursor's own structural
   # process identity, never on the verdict alone, so the strict blank-row
   # posture that owns `unknown` for every other harness is untouched.
-  if [ "$verdict" = unknown ] && fm_backend_thurbox_pane_is_cursor "$FM_BACKEND_THURBOX_PANE"; then
-    verdict=$(fm_composer_classify_screen "$(fm_backend_thurbox_composer_caps)" "$pane" '')
+  #
+  # The pane is resolved HERE, by a direct call in this shell, and handed to
+  # the probe as an argument. The two reads above are command substitutions,
+  # so the pane target_ready resolved inside each of them died with its
+  # subshell; reading that global back here would probe whatever pane the
+  # CALLER's shell last resolved - or, in a process that never resolved one
+  # (every `set -u` command-substitution call site, which is how the watcher
+  # and the doorbell reach this), abort on an unbound variable and silently
+  # lose the reclassification entirely.
+  if [ "$verdict" = unknown ]; then
+    fm_backend_thurbox_target_ready "$target" "$expected_label" || { printf '%s' "$verdict"; return 0; }
+    pane_id=$FM_BACKEND_THURBOX_PANE
+    if fm_backend_thurbox_pane_is_cursor "$pane_id"; then
+      verdict=$(fm_composer_classify_screen "$(fm_backend_thurbox_composer_caps)" "$pane" '')
+    fi
   fi
   printf '%s' "$verdict"
 }

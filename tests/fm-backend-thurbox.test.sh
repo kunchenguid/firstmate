@@ -259,6 +259,13 @@ reset_world() {
         FM_TB_CREATE_EXIT FM_TB_AGENTS_TOML FM_TB_CURSOR_Y FM_TB_PANE_PATH \
         FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT FM_TB_PS FM_TB_PANE_TTY 2>/dev/null || true
   FM_BACKEND_THURBOX_SOCKET_CACHE=''
+  # The adapter's own RESOLUTION output, not fixture state: target_ready and
+  # resolve_row set these in whatever shell calls them, so a case run directly
+  # in the suite shell leaves them behind. Clearing them is what stops a later
+  # case from passing on an earlier case's resolution instead of its own - a
+  # green that would survive the adapter never resolving anything at all.
+  unset FM_BACKEND_THURBOX_PANE FM_BACKEND_THURBOX_SESSION \
+        FM_BACKEND_THURBOX_ROW FM_BACKEND_THURBOX_ROW_UUID 2>/dev/null || true
 }
 
 add_row() {  # <uuid> <name> <pane> <btype> <hook>
@@ -647,15 +654,20 @@ tb_pane_process() {  # <comm> <args>
 
 test_composer_state_reclassifies_a_cursor_pane() {
   reset_world
-  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  # A pane id no other case uses, and one the recorded target deliberately
+  # disagrees with: the reclassification must act on the pane the adapter
+  # RE-RESOLVES from the session row in this very call, never on one left in
+  # the shell by an earlier case or by the caller.
+  add_row "$UUID" "$TITLE" "%40" local-tmux -
+  export FM_TB_PANES="%40"
   tb_cursor_screen 'Plan, search, build anything' 1
   tb_pane_process cursor-agent /opt/cursor/cursor-agent
   [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = empty ] \
     || fail "an idle Cursor composer on thurbox must read empty; otherwise every steer to a Cursor task reports unverified forever"
   # The pane tty MUST be read off thurbox's own socket, never the ambient
   # default server, or the probe would answer about an unrelated pane.
-  grep -q $'tmux\x1f-L\x1fthurbox\x1fdisplay-message\x1f-p\x1f-t\x1f%20\x1f#{pane_tty}' "$FM_TB_TMUXLOG" \
-    || fail "the Cursor probe did not read #{pane_tty} through thurbox's socket"
+  grep -q $'tmux\x1f-L\x1fthurbox\x1fdisplay-message\x1f-p\x1f-t\x1f%40\x1f#{pane_tty}' "$FM_TB_TMUXLOG" \
+    || fail "the Cursor probe did not read #{pane_tty} for the re-resolved pane through thurbox's socket"
 
   tb_cursor_screen 'half typed captain text' 0
   [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = pending ] \
@@ -665,7 +677,8 @@ test_composer_state_reclassifies_a_cursor_pane() {
 
 test_composer_state_does_not_reclassify_a_non_cursor_pane() {
   reset_world
-  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  add_row "$UUID" "$TITLE" "%40" local-tmux -
+  export FM_TB_PANES="%40"
   # The SAME rendered screen, with only the foreground process identity
   # changed: the reclassification is gated on Cursor's own structural process
   # identity, so the strict blank-row posture stays in force everywhere else.

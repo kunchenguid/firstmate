@@ -403,7 +403,8 @@ test_orca_refuses_an_escape_harness_interrupt() {
 
 test_unverified_state_backends_refuse_stop_verbs() {
   local dir out rc backend
-  for backend in zellij cmux; do
+  local uuid=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+  for backend in zellij cmux thurbox; do
     dir=$(new_case "nostate-$backend")
     if [ "$backend" = zellij ]; then
       add_task "$dir" t1 claude ship zellij "sess:7"
@@ -411,6 +412,12 @@ test_unverified_state_backends_refuse_stop_verbs() {
         echo "zellij_session=sess"
         echo "zellij_tab_id=1"
         echo "zellij_pane_id=7"
+      } >> "$dir/home/state/t1.meta"
+    elif [ "$backend" = thurbox ]; then
+      add_task "$dir" t1 claude ship thurbox "$uuid:%20"
+      {
+        echo "thurbox_session_id=$uuid"
+        echo "thurbox_pane_id=%20"
       } >> "$dir/home/state/t1.meta"
     else
       add_task "$dir" t1 claude ship cmux "ws1:surface1"
@@ -436,7 +443,7 @@ test_state_verified_backends_are_exactly_tmux_and_herdr() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
   local backend
-  for backend in zellij orca cmux; do
+  for backend in zellij orca cmux thurbox; do
     fm_control_backend_state_verified "$backend" \
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
