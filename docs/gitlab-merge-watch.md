@@ -44,7 +44,7 @@ That is deliberate: the host-agnostic property is a property of the stored recor
 GitLab runs mostly on self-hosted instances, so a merge request can live under any host.
 A GitLab project also sits under at least one group at no fixed depth, so no owner-and-repository pair can address one the way it can on GitHub.
 The stored record therefore carries `provider`, `url`, `host`, `path`, and `number`, and every consumer rebuilds the URL from those parts and refuses any record that does not reconstruct the stored URL exactly.
-`tests/fm-pr-check-security.test.sh` asserts that neither `bin/fm-pr-lib.sh` nor `bin/fm-pr-poll.sh` contains the string `gitlab.com` at all.
+`tests/fm-pr-check-security.test.sh` proves the host-agnostic path through a non-default-host sidecar and verifies that `glab` receives the reconstructed project URL.
 
 ## How plain glab is invoked, and why
 
@@ -182,7 +182,7 @@ armed: state/e6.check.sh
 
 The live registration tag is `fm-pr-poll-registration-v2`, which includes the provider tag.
 A `fm-pr-poll-registration-v1` record no longer parses.
-The one-time non-executing rebuild that converted those older watches has been retired; arm a current watch with `bin/fm-pr-check.sh`.
+Arm a current watch with `bin/fm-pr-check.sh`.
 
 ## Merging a merge request
 
