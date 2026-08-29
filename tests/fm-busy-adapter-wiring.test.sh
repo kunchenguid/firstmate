@@ -310,6 +310,119 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+# issue: fm-spawn wrote .claude/settings.local.json wholesale, destroying a
+# project's own committed permissions/env/enabledPlugins content instead of
+# merging its busy hooks into it.
+test_claude_hooks_merge_preserves_committed_project_settings() {
+  local rec id=busy-cl-3 out state settings
+  rec=$(make_spawn_case claude-project-settings claude "$id")
+  read_case_record "$rec"
+  # fm-spawn freshens a pooled worktree by fetching and hard-resetting to
+  # origin's DEFAULT branch (freshen_spawn_worktree_base), so a project's
+  # committed file must be pushed to the branch origin/HEAD actually points
+  # at - the fixture repo's own initial branch, which follows the machine's
+  # init.defaultBranch - or on a master-default machine the push would mint a
+  # second, non-default branch and the file would never reach the worktree.
+  mkdir -p "$PROJ_DIR/.claude"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"enabledPlugins":{"context7":true}}' \
+    > "$PROJ_DIR/.claude/settings.local.json"
+  git -C "$PROJ_DIR" add .claude/settings.local.json
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'project commits its own claude settings'
+  git -C "$PROJ_DIR" push -q origin "HEAD:$(git -C "$PROJ_DIR" rev-parse --abbrev-ref HEAD)"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed over a committed project settings file: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "spawn must preserve the project's own committed permissions.allow"
+  [ "$(jq -r '.enabledPlugins.context7' "$settings")" = true ] \
+    || fail "spawn must preserve the project's own committed enabledPlugins"
+  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
+    jq -e --arg ev "$ev" '.commands[$ev][0] | type == "string"' \
+      "$state/$id.claude-settings-owned" >/dev/null \
+      || fail "the ownership record must hold the $ev hook command the spawn merged in"
+  done
+
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+  run_claude_hook "$settings" Stop || fail "Stop hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] \
+    || fail "Stop must still classify 'idle claude-hook' when merged into a committed file, got '$out'"
+  pass "claude spawn merges its busy hooks into a project's committed settings.local.json instead of destroying it"
+}
+
+# issue: a committed settings.local.json that cannot be parsed as a JSON
+# object (a mid-edit syntax error) used to be replaced by a bare hooks
+# document, destroying the project's committed bytes. There is deliberately
+# no fallback: the spawn must refuse with the file untouched, because
+# firstmate never overwrites project content it cannot prove it can merge.
+test_claude_hooks_spawn_refuses_unmergeable_settings_untouched() {
+  local rec id=busy-cl-4 out rc state settings malformed
+  rec=$(make_spawn_case claude-invalid-settings claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.claude"
+  malformed='{"permissions": {"allow": ["Bash(npm test)"],}'
+  printf '%s' "$malformed" > "$PROJ_DIR/.claude/settings.local.json"
+  git -C "$PROJ_DIR" add .claude/settings.local.json
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'project commits a mid-edit, syntactically invalid claude settings file'
+  # Push to the fixture repo's own initial branch so the committed file
+  # reaches the spawned worktree whatever the machine's init.defaultBranch is
+  # (see test_claude_hooks_merge_preserves_committed_project_settings).
+  git -C "$PROJ_DIR" push -q origin "HEAD:$(git -C "$PROJ_DIR" rev-parse --abbrev-ref HEAD)"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "claude spawn must refuse an unparseable committed settings file rather than overwrite it: $out"
+  assert_contains "$out" "settings.local.json" \
+    "the refusal must name the settings file so the operator can act on it"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  [ "$(cat "$settings")" = "$malformed" ] \
+    || fail "a refused spawn must leave the project's original bytes untouched, got $(cat "$settings" 2>/dev/null)"
+  assert_absent "$state/$id.claude-settings-owned" \
+    "a refused spawn must not write a claude settings ownership record"
+  # The refusal fires before the busy contract is armed, so a dispatch
+  # attempt against such a project leaves no armed busy records behind.
+  assert_absent "$state/$id.busy-gen" \
+    "a refused spawn must not leave an armed busy generation behind"
+  assert_absent "$state/$id.busy-state" \
+    "a refused spawn must not leave a seeded busy-state record behind"
+  pass "claude spawn refuses an unmergeable committed settings file loudly, leaving its bytes untouched and no armed busy records"
+}
+
+test_claude_hooks_spawn_retires_busy_gen_when_install_fails_after_arm() {
+  local rec id=busy-cl-5 out rc state
+  rec=$(make_spawn_case claude-install-failure claude "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  # A corrupt/old-schema ownership record left behind from a superseded
+  # incarnation cannot prove which hooks are firstmate's own, so install
+  # refuses it - but the settings file itself is absent, so the pre-arm
+  # mergeability probe (which only checks the settings file's JSON shape)
+  # passes and the busy contract is armed before install's refusal is
+  # discovered, exercising the post-arm failure path rather than the
+  # pre-arm refusal test_claude_hooks_spawn_refuses_unmergeable_settings_untouched
+  # already covers.
+  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply old-gen"}]}]}}' \
+    > "$state/$id.claude-settings-owned"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "claude spawn must refuse when the settings install fails after the busy contract is armed: $out"
+  assert_contains "$out" "could not arm claude busy hooks" \
+    "the refusal must name the post-arm install failure"
+  assert_absent "$state/$id.busy-gen" \
+    "a spawn refused after arming must retire the busy generation it minted, not leave it armed"
+  assert_absent "$state/$id.busy-state" \
+    "a spawn refused after arming must not leave a seeded busy-state record behind"
+  pass "claude spawn retires the busy generation it armed when the claude settings install fails afterward"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -349,6 +462,9 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_hooks_merge_preserves_committed_project_settings
+test_claude_hooks_spawn_refuses_unmergeable_settings_untouched
+test_claude_hooks_spawn_retires_busy_gen_when_install_fails_after_arm
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

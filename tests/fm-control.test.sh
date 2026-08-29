@@ -284,6 +284,370 @@ test_harness_family_resolution() {
   pass "fm-control-lib: a recorded harness resolves to its verified adapter without guessing"
 }
 
+# fm-spawn.sh's claude branch is the one caller of these three; issue: a
+# wholesale settings.local.json write destroys a project's committed content.
+# Ownership is structural: install records the exact entries it wrote in a
+# private record file, and only entries deep-equal to a recorded one are ever
+# stripped or restored - so these fixtures deliberately include a project hook
+# whose command TEXT mentions fm-busy-event.sh, which must never be treated as
+# firstmate's own.
+test_claude_settings_install_preserves_project_keys_and_replaces_own_hooks() {
+  local dir=$TMP_ROOT/claude-settings-install settings record hooks1 hooks2
+  mkdir -p "$dir"
+  settings=$dir/settings.local.json
+  record=$dir/claude-settings-owned
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]},"enabledPlugins":{"context7":true},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"project hook mentioning fm-busy-event.sh in its text"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"project-lint-on-pretooluse"}]}]}}' \
+    > "$settings"
+  hooks1='{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}'
+  fm_control_claude_settings_install "$settings" "$hooks1" "$record" \
+    || fail "install into a valid project settings file must succeed"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "install must preserve the project's own permissions.allow"
+  [ "$(jq -r '.enabledPlugins.context7' "$settings")" = true ] \
+    || fail "install must preserve an unrelated top-level key"
+  [ "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$settings")" = "project-lint-on-pretooluse" ] \
+    || fail "install must preserve a project's own hook on an event firstmate does not manage"
+  [ "$(jq '.hooks.Stop | length' "$settings")" = 2 ] \
+    || fail "install must keep a project's own hook group alongside firstmate's on a shared event, got $(jq -c '.hooks.Stop' "$settings")"
+  assert_contains "$(jq -c '.hooks.Stop' "$settings")" "fm-busy-event.sh apply gen1" \
+    "install must add firstmate's own hook entry"
+  [ "$(jq -c '.commands.Stop' "$record")" = '["fm-busy-event.sh apply gen1"]' ] \
+    || fail "install must record exactly the hook commands it wrote as the ownership authority, got $(cat "$record")"
+
+  # A respawn (a fresh busy-gen re-arms the same task) must replace, not
+  # accumulate, firstmate's own recorded entries, while a project hook whose
+  # command text merely mentions fm-busy-event.sh is not deep-equal to any
+  # recorded entry and must survive untouched.
+  hooks2='{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen2"}]}]}'
+  fm_control_claude_settings_install "$settings" "$hooks2" "$record" \
+    || fail "a respawn install must succeed"
+  [ "$(jq '.hooks.Stop | length' "$settings")" = 2 ] \
+    || fail "a respawn must not accumulate stale hook entries, got $(jq -c '.hooks.Stop' "$settings")"
+  assert_not_contains "$(jq -c '.hooks.Stop' "$settings")" "gen1" \
+    "a respawn must fully replace the previous incarnation's own hook entry"
+  assert_contains "$(jq -c '.hooks.Stop' "$settings")" "fm-busy-event.sh apply gen2" \
+    "a respawn must carry the fresh generation's entry"
+  assert_contains "$(jq -c '.hooks.Stop' "$settings")" "project hook mentioning fm-busy-event.sh in its text" \
+    "a project hook whose command text mentions fm-busy-event.sh must never be classified as firstmate's own"
+  [ "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$settings")" = "project-lint-on-pretooluse" ] \
+    || fail "a respawn must still preserve a project's own hook on an unmanaged event"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "a respawn must still preserve the project's own keys"
+
+  rm -f "$dir/absent.json" "$dir/absent-record"
+  fm_control_claude_settings_install "$dir/absent.json" "$hooks1" "$dir/absent-record" \
+    || fail "install with no existing file must succeed"
+  [ "$(jq -c 'keys' "$dir/absent.json")" = '["hooks"]' ] \
+    || fail "an absent existing file must produce a bare hooks document, got $(cat "$dir/absent.json")"
+
+  # There is deliberately NO fallback for content install cannot prove it can
+  # merge into: unparseable JSON, a non-object top level, or a non-object
+  # hooks value must refuse with the original bytes untouched and no
+  # ownership record written. The same criteria gate the spawn-time preflight
+  # probe, so it is asserted alongside each refusal.
+  local bad
+  for bad in '{"permissions": {"allow": ["x"],}' '[]' '"a string"'; do
+    printf '%s' "$bad" > "$dir/bad.json"
+    rm -f "$dir/bad-record"
+    fm_control_claude_settings_mergeable "$dir/bad.json" \
+      && fail "the mergeability probe must refuse what install refuses: $(printf '%q' "$bad")"
+    fm_control_claude_settings_install "$dir/bad.json" "$hooks1" "$dir/bad-record" 2>/dev/null \
+      && fail "install must refuse a settings file it cannot merge into: $(printf '%q' "$bad")"
+    [ "$(cat "$dir/bad.json")" = "$bad" ] \
+      || fail "a refused install must leave the original bytes untouched, got $(cat "$dir/bad.json")"
+    [ ! -e "$dir/bad-record" ] \
+      || fail "a refused install must not write an ownership record"
+  done
+  printf '%s\n' '{"hooks":"not-an-object"}' > "$dir/bad.json"
+  fm_control_claude_settings_mergeable "$dir/bad.json" \
+    && fail "the mergeability probe must refuse a non-object hooks value"
+  fm_control_claude_settings_install "$dir/bad.json" "$hooks1" "$dir/bad-record" 2>/dev/null \
+    && fail "install must refuse a non-object hooks value"
+
+  # A zero-byte file is the one accepted degenerate case: it has no project
+  # content to protect, so refusing it would be a pure regression. It merges
+  # as the empty object, and preexisted stays true so clear never deletes it.
+  : > "$dir/empty.json"
+  rm -f "$dir/empty-record"
+  fm_control_claude_settings_mergeable "$dir/empty.json" \
+    || fail "the mergeability probe must accept a zero-byte settings file"
+  fm_control_claude_settings_install "$dir/empty.json" "$hooks1" "$dir/empty-record" \
+    || fail "install into a zero-byte settings file must succeed"
+  [ "$(jq -c 'keys' "$dir/empty.json")" = '["hooks"]' ] \
+    || fail "a zero-byte file must merge as the empty object, got $(cat "$dir/empty.json")"
+  jq -e '.preexisted == true' "$dir/empty-record" >/dev/null \
+    || fail "a zero-byte file existed before the install, so preexisted must stay true"
+
+  # A corrupt ownership record can no longer prove which hooks are
+  # firstmate's own, so install must refuse rather than guess - including a
+  # record from the superseded whole-entry schema, whose entries this reader
+  # deliberately does not reinterpret.
+  printf '%s\n' 'not a record' > "$dir/corrupt-record"
+  printf '%s\n' '{"hooks":{}}' > "$dir/ok.json"
+  fm_control_claude_settings_install "$dir/ok.json" "$hooks1" "$dir/corrupt-record" 2>/dev/null \
+    && fail "install must refuse an unreadable ownership record"
+  printf '%s\n' '{"version":1,"entries":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen0"}]}]}}' \
+    > "$dir/entries-only-record"
+  fm_control_claude_settings_install "$dir/ok.json" "$hooks1" "$dir/entries-only-record" 2>/dev/null \
+    && fail "install must refuse a record without a commands object rather than guess at ownership"
+  pass "fm-control-lib: claude settings install preserves a project's own keys, hooks, and lookalike commands, fully replaces firstmate's own recorded entries on respawn, and refuses unmergeable content untouched"
+}
+
+test_claude_settings_clear_strips_own_hooks_and_diff_predicate() {
+  local dir=$TMP_ROOT/claude-settings-clear settings record head wt
+  mkdir -p "$dir"
+  settings=$dir/settings.local.json
+  record=$dir/claude-settings-owned
+
+  head='{"permissions":{"allow":["Bash(npm test)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"project-lint-on-pretooluse"}]}]}}'
+  printf '%s\n' "$head" > "$settings"
+  fm_control_claude_settings_install "$settings" \
+    '{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}' "$record" \
+    || fail "install before clear must succeed"
+  fm_control_claude_settings_clear "$settings" "$record" \
+    || fail "clearing a mixed file must succeed"
+  [ -f "$settings" ] \
+    || fail "clearing must never delete a pre-existing settings file"
+  [ ! -e "$record" ] \
+    || fail "clearing must retire the ownership record whose entries it stripped"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "clearing must preserve the project's own top-level content"
+  [ "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$settings")" = "project-lint-on-pretooluse" ] \
+    || fail "clearing must preserve a project's own hook on an event firstmate does not manage"
+  [ "$(jq -c '.hooks.Stop' "$settings")" = '[{"hooks":[{"type":"command","command":"project-own-stop-hook"}]}]' ] \
+    || fail "clearing must remove only firstmate's own recorded Stop entry, keeping the project's, got $(jq -c '.hooks.Stop' "$settings")"
+
+  # A file the record says firstmate itself created is removed once nothing
+  # but firstmate's own entries remains in it, so a retired incarnation
+  # leaves no trace of a file the project never had - but anything anyone
+  # else added to it since (e.g. a permission grant claude wrote mid-task)
+  # keeps the file alive with that content.
+  rm -f "$dir/created.json" "$dir/created-record"
+  fm_control_claude_settings_install "$dir/created.json" \
+    '{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen9"}]}]}' "$dir/created-record" \
+    || fail "install into an absent file must succeed"
+  fm_control_claude_settings_clear "$dir/created.json" "$dir/created-record" \
+    || fail "clearing a firstmate-created file must succeed"
+  [ ! -e "$dir/created.json" ] \
+    || fail "clearing a firstmate-created file holding nothing else must remove it, got $(cat "$dir/created.json" 2>/dev/null)"
+  rm -f "$dir/created.json" "$dir/created-record"
+  fm_control_claude_settings_install "$dir/created.json" \
+    '{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen9"}]}]}' "$dir/created-record" \
+    || fail "install into an absent file must succeed"
+  printf '%s\n' "$(jq -c '.permissions = {"allow":["Bash(npm test)"]}' "$dir/created.json")" > "$dir/created.json"
+  fm_control_claude_settings_clear "$dir/created.json" "$dir/created-record" \
+    || fail "clearing a firstmate-created file with later additions must succeed"
+  [ "$(jq -r '.permissions.allow[0]' "$dir/created.json" 2>/dev/null)" = "Bash(npm test)" ] \
+    || fail "clearing must keep a firstmate-created file alive when anything else landed in it, got $(cat "$dir/created.json" 2>/dev/null)"
+
+  # A pre-existing file holding none of the recorded entries stays
+  # byte-untouched: no rewrite may disturb a project file's own formatting.
+  printf '{\n  "permissions": { "allow": ["Bash(npm test)"] }\n}\n' > "$dir/pretty.json"
+  printf '%s\n' '{"version":1,"preexisted":true,"commands":{"Stop":["fm-busy-event.sh apply gone-gen"]}}' \
+    > "$dir/pretty-record"
+  fm_control_claude_settings_clear "$dir/pretty.json" "$dir/pretty-record" \
+    || fail "clearing a file holding none of the recorded entries must succeed"
+  [ "$(cat "$dir/pretty.json")" = "$(printf '{\n  "permissions": { "allow": ["Bash(npm test)"] }\n}')" ] \
+    || fail "clearing must leave a project file's own formatting byte-untouched when nothing is stripped, got $(cat "$dir/pretty.json")"
+
+  # With no ownership record nothing is provably firstmate's own, so clear
+  # must leave the file alone entirely - even entries that look like
+  # firstmate's, because looking alike is not ownership.
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen1"}]}]}}' \
+    > "$dir/no-record.json"
+  fm_control_claude_settings_clear "$dir/no-record.json" "$dir/never-written-record" \
+    || fail "clearing with no record must succeed as a no-op"
+  [ "$(jq -c '.hooks.Stop | length' "$dir/no-record.json")" = 1 ] \
+    || fail "clearing with no record must not strip anything, got $(cat "$dir/no-record.json")"
+
+  # An unparseable settings file fires no hooks and cannot be stripped, so
+  # clear leaves it and its record in place rather than guessing.
+  printf '%s' 'not json' > "$dir/unparseable.json"
+  printf '%s\n' '{"version":1,"commands":{"Stop":[]}}' > "$dir/unparseable-record"
+  fm_control_claude_settings_clear "$dir/unparseable.json" "$dir/unparseable-record" 2>/dev/null \
+    || fail "clearing an unparseable file must not fail the caller"
+  [ "$(cat "$dir/unparseable.json")" = 'not json' ] \
+    || fail "clearing must leave an unparseable file's bytes untouched"
+  [ -e "$dir/unparseable-record" ] \
+    || fail "clearing must keep the record for an unparseable file so a later owner can still act on it"
+
+  fm_control_claude_settings_clear "$dir/does-not-exist.json" "$dir/never-written-record" \
+    || fail "clearing a missing file with no record must be a silent no-op"
+  printf '%s\n' '{"version":1,"commands":{"Stop":[]}}' > "$dir/orphan-record"
+  fm_control_claude_settings_clear "$dir/does-not-exist.json" "$dir/orphan-record" \
+    || fail "clearing a missing file must retire its orphaned record"
+  [ ! -e "$dir/orphan-record" ] \
+    || fail "an orphaned record for a missing file must be removed"
+
+  # The teardown diff predicate: true only when the working tree differs from
+  # HEAD by exactly the recorded entries, stripped from the working-tree side.
+  fm_control_claude_settings_install "$settings" \
+    '{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen2"}]}]}' "$record" \
+    || fail "reinstall before the predicate checks must succeed"
+  wt=$(cat "$settings")
+  fm_control_claude_settings_only_owned_differ "$head" "$wt" "$record" \
+    || fail "a working tree that differs from HEAD only by the recorded entries must be recognized"
+  ! fm_control_claude_settings_only_owned_differ "$head" "$wt" "$dir/never-written-record" \
+    || fail "with no record nothing is provably firstmate's own, so the predicate must refuse"
+  ! fm_control_claude_settings_only_owned_differ \
+    "$head" "$(printf '%s' "$wt" | jq -c '.permissions.allow += ["Bash(rm)"]')" "$record" \
+    || fail "a real permissions difference must never be reported as hooks-only"
+  # The exact bug class this predicate exists to refuse: an UNCOMMITTED
+  # project hook whose command text mentions fm-busy-event.sh must not be
+  # stripped out of the comparison and silently discarded by the restore.
+  ! fm_control_claude_settings_only_owned_differ \
+    "$head" "$(printf '%s' "$wt" | jq -c '.hooks.Stop += [{"hooks":[{"type":"command","command":"project edit naming fm-busy-event.sh"}]}]')" "$record" \
+    || fail "an uncommitted project hook mentioning fm-busy-event.sh must never be reported as hooks-only"
+  ! fm_control_claude_settings_only_owned_differ 'not json' "$wt" "$record" \
+    || fail "malformed JSON on either side must never be reported as hooks-only"
+  ! fm_control_claude_settings_only_owned_differ "$head" 'not json' "$record" \
+    || fail "a malformed working-tree file must never be reported as hooks-only"
+  # Stripping firstmate's entries out of an event it created leaves an empty
+  # array; that must compare equal to the event being absent at HEAD, and an
+  # event committed as an empty array must compare equal both ways.
+  printf '%s\n' '{"hooks":{"UserPromptSubmit":[]}}' > "$dir/norm.json"
+  fm_control_claude_settings_install "$dir/norm.json" \
+    '{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen3"}]}],"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh stop gen3"}]}]}' \
+    "$dir/norm-record" || fail "normalization fixture install must succeed"
+  fm_control_claude_settings_only_owned_differ \
+    '{"hooks":{"UserPromptSubmit":[]}}' "$(cat "$dir/norm.json")" "$dir/norm-record" \
+    || fail "an event left as an empty array after stripping must compare equal to it being absent at HEAD"
+  pass "fm-control-lib: claude settings clear strips only recorded entries and retires the record, and the record-driven diff predicate refuses everything it cannot account for"
+}
+
+test_claude_settings_clear_propagates_record_removal_failure() {
+  local dir=$TMP_ROOT/claude-settings-clear-rm-failure fakebin real_rm
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  real_rm=$(command -v rm)
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ -n "${FM_FAKE_RM_FAIL_PATH:-}" ] && [ "$arg" = "$FM_FAKE_RM_FAIL_PATH" ]; then
+    exit 1
+  fi
+done
+exec "$FM_REAL_RM" "$@"
+SH
+  chmod +x "$fakebin/rm"
+
+  # Branch 1: the settings file is already gone, so clear only has the record
+  # left to retire; a failed rm on it must fail the caller, not swallow the
+  # failure and report a clean retirement that never happened.
+  printf '%s\n' '{"version":1,"commands":{"Stop":["fm-busy-event.sh apply gen1"]}}' \
+    > "$dir/absent-record"
+  ( PATH="$fakebin:$PATH" FM_REAL_RM="$real_rm" \
+    FM_FAKE_RM_FAIL_PATH="$dir/absent-record" \
+    fm_control_claude_settings_clear "$dir/absent-settings.json" "$dir/absent-record" ) \
+    && fail "clear must fail when it cannot retire an orphaned record's rm"
+  [ -e "$dir/absent-record" ] \
+    || fail "the record whose rm was blocked should still be on disk"
+
+  # Branch 2: firstmate created the file and stripping its own entries empties
+  # it, so both the file and the record are removed; a failed rm on the
+  # record (after the file rm already succeeded) must still fail the caller.
+  fm_control_claude_settings_install "$dir/created.json" \
+    '{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply gen2"}]}]}' \
+    "$dir/created-record" \
+    || fail "install fixture for branch 2 must succeed"
+  ( PATH="$fakebin:$PATH" FM_REAL_RM="$real_rm" \
+    FM_FAKE_RM_FAIL_PATH="$dir/created-record" \
+    fm_control_claude_settings_clear "$dir/created.json" "$dir/created-record" ) \
+    && fail "clear must fail when it cannot retire the record of a fully-emptied firstmate-created file"
+  [ ! -e "$dir/created.json" ] \
+    || fail "the firstmate-created file itself should still be removed even though the record rm failed"
+  [ -e "$dir/created-record" ] \
+    || fail "the record whose rm was blocked should still be on disk"
+
+  # Branch 3: the file holds none of the recorded entries, so clear skips the
+  # rewrite and only retires the record; a failed rm on it must still fail
+  # the caller instead of reporting success.
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test)"]}}' > "$dir/untouched.json"
+  printf '%s\n' '{"version":1,"commands":{"Stop":["fm-busy-event.sh apply gone-gen"]}}' \
+    > "$dir/untouched-record"
+  ( PATH="$fakebin:$PATH" FM_REAL_RM="$real_rm" \
+    FM_FAKE_RM_FAIL_PATH="$dir/untouched-record" \
+    fm_control_claude_settings_clear "$dir/untouched.json" "$dir/untouched-record" ) \
+    && fail "clear must fail when it cannot retire a record whose entries were never present in the file"
+  [ "$(cat "$dir/untouched.json")" = '{"permissions":{"allow":["Bash(npm test)"]}}' ] \
+    || fail "the untouched file's bytes must stay untouched regardless of the record rm outcome"
+  [ -e "$dir/untouched-record" ] \
+    || fail "the record whose rm was blocked should still be on disk"
+
+  pass "fm-control-lib: claude settings clear propagates a failed record-removal rm as a caller failure on every retirement path"
+}
+
+# The two real-world ways the previous whole-entry-equality design lost
+# ownership silently and permanently, now pinned as regressions:
+# 1. claude itself rewrites .claude/settings.local.json (a mid-task
+#    permission grant re-serializes it) and may add or default sibling
+#    fields on firstmate's entry - ownership must survive that rewrite,
+#    because the recorded COMMAND string is the identity, not the entry.
+# 2. an interruption between install's two writes must never orphan the
+#    previous incarnation's entries - the record is monotone (old commands
+#    unioned with fresh, written first), so a crash leaves it over-broad,
+#    never under-broad.
+test_claude_settings_ownership_survives_entry_rewrite_and_crash_window() {
+  local dir=$TMP_ROOT/claude-settings-drift settings record head gen1 gen2 file_with_gen1
+  mkdir -p "$dir"
+  settings=$dir/settings.local.json
+  record=$dir/claude-settings-owned
+  head='{"permissions":{"allow":["Bash(npm test)"]}}'
+  printf '%s\n' "$head" > "$settings"
+  gen1='{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply /st t1 --gen gen1"}]}]}'
+  gen2='{"Stop":[{"hooks":[{"type":"command","command":"fm-busy-event.sh apply /st t1 --gen gen2"}]}]}'
+  fm_control_claude_settings_install "$settings" "$gen1" "$record" \
+    || fail "install before the drift simulation must succeed"
+
+  # Simulate claude's own rewrite: a defaulted matcher on the entry and an
+  # extra field on the inner hook, exactly what a re-serialization from
+  # claude's parsed model produces. The command string is untouched.
+  printf '%s\n' "$(jq -c '.hooks.Stop[0].matcher = "" | .hooks.Stop[0].hooks[0].timeout = 600' "$settings")" \
+    > "$settings"
+  fm_control_claude_settings_only_owned_differ "$head" "$(cat "$settings")" "$record" \
+    || fail "the diff predicate must still recognize firstmate's own hook after claude rewrites the entry"
+  fm_control_claude_settings_install "$settings" "$gen2" "$record" \
+    || fail "a respawn install over a rewritten entry must succeed"
+  [ "$(jq '.hooks.Stop | length' "$settings")" = 1 ] \
+    || fail "a respawn must still replace, not accumulate, a rewritten entry, got $(jq -c '.hooks.Stop' "$settings")"
+  assert_not_contains "$(jq -c '.hooks.Stop' "$settings")" "gen1" \
+    "a respawn must strip the rewritten previous-incarnation entry by its recorded command"
+  fm_control_claude_settings_clear "$settings" "$record" \
+    || fail "clear over a rewritten entry must succeed"
+  [ "$(jq -r '.permissions.allow[0]' "$settings")" = "Bash(npm test)" ] \
+    || fail "clear must leave the project's own content after stripping a rewritten entry"
+  assert_not_contains "$(jq -c '.hooks // {}' "$settings")" "fm-busy-event.sh" \
+    "clear must remove firstmate's own hook even after claude rewrote its entry"
+  [ ! -e "$record" ] \
+    || fail "clear must retire the record once its entries are stripped"
+
+  # The record is monotone: a reinstall's record still names the previous
+  # incarnation's commands, so the crash window between the record write and
+  # the settings write can never orphan the entries still in the file.
+  printf '%s\n' "$head" > "$settings"
+  rm -f "$record"
+  fm_control_claude_settings_install "$settings" "$gen1" "$record" \
+    || fail "gen1 install for the crash-window simulation must succeed"
+  file_with_gen1=$(cat "$settings")
+  fm_control_claude_settings_install "$settings" "$gen2" "$record" \
+    || fail "gen2 reinstall for the crash-window simulation must succeed"
+  jq -e '.commands.Stop | contains(["fm-busy-event.sh apply /st t1 --gen gen1"]) and contains(["fm-busy-event.sh apply /st t1 --gen gen2"])' \
+    "$record" >/dev/null \
+    || fail "a reinstall must union the old commands into the record, never narrow it, got $(cat "$record")"
+  # Reproduce the interrupted state: the record already names gen2, the
+  # settings write never landed and the file still holds gen1.
+  printf '%s\n' "$file_with_gen1" > "$settings"
+  fm_control_claude_settings_only_owned_differ "$head" "$(cat "$settings")" "$record" \
+    || fail "the over-broad record must still account for the previous incarnation's entries after a crash"
+  fm_control_claude_settings_clear "$settings" "$record" \
+    || fail "clear must succeed on the crash-window state"
+  [ "$(jq -c '.permissions.allow' "$settings")" = '["Bash(npm test)"]' ] \
+    || fail "clear on the crash-window state must preserve the project's content"
+  assert_not_contains "$(jq -c '.hooks // {}' "$settings")" "fm-busy-event.sh" \
+    "clear on the crash-window state must strip the stranded previous-incarnation entry"
+  pass "fm-control-lib: ownership survives claude rewriting the entry, and the monotone record covers the install crash window"
+}
+
 test_prefixed_recorded_harness_reaches_each_control_verb() {
   local dir out rc
   dir=$(new_case prefixed-interrupt)
@@ -878,6 +1242,10 @@ test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
+test_claude_settings_install_preserves_project_keys_and_replaces_own_hooks
+test_claude_settings_clear_strips_own_hooks_and_diff_predicate
+test_claude_settings_clear_propagates_record_removal_failure
+test_claude_settings_ownership_survives_entry_rewrite_and_crash_window
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability

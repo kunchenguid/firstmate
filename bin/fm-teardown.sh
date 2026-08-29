@@ -21,7 +21,18 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
+# Uncommitted changes are never landed. A project-committed .claude/settings.local.json
+# is a tracked exception to that: fm-spawn.sh merges its per-task busy hooks into that
+# file rather than replacing it, so the dirty check would otherwise false-refuse on
+# firstmate's own hook entries every time. restore_claude_settings_if_only_hooks_differ
+# restores that file to HEAD before the dirty check runs, but ONLY when the file's sole
+# working-tree difference from HEAD is hooks whose commands are recorded in
+# state/<id>.claude-settings-owned (proven by
+# fm_control_claude_settings_only_owned_differ in bin/fm-control-lib.sh); any other
+# difference is potentially real unlanded work and still refuses normally. The later
+# cleanup step (teardown_reset_claude_settings) restores a tracked settings file to
+# HEAD instead of deleting it, and still deletes the untracked case, so a
+# treehouse-returned worktree never hands the next task a dead task's live hooks.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1374,9 +1385,66 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Undo firstmate's own tracked .claude/settings.local.json injection before
+# the dirty check below runs, so live per-task busy hooks merged into a
+# project's committed settings file never manufacture a false "uncommitted
+# changes" refusal. Only a TRACKED file whose sole difference from HEAD is
+# the exact entries the state/<id>.claude-settings-owned record proves
+# firstmate wrote is restored; any other difference - including a hook a
+# project added whose command merely resembles firstmate's, and any
+# difference with no record to account for it - is potentially real unlanded
+# work and is left for the dirty check to catch (AGENTS.md hard rule 3).
+# Always succeeds: a restore that cannot be proven safe is simply skipped,
+# never a teardown failure.
+restore_claude_settings_if_only_hooks_differ() {
+  local wt=$1 record_path=$2 path="$1/.claude/settings.local.json" head_json wt_json
+  [ -f "$path" ] || return 0
+  git -C "$wt" ls-files --error-unmatch -- .claude/settings.local.json >/dev/null 2>&1 || return 0
+  head_json=$(git -C "$wt" show HEAD:.claude/settings.local.json 2>/dev/null) || return 0
+  wt_json=$(cat "$path")
+  fm_control_claude_settings_only_owned_differ "$head_json" "$wt_json" "$record_path" || return 0
+  git -C "$wt" checkout -q -- .claude/settings.local.json 2>/dev/null || true
+}
+
+# Reset firstmate's per-task claude settings wiring so a treehouse-returned
+# worktree never carries a dead task's live hooks into whichever task reuses
+# it next. A tracked path - a project's own committed settings.local.json -
+# is restored to HEAD rather than deleted, since deleting a tracked file is
+# itself an unwanted modification; an untracked path, the common case for a
+# project that never committed one, is removed exactly as before.
+teardown_reset_claude_settings() {
+  local wt=$1 path="$1/.claude/settings.local.json"
+  [ -e "$path" ] || return 0
+  if git -C "$wt" ls-files --error-unmatch -- .claude/settings.local.json >/dev/null 2>&1; then
+    git -C "$wt" checkout -q -- .claude/settings.local.json 2>/dev/null || true
+  else
+    rm -f -- "$path"
+  fi
+}
+
+# When a dirty refusal is about to fire and the ONLY uncommitted change is a
+# tracked .claude/settings.local.json with no ownership record to account for
+# it, name the file and the missing record: the likeliest cause is a task
+# armed by a firstmate from before the record existed (homes fast-forward
+# while tasks are live), and a bare "uncommitted changes present" would send
+# the operator hunting for work that may not exist. Purely additive to the
+# refusal - the predicate is never weakened and the refusal still stands.
+explain_claude_settings_refusal() {
+  local dirty_raw=$1 rest
+  [ ! -e "$STATE/$ID.claude-settings-owned" ] || return 0
+  rest=$(printf '%s\n' "$dirty_raw" \
+    | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' \
+    | grep -v '\.claude/settings\.local\.json$' | grep -v '^$' || true)
+  [ -z "$rest" ] || return 0
+  printf '%s\n' "$dirty_raw" | grep -q '^.[^?] \.claude/settings\.local\.json$' || return 0
+  echo "note: the only uncommitted change is .claude/settings.local.json, and no state/$ID.claude-settings-owned record exists for this task." >&2
+  echo "If this task was armed before firstmate recorded its claude hook ownership, that difference may be firstmate's own busy hooks; inspect 'git -C $WT diff -- .claude/settings.local.json' before asking the captain about --force." >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
+  restore_claude_settings_if_only_hooks_differ "$WT" "$STATE/$ID.claude-settings-owned"
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
@@ -1416,6 +1484,7 @@ validate_worktree_teardown_safety() {
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      [ -n "$dirty" ] && explain_claude_settings_refusal "$dirty_raw"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
@@ -1423,6 +1492,7 @@ validate_worktree_teardown_safety() {
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
+    explain_claude_settings_refusal "$dirty_raw"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
@@ -2466,13 +2536,15 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+        teardown_reset_claude_settings "$child_wt"
+        rm -f "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+      teardown_reset_claude_settings "$child_wt"
+      rm -f "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
@@ -2502,7 +2574,8 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
-      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged"
+      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
+      "$sub_state/$child_id.claude-settings-owned"
   done
 }
 
@@ -2685,7 +2758,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+    teardown_reset_claude_settings "$WT"
+    rm -f "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
@@ -2699,7 +2773,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+  teardown_reset_claude_settings "$WT"
+  rm -f "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
@@ -2818,6 +2893,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.claude-settings-owned" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged"

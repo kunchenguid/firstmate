@@ -69,6 +69,14 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      - name: Pin git init.defaultBranch to master
+        run: |
+          set -eu
+          # Stock runners leave init.defaultBranch unset (git's built-in
+          # default is master); pin it so the default-branch-divergence
+          # coverage in the test fixtures cannot silently vanish if the
+          # runner image ever changes its git default (issue #3111).
+          git config --global init.defaultBranch master
       - name: Run portable parallel shard 1
         run: |
           set -eu
@@ -106,6 +114,11 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      - name: Pin git init.defaultBranch to master
+        run: |
+          set -eu
+          # Same pin as shard 1; see that step's comment.
+          git config --global init.defaultBranch master
       - name: Run portable parallel shard 2
         run: |
           set -eu
@@ -165,6 +178,11 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      - name: Pin git init.defaultBranch to master
+        run: |
+          set -eu
+          # Same pin as the parallel shards; see that step's comment.
+          git config --global init.defaultBranch master
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
