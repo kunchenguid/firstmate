@@ -291,6 +291,9 @@ It refuses Zellij, Orca, and cmux as supervisor backends rather than applying th
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
+The Codex-primary watcher bridge (`bin/fm-watch-codex-bridge.sh`, [watcher-continuity.md](watcher-continuity.md#codex-bridge-ownership)) reuses the same two primitives for its tracked-terminal launch and its wake-doorbell injection: a dedicated non-visible Herdr workspace in the captain's named session, and the verified submit path with positive acknowledgement.
+It adds no Herdr-specific copy of either contract.
+
 Harnesses with native tracked background execution can run the daemon in their terminal.
 Pi has no such mechanism.
 `bin/fm-afk-launch.sh` therefore creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.

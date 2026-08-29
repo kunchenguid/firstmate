@@ -103,7 +103,7 @@ Before inspecting or changing session-open behavior, read `docs/sessionstart-nud
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
 Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
-Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
+Codex uses the persistent watcher bridge `bin/fm-watch-codex-bridge.sh`, which injects the canonical wake doorbell into the primary pane, because Codex cannot reason while a foreground tool call is running and has no background-task notification; the bounded foreground checkpoint remains its fallback while the bridge cannot launch.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
@@ -238,8 +238,8 @@ Codex Stop hooks block on exit 2 and expose `stop_hook_active` for the same one-
 Codex's Stop payload includes `cwd`, but the tracked primary hook does not use it to choose the guard executable.
 Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
-Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
-The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
+Codex's primary watcher protocol is the persistent bridge armed with `bin/fm-watch-codex-bridge.sh arm`, not `bin/fm-watch-arm.sh`.
+The bridge launches the persistent owner in its own tracked non-visible terminal and injects `FIRSTMATE_OP: v1 watcher:` wake doorbells into the exact primary pane; `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"` remains the bounded foreground fallback while the bridge cannot launch, deliberately foreground and bounded so Codex regains control regularly.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 

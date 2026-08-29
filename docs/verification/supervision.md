@@ -428,6 +428,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Codex bridge | `tests/fm-watch-codex-bridge-herdr-e2e.test.sh` (isolated lab; skips cleanly without herdr) | The arm launched one persistent owner in its own non-visible lab workspace and re-arming attached; the daemon injected the exact canonical doorbell (U+2063 watcher kind, verbatim queued reason, drain instruction) through the verified submit path, recorded the delivery point, suppressed duplicates, deferred behind a busy primary and a pending composer without typing into either, and stood down without injection when the recorded session was replaced. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
@@ -448,6 +449,8 @@ Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watc
 
 The once-per-generation recovery bound and immediate handling-successor poll were verified on 2026-08-21 with the tracked Pi extension, real watcher processes, and an isolated home.
 The regression forced handling confirmation to fail, observed one recovery follow-up across the former repeat window, confirmed the successor remained live, and then proved a separate handling successor durably queued a crew event within the bounded poll window.
+
+The Codex-primary watcher bridge was verified live on 2026-08-28 against real herdr 0.7.x in an isolated lab session (`bin/fm-herdr-lab.sh` guard, default-session tripwire verified unchanged after teardown), together with the portable regression:
 
 ```sh
 bin/fm-test-run.sh tests/fm-watch-recovery-loop.test.sh
@@ -473,6 +476,8 @@ tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
+tests/fm-watch-codex-bridge.test.sh
+tests/fm-watch-codex-bridge-herdr-e2e.test.sh
 ```
 
 ## Wedge-alarm channels

@@ -39,11 +39,23 @@ The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
-Codex retains its bounded foreground checkpoint protocol.
+Codex owns continuity through the persistent watcher bridge ("Codex bridge ownership" below); its bounded foreground checkpoint remains the fallback while the bridge cannot launch.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
 The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode.
+
+## Codex bridge ownership
+
+A Codex primary has no extension API, no background-task completion notification, and no Stop-rewake, so its continuity owner is the persistent watcher bridge: `bin/fm-watch-codex-bridge.sh arm`, run by the model as one foreground tool call at the first supervision cycle (or on an explicit repair notification), resolves and verifies the exact primary pane and launches the bridge daemon in its own tracked non-visible terminal (a dedicated `--no-focus` Herdr workspace in the captain's named session, or a detached tmux session), mirroring the away launcher's mechanics with the bridge's own record.
+The bridge daemon keeps one live watcher cycle running under the unchanged watcher singleton, beacon, and recovery-generation machinery, and injects the canonical `FIRSTMATE_OP: v1 watcher:` wake prompt into the exact recorded pane through the verified submit path when the durable queue holds wakes Codex has not been doorbelled about yet.
+The injection is a doorbell only: the durable wake queue and the generation-bound acknowledgement stay the source of truth, the bridge never acknowledges a row, and duplicate suppression is exactly "nothing newer than the last confirmed injection".
+Before every injection the bridge re-verifies its ownership binding - canonical home, session lock pid and identity, watcher generation, backend session, exact workspace/tab/pane ids, and the Codex primary identity (the pane's shell must positively contain the session pid in its process tree) - and stands down instead of injecting when any of them no longer matches, so a replaced session, a changed pane, or an unreadable pane never receives a doorbell.
+A busy pane or a composer that is not positively empty defers the injection behind a bounded retry cadence; captain input is never overwritten.
+After an actionable watcher close the bridge's next watcher cycle starts as a handling successor (no recovery re-announcement) while the model handles the delivered wake.
+While `state/.afk` exists the bridge stops entirely so the away daemon owns supervision alone; the next turn-end guard repair re-arms the bridge afterwards.
+The bounded foreground checkpoint (`bin/fm-watch-checkpoint.sh`) remains the manual fallback while the bridge cannot launch, and it no-ops against the watcher singleton while the bridge's cycle is live.
+Regression coverage lives in `tests/fm-watch-codex-bridge.test.sh` and the Herdr-lab end-to-end in `tests/fm-watch-codex-bridge-herdr-e2e.test.sh`; [`verification/supervision.md`](verification/supervision.md#watcher-continuity) owns the live evidence record.
 
 ## Recovery episode acknowledgement
 
@@ -114,6 +126,6 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex depends on the bridge-launched persistent owner with the foreground checkpoint as its fallback.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

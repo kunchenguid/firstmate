@@ -87,10 +87,10 @@ case "$HARNESS" in
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
 
-checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
+codex_bridge="$FM_ROOT/bin/fm-watch-codex-bridge.sh"
 
 shell_quote() {
   printf "'"
@@ -111,6 +111,7 @@ render_snippet() {
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
+    line=${line//__FM_CODEX_BRIDGE__/$codex_bridge}
     printf '%s\n' "$line"
   done < "$SNIPPET"
 }
@@ -138,7 +139,7 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
     codex)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      printf '%s%s\n' "$prefix" 'repair missing watcher supervision with the Codex bridge arm: bin/fm-watch-codex-bridge.sh arm (one foreground call; bin/fm-watch-checkpoint.sh only as the bounded fallback while the bridge cannot launch).'
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
@@ -164,7 +165,7 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     codex)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      printf '%s\n' '- Ordinary wake: the Codex bridge already owns watcher continuity and delivered this wake; drain and handle it, and do not run a checkpoint or arm another cycle.'
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'

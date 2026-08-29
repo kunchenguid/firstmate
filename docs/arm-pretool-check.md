@@ -8,7 +8,7 @@ The tracked harness adapters forward command text without classifying it.
 
 ## Purpose and boundary
 
-A firstmate primary must arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoint.sh` through an observable harness call.
+A firstmate primary must arm `bin/fm-watch-arm.sh`, run `bin/fm-watch-checkpoint.sh`, or arm the Codex bridge `bin/fm-watch-codex-bridge.sh` through an observable harness call.
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
 
@@ -61,9 +61,10 @@ Quoted text, comments, heredoc bodies, and later argument words are data positio
 A command word in executed position is a protected execution when its normalized path suffix matches one of the protected watcher scripts:
 
 ```text
-bin/fm-watch-arm.sh          (arm; blessed entry point)
-bin/fm-watch-checkpoint.sh   (checkpoint; blessed entry point)
-bin/fm-watch.sh              (watch; protected but never blessed)
+bin/fm-watch-arm.sh             (arm; blessed entry point)
+bin/fm-watch-checkpoint.sh      (checkpoint; blessed entry point)
+bin/fm-watch-codex-bridge.sh    (codex bridge arm; blessed entry point)
+bin/fm-watch.sh                 (watch; protected but never blessed)
 ```
 
 The relative form, the `<code-root>`-anchored absolute form, and any word ending in `/bin/<script>` all resolve to that identity.
@@ -73,7 +74,7 @@ Static quote forms are cooked before the suffix match, so a command word split b
 This covers statically-visible literal words in command position; opaque dynamic dataflow such as `bash -lc "$WHOLE_COMMAND"` remains out of scope.
 
 `bin/fm-watch.sh` is protected but is not a blessed entry point.
-A direct `bin/fm-watch.sh` execution - relative, `<code-root>`-anchored, `$VAR`-prefixed, or `~`-prefixed - always denies with `watcher-direct`, whose reason points the caller at `bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh`.
+A direct `bin/fm-watch.sh` execution - relative, `<code-root>`-anchored, `$VAR`-prefixed, or `~`-prefixed - always denies with `watcher-direct`, whose reason points the caller at `bin/fm-watch-arm.sh`, `bin/fm-watch-checkpoint.sh`, and the Codex bridge arm.
 
 The same bytes in an argument, comment, assertion, documentation query, Python string, `printf`, or `tmux send-keys` payload are data and do not make the outer command relevant.
 
@@ -90,7 +91,7 @@ An actual protected command with a heredoc still has a redirection and is denied
 ## Blessed syntax tree
 
 An allowed watcher program is one linear outer command list with zero or more approved setup nodes followed by exactly one direct protected node.
-`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
+`bin/fm-watch-arm.sh`, `bin/fm-watch-checkpoint.sh`, and `bin/fm-watch-codex-bridge.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
 
 Approved setup nodes are:
 
@@ -138,7 +139,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
-| `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
+| `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh`, `bin/fm-watch-checkpoint.sh`, or the Codex bridge arm. |
 
 Reason codes are the stable contract for tests and adapters.
 Prose may improve without changing adapter behavior.
