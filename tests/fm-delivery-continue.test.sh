@@ -62,17 +62,23 @@ run_continue() {
 }
 
 test_exactly_once_delivery_and_replay() {
-  local dir home send state first second count due
+  local dir home send state first second third count due record
   dir="$TMP_ROOT/exactly-once"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
   send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
   first=$(run_continue "$home" "$send" "$state") || fail "initial continuation failed"
+  make_state_stub "$state" unavailable
   second=$(run_continue "$home" "$send" "$state") || fail "replay continuation failed"
+  due=$(FM_TASK_INBOX_GRACE_SECS=0 fm_task_inbox_due_action "$home/state" ship)
+  record=$(find "$home/state/ship.inbox" -maxdepth 1 -name '*.msg' -print -quit)
+  mkdir -p "$home/state/ship.inbox/handled"
+  mv "$record" "$home/state/ship.inbox/handled/"
+  third=$(run_continue "$home" "$send" "$state") || fail "handled replay continuation failed"
   count=$(find "$home/state/ship.inbox" -name '*.msg' | wc -l | tr -d ' ')
   [ "$first" = 'result=sent task=ship' ] || fail "initial result wrong: $first"
   [ "$second" = 'result=already-delivered task=ship' ] || fail "replay result wrong: $second"
+  [ "$third" = 'result=already-delivered task=ship' ] || fail "handled replay result wrong: $third"
   [ "$count" = 1 ] || fail "replay created $count delivery records"
-  due=$(FM_TASK_INBOX_GRACE_SECS=0 fm_task_inbox_due_action "$home/state" ship)
   [[ "$due" == ring* ]] || fail "continuation record was excluded from acknowledgement retries: $due"
   [ ! -e "$home/state/.lease-ship" ] || fail "continuation stranded its lease"
   pass "committed-ready delivery is durable exactly once and replay-safe"
@@ -83,7 +89,7 @@ test_refusals_preserve_stop() {
   dir="$TMP_ROOT/refusals"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
   send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
-  { printf 'blocked [key=real]: waiting for authority\n'; cat "$home/state/ship.status"; } > "$home/state/ship.status.next"
+  { printf 'blocked: waiting while docs mention [key=route] in prose\n'; cat "$home/state/ship.status"; } > "$home/state/ship.status.next"
   mv "$home/state/ship.status.next" "$home/state/ship.status"
   out=$(run_continue "$home" "$send" "$state") || fail "blocked result execution failed"
   [[ "$out" == *'reason=open-decision-or-blocker'* ]] || fail "open blocker was not refused: $out"

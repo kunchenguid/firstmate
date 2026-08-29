@@ -40,6 +40,10 @@ install_pi_watch_extension_fixture() {
   cat > "$repo/bin/fm-delivery-continue.sh" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_DELIVERY_LOG:-}" ] || printf 'delivery=%s\n' "$1" >> "$FM_DELIVERY_LOG"
+if [ -n "${FM_DELIVERY_BLOCK_FILE:-}" ] && [ ! -e "$FM_DELIVERY_BLOCK_FILE" ]; then
+  printf 'result=retry task=%s reason=validation-attribution-unavailable\n' "$1"
+  exit 0
+fi
 if [ -n "${FM_DELIVERY_RETRY_MARK:-}" ] && [ ! -e "$FM_DELIVERY_RETRY_MARK" ]; then
   : > "$FM_DELIVERY_RETRY_MARK"
   printf 'result=retry task=%s reason=%s\n' "$1" "${FM_DELIVERY_RETRY_REASON:-supervision-owner-active}"
@@ -431,6 +435,88 @@ EOF
   expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
   [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
   pass "Pi actionable close starts one successor before wake delivery settles"
+}
+
+test_pi_transient_delivery_retry_keeps_successor_supervised() {
+  local repo home plugin log stop release out status
+  repo="$TMP_ROOT/pi-delivery-retry-supervision-root"
+  home="$TMP_ROOT/pi-delivery-retry-supervision-home"
+  log="$TMP_ROOT/pi-delivery-retry-supervision.log"
+  stop="$TMP_ROOT/pi-delivery-retry-supervision.stop"
+  release="$TMP_ROOT/pi-delivery-retry-supervision.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: task-retry committed\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation-%s\n' "$$" "$count"
+if [ "$count" -eq 2 ]; then
+  sleep 0.1
+  printf 'watcher: FAILED - successor closed during delivery retry\n' >&2
+  exit 1
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELIVERY_LOG="$log" FM_DELIVERY_BLOCK_FILE="$release" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let mainPrompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    mainPrompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task-retry.meta`, "project=/projects/approved\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\ttask-retry.status\tsignal: task-retry committed\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-delivery-retry", {}, undefined, undefined, {});
+for (let i = 0; i < 500; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8") : "";
+  if ((rows.match(/^arm=/gm) || []).length >= 3) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const beforeRelease = readFileSync(process.env.FM_ARM_LOG, "utf8");
+if ((beforeRelease.match(/^arm=/gm) || []).length !== 3) {
+  throw new Error(`successor close was stranded during delivery retry: ${beforeRelease.replace(/\n/g, " | ")}`);
+}
+if (mainPrompt) throw new Error(`transient preflight reached main before it settled: ${mainPrompt}`);
+writeFileSync(process.env.FM_DELIVERY_BLOCK_FILE, "release\n");
+for (let i = 0; i < 500 && !mainPrompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!mainPrompt.includes("result=refused task=task-retry reason=fixture-stop")) {
+  throw new Error(`settled preflight did not reach main: ${mainPrompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi transient delivery retries must not strand successor supervision: $out"
+  [ -z "$out" ] || fail "Pi delivery-retry supervision test printed output: $out"
+  pass "Pi delivery retries leave successor close handling supervised"
 }
 
 test_pi_branch_offer_owns_actionable_wake() {
@@ -2836,6 +2922,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_transient_delivery_retry_keeps_successor_supervised
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check

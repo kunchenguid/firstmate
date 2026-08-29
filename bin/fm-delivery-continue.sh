@@ -110,6 +110,16 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 [ -z "$(status_open_decisions "$STATUS")" ] || refuse open-decision-or-blocker
 
+# shellcheck source=bin/fm-task-inbox-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+DELIVERY=$(fm_delivery_continuation_id "$TASK" "$HEAD" "$SPAWN_GEN")
+DELIVERY_STATE=$(fm_delivery_continuation_state "$STATE" "$TASK" "$SPAWN_GEN" "$HEAD" 2>/dev/null || true)
+case "$DELIVERY_STATE" in
+  pending$'\t'*|acknowledged$'\t'*) result already-delivered; exit 0 ;;
+  head-mismatch$'\t'*) refuse continuation-head-mismatch ;;
+esac
+
 # The strict run-attribution read distinguishes proven absence from an
 # unavailable no-mistakes query before any durable instruction is created.
 CREW_STATE=$("$CREW_STATE_BIN" --run-attribution "$TASK" 2>/dev/null || true)
@@ -121,17 +131,7 @@ case "$CREW_STATE" in
   *) retry validation-attribution-unavailable ;;
 esac
 
-# shellcheck source=bin/fm-task-inbox-lib.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
-DELIVERY=$(fm_delivery_continuation_id "$TASK" "$HEAD" "$SPAWN_GEN")
 MESSAGE=$(fm_delivery_continuation_message "$TASK" "$HEAD" "$SPAWN_GEN" "$DELIVERY")
-DELIVERY_STATE=$(fm_delivery_continuation_state "$STATE" "$TASK" "$SPAWN_GEN" "$HEAD" 2>/dev/null || true)
-case "$DELIVERY_STATE" in
-  pending$'\t'*|acknowledged$'\t'*) result already-delivered; exit 0 ;;
-  head-mismatch$'\t'*) refuse continuation-head-mismatch ;;
-esac
-
 FM_SEND_IDEMPOTENT=1 FM_SEND_EXPECTED_SPAWN_GEN="$SPAWN_GEN" \
   "$SEND_BIN" "$TASK" "$MESSAGE" >/dev/null || retry inbox-delivery-failed
 result sent

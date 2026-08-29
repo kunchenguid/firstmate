@@ -346,6 +346,14 @@ _fm_key_at_note_tail_compat() {  # <status-line> -> raw slug
   case "$prefix" in *'[key='*) return 1 ;; esac
   printf '%s' "$k"
 }
+_fm_has_note_tail_key_position() {  # <status-line>
+  local line=$1 rest verb
+  verb=$(status_line_verb "$line")
+  case "$verb" in blocked|resolved) ;; *) return 1 ;; esac
+  case "$line" in *:*) rest=${line#*:} ;; *) return 1 ;; esac
+  rest=${rest%"${rest##*[![:space:]]}"}
+  case "$rest" in *' [key='*']') return 0 ;; *) return 1 ;; esac
+}
 _fm_status_legacy_tail_key_compat_enabled() {  # <status-file>
   local f=$1 task home data brief
   task=${f##*/}; task=${task%.status}
@@ -395,13 +403,18 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   else
     if k=$(_fm_key_at_note_head "$1"); then
       :
-    elif [ "${FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY:-0}" = 1 ] \
-      && k=$(_fm_key_at_note_tail_compat "$1"); then
-      :
+    elif [ "${FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY:-0}" = 1 ]; then
+      if k=$(_fm_key_at_note_tail_compat "$1"); then
+        :
+      elif _fm_has_note_tail_key_position "$1"; then
+        return 1
+      else
+        printf 'default'
+        return 0
+      fi
     else
-      # A malformed or multiply-keyed legacy tail is a stated-but-invalid
-      # transition, not a reason to fall back into the shared default bucket.
-      case "$1" in *' [key='*']') return 1 ;; *) printf 'default'; return 0 ;; esac
+      printf 'default'
+      return 0
     fi
   fi
   _fm_decision_slug_ok "$k" || return 1

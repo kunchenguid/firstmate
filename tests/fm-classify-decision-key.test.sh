@@ -275,8 +275,14 @@ test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak() {
   printf 'resolved: custody receipt is valid and validation is active [key=main-custody]\n' >> "$dir/t.status"
   FM_DATA_OVERRIDE="$data" assert_fold "$dir/t.status" "" "legacy trailing resolution"
 
+  mkdir -p "$data/malformed"
+  cp "$data/t/brief.md" "$data/malformed/brief.md"
   printf 'blocked: prose mentions [key=other] before the final detail [key=main-custody]\n' > "$dir/malformed.status"
-  assert_fold "$dir/malformed.status" "" "multiple legacy tokens stay non-authoritative"
+  FM_DATA_OVERRIDE="$data" assert_fold "$dir/malformed.status" "" "multiple legacy tokens stay non-authoritative"
+  printf 'blocked: waiting while docs mention [key=route] in prose\n' > "$dir/mid-note.status"
+  assert_fold "$dir/mid-note.status" \
+    "$(printf 'default\tblocked\twaiting while docs mention [key=route] in prose\n')" \
+    "mid-note key prose retains the default blocker"
   printf 'needs-decision [key=q1]: choose the route\nresolved: docs still mention [key=q1]\n' > "$dir/current.status"
   assert_fold "$dir/current.status" "$(printf 'q1\tneeds-decision\tchoose the route\n')" "unproven trailing prose"
   pass "only a legacy generated brief enables the trailing-key compatibility form"

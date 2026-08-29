@@ -584,16 +584,19 @@ export default function (pi: ExtensionAPI) {
         owner.retryFailures = 0;
         owner.restoring = true;
         void (async () => {
+          let ownsRestoration = true;
           try {
             const restoration = await restoreAfterActionableClose(owner, predecessor);
             if (!generationIsLive(owner)) return;
+            owner.restoring = false;
+            ownsRestoration = false;
             const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
             await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
           } finally {
-            if (generationIsLive(owner)) owner.restoring = false;
+            if (generationIsLive(owner) && ownsRestoration) owner.restoring = false;
           }
         })();
         return;

@@ -24,6 +24,7 @@ A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=
 A captain-facing outcome instead opens exactly one follow-up turn on this conversation - MAIN must produce its captain-visible response in that turn, and no separate note is printed here.
 Before MAIN steers, controls lifecycle, or cleans up a task, claim its lease with `bin/fm-lease.sh claim <task>` and release it afterwards; Pi binds those claims to the current logical agent run and cleans that exact owner at settlement, while a refused claim means another supervision operation is acting on that task right now.
 This conversation still receives every other fleet-wide or unresolvable wake, the branch's wakes when it is unavailable or away mode is active, and every watcher-failure alarm regardless, so the arm and repair contract above is unchanged.
+When a wake includes a `Deterministic delivery continuation preflight`, its typed result is authoritative for that receipt; MAIN must not call the continuation owner, trigger validation independently, or send another validation instruction for the same receipt.
 Treat the merged fleet event as already handled for fleet operations: MAIN must not re-drain, re-run, or acknowledge it.
 Separately, MAIN applies judgment about whether and how to surface, summarize, reference, or incorporate a merged sailboat outcome in the captain conversation; event ownership does not decide the conversational treatment.
 Read the durable outcome store with the fm_branch_outcomes tool when the captain asks what happened.
