@@ -791,25 +791,75 @@ test('failed wake append is recoverable by ordinary intake scan', async () => {
   assert.equal(again.stdout, '');
 });
 
-test('ordinary wake drain consumes the answer before draining its pointer', async () => {
-  const fx = await fixture('wake-boundary');
+test('ordinary wake drain skips an unreadable legacy Downloads path and consumes the answer', async () => {
+  const fx = await fixture('wake-boundary-unreadable-downloads');
   const id = await createRequest(fx);
   const answered = await answer(fx, id);
   assert.equal(answered.code, 0, answered.stderr);
   const fakeBin = join(fx.root, 'bin');
+  const legacyHome = join(fx.root, 'legacy-home');
   await mkdir(fakeBin);
+  await mkdir(legacyHome);
   await symlink(CLI, join(fakeBin, 'lavish-axi'));
+  await writeFile(join(legacyHome, 'Downloads'), 'not a directory\n');
 
+  const drained = await runExecutable(WAKE_DRAIN, [], {
+    env: {
+      FM_HOME: fx.home,
+      HOME: legacyHome,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+    },
+    unsetEnv: ['LAVISH_SCAN_HOME_DOWNLOADS'],
+  });
+  assert.equal(drained.code, 0, drained.stderr);
+  assert.doesNotMatch(drained.stdout, /scan-incomplete|payload_scan_error/);
+  assert.match(drained.stdout, /LAVISH_INTAKE:/);
+  assert.match(drained.stdout, /release-choice,consumed/);
+  assert.match(drained.stdout, /\tsignal\tlavish:release-choice\tdecision-answer:/);
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'receipt.toon')),
+    true,
+  );
+  assert.equal(
+    await exists(join(fx.home, 'data/replies/release-choice.toon')),
+    true,
+  );
+});
+
+test('ordinary wake drain stays prompt when legacy Downloads recovery would stall', async () => {
+  const fx = await fixture('wake-boundary-slow-downloads');
+  const id = await createRequest(fx);
+  const answered = await answer(fx, id);
+  assert.equal(answered.code, 0, answered.stderr);
+  const fakeBin = join(fx.root, 'bin');
+  const lavishShim = join(fakeBin, 'lavish-axi');
+  await mkdir(fakeBin);
+  await writeFile(lavishShim, `#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+  exec '${CLI}' --version
+fi
+if [ "\${LAVISH_SCAN_HOME_DOWNLOADS:-}" != 0 ]; then
+  sleep 4
+  printf 'simulated optional Downloads scan stall\\n' >&2
+  exit 97
+fi
+exec '${CLI}' "$@"
+`);
+  await chmod(lavishShim, 0o700);
+
+  const startedAt = Date.now();
   const drained = await runExecutable(WAKE_DRAIN, [], {
     env: {
       FM_HOME: fx.home,
       PATH: `${fakeBin}:${process.env.PATH}`,
     },
+    unsetEnv: ['LAVISH_SCAN_HOME_DOWNLOADS'],
   });
+  const elapsedMs = Date.now() - startedAt;
+
   assert.equal(drained.code, 0, drained.stderr);
-  assert.match(drained.stdout, /LAVISH_INTAKE:/);
+  assert.ok(elapsedMs < 2_000, `wake drain took ${elapsedMs}ms`);
   assert.match(drained.stdout, /release-choice,consumed/);
-  assert.match(drained.stdout, /\tsignal\tlavish:release-choice\tdecision-answer:/);
   assert.equal(
     await exists(join(fx.home, 'data/decisions', id, 'receipt.toon')),
     true,

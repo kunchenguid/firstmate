@@ -114,11 +114,15 @@ lavish-axi collect <decision-id> --payload /path/to/payload.json --home '/Users/
 
 `collect` validates the complete payload against the immutable manifest, commits the write-once `answer.toon`, and then invokes the redundant wake path.
 
-At firstmate's existing wake and session-start boundaries:
+At firstmate's existing wake and session-start boundaries, `bin/fm-lavish-intake.sh` runs:
 
 ```sh
-lavish-axi intake
+LAVISH_SCAN_HOME_DOWNLOADS=0 lavish-axi intake --home "$FM_HOME"
 ```
+
+The boundary adapter skips only implicit legacy recovery below the invoking user's Downloads directory, because that optional scan must not stall fleet supervision.
+Authoritative answer intake and board payload recovery below the effective state root remain enabled.
+Run `lavish-axi intake --home <path>` directly when legacy home-Downloads recovery is explicitly needed.
 
 Intake validates every unreceipted answer, writes the declared destination first, then writes `receipt.toon`.
 An existing matching destination or receipt is an idempotent success.

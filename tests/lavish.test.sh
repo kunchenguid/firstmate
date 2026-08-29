@@ -25,6 +25,10 @@ if [ "${1:-}" = --version ]; then
   printf '%s\n' "${LAVISH_TEST_VERSION:?}"
   exit 0
 fi
+[ "${LAVISH_SCAN_HOME_DOWNLOADS:-}" = 0 ] || {
+  printf 'ordinary intake left optional home Downloads recovery enabled\n' >&2
+  exit 97
+}
 printf '%s\n' "$*" >> "${LAVISH_TEST_CALL_LOG:?}"
 SH
   chmod +x "$test_root/bin/lavish-axi"
