@@ -942,7 +942,8 @@ test_pi_compact_refresh_is_nontriggering_bounded_and_restorable() {
   fixture="$TMP_ROOT/pi-compact-refresh"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
@@ -998,9 +999,9 @@ const sessionCtx = {
   hasUI: false,
 };
 await first.handlers.get("session_start")({ reason: "startup" }, sessionCtx);
-if (first.sent.length !== 1) throw new Error(`startup sent ${first.sent.length} messages`);
-if (first.sent[0].options?.triggerTurn !== false) throw new Error("startup delivery was not explicitly non-triggering");
-first.sent.length = 0;
+const startupResult = await first.handlers.get("before_agent_start")({ prompt: "test" }, sessionCtx);
+if (!startupResult?.message) throw new Error("expected one persistent preflight message from before_agent_start");
+if (first.sent.length !== 0) throw new Error(`startup used sendMessage instead of before_agent_start delivery, got ${first.sent.length}`);
 await first.handlers.get("session_before_compact")({
   preparation: { settings: { reserveTokens: 1024, keepRecentTokens: 512 } },
 });

@@ -33,7 +33,9 @@ type CompactRefreshBudget = {
 const compactRefreshStateType = "firstmate-post-compact-refresh";
 let compactSettings: { reserveTokens: number; keepRecentTokens: number } | undefined;
 let compactRefresh: CompactRefreshState | undefined;
-let previousCompactRefreshTokens = 0;
+// UTF-8 BYTE count of the last delivered refresh (an upper bound on its token
+// count, since every token encodes at least one byte) - never a token count.
+let previousCompactRefreshBytes = 0;
 let compactRefreshNotice = "";
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -519,7 +521,7 @@ function activeToolTokens(pi: ExtensionAPI): number {
 
 function restoreCompactRefresh(ctx: SessionStartContext): void {
   compactRefresh = undefined;
-  previousCompactRefreshTokens = 0;
+  previousCompactRefreshBytes = 0;
   compactRefreshNotice = "";
   const branch = ctx.sessionManager?.getBranch?.();
   if (!Array.isArray(branch)) return;
@@ -579,6 +581,9 @@ function compactRefreshContent(
   } catch {
     return undefined;
   }
+  // Sizing needs an UPPER bound on token count so we never claim to fit more
+  // than we do; UTF-8 byte length is a valid upper bound because every token
+  // encodes at least one byte.
   const fullTokens = utf8Bytes(fullContent);
   if (!refresh.hardTruncated && refresh.raw && fullTokens <= availableTokens) {
     return { content: fullContent, deliveredTokens: fullTokens, omitted: false };
@@ -616,8 +621,18 @@ function compactRefreshBudget(
   const desiredSafetyTokens = Math.max(compactRefreshSafetyTokens, Math.ceil(contextWindow * 0.05));
   let baseTokens: number;
   if (usage?.tokens !== null && usage?.tokens !== undefined) {
-    baseTokens = Math.max(0, usage.tokens - previousCompactRefreshTokens);
+    // Subtracting the prior refresh out of authoritative provider usage needs
+    // a LOWER bound on its token count, so baseTokens stays an over-estimate
+    // and headroom stays an under-estimate. maxBytesPerToken is a deliberately
+    // conservative MAXIMUM (not the ~4 byte/token average for ordinary text,
+    // which individual tokens routinely exceed) so the quotient is a floor.
+    const maxBytesPerToken = 8;
+    const previousCompactRefreshTokensFloor = Math.floor(previousCompactRefreshBytes / maxBytesPerToken);
+    baseTokens = Math.max(0, usage.tokens - previousCompactRefreshTokensFloor);
   } else {
+    // No authoritative usage available: sum UTF-8 byte estimates, which is an
+    // upper bound on base context and therefore already errs in the safe
+    // direction (do not "fix" this toward the byte/token average).
     const messageTokens = serializedBytes(eventMessages);
     const systemTokens = utf8Bytes(String(ctx.getSystemPrompt?.() ?? ""));
     baseTokens = messageTokens + systemTokens + activeToolTokens(pi);
@@ -729,6 +744,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("session_before_compact", (event) => {
+    // keepRecentTokens is captured and persisted (see CompactRefreshState) but
+    // deliberately not folded into compactRefreshBudget: retained messages
+    // already appear in event.messages and in usage.tokens on both budget
+    // branches, so adding it would double-count retained context and shrink
+    // the refresh with no safety benefit.
     compactSettings = {
       reserveTokens: event.preparation.settings.reserveTokens,
       keepRecentTokens: event.preparation.settings.keepRecentTokens,
@@ -761,7 +781,7 @@ export default function (pi: ExtensionAPI) {
       reserveTokens,
       keepRecentTokens,
     };
-    previousCompactRefreshTokens = 0;
+    previousCompactRefreshBytes = 0;
     compactRefreshNotice = "";
     try {
       pi.appendEntry(compactRefreshStateType, compactRefresh);
@@ -785,7 +805,7 @@ export default function (pi: ExtensionAPI) {
       removeSessionstartExitListener();
       compactSettings = undefined;
       compactRefresh = undefined;
-      previousCompactRefreshTokens = 0;
+      previousCompactRefreshBytes = 0;
       compactRefreshNotice = "";
     }
   });
@@ -796,7 +816,7 @@ export default function (pi: ExtensionAPI) {
     if (!budget) return;
     const bounded = compactRefreshContent(compactRefresh, budget.availableTokens);
     if (!bounded) {
-      previousCompactRefreshTokens = 0;
+      previousCompactRefreshBytes = 0;
       const notice = "none";
       if (ctx.hasUI && compactRefreshNotice !== notice) {
         compactRefreshNotice = notice;
@@ -807,7 +827,7 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    previousCompactRefreshTokens = bounded.deliveredTokens;
+    previousCompactRefreshBytes = bounded.deliveredTokens;
     if (bounded.omitted) {
       const notice = "bounded";
       if (ctx.hasUI && compactRefreshNotice !== notice) {
@@ -835,7 +855,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("model_select", () => {
-    previousCompactRefreshTokens = 0;
+    previousCompactRefreshBytes = 0;
     compactRefreshNotice = "";
   });
 
