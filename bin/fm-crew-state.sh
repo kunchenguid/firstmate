@@ -27,7 +27,11 @@
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
 #   2. Attribute an active or terminal no-mistakes run under the branch, head,
-#      pipeline-custody, and newest-first rules owned by bin/fm-nm-run-lib.sh.
+#      and pipeline-custody rules owned by bin/fm-nm-run-lib.sh, applied to the
+#      branch's NEWEST run row only (this script owns that row selection; see
+#      nm_runs_status_for_branch and the own-branch bind below): that row binds
+#      or nothing is attributed, because a superseded run surfaced in a live
+#      one's place reports working crews as failed.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
