@@ -830,7 +830,9 @@ cat > "$REPORT_HOME/state/.home-summary-refresh.log" <<'EOF'
 [2026-08-28T09:59:00Z] refresh exceeded its 60-second deadline
 EOF
 run_bootstrap_detect() {
+  local threshold=${2:-2}
   PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$1" \
+    FM_HOME_SUMMARY_FAILURE_REPORT="$threshold" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
@@ -937,7 +939,7 @@ LOCK_HOLDER_PID=
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ORDER_HOME" \
   FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
   "$WRITER" || fail "could not publish after the ordered timeout"
-order_out=$(run_bootstrap_detect "$ORDER_HOME")
+order_out=$(run_bootstrap_detect "$ORDER_HOME" 1)
 case "$order_out" in
   *HOME_SUMMARY:*)
     fail "a pre-publication attempt was reported after the newer ledger: $order_out"
