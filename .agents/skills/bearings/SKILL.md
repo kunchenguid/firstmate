@@ -143,7 +143,7 @@ Rules that keep the contract unambiguous:
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
 - The chat follows `AGENTS.md` section 9 in every section.
 - Recently Landed, Underway, and Charted Next carry one scannable line per item.
-- When context is needed, a Captain's Call item gets two or three short sentences so it is answerable without a follow-up question.
+- When context is needed, a Captain's Call item may use two or three short sentences so it is answerable without a follow-up question.
 - Those sentences name the item in plain words, give one clause of provenance, and state the exact ask: the word to say, the click to make, or the thing to paste.
 - Use that room only when an item genuinely needs the context; a self-evident Captain's Call item stays one line, no item runs past three sentences, and the room is for the ask and its provenance, never the full decision record or options list.
 - Here is the shape.
