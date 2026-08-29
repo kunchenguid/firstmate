@@ -661,6 +661,66 @@ test_queued_enter_verdict_does_not_convert_other_states() {
   pass "fm_composer_queued_enter_verdict: only proven pending is converted"
 }
 
+# --- Claude's workspace-trust dialog ----------------------------------------
+#
+# Byte-level fixture captured live (task fm-claude-trust-dialog-autoaccept,
+# Claude Code 2.1.251, 2026-08-29) from a real never-trusted git worktree
+# launched through bin/fm-spawn.sh. The dialog is cancel-first and
+# cancel-focused by default, so the fixture starts with "No, exit" focused -
+# the landmine this classifier exists to detect before a bare Enter declines
+# and exits the worker.
+CLAUDE_TRUST_CANCEL_FOCUSED=$' Accessing workspace:\n\n /repo/wt\n\n Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what\'s in this folder first.\n\n Claude Code\'ll be able to read, edit, and execute files here.\n\n Security guide\n\n \xe2\x9d\xaf No, exit\n   Yes, I trust this folder\n\n Enter to confirm . Esc to cancel'
+CLAUDE_TRUST_YES_FOCUSED=$' Accessing workspace:\n\n /repo/wt\n\n Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what\'s in this folder first.\n\n Claude Code\'ll be able to read, edit, and execute files here.\n\n Security guide\n\n   No, exit\n \xe2\x9d\xaf Yes, I trust this folder\n\n Enter to confirm . Esc to cancel'
+CLAUDE_TRUST_PERMISSIONS_VARIANT=$' Accessing workspace:\n\n /repo/wt\n\n Quick safety check: ...\n\n \xe2\x9d\xaf No, continue without these permissions\n   Yes, I trust this folder\n\n Enter to confirm . Esc to cancel'
+
+test_claude_trust_dialog_defaults_to_cancel_focused() {
+  local out
+  out=$(fm_composer_claude_trust_dialog_state "$CLAUDE_TRUST_CANCEL_FOCUSED")
+  [ "$out" = trust-unfocused ] || fail "the cancel-focused default must read trust-unfocused (a bare Enter here declines and exits), got '$out'"
+  pass "fm_composer_claude_trust_dialog_state: the cancel-focused default reads trust-unfocused"
+}
+
+test_claude_trust_dialog_yes_focused_after_navigation() {
+  local out
+  out=$(fm_composer_claude_trust_dialog_state "$CLAUDE_TRUST_YES_FOCUSED")
+  [ "$out" = trust-focused ] || fail "the Yes row focused (after Down) must read trust-focused, got '$out'"
+  pass "fm_composer_claude_trust_dialog_state: focus on \"Yes, I trust this folder\" reads trust-focused"
+}
+
+test_claude_trust_dialog_permissions_backstop_variant() {
+  local out
+  out=$(fm_composer_claude_trust_dialog_state "$CLAUDE_TRUST_PERMISSIONS_VARIANT")
+  [ "$out" = trust-unfocused ] || fail "the gated-grants cancel label variant must still be detected, got '$out'"
+  pass "fm_composer_claude_trust_dialog_state: the alternate cancel label still detects the dialog"
+}
+
+test_claude_trust_dialog_absent_on_ordinary_screens() {
+  local out
+  out=$(fm_composer_claude_trust_dialog_state $'transcript line\n────────────────────────\n❯'"$NBSP"$'\n────────────────────────')
+  [ "$out" = absent ] || fail "claude's ordinary idle composer must not read as the trust dialog, got '$out'"
+  out=$(fm_composer_claude_trust_dialog_state 'Yes, I trust this folder mentioned in passing, no title')
+  [ "$out" = absent ] || fail "the Yes label alone, without the dialog's own title, must not false-positive, got '$out'"
+  pass "fm_composer_claude_trust_dialog_state: absent on an ordinary composer and on the label alone without the title"
+}
+
+test_claude_trust_dialog_state_survives_ansi_styling() {
+  local esc styled out
+  esc=$(printf '\033')
+  styled="${esc}[1m Accessing workspace:${esc}[0m
+ /repo/wt
+ ${esc}[7m❯${esc}[0m No, exit
+   Yes, I trust this folder"
+  out=$(fm_composer_claude_trust_dialog_state "$styled")
+  [ "$out" = trust-unfocused ] || fail "ANSI-styled dialog text must still be detected, got '$out'"
+  pass "fm_composer_claude_trust_dialog_state: detection survives ANSI styling"
+}
+
+test_claude_trust_dialog_defaults_to_cancel_focused
+test_claude_trust_dialog_yes_focused_after_navigation
+test_claude_trust_dialog_permissions_backstop_variant
+test_claude_trust_dialog_absent_on_ordinary_screens
+test_claude_trust_dialog_state_survives_ansi_styling
+
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states

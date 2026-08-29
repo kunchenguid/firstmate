@@ -2403,6 +2403,61 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+claude_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+# Claude's own workspace-trust dialog (bin/fm-composer-lib.sh owns detection
+# and the "bare Enter declines and exits" hazard) can appear before any
+# composer exists, once, the first time ANY worktree of a never-trusted
+# repository is spawned into. The common already-trusted case costs one cheap
+# capture read and returns immediately; CLAUDE_TRUST_DIALOG_SEEN is set only
+# when the dialog was actually observed, so an ordinary spawn's behavior is
+# unchanged.
+CLAUDE_TRUST_DIALOG_SEEN=0
+claude_trust_dialog_clear() {
+  local pane state i=0 max=${FM_CLAUDE_TRUST_POLLS:-30} interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
+  pane=$(claude_capture)
+  state=$(fm_composer_claude_trust_dialog_state "$pane")
+  [ "$state" = absent ] && return 0
+  CLAUDE_TRUST_DIALOG_SEEN=1
+  while [ "$i" -lt "$max" ]; do
+    case "$state" in
+      absent) return 0 ;;
+      trust-focused) spawn_send_key "$T" Enter ;;
+      trust-unfocused) spawn_send_key "$T" Down ;;
+    esac
+    sleep "$interval"
+    pane=$(claude_capture)
+    state=$(fm_composer_claude_trust_dialog_state "$pane")
+    i=$((i + 1))
+  done
+  [ "$state" = absent ]
+}
+
+# Postcondition for the trust-dialog accept above: the dialog being gone is
+# not proof the launch brief is being processed (a delivered key is not proof
+# of submission - harness-adapters' control-and-recovery reference). This
+# reads the same delivery-only rendered busy footer bin/fm-composer-lib.sh
+# already uses fleet-wide to confirm a submitted turn actually started, so a
+# claude that quietly re-showed a second gate (or never resumed) fails loudly
+# instead of reporting a false "spawned".
+claude_wait_for_processing() {
+  local pane i=0 max=${FM_CLAUDE_PROCESSING_POLLS:-40} interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(claude_capture)
+    printf '%s' "$pane" | fm_busy_lines_match claude && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+claude_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -3087,6 +3142,18 @@ if [ "$HARNESS" = kimi ]; then
     exit 1
   fi
 fi
+case "$HARNESS" in
+  claude*)
+    if ! claude_trust_dialog_clear; then
+      claude_spawn_fail "claude's workspace-trust dialog could not be cleared"
+      exit 1
+    fi
+    if [ "$CLAUDE_TRUST_DIALOG_SEEN" = 1 ] && ! claude_wait_for_processing; then
+      claude_spawn_fail "claude accepted the workspace-trust dialog but never confirmed it started processing the launch brief"
+      exit 1
+    fi
+    ;;
+esac
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

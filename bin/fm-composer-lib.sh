@@ -1290,6 +1290,97 @@ EOF
   esac
 }
 
+# --- Claude's workspace-trust dialog -----------------------------------------
+#
+# Verified live (task fm-claude-trust-dialog-autoaccept, 2026-08-29, Claude Code
+# 2.1.251, real launch through bin/fm-spawn.sh into a never-trusted git
+# worktree): a fresh worktree of a repository firstmate has never trusted shows
+# this box BEFORE any composer exists, and --dangerously-skip-permissions does
+# NOT suppress it (that flag bypasses PERMISSION checks; workspace trust is a
+# separate gate). The rendered box, plain text, no dim/ghost styling:
+#
+#   Accessing workspace:
+#
+#   <cwd>
+#
+#   Quick safety check: Is this a project you created or one you trust? ...
+#
+#   Claude Code'll be able to read, edit, and execute files here.
+#
+#   Security guide
+#
+#   ❯ No, exit
+#     Yes, I trust this folder
+#
+#   Enter to confirm . Esc to cancel
+#
+# THE LANDMINE: the option list is cancel-first and CANCEL-FOCUSED by default
+# (Claude Code's own TrustDialog component passes cancelFirst:true,
+# focus:"cancel"). A bare Enter therefore selects "No, exit" and the process
+# quits immediately - verified live: sending a bare Enter here kills claude and
+# drops the pane back to a bare shell prompt. This retires the harness-adapters
+# claude reference's old "accept with --key Enter" advice, which would have
+# silently exited every never-trusted worker it touched. Accepting trust
+# requires moving the highlight down to "Yes, I trust this folder" FIRST, then
+# Enter; bin/fm-spawn.sh drives that sequence through the existing key-delivery
+# path, never a hand-rolled key send.
+#
+# PERSISTENCE (verified live, same session): accepting this dialog for a git
+# worktree records hasTrustDialogAccepted under the REPOSITORY's own checkout
+# path in ~/.claude.json, never under the worktree's own absolute path - a
+# second worktree of the same now-trusted repository launched with zero
+# dialog and no new entry. So this is a one-time cost per repository, not a
+# per-worktree or per-task cost, and firstmate must never write that file
+# itself (it is claude's own managed trust store).
+#
+# Detection is anchored on the dialog's own literal, stable strings rather than
+# box-drawing geometry: nothing else in ordinary transcript output produces
+# "Accessing workspace:" paired with the "Yes, I trust this folder" option
+# label, so a plain substring scan is enough and needs no ANSI-aware ghost
+# handling (this dialog is never rendered with dim/placeholder text).
+FM_COMPOSER_CLAUDE_TRUST_TITLE='Accessing workspace:'
+FM_COMPOSER_CLAUDE_TRUST_YES_LABEL='Yes, I trust this folder'
+
+# fm_composer_claude_trust_dialog_state: <screen> (plain or styled) ->
+#   absent          the screen does not show Claude's trust dialog.
+#   trust-focused   the dialog is showing AND "Yes, I trust this folder" is
+#                   the currently highlighted row - Enter alone accepts it.
+#   trust-unfocused the dialog is showing but a different row is highlighted
+#                   (the cancel-focused default) - Enter alone would decline
+#                   and exit; the caller must move the highlight first.
+fm_composer_claude_trust_dialog_state() {  # <screen>
+  local plain line trimmed content focus=0 yes_seen=0 yes_focused=0
+  plain=$(printf '%s\n' "$1" | fm_composer_strip_ansi)
+  case "$plain" in
+    *"$FM_COMPOSER_CLAUDE_TRUST_TITLE"*) ;;
+    *) printf 'absent'; return 0 ;;
+  esac
+  while IFS= read -r line; do
+    trimmed=$line
+    fm_composer_normalize_trim_var trimmed
+    focus=0
+    content=$trimmed
+    case "$content" in
+      '❯'*) focus=1; content=${content#'❯'}; fm_composer_normalize_trim_var content ;;
+    esac
+    if [ "$content" = "$FM_COMPOSER_CLAUDE_TRUST_YES_LABEL" ]; then
+      yes_seen=1
+      [ "$focus" = 1 ] && yes_focused=1
+    fi
+  done <<EOF
+$plain
+EOF
+  if [ "$yes_seen" != 1 ]; then
+    printf 'absent'
+    return 0
+  fi
+  if [ "$yes_focused" = 1 ]; then
+    printf 'trust-focused'
+  else
+    printf 'trust-unfocused'
+  fi
+}
+
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
 # for the cursor-less backends (cmux, orca, zellij), parameterised by the
 # adapter's send-key and composer-state functions. The caller has already
