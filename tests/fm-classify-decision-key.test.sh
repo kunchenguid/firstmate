@@ -263,18 +263,23 @@ test_incremental_agrees_with_full_fold_across_appends() {
 }
 
 test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak() {
-  local dir expected
+  local dir expected data
   dir=$(case_dir legacy-trailing-key)
+  data="$dir/data"
+  mkdir -p "$data/t"
+  printf '%s\n' '   Firstmate'"'"'s reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append `resolved: {how it cleared}` yourself (same `[key=<slug>]` if you opened it with one) as you resume.' > "$data/t/brief.md"
   printf 'blocked: invalid custody receipt remains inadmissible [key=main-custody]\n' > "$dir/t.status"
   expected=$(printf 'main-custody\tblocked\tinvalid custody receipt remains inadmissible\n')
-  assert_fold "$dir/t.status" "$expected" "legacy trailing blocker key"
+  FM_DATA_OVERRIDE="$data" assert_fold "$dir/t.status" "$expected" "legacy trailing blocker key"
 
   printf 'resolved: custody receipt is valid and validation is active [key=main-custody]\n' >> "$dir/t.status"
-  assert_fold "$dir/t.status" "" "legacy trailing resolution"
+  FM_DATA_OVERRIDE="$data" assert_fold "$dir/t.status" "" "legacy trailing resolution"
 
   printf 'blocked: prose mentions [key=other] before the final detail [key=main-custody]\n' > "$dir/malformed.status"
   assert_fold "$dir/malformed.status" "" "multiple legacy tokens stay non-authoritative"
-  pass "the bounded legacy trailing-key form clears its real key without creating a false default blocker"
+  printf 'needs-decision [key=q1]: choose the route\nresolved: docs still mention [key=q1]\n' > "$dir/current.status"
+  assert_fold "$dir/current.status" "$(printf 'q1\tneeds-decision\tchoose the route\n')" "unproven trailing prose"
+  pass "only a legacy generated brief enables the trailing-key compatibility form"
 }
 
 test_stated_key_is_honored_in_both_positions

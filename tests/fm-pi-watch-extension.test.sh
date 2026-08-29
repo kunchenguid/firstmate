@@ -37,7 +37,12 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
-  chmod +x "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-delivery-continue.sh" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_DELIVERY_LOG:-}" ] || printf 'delivery=%s\n' "$1" >> "$FM_DELIVERY_LOG"
+printf 'result=refused task=%s reason=fixture-stop\n' "$1"
+SH
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-delivery-continue.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
@@ -229,7 +234,7 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELIVERY_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -450,7 +455,7 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELIVERY_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -475,6 +480,9 @@ async function runScenario(withAcceptor) {
   };
   if (withAcceptor) {
     bus.on("fm-branch-supervision:dispatch", (offer) => {
+      if (!readFileSync(process.env.FM_DELIVERY_LOG, "utf8").includes("delivery=branch-offer")) {
+        throw new Error("branch offer arrived before the common delivery continuation preflight");
+      }
       offers.push({ message: offer.message, projects: offer.projects });
       offer.accept();
     });
@@ -506,9 +514,14 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${process.env.FM_HOME}/state/branch-offer.meta`, "project=/projects/approved\nwindow=fm-branch-offer\n");
 writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tbranch-offer.status\tsignal: branch-offer synthetic wake\n");
 const accepted = await runScenario(true);
-if (accepted.offers.length !== 1) throw new Error(`expected one branch offer, got ${accepted.offers.length}`);
+if (accepted.offers.length !== 1) {
+  throw new Error(`expected one branch offer, got ${accepted.offers.length}; main=${accepted.mainPrompt}; rows=${accepted.rows.join(" | ")}`);
+}
 if (!accepted.offers[0].message.includes("signal: branch-offer synthetic wake")) {
   throw new Error(`offer missed the wake reason: ${accepted.offers[0].message}`);
+}
+if (!accepted.offers[0].message.includes("result=refused task=branch-offer reason=fixture-stop")) {
+  throw new Error(`branch offer missed the common continuation result: ${accepted.offers[0].message}`);
 }
 if (JSON.stringify(accepted.offers[0].projects) !== JSON.stringify(["/projects/approved"])) {
   throw new Error(`offer did not carry the queued task project: ${JSON.stringify(accepted.offers[0].projects)}`);
@@ -525,12 +538,15 @@ if (!declined.mainPrompt.includes("FIRSTMATE WATCHER WAKE")) {
 if (!declined.mainPrompt.includes("signal: branch-offer synthetic wake")) {
   throw new Error(`fallback wake lost the reason line: ${declined.mainPrompt}`);
 }
+if (!declined.mainPrompt.includes("result=refused task=branch-offer reason=fixture-stop")) {
+  throw new Error(`main fallback missed the common continuation result: ${declined.mainPrompt}`);
+}
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "Pi dispatcher must hand an accepted wake to the branch and fall back to main otherwise"
+  expect_code 0 "$status" "Pi dispatcher must hand an accepted wake to the branch and fall back to main otherwise: $out"
   [ -z "$out" ] || fail "Pi branch-offer test printed output: $out"
   pass "Pi dispatcher branch offer owns accepted wakes and falls back to main"
 }

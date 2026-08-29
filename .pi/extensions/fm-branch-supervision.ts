@@ -117,7 +117,6 @@ const mirrorCursorFile = join(state, ".branch-mirror-cursor");
 const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
-const deliveryContinueScript = join(fmRoot, "bin", "fm-delivery-continue.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
 const modelPinFile = join(config, "supervision-branch-model");
@@ -594,52 +593,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // The queue remains the event owner, but delivery continuation is mechanical:
-  // before the branch model can classify a committed receipt as routine, invoke
-  // the narrow leased owner for every task represented by the granted rows.
-  function deliveryTasksForRows(seqs: readonly string[]): string[] {
-    let queue = "";
-    try {
-      queue = readFileSync(`${state}/.wake-queue`, "utf8");
-    } catch {
-      throw new Error("could not read granted wake rows for delivery continuation");
-    }
-    const wanted = new Set(seqs);
-    const tasks = new Set<string>();
-    for (const row of queue.split(/\r?\n/)) {
-      const fields = row.split("\t");
-      if (fields.length < 5 || !wanted.has(fields[1])) continue;
-      if (fields[2] === "signal") {
-        const task = fields[3].replace(/\.(?:status|turn-ended)$/, "");
-        if (/^[A-Za-z0-9._-]+$/.test(task)) tasks.add(task);
-      } else if (fields[2] === "stale") {
-        const task = fields[3].replace(/^fm-/, "");
-        if (/^[A-Za-z0-9._-]+$/.test(task)) tasks.add(task);
-      }
-    }
-    return [...tasks].sort();
-  }
-
-  function runDeliveryContinuations(seqs: readonly string[]): string[] {
-    const results: string[] = [];
-    for (const task of deliveryTasksForRows(seqs)) {
-      const result = spawnSync("bash", [deliveryContinueScript, task], {
-        cwd: fmRoot,
-        encoding: "utf8",
-        env: { ...scriptEnv, FM_SUPERVISION_ACTOR: "branch", FM_LEASE_HOLDER_PID: ownedLockPid },
-      });
-      if (result.status !== 0) {
-        throw new Error(`delivery continuation failed for ${task}: ${(result.stderr || "").trim()}`);
-      }
-      const line = (result.stdout || "").trim();
-      if (!/^result=(sent|already-delivered|already-active|refused) task=[A-Za-z0-9._-]+(?: reason=[A-Za-z0-9._-]+)?$/.test(line)) {
-        throw new Error(`delivery continuation returned an invalid result for ${task}: ${line}`);
-      }
-      results.push(line);
-    }
-    return results;
-  }
-
   // Append-only merge into main. The store row is already durable when this
   // runs; the note is a cache of it at main's tail. Delivery modes per the
   // design: routine+idle appends now with no turn, routine+busy appends after
@@ -990,11 +943,10 @@ ${context.command}
         );
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
-        const continuations = runDeliveryContinuations(scope.eligibleSeqs);
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         await session.prompt(
-          `FIRSTMATE SUPERVISION WAKE: ${message}\n\nDeterministic delivery continuation preflight:\n${continuations.length ? continuations.join("\n") : "none"}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
+          `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
         );
         if (!releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration))) {
           throw new Error("could not release the branch's settled wake-row grant");

@@ -18,6 +18,7 @@ import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   createBranchDispatchOffer,
+  deliveryTasksForUnreadWake,
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
@@ -88,6 +89,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const deliveryContinueScript = `${fmRoot}/bin/fm-delivery-continue.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -316,6 +318,38 @@ export default function (pi: ExtensionAPI) {
     return offer.accepted;
   }
 
+  function runDeliveryContinuations(): string[] {
+    let lockPid = "";
+    const results: string[] = [];
+    try {
+      lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+    } catch {}
+    for (const task of deliveryTasksForUnreadWake(state)) {
+      const result = spawnSync("bash", [deliveryContinueScript, task], {
+        cwd: fmRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          FM_HOME: fmHome,
+          FM_STATE_OVERRIDE: state,
+          FM_ROOT_OVERRIDE: fmRoot,
+          FM_SUPERVISION_ACTOR: "main",
+          FM_LEASE_HOLDER_PID: lockPid,
+        },
+      });
+      const line = (result.stdout || "").trim();
+      if (
+        result.status !== 0 ||
+        !/^result=(sent|already-delivered|already-active|refused) task=[A-Za-z0-9._-]+(?: reason=[A-Za-z0-9._-]+)?$/.test(line)
+      ) {
+        const detail = (result.stderr || "").trim();
+        throw new Error(`delivery continuation failed for ${task}: ${detail || line || `status=${result.status ?? "none"}`}`);
+      }
+      results.push(line);
+    }
+    return results;
+  }
+
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
@@ -334,8 +368,19 @@ export default function (pi: ExtensionAPI) {
         return;
       }
     }
-    if (!repairFailed && offerWakeToBranch(message)) return;
-    await sendWake(owner, message);
+    let continuationResults: string[] = [];
+    try {
+      continuationResults = runDeliveryContinuations();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await sendWake(owner, `${message}\n\nwatcher: FAILED - ${detail}`);
+      return;
+    }
+    const handlingMessage = continuationResults.length > 0
+      ? `${message}\n\nDeterministic delivery continuation preflight:\n${continuationResults.join("\n")}`
+      : message;
+    if (!repairFailed && offerWakeToBranch(handlingMessage)) return;
+    await sendWake(owner, handlingMessage);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {

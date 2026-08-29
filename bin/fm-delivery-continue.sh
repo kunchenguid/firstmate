@@ -4,8 +4,8 @@
 # Usage: fm-delivery-continue.sh <task-id>
 #
 # This is intentionally a narrow transition owner, not a scheduler. It sends
-# exactly one durable fire-and-forget inbox instruction only for a recorded
-# ship/no-mistakes task whose latest receipt says `done: committed <head>`,
+# exactly one durable acknowledged inbox instruction only for a recorded
+# ship/no-mistakes task whose latest receipt establishes a committed head,
 # whose generated brief grants that validation handoff, and whose current
 # durable state leaves no decision, safety stop, or attributed pipeline run.
 #
@@ -54,18 +54,27 @@ META="$STATE/$TASK.meta"
 meta_get() { sed -n "s/^$1=//p" "$META" | tail -1; }
 [ "$(meta_get kind)" = ship ] || refuse non-ship-task
 [ "$(meta_get mode)" = no-mistakes ] || refuse unsupported-delivery-mode
+SPAWN_GEN=$(meta_get spawn_gen)
+case "$SPAWN_GEN" in ''|*[!A-Za-z0-9._-]*) refuse missing-task-incarnation ;; esac
 
 STATUS="$STATE/$TASK.status"
 [ -f "$STATUS" ] && [ ! -L "$STATUS" ] || refuse missing-committed-receipt
 LAST=$(grep -v '^[[:space:]]*$' "$STATUS" | tail -1)
 HEAD_SHORT=$(printf '%s\n' "$LAST" | sed -n 's/^done:[[:space:]]*committed[[:space:]]\([0-9A-Fa-f][0-9A-Fa-f]*\)\([[:space:]].*\)\{0,1\}$/\1/p')
-case "$HEAD_SHORT" in ???????*) ;; *) refuse missing-committed-receipt ;; esac
 
 WORKTREE=$(meta_get worktree)
 [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] || refuse missing-worktree
-HEAD=$(git -C "$WORKTREE" rev-parse --verify "${HEAD_SHORT}^{commit}" 2>/dev/null) || refuse invalid-committed-head
 CURRENT=$(git -C "$WORKTREE" rev-parse --verify HEAD 2>/dev/null) || refuse unreadable-worktree-head
-[ "$HEAD" = "$CURRENT" ] || refuse committed-head-mismatch
+WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null) || refuse unreadable-worktree-status
+[ -z "$WORKTREE_STATUS" ] || refuse uncommitted-worktree
+if [ -n "$HEAD_SHORT" ]; then
+  case "$HEAD_SHORT" in ???????*) ;; *) refuse invalid-committed-head ;; esac
+  HEAD=$(git -C "$WORKTREE" rev-parse --verify "${HEAD_SHORT}^{commit}" 2>/dev/null) || refuse invalid-committed-head
+  [ "$HEAD" = "$CURRENT" ] || refuse committed-head-mismatch
+else
+  case "$LAST" in 'done: '*) ;; *) refuse missing-committed-receipt ;; esac
+  HEAD=$CURRENT
+fi
 
 BRIEF="$DATA/$TASK/brief.md"
 [ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] || refuse missing-generated-delivery-contract
@@ -90,37 +99,19 @@ case "$CREW_STATE" in
   'state: done · source: run-step ·'*|'state: failed · source: run-step ·'*) refuse attributable-validation-terminal ;;
 esac
 
-DELIVERY=$(printf '%s' "$TASK:$HEAD:committed-to-validation" | shasum -a 256 | cut -c1-16)
-MESSAGE="FIRSTMATE_DELIVERY: validation-ready task=$TASK head=$HEAD delivery=$DELIVERY. Begin the already-authorized /no-mistakes validation flow now. Do not merge."
-
-# Check the existing fire-and-forget body while holding the task lease. The
-# inbox writer repeats the same exact-body check under its own sequence lock,
-# so this classification stays correct across interrupted delivery and replay.
 # shellcheck source=bin/fm-task-inbox-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
-inbox="$STATE/$TASK.inbox"
-existing=0
-if [ -d "$inbox" ]; then
-  want=$(mktemp "$inbox/.delivery.XXXXXX") || refuse inbox-unwritable
-  printf '%s' "$MESSAGE" > "$want"
-  for record in "$inbox"/*.msg "$inbox"/handled/*.msg; do
-    [ -f "$record" ] || continue
-    fm_task_inbox_is_fire_and_forget "$record" || continue
-    have=$(mktemp "$inbox/.delivery.XXXXXX") || continue
-    fm_task_inbox_body "$record" > "$have" 2>/dev/null || true
-    if cmp -s "$want" "$have"; then existing=1; fi
-    rm -f "$have"
-    [ "$existing" = 1 ] && break
-  done
-  rm -f "$want"
+# shellcheck source=bin/fm-delivery-continuation-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
+DELIVERY=$(fm_delivery_continuation_id "$TASK" "$HEAD" "$SPAWN_GEN")
+MESSAGE=$(fm_delivery_continuation_message "$TASK" "$HEAD" "$SPAWN_GEN" "$DELIVERY")
+if fm_delivery_continuation_state "$STATE" "$TASK" "$SPAWN_GEN" >/dev/null; then
+  result already-delivered
+  exit 0
 fi
-[ "$existing" = 0 ] || { result already-delivered; exit 0; }
 
-SPAWN_GEN=$(meta_get spawn_gen)
-if [ -n "$SPAWN_GEN" ]; then
-  FM_SEND_EXPECTED_SPAWN_GEN="$SPAWN_GEN" "$SEND_BIN" "$TASK" --fire-and-forget "$DELIVERY" "$MESSAGE" >/dev/null || refuse inbox-delivery-failed
-else
-  "$SEND_BIN" "$TASK" --fire-and-forget "$DELIVERY" "$MESSAGE" >/dev/null || refuse inbox-delivery-failed
-fi
+FM_SEND_IDEMPOTENT=1 FM_SEND_EXPECTED_SPAWN_GEN="$SPAWN_GEN" \
+  "$SEND_BIN" "$TASK" "$MESSAGE" >/dev/null || refuse inbox-delivery-failed
 result sent

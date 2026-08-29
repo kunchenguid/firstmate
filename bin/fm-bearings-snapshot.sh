@@ -383,11 +383,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
-       | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | select(.backlog.current_role != "held" or .current_state.state == "working" or .delivery_continuation.state == "pending")
        | {id, kind,
-        state: .current_state.state,
-        doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+        state: (if .delivery_continuation.state == "pending" then "validation_pending" else .current_state.state end),
+        doing: ((if .delivery_continuation.state == "pending" then
+                   ("Validation instruction awaiting acknowledgement"
+                    + (if .delivery_continuation.worker_unverified_busy then "; activity source unverified" else "" end))
+                 else ((.current_state.detail // "") as $d
+                   | if $d != "" then $d else (.hints.last_event_text // "") end)
+                 end) | trunc(90))
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")

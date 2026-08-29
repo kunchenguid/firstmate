@@ -156,6 +156,12 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-delivery-continuation-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
@@ -448,7 +454,7 @@ task_json_lines() {
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json continuation_tsv continuation_state continuation_head continuation_delivery continuation_json continuation_unverified_busy
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -492,6 +498,27 @@ task_json_lines() {
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    continuation_state=
+    continuation_head=
+    continuation_delivery=
+    continuation_unverified_busy=false
+    continuation_tsv=$(fm_delivery_continuation_state "$STATE" "$id" "$spawn_gen" 2>/dev/null || true)
+    if [ -n "$continuation_tsv" ]; then
+      IFS=$(printf '\t') read -r continuation_state continuation_head continuation_delivery <<EOF
+$continuation_tsv
+EOF
+      if [ "$continuation_state" = pending ] && [ "$current_source" != run-step ] \
+        && { [ "$current_state" = working ] || [ "$current_state" = unknown ]; }; then
+        continuation_unverified_busy=true
+      fi
+      continuation_json=$(jq -n \
+        --arg state "$continuation_state" --arg head "$continuation_head" --arg delivery "$continuation_delivery" \
+        --arg worker_state "$current_state" --arg worker_source "$current_source" \
+        --argjson worker_unverified_busy "$continuation_unverified_busy" \
+        '{state:$state,head:$head,delivery:$delivery,worker_state:$worker_state,worker_source:$worker_source,worker_unverified_busy:$worker_unverified_busy}')
+    else
+      continuation_json=null
+    fi
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -593,6 +620,7 @@ task_json_lines() {
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
+      --argjson delivery_continuation "$continuation_json" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
@@ -622,6 +650,7 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        delivery_continuation:$delivery_continuation,
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive

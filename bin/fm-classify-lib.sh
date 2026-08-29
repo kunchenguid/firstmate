@@ -213,12 +213,11 @@ status_is_paused_or_captain_held() {  # <status-line>
 # note-head token is key metadata, stripped from the note); when both positions
 # carry a token, the documented before-colon one wins and the note-head token
 # stays note text. A token deeper inside the note is prose, never a stated key,
-# except for one bounded legacy form emitted by older generated worker briefs:
-# a SINGLE complete token at the end of a `blocked:` or `resolved:` note. That
-# compatibility reader prevents an old `blocked: reason [key=x]` and its later
-# matching resolution from leaving a false `default` blocker. New producers use
-# the documented position. A mid-note mention, multiple tokens, or any other
-# verb remains prose and never becomes authority.
+# A legacy brief that explicitly carried the former loose key-placement sentence
+# enables one compatibility form: a single complete token at the end of a
+# `blocked:` or `resolved:` note. New briefs and free-standing status prose do
+# not enable it. A mid-note mention, multiple tokens, or any other verb remains
+# prose and never becomes authority.
 # A line with no token in either position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
@@ -347,6 +346,18 @@ _fm_key_at_note_tail_compat() {  # <status-line> -> raw slug
   case "$prefix" in *'[key='*) return 1 ;; esac
   printf '%s' "$k"
 }
+_fm_status_legacy_tail_key_compat_enabled() {  # <status-file>
+  local f=$1 task home data brief
+  task=${f##*/}; task=${task%.status}
+  data=${FM_DATA_OVERRIDE:-}
+  if [ -z "$data" ]; then
+    case "$f" in */state/*.status) home=${f%/state/*}; data="$home/data" ;; *) return 1 ;; esac
+  fi
+  brief="$data/$task/brief.md"
+  [ -f "$brief" ] && [ ! -L "$brief" ] || return 1
+  grep -Fqx 'The main firstmate'"'"'s answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append `resolved: {how it cleared}` yourself (keyed with `[key=<slug>]` if you opened it with one) as your domain resumes.' "$brief" \
+    || grep -Fqx '   Firstmate'"'"'s reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append `resolved: {how it cleared}` yourself (same `[key=<slug>]` if you opened it with one) as you resume.' "$brief"
+}
 # 0 when a stated key slug is well-formed: nonempty, A-Za-z0-9._- only.
 _fm_decision_slug_ok() {  # <slug>
   case "$1" in
@@ -367,7 +378,8 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
-  elif ! _fm_key_before_colon "$1" && k=$(_fm_key_at_note_tail_compat "$1") \
+  elif [ "${FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY:-0}" = 1 ] \
+    && ! _fm_key_before_colon "$1" && k=$(_fm_key_at_note_tail_compat "$1") \
     && _fm_decision_slug_ok "$k"; then
     n=${n%"[key=$k]"}
     n=${n%"${n##*[![:space:]]}"}
@@ -383,7 +395,8 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   else
     if k=$(_fm_key_at_note_head "$1"); then
       :
-    elif k=$(_fm_key_at_note_tail_compat "$1"); then
+    elif [ "${FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY:-0}" = 1 ] \
+      && k=$(_fm_key_at_note_tail_compat "$1"); then
       :
     else
       # A malformed or multiply-keyed legacy tail is a stated-but-invalid
@@ -484,9 +497,9 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
-# most-recently-opened-last order; prints nothing when none are open. Pure read of
-# the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
-# is the durable open-set the fleet snapshot and any point-in-time consumer must use
+# most-recently-opened-last order; prints nothing when none are open. Read-only;
+# the historical compatibility gate may also inspect the task's generated brief.
+# This is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
@@ -495,8 +508,9 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file>
-  local f=$1 line resolve held open=''
+  local f=$1 line resolve held open='' FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  _fm_status_legacy_tail_key_compat_enabled "$f" && FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY=1
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
@@ -546,9 +560,10 @@ EOF
 # lets the scan pre-filter the stream to lines carrying its token and stay cheap
 # on a long log.
 status_key_closing_verb() {  # <status-file> <key>
-  local f=$1 want=$2 line resolve held open='' was verb='' stream
+  local f=$1 want=$2 line resolve held open='' was verb='' stream FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   [ -n "$want" ] || return 0
+  _fm_status_legacy_tail_key_compat_enabled "$f" && FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY=1
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   if [ "$want" = default ]; then
@@ -668,7 +683,9 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=5
+# 6: trailing-key compatibility is conditional on the historical generated
+# brief contract, so cursors built under the unconditional reading are rebuilt.
+FM_OPEN_DECISIONS_FOLD_VERSION=6
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
@@ -734,8 +751,9 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor
+  local target_cursor FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  _fm_status_legacy_tail_key_compat_enabled "$f" && FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY=1
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''

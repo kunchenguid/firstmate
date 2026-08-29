@@ -232,6 +232,26 @@ export interface BranchDispatchOffer {
   accept(): void;
 }
 
+export function deliveryTasksForUnreadWake(state: string): string[] {
+  const queue = readFileSync(`${state}/.wake-queue`, "utf8");
+  const tasks = new Set<string>();
+  for (const row of queue.split(/\r?\n/)) {
+    if (!row) continue;
+    const fields = row.split("\t");
+    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) throw new Error("the unread wake queue is malformed");
+    if (fields[2] === "signal") {
+      const task = fields[3].replace(/\.(?:status|turn-ended)$/, "");
+      if (!/^[A-Za-z0-9._-]+$/.test(task)) throw new Error("the unread signal task identity is malformed");
+      tasks.add(task);
+    } else if (fields[2] === "stale") {
+      const task = fields[3].replace(/^fm-/, "");
+      if (!/^[A-Za-z0-9._-]+$/.test(task)) throw new Error("the unread stale task identity is malformed");
+      tasks.add(task);
+    }
+  }
+  return [...tasks].sort();
+}
+
 export function createBranchDispatchOffer(
   message: string,
   projects: readonly string[] = [],
