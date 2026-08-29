@@ -285,6 +285,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/how-firstmate-works-evidence.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/herdr-backend.md",
       "audience": "operator-current"
     },

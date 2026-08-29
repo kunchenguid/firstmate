@@ -1,0 +1,2142 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="A plain-English, evidence-linked explanation of how Firstmate coordinates agents, state, supervision, delivery, and recovery.">
+  <title>How Firstmate works</title>
+  <style>
+    :root {
+      --ink: #10253a;
+      --ink-soft: #395064;
+      --paper: #fbf3df;
+      --paper-deep: #f1dfb8;
+      --white: #fffdf8;
+      --navy: #14364d;
+      --navy-deep: #0a2233;
+      --rust: #ad471c;
+      --rust-deep: #7b3015;
+      --gold: #d99b24;
+      --green: #2b6b59;
+      --blue: #176b91;
+      --red: #a2352b;
+      --line: #ceb98d;
+      --line-strong: #927a4d;
+      --shadow: 0 18px 48px rgb(35 30 20 / 12%);
+      --radius: 1.15rem;
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      max-width: 100%;
+    }
+
+    body {
+      margin: 0;
+      max-width: 100%;
+      background:
+        radial-gradient(circle at 10% 0%, rgb(217 155 36 / 13%), transparent 28rem),
+        linear-gradient(180deg, var(--paper) 0%, #f8edd2 100%);
+      color: var(--ink);
+      line-height: 1.65;
+    }
+
+    :where(main, section, article, aside, figure, details, div, nav) {
+      min-width: 0;
+    }
+
+    :where(p, h1, h2, h3, h4, li, dd, dt, figcaption, td, th, summary, a, code) {
+      overflow-wrap: anywhere;
+    }
+
+    :where(img, svg, video, canvas, iframe) {
+      max-width: 100%;
+      height: auto;
+    }
+
+    a {
+      color: var(--blue);
+      text-underline-offset: 0.18em;
+      text-decoration-thickness: 0.08em;
+    }
+
+    a:hover {
+      color: var(--rust);
+    }
+
+    a:focus-visible,
+    button:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid var(--gold);
+      outline-offset: 3px;
+      border-radius: 0.3rem;
+    }
+
+    code,
+    kbd {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    code {
+      padding: 0.08rem 0.3rem;
+      border: 1px solid rgb(20 54 77 / 16%);
+      border-radius: 0.35rem;
+      background: rgb(20 54 77 / 7%);
+    }
+
+    .skip-link {
+      position: fixed;
+      top: 0.75rem;
+      left: 0.75rem;
+      z-index: 100;
+      transform: translateY(-180%);
+      padding: 0.65rem 0.85rem;
+      border-radius: 0.5rem;
+      background: var(--navy-deep);
+      color: white;
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgb(255 255 255 / 16%);
+      background: rgb(10 34 51 / 95%);
+      color: white;
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      width: min(100% - 2rem, 78rem);
+      margin-inline: auto;
+      padding: 0.65rem 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      min-width: 0;
+      color: white;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      text-decoration: none;
+    }
+
+    .brand-mark {
+      display: grid;
+      flex: 0 0 2rem;
+      width: 2rem;
+      height: 2rem;
+      place-items: center;
+      border: 1px solid rgb(255 255 255 / 32%);
+      border-radius: 50%;
+      background: var(--rust);
+      color: white;
+      font-size: 1.1rem;
+    }
+
+    .top-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+
+    .top-button {
+      min-height: 2.25rem;
+      padding: 0.42rem 0.75rem;
+      border: 1px solid rgb(255 255 255 / 28%);
+      border-radius: 999px;
+      background: rgb(255 255 255 / 8%);
+      color: white;
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 750;
+    }
+
+    .top-button:hover {
+      background: rgb(255 255 255 / 16%);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(13rem, 16rem) minmax(0, 1fr);
+      gap: clamp(1.5rem, 4vw, 4rem);
+      width: min(100% - 2rem, 78rem);
+      margin-inline: auto;
+      padding: 2.25rem 0 5rem;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 4.75rem;
+      align-self: start;
+      max-height: calc(100vh - 5.75rem);
+      overflow-y: auto;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: rgb(255 253 248 / 76%);
+      box-shadow: 0 8px 24px rgb(35 30 20 / 7%);
+    }
+
+    .sidebar-title {
+      margin: 0 0 0.55rem;
+      color: var(--rust-deep);
+      font-size: 0.74rem;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .sidebar ul {
+      display: grid;
+      gap: 0.1rem;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .sidebar a {
+      display: block;
+      padding: 0.38rem 0.5rem;
+      border-radius: 0.5rem;
+      color: var(--ink-soft);
+      font-size: 0.88rem;
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .sidebar a:hover {
+      background: var(--paper-deep);
+      color: var(--rust-deep);
+    }
+
+    main {
+      display: grid;
+      gap: 1.4rem;
+      min-width: 0;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(2rem, 6vw, 4.25rem);
+      border: 1px solid rgb(255 255 255 / 20%);
+      border-radius: 1.5rem;
+      background:
+        linear-gradient(115deg, rgb(10 34 51 / 97%), rgb(20 54 77 / 90%)),
+        url("../assets/banner.png") center / cover;
+      color: white;
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      position: absolute;
+      right: -6rem;
+      bottom: -8rem;
+      width: 22rem;
+      height: 22rem;
+      border: 2px solid rgb(217 155 36 / 30%);
+      border-radius: 50%;
+      content: "";
+      box-shadow: 0 0 0 2.5rem rgb(217 155 36 / 5%), 0 0 0 5rem rgb(217 155 36 / 4%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      margin: 0 0 0.7rem;
+      color: #f6c963;
+      font-size: 0.78rem;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4 {
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.15;
+      text-wrap: balance;
+    }
+
+    h1 {
+      max-width: 14ch;
+      margin: 0;
+      font-size: clamp(2.55rem, 7vw, 5.4rem);
+      letter-spacing: -0.045em;
+    }
+
+    .hero-lede {
+      max-width: 54rem;
+      margin: 1.25rem 0 0;
+      color: rgb(255 255 255 / 88%);
+      font-size: clamp(1.02rem, 2vw, 1.25rem);
+    }
+
+    .hero-chips,
+    .source-row,
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .hero-chips {
+      margin-top: 1.5rem;
+    }
+
+    .chip,
+    .status-tag,
+    .source-link {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      min-height: 1.85rem;
+      padding: 0.28rem 0.62rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.015em;
+      line-height: 1.2;
+      text-decoration: none;
+    }
+
+    .chip {
+      border: 1px solid rgb(255 255 255 / 25%);
+      background: rgb(255 255 255 / 9%);
+      color: white;
+    }
+
+    .section {
+      scroll-margin-top: 5.5rem;
+      padding: clamp(1.3rem, 3vw, 2.15rem);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgb(255 253 248 / 88%);
+      box-shadow: 0 12px 32px rgb(35 30 20 / 7%);
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .section-number {
+      display: inline-block;
+      margin-bottom: 0.35rem;
+      color: var(--rust);
+      font-size: 0.72rem;
+      font-weight: 900;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin: 0;
+      color: var(--navy-deep);
+      font-size: clamp(1.75rem, 4vw, 2.65rem);
+      letter-spacing: -0.025em;
+    }
+
+    h3 {
+      margin: 0 0 0.65rem;
+      color: var(--navy);
+      font-size: clamp(1.15rem, 2.5vw, 1.5rem);
+    }
+
+    h4 {
+      margin: 0 0 0.45rem;
+      color: var(--navy);
+      font-size: 1.08rem;
+    }
+
+    .section-summary {
+      max-width: 68ch;
+      margin: 0.55rem 0 0;
+      color: var(--ink-soft);
+      font-size: 1.03rem;
+    }
+
+    .status-tag {
+      white-space: nowrap;
+      border: 1px solid currentColor;
+    }
+
+    .status-current {
+      background: #e4f2ec;
+      color: #235b4b;
+    }
+
+    .status-limit {
+      background: #fff0d1;
+      color: #7a4c00;
+    }
+
+    .status-future {
+      background: #e9e9f8;
+      color: #4b3f83;
+    }
+
+    .legend {
+      align-items: center;
+      padding: 0.9rem 1rem;
+      border: 1px dashed var(--line-strong);
+      border-radius: 0.85rem;
+      background: #fff8e8;
+    }
+
+    .legend strong {
+      margin-right: 0.15rem;
+    }
+
+    .grid-2,
+    .grid-3,
+    .grid-4 {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .grid-4 {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .card {
+      min-width: 0;
+      padding: 1.1rem;
+      border: 1px solid var(--line);
+      border-radius: 0.9rem;
+      background: var(--white);
+    }
+
+    .card p:last-child,
+    .card ul:last-child {
+      margin-bottom: 0;
+    }
+
+    .role-card {
+      border-top: 4px solid var(--rust);
+    }
+
+    .role-icon {
+      display: grid;
+      width: 2.35rem;
+      height: 2.35rem;
+      margin-bottom: 0.75rem;
+      place-items: center;
+      border-radius: 0.65rem;
+      background: var(--paper-deep);
+      color: var(--rust-deep);
+      font-weight: 900;
+    }
+
+    .callout {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 0.85rem;
+      margin: 1rem 0;
+      padding: 1rem;
+      border-left: 5px solid var(--blue);
+      border-radius: 0.2rem 0.8rem 0.8rem 0.2rem;
+      background: #eef7fb;
+    }
+
+    .callout.warning {
+      border-left-color: var(--gold);
+      background: #fff5dc;
+    }
+
+    .callout.future {
+      border-left-color: #6956a5;
+      background: #f2effb;
+    }
+
+    .callout-mark {
+      font-size: 1.25rem;
+      line-height: 1.25;
+    }
+
+    .callout p {
+      margin: 0;
+    }
+
+    figure {
+      margin: 1.2rem 0;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 0.95rem;
+      background: #fffdf8;
+    }
+
+    figcaption {
+      margin-top: 0.75rem;
+      color: var(--ink-soft);
+      font-size: 0.87rem;
+    }
+
+    .mermaid-wrap {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+      overscroll-behavior-inline: contain;
+    }
+
+    .mermaid {
+      min-width: 0;
+      color: var(--ink);
+      text-align: center;
+    }
+
+    .mermaid svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin-inline: auto;
+    }
+
+    details {
+      margin-top: 0.8rem;
+      border: 1px solid var(--line);
+      border-radius: 0.75rem;
+      background: rgb(251 243 223 / 58%);
+    }
+
+    summary {
+      padding: 0.8rem 1rem;
+      color: var(--navy);
+      cursor: pointer;
+      font-weight: 800;
+    }
+
+    details[open] summary {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .detail-body {
+      padding: 0.3rem 1rem 1rem;
+    }
+
+    .detail-body > :last-child {
+      margin-bottom: 0;
+    }
+
+    .source-row {
+      margin-top: 0.75rem;
+    }
+
+    .source-link {
+      border: 1px solid #a8c3d1;
+      background: #eef7fb;
+      color: #185a78;
+    }
+
+    .source-link:hover {
+      background: #dceef6;
+      color: #124863;
+    }
+
+    .layer-list,
+    .plain-list,
+    .steps-list {
+      margin: 0.65rem 0 0;
+      padding-left: 1.2rem;
+    }
+
+    .layer-list li,
+    .plain-list li,
+    .steps-list li {
+      margin-block: 0.45rem;
+    }
+
+    .term-grid {
+      display: grid;
+      grid-template-columns: minmax(8rem, 0.65fr) minmax(0, 2fr);
+      gap: 0;
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 0.8rem;
+      overflow: hidden;
+    }
+
+    .term-grid dt,
+    .term-grid dd {
+      margin: 0;
+      padding: 0.75rem 0.9rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .term-grid dt {
+      background: var(--paper-deep);
+      color: var(--navy-deep);
+      font-weight: 850;
+    }
+
+    .term-grid dd {
+      background: var(--white);
+    }
+
+    .term-grid > :nth-last-child(-n + 2) {
+      border-bottom: 0;
+    }
+
+    .table-shell {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 0.85rem;
+      background: var(--white);
+    }
+
+    table {
+      width: 100%;
+      min-width: 42rem;
+      border-collapse: collapse;
+      font-size: 0.91rem;
+    }
+
+    th,
+    td {
+      padding: 0.75rem 0.85rem;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--navy);
+      color: white;
+      font-size: 0.78rem;
+      letter-spacing: 0.025em;
+      text-transform: uppercase;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    tbody tr:nth-child(even) td {
+      background: #fbf5e8;
+    }
+
+    .file-tree,
+    .file-tree ul {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .file-tree {
+      display: grid;
+      gap: 0.5rem;
+    }
+
+    .file-tree ul {
+      display: grid;
+      gap: 0.42rem;
+      margin-top: 0.42rem;
+      margin-left: 0.6rem;
+      padding-left: 1rem;
+      border-left: 2px solid var(--line);
+    }
+
+    .tree-row {
+      display: grid;
+      grid-template-columns: minmax(8rem, 0.7fr) minmax(0, 1.5fr) auto;
+      align-items: start;
+      gap: 0.7rem;
+      padding: 0.65rem 0.7rem;
+      border: 1px solid var(--line);
+      border-radius: 0.65rem;
+      background: var(--white);
+    }
+
+    .tree-path {
+      color: var(--navy-deep);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-weight: 800;
+    }
+
+    .authority {
+      color: var(--green);
+      font-size: 0.72rem;
+      font-weight: 850;
+      text-transform: uppercase;
+    }
+
+    .history {
+      color: #8c5b13;
+    }
+
+    .scenario {
+      counter-increment: scenario;
+      border-left: 4px solid var(--rust);
+    }
+
+    .scenario h3::before {
+      margin-right: 0.45rem;
+      color: var(--rust);
+      content: counter(scenario, decimal-leading-zero) ".";
+    }
+
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(12rem, 0.7fr);
+      gap: 1rem;
+    }
+
+    .captain-sees {
+      padding: 0.9rem;
+      border: 1px solid #b9cdd8;
+      border-radius: 0.7rem;
+      background: #f0f7fa;
+    }
+
+    .captain-sees strong {
+      display: block;
+      margin-bottom: 0.4rem;
+      color: var(--navy);
+    }
+
+    .captain-mock {
+      overflow: hidden;
+      border: 2px solid #655693;
+      border-radius: 1rem;
+      background: #faf8ff;
+      box-shadow: 0 10px 30px rgb(74 55 120 / 12%);
+    }
+
+    .captain-mock-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.75rem 1rem;
+      background: #372b5e;
+      color: white;
+    }
+
+    .captain-mock-body {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.7rem;
+      padding: 1rem;
+    }
+
+    .mock-card {
+      padding: 0.8rem;
+      border: 1px solid #d4ccea;
+      border-radius: 0.7rem;
+      background: white;
+    }
+
+    .mock-card small {
+      display: block;
+      margin-top: 0.35rem;
+      color: #685d80;
+    }
+
+    .faq details {
+      background: var(--white);
+    }
+
+    .footer-note {
+      padding: 1.25rem;
+      border: 1px dashed var(--line-strong);
+      border-radius: 0.9rem;
+      background: #fff8e8;
+      color: var(--ink-soft);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 64rem) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        position: static;
+        max-height: none;
+      }
+
+      .sidebar ul {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .grid-4 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 46rem) {
+      .topbar-inner,
+      .layout {
+        width: min(100% - 1rem, 78rem);
+      }
+
+      .topbar-inner {
+        align-items: flex-start;
+      }
+
+      .brand span:last-child,
+      .top-button.secondary {
+        display: none;
+      }
+
+      .layout {
+        padding-top: 0.9rem;
+      }
+
+      .sidebar ul,
+      .grid-2,
+      .grid-3,
+      .grid-4,
+      .scenario-grid,
+      .captain-mock-body {
+        grid-template-columns: 1fr;
+      }
+
+      .section-head {
+        grid-template-columns: 1fr;
+      }
+
+      .section-head .status-tag {
+        justify-self: start;
+      }
+
+      .term-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .term-grid dt,
+      .term-grid dd {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .term-grid dt {
+        padding-bottom: 0.35rem;
+      }
+
+      .term-grid dd {
+        padding-top: 0.35rem;
+      }
+
+      .term-grid > :nth-last-child(-n + 2) {
+        border-bottom: 0;
+      }
+
+      .tree-row {
+        grid-template-columns: 1fr;
+        gap: 0.2rem;
+      }
+
+      h1 {
+        font-size: clamp(2.45rem, 15vw, 4rem);
+      }
+    }
+
+    @media print {
+      @page {
+        size: A4;
+        margin: 14mm;
+      }
+
+      :root,
+      body {
+        background: white !important;
+        color: black !important;
+      }
+
+      .topbar,
+      .sidebar,
+      .top-actions,
+      .skip-link {
+        display: none !important;
+      }
+
+      .layout {
+        display: block;
+        width: 100%;
+        padding: 0;
+      }
+
+      .hero,
+      .section {
+        margin: 0 0 0.7rem;
+        box-shadow: none;
+        break-inside: avoid-page;
+      }
+
+      .hero {
+        padding: 1.2rem;
+        border: 2px solid #222;
+        background: white !important;
+        color: black !important;
+      }
+
+      .hero * {
+        color: black !important;
+      }
+
+      .section {
+        padding: 1rem;
+        background: white;
+      }
+
+      details:not([open]) > :not(summary) {
+        display: block !important;
+      }
+
+      details,
+      figure,
+      .card,
+      .callout,
+      .table-shell,
+      .captain-mock {
+        break-inside: avoid-page;
+        box-shadow: none;
+      }
+
+      .mermaid-wrap,
+      .table-shell {
+        overflow: visible;
+      }
+
+      table {
+        min-width: 0;
+        font-size: 8.5pt;
+      }
+
+      a {
+        color: black;
+        text-decoration: underline;
+      }
+
+      .status-tag,
+      .source-link {
+        border-color: #555 !important;
+        background: white !important;
+        color: black !important;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to the explanation</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top" aria-label="How Firstmate works, back to top">
+        <span class="brand-mark" aria-hidden="true">⚓</span>
+        <span>How Firstmate works</span>
+      </a>
+      <div class="top-actions" aria-label="Page controls">
+        <button class="top-button secondary" id="expand-all" type="button">Open technical evidence</button>
+        <button class="top-button" id="collapse-all" type="button">Close expanders</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout" id="top">
+    <nav class="sidebar" aria-label="On this page">
+      <p class="sidebar-title">On this page</p>
+      <ul>
+        <li><a href="#read-first">Read this first</a></li>
+        <li><a href="#mental-model">Mental model</a></li>
+        <li><a href="#component-map">Component map</a></li>
+        <li><a href="#session-loop">Session and supervision</a></li>
+        <li><a href="#task-lifecycle">Task lifecycle</a></li>
+        <li><a href="#second-mates">Second Mates</a></li>
+        <li><a href="#safety">Hooks and safety</a></li>
+        <li><a href="#state-recovery">State and recovery</a></li>
+        <li><a href="#captain-view">What the captain sees</a></li>
+        <li><a href="#scenarios">Worked scenarios</a></li>
+        <li><a href="#glossary">Glossary</a></li>
+        <li><a href="#faq">FAQ</a></li>
+      </ul>
+    </nav>
+
+    <main id="main-content" tabindex="-1">
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">Current implementation, in plain English</p>
+        <h1 id="page-title">One conversation. A supervised fleet.</h1>
+        <p class="hero-lede">Firstmate is a durable operating system for agent work: it turns a captain's request into isolated tasks, keeps watch without spending model tokens, preserves enough truth to recover after interruption, and never treats a notification as proof that the work is safe.</p>
+        <div class="hero-chips" aria-label="Key ideas">
+          <span class="chip">Human-facing crew</span>
+          <span class="chip">Mechanical IDs underneath</span>
+          <span class="chip">Event-driven supervision</span>
+          <span class="chip">Explicit merge authority</span>
+        </div>
+      </section>
+
+      <section class="section" id="read-first" aria-labelledby="read-first-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">Orientation</span>
+            <h2 id="read-first-title">Read this first</h2>
+            <p class="section-summary">The page separates what Firstmate does now, what is a known limit, and what is only a possible design direction.</p>
+          </div>
+          <span class="status-tag status-current">Evidence-linked</span>
+        </div>
+
+        <div class="legend" aria-label="Status legend">
+          <strong>Legend</strong>
+          <span class="status-tag status-current">Current behaviour</span>
+          <span class="status-tag status-limit">Verified limitation</span>
+          <span class="status-tag status-future">Proposed enhancement</span>
+        </div>
+
+        <div class="callout warning">
+          <span class="callout-mark" aria-hidden="true">⚓</span>
+          <p><strong>Names have two layers.</strong> HMS <em>Surprise</em> and Pullings are display identities for the captain-facing experience, but scripts still address work through stable mechanical task identifiers such as <code>feature-login</code> and endpoint labels derived from them. The friendly name can change without moving the task's branch, worktree, status ledger, or backend endpoint.</p>
+        </div>
+
+        <p>This explanation intentionally omits live home contents, private paths, credentials, tokens, and message bodies. File links point only to tracked implementation and documentation.</p>
+        <div class="source-row">
+          <a class="source-link" href="../README.md">Product overview</a>
+          <a class="source-link" href="architecture.md">Maintainer architecture</a>
+          <a class="source-link" href="how-firstmate-works-evidence.md">Validation evidence</a>
+        </div>
+      </section>
+
+      <section class="section" id="mental-model" aria-labelledby="mental-model-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">01</span>
+            <h2 id="mental-model-title">The mental model</h2>
+            <p class="section-summary">The captain talks to one primary Firstmate. That Firstmate routes work to persistent domain leads or temporary specialists, each with an isolated place to work.</p>
+          </div>
+          <span class="status-tag status-current">Current behaviour</span>
+        </div>
+
+        <div class="grid-4">
+          <article class="card role-card">
+            <div class="role-icon" aria-hidden="true">C</div>
+            <h3>Captain</h3>
+            <p>Sets intent, answers material choices, reviews outcomes, and retains merge authority unless an explicit standing posture allows routine green merges.</p>
+          </article>
+          <article class="card role-card">
+            <div class="role-icon" aria-hidden="true">1M</div>
+            <h3>Primary Firstmate</h3>
+            <p>Owns intake, routing, supervision, escalation, durable fleet records, and the final plain-English report back to the captain.</p>
+          </article>
+          <article class="card role-card">
+            <div class="role-icon" aria-hidden="true">2M</div>
+            <h3>Second Mate</h3>
+            <p>A persistent Firstmate in an isolated home with a charter and scope. It can supervise its own crewmates and waits silently when its queue is empty.</p>
+          </article>
+          <article class="card role-card">
+            <div class="role-icon" aria-hidden="true">W</div>
+            <h3>Crewmate or scout</h3>
+            <p>A temporary autonomous worker in a disposable worktree. A crewmate ships change; a scout produces a standalone report and never pushes.</p>
+          </article>
+        </div>
+
+        <figure aria-labelledby="system-map-caption">
+          <div class="mermaid-wrap">
+            <pre class="mermaid">
+flowchart TB
+  accTitle: Firstmate system map
+  accDescr: The captain talks to a primary Firstmate, which routes work to a persistent Second Mate or temporary workers backed by durable records and isolated worktrees.
+  C["Captain"] -->|"requests, decisions, merge words"| P["Primary Firstmate\nPullings display identity"]
+  P -->|"scope route"| S["Persistent Second Mate\nisolated Firstmate home"]
+  P -->|"task brief"| W1["Temporary crewmate or scout"]
+  S -->|"task brief"| W2["Second Mate's own crewmate"]
+  P --- R["Durable records\nbacklog, metadata, wake queue"]
+  S --- R2["Second Mate home records"]
+  W1 --> T1["Disposable worktree"]
+  W2 --> T2["Disposable worktree"]
+  T1 --> D["PR, local branch, or report"]
+  T2 --> D
+  D --> P
+            </pre>
+          </div>
+          <figcaption id="system-map-caption">At a glance: humans see a crew hierarchy, while every worker still resolves to a mechanical task record, endpoint, and isolated copy.</figcaption>
+        </figure>
+
+        <div class="grid-2">
+          <article class="card">
+            <h3>Project clone</h3>
+            <p>The home's long-lived, guarded local clone used for orientation, registry operations, and safe refreshes. The primary Firstmate normally reads it rather than implementing inside it.</p>
+          </article>
+          <article class="card">
+            <h3>Task worktree</h3>
+            <p>A separate working copy for one task. Ship and scout spawns refuse to start if the resolved path is the primary project checkout instead of a genuine isolated worktree.</p>
+          </article>
+        </div>
+
+        <details>
+          <summary>Technical evidence for the mental model</summary>
+          <div class="detail-body">
+            <p>The product overview defines the one-liaison model, visible workers, disposable worktrees, two task shapes, and optional Second Mates. The spawn script and its isolation regression enforce the distinct-worktree boundary rather than leaving it as prose.</p>
+            <div class="source-row">
+              <a class="source-link" href="../README.md">README</a>
+              <a class="source-link" href="architecture.md#worktrees-not-branches-in-your-checkout">Worktree architecture</a>
+              <a class="source-link" href="../bin/fm-spawn.sh">Spawn owner</a>
+              <a class="source-link" href="../tests/fm-spawn-pool-base-freshen.test.sh">Isolation regression</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="component-map" aria-labelledby="component-map-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">02</span>
+            <h2 id="component-map-title">The component map</h2>
+            <p class="section-summary">Firstmate is not a single daemon or model. It is a tracked agent distribution plus private operational homes, helper scripts, harness integrations, and a runtime backend.</p>
+          </div>
+          <span class="status-tag status-current">Current behaviour</span>
+        </div>
+
+        <div class="grid-2">
+          <article class="card">
+            <h3>Tracked distribution</h3>
+            <ul class="layer-list">
+              <li><code>AGENTS.md</code> gives the always-loaded operating contract.</li>
+              <li><code>.agents/skills/</code> holds conditional procedures.</li>
+              <li><code>bin/</code> owns mechanical actions and safety checks.</li>
+              <li><code>docs/</code> explains stable behaviour and evidence.</li>
+              <li>Harness hook directories adapt lifecycle events to shared scripts.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Private operational home</h3>
+            <ul class="layer-list">
+              <li><code>data/</code> holds backlog, preferences, registries, and reports.</li>
+              <li><code>state/</code> holds task identity, notifications, locks, wakes, and recovery records.</li>
+              <li><code>config/</code> holds home-local choices such as backend and harness routing.</li>
+              <li><code>projects/</code> holds guarded project clones.</li>
+              <li><code>.env</code> is optional, private, and never part of tracked documentation.</li>
+            </ul>
+          </article>
+        </div>
+
+        <h3>Four terms that sound similar but are not</h3>
+        <div class="table-shell" role="region" aria-label="Harness, model, backend, and Herdr Space comparison" tabindex="0">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Layer</th>
+                <th scope="col">Plain-English meaning</th>
+                <th scope="col">Examples</th>
+                <th scope="col">What it does not decide</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Harness</strong></td>
+                <td>The agent program that reads the brief, calls tools, and presents a conversation.</td>
+                <td>Codex, Claude, Pi, Grok, OpenCode, Cursor, Kimi, Muse.</td>
+                <td>It is not the language model and it is not the terminal placement layer.</td>
+              </tr>
+              <tr>
+                <td><strong>Model</strong></td>
+                <td>The reasoning model selected inside or through the harness.</td>
+                <td>A configured model name recorded with a spawn profile.</td>
+                <td>It does not own the worktree, terminal, or delivery mode.</td>
+              </tr>
+              <tr>
+                <td><strong>Runtime backend</strong></td>
+                <td>The session provider that creates, finds, sends to, and observes the worker endpoint.</td>
+                <td>tmux, Herdr, Zellij, Orca, cmux.</td>
+                <td>It does not choose the model or interpret the task.</td>
+              </tr>
+              <tr>
+                <td><strong>Herdr Space</strong></td>
+                <td>An optional disposable visual workspace used when the runtime backend is Herdr.</td>
+                <td>A projected one-task workspace under the launching home's workspace.</td>
+                <td>It never becomes task, endpoint, send, or cleanup authority.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">
+          <span class="callout-mark" aria-hidden="true">i</span>
+          <p><strong>A practical example:</strong> a worker can run the Codex harness, use a selected model, live in a Herdr runtime endpoint, and appear in a disposable Herdr Space. These are four separate facts recorded or resolved by different owners.</p>
+        </div>
+
+        <details>
+          <summary>Key script families and their responsibilities</summary>
+          <div class="detail-body">
+            <div class="grid-3">
+              <article class="card">
+                <h4>Start and recover</h4>
+                <p><code>fm-session-start</code>, <code>fm-bootstrap</code>, <code>fm-startup-network</code>, and <code>fm-wake-drain</code> establish authority and present the work queue.</p>
+              </article>
+              <article class="card">
+                <h4>Create and communicate</h4>
+                <p><code>fm-brief</code>, <code>fm-spawn</code>, <code>fm-send</code>, and <code>fm-control</code> create instructions, start work, send text, and operate lifecycle controls.</p>
+              </article>
+              <article class="card">
+                <h4>Watch and reconcile</h4>
+                <p><code>fm-watch</code>, <code>fm-crew-state</code>, and <code>fm-classify-lib</code> detect events, distinguish history from current state, and route actionable wakes.</p>
+              </article>
+              <article class="card">
+                <h4>Deliver</h4>
+                <p><code>fm-pr-check</code>, <code>fm-pr-merge</code>, <code>fm-merge-local</code>, and no-mistakes adapters preserve delivery and approval boundaries.</p>
+              </article>
+              <article class="card">
+                <h4>Clean up</h4>
+                <p><code>fm-teardown</code> owns the landed-work proof and refuses dirty or unlanded work unless explicit discard authority exists.</p>
+              </article>
+              <article class="card">
+                <h4>Persistent domains</h4>
+                <p><code>fm-home-seed</code>, registry helpers, remote controls, and backlog handoff create and maintain Second Mate homes.</p>
+              </article>
+            </div>
+            <div class="source-row">
+              <a class="source-link" href="scripts.md">Toolbelt index</a>
+              <a class="source-link" href="configuration.md#harness-support">Harness support</a>
+              <a class="source-link" href="configuration.md#runtime-backend-configbackend--fm_backend">Backend selection</a>
+              <a class="source-link" href="herdr-backend.md#presentation-spaces">Herdr Spaces</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="session-loop" aria-labelledby="session-loop-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">03</span>
+            <h2 id="session-loop-title">Session start and the supervision loop</h2>
+            <p class="section-summary">A session first proves it may act, then presents durable work, then keeps one supervision cycle alive until the fleet is quiet.</p>
+          </div>
+          <span class="status-tag status-current">Current behaviour</span>
+        </div>
+
+        <ol class="steps-list">
+          <li><strong>Acquire the home lock.</strong> A session that cannot prove lock ownership stays read-only.</li>
+          <li><strong>Run local bootstrap checks.</strong> Mutating sweeps run only for the lock owner.</li>
+          <li><strong>Start network checks off the blocking path.</strong> Authentication, remote routes, handoffs, and clone refreshes can finish later and report durably.</li>
+          <li><strong>Present the wake queue and open decisions.</strong> Presented rows remain until the exact acknowledgement is issued after handling.</li>
+          <li><strong>Emit one harness-specific supervision protocol.</strong> The script does not invent a generic wait shape.</li>
+          <li><strong>Print fleet and context digests.</strong> Live task identity comes before curated context so truncation loses the cheaper information last.</li>
+          <li><strong>Return to the watch.</strong> Exactly one cycle waits for actionable change and wakes the primary Firstmate.</li>
+        </ol>
+
+        <figure aria-labelledby="session-sequence-caption">
+          <div class="mermaid-wrap">
+            <pre class="mermaid">
+sequenceDiagram
+  accTitle: Session start and supervision sequence
+  accDescr: The session-start hook acquires the home lock, presents durable wakes, emits the supervision protocol, and hands actionable worker events back through the durable wake queue.
+  actor Captain
+  participant Hook as SessionStart hook
+  participant Start as fm-session-start
+  participant Lock as Home lock
+  participant Queue as Durable wake queue
+  participant Firstmate
+  participant Watcher
+  participant Worker
+
+  Hook->>Start: start once
+  Start->>Lock: acquire and verify
+  alt lock refused
+    Lock-->>Start: read-only diagnosis
+    Start-->>Firstmate: no mutation, no drain
+  else lock held
+    Lock-->>Start: mutation authority
+    Start->>Start: local bootstrap
+    Start-)Start: deferred network worker
+    Start->>Queue: drain and present
+    Queue-->>Firstmate: wakes, open decisions, ack command
+    Start-->>Firstmate: protocol, fleet digest, context
+    Firstmate->>Worker: handle or steer only if needed
+    Firstmate->>Queue: acknowledge handled sequence
+    Firstmate->>Watcher: arm one supervision cycle
+    Worker-->>Queue: status or turn-end event
+    Watcher-->>Firstmate: actionable wake
+    Firstmate->>Queue: drain before other action
+  end
+            </pre>
+          </div>
+          <figcaption id="session-sequence-caption">The durable queue is the hand-off between shell supervision and model reasoning. A wake is not consumed merely because it was printed.</figcaption>
+        </figure>
+
+        <div class="grid-4">
+          <article class="card">
+            <h3>Heartbeat</h3>
+            <p>A bounded prompt to review the whole fleet when normal events have been quiet. No change is an expected result, not progress to report.</p>
+          </article>
+          <article class="card">
+            <h3>Wake</h3>
+            <p>A durable queue record saying something may require Firstmate attention. It carries a sequence and survives interruption until acknowledged.</p>
+          </article>
+          <article class="card">
+            <h3>Stale</h3>
+            <p>An endpoint or worker has remained unchanged beyond a safety cadence. It is a demand to inspect, not permission to interrupt or restart automatically.</p>
+          </article>
+          <article class="card">
+            <h3>Open decision</h3>
+            <p>A keyed <code>needs-decision</code> or blocker event that remains visible until the matching resolution is appended or transferred into durable captain-owned work.</p>
+          </article>
+        </div>
+
+        <div class="callout warning">
+          <span class="callout-mark" aria-hidden="true">!</span>
+          <p><strong>Why Pullings can be prevented from ending a turn:</strong> if work, a registered event source, or Relay polling still needs supervision and no healthy identity-matched watch is proven, the stop or turn-end integration blocks the stop or schedules one bounded follow-up. This prevents a quiet-looking turn ending with nobody watching the fleet. The mechanism is bounded per harness so a broken guard does not trap the session forever.</p>
+        </div>
+
+        <details>
+          <summary>How the watcher decides what is actionable</summary>
+          <div class="detail-body">
+            <p>The shell watcher absorbs routine no-change heartbeats and positively proven busy work. It surfaces captain-relevant status, unproven no-verb signals, authenticated check results, overdue declared waits, stale or wedged workers, and heartbeat reviews. It appends actionable records to <code>state/.wake-queue</code> before waking the primary session.</p>
+            <p>Status files are append-only event logs, so the drain separately folds keyed open decisions and unread notes. This prevents an unresolved decision from disappearing beneath a later progress line.</p>
+            <div class="source-row">
+              <a class="source-link" href="architecture.md#event-driven-supervision">Supervision architecture</a>
+              <a class="source-link" href="../bin/fm-watch.sh">Watcher</a>
+              <a class="source-link" href="../bin/fm-wake-drain.sh">Wake drain</a>
+              <a class="source-link" href="../bin/fm-classify-lib.sh">Status classification</a>
+              <a class="source-link" href="../tests/fm-wake-queue.test.sh">Queue regression</a>
+            </div>
+          </div>
+        </details>
+
+        <details>
+          <summary>How session start is kept bounded</summary>
+          <div class="detail-body">
+            <p>The blocking digest performs local work only. GitHub authentication, Second Mate convergence and liveness, pending remote handoff delivery, and project clone refresh run in a separately bounded deferred stage. If they are still running, the digest says what remains unconfirmed instead of claiming success.</p>
+            <div class="source-row">
+              <a class="source-link" href="../bin/fm-session-start.sh">Session-start composition</a>
+              <a class="source-link" href="../bin/fm-startup-network.sh">Deferred network stage</a>
+              <a class="source-link" href="../tests/fm-session-start.test.sh">Session-start regression</a>
+              <a class="source-link" href="../tests/fm-startup-network.test.sh">Network-stage regression</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="task-lifecycle" aria-labelledby="task-lifecycle-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">04</span>
+            <h2 id="task-lifecycle-title">The task lifecycle</h2>
+            <p class="section-summary">The lifecycle carries the same intent through intake, isolation, work, decisions, validation, landing, and safe cleanup.</p>
+          </div>
+          <span class="status-tag status-current">Current behaviour</span>
+        </div>
+
+        <figure aria-labelledby="task-state-caption">
+          <div class="mermaid-wrap">
+            <pre class="mermaid">
+stateDiagram-v2
+  accTitle: Task operational state machine
+  accDescr: A task moves from intake through an isolated worker, decisions, delivery-mode-specific validation, authorised landing, and teardown, with a recovery loop that preserves the worktree.
+  [*] --> Intake
+  Intake --> Queued: project, scope, mode, authority
+  Queued --> Briefed: task contract written
+  Briefed --> Working: isolated spawn confirmed
+  Working --> Decision: material choice or blocker
+  Decision --> Working: keyed answer resolves it
+  Working --> ImplementationReady: change committed or scout report complete
+  ImplementationReady --> Validation: no-mistakes
+  ImplementationReady --> PRReady: direct-PR
+  ImplementationReady --> LocalReady: local-only
+  Validation --> Decision: ask-user finding
+  Validation --> PRReady: checks green
+  PRReady --> Landed: explicit merge or authorised green yolo merge
+  LocalReady --> Landed: approved guarded fast-forward
+  Landed --> Teardown: landed-work proof
+  Teardown --> [*]
+  Working --> Recovery: endpoint lost or worker stuck
+  Recovery --> Working: preserved worktree and relaunch
+  Working --> Failed: terminal failure
+  Failed --> Recovery: safe retry chosen
+            </pre>
+          </div>
+          <figcaption id="task-state-caption">This is the operational lifecycle, not a list of backlog enum values. A worker's <code>done:</code> signal can mean implementation-ready while Firstmate still waits for landing before cleanup.</figcaption>
+        </figure>
+
+        <h3>Three delivery modes</h3>
+        <div class="table-shell" role="region" aria-label="Delivery mode comparison" tabindex="0">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Mode</th>
+                <th scope="col">Worker delivery</th>
+                <th scope="col">Ready signal</th>
+                <th scope="col">Landing authority</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>no-mistakes</strong></td>
+                <td>The pipeline owns review, fixes, tests, docs, lint, push, PR, and CI.</td>
+                <td>PR URL with checks green.</td>
+                <td>Captain with yolo off; Firstmate may merge routine green work with valid yolo posture.</td>
+              </tr>
+              <tr>
+                <td><strong>direct-PR</strong></td>
+                <td>The worker performs proportionate checks, pushes, and opens a PR without the no-mistakes pipeline.</td>
+                <td>PR URL after opening.</td>
+                <td>The same explicit merge boundary applies.</td>
+              </tr>
+              <tr>
+                <td><strong>local-only</strong></td>
+                <td>The worker leaves a clean ready branch without pushing.</td>
+                <td>Clean local branch ready to land.</td>
+                <td>Firstmate uses the guarded fast-forward path only after approval; this work stays in the main home.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout warning">
+          <span class="callout-mark" aria-hidden="true">✓</span>
+          <p><strong>Delivery mode is not merge authority.</strong> Mode selects the route and rigour. The independent <code>yolo</code> posture controls routine gate and green-merge autonomy within accepted intent. Destructive, irreversible, security-sensitive, expanded-scope, and red-PR choices retain stronger captain boundaries.</p>
+        </div>
+
+        <div class="grid-3">
+          <article class="card">
+            <h3>Intake</h3>
+            <p>Resolve the project, route by Second Mate scope, decide ship versus scout, choose concrete delivery mode and yolo posture, and write a task-specific brief.</p>
+          </article>
+          <article class="card">
+            <h3>Execution</h3>
+            <p>Spawn into a fresh isolated worktree, verify the worker is processing the brief, supervise sparse status events, and answer keyed decisions through the data plane.</p>
+          </article>
+          <article class="card">
+            <h3>Landing</h3>
+            <p>Use the selected validation path, record the PR or local result, wait for authority, land through guarded helpers, then prove the work is landed before teardown.</p>
+          </article>
+        </div>
+
+        <details>
+          <summary>Text messages, lifecycle control, and teardown are separate</summary>
+          <div class="detail-body">
+            <p><code>fm-send</code> is the data plane for text an agent should read. <code>fm-control</code> is the control plane for the closed verbs <code>interrupt</code>, <code>exit</code>, and <code>relaunch</code>, each with a backend-verifiable postcondition. Teardown is deliberately outside that control plane because it can remove an endpoint and worktree.</p>
+            <div class="source-row">
+              <a class="source-link" href="agent-control.md">Control-plane contract</a>
+              <a class="source-link" href="../bin/fm-send.sh">Data plane</a>
+              <a class="source-link" href="../bin/fm-control.sh">Control plane</a>
+              <a class="source-link" href="../bin/fm-teardown.sh">Teardown owner</a>
+            </div>
+          </div>
+        </details>
+
+        <details>
+          <summary>Decision and validation ownership</summary>
+          <div class="detail-body">
+            <p>A worker reports a material product or engineering choice as a keyed decision. Firstmate applies the configured authority, passes the exact answer back with the same key, and the resolution append closes that open record. During no-mistakes validation, the pipeline alone owns fixes and branch custody; the implementation worker drives every gate until checks pass or a genuine captain choice is escalated.</p>
+            <div class="source-row">
+              <a class="source-link" href="decision-hold-lifecycle.md">Durable decisions</a>
+              <a class="source-link" href="../bin/fm-decision-hold.sh">Decision owner</a>
+              <a class="source-link" href="architecture.md#no-mistakes-gate-authority-boundary">Gate authority</a>
+              <a class="source-link" href="../bin/fm-pr-check.sh">PR readiness record</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="second-mates" aria-labelledby="second-mates-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">05</span>
+            <h2 id="second-mates-title">The Second Mate lifecycle</h2>
+            <p class="section-summary">A Second Mate is persistent organisational capacity, not a long-running ordinary task and not a separate architecture.</p>
+          </div>
+          <span class="status-tag status-current">Current behaviour</span>
+        </div>
+
+        <div class="grid-2">
+          <article class="card">
+            <h3>What makes it persistent</h3>
+            <ul class="plain-list">
+              <li>Its own <code>FM_HOME</code>, data, state, config, projects, and session lock.</li>
+              <li>A charter stored in its home and a route recorded in the primary home's Second Mate registry.</li>
+              <li>A natural-language scope used for routing; project lists help provision the home but do not grant exclusive ownership.</li>
+              <li>Its own crewmates, endpoints, backlog, decisions, and recovery loop.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>What keeps it bounded</h3>
+            <ul class="plain-list">
+              <li>It reconciles existing work after restart, then idles if no task has been routed.</li>
+              <li>It never invents audits, surveys, or improvements from an empty queue.</li>
+              <li>The primary reads routed replies from status or a referenced document, not by scraping the Second Mate's chat.</li>
+              <li>Retirement is explicit and refuses while child work remains in flight.</li>
+            </ul>
+          </article>
+        </div>
+
+        <h3>Lifecycle in six steps</h3>
+        <ol class="steps-list">
+          <li><strong>Seed:</strong> create an isolated home, projects or project-less lease, charter, and registry entry transactionally.</li>
+          <li><strong>Launch:</strong> resolve its harness pin and backend, then start it as a direct report with its own home.</li>
+          <li><strong>Route:</strong> move judged in-scope backlog work into that home's queue and send a marked request.</li>
+          <li><strong>Supervise:</strong> the Second Mate runs its own session-start and watcher loop and can dispatch its own isolated workers.</li>
+          <li><strong>Recover:</strong> a confirmed dead or missing agent can be relaunched against the preserved home; an unreachable remote route remains unknown and is never silently replaced locally.</li>
+          <li><strong>Retire:</strong> only an explicit decision can remove the persistent route, and the home must have no work under way unless discard is separately authorised.</li>
+        </ol>
+
+        <div class="callout">
+          <span class="callout-mark" aria-hidden="true">↔</span>
+          <p><strong>The captain can still talk directly to a Second Mate.</strong> A marked Firstmate request is routed back through status and correlation records. Direct human typing stays unmarked and conversational, and Firstmate reconciles that authoritative intervention at the next supervision review.</p>
+        </div>
+
+        <details>
+          <summary>Inherited configuration and remote homes</summary>
+          <div class="detail-body">
+            <p>The primary conservatively propagates a declared allowlist of local configuration and shared captain preferences. The primary's <code>secondmate-harness</code> selection is not inherited as a child preference because Second Mates do not create more Second Mates. A remote Second Mate places the whole home on an SSH-reachable host, pins that agent to Herdr, and keeps its own workers' backend selection independent.</p>
+            <div class="source-row">
+              <a class="source-link" href="configuration.md#secondmate-routes-datasecondmatesmd">Second Mate routes</a>
+              <a class="source-link" href="remote-secondmates.md">Remote homes</a>
+              <a class="source-link" href="../bin/fm-home-seed.sh">Home seeding</a>
+              <a class="source-link" href="../bin/fm-backlog-handoff.sh">Backlog handoff</a>
+              <a class="source-link" href="../tests/fm-secondmate-lifecycle-e2e.test.sh">Lifecycle regression</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="safety" aria-labelledby="safety-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">06</span>
+            <h2 id="safety-title">Hooks and safety controls</h2>
+            <p class="section-summary">Hooks enforce narrow, mechanical boundaries. They do not replace the reasoning, authority, and reporting responsibilities carried by the operating contract.</p>
+          </div>
+          <span class="status-tag status-current">Current behaviour</span>
+        </div>
+
+        <div class="table-shell" role="region" aria-label="Hook and safety control map" tabindex="0">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Control</th>
+                <th scope="col">What it can enforce</th>
+                <th scope="col">What remains a model or process responsibility</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>SessionStart</strong></td>
+                <td>Invoke the bounded start owner or nudge the correct start path for the harness.</td>
+                <td>Understand the digest, reconcile decisions, and act only with verified lock authority.</td>
+              </tr>
+              <tr>
+                <td><strong>PreToolUse seatbelts</strong></td>
+                <td>Block unsafe watcher-arm command shapes, persistent top-level directory changes, and supported subagent creation surfaces in primary scope.</td>
+                <td>Choose the right project, route work, avoid dangerous commands outside covered shapes, and respect captain scope.</td>
+              </tr>
+              <tr>
+                <td><strong>Stop or turn-end guard</strong></td>
+                <td>Detect supervision need and either block a stop or issue one bounded follow-up through the harness's verified mechanism.</td>
+                <td>Handle the wake, repair continuity, and report only captain-relevant outcomes.</td>
+              </tr>
+              <tr>
+                <td><strong>Watcher protection</strong></td>
+                <td>Use identity-matched locks, fresh beacons, durable queue ordering, and bounded recovery acknowledgements.</td>
+                <td>Interpret a stale event and decide whether to inspect, steer, relaunch, or escalate.</td>
+              </tr>
+              <tr>
+                <td><strong>Project boundary</strong></td>
+                <td>Refuse unsafe spawn locations, restrict Firstmate's primary writes, and route project changes through isolated workers.</td>
+                <td>Keep the task within accepted intent and avoid changing unrelated user work.</td>
+              </tr>
+              <tr>
+                <td><strong>Landing and teardown guards</strong></td>
+                <td>Require explicit merge paths, reject red or malformed PR operations, and refuse dirty or unlanded worktree removal.</td>
+                <td>Obtain the correct merge or discard authority and explain failures faithfully.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="grid-3">
+          <article class="card">
+            <h3>No unlanded work</h3>
+            <p>Teardown is a proof, not tidying. A dirty worktree or committed change that is not demonstrably landed stops cleanup for investigation.</p>
+          </article>
+          <article class="card">
+            <h3>Explicit merge authority</h3>
+            <p>No PR merge occurs from implication. The captain's concrete instruction or a valid yolo posture for routine green work is required, and every task merge uses the guarded helper.</p>
+          </article>
+          <article class="card">
+            <h3>Secret boundaries</h3>
+            <p>Private home state and optional tokens live in gitignored surfaces. Tracked docs, briefs, reports, and public replies must not copy credentials or sensitive message bodies.</p>
+          </article>
+        </div>
+
+        <details>
+          <summary>Tracked hook integrations</summary>
+          <div class="detail-body">
+            <p>Claude, Codex, Cursor, Grok, Pi, and OpenCode use different host events and response mechanisms, but converge on shared scripts for session start, pre-tool checks, and turn-end safety where supported. Some host boundaries deliberately step aside when prerequisites are unreadable because blocking every command or trapping a session would be worse than losing an optional check.</p>
+            <div class="source-row">
+              <a class="source-link" href="../.claude/settings.json">Claude hooks</a>
+              <a class="source-link" href="../.codex/hooks.json">Codex hooks</a>
+              <a class="source-link" href="../.cursor/hooks.json">Cursor hooks</a>
+              <a class="source-link" href="../.grok/hooks/fm-primary-turnend-guard.json">Grok hooks</a>
+              <a class="source-link" href="../.pi/extensions/fm-primary-turnend-guard.ts">Pi extension</a>
+              <a class="source-link" href="../.opencode/plugins/fm-primary-turnend-guard.js">OpenCode plugin</a>
+            </div>
+          </div>
+        </details>
+
+        <details>
+          <summary>Safety evidence</summary>
+          <div class="detail-body">
+            <div class="source-row">
+              <a class="source-link" href="turnend-guard.md">Turn-end guard contract</a>
+              <a class="source-link" href="arm-pretool-check.md">Watcher-arm seatbelt</a>
+              <a class="source-link" href="cd-guard.md">Directory-change seatbelt</a>
+              <a class="source-link" href="subagent-guard.md">Subagent boundary</a>
+              <a class="source-link" href="../tests/fm-turnend-guard.test.sh">Turn-end regression</a>
+              <a class="source-link" href="../tests/fm-cd-pretool-check.test.sh">Directory guard regression</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="state-recovery" aria-labelledby="state-recovery-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">07</span>
+            <h2 id="state-recovery-title">Durable state and recovery</h2>
+            <p class="section-summary">Firstmate recovers from disk and live endpoint facts, not from confidence, chat scrollback, or the latest status sentence.</p>
+          </div>
+          <span class="status-tag status-current">Current behaviour</span>
+        </div>
+
+        <figure aria-labelledby="filesystem-caption">
+          <ul class="file-tree" aria-label="Firstmate filesystem and state hierarchy">
+            <li>
+              <div class="tree-row">
+                <span class="tree-path">Effective Firstmate home/</span>
+                <span>The operational domain selected by <code>FM_HOME</code>, which falls back to the tracked code root when unset.</span>
+                <span class="authority">Home root</span>
+              </div>
+              <ul>
+                <li>
+                  <div class="tree-row">
+                    <span class="tree-path">data/</span>
+                    <span>Backlog, project and Second Mate registries, preferences, charters, and scout reports.</span>
+                    <span class="authority">Durable intent</span>
+                  </div>
+                </li>
+                <li>
+                  <div class="tree-row">
+                    <span class="tree-path">state/</span>
+                    <span>Runtime identity, event history, locks, queues, checks, and recovery records.</span>
+                    <span class="authority">Durable operations</span>
+                  </div>
+                  <ul>
+                    <li><div class="tree-row"><span class="tree-path">&lt;id&gt;.meta</span><span>Task kind, mode, harness, backend, branch, worktree, endpoint, and related identity.</span><span class="authority">Target identity</span></div></li>
+                    <li><div class="tree-row"><span class="tree-path">&lt;id&gt;.status</span><span>Append-only wake events such as working, blocked, needs-decision, resolved, done, and failed.</span><span class="authority history">History only</span></div></li>
+                    <li><div class="tree-row"><span class="tree-path">.wake-queue</span><span>Sequenced actionable notifications awaiting handling and acknowledgement.</span><span class="authority">Durable hand-off</span></div></li>
+                    <li><div class="tree-row"><span class="tree-path">.lock</span><span>The verified harness session that currently owns this home's mutation authority.</span><span class="authority">Session authority</span></div></li>
+                    <li><div class="tree-row"><span class="tree-path">.last-watcher-beat</span><span>Freshness beacon touched only by the watcher.</span><span class="authority">Liveness evidence</span></div></li>
+                    <li><div class="tree-row"><span class="tree-path">decision-bindings/</span><span>Bindings that let keyed captured answers close the correct durable captain decision.</span><span class="authority">Decision routing</span></div></li>
+                  </ul>
+                </li>
+                <li>
+                  <div class="tree-row">
+                    <span class="tree-path">config/</span>
+                    <span>Backend, harness, dispatch, calm, inherited material, and local operational choices.</span>
+                    <span class="authority">Home configuration</span>
+                  </div>
+                </li>
+                <li>
+                  <div class="tree-row">
+                    <span class="tree-path">projects/</span>
+                    <span>Guarded long-lived clones used for routing and safe project operations.</span>
+                    <span class="authority">Project baseline</span>
+                  </div>
+                </li>
+                <li>
+                  <div class="tree-row">
+                    <span class="tree-path">task worktree</span>
+                    <span>The isolated working copy whose Git state is the authority for uncommitted and committed task changes.</span>
+                    <span class="authority">Work product</span>
+                  </div>
+                </li>
+              </ul>
+            </li>
+          </ul>
+          <figcaption id="filesystem-caption">Important hierarchy: a status line can wake Firstmate, but it does not override the worktree, metadata identity, live endpoint, current no-mistakes run, backlog, or a registered Second Mate home's own structured state.</figcaption>
+        </figure>
+
+        <h3>How current state is reconstructed</h3>
+        <ol class="steps-list">
+          <li>Read the task metadata to identify the exact branch, worktree, harness, backend, and endpoint.</li>
+          <li>Attribute a current no-mistakes run only when its branch and code identity match the task.</li>
+          <li>Otherwise ask the backend for semantic busy, idle, dead, or unknown evidence.</li>
+          <li>Only a proven idle endpoint may fall back to a recognised status event; unknown never becomes working or done by guesswork.</li>
+          <li>For registered Second Mates, their own validated home outranks the parent task's historical status lines.</li>
+        </ol>
+
+        <div class="table-shell" role="region" aria-label="Recovery examples" tabindex="0">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Observed condition</th>
+                <th scope="col">What Firstmate trusts</th>
+                <th scope="col">Safe response</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Dead endpoint</td>
+                <td>Exact metadata plus backend agent-state classification and preserved worktree.</td>
+                <td>Load recovery procedure and relaunch in place without discarding work.</td>
+              </tr>
+              <tr>
+                <td>Stale worker</td>
+                <td>Current state, live pane evidence, turn-end age, and validation logs where relevant.</td>
+                <td>Inspect deeply; never infer that stale means dead or auto-interrupt.</td>
+              </tr>
+              <tr>
+                <td>Pending Second Mate reply</td>
+                <td>Parent-owned correlation and retry record, not the Second Mate's chat transcript.</td>
+                <td>Retry or escalate through the durable pending-reply path.</td>
+              </tr>
+              <tr>
+                <td>Unresolved decision</td>
+                <td>Keyed open-decision fold or structured captain-owned backlog item.</td>
+                <td>Present the concrete choice and close it only with a matching answer.</td>
+              </tr>
+              <tr>
+                <td>Dirty worktree</td>
+                <td>Git status and landed-work proof.</td>
+                <td>Refuse teardown and preserve the copy for investigation.</td>
+              </tr>
+              <tr>
+                <td>Watcher loss</td>
+                <td>Identity-matched lock, process identity, fresh beacon, recovery generation, and durable queue.</td>
+                <td>Restore one cycle, re-present unacknowledged work, and use the printed generation-bound acknowledgement.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <details>
+          <summary>Why chat memory is deliberately secondary</summary>
+          <div class="detail-body">
+            <p>A conversation can be compacted, a terminal can disappear, and a status event can become stale. Briefs, worktrees, metadata, backlogs, queue rows, decision keys, checks, and live backend observations survive those failures and can be reconciled by a fresh session. Terminal scrollback is useful for diagnosis but never overrides valid structured state.</p>
+            <div class="source-row">
+              <a class="source-link" href="architecture.md#restart-proof">Restart-proof architecture</a>
+              <a class="source-link" href="../bin/fm-crew-state.sh">Current-state reconciler</a>
+              <a class="source-link" href="../tests/fm-crew-state.test.sh">Current-state regression</a>
+              <a class="source-link" href="watcher-continuity.md">Watcher continuity</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="captain-view" aria-labelledby="captain-view-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">08</span>
+            <h2 id="captain-view-title">What the captain sees</h2>
+            <p class="section-summary">The current experience is intentionally transparent: visible worker surfaces plus concise Firstmate outcomes. Presentation cleanliness depends on the harness and backend.</p>
+          </div>
+          <span class="status-tag status-limit">Current plus limits</span>
+        </div>
+
+        <div class="grid-2">
+          <article class="card">
+            <span class="status-tag status-current">Current behaviour</span>
+            <h3>Spaces and crew labels</h3>
+            <p>Each worker appears in a backend-specific endpoint such as a tmux window, Herdr tab or Space, Zellij tab, Orca terminal, or cmux workspace. Human-facing labels make the fleet navigable while durable metadata retains the mechanical identity.</p>
+          </article>
+          <article class="card">
+            <span class="status-tag status-current">Current behaviour</span>
+            <h3>Pullings versus raw transcript</h3>
+            <p>Pullings reports the outcome, consequence, decision, and full PR link in the primary conversation. The worker panes remain available for direct observation, including tool rows and operational messages that are not repeated into captain-facing summaries.</p>
+          </article>
+          <article class="card">
+            <span class="status-tag status-current">Current behaviour</span>
+            <h3>Direct Second Mate conversation</h3>
+            <p>The captain can type directly into a Second Mate's endpoint. That message is conversational rather than a routed Firstmate control message, and the next supervision review reconciles any resulting change.</p>
+          </article>
+          <article class="card">
+            <span class="status-tag status-limit">Verified limitation</span>
+            <h3>Codex has no supported in-pane tool-row filter</h3>
+            <p>The tracked Codex integration supplies session-start, pre-tool, and stop hooks, but no supported transcript-rendering extension point for hiding its tool rows. Firstmate therefore cannot present a clean filtered Codex worker pane today.</p>
+          </article>
+        </div>
+
+        <div class="callout warning">
+          <span class="callout-mark" aria-hidden="true">π</span>
+          <p><strong>Pi Calm is different and harness-specific.</strong> Pi's tracked <code>/calm</code> extension can hide supported transcript chrome and operational rows, replace the working indicator, and preserve the underlying context and exports. It is not a general Firstmate display layer and does not imply that Codex or other harnesses can filter their panes.</p>
+        </div>
+
+        <h3>A clean Captain View is only a possible enhancement</h3>
+        <div class="captain-mock" aria-label="Conceptual mock-up of a future Captain View">
+          <div class="captain-mock-header">
+            <strong>Captain View concept</strong>
+            <span class="status-tag status-future">Not implemented</span>
+          </div>
+          <div class="captain-mock-body">
+            <div class="mock-card"><strong>Under way</strong><small>Two outcomes described in captain language, without tool rows.</small></div>
+            <div class="mock-card"><strong>Captain's call</strong><small>One concrete choice with evidence and consequences.</small></div>
+            <div class="mock-card"><strong>Ready to review</strong><small>One green PR with a full link and risk summary.</small></div>
+          </div>
+        </div>
+        <div class="callout future">
+          <span class="callout-mark" aria-hidden="true">◇</span>
+          <p><strong>Proposed enhancement:</strong> a separate read model could present only structured fleet outcomes and captain decisions while leaving every underlying worker transcript intact. No such unified Captain View exists in the current implementation, and this concept does not grant a display layer any new task or lifecycle authority.</p>
+        </div>
+
+        <details>
+          <summary>Presentation evidence and limits</summary>
+          <div class="detail-body">
+            <div class="source-row">
+              <a class="source-link" href="../README.md#features">Visible crew</a>
+              <a class="source-link" href="herdr-backend.md#presentation-spaces">Herdr presentation</a>
+              <a class="source-link" href="calm.md">Pi Calm current behaviour</a>
+              <a class="source-link" href="calm-mode-feasibility.md#cross-harness-verification-record">Cross-harness Calm evidence</a>
+              <a class="source-link" href="../.codex/hooks.json">Codex integration surface</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="scenarios" aria-labelledby="scenarios-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">09</span>
+            <h2 id="scenarios-title">Worked scenarios</h2>
+            <p class="section-summary">These examples show the difference between what happens internally and what the captain needs to hear.</p>
+          </div>
+          <span class="status-tag status-current">Current behaviour</span>
+        </div>
+
+        <div class="grid-2" style="counter-reset: scenario;">
+          <article class="card scenario">
+            <h3>Build a new feature</h3>
+            <div class="scenario-grid">
+              <ol class="steps-list">
+                <li>Resolve the project and delivery posture.</li>
+                <li>Route by Second Mate scope or keep it in the main home.</li>
+                <li>Create a precise brief and spawn an isolated worktree.</li>
+                <li>Supervise until implementation is committed.</li>
+                <li>Run the selected delivery path and report the ready result.</li>
+              </ol>
+              <div class="captain-sees"><strong>Captain sees</strong>A concise feature outcome, the complete PR URL or local-ready result, risk where relevant, and any actual choice.</div>
+            </div>
+          </article>
+
+          <article class="card scenario">
+            <h3>Answer a decision</h3>
+            <div class="scenario-grid">
+              <ol class="steps-list">
+                <li>The worker opens a privacy-safe decision key.</li>
+                <li>The wake drain keeps that choice visible even if later progress events arrive.</li>
+                <li>Pullings presents evidence, consequence, options, and a recommendation.</li>
+                <li>The answer is sent with the same key, which appends the resolution.</li>
+                <li>Any authorised follow-up remains linked in durable backlog state.</li>
+              </ol>
+              <div class="captain-sees"><strong>Captain sees</strong>The real choice in plain language, not a status prefix, internal hold, or raw pipeline finding.</div>
+            </div>
+          </article>
+
+          <article class="card scenario">
+            <h3>An agent crashes</h3>
+            <div class="scenario-grid">
+              <ol class="steps-list">
+                <li>A dead or stale signal wakes supervision.</li>
+                <li>Firstmate reconciles metadata, backend agent state, worktree Git state, and validation ownership.</li>
+                <li>If recovery is safe, it relaunches against the same preserved worktree and brief plus a progress note.</li>
+                <li>If the endpoint is unknown, Firstmate stops short of guessing or destroying anything.</li>
+              </ol>
+              <div class="captain-sees"><strong>Captain sees</strong>Nothing for an automatic safe recovery; a concrete blocker only if the work cannot continue without help.</div>
+            </div>
+          </article>
+
+          <article class="card scenario">
+            <h3>The captain intervenes directly</h3>
+            <div class="scenario-grid">
+              <ol class="steps-list">
+                <li>The captain types into a worker or Second Mate endpoint.</li>
+                <li>That instruction is authoritative within its concrete scope.</li>
+                <li>At the next supervision review, Pullings reconciles the live endpoint and durable records.</li>
+                <li>Any conflict, new decision, or delivery impact is recorded and handled through the normal lifecycle.</li>
+              </ol>
+              <div class="captain-sees"><strong>Captain sees</strong>No duplicate lecture or transcript relay; only a material consequence that now needs attention.</div>
+            </div>
+          </article>
+
+          <article class="card scenario">
+            <h3>Work is ready to merge</h3>
+            <div class="scenario-grid">
+              <ol class="steps-list">
+                <li>The PR path reports readiness at its mode-specific point.</li>
+                <li>Firstmate records the exact PR and arms merge observation.</li>
+                <li>The captain explicitly says to merge, or valid yolo authority covers routine green landing.</li>
+                <li>The guarded merge helper records the result.</li>
+                <li>Only confirmed landed work can be torn down.</li>
+              </ol>
+              <div class="captain-sees"><strong>Captain sees</strong>The complete PR URL before merge, then a one-line landed outcome after the merge succeeds.</div>
+            </div>
+          </article>
+        </div>
+
+        <details>
+          <summary>Scenario evidence</summary>
+          <div class="detail-body">
+            <div class="source-row">
+              <a class="source-link" href="architecture.md#delivery-modes-are-explicit-per-task">Delivery modes</a>
+              <a class="source-link" href="decision-hold-lifecycle.md">Decision lifecycle</a>
+              <a class="source-link" href="agent-control.md#transactional-relaunch">Relaunch</a>
+              <a class="source-link" href="../bin/fm-pr-merge.sh">PR merge owner</a>
+              <a class="source-link" href="../bin/fm-merge-local.sh">Local merge owner</a>
+              <a class="source-link" href="../bin/fm-teardown.sh">Cleanup proof</a>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="section" id="glossary" aria-labelledby="glossary-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">10</span>
+            <h2 id="glossary-title">Glossary</h2>
+            <p class="section-summary">The short definitions used throughout this page.</p>
+          </div>
+          <span class="status-tag status-current">Reference</span>
+        </div>
+
+        <dl class="term-grid">
+          <dt>Firstmate home</dt><dd>One isolated operational domain selected by <code>FM_HOME</code>, containing private data, state, config, projects, and a session lock.</dd>
+          <dt>Project clone</dt><dd>The home's long-lived guarded clone, distinct from each temporary task working copy.</dd>
+          <dt>Worktree</dt><dd>An isolated Git working copy for one ship or scout task.</dd>
+          <dt>Harness</dt><dd>The agent program that reads prompts, calls tools, and exposes lifecycle events.</dd>
+          <dt>Model</dt><dd>The reasoning model selected for an agent run.</dd>
+          <dt>Backend</dt><dd>The runtime session provider that creates and observes worker endpoints.</dd>
+          <dt>Herdr</dt><dd>An experimental runtime backend with tabs and optional disposable presentation Spaces.</dd>
+          <dt>Wake</dt><dd>A durable actionable notification queued for Firstmate handling.</dd>
+          <dt>Status event</dt><dd>One append-only worker report. It may trigger attention but is not current-state truth by itself.</dd>
+          <dt>Watcher</dt><dd>The zero-token shell process that observes fleet state and writes actionable wakes.</dd>
+          <dt>Decision key</dt><dd>A stable privacy-safe identifier that binds an unresolved choice to its eventual answer.</dd>
+          <dt>no-mistakes</dt><dd>The full validation and delivery pipeline for review, fixes, tests, documentation, lint, push, PR, and CI.</dd>
+          <dt>PR</dt><dd>A pull request used for review and landing in PR-based delivery modes.</dd>
+          <dt>Teardown</dt><dd>Guarded cleanup after a task is proven landed or, for a scout, its report and decision inventory are complete.</dd>
+          <dt>Yolo posture</dt><dd>Standing authority for Firstmate to decide routine gates and merge green work within already accepted intent.</dd>
+        </dl>
+      </section>
+
+      <section class="section faq" id="faq" aria-labelledby="faq-title">
+        <div class="section-head">
+          <div>
+            <span class="section-number">11</span>
+            <h2 id="faq-title">Frequently asked questions</h2>
+            <p class="section-summary">The implementation boundaries that are easiest to misunderstand.</p>
+          </div>
+          <span class="status-tag status-current">Reference</span>
+        </div>
+
+        <details>
+          <summary>Is Firstmate a model, harness, app, skill, or MCP server?</summary>
+          <div class="detail-body"><p>No. It is an agent distribution made of instructions, skills, tooling, policies, and state conventions. A supported harness launched inside it instantiates the primary Firstmate.</p></div>
+        </details>
+        <details>
+          <summary>Why not trust the latest status line?</summary>
+          <div class="detail-body"><p>Because status is append-only notification history. A later progress line can sit above an unresolved decision, and a terminal-looking line can be older than a live validation run. Firstmate reconciles the current run, endpoint, worktree, and structured records instead.</p></div>
+        </details>
+        <details>
+          <summary>Does stale mean the agent is dead?</summary>
+          <div class="detail-body"><p>No. Stale means the endpoint has not changed within the expected cadence. A busy-but-wedged worker, an idle stopped worker, an external wait, and an unreadable endpoint need different responses.</p></div>
+        </details>
+        <details>
+          <summary>Can Firstmate merge without asking?</summary>
+          <div class="detail-body"><p>Only when the project's standing yolo posture authorises routine green landing within accepted scope. With yolo off, the captain must explicitly state the concrete merge. Red, destructive, irreversible, security-sensitive, or expanded-scope choices retain stronger boundaries.</p></div>
+        </details>
+        <details>
+          <summary>Does teardown discard my uncommitted work?</summary>
+          <div class="detail-body"><p>No. Dirty or unlanded ship work refuses teardown. Explicit discard authority is separate and cannot be inferred from a desire to clean up.</p></div>
+        </details>
+        <details>
+          <summary>Why does the stop guard sometimes keep Pullings working?</summary>
+          <div class="detail-body"><p>Because work or an event source still needs a verified supervisor and no healthy watch has been proven. The guard creates a bounded continuation opportunity so the session does not end blind.</p></div>
+        </details>
+        <details>
+          <summary>Can I speak directly to a Second Mate?</summary>
+          <div class="detail-body"><p>Yes. Direct typing stays conversational. Firstmate-routed messages use a separate marker and correlation path so replies return to the parent without scraping chat.</p></div>
+        </details>
+        <details>
+          <summary>Is Herdr required?</summary>
+          <div class="detail-body"><p>No. tmux is the reference default, with Herdr, Zellij, Orca, and cmux available under their documented support boundaries. A Herdr Space exists only on the Herdr path.</p></div>
+        </details>
+        <details>
+          <summary>Can Codex hide its tool rows like Pi Calm?</summary>
+          <div class="detail-body"><p>Not through a supported Firstmate in-pane filtering surface today. Pi Calm is implemented through Pi-specific extension APIs. A separate Captain View would be a new product layer, not a hidden current Codex feature.</p></div>
+        </details>
+        <details>
+          <summary>What survives if every visible session closes?</summary>
+          <div class="detail-body"><p>The briefs, backlogs, registries, metadata, status ledgers, queues, decisions, worktrees, branches, reports, and remote-home records remain on disk. The next valid lock-owning session uses those plus live backend facts to reconstruct reality.</p></div>
+        </details>
+      </section>
+
+      <aside class="footer-note">
+        <strong>Evidence boundary:</strong> this page is a plain-English map, not a second owner of script formats or exact command syntax. Follow the linked script headers, current help, tests, and authoritative documents when operating or extending Firstmate. See <a href="how-firstmate-works-evidence.md">the evidence note</a> for the principal sources and validation performed.
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    const expandButton = document.querySelector("#expand-all");
+    const collapseButton = document.querySelector("#collapse-all");
+    const details = [...document.querySelectorAll("main details")];
+    let printInitiallyClosed = [];
+
+    expandButton.addEventListener("click", () => {
+      for (const item of details) item.open = true;
+      expandButton.textContent = "Technical evidence open";
+    });
+
+    collapseButton.addEventListener("click", () => {
+      for (const item of details) item.open = false;
+      expandButton.textContent = "Open technical evidence";
+      document.querySelector("#read-first").scrollIntoView({ block: "start" });
+    });
+
+    window.addEventListener("beforeprint", () => {
+      printInitiallyClosed = details.filter((item) => !item.open);
+      for (const item of printInitiallyClosed) item.open = true;
+    });
+
+    window.addEventListener("afterprint", () => {
+      for (const item of printInitiallyClosed) item.open = false;
+      printInitiallyClosed = [];
+    });
+  </script>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+
+    const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const paint = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+
+    function toRgba(colour) {
+      paint.clearRect(0, 0, 1, 1);
+      paint.fillStyle = "#000";
+      paint.fillStyle = colour;
+      paint.fillRect(0, 0, 1, 1);
+      return paint.getImageData(0, 0, 1, 1).data;
+    }
+
+    function compositeRgba(foreground, background) {
+      const foregroundAlpha = foreground[3] / 255;
+      const backgroundAlpha = background[3] / 255;
+      const alpha = foregroundAlpha + backgroundAlpha * (1 - foregroundAlpha);
+      if (alpha === 0) return [0, 0, 0, 0];
+      return [
+        (foreground[0] * foregroundAlpha + background[0] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+        (foreground[1] * foregroundAlpha + background[1] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+        (foreground[2] * foregroundAlpha + background[2] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+        alpha * 255,
+      ];
+    }
+
+    function pageIsDark() {
+      const rootBackground = toRgba(getComputedStyle(document.documentElement).backgroundColor);
+      const bodyBackground = toRgba(getComputedStyle(document.body).backgroundColor);
+      const [r, g, b, a] = compositeRgba(bodyBackground, rootBackground);
+      if (a > 0) return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+      return darkQuery.matches;
+    }
+
+    const diagrams = [...document.querySelectorAll(".mermaid")].map((element) => ({
+      element,
+      source: element.textContent,
+    }));
+    let appliedTheme;
+    let rendering = false;
+    let queued = false;
+
+    function queueRender() {
+      queued = true;
+      if (!rendering) void render();
+    }
+
+    async function render() {
+      rendering = true;
+      try {
+        while (queued) {
+          queued = false;
+          const theme = pageIsDark() ? "dark" : "base";
+          if (theme === appliedTheme) continue;
+          mermaid.initialize({
+            startOnLoad: false,
+            theme,
+            securityLevel: "strict",
+            themeVariables: theme === "base" ? {
+              primaryColor: "#f1dfb8",
+              primaryTextColor: "#10253a",
+              primaryBorderColor: "#927a4d",
+              lineColor: "#ad471c",
+              secondaryColor: "#eef7fb",
+              tertiaryColor: "#fffdf8",
+              fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+            } : {},
+            flowchart: { htmlLabels: false, curve: "basis" },
+          });
+          for (const { element, source } of diagrams) {
+            element.removeAttribute("data-processed");
+            element.textContent = source;
+          }
+          try {
+            await mermaid.run({ nodes: diagrams.map(({ element }) => element) });
+          } catch (error) {
+            console.error("Mermaid diagram render failed:", error);
+            return;
+          }
+          appliedTheme = theme;
+        }
+      } finally {
+        rendering = false;
+        if (queued) queueRender();
+      }
+    }
+
+    if (document.readyState === "complete") queueRender();
+    else window.addEventListener("load", queueRender, { once: true });
+    darkQuery.addEventListener("change", queueRender);
+  </script>
+</body>
+</html>
