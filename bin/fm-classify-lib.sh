@@ -616,25 +616,23 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 FM_OPEN_DECISIONS_FOLD_VERSION=5
 
 # Portable device:inode identity for the rotation/recreation check below.
-_fm_open_decisions_file_ident() {  # <file> -> "dev:inode:birth", empty on I/O failure
+_fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   local f=$1 epoch birth ident
   if [ -n "${FM_STATUS_IDENTITY_READER:-}" ]; then
     "$FM_STATUS_IDENTITY_READER" "$f"
     return
   fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    epoch=$(LC_ALL=C stat -f '%B' "$f" 2>/dev/null) || return 1
-    case "$epoch" in ''|0|*[!0-9]*) return 1 ;; esac
-    birth=$(LC_ALL=C stat -f '%FB' "$f" 2>/dev/null) || return 1
     ident=$(LC_ALL=C stat -f '%d:%i' "$f" 2>/dev/null) || return 1
+    epoch=$(LC_ALL=C stat -f '%B' "$f" 2>/dev/null) || epoch=0
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
   else
-    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || return 1
-    case "$epoch" in ''|0|*[!0-9]*) return 1 ;; esac
-    birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || return 1
     ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
+    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
   fi
-  case "$birth$ident" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
-  printf '%s:%s' "$ident" "$birth"
+  case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
+  if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
 }
 
 _fm_status_file_size() {  # <status-file>

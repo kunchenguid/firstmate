@@ -140,16 +140,18 @@ set_mtime() {  # <epoch> <file>
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
-  local size ident
+  local size ident epoch birth
   case "$1" in
     *.status)
       size=$(size_of "$1")
       if [ "$(uname)" = Darwin ]; then
-        ident=$(stat -f '%d:%i:%FB' "$1" 2>/dev/null)
+        ident=$(stat -f '%d:%i' "$1" 2>/dev/null); epoch=$(stat -f '%B' "$1" 2>/dev/null)
+        [ "$epoch" = 0 ] || birth=$(stat -f '%FB' "$1" 2>/dev/null)
       else
-        ident="$(stat -c '%d:%i' "$1" 2>/dev/null):$(stat -c '%w' "$1" 2>/dev/null)"
+        ident=$(stat -c '%d:%i' "$1" 2>/dev/null); epoch=$(stat -c '%W' "$1" 2>/dev/null)
+        [ "$epoch" = 0 ] || birth=$(stat -c '%w' "$1" 2>/dev/null)
       fi
-      printf '%s@%s' "$size" "$ident"
+      if [ -n "${birth:-}" ]; then printf '%s@strong:%s:%s' "$size" "$ident" "$birth"; else printf '%s@weak:%s' "$size" "$ident"; fi
       ;;
     *)
       if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi

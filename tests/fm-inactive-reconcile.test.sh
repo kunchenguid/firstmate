@@ -113,13 +113,14 @@ outcome_count() { # <home> <suffix>
 }
 
 prime_seen() { # <state> <status>
-  local state=$1 status=$2 size ident
+  local state=$1 status=$2 size ident epoch birth=''
   size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
   if [ "$(uname)" = Darwin ]; then
-    ident=$(stat -f '%d:%i:%FB' "$status")
+    ident=$(stat -f '%d:%i' "$status"); epoch=$(stat -f '%B' "$status"); [ "$epoch" = 0 ] || birth=$(stat -f '%FB' "$status")
   else
-    ident="$(stat -c '%d:%i' "$status"):$(stat -c '%w' "$status")"
+    ident=$(stat -c '%d:%i' "$status"); epoch=$(stat -c '%W' "$status"); [ "$epoch" = 0 ] || birth=$(stat -c '%w' "$status")
   fi
+  if [ -n "$birth" ]; then ident="strong:$ident:$birth"; else ident="weak:$ident"; fi
   printf '%s@%s' "$size" "$ident" > "$state/.seen-$(basename "$status" | tr '.' '_')"
 }
 

@@ -263,6 +263,37 @@ test_retired_task_id_starts_new_status_unread() {
   pass "a reused task id starts its replacement status log unread at byte zero"
 }
 
+test_weak_identity_still_presents_and_advances() {
+  local dir state out second reader
+  dir=$(make_case weak-identity); state="$dir/state"
+  out="$dir/first.out"; second="$dir/second.out"; reader="$dir/identity-reader"
+  printf '#!/usr/bin/env bash\nprintf "weak:7:8"\n' > "$reader"; chmod +x "$reader"
+  printf 'needs-decision [key=release]: choose target\nnote: release context attached\n' > "$state/weak.status"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed with the platform-strength fallback identity"
+  grep -F 'weak [key=release] needs-decision: choose target' "$out" >/dev/null \
+    || fail "weak identity omitted OPEN DECISIONS: $(cat "$out")"
+  grep -F 'weak note: release context attached' "$out" >/dev/null \
+    || fail "weak identity omitted unread status: $(cat "$out")"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" \
+    || fail "second drain failed with the platform-strength fallback identity"
+  grep -F 'release context attached' "$second" >/dev/null \
+    && fail "weak identity did not advance the presented-status cursor"
+  pass "fallback identity still presents and advances status state"
+}
+
+test_snapshot_failure_is_visible() {
+  local dir state out reader
+  dir=$(make_case snapshot-failure); state="$dir/state"; out="$dir/drain.out"; reader="$dir/identity-reader"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"; chmod +x "$reader"
+  printf 'needs-decision: choose target\n' > "$state/fail.status"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain aborted instead of reporting its incomplete status surface"
+  grep -F 'STATUS PRESENTATION INCOMPLETE:' "$out" >/dev/null \
+    || fail "snapshot failure produced a silently incomplete drain: $(cat "$out")"
+  pass "snapshot failures are reported visibly"
+}
+
 test_open_decisions_fold_is_unchanged() {
   local dir state out
   dir=$(make_case open-decisions-regression)
@@ -341,6 +372,8 @@ test_pending_reply_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
+test_weak_identity_still_presents_and_advances
+test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_lines_stay_silent_on_the_empty_queue
