@@ -821,6 +821,16 @@ On a live `claude` session that read reported `cursor_row: 57`, `foreground_proc
 
 The full argv is the load-bearing part, and it is what retires this adapter's own socket-level Cursor probe: a multiplexer's command *name* reports a bare `node` for a bundled Node CLI, so the name alone cannot tell Cursor Agent CLI from any other node process, while the argv can.
 
+**`--lines` is a scrollback count, and `cursor_row` is pane-relative.** Measured 2026-08-29 on 2.10.1 against a live 60-row pane with `history_size` 3 and `#{cursor_y}` 57, comparing `.output` with `tmux -L thurbox capture-pane -p -S 0 -E -` on the same pane:
+
+| `--lines` | `.output` rows | Alignment |
+| --- | --- | --- |
+| `0` | 60 | Exactly the visible screen, row-for-row identical to `capture-pane -S 0`. |
+| `3` | 62 | The visible screen with 2 scrollback rows PREPENDED; the screen starts at `.output` row 2. |
+| `20`, `200` | 62 | Identical to `--lines 3` - the count is capped by `history_size`, and the response is never trimmed to it. |
+
+`cursor_row` read 57 for every one of those calls, matching tmux's pane-relative `#{cursor_y}` rather than moving with the response. So `cursor_row` is a valid index into `.output` **only** at `--lines 0`; any positive count shifts every screen row down by the scrollback prefix and would anchor `fm_composer_classify_screen` to the wrong row. The adapter's composer reads therefore pass `FM_BACKEND_THURBOX_SCREEN_ONLY` (0) rather than `FM_COMPOSER_CAPTURE_LINES`, which remains the right bound only for the cursor-less tail-capture adapters. The `lines` field in the response echoes the request and is not a row count of the payload.
+
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
 | Unsubmitted input | `session send <uuid> --no-enter -- <text>` | Parsed and reached session lookup; `--` guards text beginning with `-`. Delivered as one bracketed paste, so no shell sees it. |
@@ -838,7 +848,7 @@ thurbox-cli version --json
 Observed version:
 
 ```json
-{"data_dir":"...","schema_version":40,"tmux_socket":"thurbox","version":"2.9.2"}
+{"data_dir":"...","schema_version":40,"tmux_socket":"thurbox","version":"2.10.1"}
 ```
 
 `version` is used rather than `--version`: thurbox's own help records that clap's implicit `--version` reads a static `0.0.0-dev` marker the project never bumps, so only the subcommand reports the real build.
@@ -858,7 +868,7 @@ Current active CLI findings:
 | CLI send counterexample | `session send <uuid> <text>` | Always appended Enter, so it cannot serve unsubmitted input. |
 | Keys | `tmux -L thurbox send-keys -t <pane> Enter\|Escape\|C-c\|C-u` | All shared key operations worked. |
 | Styled capture | `tmux -L thurbox capture-pane -e -p -t <pane>` | Returned ANSI-preserving output; `#{cursor_y}` returned the cursor row. |
-| Plain capture | `session capture <uuid> --lines N --json` | Payload in `.output`; `--lines` bounded the fetch but did not trim the response. |
+| Plain capture | `session capture <uuid> --lines N --json` | Payload in `.output`; `--lines` is a SCROLLBACK count, not a cap - see the row/cursor alignment finding below. |
 | Nested cwd | `tmux -L thurbox display-message '#{pane_current_path}'` | Tracked the live foreground process - no marker probe needed, unlike zellij and cmux. |
 | Native state | `session signal --state working --session <uuid>` then `session get` | Round-tripped into `hook_state`; null before any agent signals. |
 | Teardown | `session delete <uuid> --force --json` | `"killed_window": true`; the non-forced form only soft-deletes the row. |
@@ -873,7 +883,7 @@ Two consequences of `cursor=1` and of the row/window split are covered by the st
 
 | Guarantee | Shape | Result |
 | --- | --- | --- |
-| Cursor pane reclassification | `#{pane_tty}` read via `tmux -L thurbox`, foreground process identity via `bin/fm-cursor-lib.sh` | A Cursor pane's cursor row is parked outside its composer, so the cursor-anchored read answers `unknown`; the pane is reclassified cursorlessly, gated on Cursor's structural process identity, and an identical screen on a non-Cursor pane stays `unknown`. |
+| Cursor pane reclassification | `foreground_process`/`foreground_command` from the same `session capture`, identity via `bin/fm-cursor-lib.sh` | A Cursor pane's cursor row is parked outside its composer, so the cursor-anchored read answers `unknown`; the pane is reclassified cursorlessly, gated on Cursor's structural process identity, and an identical screen on a non-Cursor pane stays `unknown`. |
 | Teardown of a row with no window | `session delete <uuid> --force` after the pane is gone | The database row outlives its tmux window, so `kill` verifies identity from the row's name and deletes regardless of pane liveness; the name is then immediately reusable. |
 
 The queued-Enter conversion added on top of that native signal is **not** part of this live pass and is not claimed as verified: no real mid-turn thurbox steer has been observed. What the stubbed suite covers is the conversion's gate - a proven `pending` composer with `hook_state: working` reports delivered, while a null, idle, done, or blocked `hook_state` leaves it `pending`.

@@ -23,16 +23,19 @@
 # judged; they never change what the shapes ARE:
 #   styled=1    the capture preserves ANSI styling, so ghost/placeholder text
 #               is detectable and can be stripped (tmux -e, herdr --format
-#               ansi, zellij dump-screen --ansi, thurbox capture-pane -e
-#               against thurbox's own tmux socket). With styled=0 (cmux, orca)
+#               ansi, zellij dump-screen --ansi, thurbox-cli
+#               `session capture --ansi`). With styled=0 (cmux, orca)
 #               ghost text is unreadable, so a bare glyph row or left-bar row
 #               carrying trailing non-idle text degrades to `unknown` rather
 #               than `pending`: the text may be the harness's own idle
 #               suggestion, and a false `pending` blocks every safe caller.
-#   cursor=1    a cursor row is supplied (tmux #{cursor_y}, and thurbox's read
-#               of that same primitive on thurbox's socket). The cursor
-#               anchors shape selection: the shape containing the cursor is the
-#               composer. Without it, the bottom-most shape wins.
+#   cursor=1    a cursor row is supplied (tmux #{cursor_y}, and thurbox's
+#               `cursor_row` on the same `session capture` response as the
+#               screen). The cursor anchors shape selection: the shape
+#               containing the cursor is the composer. Without it, the
+#               bottom-most shape wins. A cursor row is PANE-RELATIVE, so a
+#               cursor=1 adapter must supply the visible screen itself and not
+#               a scrollback tail, or the anchor addresses the wrong row.
 #   identity=1  a native agent identity/state probe exists (herdr `agent get`;
 #               the tmux pi foreground-process probe). Identity is what makes
 #               Pi's blank separated composer provable; with identity=0 that

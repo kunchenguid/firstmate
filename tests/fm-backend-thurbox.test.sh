@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # tests/fm-backend-thurbox.test.sh - stubbed-CLI unit tests for the thurbox
 # session-provider adapter (bin/backends/thurbox.sh), written against the
-# behaviour verified on the real thurbox 2.9.2 (docs/thurbox-backend.md).
+# behaviour verified on the real thurbox 2.10.1 (docs/thurbox-backend.md).
 #
-# Two stubs, because thurbox is a TWO-CLI backend: a fake `thurbox-cli` for
-# session identity and lifecycle, and a fake `tmux` for the pane primitives
-# the adapter runs against thurbox's own socket. Both are state-driven rather
-# than an ordered response queue (the convention
+# ONE working stub, because the adapter is a SINGLE-CLI backend: a fake
+# `thurbox-cli` serving session identity, lifecycle, and every pane primitive.
+# The fake `tmux` beside it is a tripwire, not a stub - an earlier revision of
+# the adapter did drive tmux directly, so any invocation must fail rather than
+# quietly work here. The thurbox-cli stub is state-driven rather than
+# an ordered response queue (the convention
 # tests/fm-backend-{cmux,zellij}.test.sh use): the adapter re-resolves the pane
 # from the session row before EVERY operation, so a positional queue would make
 # each case a call-counting exercise instead of a behavioural one. A small
@@ -35,10 +37,15 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-thurbox-tests)
 #                 <uuid>\t<name>\t<backend_id>\t<backend_type>\t<hook_state>
 #               An empty field is written as "-" so read/awk stay simple; the
 #               stub maps "-" back to JSON null/"" as thurbox itself would.
-# $FM_TB_PANES  whitespace-separated live pane ids on thurbox's tmux socket.
-# $FM_TB_SCREEN file whose contents the fake tmux returns for capture-pane.
+# $FM_TB_PANES  whitespace-separated live pane ids on thurbox's tmux socket;
+#               a row whose pane is absent captures nothing, as thurbox does.
+# $FM_TB_CAPTURE file whose contents `session capture` returns unstyled.
+# $FM_TB_SCREEN file whose contents `session capture --ansi` returns.
+# $FM_TB_SCROLLBACK file standing in for the pane's tmux history, which
+#               `--lines N` prepends to the screen N rows at a time.
 # $FM_TB_LOG    every thurbox-cli invocation, one unit-separated line.
-# $FM_TB_TMUXLOG  every tmux invocation, same shape.
+# $FM_TB_TMUXLOG  every tmux invocation - which must stay empty; the tmux on
+#               PATH is a tripwire that fails on any call.
 
 make_thurbox_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
@@ -141,9 +148,28 @@ case "${2:-}" in
     # --ansi selects the styled body, so the two capture files stand in for
     # thurbox returning styled or plain text for the same pane.
     ansi=false
-    for a in "$@"; do [ "$a" = --ansi ] && ansi=true; done
+    lines=0
+    prev=''
+    for a in "$@"; do
+      [ "$a" = --ansi ] && ansi=true
+      [ "$prev" = --lines ] && lines=$a
+      prev=$a
+    done
     body="${FM_TB_CAPTURE:-/dev/null}"
     [ "$ansi" = true ] && body="${FM_TB_SCREEN:-${FM_TB_CAPTURE:-/dev/null}}"
+    # VERIFIED on the real 2.10.1: --lines is a SCROLLBACK count, NOT a cap.
+    # The response is the whole visible screen with min(--lines, history) rows
+    # of scrollback PREPENDED, and cursor_row stays pane-relative regardless -
+    # so at any positive --lines the cursor row no longer indexes .output.
+    # $FM_TB_SCROLLBACK is a case's fake history; --lines 0 never reaches it.
+    case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+    trimmed=''
+    if [ "$lines" -gt 0 ] && [ -s "${FM_TB_SCROLLBACK:-/dev/null}" ]; then
+      trimmed=$(mktemp)
+      tail -n "$lines" "$FM_TB_SCROLLBACK" > "$trimmed"
+      cat "$body" >> "$trimmed"
+      body=$trimmed
+    fi
     jq -Rs --argjson ansi "$ansi" \
       --arg cy "${FM_TB_CURSOR_ROW:-0}" \
       --arg fp "${FM_TB_FG_PROCESS:-}" \
@@ -157,6 +183,7 @@ case "${2:-}" in
         foreground_command: (if $fc == "" then null else $fc end),
         foreground_cwd: (if $fw == "" then null else $fw end)
       }' < "$body"
+    [ -z "$trimmed" ] || rm -f "$trimmed"
     ;;
   send)
     exit "${FM_TB_SEND_EXIT:-0}"
@@ -184,46 +211,9 @@ exit 97
 SH
   chmod +x "$fb/tmux"
 
-  # A third stub, for the ONE non-tmux, non-thurbox primitive the adapter
-  # reaches: the process table behind a pane's tty, which is how Cursor's
-  # foreground identity is established (bin/fm-cursor-lib.sh). Stubbing `ps`
-  # rather than the identity function keeps the real pgid/tpgid foreground
-  # scoping and the real name/install-tree matching under test.
-  #
-  # $FM_TB_PS is a table, one process per line:
-  #   <tty>\t<pid>\t<pgid>\t<tpgid>\t<comm>\t<args>
-  cat > "$fb/ps" <<'SH'
-#!/usr/bin/env bash
-set -u
-table="${FM_TB_PS:-}"
-# Anything outside a case that set up a fake process table gets the real ps,
-# so this stub cannot change the behaviour of unrelated code on this PATH.
-[ -n "$table" ] && [ -f "$table" ] || exec "${FM_TB_REAL_PS:?}" "$@"
-case "${1:-}" in
-  -t)
-    want=$2
-    while IFS=$'\t' read -r tty pid pgid tpgid comm args; do
-      [ "${tty:-}" = "$want" ] || continue
-      printf '%s %s %s %s\n' "$pid" "$pgid" "$tpgid" "$comm"
-    done < "$table"
-    ;;
-  -p)
-    want=$2
-    while IFS=$'\t' read -r tty pid pgid tpgid comm args; do
-      [ "${pid:-}" = "$want" ] || continue
-      printf '%s\n' "$args"
-    done < "$table"
-    ;;
-  *) exit 1 ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/ps"
   printf '%s\n' "$fb"
 }
 
-FM_TB_REAL_PS=$(command -v ps) || fail "ps not found"
-export FM_TB_REAL_PS
 FAKEBIN=$(make_thurbox_fakebin "$TMP_ROOT")
 
 # --- per-case world reset ---------------------------------------------------
@@ -246,9 +236,9 @@ reset_world() {
   export FM_TB_PANES="%20"
   unset FM_TB_FAKE_VERSION FM_TB_FAKE_SOCKET FM_TB_CREATE_UUID FM_TB_CREATE_PANE \
         FM_TB_CREATE_EXIT FM_TB_AGENTS_TOML FM_TB_CURSOR_ROW FM_TB_PANE_PATH \
-        FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT FM_TB_PS \
+        FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT \
         FM_TB_CURSOR_ROW FM_TB_FG_PROCESS FM_TB_FG_COMMAND FM_TB_FG_CWD \
-        FM_TB_SEND_EXIT FM_TB_KEY_EXIT \
+        FM_TB_SEND_EXIT FM_TB_KEY_EXIT FM_TB_SCROLLBACK \
         FM_TB_LIST_EXIT 2>/dev/null || true
   FM_BACKEND_THURBOX_SOCKET_CACHE=''
   # The adapter's own RESOLUTION output, not fixture state: target_ready and
@@ -701,9 +691,10 @@ test_capture_is_plain_text_composer_is_styled() {
   [ "$(fm_backend_thurbox_capture "$UUID:%20" 5 fm-t1)" = plain ] \
     || fail "human-facing capture did not come from thurbox-cli"
   [ "$(fm_backend_thurbox_composer_capture "$UUID:%20" fm-t1)" = styled ] \
-    || fail "composer capture did not come from tmux capture-pane"
+    || fail "composer capture did not request the styled body"
   assert_grep $'\x1f--ansi' "$FM_TB_LOG" "composer capture did not request ANSI styling"
-  pass "plain capture goes through thurbox-cli, styled capture through tmux -e"
+  [ ! -s "$FM_TB_TMUXLOG" ] || fail "a capture shelled out to tmux"
+  pass "both captures go through thurbox-cli, styled selected by --ansi"
 }
 
 test_composer_caps_claim_styled_and_cursor() {
@@ -767,6 +758,61 @@ test_composer_state_reclassifies_a_cursor_pane() {
   [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = pending ] \
     || fail "real unsubmitted text in a Cursor composer must still read pending, never empty"
   pass "composer_state reclassifies a Cursor pane cursorlessly, from the capture's own foreground fields"
+}
+
+test_composer_state_reclassifies_a_bundled_node_cursor_pane() {
+  reset_world
+  add_row "$UUID" "$TITLE" "%40" local-tmux -
+  export FM_TB_PANES="%40"
+  # The case the foreground_command field exists for, and the one a command
+  # NAME cannot answer: Cursor ships as a bundled node script, so thurbox
+  # reports foreground_process `node` - indistinguishable from any other node
+  # process - while foreground_command carries the full argv whose argv[0] is
+  # Cursor's own install path. Deciding identity from the name alone leaves
+  # every Cursor-hosted thurbox task on the cursor-anchored `unknown` verdict,
+  # so every steer to it reports unverified forever.
+  tb_cursor_screen 'Plan, search, build anything' 1
+  tb_pane_process node \
+    '/home/u/.local/share/cursor-agent/versions/2026.08.11/cursor-agent --resume x'
+  [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = empty ] \
+    || fail "a bundled-node Cursor pane must be identified from its argv, not its command name"
+
+  tb_cursor_screen 'half typed captain text' 0
+  [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = pending ] \
+    || fail "real unsubmitted text in a bundled-node Cursor composer must still read pending"
+
+  # The narrowing that keeps this from matching every node process: the same
+  # bare `node` with an argv that is not Cursor's stays strictly anchored.
+  tb_cursor_screen 'Plan, search, build anything' 1
+  tb_pane_process node '/usr/lib/other-agent/cli.js --serve'
+  [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = unknown ] \
+    || fail "a non-Cursor node pane must keep the strict cursor-anchored verdict"
+  pass "composer_state identifies a bundled-node Cursor pane from foreground_command's argv"
+}
+
+test_composer_state_reads_the_screen_without_scrollback() {
+  reset_world
+  add_row "$UUID" "$TITLE" "%40" local-tmux -
+  export FM_TB_PANES="%40"
+  # thurbox's `--lines N` PREPENDS up to N rows of scrollback to the visible
+  # screen, while cursor_row stays PANE-relative - so a composer read that asks
+  # for any scrollback at all anchors the classifier that many rows too high
+  # and silently classifies the wrong row. This pane has two rows of ordinary
+  # shell scrollback above a composer whose text sits on the cursor row.
+  printf '$ ls\nREADME.md\n' > "$TMP_ROOT/scrollback"
+  export FM_TB_SCROLLBACK="$TMP_ROOT/scrollback"
+  tb_pending_composer 'hello captain'
+  [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = pending ] \
+    || fail "composer_state anchored the cursor row against a screen carrying scrollback"
+
+  # And the styled capture the classifier consumes is the screen itself, with
+  # no history ahead of it - the property that makes the cursor row an index.
+  local cap
+  cap=$(fm_backend_thurbox_composer_capture "$UUID:%20" fm-t1)
+  case "$cap" in
+    *'README.md'*) fail "composer capture pulled the pane's scrollback into the classifier's screen" ;;
+  esac
+  pass "composer reads take the visible screen only, so cursor_row indexes it"
 }
 
 test_composer_state_does_not_reclassify_a_non_cursor_pane() {
@@ -1062,10 +1108,12 @@ test_safety_guard_refuses_a_real_cli() {
 }
 
 test_safety_guard_refuses_a_real_tmux() {
-  # The adapter is a two-CLI adapter: every destructive pane primitive runs the
-  # ambient tmux from PATH against thurbox's REAL socket. A case that narrowed
-  # or reset PATH would send keys to a live pane on the operator's own thurbox
-  # server, so the guard must fail closed over that CLI too.
+  # Defence in depth, deliberately retained after the 2.10 rework moved every
+  # pane primitive onto thurbox-cli. An earlier revision ran the ambient tmux
+  # from PATH against thurbox's REAL socket, so a regression that reintroduced
+  # one under a case that narrowed or reset PATH would send keys to a live pane
+  # on the operator's own thurbox server. The guard fails closed over that CLI
+  # too, so such a regression can never reach a real tmux.
   local out rc bare="$TMP_ROOT/no-tmux"
   mkdir -p "$bare"
   out=$(PATH="$bare" thurbox_refuse_if_unsafe "$TMP_ROOT" 2>&1); rc=$?
@@ -1143,6 +1191,8 @@ test_capture_is_plain_text_composer_is_styled
 test_composer_caps_claim_styled_and_cursor
 test_composer_state_unknown_when_pane_unreadable
 test_composer_state_reclassifies_a_cursor_pane
+test_composer_state_reclassifies_a_bundled_node_cursor_pane
+test_composer_state_reads_the_screen_without_scrollback
 test_composer_state_does_not_reclassify_a_non_cursor_pane
 test_send_text_submit_converts_a_queued_enter_on_native_busy
 test_send_text_submit_never_converts_without_affirmative_busy

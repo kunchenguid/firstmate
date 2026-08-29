@@ -66,10 +66,11 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
 # thurbox is EXPERIMENTAL and spawn-capable, session-provider-only like
-# herdr/zellij/cmux - verified against the real 2.9.2 binary
+# herdr/zellij/cmux - verified against the real 2.10.1 binary
 # (docs/thurbox-backend.md). It is the one backend whose sessions ARE tmux
 # windows (on thurbox's own socket), so it reaches tmux's own composer
-# fidelity and exposes a native hook_state busy primitive like herdr's.
+# fidelity and exposes a native hook_state busy primitive like herdr's - both
+# through thurbox-cli alone, which is why tmux is not among its required tools.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux thurbox"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux thurbox"

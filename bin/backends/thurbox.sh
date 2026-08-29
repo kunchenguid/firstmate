@@ -54,8 +54,8 @@
 # best-effort. The recorded pane id is kept in meta only as a debugging
 # breadcrumb and a fast path; it is never the authority.
 #
-# Empirical verification (real thurbox 2.9.2, schema 40, Linux x86_64,
-# 2026-08-28; docs/thurbox-backend.md holds the full evidence log). Findings
+# Empirical verification (real thurbox 2.10.1, schema 40, Linux x86_64,
+# 2026-08-29; docs/thurbox-backend.md holds the full evidence log). Findings
 # that are load-bearing for this adapter:
 #
 #   1. `session create --json` does NOT return `backend_id` - only
@@ -96,7 +96,10 @@
 #      isolated from the operator's own sessions. They do NOT relocate the
 #      tmux socket, which stays shared - the reason finding 7 matters.
 #
-# Requires: thurbox-cli, tmux, jq. Bootstrap detects these through
+# Requires: thurbox-cli, jq. NOT tmux - the 2.10 rework moved every pane
+# primitive onto thurbox's own CLI, so fm_backend_required_tools (bin/fm-backend.sh)
+# lists `thurbox-cli jq treehouse` and an operator is never told to install a
+# tmux client for thurbox's sake. Bootstrap detects those through
 # fm_backend_required_tools only when thurbox is the resolved backend; this
 # adapter also gates them again before spawning.
 
@@ -226,6 +229,15 @@ fm_backend_thurbox_socket() {
 # response as the screen, so a composer verdict that used to cost two pane
 # reads plus a capture now costs one call whose fields are all consistent with
 # each other - they describe one instant, not three.
+#
+# <lines> IS A SCROLLBACK COUNT, NOT A CAP. Verified live on 2.10.1: `.output`
+# is min(<lines>, history) rows of scrollback PREPENDED to the whole visible
+# screen, so the response grows past <lines> rather than being trimmed to it,
+# and `--lines 0` returns exactly the visible screen and nothing else. That
+# distinction is load-bearing for `cursor_row`, which is pane-relative: it
+# indexes `.output` from row 0 only when no scrollback was prepended. Every
+# caller that pairs the screen with cursor_row must therefore pass 0; see
+# FM_BACKEND_THURBOX_SCREEN_ONLY below.
 fm_backend_thurbox_pane_state() {  # <lines> <ansi> -> capture JSON on stdout
   local lines=${1:-200} ansi=${2:-false} args
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
@@ -234,6 +246,13 @@ fm_backend_thurbox_pane_state() {  # <lines> <ansi> -> capture JSON on stdout
   # shellcheck disable=SC2086 # args is a controlled flag list, never user text.
   fm_backend_thurbox_cli session capture "$FM_BACKEND_THURBOX_SESSION" $args 2>/dev/null
 }
+
+# FM_BACKEND_THURBOX_SCREEN_ONLY: the <lines> value that asks `session capture`
+# for the visible screen with NO scrollback ahead of it. Named rather than
+# spelled `0` at each call site because it is a correctness constraint, not a
+# tuning knob: it is what makes `cursor_row` a valid index into `.output`, and
+# what keeps a pane's own scrollback out of the classifier's candidate set.
+FM_BACKEND_THURBOX_SCREEN_ONLY=0
 
 # fm_backend_thurbox_agent: the thurbox agent entry firstmate launches its
 # sessions with, from config/thurbox-agent (first non-empty line), defaulting
@@ -565,7 +584,7 @@ EOF
 # the pane's later movement. Only `foreground_cwd` does.
 fm_backend_thurbox_current_path() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || return 0
-  fm_backend_thurbox_pane_state 1 false | jq -r '.foreground_cwd // empty' 2>/dev/null
+  fm_backend_thurbox_pane_state "$FM_BACKEND_THURBOX_SCREEN_ONLY" false | jq -r '.foreground_cwd // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_send_literal: send TEXT as literal, UNSUBMITTED input - the
@@ -644,15 +663,21 @@ fm_backend_thurbox_capture() {  # <target> <lines> [expected-label]
 # draft from a styled placeholder. Like bin/fm-tmux-lib.sh's equivalent, the
 # styled capture is consumed only by the classifier and is NEVER surfaced to a
 # human or an LLM.
+#
+# Screen-only, like bin/fm-tmux-lib.sh's `capture-pane -S 0 -E -` and unlike
+# the FM_COMPOSER_CAPTURE_LINES tail cmux, orca, zellij and herdr take: that
+# tail is a scrollback bound for adapters with no cursor row, whereas a
+# cursor=1 adapter must hand the classifier the exact screen cursor_row
+# indexes. composer_caps says the same thing with rows=0.
 fm_backend_thurbox_composer_capture() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || return 1
-  fm_backend_thurbox_pane_state "$FM_COMPOSER_CAPTURE_LINES" true | jq -r '.output // empty' 2>/dev/null
+  fm_backend_thurbox_pane_state "$FM_BACKEND_THURBOX_SCREEN_ONLY" true | jq -r '.output // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_composer_cursor_row: the pane's zero-based cursor row.
 fm_backend_thurbox_composer_cursor_row() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || return 1
-  fm_backend_thurbox_pane_state 1 false | jq -r '.cursor_row // empty' 2>/dev/null
+  fm_backend_thurbox_pane_state "$FM_BACKEND_THURBOX_SCREEN_ONLY" false | jq -r '.cursor_row // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_composer_caps: static capability facts, not logic (see the
@@ -684,10 +709,19 @@ fm_backend_thurbox_composer_caps() {
 # because Cursor runs as a bundled node script and reports a bare `node`.
 # Cursor's identity stays owned by bin/fm-cursor-lib.sh, which already knows
 # how to read a bare `node` plus its argv; this adapter re-derives none of it.
+#
+# What that owner wants is the STRUCTURED argv[0], its third parameter - it
+# reads no second argument at all - so the full command line is reduced to its
+# first whitespace-delimited token here, exactly as bin/fm-cursor-lib.sh's own
+# fm_cursor_tty_has_cursor reduces `ps -o args=`. Handing the whole argv over
+# in the ignored slot would decide Cursor identity from the bare command name
+# alone, which is the one thing the name cannot answer.
 fm_backend_thurbox_pane_is_cursor() {  # <foreground_process> <foreground_command>
-  local comm=$1 args=$2
-  [ -n "$comm" ] || [ -n "$args" ] || return 1
-  fm_cursor_process_matches "$comm" "$args"
+  local comm=$1 args=$2 argv0
+  args=${args#"${args%%[![:space:]]*}"}
+  argv0=${args%%[[:space:]]*}
+  [ -n "$comm" ] || [ -n "$argv0" ] || return 1
+  fm_cursor_process_matches "$comm" '' "$argv0"
 }
 
 # fm_backend_thurbox_composer_state: thin adapter - capture plus cursor plus
@@ -702,7 +736,13 @@ fm_backend_thurbox_composer_state() {  # <target> [expected-label] -> empty|pend
   # the same response, so they describe one instant. Reading them separately
   # would let the pane move between them and classify a screen against a cursor
   # row that no longer belongs to it.
-  raw=$(fm_backend_thurbox_pane_state "$FM_COMPOSER_CAPTURE_LINES" true) || { printf 'unknown'; return 0; }
+  #
+  # SCREEN-ONLY, and that is a correctness requirement rather than a saving:
+  # `cursor_row` is pane-relative, so it indexes `.output` only when no
+  # scrollback sits ahead of the screen. Asking for N lines of scrollback would
+  # shift every screen row down by up to N and silently anchor the classifier
+  # to the wrong row (see fm_backend_thurbox_pane_state).
+  raw=$(fm_backend_thurbox_pane_state "$FM_BACKEND_THURBOX_SCREEN_ONLY" true) || { printf 'unknown'; return 0; }
   [ -n "$raw" ] || { printf 'unknown'; return 0; }
   IFS=$'\t' read -r cy comm args <<EOF
 $(printf '%s' "$raw" | jq -r '"\(.cursor_row // "")\t\(.foreground_process // "")\t\(.foreground_command // "")"' 2>/dev/null)

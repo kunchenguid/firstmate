@@ -249,10 +249,13 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
 # is a bare `node`; identity therefore comes from the narrowed structural rule
 # in fm_cursor_process_matches above.
 #
-# The tty is the argument rather than a pane target because every caller reads
-# it from a DIFFERENT tmux server - bin/fm-tmux-lib.sh from the default socket,
-# bin/backends/thurbox.sh from thurbox's own - while the process identity
-# question below is server-independent and must not be re-derived per caller.
+# The tty is the argument rather than a pane target because a caller reads it
+# from whichever tmux server owns the pane (bin/fm-tmux-lib.sh, from the default
+# socket), while the process identity question below is server-independent and
+# must not be re-derived per caller. bin/backends/thurbox.sh needs no tty at
+# all: `session capture` hands it the foreground process's own name and argv,
+# so it calls fm_cursor_process_matches directly - the same owner, reached
+# without a process-table walk.
 fm_cursor_tty_has_cursor() {  # <tty>
   local tty=$1 pid pgid tpgid comm args argv0
   case "$tty" in /dev/*) ;; *) return 1 ;; esac

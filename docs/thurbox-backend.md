@@ -28,6 +28,12 @@ Reading a name needs no tmux client.
 `fm_backend_thurbox_composer_state` reads all of that in **one** call.
 That is not only cheaper than the three it replaced: the screen, the cursor row that anchors it, and the process that may disqualify that anchor now describe a single instant, where separate reads could let the pane move between them.
 
+That call asks for `--lines 0`, and the zero is load-bearing rather than frugal.
+`--lines N` is a **scrollback count, not a cap**: the response is the whole visible screen with up to N rows of the pane's history *prepended*, while `cursor_row` stays pane-relative.
+So `cursor_row` indexes `.output` only at `--lines 0`; any positive count shifts every screen row down by the prefix and would anchor the classifier to the wrong row - silently, since the read still succeeds.
+`FM_COMPOSER_CAPTURE_LINES` remains the right bound for the cursor-less tail-capture adapters and is deliberately not used here.
+See [`verification/runtime-backends.md`](verification/runtime-backends.md) for the measurement.
+
 thurbox is the **only non-tmux backend at the default backend's composer fidelity** - `styled=1` *and* `cursor=1`, where zellij manages styled-only and cmux and Orca have neither - and the second backend after herdr **wired to a native busy primitive** rather than a pane regex.
 That wiring is real but currently unfed: nothing in a default firstmate-spawned session writes `hook_state`, so the verdict is `unknown` until an operator supplies the signal.
 See "Active limits".
