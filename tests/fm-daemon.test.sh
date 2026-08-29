@@ -153,6 +153,45 @@ test_classify_signal_survives_a_later_routine_append() {
 
 # The away-mode backstop must reach the same event when the per-wake path never
 # ran, which is exactly what it exists for.
+test_classification_commits_its_captured_endpoint() {
+  local dir state capture out key captured
+  dir=$(make_supercase captured-endpoint); state="$dir/state"
+  capture="$dir/endpoints"
+  printf 'done: first release complete\n' > "$state/race-r1.status"
+  out=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" \
+    classify_signal "$state/race-r1.status" "$state")
+  case "$out" in escalate\|*) ;; *) fail "the first event did not classify actionable: $out" ;; esac
+  captured=$(log_size "$state/race-r1.status")
+  printf 'failed: second release verification failed\n' >> "$state/race-r1.status"
+  mark_escalated_seen "$state" "$capture"
+  key=$(printf '%s' race-r1 | tr ':/.' '___')
+  [ "$(cat "$state/.subsuper-seen-status-$key")" = "$captured" ] \
+    || fail "the daemon advanced past bytes appended after classification"
+  out=$(classify_signal "$state/race-r1.status" "$state")
+  case "$out" in
+    escalate\|*"failed: second release verification failed"*) ;;
+    *) fail "an event appended between classification and commit was lost: $out" ;;
+  esac
+  pass "the daemon commits exactly the endpoint captured by classification"
+}
+
+test_status_read_failure_surfaces_without_advancing_seen() {
+  local dir state key out
+  dir=$(make_supercase unreadable-span); state="$dir/state"
+  printf 'done: release complete\n' > "$state/read-r1.status"
+  key=$(printf '%s' read-r1 | tr ':/.' '___')
+  printf '3' > "$state/.subsuper-seen-status-$key"
+  (
+    _fm_status_read_span() { return 1; }
+    FM_ESCALATE_BATCH_SECS=999 handle_wake "signal: $state/read-r1.status" "$state"
+  )
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;; *) fail "a status span read failure was silently absorbed" ;; esac
+  [ "$(cat "$state/.subsuper-seen-status-$key")" = 3 ] \
+    || fail "a status span read failure advanced the daemon seen marker"
+  pass "a status read failure surfaces without advancing the daemon suppressor"
+}
+
 test_catchall_scan_surfaces_a_masked_event() {
   local dir state
   dir=$(make_supercase catchall-masked)
@@ -2244,6 +2283,8 @@ test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
 test_classify_signal_survives_a_later_routine_append
+test_classification_commits_its_captured_endpoint
+test_status_read_failure_surfaces_without_advancing_seen
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging

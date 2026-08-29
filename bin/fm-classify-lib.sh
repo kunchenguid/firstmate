@@ -631,7 +631,11 @@ _fm_status_file_size() {  # <status-file>
     "$FM_STATUS_SIZE_READER" "$f"
     return
   fi
-  LC_ALL=C wc -c < "$f" 2>/dev/null
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%z' "$f" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%s' "$f" 2>/dev/null
+  fi
 }
 
 # Private scratch path for a one-shot span read, alongside the status file the
@@ -1253,7 +1257,7 @@ window_to_task() {
 
 # Print the FIRST still-live captain-relevant event in the bytes of an append-only
 # status log at or after <start-offset>, and return 0; return 1 when the span
-# carries none.
+# carries none, or return 2 when the classification snapshot cannot be read.
 #
 # This is the read model every supervisor's per-wake classification must use.
 # Asking "is the LAST line captain-relevant?" cannot answer "did an actionable
@@ -1280,62 +1284,94 @@ window_to_task() {
 # is the single owner of that open/closed rule, including its same-key reopening
 # behavior, so this never re-derives it. Every other captain-relevant event
 # (`done`, `failed`, a legacy bare line) is terminal and always actionable.
-status_span_first_actionable() {  # <status-file> <start-offset>
-  local f=$1 start=${2:-0} size chunk_file line verb key open='' folded=0 rc=1
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
-  size=$(_fm_status_file_size "$f") || return 1
+_fm_status_last_exact_line_number() {  # <status-file> <line>
+  local f=$1 want=$2 line number=0 last=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
+    [ "$line" = "$want" ] && last=$number
+  done < "$f"
+  printf '%s' "$last"
+}
+
+# Print "<captured-end-offset>\t<event>" for the first actionable event and
+# return 0, print only the captured end and return 1 when there is no event, or
+# return 2 without output when the classification snapshot cannot be read.
+status_span_first_actionable_record() {  # <status-file> <start-offset>
+  local f=$1 start=${2:-0} size full_file chunk_file prefix_file line verb key
+  local open='' folded=0 rc=1 prefix_lines=0 line_number=0 live_line=0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
+  size=$(_fm_status_file_size "$f") || return 2
   size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  case "$size" in ''|*[!0-9]*) return 2 ;; esac
   case "$start" in ''|*[!0-9]*) start=0 ;; esac
   [ "$start" -le "$size" ] || start=0
-  [ "$start" -lt "$size" ] || return 1
-  chunk_file=$(_fm_status_span_scratch "$f") || return 1
-  _fm_status_read_span "$f" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
-    || { rm -f "$chunk_file"; return 1; }
+  full_file=$(_fm_status_span_scratch "$f") || return 2
+  chunk_file="${full_file}.span"
+  prefix_file="${full_file}.prefix"
+  _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
+    || { rm -f "$full_file" "$chunk_file" "$prefix_file"; return 2; }
+  if [ "$start" -gt 0 ]; then
+    _fm_status_read_span "$full_file" 0 "$start" > "$prefix_file" 2>/dev/null \
+      || { rm -f "$full_file" "$chunk_file" "$prefix_file"; return 2; }
+    while IFS= read -r line || [ -n "$line" ]; do
+      prefix_lines=$((prefix_lines + 1))
+    done < "$prefix_file"
+  fi
+  _fm_status_read_span "$full_file" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
+    || { rm -f "$full_file" "$chunk_file" "$prefix_file"; return 2; }
   while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     status_is_captain_relevant "$line" || continue
     verb=$(status_line_verb "$line")
     case "$verb" in
       needs-decision|blocked)
-        # Only a line the fold would actually have opened can be closed by it;
-        # a rejected key or a reserved-namespace violation stays actionable.
         key=$(_fm_decision_key "$line") || { rc=0; break; }
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
           || { rc=0; break; }
         if [ "$folded" -eq 0 ]; then
-          open=$(status_open_decisions "$f")
+          open=$(status_open_decisions "$full_file") || {
+            rm -f "$full_file" "$chunk_file" "$prefix_file"
+            return 2
+          }
           folded=1
         fi
         _fm_open_set_has "$open" "$key" || continue
+        [ "$(_fm_open_set_verb "$open" "$key")" = "$verb" ] || continue
+        case "$open" in
+          "$key"$'\t'"$verb"$'\t'"$(status_line_note "$line")"|*$'\n'"$key"$'\t'"$verb"$'\t'"$(status_line_note "$line")") ;;
+          *) continue ;;
+        esac
+        live_line=$(_fm_status_last_exact_line_number "$full_file" "$line") || {
+          rm -f "$full_file" "$chunk_file" "$prefix_file"
+          return 2
+        }
+        [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
         rc=0
         break
         ;;
       *) rc=0; break ;;
     esac
   done < "$chunk_file"
-  rm -f "$chunk_file"
-  [ "$rc" -eq 0 ] && printf '%s' "$line"
+  rm -f "$full_file" "$chunk_file" "$prefix_file"
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\t%s' "$size" "$line"
+  else
+    printf '%s' "$size"
+  fi
   return "$rc"
 }
 
-# Print the byte offset that means "classified through the end of this log", for
-# a supervisor recording its own position after acting on a span. Fails without
-# printing when the size cannot be read or is not a count, so a caller records a
-# stale position rather than a wrong one.
-status_log_end_offset() {  # <status-file>
-  local size
-  size=$(_fm_status_file_size "$1") || return 1
-  size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s' "$size"
+status_span_first_actionable() {  # <status-file> <start-offset>
+  local record rc
+  record=$(status_span_first_actionable_record "$1" "${2:-0}")
+  rc=$?
+  [ "$rc" -eq 0 ] && printf '%s' "${record#*$'\t'}"
+  return "$rc"
 }
 
-# 0 when that same span carries such an event, printing nothing. The predicate
-# every per-wake classification uses; callers that must also NAME the event they
-# found (an away-mode escalation digest) use status_span_first_actionable above.
 status_span_has_actionable() {  # <status-file> <start-offset>
-  status_span_first_actionable "$1" "${2:-0}" > /dev/null
+  status_span_first_actionable_record "$1" "${2:-0}" > /dev/null
 }
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,

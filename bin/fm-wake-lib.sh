@@ -1538,14 +1538,17 @@ fm_wake_signal_seen_path() {  # <state> <file>
 # span from here to the current size rather than only the log's last line. A 0
 # means "classify the whole file", which surfaces events rather than losing them.
 fm_wake_signal_seen_size() {  # <state> <file>
-  local marker sig size
+  local marker sig size mtime mtime_digits
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   sig=$(cat "$marker" 2>/dev/null) || { printf '0'; return 0; }
-  size=${sig%%:*}
-  case "$size" in
-    ''|*[!0-9]*) printf '0' ;;
-    *) printf '%s' "$size" ;;
+  case "$sig" in
+    *:*) size=${sig%%:*}; mtime=${sig#*:} ;;
+    *) printf '0'; return 0 ;;
   esac
+  case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  case "$mtime" in ''|*[!0-9.]*|.*|*.|*.*.*) printf '0'; return 0 ;; esac
+  mtime_digits=${mtime//./}
+  case "$mtime_digits" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
 }
 
 # 0 when <file>'s current signature exactly matches its recorded seen marker,

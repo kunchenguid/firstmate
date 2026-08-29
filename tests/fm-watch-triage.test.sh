@@ -239,8 +239,10 @@ test_status_span_respects_decision_closure() {
   # earlier opening, not to the one that came after it.
   printf 'needs-decision [key=api]: pick A or B\nresolved [key=api]: took A\nneeds-decision [key=api]: A broke, pick again\n' \
     > "$state/reopened.status"
-  status_span_has_actionable "$state/reopened.status" 0 \
+  event=$(status_span_first_actionable "$state/reopened.status" 0) \
     || fail "a decision reopened under a key that was closed earlier was classified routine"
+  [ "$event" = "needs-decision [key=api]: A broke, pick again" ] \
+    || fail "the reopened key surfaced its closed opening instead of the live reopening: $event"
   # A terminal event is never retired by a later closure line.
   printf 'failed: build broke on main\nresolved [key=api]: unrelated\n' > "$state/term.status"
   status_span_has_actionable "$state/term.status" 0 \
@@ -253,6 +255,21 @@ test_status_span_respects_decision_closure() {
   [ "$event" = "needs-decision [key=api]: pick A or B" ] \
     || fail "the span reported '$event' instead of the decision still open"
   pass "span classification retires only decisions the whole-file fold proves closed"
+}
+
+test_malformed_seen_signature_reads_the_whole_log() {
+  local dir state f marker offset
+  dir=$(make_case malformed-seen); state="$dir/state"; f="$state/task.status"
+  printf 'needs-decision: choose the release target\nworking: cleanup\n' > "$f"
+  marker="$state/.seen-task_status"
+  printf '40' > "$marker"
+  offset=$(bash -c '. "$1"; fm_wake_signal_seen_size "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$state" "$f")
+  [ "$offset" = 0 ] \
+    || fail "a digits-only malformed seen signature was accepted as an offset"
+  status_span_has_actionable "$f" "$offset" \
+    || fail "a malformed seen signature skipped the actionable start of the log"
+  pass "a malformed seen signature causes the whole status log to be classified"
 }
 
 test_stale_is_terminal_classifier() {
@@ -2970,6 +2987,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
+test_malformed_seen_signature_reads_the_whole_log
 test_stale_is_terminal_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier

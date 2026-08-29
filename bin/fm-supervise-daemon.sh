@@ -342,7 +342,7 @@ _collapse_newlines() {  # <text>
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last event distilled="" rel="" seen_rel="" task
+  local reason=$1 state=$2 f last event record endpoint rc distilled="" rel="" seen_rel="" task
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
@@ -354,7 +354,21 @@ classify_signal() {  # <reason-after-colon> <state>
     # and the digest quotes the EVENT it found rather than whatever line happens
     # to sit last, so a masked decision is not escalated under a routine summary.
     task=$(basename "$f"); task="${task%.status}"
-    if event=$(status_span_first_actionable "$f" "$(status_seen_offset "$state" "$task")"); then
+    record=$(status_span_first_actionable_record "$f" \
+      "$(status_seen_offset "$state" "$task")")
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
+        && printf 'ERROR\t%s\n' "$f" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
+      distilled="${distilled}$(basename "$f"): unreadable status span | "
+      rel=1
+      continue
+    fi
+    endpoint=${record%%$'\t'*}
+    [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
+      && printf '%s\t%s\n' "$task" "$endpoint" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
+    if [ "$rc" -eq 0 ]; then
+      event=${record#*$'\t'}
       distilled="${distilled}$(basename "$f"): ${event} | "
       rel=1
       continue
@@ -413,11 +427,19 @@ classify_stale() {  # <window> <state>
     # Dedupe against the signal path: when no captain-relevant event remains
     # ahead of the recorded offset, this terminal was already escalated, so
     # self-handle to avoid a duplicate in the digest.
-    if ! status_span_has_actionable "$state/$task.status" \
-      "$(status_seen_offset "$state" "$task")"; then
-      printf 'self|stale + terminal (already escalated by signal): %s' "$last"
-      return
-    fi
+    status_span_has_actionable "$state/$task.status" \
+      "$(status_seen_offset "$state" "$task")"
+    case $? in
+      0) ;;
+      1)
+        printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+        return
+        ;;
+      *)
+        printf 'escalate|unreadable status span for %s' "$task"
+        return
+        ;;
+    esac
     printf 'escalate|stale + terminal status: %s' "$last"
     return
   fi
@@ -567,28 +589,22 @@ status_seen_offset() {  # <state> <task>
 # heartbeat catch-all scan does not re-fire the events just escalated. The single
 # source of truth for the .subsuper-seen-status-<task> dedup state: called from
 # both the per-wake escalate path and the catch-all scan.
-mark_status_seen() {  # <state> <task>
-  local state=$1 task=$2 size
-  size=$(status_log_end_offset "$state/$task.status") || return 0
+mark_status_seen() {  # <state> <task> <captured-end-offset>
+  local state=$1 task=$2 size=$3
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$size" > "$(_seen_status_path "$state" "$task")"
 }
 
 # Advance the offset for every task a per-wake classification escalated, so the
 # catch-all scan does not re-escalate the same events within HEARTBEAT_SCAN_SECS.
-mark_escalated_seen() {  # <kind> <arg> <state>
-  local kind=$1 arg=$2 state=$3 f task
-  case "$kind" in
-    signal)
-      for f in $arg; do
-        case "$f" in *.status) ;; *) continue ;; esac
-        [ -e "$f" ] || continue
-        task=$(basename "$f"); task="${task%.status}"
-        mark_status_seen "$state" "$task"
-      done ;;
-    stale)
-      task=$(window_to_task "$arg" "$state")
-      [ -n "$task" ] && mark_status_seen "$state" "$task" ;;
-  esac
+mark_escalated_seen() {  # <state> <captured-endpoint-file>
+  local state=$1 capture=$2 task endpoint
+  [ -f "$capture" ] || return 0
+  grep -q '^ERROR' "$capture" 2>/dev/null && return 0
+  while IFS=$(printf '\t') read -r task endpoint; do
+    [ -n "$task" ] || continue
+    mark_status_seen "$state" "$task" "$endpoint"
+  done < "$capture"
 }
 
 # Busy and composer-empty detection form the injection boundary.
@@ -1125,14 +1141,22 @@ housekeeping() {  # <state>
   #     read decides relevance, and the escalated-through offset is the dedup.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local event
+    local event record endpoint rc
     for f in "$state"/*.status; do
       [ -e "$f" ] || continue
       task=$(basename "$f"); task="${task%.status}"
-      event=$(status_span_first_actionable "$f" "$(status_seen_offset "$state" "$task")") \
-        || continue
+      record=$(status_span_first_actionable_record "$f" \
+        "$(status_seen_offset "$state" "$task")")
+      rc=$?
+      if [ "$rc" -eq 2 ]; then
+        escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
+        continue
+      fi
+      [ "$rc" -eq 0 ] || continue
+      endpoint=${record%%$'\t'*}
+      event=${record#*$'\t'}
       escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"
-      mark_status_seen "$state" "$task"
+      mark_status_seen "$state" "$task" "$endpoint"
     done
   fi
 }
@@ -1264,16 +1288,28 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
+  local capture="$state/.subsuper-classified-end.$$" span_record endpoint
   local kind="" arg=""
+  : > "$capture" || return 1
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
+    rm -f "$capture"
     return
   fi
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
-              decision=$(classify_signal "$arg" "$state") ;;
+              decision=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
+              task=$(window_to_task "$arg" "$state")
+              if [ -n "$task" ]; then
+                span_record=$(status_span_first_actionable_record "$state/$task.status" \
+                  "$(status_seen_offset "$state" "$task")")
+                case $? in
+                  0|1) endpoint=${span_record%%$'\t'*}; printf '%s\t%s\n' "$task" "$endpoint" > "$capture" ;;
+                  *) printf 'ERROR\t%s\n' "$task" > "$capture" ;;
+                esac
+              fi
               decision=$(classify_stale "$arg" "$state")
               # An enriched wedge reason carries the watcher's own escalation count
               # and its "do not re-absorb on the run-step/pane state alone" demand,
@@ -1306,7 +1342,7 @@ handle_wake() {  # <reason> <state>
       # A terminal-stale escalate must not leave a persistence marker behind, or
       # housekeeping re-escalates the same pane as a false wedge later.
       [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-      mark_escalated_seen "$kind" "$arg" "$state"
+      mark_escalated_seen "$state" "$capture"
       [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       ;;
     pause)
@@ -1352,6 +1388,7 @@ handle_wake() {  # <reason> <state>
       log "self-handle: $reason -> $distilled"
       ;;
   esac
+  rm -f "$capture"
 }
 
 handle_durable_wakes() {  # <watcher-reason> <state>

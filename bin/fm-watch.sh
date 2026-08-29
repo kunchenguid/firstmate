@@ -957,26 +957,40 @@ run_check_capture() {
 # no verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal is
 # only benign when the crew is also provably working (signal_crew_provably_working).
 signal_files_actionable() {  # <status-file> ...
-  local f
+  local f record rc found=1
+  FM_SIGNAL_SURFACE_ENDPOINTS=''
+  FM_SIGNAL_CLASSIFY_ERROR=0
   for f in "$@"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || continue
-    status_span_has_actionable "$f" "$(fm_wake_signal_seen_size "$STATE" "$f")" && return 0
+    record=$(status_span_first_actionable_record "$f" \
+      "$(fm_wake_signal_seen_size "$STATE" "$f")")
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      FM_SIGNAL_CLASSIFY_ERROR=1
+      found=0
+      continue
+    fi
+    FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${record%%$'\t'*}"$'\n'
+    [ "$rc" -eq 0 ] && found=0
   done
-  return 1
+  return "$found"
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
-# Mark every status log as surfaced through its current end. Called after the
-# heartbeat backstop enqueues its wake, so the same events are not re-surfaced by
-# the next heartbeat.
+# Mark each actionable status log through the endpoint captured by the heartbeat
+# scan. Called after the backstop enqueues its wake, so the same events are not
+# re-surfaced by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f
-  for f in "$STATE"/*.status; do
-    [ -e "$f" ] || continue
-    mark_surfaced "$f"
-  done
+  local f endpoint
+  [ "${FM_HEARTBEAT_SCAN_ERROR:-0}" -eq 0 ] || return 0
+  while IFS=$(printf '\t') read -r f endpoint; do
+    [ -n "$f" ] || continue
+    mark_surfaced "$f" "$endpoint"
+  done <<EOF
+$FM_HEARTBEAT_SURFACE_ENDPOINTS
+EOF
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
@@ -990,13 +1004,25 @@ mark_all_captain_relevant_surfaced() {
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task
+  local f task record rc found=1
+  FM_HEARTBEAT_SURFACE_ENDPOINTS=''
+  FM_HEARTBEAT_SCAN_ERROR=0
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    status_span_has_actionable "$f" "$(hb_surfaced_offset "$task")" && return 0
+    record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      FM_HEARTBEAT_SCAN_ERROR=1
+      found=0
+      continue
+    fi
+    if [ "$rc" -eq 0 ]; then
+      FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${record%%$'\t'*}"$'\n'
+      found=0
+    fi
   done
-  return 1
+  return "$found"
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -1375,6 +1401,8 @@ EOF
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    FM_SIGNAL_SURFACE_ENDPOINTS=''
+    FM_SIGNAL_CLASSIFY_ERROR=0
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_files_actionable $files || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -1383,13 +1411,20 @@ EOF
       done <<EOF
 $pending
 EOF
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
-        mark_surfaced "$f"
-      done <<EOF
+      if [ "$FM_SIGNAL_CLASSIFY_ERROR" -eq 0 ]; then
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          printf '%s' "$sig" > "$sf"
+        done <<EOF
 $pending
 EOF
+        while IFS=$(printf '\t') read -r f surface_end; do
+          [ -n "$f" ] || continue
+          mark_surfaced "$f" "$surface_end"
+        done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+      fi
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -1487,7 +1522,10 @@ EOF
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
+              stale_record=$(status_span_first_actionable_record "$stale_status" 0)
+              case $? in 0|1) stale_end=${stale_record%%$'\t'*} ;; *) stale_end='' ;; esac
+              mark_surfaced "$stale_status" "$stale_end"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
