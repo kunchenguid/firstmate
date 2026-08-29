@@ -158,7 +158,10 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEFPOINTER__ quoted path to the short launch prompt naming the resolved brief;
+#                      raw launch commands must use this for prompt input
+#     __BRIEF__        absolute brief path reserved for internal non-prompt arguments;
+#                      raw launch commands containing it are refused
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1208,6 +1211,12 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    case "$LAUNCH" in
+      *'__BRIEF__'*)
+        echo "error: raw launch commands cannot expand __BRIEF__ because brief text must never enter agent argv; use __BRIEFPOINTER__ for the prompt argument" >&2
+        exit 1
+        ;;
+    esac
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -1744,15 +1753,17 @@ real_path_or_raw() {  # <path>
 # worktree it is still working in.
 #
 # That double-assignment is reachable whenever a worktree returns to the pool
-# while a record still claims it (a half-retired teardown, a hand-edited or
-# restored record, a pool reused across homes), so the invariant is checked here
-# rather than assumed. The task's OWN record is skipped: a relaunch legitimately
-# re-enters the worktree its meta already names.
+# while a record in this home still claims it (a half-retired teardown, or a
+# hand-edited or restored record), so the invariant is checked here rather than
+# assumed. Cross-home allocation is owned by treehouse's owner reservation, and
+# teardown keeps that reservation until the endpoint retires. The task's OWN
+# record is skipped: a relaunch legitimately re-enters the worktree its meta
+# already names.
 #
 # This is a pre-publication check, so it cannot by itself serialize two spawns
 # racing for one slot; the task-set lock held across meta publication owns that.
-# Its job is the far more common case - a stale claim that is already on disk
-# before this spawn starts.
+# Its job is the far more common case - a stale claim already on disk in this
+# home's state before the spawn starts.
 refuse_worktree_claimed_by_live_task() {  # <source> <worktree-real>
   local source=$1 wt_real=$2 meta claim_id claim_wt claim_real
   [ -n "$wt_real" ] || return 0

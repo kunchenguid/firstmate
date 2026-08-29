@@ -217,6 +217,41 @@ test_every_prompt_bearing_harness_is_covered() {
   pass "no prompt-bearing harness expands the brief body into argv"
 }
 
+test_raw_launch_uses_pointer_and_refuses_brief_expansion() {
+  local rec out argvlog raw_launch
+  rec=$(make_case raw-pointer raw-harness)
+  read_case "$rec"
+  fm_fake_exit0 "$FAKEBIN_DIR" raw-harness
+  raw_launch='raw-harness "$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"'
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" "$raw_launch") || fail "raw pointer spawn failed: $out"
+  argvlog="$TMP_ROOT/argv/raw-harness.argv"
+  mkdir -p "$(dirname "$argvlog")"
+  execute_launch_line "$LAUNCH_LOG" "$argvlog" "$FAKEBIN_DIR" raw-harness \
+    || fail "could not execute the emitted raw launch line"
+  grep -Fq 'Read the brief at' "$argvlog" \
+    || fail "raw launch argv lost the pointer instruction"
+  grep -Fq "$HOME_DIR/data/$CASE_ID/brief.md" "$argvlog" \
+    || fail "raw launch pointer did not name the absolute brief path"
+  if grep -Fq "$SENTINEL" "$argvlog"; then
+    fail "raw launch expanded the brief body into agent argv"
+  fi
+
+  rec=$(make_case raw-brief raw-harness)
+  read_case "$rec"
+  raw_launch='raw-harness "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" "$raw_launch") \
+    && fail "raw launch accepted __BRIEF__ as prompt input"
+  case "$out" in
+    *"use __BRIEFPOINTER__ for the prompt argument"*) ;;
+    *) fail "raw __BRIEF__ refusal did not name the pointer contract (got: $out)" ;;
+  esac
+  [ ! -s "$LAUNCH_LOG" ] \
+    || fail "raw __BRIEF__ refusal emitted a launch command"
+  pass "raw launches use the pointer contract and refuse brief-body expansion"
+}
+
 # An unwritable pointer must stop the spawn. Launching anyway would hand the
 # agent an empty prompt and leave a silently idle worker holding a worktree.
 test_unwritable_pointer_refuses_the_spawn() {
@@ -240,6 +275,7 @@ test_unwritable_pointer_refuses_the_spawn() {
 test_brief_body_never_reaches_agent_argv
 test_pointer_is_a_complete_instruction
 test_every_prompt_bearing_harness_is_covered
+test_raw_launch_uses_pointer_and_refuses_brief_expansion
 test_unwritable_pointer_refuses_the_spawn
 
 echo "# all fm-spawn-brief-argv tests passed"
