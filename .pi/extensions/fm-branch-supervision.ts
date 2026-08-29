@@ -66,6 +66,7 @@ import {
   DefaultResourceLoader,
   DynamicBorder,
   getAgentDir,
+  keyHint,
   ModelRuntime,
   SessionManager,
   type AgentSession,
@@ -131,6 +132,7 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+const OUTCOMES_TOOL_PREVIEW_LINES = 10;
 // Carried inside the captain note's own text because that text is the only
 // part of a custom message Pi gives the model (see mergeIntoMain).
 //
@@ -1439,7 +1441,7 @@ ${context.command}
       shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_outcomes")), 0, 0);
       return refreshOutcomesToolShell(shellState, theme, context);
     },
-    renderResult: (result, _options, theme, context) => {
+    renderResult: (result, options, theme, context) => {
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("tool-result")) return new Container();
       const output = result.content
@@ -1449,9 +1451,14 @@ ${context.command}
       const shellState = context.state as OutcomesToolShellState;
       // Keep each line's ANSI scope independent, matching Pi's stock fallback.
       // Pi 0.84.4 no longer supplies an implicit reset at multiline boundaries.
-      shellState.result = output
-        ? new Text(output.split("\n").map((line) => theme.fg("toolOutput", line)).join("\n"), 0, 0)
-        : new Container();
+      const lines = output.split("\n");
+      const displayLines = options.expanded ? lines : lines.slice(0, OUTCOMES_TOOL_PREVIEW_LINES);
+      const remaining = lines.length - displayLines.length;
+      let renderedOutput = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
+      if (remaining > 0) {
+        renderedOutput += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+      }
+      shellState.result = output ? new Text(renderedOutput, 0, 0) : new Container();
       refreshOutcomesToolShell(shellState, theme, context);
       return new Container();
     },

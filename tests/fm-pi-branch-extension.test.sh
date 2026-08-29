@@ -47,6 +47,10 @@ export function getMarkdownTheme() {
   return {};
 }
 
+export function keyHint(_keybinding, description) {
+  return `ctrl+o ${description}`;
+}
+
 export class UserMessageComponent {}
 
 export class DynamicBorder {
@@ -3042,7 +3046,23 @@ delete stockDefinition.renderResult;
 
 const args = { recent: 2 };
 const result = {
-  content: [{ type: "text", text: "\x1b[31mOUTCOME_ONE\x1b[0m\r\nOUT\u0000COME_TWO\uFFF9" }],
+  content: [{
+    type: "text",
+    text: [
+      "\x1b[31mOUTCOME_ONE\x1b[0m",
+      "OUT\u0000COME_TWO\uFFF9",
+      "OUTCOME_THREE",
+      "OUTCOME_FOUR",
+      "OUTCOME_FIVE",
+      "OUTCOME_SIX",
+      "OUTCOME_SEVEN",
+      "OUTCOME_EIGHT",
+      "OUTCOME_NINE",
+      "OUTCOME_TEN",
+      "OUTCOME_ELEVEN",
+      "OUTCOME_TWELVE",
+    ].join("\r\n"),
+  }],
   details: { ok: true },
   isError: false,
 };
@@ -3054,8 +3074,24 @@ for (const row of [stockRow, actualRow]) {
   row.setArgsComplete();
   row.updateResult(result);
 }
-if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+const collapsedStock = stockRow.render(100);
+const collapsedActual = actualRow.render(100);
+if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedStock)) {
   throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
+}
+const collapsedText = collapsedStock.join("\n");
+if (collapsedText.includes("OUTCOME_TWELVE") || !collapsedText.includes("more lines") || !collapsedText.includes("to expand")) {
+  throw new Error("stock rendering fixture did not exercise its collapsed preview and expansion hint");
+}
+stockRow.setExpanded(true);
+actualRow.setExpanded(true);
+const expandedStock = stockRow.render(100);
+const expandedActual = actualRow.render(100);
+if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
+  throw new Error("expanded Calm-off ToolExecutionComponent rendering differs from Pi stock");
+}
+if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
+  throw new Error("stock rendering fixture did not exercise expanded output");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 actualRow.invalidate();
