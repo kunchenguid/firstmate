@@ -190,6 +190,10 @@ Automatic acceptance is gated by the task-scoped `fm-spawn.sh --accept-claude-tr
 Without the grant, an observed dialog remains untouched and becomes a supervisor-visible blocker.
 Firstmate never writes or pre-seeds Claude's trust store.
 
+The 2026-08-29 applicability review inspected the Codex, Pi, Cursor, and Muse launch adapters before keeping this change Claude-only.
+Codex and Pi document their own first-run trust dialogs, but their `fm-spawn.sh` launch paths have no post-launch trust handling, so those gaps remain separate unverified follow-up work.
+Cursor already passes its verified `--trust` launch flag, and Muse's verified `--yolo` launch suppresses its trust dialog, so neither shares Claude's unattended-spawn gap on the current adapter path.
+
 The opt-in guard creates a fresh isolated config directory and proceeds to the real launch path only when Claude reports that profile authenticated:
 
 ```sh
