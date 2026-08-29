@@ -264,7 +264,7 @@ test_promote_requires_and_records_the_delivery_contract() {
 # The delivery contract only protects a worker that actually receives it. A promoted
 # scout used to get a free-form hint instead of the mode-specific Definition of done,
 # so it never saw the ask-user escalation rule or the --yes ban that every briefed
-# worker gets. This drives the real promotion path, then runs the delivery command it
+# no-mistakes worker gets. This drives the real promotion path, then runs the delivery command it
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {

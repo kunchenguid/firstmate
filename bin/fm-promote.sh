@@ -8,7 +8,8 @@
 # default-branch base, the fm/<task-id> branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
-# delivery contract, ask-user escalation rule, and --yes ban as a briefed one.
+# delivery contract as a briefed one, including the no-mistakes mode's ask-user
+# escalation rule and --yes ban.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
@@ -123,8 +124,8 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
-# promoted worker that never received the ask-user escalation rule or the --yes
-# ban is the delivery hole this file used to leave open.
+# promoted no-mistakes worker that never received the ask-user escalation rule or
+# the --yes ban is the delivery hole this file used to leave open.
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
