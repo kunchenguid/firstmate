@@ -757,6 +757,24 @@ test_off_limits_module_fence_is_in_every_scaffold() {
   pass "fm-brief.sh: off-limits module fence renders in ship, scout, and secondmate scaffolds"
 }
 
+test_off_limits_module_fence_uses_active_data_root() {
+  local home active_data brief
+  home="$TMP_ROOT/off-limits-active-root-home"
+  active_data="$TMP_ROOT/off-limits-active-root-data"
+  mkdir -p "$home/data" "$active_data"
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$active_data" \
+    "$ROOT/bin/fm-brief.sh" active-data-root module --mode no-mistakes >/dev/null 2>&1 \
+    || fail "ship brief with an alternate data root exited non-zero"
+  brief="$active_data/active-data-root/brief.md"
+  assert_present "$brief" "alternate data-root brief was not scaffolded"
+  assert_grep "private preferences file at $active_data/captain.md" "$brief" \
+    "off-limits module fence did not use the active data root"
+  assert_no_grep "$home/data/captain.md" "$brief" \
+    "off-limits module fence retained the default data root"
+  pass "fm-brief.sh: off-limits module fence uses the active data root"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -818,5 +836,6 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_off_limits_module_fence_is_in_every_scaffold
+test_off_limits_module_fence_uses_active_data_root
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

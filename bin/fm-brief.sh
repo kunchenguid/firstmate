@@ -203,7 +203,7 @@ INBOX_SECTION=${INBOX_SECTION%$'\n'}
 IFS= read -r -d '' OFF_LIMITS_MODULE_SECTION <<EOF || true
 # Off-limits module prohibition - permanent safety boundary
 1. The rule. Honour every off-limits module prohibition recorded by this brief's operator. Never edit, and never make a read that leads to a write, anywhere in a fenced module. This is permanent until the operator personally lifts it.
-2. The operator's concrete prohibition. Read the operator's own private preferences file at $FM_HOME/data/captain.md for the concrete fenced-module list before inspecting or changing code that might be fenced. Do not copy that private list into this shared template.
+2. The operator's concrete prohibition. Read the operator's own private preferences file at $DATA/captain.md for the concrete fenced-module list before inspecting or changing code that might be fenced. Do not copy that private list into this shared template.
 3. The check that actually works. Ask whether the fenced module RENDERS this file, not whether the path looks like it belongs to that module.
 Fenced modules can render shared components that live outside their own directories, so every "is this under the module directory/" test can pass while a change alters what a fenced module displays.
 4. The escape. If a task appears to REQUIRE touching a fenced module, that is NOT a green light - append \`blocked: {why}\` and return it to the operator.
