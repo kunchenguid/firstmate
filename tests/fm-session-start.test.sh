@@ -1445,12 +1445,14 @@ EOF
 }
 
 # The digest bounds `diagnose --endpoint-only`, and that command bounds its own
-# endpoint capture inside it. The inner bound must sit strictly below the outer
-# one: whichever timer fires first decides what the reader is told, and only the
-# inner one can name the wedged capture. Left at its standalone default the
-# capture bound is 15s, at or above every per-scan bound the digest imposes, so
-# the outer kill would always land first and the concrete reason would be
-# unreachable on the one path that runs automatically. This fails if either
+# endpoint capture inside it. Whichever timer fires first decides what the reader
+# is told, and only the inner one can name the wedged capture, so the inner bound
+# must come from fm_inner_bound - which owns that rule and states exactly what it
+# guarantees. Left at its standalone default the capture bound is 15s, at or
+# above every per-scan bound the digest imposes, so the outer kill would always
+# land first and the concrete reason would be unreachable on the one path that
+# runs automatically. Driven at bounds with room to separate, because at one
+# second the derivation floors to the outer bound by design; this fails if either
 # bound is edited without the other, or if the derivation is dropped.
 test_wall_scan_bounds_the_capture_below_its_own_bound() {
   local rec root home fakebin out

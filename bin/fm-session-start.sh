@@ -860,10 +860,9 @@ if [ "$SESSION_START_FLEET_BOUND_FITS" -eq 0 ]; then
     "$SESSION_START_WALL_BUDGET" "$SESSION_START_OUTER_BOUND"
   printf 'FLEET_STATE_BOUNDS_NOTE: that is over half the whole digest, so later stages may be truncated - lower FM_SESSION_START_HEADROOM_TIMEOUT or FM_SESSION_START_WALL_BUDGET, or raise FM_SESSION_START_TIMEOUT.\n'
 fi
-# The gauge's own reading budget is defaulted strictly BELOW this bound, by the
-# rule bin/fm-timeout-lib.sh owns: an inner bound at or above the outer one is a
-# false-unmeasurable generator. An operator who sets FM_USAGE_WALL_QUOTA_TIMEOUT
-# explicitly still wins.
+# The gauge's own reading budget is defaulted under this bound by fm_inner_bound,
+# which owns that rule and states exactly what it guarantees. An operator who
+# sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
 HEADROOM_INNER_TIMEOUT=$(fm_inner_bound "$SESSION_START_HEADROOM_TIMEOUT")
 # The status is captured from the run itself, not read inside an `if !` branch,
 # where `$?` is the negation's own status and always 0 - which would report
@@ -907,12 +906,13 @@ wall_scan() {  # <task-id>
     return 0
   fi
   scan_started=$(date +%s)
-  # The scan's own endpoint capture is bounded under this bound by the same rule
-  # bin/fm-timeout-lib.sh owns. Left at its standalone default the capture bound
-  # would sit at or above this one, this kill would land first, and every wedged
+  # The scan's own endpoint capture is bounded under this bound by fm_inner_bound,
+  # which owns that rule. Left at its standalone default the capture bound would
+  # sit at or above this one, this kill would land first, and every wedged
   # endpoint would read as `scan-did-not-complete` instead of naming the wedged
   # capture - the concrete reason the scan exists to produce. Derived per scan
-  # because this bound shrinks as the shared budget is spent.
+  # because this bound shrinks as the shared budget is spent, which is also what
+  # makes fm_inner_bound's one-second corner reachable here.
   scan_out=$(FM_USAGE_WALL_CAPTURE_TIMEOUT=${FM_USAGE_WALL_CAPTURE_TIMEOUT:-$(fm_inner_bound "$scan_bound")} \
     fm_run_timed "$scan_bound" \
       "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$scan_id" --endpoint-only 2>/dev/null)

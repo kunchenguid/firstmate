@@ -18,8 +18,8 @@
 # same unknown line as any other unreadable gauge - never a healthy one, and
 # never a silently omitted section.
 #
-# The inner reading budget is defaulted strictly BELOW this outer bound, by the
-# rule bin/fm-timeout-lib.sh owns alongside the bound itself. An operator who
+# The inner reading budget is defaulted under this outer bound by fm_inner_bound,
+# which owns that rule and states exactly what it guarantees. An operator who
 # sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
 set -u
 

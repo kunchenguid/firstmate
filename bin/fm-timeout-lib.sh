@@ -173,11 +173,25 @@ fm_run_timed_reason() {  # <rc> <bound-secs> <what>
 # inside a bound of their own (the session-start digest's headroom read and its
 # per-task wall scan, and the fleet view's headroom read), and the derivation
 # lives here rather than in each of them so the numbers cannot drift apart.
+# Callers point at this header rather than restating the rule: two independent
+# restatements of one rule is how this pair drifted apart before.
 #
 # Three quarters, floored at one second: enough headroom for the inner bound to
 # fire and its reason to be printed before the outer kill, and never zero, which
 # fm_run_timed's own contract above forbids. A caller that sets the inner
 # tunable explicitly still wins; this is only the default.
+#
+# WHAT THAT ACTUALLY GUARANTEES, stated exactly because the floor is a real
+# exception: the inner bound is BELOW the outer wherever there is room for it,
+# and never above. At `outer=1` there is no room - three quarters of one second
+# floors back to one - so the two are EQUAL, and that corner is reachable rather
+# than theoretical: the digest's wall scan derives its capture bound from
+# whatever is left of the shared budget, so the last scan before exhaustion runs
+# with `outer=1`. Nothing becomes false there, only less specific: the outer
+# kill wins the tie and the reader is told the outer read did not complete
+# rather than which inner read was wedged. Zero would be the real defect and is
+# what the floor exists to refuse, so the floor stays and the claim is stated
+# with its exception instead.
 fm_inner_bound() {  # <outer-secs>
   local outer=${1:-0} inner
   case "$outer" in ''|*[!0-9]*) outer=0 ;; esac
