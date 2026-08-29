@@ -241,3 +241,30 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   return 1
 }
 
+
+# fm_cursor_tty_has_cursor: true when <tty> has a genuine Cursor Agent CLI
+# process in its FOREGROUND process group. The foreground scoping (pgid =
+# tpgid) means a pane whose agent exited to a shell has no Cursor foreground
+# process. Cursor runs as a bundled node script, so a pane's reported command
+# is a bare `node`; identity therefore comes from the narrowed structural rule
+# in fm_cursor_process_matches above.
+#
+# The tty is the argument rather than a pane target because every caller reads
+# it from a DIFFERENT tmux server - bin/fm-tmux-lib.sh from the default socket,
+# bin/backends/thurbox.sh from thurbox's own - while the process identity
+# question below is server-independent and must not be re-derived per caller.
+fm_cursor_tty_has_cursor() {  # <tty>
+  local tty=$1 pid pgid tpgid comm args argv0
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r pid pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    fm_cursor_process_matches "$comm" '' "$argv0" && return 0
+  done <<INNER_EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+INNER_EOF
+  return 1
+}

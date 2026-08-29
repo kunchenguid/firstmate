@@ -1538,7 +1538,9 @@ fm_super_main() {
   local discovered_backend backend_source
   backend_source="FM_SUPERVISOR_BACKEND"
   if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
-    if [ -n "${TMUX_PANE:-}" ]; then
+    if [ -n "${THURBOX_SESSION:-}" ] && fm_backend_detect_thurbox_socket_match; then
+      backend_source="THURBOX_SESSION"
+    elif [ -n "${TMUX_PANE:-}" ]; then
       backend_source="TMUX_PANE"
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       backend_source="HERDR_ENV"

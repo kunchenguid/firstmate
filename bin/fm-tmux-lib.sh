@@ -172,21 +172,14 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
 # single owner is bin/fm-cursor-lib.sh. The foreground scoping (pgid = tpgid)
 # matches fm_tmux_composer_identity, so a pane whose agent exited to a shell has
 # no Cursor foreground process and gets no reclassification.
+#
+# Only the tty read is tmux-server-specific, so it is the only part that lives
+# here: the process scan itself is fm_cursor_tty_has_cursor, shared with the
+# thurbox adapter, which reads the same tty off thurbox's own socket.
 fm_tmux_pane_is_cursor() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
+  local target=$1 tty
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
-  case "$tty" in /dev/*) ;; *) return 1 ;; esac
-  while read -r pid pgid tpgid comm; do
-    [ -n "$comm" ] || continue
-    [ "$pgid" = "$tpgid" ] || continue
-    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
-    args=${args#"${args%%[![:space:]]*}"}
-    argv0=${args%%[[:space:]]*}
-    fm_cursor_process_matches "$comm" '' "$argv0" && return 0
-  done <<EOF
-$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
-EOF
-  return 1
+  fm_cursor_tty_has_cursor "$tty"
 }
 
 # fm_pane_input_pending: 0 when the composer is not proven empty, so pending

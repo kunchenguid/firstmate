@@ -108,6 +108,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_BACKEND_THURBOX_ROOT/bin/fm-backend-hometag-lib.sh"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_THURBOX_ROOT/bin/fm-composer-lib.sh"
+# Cursor's process identity has exactly one owner fleet-wide; this adapter
+# needs it for the same cursor-parked-outside-the-composer hazard the default
+# tmux backend mitigates.
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$FM_BACKEND_THURBOX_ROOT/bin/fm-cursor-lib.sh"
 
 # Verified minimum: the version the live pass ran against
 # (docs/thurbox-backend.md). 2.9 is where `session capture --json`, the
@@ -250,8 +255,30 @@ fm_backend_thurbox_agent_defined() {  # <agent-name>
   local path
   path=$(printf '%s' "$out" | jq -r '.agents_toml.path // empty' 2>/dev/null)
   [ -n "$path" ] && [ -f "$path" ] || return 1
-  # TOML accepts both quote styles for a basic string, so both are matched.
-  grep -Eq "^[[:space:]]*name[[:space:]]*=[[:space:]]*[\"']${agent}[\"'][[:space:]]*\$" "$path"
+  # Scoped to an actual [[agents]] table, and compared LITERALLY rather than as
+  # an interpolated regex. Both matter: agents.toml also carries hook, profile,
+  # and sharing tables that have their own `name` keys, so an unscoped search
+  # would report a missing agent as defined and push the failure back out to
+  # `session create --agent`, which is exactly what this gate exists to
+  # prevent; and an agent name carrying a regex metacharacter (`fm.shell`)
+  # would otherwise match a different entry (`fmXshell`). TOML accepts both
+  # quote styles for a basic string, so both are matched.
+  awk -v want="$agent" '
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line ~ /^\[/) { in_agents = (line == "[[agents]]"); next }
+      if (!in_agents) next
+      if (line !~ /^name[[:space:]]*=[[:space:]]*/) next
+      sub(/^name[[:space:]]*=[[:space:]]*/, "", line)
+      q = substr(line, 1, 1)
+      if (q != "\"" && q != "\047") next
+      if (length(line) < 2 || substr(line, length(line), 1) != q) next
+      if (substr(line, 2, length(line) - 2) == want) { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$path"
 }
 
 # fm_backend_thurbox_container_ensure: the full spawn-time container-ensure
@@ -400,24 +427,43 @@ fm_backend_thurbox_parse_target() {  # <target>
 # primitive here would silently address nothing. Those are refused explicitly
 # rather than half-working; docs/thurbox-backend.md "Remote sessions" records
 # that boundary.
-fm_backend_thurbox_target_ready() {  # <target> [expected-label]
-  local expected_label=${2:-} expected_title row name pane btype uuid
-  fm_backend_thurbox_parse_target "$1" || return 1
-  if [ -n "$expected_label" ]; then
-    expected_title=$(fm_backend_thurbox_scoped_title "$expected_label" 2>/dev/null) || return 1
-  fi
-  uuid=$FM_BACKEND_THURBOX_SESSION
+# fm_backend_thurbox_resolve_row: steps 1 and 3 of that order of authority, and
+# the single owner of "which session row IS this task's". Sets
+# FM_BACKEND_THURBOX_ROW_UUID and FM_BACKEND_THURBOX_ROW on success and touches
+# nothing on failure, so a caller's own target variables are only ever replaced
+# by a row that was actually found. Kept separate from target_ready because
+# teardown needs the row WITHOUT the pane liveness the rest of the adapter
+# needs: the row, not the window, is what kill owns.
+fm_backend_thurbox_resolve_row() {  # <uuid> [expected-title]
+  local uuid=$1 expected_title=${2:-} row
   row=$(fm_backend_thurbox_session_row "$uuid")
   if [ -z "$row" ]; then
-    [ -n "$expected_label" ] || return 1
+    [ -n "$expected_title" ] || return 1
     uuid=$(fm_backend_thurbox_session_id_for_label "$expected_title")
     [ -n "$uuid" ] || return 1
     row=$(fm_backend_thurbox_session_row "$uuid")
     [ -n "$row" ] || return 1
   fi
-  name=$(printf '%s' "$row" | jq -r '.name // empty' 2>/dev/null)
-  pane=$(printf '%s' "$row" | jq -r '.backend_id // empty' 2>/dev/null)
-  btype=$(printf '%s' "$row" | jq -r '.backend_type // empty' 2>/dev/null)
+  FM_BACKEND_THURBOX_ROW_UUID=$uuid
+  FM_BACKEND_THURBOX_ROW=$row
+  return 0
+}
+
+fm_backend_thurbox_target_ready() {  # <target> [expected-label]
+  local expected_label=${2:-} expected_title='' row name pane btype uuid
+  fm_backend_thurbox_parse_target "$1" || return 1
+  if [ -n "$expected_label" ]; then
+    expected_title=$(fm_backend_thurbox_scoped_title "$expected_label" 2>/dev/null) || return 1
+  fi
+  fm_backend_thurbox_resolve_row "$FM_BACKEND_THURBOX_SESSION" "$expected_title" || return 1
+  uuid=$FM_BACKEND_THURBOX_ROW_UUID
+  row=$FM_BACKEND_THURBOX_ROW
+  # One jq pass over the row rather than one per field: target_ready runs
+  # before EVERY operation and twice per composer read, so this is the hot
+  # path. Same one-pass tab-separated form fm_backend_thurbox_list_live uses.
+  IFS=$'\t' read -r name pane btype <<EOF
+$(printf '%s' "$row" | jq -r '"\(.name // "")\t\(.backend_id // "")\t\(.backend_type // "")"' 2>/dev/null)
+EOF
   [ "$btype" = "local-tmux" ] || return 1
   if [ -n "$expected_label" ] && [ "$name" != "$expected_title" ]; then
     return 1
@@ -554,6 +600,23 @@ fm_backend_thurbox_composer_caps() {
   printf 'styled=1\ncursor=1\nidentity=0\nrows=0\n'
 }
 
+# fm_backend_thurbox_pane_is_cursor: the Cursor-pane probe of
+# bin/fm-tmux-lib.sh's fm_tmux_pane_is_cursor, against THURBOX's socket.
+#
+# Only the #{pane_tty} read is server-specific, and it is the one thing done
+# here; Cursor's process identity stays owned by bin/fm-cursor-lib.sh
+# (fm_cursor_tty_has_cursor), so this adapter re-derives none of it.
+#
+# This is deliberately treated differently from identity=0 above. The pi
+# identity probe additionally depends on pi's busy-footer semantics, which have
+# had no thurbox pass; Cursor detection is pure foreground-process identity,
+# and the only socket-dependent part is the tmux call itself.
+fm_backend_thurbox_pane_is_cursor() {  # <pane-id>
+  local tty
+  tty=$(fm_backend_thurbox_tmux display-message -p -t "$1" '#{pane_tty}' 2>/dev/null) || return 1
+  fm_cursor_tty_has_cursor "$tty"
+}
+
 # fm_backend_thurbox_composer_state: thin adapter - capture plus cursor plus
 # capabilities in, shared verdict out. Every shape, glyph, and border family
 # lives in bin/fm-composer-lib.sh, so a new harness shape is taught there once
@@ -565,6 +628,18 @@ fm_backend_thurbox_composer_state() {  # <target> [expected-label] -> empty|pend
   pane=$(fm_backend_thurbox_composer_capture "$target" "$expected_label") || { printf 'unknown'; return 0; }
   verdict=$(fm_composer_classify_screen "$(fm_backend_thurbox_composer_caps)" "$pane" "$cy")
   [ "$verdict" != need-identity ] || verdict=unknown
+  # Cursor Agent CLI parks its terminal cursor OUTSIDE its composer, below the
+  # footer, so on a Cursor pane the cursor row is not a composer locator and
+  # the cursor-anchored read can only ever answer `unknown`. cursor=1 buys
+  # thurbox tmux's composer fidelity and therefore tmux's Cursor hazard, so it
+  # takes tmux's mitigation too (bin/fm-tmux-lib.sh): reclassify that pane the
+  # cursorless way, letting the bottom-most shape win, exactly as every
+  # cursorless backend already classifies it. Gated on Cursor's own structural
+  # process identity, never on the verdict alone, so the strict blank-row
+  # posture that owns `unknown` for every other harness is untouched.
+  if [ "$verdict" = unknown ] && fm_backend_thurbox_pane_is_cursor "$FM_BACKEND_THURBOX_PANE"; then
+    verdict=$(fm_composer_classify_screen "$(fm_backend_thurbox_composer_caps)" "$pane" '')
+  fi
   printf '%s' "$verdict"
 }
 
@@ -597,8 +672,11 @@ fm_backend_thurbox_send_text_submit() {  # <target> <text> <retries> <enter-slee
 # not-yet-reporting session can never be mistaken for a finished one.
 fm_backend_thurbox_busy_state() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || { printf 'unknown'; return 0; }
+  # The row target_ready just resolved is the same row `session get` would
+  # return, so it is read rather than fetched a second time - the watcher runs
+  # this per task per poll.
   local raw
-  raw=$(fm_backend_thurbox_session_row "$FM_BACKEND_THURBOX_SESSION" | jq -r '.hook_state // empty' 2>/dev/null)
+  raw=$(printf '%s' "$FM_BACKEND_THURBOX_ROW" | jq -r '.hook_state // empty' 2>/dev/null)
   case "$raw" in
     working) printf 'busy' ;;
     idle|done) printf 'idle' ;;
@@ -617,15 +695,26 @@ fm_backend_thurbox_busy_state() {  # <target> [expected-label]
 # --force kills the window, removes worktrees, and cancels pending scheduled
 # commands, and reported "killed_window": true in the live pass.
 #
-# When teardown supplies the expected task label, target_ready's name check
-# runs first, so a UUID that has been recycled onto some other session can
-# never be deleted by mistake.
+# When teardown supplies the expected task label, the resolved ROW's name must
+# equal this home's scoped title for it, so a UUID that has been recycled onto
+# some other session can never be deleted by mistake.
+#
+# That identity check reads the session row and deliberately NOT the pane:
+# what kill owns is the row, and the row OUTLIVES its window. A pane the
+# operator exited, or every pane at once after thurbox's tmux server restarts,
+# leaves the row behind - the very state the non-forced delete's soft-delete
+# also produces - and gating teardown on pane liveness would leave that row and
+# its name reserved forever, so the next spawn of the same task id would hit
+# create_task's duplicate refusal permanently.
 fm_backend_thurbox_kill() {  # <target> [unused] [expected-label]
-  local expected_label=${3:-}
+  local expected_label=${3:-} expected_title='' name
+  fm_backend_thurbox_parse_target "$1" || return 0
   if [ -n "$expected_label" ]; then
-    fm_backend_thurbox_target_ready "$1" "$expected_label" || return 0
-  else
-    fm_backend_thurbox_parse_target "$1" || return 0
+    expected_title=$(fm_backend_thurbox_scoped_title "$expected_label" 2>/dev/null) || return 0
+    fm_backend_thurbox_resolve_row "$FM_BACKEND_THURBOX_SESSION" "$expected_title" || return 0
+    name=$(printf '%s' "$FM_BACKEND_THURBOX_ROW" | jq -r '.name // empty' 2>/dev/null)
+    [ "$name" = "$expected_title" ] || return 0
+    FM_BACKEND_THURBOX_SESSION=$FM_BACKEND_THURBOX_ROW_UUID
   fi
   fm_backend_thurbox_cli session delete "$FM_BACKEND_THURBOX_SESSION" --force --json >/dev/null 2>&1 || true
 }

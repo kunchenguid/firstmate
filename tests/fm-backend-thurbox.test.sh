@@ -169,6 +169,7 @@ case "${1:-}" in
       '#{pane_id}') printf '%s\n' "$target" ;;
       '#{pane_current_path}') printf '%s\n' "${FM_TB_PANE_PATH:-/w}" ;;
       '#{cursor_y}') printf '%s\n' "${FM_TB_CURSOR_Y:-0}" ;;
+      '#{pane_tty}') printf '%s\n' "${FM_TB_PANE_TTY:-}" ;;
       *) printf '\n' ;;
     esac
     ;;
@@ -193,9 +194,47 @@ case "${1:-}" in
 esac
 SH
   chmod +x "$fb/tmux"
+
+  # A third stub, for the ONE non-tmux, non-thurbox primitive the adapter
+  # reaches: the process table behind a pane's tty, which is how Cursor's
+  # foreground identity is established (bin/fm-cursor-lib.sh). Stubbing `ps`
+  # rather than the identity function keeps the real pgid/tpgid foreground
+  # scoping and the real name/install-tree matching under test.
+  #
+  # $FM_TB_PS is a table, one process per line:
+  #   <tty>\t<pid>\t<pgid>\t<tpgid>\t<comm>\t<args>
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+table="${FM_TB_PS:-}"
+# Anything outside a case that set up a fake process table gets the real ps,
+# so this stub cannot change the behaviour of unrelated code on this PATH.
+[ -n "$table" ] && [ -f "$table" ] || exec "${FM_TB_REAL_PS:?}" "$@"
+case "${1:-}" in
+  -t)
+    want=$2
+    while IFS=$'\t' read -r tty pid pgid tpgid comm args; do
+      [ "${tty:-}" = "$want" ] || continue
+      printf '%s %s %s %s\n' "$pid" "$pgid" "$tpgid" "$comm"
+    done < "$table"
+    ;;
+  -p)
+    want=$2
+    while IFS=$'\t' read -r tty pid pgid tpgid comm args; do
+      [ "${pid:-}" = "$want" ] || continue
+      printf '%s\n' "$args"
+    done < "$table"
+    ;;
+  *) exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/ps"
   printf '%s\n' "$fb"
 }
 
+FM_TB_REAL_PS=$(command -v ps) || fail "ps not found"
+export FM_TB_REAL_PS
 FAKEBIN=$(make_thurbox_fakebin "$TMP_ROOT")
 
 # --- per-case world reset ---------------------------------------------------
@@ -218,7 +257,7 @@ reset_world() {
   export FM_TB_PANES="%20"
   unset FM_TB_FAKE_VERSION FM_TB_FAKE_SOCKET FM_TB_CREATE_UUID FM_TB_CREATE_PANE \
         FM_TB_CREATE_EXIT FM_TB_AGENTS_TOML FM_TB_CURSOR_Y FM_TB_PANE_PATH \
-        FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT 2>/dev/null || true
+        FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT FM_TB_PS FM_TB_PANE_TTY 2>/dev/null || true
   FM_BACKEND_THURBOX_SOCKET_CACHE=''
 }
 
@@ -248,6 +287,11 @@ export FM_CONFIG_OVERRIDE
 . "$ROOT/bin/backends/thurbox.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
+# The away-mode captain-pane resolver. Its thurbox arm is what makes the
+# daemon's and fm-afk-launch.sh's existing refusals reachable at all, and it
+# needs the same THURBOX_SESSION-plus-socket detection this file already stubs.
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$ROOT/bin/fm-supervisor-target-lib.sh"
 
 HOMETAG=$(fm_backend_thurbox_home_label)
 TITLE="fm-$HOMETAG-t1"
@@ -342,6 +386,37 @@ test_container_ensure_accepts_single_quoted_toml() {
   export FM_TB_AGENTS_TOML="$TMP_ROOT/agents.toml"
   fm_backend_thurbox_container_ensure || fail "container_ensure rejected a single-quoted agents.toml entry"
   pass "container_ensure accepts either TOML quote style for the agent name"
+}
+
+test_container_ensure_refuses_a_name_outside_an_agents_table() {
+  reset_world
+  # agents.toml also carries hook, profile, and sharing tables with their own
+  # `name` keys. Reading one of those as an agent would report the missing
+  # entry as defined and push the failure back out to `session create --agent`,
+  # which is the exact late failure this gate exists to prevent.
+  printf 'config_version = 1\n[[hooks]]\nname = "shell"\ncommand = "true"\n' > "$TMP_ROOT/agents.toml"
+  export FM_TB_AGENTS_TOML="$TMP_ROOT/agents.toml"
+  local rc
+  fm_backend_thurbox_container_ensure >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "container_ensure with 'shell' named only in an unrelated table"
+  pass "container_ensure only accepts a name inside an [[agents]] table"
+}
+
+test_container_ensure_matches_the_agent_name_literally() {
+  reset_world
+  # A configured name carrying a regex metacharacter must not match a
+  # different entry: '.' is not a wildcard here.
+  printf 'fm.shell\n' > "$FM_CONFIG_OVERRIDE/thurbox-agent"
+  printf 'config_version = 1\n[[agents]]\nname = "fmXshell"\ncommand = "bash"\n' > "$TMP_ROOT/agents.toml"
+  export FM_TB_AGENTS_TOML="$TMP_ROOT/agents.toml"
+  local rc
+  fm_backend_thurbox_container_ensure >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "container_ensure matched 'fm.shell' against the entry 'fmXshell'"
+  printf 'config_version = 1\n[[agents]]\nname = "fm.shell"\ncommand = "bash"\n' > "$TMP_ROOT/agents.toml"
+  fm_backend_thurbox_container_ensure \
+    || fail "container_ensure rejected the agent entry that is literally named 'fm.shell'"
+  rm -f "$FM_CONFIG_OVERRIDE/thurbox-agent"
+  pass "the configured agent name is matched literally, never as a regex"
 }
 
 test_configured_agent_name_is_honored() {
@@ -550,6 +625,64 @@ test_composer_state_unknown_when_pane_unreadable() {
   pass "composer_state degrades to unknown when the pane cannot be read"
 }
 
+# Cursor Agent CLI's real screen shape: a bare composer row carrying its U+2192
+# glyph, two footer rows below it, and the terminal cursor parked on a blank
+# row PAST the footer - so the cursor row is not a composer locator and the
+# cursor-anchored read can only ever answer unknown. An idle composer draws its
+# placeholder de-emphasised (SGR 2), which is what separates it from real typed
+# text once the capture preserves styling.
+tb_cursor_screen() {  # <composer-text> <ghost 0|1>
+  local text=$1 ghost=$2 open='' close=''
+  if [ "$ghost" = 1 ]; then open=$(printf '\033[2m'); close=$(printf '\033[0m'); fi
+  printf '\n  \xe2\x86\x92 %s%s%s\n\n  Cursor Grok 4.5 High                    Run Everything\n  /w \xc2\xb7 main\n\n' \
+    "$open" "$text" "$close" > "$FM_TB_SCREEN"
+  export FM_TB_CURSOR_Y=6
+  export FM_TB_PANE_TTY=/dev/pts/9
+}
+
+tb_pane_process() {  # <comm> <args>
+  printf 'pts/9\t4242\t4242\t4242\t%s\t%s\n' "$1" "$2" > "$TMP_ROOT/ps.tsv"
+  export FM_TB_PS="$TMP_ROOT/ps.tsv"
+}
+
+test_composer_state_reclassifies_a_cursor_pane() {
+  reset_world
+  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  tb_cursor_screen 'Plan, search, build anything' 1
+  tb_pane_process cursor-agent /opt/cursor/cursor-agent
+  [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = empty ] \
+    || fail "an idle Cursor composer on thurbox must read empty; otherwise every steer to a Cursor task reports unverified forever"
+  # The pane tty MUST be read off thurbox's own socket, never the ambient
+  # default server, or the probe would answer about an unrelated pane.
+  grep -q $'tmux\x1f-L\x1fthurbox\x1fdisplay-message\x1f-p\x1f-t\x1f%20\x1f#{pane_tty}' "$FM_TB_TMUXLOG" \
+    || fail "the Cursor probe did not read #{pane_tty} through thurbox's socket"
+
+  tb_cursor_screen 'half typed captain text' 0
+  [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = pending ] \
+    || fail "real unsubmitted text in a Cursor composer must still read pending, never empty"
+  pass "composer_state reclassifies a Cursor pane cursorlessly, on thurbox's own socket"
+}
+
+test_composer_state_does_not_reclassify_a_non_cursor_pane() {
+  reset_world
+  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  # The SAME rendered screen, with only the foreground process identity
+  # changed: the reclassification is gated on Cursor's own structural process
+  # identity, so the strict blank-row posture stays in force everywhere else.
+  tb_cursor_screen 'Plan, search, build anything' 1
+  tb_pane_process notcursor /opt/other/notcursor
+  [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = unknown ] \
+    || fail "a non-Cursor pane must keep the strict cursor-anchored verdict"
+
+  # A Cursor agent that exited leaves its rendered composer on screen while the
+  # foreground process becomes a plain shell. Typing there would run the text
+  # as a shell command, so it must never read empty.
+  tb_pane_process bash /bin/bash
+  [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" != empty ] \
+    || fail "a dead-shell pane still showing Cursor's composer must never read empty"
+  pass "composer_state leaves a non-Cursor pane's verdict untouched"
+}
+
 # ============================================================================
 # native busy state
 # ============================================================================
@@ -596,6 +729,39 @@ test_kill_refuses_recycled_uuid() {
   assert_no_grep $'session\x1fdelete' "$FM_TB_LOG" \
     "kill deleted a session whose name belongs to another task"
   pass "kill refuses a uuid that now names a different task"
+}
+
+test_kill_reclaims_the_row_when_the_window_is_already_gone() {
+  reset_world
+  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  # The window is gone but the database row survives - what an operator
+  # exiting the shell, or thurbox's tmux server restarting, leaves behind, and
+  # also what the non-forced delete's soft-delete produces. The row and its
+  # NAME stay reserved until something deletes them, so a kill that no-ops
+  # here makes the next spawn of this task id fail forever on create's
+  # duplicate refusal.
+  export FM_TB_PANES=""
+  fm_backend_thurbox_kill "$UUID:%20" '' fm-t1
+  assert_grep $'session\x1fdelete' "$FM_TB_LOG" \
+    "kill left the session row behind because its pane was already gone"
+  [ -z "$(fm_backend_thurbox_session_id_for_label "$TITLE")" ] \
+    || fail "the session name is still reserved after teardown"
+  # And the reclaimed name is immediately reusable.
+  export FM_TB_CREATE_PANE="%30"
+  export FM_TB_PANES="%30"
+  fm_backend_thurbox_create_task fm-t1 /w >/dev/null \
+    || fail "respawning the same task id after teardown was refused as a duplicate"
+  pass "kill reclaims a session row whose window is already gone"
+}
+
+test_kill_still_refuses_a_recycled_uuid_with_no_pane() {
+  reset_world
+  add_row "$UUID" "fm-$HOMETAG-other" "%20" local-tmux -
+  export FM_TB_PANES=""
+  fm_backend_thurbox_kill "$UUID:%20" '' fm-t1
+  assert_no_grep $'session\x1fdelete' "$FM_TB_LOG" \
+    "kill deleted another task's session once pane liveness stopped gating it"
+  pass "kill verifies identity from the session row, so a recycled uuid is still refused"
 }
 
 test_list_live_filters_and_skips_unaddressable() {
@@ -691,6 +857,54 @@ test_safety_guard_refuses_a_real_cli() {
   pass "safety guard refuses any thurbox-cli outside the test fixture"
 }
 
+test_safety_guard_refuses_a_real_tmux() {
+  # The adapter is a two-CLI adapter: every destructive pane primitive runs the
+  # ambient tmux from PATH against thurbox's REAL socket. A case that narrowed
+  # or reset PATH would send keys to a live pane on the operator's own thurbox
+  # server, so the guard must fail closed over that CLI too.
+  local out rc bare="$TMP_ROOT/no-tmux"
+  mkdir -p "$bare"
+  out=$(PATH="$bare" thurbox_refuse_if_unsafe "$TMP_ROOT" 2>&1); rc=$?
+  expect_code 1 "$rc" "safety guard with no tmux resolvable at all"
+  out=$(PATH="/usr/bin:/bin" thurbox_refuse_if_unsafe "$TMP_ROOT" 2>&1); rc=$?
+  expect_code 1 "$rc" "safety guard against the tmux a reset PATH would resolve"
+  assert_contains "$out" "tmux" "guard must name which CLI it refused"
+  thurbox_refuse_if_unsafe "$TMP_ROOT" \
+    || fail "the guard refused the suite's own fixture tmux"
+  pass "safety guard fails closed over the tmux the adapter would actually run"
+}
+
+# ============================================================================
+# away-mode captain-pane resolution
+# ============================================================================
+
+test_supervisor_backend_names_thurbox_for_a_thurbox_hosted_captain() {
+  reset_world
+  local got
+  # A thurbox pane IS a tmux pane, so $TMUX_PANE is set here too. Answering
+  # tmux would make both away-mode callers run BARE tmux primitives on the
+  # DEFAULT server against a pane id that only exists on thurbox's - either a
+  # confusing failure or, worse, injections typed into an unrelated pane of
+  # the operator's own server. Naming thurbox is what makes the daemon's
+  # unsupported-backend refusal and fm-afk-launch.sh's create refusal fire.
+  got=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='%31' TMUX="/tmp/tmux-1000/thurbox,123,0" \
+    THURBOX_SESSION="$UUID" discover_supervisor_backend)
+  [ "$got" = thurbox ] || fail "a thurbox-hosted captain resolved to '$got', so the refusal never fires"
+  pass "discover_supervisor_backend names thurbox for a thurbox-hosted captain"
+}
+
+test_supervisor_backend_yields_to_tmux_for_a_nested_server() {
+  reset_world
+  local got
+  got=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='%31' TMUX="/tmp/tmux-1000/default,123,0" \
+    THURBOX_SESSION="$UUID" discover_supervisor_backend)
+  [ "$got" = tmux ] || fail "a nested tmux inside a thurbox pane resolved to '$got', expected tmux"
+  got=$(FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%31' TMUX="/tmp/tmux-1000/thurbox,123,0" \
+    THURBOX_SESSION="$UUID" discover_supervisor_backend)
+  [ "$got" = herdr ] || fail "the explicit FM_SUPERVISOR_BACKEND override lost to thurbox detection"
+  pass "supervisor discovery keeps tmux for a nested server and honors the explicit override"
+}
+
 test_version_check_accepts_verified_build
 test_version_check_refuses_older_than_minimum
 test_socket_comes_from_thurbox_not_a_hardcoded_name
@@ -700,6 +914,8 @@ test_scoped_title_refuses_over_length_name
 test_container_ensure_refuses_missing_shell_agent
 test_container_ensure_accepts_defined_agent
 test_container_ensure_accepts_single_quoted_toml
+test_container_ensure_refuses_a_name_outside_an_agents_table
+test_container_ensure_matches_the_agent_name_literally
 test_configured_agent_name_is_honored
 test_create_task_returns_uuid_and_polled_pane
 test_create_task_refuses_duplicate_name
@@ -718,10 +934,14 @@ test_capture_reads_output_field_and_trims_locally
 test_capture_is_plain_text_composer_is_styled
 test_composer_caps_claim_styled_and_cursor
 test_composer_state_unknown_when_pane_unreadable
+test_composer_state_reclassifies_a_cursor_pane
+test_composer_state_does_not_reclassify_a_non_cursor_pane
 test_busy_state_maps_thurbox_hook_state
 test_busy_state_unknown_before_first_signal
 test_kill_forces_window_reclaim
 test_kill_refuses_recycled_uuid
+test_kill_reclaims_the_row_when_the_window_is_already_gone
+test_kill_still_refuses_a_recycled_uuid_with_no_pane
 test_list_live_filters_and_skips_unaddressable
 test_backend_is_known_and_spawn_capable
 test_endpoint_validation_accepts_consistent_meta
@@ -729,3 +949,6 @@ test_endpoint_validation_refuses_inconsistent_meta
 test_detect_prefers_thurbox_over_its_own_tmux_socket
 test_detect_prefers_tmux_for_nested_server
 test_safety_guard_refuses_a_real_cli
+test_safety_guard_refuses_a_real_tmux
+test_supervisor_backend_names_thurbox_for_a_thurbox_hosted_captain
+test_supervisor_backend_yields_to_tmux_for_a_nested_server

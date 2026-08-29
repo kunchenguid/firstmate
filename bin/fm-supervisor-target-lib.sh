@@ -57,12 +57,37 @@ discover_supervisor_target() {
 # which primitives (tmux vs herdr) to dispatch through. Priority mirrors
 # discover_supervisor_target and bin/fm-backend.sh's fm_backend_detect:
 #   1. FM_SUPERVISOR_BACKEND env (explicit override).
-#   2. $TMUX_PANE set - tmux.
-#   3. $HERDR_ENV=1 (with $HERDR_PANE_ID present) - herdr.
-#   4. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback. Returns 1.
+#   2. THURBOX_SESSION set AND $TMUX on thurbox's own socket - thurbox.
+#   3. $TMUX_PANE set - tmux.
+#   4. $HERDR_ENV=1 (with $HERDR_PANE_ID present) - herdr.
+#   5. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback. Returns 1.
+#
+# thurbox is checked BEFORE $TMUX_PANE for exactly the reason fm_backend_detect
+# checks it first: a thurbox pane IS a tmux pane (on thurbox's OWN socket), so
+# a $TMUX_PANE test would win and answer `tmux`, and both callers would then
+# run BARE tmux primitives - on the DEFAULT server - against a pane id that
+# only exists on thurbox's. Pane ids are per-server, so that either fails
+# confusingly or, worse, names an unrelated pane on the operator's own server
+# and types supervisor injections into it. Neither caller supports thurbox
+# (the daemon's FM_SUPERVISOR_SUPPORTED_BACKENDS gate, fm-afk-launch.sh's
+# create dispatch), so answering `thurbox` here is what makes those refusals
+# real rather than a silent cross-server misread.
+#
+# Detection is fm_backend_detect's own, reused rather than restated: the
+# THURBOX_SESSION marker paired with a match against the socket thurbox itself
+# reports, so a nested tmux inside a thurbox pane (a different socket) still
+# resolves to tmux. Both callers source bin/fm-backend.sh before this file; the
+# guard keeps a standalone sourcing of this file working, and simply falls
+# through to the ordinary answer.
 discover_supervisor_backend() {
   if [ -n "${FM_SUPERVISOR_BACKEND:-}" ]; then
     printf '%s' "$FM_SUPERVISOR_BACKEND"
+    return 0
+  fi
+  if [ -n "${THURBOX_SESSION:-}" ] \
+    && declare -F fm_backend_detect_thurbox_socket_match >/dev/null 2>&1 \
+    && fm_backend_detect_thurbox_socket_match; then
+    printf 'thurbox'
     return 0
   fi
   if [ -n "${TMUX_PANE:-}" ]; then

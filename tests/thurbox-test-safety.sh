@@ -31,29 +31,46 @@
 # outside-the-fixture binary refuses rather than proceeding, because the cost
 # of a false refusal (a skipped test) is trivially recoverable while the cost
 # of a false negative (mutating the operator's live sessions) is not.
+#
+# The rule covers BOTH CLIs the adapter drives, because it is a two-CLI
+# adapter: every destructive pane primitive (send-keys, capture-pane) runs the
+# ambient `tmux` from PATH against thurbox's REAL socket through
+# fm_backend_thurbox_tmux. Guarding only FM_THURBOX_BIN would leave half the
+# reachable surface unguarded - a case that narrowed or reset PATH could send
+# Enter to a live pane on the operator's thurbox server with the guard
+# reporting SAFE.
 set -u
 
-# thurbox_refuse_if_unsafe: 0 (SAFE to proceed) only when FM_THURBOX_BIN names
-# an executable file located INSIDE <fixture-root>. 1 (REFUSE) otherwise.
-#
-# The containment check is done on resolved absolute paths, so neither a
-# relative path nor a `..` traversal out of the fixture can smuggle in the real
-# CLI. `thurbox-cli` found merely on PATH is never acceptable: that is the
-# operator's own installation by definition.
-thurbox_refuse_if_unsafe() {  # <fixture-root>
-  local root=$1 bin real_root real_bin
-  bin=${FM_THURBOX_BIN:-}
-  [ -n "$root" ] || { echo "thurbox safety guard: refusing - empty fixture root" >&2; return 1; }
-  [ -n "$bin" ] || { echo "thurbox safety guard: refusing - FM_THURBOX_BIN is unset, so the adapter would run the REAL thurbox-cli from PATH against the operator's live sessions" >&2; return 1; }
-  [ -x "$bin" ] || { echo "thurbox safety guard: refusing - FM_THURBOX_BIN '$bin' is not an executable file" >&2; return 1; }
-  real_root=$(cd "$root" 2>/dev/null && pwd -P) || { echo "thurbox safety guard: refusing - fixture root '$root' is not a readable directory" >&2; return 1; }
-  real_bin=$(cd "$(dirname "$bin")" 2>/dev/null && pwd -P)/$(basename "$bin") || { echo "thurbox safety guard: refusing - cannot resolve FM_THURBOX_BIN '$bin'" >&2; return 1; }
+# thurbox_safe_binary_or_refuse: 0 only when <path> resolves to an executable
+# file INSIDE <fixture-root>. The containment check is done on resolved
+# absolute paths, so neither a relative path nor a `..` traversal out of the
+# fixture can smuggle in a real binary.
+thurbox_safe_binary_or_refuse() {  # <fixture-root-resolved> <path> <what>
+  local real_root=$1 bin=$2 what=$3 real_bin
+  [ -n "$bin" ] || { echo "thurbox safety guard: refusing - no $what resolved, so the adapter would run the operator's own installation against their live sessions" >&2; return 1; }
+  [ -x "$bin" ] || { echo "thurbox safety guard: refusing - $what '$bin' is not an executable file" >&2; return 1; }
+  real_bin=$(cd "$(dirname "$bin")" 2>/dev/null && pwd -P)/$(basename "$bin") || { echo "thurbox safety guard: refusing - cannot resolve $what '$bin'" >&2; return 1; }
   case "$real_bin" in
-    "$real_root"/*) : ;;
-    *)
-      echo "thurbox safety guard: refusing - FM_THURBOX_BIN '$real_bin' is outside the test fixture '$real_root'; a thurbox test must never run a real thurbox-cli (see this file's header)" >&2
-      return 1
-      ;;
+    "$real_root"/*) return 0 ;;
   esac
+  echo "thurbox safety guard: refusing - $what '$real_bin' is outside the test fixture '$real_root'; a thurbox test must never run a real thurbox-cli or reach a real thurbox tmux server (see this file's header)" >&2
+  return 1
+}
+
+# thurbox_refuse_if_unsafe: 0 (SAFE to proceed) only when BOTH the thurbox CLI
+# the adapter would run (FM_THURBOX_BIN) and the `tmux` it would resolve from
+# PATH are stubs inside <fixture-root>. 1 (REFUSE) otherwise.
+#
+# Either found merely on PATH is never acceptable: that is the operator's own
+# installation by definition, and FM_THURBOX_BIN being unset means exactly
+# that.
+thurbox_refuse_if_unsafe() {  # <fixture-root>
+  local root=$1 real_root tmux_bin
+  [ -n "$root" ] || { echo "thurbox safety guard: refusing - empty fixture root" >&2; return 1; }
+  real_root=$(cd "$root" 2>/dev/null && pwd -P) || { echo "thurbox safety guard: refusing - fixture root '$root' is not a readable directory" >&2; return 1; }
+  [ -n "${FM_THURBOX_BIN:-}" ] || { echo "thurbox safety guard: refusing - FM_THURBOX_BIN is unset, so the adapter would run the REAL thurbox-cli from PATH against the operator's live sessions" >&2; return 1; }
+  thurbox_safe_binary_or_refuse "$real_root" "${FM_THURBOX_BIN:-}" FM_THURBOX_BIN || return 1
+  tmux_bin=$(command -v tmux 2>/dev/null) || tmux_bin=''
+  thurbox_safe_binary_or_refuse "$real_root" "$tmux_bin" "the 'tmux' on PATH" || return 1
   return 0
 }

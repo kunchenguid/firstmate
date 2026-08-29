@@ -2413,16 +2413,19 @@ test_fm_send_exits_nonzero_on_unproven_submit() {
 
 test_discover_supervisor_backend_precedence() {
   local out
-  out=$(FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  # THURBOX_SESSION is neutralized alongside TMUX_PANE/HERDR_ENV for the same
+  # reason: thurbox now sits ahead of tmux in this precedence, so a suite run
+  # from inside a thurbox session would otherwise answer thurbox here.
+  out=$(FM_SUPERVISOR_BACKEND=herdr THURBOX_SESSION='' TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "explicit FM_SUPERVISOR_BACKEND override was not honored: $out"
 
-  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  out=$(FM_SUPERVISOR_BACKEND='' THURBOX_SESSION='' TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
   [ "$out" = tmux ] || fail "TMUX_PANE should win over HERDR_ENV (tmux nested in herdr resolves to tmux): $out"
 
-  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
+  out=$(FM_SUPERVISOR_BACKEND='' THURBOX_SESSION='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "HERDR_ENV=1 with HERDR_PANE_ID present should resolve to herdr: $out"
 
-  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
+  if out=$(FM_SUPERVISOR_BACKEND='' THURBOX_SESSION='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
     fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV) should return non-zero"
   fi
   [ "$out" = tmux ] || fail "bare fallback should still print tmux: $out"
