@@ -70,10 +70,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CLAUDE_DIR="${FM_USAGE_CLAUDE_DIR:-${HOME:-}/.claude/projects}"
 CODEX_DIR="${FM_USAGE_CODEX_DIR:-${HOME:-}/.codex/sessions}"
 
-# Portable directory-lock helpers (fm_lock_acquire_wait / fm_lock_release) let
+# Portable directory-lock helpers (fm_lock_try_acquire / fm_lock_release) let
 # the idempotent check-and-append below run as one critical section, so two
 # concurrent harvests of the same task cannot both pass the existence check and
-# each append a duplicate row.
+# each append a duplicate row. The acquire is bounded (see below) so it never
+# blocks the synchronous teardown caller indefinitely.
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -272,8 +273,24 @@ mkdir -p -- "$DATA"
 # lock, then test for an existing row for this task and append only when
 # absent. Two concurrent harvests of the same task cannot both pass the
 # existence test and each append a duplicate row.
+#
+# The acquire is BOUNDED, not fm_lock_acquire_wait's unbounded spin, because
+# this runs synchronously inside teardown: a wedged live holder must never
+# block teardown from retiring the task. fm_lock_try_acquire already steals a
+# dead owner's lock, so only a live concurrent harvest makes us wait, and its
+# critical section is a grep plus an append. If the lock stays busy past the
+# bound we give up best-effort (exit 1, which teardown warns on and continues)
+# rather than duplicate the row by appending unserialized.
 LEDGER_LOCK="$DATA/.usage-ledger.lock"
-fm_lock_acquire_wait "$LEDGER_LOCK"
+LEDGER_LOCK_WAIT=${FM_USAGE_LEDGER_LOCK_WAIT:-30}
+lock_deadline=$(( $(date +%s) + LEDGER_LOCK_WAIT ))
+until fm_lock_try_acquire "$LEDGER_LOCK"; do
+  if [ "$(date +%s)" -ge "$lock_deadline" ]; then
+    err "ledger lock busy after ${LEDGER_LOCK_WAIT}s; skipping harvest for $ID"
+    exit 1
+  fi
+  sleep 0.1
+done
 LEDGER_LOCK_HELD=1
 if [ -f "$LEDGER" ] && grep -qF "\"task\":\"$ID\"" "$LEDGER" 2>/dev/null; then
   exit 0
