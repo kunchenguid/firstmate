@@ -1069,6 +1069,42 @@ fi
   exit 1
 }
 
+# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
+# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
+# substitution, so it matches the stored holder pid for the self-eviction check.
+# Resolved before the singleton lock so the arm-window trap below can recognise
+# a lock this process owns.
+WATCHER_PID=${BASHPID:-$$}
+WATCHER_SIGNAL_EXIT=0
+
+# The arm window - the singleton lock, the recovery-marker section, and the
+# first beat - runs before watcher_cleanup exists, and the arm TERMs a watcher
+# that has not beaten inside FM_ARM_CONFIRM_TIMEOUT. Dying here used to leave
+# this process's singleton lock (with no pid-identity written yet) AND the
+# wake-queue lock behind, so the next watcher had to steal both, which costs
+# seconds of forks under load and made IT more likely to miss the same
+# confirmation: one slow arm compounded into a supervision outage that could not
+# clear itself. Hand the locks back instead.
+watcher_bootstrap_cleanup() {
+  local cleanup_status=0
+  # Only a signal releases the singleton lock here. The recovery-marker exits
+  # below deliberately retain it as stale evidence, and this must not undo that.
+  if [ "$WATCHER_SIGNAL_EXIT" -eq 1 ] \
+    && [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ] \
+    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" release-lock "$WATCH_LOCK" downtime; then
+    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
+    cleanup_status=1
+  fi
+  # WATCH_LOCK is excluded from this sweep because fm_lock_prepare_owner stamps
+  # our pid into the owner dir before fm_lock_try_create ever publishes the
+  # symlink, so the instant this lock is visible on disk it already reads as
+  # ours; the recovery-marker branch above is what owns releasing it.
+  fm_lock_release_all_held "$WATCH_LOCK"
+  return "$cleanup_status"
+}
+trap watcher_bootstrap_cleanup EXIT
+trap 'WATCHER_SIGNAL_EXIT=1; exit 1' HUP INT TERM
+
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
@@ -1124,14 +1160,15 @@ watcher_cleanup() {
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi
+  # The singleton lock is released above, through the recovery marker, so it
+  # stays out of the sweep; the wake-queue and recovery-marker locks a signal
+  # can interrupt this watcher inside do not, and a stale one of those is what
+  # the next watcher pays a multi-second steal for.
+  fm_lock_release_all_held "$WATCH_LOCK"
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
-# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
+trap 'WATCHER_SIGNAL_EXIT=1; exit 1' HUP INT TERM
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.

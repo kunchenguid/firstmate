@@ -285,6 +285,104 @@ fm_watcher_supervision_verdict() {
   return 0
 }
 
+# Locks this process currently holds, and owner directories it has created but
+# not yet linked, each a newline-bounded, newline-delimited list
+# ("\n<path>\n<path>\n") in acquisition order. A lock outlives the process that
+# took it, and the only way back is fm_lock_try_acquire's dead-holder steal,
+# which costs seconds of forks under load rather than microseconds. A process
+# that can still run code on its way out must therefore hand its locks back, so
+# the next process finds a free lock instead of a recoverable one.
+#
+# The ordering rule these lists live by: RECORD BEFORE CREATING, FORGET AFTER
+# REMOVING, so the in-memory record is always a superset of what is durably on
+# disk. Every fork between the two is a signal-delivery point, and a signal
+# landing in an inverted window leaves a lock held by this process that its own
+# exit sweep cannot see - which is precisely how a watcher TERMed inside the arm
+# window stranded state/.wake-queue.lock and left orphaned .owner.* directories
+# behind. Over-recording is harmless: fm_lock_release is a no-op unless the
+# lock's recorded pid is the caller's own, and fm_lock_discard_owner only
+# removes a directory this process created.
+#
+# Deliberately not exported: a forked subshell inherits a copy, but that copy's
+# entries release as no-ops there because the recorded pid is the parent's, and
+# an exec'd child starts clean.
+FM_LOCK_HELD_PATHS="${FM_LOCK_HELD_PATHS:-$'\n'}"
+FM_LOCK_PENDING_OWNERS="${FM_LOCK_PENDING_OWNERS:-$'\n'}"
+
+_fm_lock_track_held() {
+  local path=$1
+  _fm_lock_untrack_held "$path"
+  FM_LOCK_HELD_PATHS="${FM_LOCK_HELD_PATHS}${path}"$'\n'
+}
+
+_fm_lock_untrack_held() {
+  local path=$1
+  # Both bounds are matched, so one tracked path can never be removed by a
+  # different path that merely ends with it.
+  FM_LOCK_HELD_PATHS=${FM_LOCK_HELD_PATHS//$'\n'"$path"$'\n'/$'\n'}
+}
+
+_fm_lock_track_pending_owner() {
+  local path=$1
+  _fm_lock_untrack_pending_owner "$path"
+  FM_LOCK_PENDING_OWNERS="${FM_LOCK_PENDING_OWNERS}${path}"$'\n'
+}
+
+_fm_lock_untrack_pending_owner() {
+  local path=$1
+  FM_LOCK_PENDING_OWNERS=${FM_LOCK_PENDING_OWNERS//$'\n'"$path"$'\n'/$'\n'}
+}
+
+# _fm_lock_list_entries <list>
+# Split a newline-bounded list into FM_LOCK_LIST_ENTRIES, oldest first. Returning
+# through a global keeps this fork-free, which matters on a trap path.
+# shellcheck disable=SC2034 # Read by callers immediately after this returns.
+FM_LOCK_LIST_ENTRIES=()
+_fm_lock_list_entries() {
+  local rest=${1#$'\n'} entry
+  FM_LOCK_LIST_ENTRIES=()
+  while [ -n "$rest" ]; do
+    entry=${rest%%$'\n'*}
+    rest=${rest#*$'\n'}
+    [ -n "$entry" ] && FM_LOCK_LIST_ENTRIES+=("$entry")
+  done
+}
+
+# fm_lock_release_all_held [<keep-path> ...]
+# Release every lock this process still holds, newest first, skipping any keep
+# path whose release its caller owns (the watcher's singleton lock is released
+# through the recovery marker, never by a blanket sweep), then discard any owner
+# directory created for a lock this process never went on to hold. Trap-safe:
+# each release is already a no-op unless the lock's recorded pid is this process.
+fm_lock_release_all_held() {
+  local keep=$'\n' path i
+  local -a paths=() owners=()
+  for path in "$@"; do
+    keep="${keep}${path}"$'\n'
+  done
+  _fm_lock_list_entries "$FM_LOCK_HELD_PATHS"
+  paths=("${FM_LOCK_LIST_ENTRIES[@]+"${FM_LOCK_LIST_ENTRIES[@]}"}")
+  i=${#paths[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    path=${paths[$i]}
+    case "$keep" in
+      *$'\n'"$path"$'\n'*) continue ;;
+    esac
+    fm_lock_release "$path"
+  done
+  # Releasing a lock already discards its owner directory, so whatever is still
+  # pending here belongs to an acquisition that was interrupted before the lock
+  # existed - the leak that leaves .owner.* directories lying around for weeks.
+  _fm_lock_list_entries "$FM_LOCK_PENDING_OWNERS"
+  owners=("${FM_LOCK_LIST_ENTRIES[@]+"${FM_LOCK_LIST_ENTRIES[@]}"}")
+  i=${#owners[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    fm_lock_discard_owner "${owners[$i]}"
+  done
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
@@ -322,10 +420,36 @@ fm_lock_abs_path() {
   printf '%s/%s\n' "$dir" "$base"
 }
 
+# Not exported: each call runs inside its own command-substitution subshell
+# regardless, so BASHPID is already unique per call and there is no state here
+# that would need to survive past that subshell.
+FM_LOCK_OWNER_SEQ=0
+
+# fm_lock_owner_path <lock-abs-path>
+# Compute a not-yet-existing owner directory path without creating anything.
+# Pure bash - no fork, no disk write - so it is safe to call through a command
+# substitution: unlike mktemp -d, nothing here needs to survive past the
+# subshell that runs it. Callers that must track the path before it exists on
+# disk (fm_lock_try_create) get their own BASHPID from that subshell, which is
+# enough entropy on its own; FM_LOCK_OWNER_SEQ just adds cheap insurance for
+# shells where BASHPID falls back to the static $$.
+fm_lock_owner_path() {
+  local lock_abs=$1
+  FM_LOCK_OWNER_SEQ=$((FM_LOCK_OWNER_SEQ + 1))
+  printf '%s.owner.%x.%x.%x\n' "$lock_abs" "${BASHPID:-$$}" "$FM_LOCK_OWNER_SEQ" "$RANDOM"
+}
+
+# Convenience wrapper for callers that just want an owner directory handed
+# back already created (tests, mainly). fm_lock_try_create does NOT use this:
+# it must record the path as pending before the directory exists, and this
+# function's mkdir would already be on disk by the time a command substitution
+# returned it, reopening the same race fm_lock_try_create exists to close.
 fm_lock_owner_dir() {
-  local lockdir=$1 lock_abs
+  local lockdir=$1 lock_abs ownerdir
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
-  mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
+  ownerdir=$(fm_lock_owner_path "$lock_abs") || return 1
+  mkdir "$ownerdir" 2>/dev/null || return 1
+  printf '%s\n' "$ownerdir"
 }
 
 fm_lock_prepare_owner() {
@@ -357,6 +481,7 @@ fm_lock_discard_owner() {
   [ -n "$ownerdir" ] || return 0
   fm_lock_clean_known_files "$ownerdir"
   rmdir "$ownerdir" 2>/dev/null || true
+  _fm_lock_untrack_pending_owner "$ownerdir"
 }
 
 fm_lock_remove_stray_owner_link() {
@@ -404,9 +529,20 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} lock_abs ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  # fm_lock_owner_path only computes a path - nothing is on disk yet - so it is
+  # recorded as pending before the mkdir below, not after. mkdir still forks,
+  # but the record is already in place by then: a signal landing anywhere from
+  # here through mkdir's fork leaves at worst a path recorded for a directory
+  # that never existed, which fm_lock_discard_owner's rmdir treats as a no-op.
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  ownerdir=$(fm_lock_owner_path "$lock_abs") || return 1
+  _fm_lock_track_pending_owner "$ownerdir"
+  if ! mkdir "$ownerdir" 2>/dev/null; then
+    _fm_lock_untrack_pending_owner "$ownerdir"
+    return 1
+  fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -415,9 +551,17 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
+  # Recorded BEFORE the symlink exists, not after the claim succeeds. Between
+  # the ln -s that publishes this lock and the claim that stamps our pid on it
+  # there are several forks, and a signal delivered in that window used to leave
+  # a held lock the exit sweep could not see. Recording a lock we then lose is
+  # the harmless direction: fm_lock_release no-ops on someone else's pid.
+  _fm_lock_track_held "$lockdir"
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
+      # The lock now owns this directory; releasing the lock discards it.
+      _fm_lock_untrack_pending_owner "$ownerdir"
       return 0
     fi
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
@@ -426,20 +570,26 @@ fm_lock_try_create() {
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
+  _fm_lock_untrack_held "$lockdir"
   fm_lock_discard_owner "$ownerdir"
   return 1
 }
 
 fm_lock_remove_path() {
   local lockdir=$1 ownerdir
+  # Untracked only once the path is gone. Forgetting first would reopen the same
+  # window in the other direction: a signal between the two leaves a lock on
+  # disk that this process still owns but no longer knows about.
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     rm -f "$lockdir" 2>/dev/null || return 1
+    _fm_lock_untrack_held "$lockdir"
     [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
     return 0
   fi
   fm_lock_clean_known_files "$lockdir"
-  rmdir "$lockdir" 2>/dev/null
+  rmdir "$lockdir" 2>/dev/null || return 1
+  _fm_lock_untrack_held "$lockdir"
 }
 
 fm_lock_mid_acquire_is_fresh() {
@@ -897,16 +1047,20 @@ fm_lock_release() {
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
     pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
-    [ "$pid" = "$current" ] || return 0
+    # A lock recorded against another pid is provably not ours, so drop it from
+    # the list rather than re-attempting it on every later sweep.
+    [ "$pid" = "$current" ] || { _fm_lock_untrack_held "$lockdir"; return 0; }
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
+    _fm_lock_untrack_held "$lockdir"
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$pid" = "$current" ] || return 0
+  [ "$pid" = "$current" ] || { _fm_lock_untrack_held "$lockdir"; return 0; }
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
+  _fm_lock_untrack_held "$lockdir"
 }
 
 fm_meta_lock_path() {
