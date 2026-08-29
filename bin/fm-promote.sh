@@ -127,6 +127,7 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 # ban is the delivery hole this file used to leave open.
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
 mkdir -p "$DATA/$ID"
+[ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
 {
   cat <<EOF
@@ -144,6 +145,7 @@ EOF
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
+[ -f "$INSTRUCTIONS" ] && [ -r "$INSTRUCTIONS" ] || { echo "error: ship instructions were not published as a readable file: $INSTRUCTIONS" >&2; exit 1; }
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
