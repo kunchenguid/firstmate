@@ -209,6 +209,159 @@ write_dead_acquisition() {  # <id> <project> <worktree> <mode> [endpoint-phase] 
   touch -t 202001010000 "$record"
 }
 
+make_historical_real_teardown_fixture() {  # <id> <landed|unlanded>
+  local id=$1 landing=$2 fixture project worktree remote default state log realbin
+  fixture=$(make_treehouse_fixture "$id")
+  project=${fixture%%$'\t'*}
+  worktree=${fixture#*$'\t'}
+  remote="$TMP/$id-remote.git"
+  git init -q --bare "$remote"
+  git -C "$project" remote add origin "$remote"
+  default=$(git -C "$project" symbolic-ref --quiet --short HEAD)
+  git -C "$project" push -q -u origin "$default"
+  git -C "$worktree" checkout -qb "fm/$id"
+  case "$landing" in
+    landed)
+      git -C "$worktree" push -q -u origin "fm/$id"
+      ;;
+    unlanded)
+      printf 'not landed\n' > "$worktree/unlanded.txt"
+      git -C "$worktree" add unlanded.txt
+      git -C "$worktree" commit -qm 'unlanded historical work'
+      ;;
+    *) fail "invalid historical landing fixture: $landing" ;;
+  esac
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$worktree" "project=$project" \
+    "kind=ship" "mode=no-mistakes" "backend=tmux" \
+    "tmux_session_target=firstmate:fm-$id" \
+    "pr=https://github.com/acme/repo/pull/7"
+  printf 'done: historical PR landed\n' > "$HOME_DIR/state/$id.status"
+
+  state="$(dirname "$(dirname "$worktree")")/treehouse-state.json"
+  log="$TMP/$id-treehouse.log"
+  realbin="$TMP/retired-gate-real-bin"
+  mkdir -p "$realbin"
+  if [ ! -e "$realbin/treehouse" ]; then
+    cp "$ROOT/tests/fixtures/treehouse-return-fixture.sh" "$realbin/treehouse"
+    chmod +x "$realbin/treehouse"
+  fi
+  if [ ! -e "$realbin/tmux" ]; then
+    cat > "$realbin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows)
+    printf "can't find session: firstmate\n" >&2
+    exit 1
+    ;;
+  has-session) exit 1 ;;
+  *) exit 1 ;;
+esac
+SH
+    chmod +x "$realbin/tmux"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$project" "$worktree" "$state" "$log" "$realbin"
+}
+
+test_retired_gate_history_reaps_and_unblocks_same_id_retry() {
+  local retry_fixture retry_project retry_worktree retry_state retry_record retry_claim
+  local historical_fixture project worktree treehouse_state treehouse_log realbin out rc log
+  local id=historical-landed retry_id=retired-gate-retry
+  reset_logs
+
+  retry_fixture=$(make_treehouse_fixture retry-seed "$HOME_DIR/.treehouse")
+  retry_project=${retry_fixture%%$'\t'*}
+  retry_worktree=${retry_fixture#*$'\t'}
+  retry_state="$(dirname "$(dirname "$retry_worktree")")/treehouse-state.json"
+  python3 - "$retry_state" "$(dirname "$(dirname "$retry_worktree")")/2/worktree" <<'PY'
+import json
+import sys
+
+state_path, available_path = sys.argv[1:]
+with open(state_path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["worktrees"].append({"path": available_path})
+with open(state_path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+  write_dead_acquisition "$retry_id" "$retry_project" "" direct
+  retry_record="$HOME_DIR/state/.worktree-acquire-$retry_id.pending"
+
+  historical_fixture=$(make_historical_real_teardown_fixture "$id" landed)
+  IFS=$'\t' read -r project worktree treehouse_state treehouse_log realbin <<EOF
+$historical_fixture
+EOF
+  out=$(
+    unset FM_AUTO_REAP_TEARDOWN_BIN
+    PATH="$realbin:$PATH" \
+      FM_AUTO_REAP_E2E_WORKTREE="$worktree" \
+      FM_AUTO_REAP_E2E_PROJECT="$project" \
+      FM_AUTO_REAP_E2E_TREEHOUSE_STATE="$treehouse_state" \
+      FM_AUTO_REAP_E2E_TREEHOUSE_LOG="$treehouse_log" \
+      FM_AUTO_REAP_STALE_SECS=1 "$AUTO_REAP" maintenance 2>&1
+  ); rc=$?
+  expect_code 0 "$rc" "landed historical maintenance with retired gate unavailable"
+  assert_contains "$out" "auto-reap cleared $retry_id" \
+    "stale pre-acquisition record did not reconcile before historical cleanup"
+  assert_contains "$out" "auto-reaped $id" \
+    "landed historical task was retained solely because its retired gate was unavailable"
+  [ ! -e "$retry_record" ] || fail "stale acquisition record still blocks same-ID retry"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "landed historical metadata survived cleanup"
+  [ ! -e "$worktree" ] || fail "landed historical worktree survived cleanup"
+  assert_contains "$(cat "$treehouse_log")" "returned $worktree" \
+    "ordinary teardown did not return the independently landed worktree"
+  log=$(cat "$HOME_DIR/state/.auto-reap.log")
+  assert_contains "$log" "audit: retired no-mistakes executable unavailable for terminal $id" \
+    "retired-gate cleanup did not leave an audit line"
+
+  out=$(
+    unset FM_AUTO_REAP_TEARDOWN_BIN
+    PATH="$realbin:$PATH" \
+      FM_AUTO_REAP_STALE_SECS=1 "$AUTO_REAP" maintenance 2>&1
+  ); rc=$?
+  expect_code 0 "$rc" "idempotent historical maintenance retry"
+  [ -z "$out" ] || fail "idempotent historical maintenance retry produced output: $out"
+
+  retry_claim=$(mktemp "$HOME_DIR/state/.worktree-acquire-$retry_id.XXXXXX")
+  printf 'fresh same-ID acquisition\n' > "$retry_claim"
+  ln "$retry_claim" "$retry_record" \
+    || fail "same-ID retry could not atomically reclaim its acquisition identity"
+  rm -f "$retry_claim" "$retry_record"
+  pass "retired-gate history reaps through ordinary proofs and releases same-ID acquisition retry"
+}
+
+test_retired_gate_history_retains_unlanded_work_on_every_retry() {
+  local fixture project worktree treehouse_state treehouse_log realbin out rc state
+  local id=historical-unlanded
+  reset_logs
+  fixture=$(make_historical_real_teardown_fixture "$id" unlanded)
+  IFS=$'\t' read -r project worktree treehouse_state treehouse_log realbin <<EOF
+$fixture
+EOF
+
+  for state in first retry; do
+    out=$(
+      unset FM_AUTO_REAP_TEARDOWN_BIN
+      PATH="$realbin:$PATH" \
+        FM_AUTO_REAP_E2E_WORKTREE="$worktree" \
+        FM_AUTO_REAP_E2E_PROJECT="$project" \
+        FM_AUTO_REAP_E2E_TREEHOUSE_STATE="$treehouse_state" \
+        FM_AUTO_REAP_E2E_TREEHOUSE_LOG="$treehouse_log" \
+        "$AUTO_REAP" maintenance 2>&1
+    ); rc=$?
+    expect_code 1 "$rc" "$state unlanded historical maintenance refusal"
+    assert_contains "$out" "landing proof could not execute" \
+      "$state retry bypassed ordinary committed-work landing proof"
+    [ -f "$HOME_DIR/state/$id.meta" ] || fail "$state retry removed unlanded metadata"
+    [ -d "$worktree" ] || fail "$state retry removed unlanded worktree"
+    assert_contains "$(cat "$treehouse_state")" "firstmate-$id" \
+      "$state retry released the unlanded Treehouse lease"
+  done
+  [ ! -e "$treehouse_log" ] || fail "unlanded historical retry invoked destructive Treehouse return"
+  rm -f "$HOME_DIR/state/$id.meta" "$HOME_DIR/state/$id.status"
+  pass "retired-gate fallback remains safely rerunnable without discarding unlanded work"
+}
+
 test_dead_acquisition_recovers_but_live_owner_is_untouched() {
   local fixture project worktree out rc start live_record
   reset_logs
@@ -514,7 +667,8 @@ test_pre_tasktmp_crash_reaps_with_real_teardown() {
   treehouse_state="$(dirname "$(dirname "$worktree")")/treehouse-state.json"
   treehouse_log="$TMP/pre-tasktmp-treehouse.log"
   mkdir -p "$realbin"
-  ln "$ROOT/tests/fixtures/treehouse-return-fixture.sh" "$realbin/treehouse"
+  cp "$ROOT/tests/fixtures/treehouse-return-fixture.sh" "$realbin/treehouse"
+  chmod +x "$realbin/treehouse"
   unset FM_AUTO_REAP_TEARDOWN_BIN
   out=$(PATH="$realbin:$PATH" \
     FM_AUTO_REAP_E2E_WORKTREE="$worktree" \
@@ -627,6 +781,8 @@ test_open_pr_refuses_without_teardown
 test_retired_mode_never_auto_reaps
 test_scout_done_uses_ordinary_teardown
 test_x_link_and_teardown_refusal_remain_visible
+test_retired_gate_history_reaps_and_unblocks_same_id_retry
+test_retired_gate_history_retains_unlanded_work_on_every_retry
 test_dead_acquisition_recovers_but_live_owner_is_untouched
 test_pre_acquisition_record_without_worktree_is_cleared
 test_pre_acquisition_record_requires_one_empty_worktree_field

@@ -9,7 +9,10 @@
 # spawn. A record is eligible only after an age threshold and exact PID/start-time
 # death proof. An exact never-acquired record is cleared only after a project-pool
 # holder-absence proof; acquired records install fail-closed cleanup metadata and
-# invoke ordinary teardown. Every refusal stays on disk and is printed.
+# invoke ordinary teardown. Maintenance may audit and pass a terminal, merged
+# historical `no-mistakes` task to ordinary teardown after that executable's
+# retirement; task-specific cleanup still refuses that retired custody mode.
+# Every refusal stays on disk and is printed.
 # Usage: fm-auto-reap.sh task <id> <pr-merged|scout-done|local-merged>
 #        fm-auto-reap.sh maintenance
 set -eu
@@ -20,6 +23,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 AUTO_REAP_STALE_SECS=${FM_AUTO_REAP_STALE_SECS:-300}
 AUTO_REAP_COMMAND_TIMEOUT=${FM_AUTO_REAP_COMMAND_TIMEOUT:-20}
+AUTO_REAP_MAINTENANCE=0
 
 # shellcheck source=bin/fm-account-routing-lib.sh
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
@@ -188,8 +192,9 @@ reap_task() {  # <task> <trigger>
   kind=$(meta_value "$meta" kind)
   [ -n "$kind" ] || kind=ship
   mode=$(meta_value "$meta" mode)
-  [ "$mode" != no-mistakes ] \
-    || refuse "retired no-mistakes task custody requires explicit operator recovery"
+  if [ "$mode" = no-mistakes ] && [ "$AUTO_REAP_MAINTENANCE" -ne 1 ]; then
+    refuse "retired no-mistakes task custody requires explicit operator recovery"
+  fi
   [ -z "$(meta_value "$meta" x_request)" ] || refuse "X-linked tasks require their final follow-up before teardown"
   [ "$kind" != secondmate ] || refuse "persistent secondmates are never auto-reaped"
   [ "$(status_last_verb "$id")" = "done" ] || refuse "last task status is not terminal done"
@@ -202,6 +207,9 @@ reap_task() {  # <task> <trigger>
     local-merged:ship:local-only) ;;
     *) refuse "trigger $trigger does not match kind=$kind mode=${mode:-direct-PR}" ;;
   esac
+  if [ "$mode" = no-mistakes ]; then
+    log_result "audit: retired no-mistakes executable unavailable for terminal $id; attempting cancellation-free ordinary teardown without bypassing landing or preservation proofs"
+  fi
   run_teardown "$id"
 }
 
@@ -481,6 +489,7 @@ recover_acquisition() {  # <record>
 
 maintenance() {
   local record meta id kind mode probe_status
+  AUTO_REAP_MAINTENANCE=1
   for record in "$STATE"/.worktree-acquire-*.pending; do
     [ -e "$record" ] || continue
     recover_acquisition "$record"
