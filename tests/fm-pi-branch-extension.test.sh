@@ -2515,18 +2515,27 @@ test_cold_start_activates_after_lock_acquisition() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_SKIP_LOCK=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home }; })()`);
-const { dispatch, settle, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainEntries, outcomeScript, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, home, mainEntries, outcomeScript, defaultSessionCtx } = globalThis.__t;
 import { existsSync, writeFileSync } from "node:fs";
 
-// An ordinary cold Pi start: session_start fires BEFORE the session acquires
-// the fleet lock (fm-sessionstart-run.sh acquires it later). Ownership must
-// be evaluated lazily per action, never latched at session_start.
+const summary = "Recovered the stored captain result after cold startup.";
+const seq = Number(outcomeScript(["append", "--task", "cold-result", "--verdict", "captain", "--summary", summary]));
+fire("session_start", {}, defaultSessionCtx);
+if (mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome")) {
+  throw new Error("captain outcome was delivered before lock ownership");
+}
 if (dispatch("signal: before lock").accepted) throw new Error("branch accepted a wake before the lock existed");
 if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
   throw new Error("branch wrote its marker before owning the lock");
 }
 writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+fire("turn_end", {}, defaultSessionCtx);
+const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
+if (visible.length !== 1 || visible[0].data.seq !== seq || visible[0].data.summary !== summary) {
+  throw new Error(`post-lock turn_end did not recover the exact captain outcome: ${JSON.stringify(visible)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("post-lock turn_end did not advance the outcome cursor");
 if (!dispatch("signal: after lock").accepted) throw new Error("branch refused a wake after the lock was acquired");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "post-lock branch wake prompt");
 if (!existsSync(`${home}/state/.pi-branch-extension-loaded`)) {

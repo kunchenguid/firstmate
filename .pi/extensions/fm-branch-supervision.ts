@@ -1088,7 +1088,12 @@ ${context.command}
   pi.on?.("turn_end", (_event, ctx) => {
     rememberMainModel(ctx);
     currentMainSession = ctx.sessionManager;
-    if (!actingAsOwner() || !collectCurrentMainDialog()) return;
+    if (!actingAsOwner()) return;
+    if (!reconcileUnreadOutcomes(generation)) {
+      branchBroken = "could not reconcile unread supervision outcomes into main";
+      return;
+    }
+    if (!collectCurrentMainDialog()) return;
     enqueueMirrorFlush();
   });
 
