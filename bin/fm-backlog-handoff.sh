@@ -51,9 +51,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 

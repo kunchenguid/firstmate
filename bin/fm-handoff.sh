@@ -13,12 +13,11 @@
 # presentation boundary: callers
 # must present the command's output, never a previously read artifact generation.
 #
-# The concrete enemy is concurrent mutation of unpublished pipeline work, which can
-# drop or corrupt its only recoverable commits. A live worker, a live no-mistakes
-# run for the exact branch, or unknown liveness therefore changes the handoff from
+# The concrete enemy is concurrent mutation of unpublished work, which can
+# drop or corrupt its only recoverable commits. A live worker or unknown liveness
+# therefore changes the handoff from
 # free-to-edit takeover to supervise-only transfer. Repository or custody changes
-# during capture cause an automatic refresh. Harmless no-mistakes activity text is
-# excluded from the comparison; only branch, run, step, head, endpoint/process,
+# during capture cause an automatic refresh. Only branch, head, endpoint/process,
 # repository, and unpublished-commit facts cause a refresh. Re-running the same
 # command is the recovery path after any refusal or unstable observation.
 #
@@ -44,7 +43,7 @@
 #
 # Fail-closed scope is intentionally narrow. Unknown custody refuses only free-edit
 # wording because the false grant could destroy unpublished work. The command does
-# not block or mutate the worker, pipeline, branch, worktree, or no-mistakes run.
+# not block or mutate the worker, pipeline, branch, worktree,.
 # False-refusal cost is one bounded local re-read or metadata correction and rerun;
 # it consumes no worker restart, cloud cycle, new generation, or unpublished commit.
 set -eu
@@ -55,8 +54,6 @@ FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 MAX_ATTEMPTS=${FM_HANDOFF_MAX_REFRESH_ATTEMPTS:-12}
-NM_TIMEOUT=${FM_HANDOFF_NM_TIMEOUT_SECONDS:-5}
-NM_RUNS_LIMIT=${FM_HANDOFF_NM_RUNS_LIMIT:-2000}
 START_MARK='<!-- firstmate-live-mutation-custody:start -->'
 END_MARK='<!-- firstmate-live-mutation-custody:end -->'
 
@@ -66,17 +63,12 @@ usage() {
 }
 
 case "$MAX_ATTEMPTS" in ''|*[!0-9]*|0) printf 'error: FM_HANDOFF_MAX_REFRESH_ATTEMPTS must be a positive integer\n' >&2; exit 2 ;; esac
-case "$NM_TIMEOUT" in ''|*[!0-9]*|0) printf 'error: FM_HANDOFF_NM_TIMEOUT_SECONDS must be a positive integer\n' >&2; exit 2 ;; esac
-case "$NM_RUNS_LIMIT" in ''|*[!0-9]*|0) printf 'error: FM_HANDOFF_NM_RUNS_LIMIT must be a positive integer\n' >&2; exit 2 ;; esac
 
 ID=${1:-}
 [ -n "$ID" ] || usage
 [ "$#" -le 2 ] || usage
 case "$ID" in ''|.*|-*|*[!A-Za-z0-9._-]*) printf "error: invalid task id '%s'\n" "$ID" >&2; exit 2 ;; esac
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 
@@ -138,33 +130,6 @@ meta_value() {
   awk -F= -v key="$1" '$1 == key { value=substr($0, length(key) + 2) } END { print value }' "$META" 2>/dev/null
 }
 
-strip_quotes() {
-  local value=$1
-  case "$value" in
-    \"*\") value=${value#\"}; value=${value%\"} ;;
-  esac
-  printf '%s' "$value"
-}
-
-nm_field() {
-  local payload=$1 key=$2 value
-  value=$(printf '%s\n' "$payload" | sed -n "s/^[[:space:]]*$key:[[:space:]]*//p" | head -1)
-  strip_quotes "$value"
-}
-
-nm_active_step() {
-  printf '%s\n' "$1" | awk '
-    /^[[:space:]]*active_steps\[[0-9]+\]/ { table=1; next }
-    table && /^[[:space:]]*[A-Za-z0-9_.-]+,[A-Za-z0-9_.-]+,/ {
-      line=$0
-      sub(/^[[:space:]]*/, "", line)
-      split(line, values, ",")
-      print values[1] "|" values[2]
-      exit
-    }
-    table && /^[^[:space:]]/ { exit }
-  '
-}
 
 artifact_generation() {
   python3 - "$ARTIFACT" <<'PY'
@@ -227,23 +192,12 @@ os.chmod(candidate, mode)
 PY
 }
 
-run_nm_bounded() {
-  local worktree=$1 output=$2
-  shift 2
-  (
-    cd "$worktree" || exit 1
-    python3 "$SCRIPT_DIR/fm_bounded_io.py" run \
-      --timeout "$NM_TIMEOUT" --max-output-bytes 65536 -- "$@"
-  ) > "$output" 2>&1
-}
 
 capture_live() {  # <identity-file> <block-file> [force-supervise-reason]
   local identity=$1 block=$2 force_reason=${3:-}
   local worktree_recorded worktree_real=unavailable project kind backend target scoped probe_home
   local repo_state=unknown branch=unknown head=unknown repo_status='unavailable' unpublished='unavailable' unpublished_count=unknown
   local endpoint_state=unknown process_state=unknown endpoint_owner=none
-  local nm_state=unknown nm_run=unknown nm_branch=unknown nm_status=unknown nm_outcome=none nm_step=unknown nm_step_status=unknown nm_head=unknown
-  local nm_status_file nm_runs_file nm_rc runs_rc active_step runs_line runs_status nm_payload
   local owner may_mutate supervise instruction generated remote_count sha top top_real unpublished_revs line
 
   worktree_recorded=$(meta_value worktree)
@@ -253,6 +207,9 @@ capture_live() {  # <identity-file> <block-file> [force-supervise-reason]
   backend=$(fm_backend_of_meta "$META")
   target=$(fm_backend_target_of_meta "$META")
   scoped=$(meta_value tmux_session_target)
+  if [ "$(meta_value mode)" = no-mistakes ]; then
+    force_reason='retired no-mistakes task custody requires explicit operator recovery'
+  fi
 
   if [ -n "$worktree_recorded" ] && [ -d "$worktree_recorded" ] && [ ! -L "$worktree_recorded" ]; then
     worktree_real=$(CDPATH='' cd -- "$worktree_recorded" 2>/dev/null && pwd -P) || worktree_real=unavailable
@@ -322,123 +279,14 @@ capture_live() {  # <identity-file> <block-file> [force-supervise-reason]
     endpoint_owner=none
   fi
 
-  if [ "$repo_state" = exact ] && command -v no-mistakes >/dev/null 2>&1; then
-    nm_status_file=$(new_tmp handoff-nm-status) || return 1
-    set +e
-    run_nm_bounded "$worktree_real" "$nm_status_file" no-mistakes axi status
-    nm_rc=$?
-    set -e
-    nm_payload=$(cat "$nm_status_file")
-    if [ "$nm_rc" -eq 0 ]; then
-      nm_branch=$(nm_field "$nm_payload" branch)
-      nm_run=$(nm_field "$nm_payload" id)
-      nm_status=$(nm_field "$nm_payload" status)
-      nm_outcome=$(nm_field "$nm_payload" outcome)
-      nm_head=$(nm_field "$nm_payload" head)
-      active_step=$(nm_active_step "$nm_payload")
-      if [ -n "$active_step" ]; then
-        nm_step=${active_step%%|*}
-        nm_step_status=${active_step#*|}
-      else
-        nm_step=none
-        nm_step_status=none
-      fi
-      [ -n "$nm_run" ] || nm_run=unknown
-      [ -n "$nm_status" ] || nm_status=unknown
-      [ -n "$nm_outcome" ] || nm_outcome=none
-      [ -n "$nm_head" ] || nm_head=unknown
-      if [ "$nm_branch" = "$branch" ]; then
-        if [ "$nm_outcome" != none ]; then
-          nm_state=inactive
-        else
-          case "$nm_status" in
-            running|fixing|ci|awaiting_approval|fix_review) nm_state=active ;;
-            completed|failed|cancelled|passed|checks-passed) nm_state=inactive ;;
-            *) nm_state=unknown ;;
-          esac
-        fi
-      else
-        nm_state=lookup-required
-      fi
-    else
-      nm_state=lookup-required
-    fi
-    if [ "$nm_state" = lookup-required ] || [ "$nm_state" = inactive ]; then
-      nm_runs_file=$(new_tmp handoff-nm-runs) || return 1
-      set +e
-      run_nm_bounded "$worktree_real" "$nm_runs_file" no-mistakes runs --limit "$NM_RUNS_LIMIT"
-      runs_rc=$?
-      set -e
-      if [ "$runs_rc" -eq 0 ]; then
-        runs_line=$(awk -v branch="$branch" '$2 == branch { print; exit }' "$nm_runs_file")
-        if [ -n "$runs_line" ]; then
-          runs_status=$(printf '%s\n' "$runs_line" | awk '{print $1}')
-          nm_head=$(printf '%s\n' "$runs_line" | awk '{print $3}')
-          nm_branch=$branch
-          nm_run=unknown
-          nm_status=$runs_status
-          nm_outcome=none
-          nm_step=unknown
-          nm_step_status=unknown
-          case "$runs_status" in
-            running) nm_state=active ;;
-            completed|failed|cancelled) nm_state=inactive ;;
-            *) nm_state=unknown ;;
-          esac
-        elif grep -Eq '\([0-9]+ more runs' "$nm_runs_file"; then
-          nm_state=unknown
-          nm_run=unknown
-          nm_branch=$branch
-          nm_status=history-truncated
-          nm_outcome=none
-          nm_step=unknown
-          nm_step_status=unknown
-          nm_head=unknown
-        else
-          nm_state=inactive
-          nm_run=none
-          nm_branch=$branch
-          nm_status=none
-          nm_outcome=none
-          nm_step=none
-          nm_step_status=none
-          nm_head=none
-        fi
-      else
-        nm_state=unknown
-        nm_run=unknown
-        nm_branch=$branch
-        nm_status=unavailable
-        nm_outcome=none
-        nm_step=unknown
-        nm_step_status=unknown
-        nm_head=unknown
-      fi
-    fi
-  else
-    nm_state=unknown
-    nm_run=unknown
-    nm_branch=$branch
-    nm_status=unavailable
-    nm_step=unknown
-    nm_step_status=unknown
-    nm_head=unknown
-  fi
-
   if [ -n "$force_reason" ]; then
     owner="unknown ($force_reason)"
-  elif [ "$nm_state" = active ] && [ "$endpoint_owner" = active ]; then
-    owner="no-mistakes run $nm_run and live crewmate endpoint ${target:-unknown}"
-  elif [ "$nm_state" = active ]; then
-    owner="no-mistakes run $nm_run"
   elif [ "$endpoint_owner" = active ]; then
     owner="crewmate endpoint ${target:-unknown}"
   elif [ "$repo_state" != exact ]; then
     owner='unknown (repository identity or unpublished commits are unreadable)'
   elif [ "$endpoint_owner" = unknown ]; then
     owner="unknown (endpoint/process liveness is unproved for ${target:-unrecorded})"
-  elif [ "$nm_state" = unknown ]; then
-    owner='unknown (no-mistakes run or step liveness is unreadable)'
   else
     owner=none
   fi
@@ -450,7 +298,7 @@ capture_live() {  # <identity-file> <block-file> [force-supervise-reason]
   else
     may_mutate=no
     supervise=yes
-    instruction="Do not edit, commit, reset, or rebase this worktree. Inspect and monitor it, relay decisions, steer the live worker, or use the owning no-mistakes response flow only. Refresh this handoff again after custody changes."
+    instruction="Do not edit, commit, reset, or rebase this worktree. Inspect and monitor it, relay decisions, steer the live worker. Refresh this handoff again after custody changes."
   fi
   generated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -467,14 +315,6 @@ capture_live() {  # <identity-file> <block-file> [force-supervise-reason]
     printf 'target\t%s\n' "$target"
     printf 'endpoint\t%s\n' "$endpoint_state"
     printf 'process\t%s\n' "$process_state"
-    printf 'nm_state\t%s\n' "$nm_state"
-    printf 'nm_run\t%s\n' "$nm_run"
-    printf 'nm_branch\t%s\n' "$nm_branch"
-    printf 'nm_status\t%s\n' "$nm_status"
-    printf 'nm_outcome\t%s\n' "$nm_outcome"
-    printf 'nm_step\t%s\n' "$nm_step"
-    printf 'nm_step_status\t%s\n' "$nm_step_status"
-    printf 'nm_head\t%s\n' "$nm_head"
     printf 'owner\t%s\n' "$owner"
     printf 'may_mutate\t%s\n' "$may_mutate"
   } > "$identity"
@@ -491,7 +331,6 @@ capture_live() {  # <identity-file> <block-file> [force-supervise-reason]
     printf '%s\n' "- HEAD: \`$head\`"
     printf '%s\n' "- Unpublished commits: \`$unpublished_count\`"
     printf '%s\n' "- Endpoint: backend=\`$backend\`, target=\`${target:-unrecorded}\`, presence=\`$endpoint_state\`, process=\`$process_state\`"
-    printf '%s\n' "- No-mistakes: owner-state=\`$nm_state\`, run=\`$nm_run\`, branch=\`$nm_branch\`, status=\`$nm_status\`, outcome=\`$nm_outcome\`, step=\`$nm_step\`, step-status=\`$nm_step_status\`, pipeline-head=\`$nm_head\`"
     printf -- '- Active mutation owner: **%s**\n' "$owner"
     printf '%s\n' "- \`may mutate now\`: **$may_mutate**"
     printf '%s\n\n' "- \`supervise only\`: **$supervise**"

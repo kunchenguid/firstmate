@@ -63,7 +63,7 @@ No writable directory is keyed only by profile label or upstream account identit
 The pooled `auth.json` is never staged.
 As defence in depth at use, `bin/fm-spawn-cloud-monitor.sh` checks that the staged account directory holds exactly one provider slot before taking the exactly-once dispatch marker.
 
-`withdraw` accepts both queued and interrupted `projecting` requests and removes only the exact projection binding the queue entry owns.
+`withdraw` accepts queued, interrupted `projecting`, and upgrade-retired requests and removes only the exact projection binding the queue entry owns.
 Provider reset removes the same exact projection only after release and cloud-side cleanup are proved.
 Cleanup inventories no sibling path, so one assignment cannot replace, inspect, or delete another assignment that uses the same profile.
 A legacy entry with no projection binding is never inferred to own and delete a shared home.
@@ -73,8 +73,8 @@ Bounded status lists every placement with profile, task generation, reusable acc
 
 The worker/supervisor software ceiling remains the independent `FM_AZURE_WORKER_MAX` maximum of sixteen even when fewer than sixteen Pi profiles or upstream accounts are available.
 Ordinary author workers and nested secondmate supervisors share that ceiling and the load-balanced Pi worker pool.
-No-mistakes uses its separate Azure runner, and Crosscheck uses its separately credentialed `fireworks-glm` model plus networkless tool/verifier compartments.
-Those specialized lanes consume the shared 40-vCPU specialized envelope and 128-vCPU regional accounting but consume no worker slot and no Codex/Pi worker profile.
+Crosscheck uses its separately credentialed `fireworks-glm` model plus networkless tool/verifier compartments.
+That specialized lane consumes the shared specialized envelope and regional accounting but consumes no worker slot and no Codex/Pi worker profile.
 
 The controller permits duplicate active upstream account bindings and rejects duplicate assignment-private projection, account-home, or writable-worktree bindings.
 A general request has role `author`, is explicitly eligible, and is owned by either the primary or a secondmate; a secondmate-owned author request may carry a parent compartment pair, which marks it as a compartment child and arms the child bounds.
@@ -97,7 +97,7 @@ The `bounded` in the compartment invariant is per message, not aggregate: each r
 Bounded status additionally projects every live compartment - task, status, slot, active and lifetime children counts, and the durable assignment TTL anchor - from `controller.json` fields only, never from the leg state the compartment monitor owns locally.
 The same task generation and exact identity is idempotent, while a changed identity under the same task generation refuses.
 An assigned request stays in the queue until its ordinary release proof is accepted and every exact cloud resource is safely reset.
-A request that never reached assignment leaves the queue by `withdraw`: it accepts `projecting` or `queued`, refuses anything a worker owns or a pending provider action names, requires `--confirm-withdraw` and `--confirm-subscription`, touches no capacity, and removes the exact provider projection plus per-task cloud state including the staged credential.
+A request that never reached assignment leaves the queue by `withdraw`: it accepts `projecting`, `queued`, or upgrade-retired status, refuses anything a worker owns or a pending provider action names, requires `--confirm-withdraw` and `--confirm-subscription`, touches no capacity, and removes the exact provider projection plus per-task cloud state including the staged credential.
 Release remains the only exit for work that ever held capacity.
 Operator surrender is not a second exit: it mints that release proof for the one case where the ordinary authorities are unrecoverable, under its own refusal-first gates (below).
 Therefore a truly empty queue also means there is no active task worker and desired worker compute is zero.
@@ -247,8 +247,6 @@ A missing repository, lost dispatched lineage, unreadable working tree, payload-
 The blob name carries the request digest, so a later execute against the same worker cannot overwrite an outcome the controller has not collected yet.
 Reset deletes the inbound staging archives by name and the outcome blobs as part of removing the whole state container.
 
-A cancelled no-mistakes placement may retain a pre-upgrade `delete-compute` claim that omitted the later service-cancel proof field.
-Task-scoped reconcile retires that legacy claim only when the current self-digested cancellation proof is exact, no matching execution or last execution exists, and live inventory already classifies the slot as exact released residual data capacity with all compute absent; it then continues through the ordinary reset path and logs the adopted mismatch.
 On explicitly absence-tolerant child inventory reads, Azure's generic `NotFound` with `vmName` after the parent VM disappears is handled like `ResourceNotFound`; mutation reads and every non-absence provider error still refuse.
 
 ## Release, reset, and cooldown
@@ -350,72 +348,6 @@ The Azure adapter re-verifies the full live assignment before invoking the minim
 Its read-only inventory uses Azure CLI 2.88-compatible role-assignment syntax (`--all` without `--resource-group`), requires private Entra blob reads for reservation/request/result identities, and uses one unambiguous primary Linux on-demand USD Consumption meter while excluding Spot, Low Priority, Windows, dev/test, reservation, and savings offers.
 It never forwards arbitrary shell text, provider credentials, or a hosted control endpoint.
 
-## No-mistakes worker wrapper
-
-`bin/fm-no-mistakes-worker` is the Firstmate-owned high-level transport used by the no-mistakes coordinator.
-Its only supported invocation is:
-
-```sh
-bin/fm-no-mistakes-worker --config '<owner-private-config.json>' execute \
-  --request '<absolute-request.json>' \
-  --payload '<absolute-payload-directory>' \
-  --result '<absolute-result.json>' \
-  --outcome '<absolute-outcome.bundle>' \
-  --step-outcome '<absolute-step-outcome.json>'
-```
-
-The request, result, and semantic step outcome use `no-mistakes.firstmate-worker-request/v1`, `no-mistakes.firstmate-worker-result/v1`, and `no-mistakes.worker-step-outcome/v1` respectively.
-The request and result echo the canonical `step` (`review` or `test`) separately from job `kind`; a repair may repair either step, and the semantic artifact follows `step`, so a test repair can never assert a review-approved head.
-They also echo the caller's lowercase SHA-256 `runtime_identity`, which binds the exact wrapper bytes, private wrapper-config bytes, and transport protocol into the job's content-addressed input; a changed runtime is a new job identity, never a replay under mutable code.
-The caller payload contains exactly `repo.bundle` and `brief.md`; the wrapper verifies both against the request, stages the configured digest-bound credential-free `runtime.tar.gz`, and submits the request's exact argv without a shell.
-The owner-private config uses `fm.no-mistakes-worker-wrapper-config/v1` and names the Firstmate home, canonical Pi account pool home, sealed runtime path and digest, lifecycle executable and exact clean Firstmate source commit, bounded assignment/cleanup/wall times, and the non-secret lifecycle environment.
-That environment may carry the exact immutable `FM_AZURE_WORKER_IMAGE_ID` and single reviewed `FM_AZURE_OPERATOR_DATA_PLANE_IP`; retaining them across incremental retries prevents an existing claimed VM from being replayed against a different image reference or disabling the controller's default-deny operator route mid-recovery.
-The wrapper rechecks that source commit and clean tracked lifecycle closure before every lifecycle call, and re-verifies the staged guest runtime against its configured digest after copying it, so neither an ordinary Firstmate update nor a path replacement can silently change an admitted job.
-
-`docs/azure-no-mistakes-worker-config.example.json` is the copy-and-fill wrapper config template.
-
-Build the credential-free runtime on Linux amd64 from the exact custom no-mistakes binary, a compatible Linux Node binary, an installed `@earendil-works/pi-coding-agent` package closure, and the exact fast-mode and Ketch packages:
-
-```sh
-bin/fm-no-mistakes-runtime \
-  --no-mistakes /absolute/linux-amd64/no-mistakes \
-  --node /absolute/linux-amd64/node \
-  --pi-package /absolute/linux-pi-package/@earendil-works/pi-coding-agent \
-  --fast-mode-package /absolute/extensions/pi-openai-fast-mode \
-  --fast-mode-fleet-extension /absolute/fast-mode-all-codex-accounts.ts \
-  --ketch-package /absolute/extensions/pi-ketch \
-  --no-mistakes-version '<exact-version>' \
-  --no-mistakes-source-commit '<exact-40-hex-source-commit>' \
-  --output /absolute/no-mistakes-pi-runtime.tar.gz
-```
-
-The builder refuses host-native or non-amd64 Node and no-mistakes artifacts, redirected package members, native modules from another platform, credential-shaped files, duplicate paths, and unbounded inputs.
-
-It emits the established `fm.azure-validation-runtime/v1` manifest with a digest for every byte and pins Pi, fast mode, and Ketch by their package bytes and versions.
-
-Use an npm installation made on the target Linux amd64 build host as `--pi-package`; never point the builder at `~/.pi/agent`, an account pool, or a directory containing `auth.json`.
-
-The worker lifecycle selects the least-loaded usable account and projects only that account into the assignment-private HOME as the fixed `openai-codex` profile.
-
-The guest does not load multi-pass or choose an account.
-
-The sealed `bin/pi` launcher uses the bundled Node, disables ambient extension discovery, pins fast mode and Ketch from the verified runtime, and reads OAuth only from `$HOME/pi-agent/auth.json`.
-
-The builder and hermetic staged-runtime execution are proven locally; a real Azure no-mistakes run is still required before claiming the packaged Linux closure live.
-It never names an account profile: `fm-worker-lifecycle` selects the least-loaded usable profile under its controller lock and creates an assignment-private projection.
-
-The dedicated `no-mistakes` lifecycle role admits only `repo.bundle`, `brief.md`, and `runtime.tar.gz`.
-The guest verifies the runtime's exact file inventory, runs the role command with that runtime on `PATH`, and returns the bounded semantic artifact through an execution-owned `fm.no-mistakes-worker-return/v1` bundle.
-The wrapper verifies the semantic bytes and head binding before writing the controller-facing result; a process exit, missing outcome, malformed outcome, or changed read-only head is a failed result, never `CLEAR` by inference.
-Repair results return one digest-bound single-ref bundle whose head must descend from the requested head, while review and test return no code bundle and must keep the exact requested head.
-The wrapper records a retryable local candidate before cleanup, releases through `service-complete` only after the lifecycle owns the exact execution result, and replays the candidate after a lost response instead of executing the step again.
-Admission, execute recovery, and cleanup use `service-reconcile`, which advances only the caller's exact task generation or replays that task's own pending slot claim rather than converging unrelated fleet work. Once a service task owns a slot, its execution and cleanup inventory reads that slot's deterministic Azure object paths in a bounded parallel batch; it neither lists the resource group nor expands peer children. Queued admission retains the whole-fleet quota, spend, and conflict census, excludes every conflicted slot from placement, and continues through conflicts bound to other exact slots.
-The guest supervisor marks a no-mistakes Azure execution as the already-isolated test boundary, so the repository test command runs the focused service suite directly instead of recursively provisioning the general validation fleet or a Herdr lab.
-The root-owned supervisor stages the job, then runs the no-mistakes process as the dedicated non-root `fmworker` user with no supplementary groups; the sealed runtime remains root-owned and read-only while the exact repository and projected account are writable only by that service identity.
-`bin/fm-azure-service-test-scope.py` owns that focused inventory and the narrow source set eligible for focused pull-request CI; an empty, mixed, or unknown diff and every push to `main` retain the complete behavior suite.
-The wrapper preserves first-seen admission, execute, and cleanup start/completion timestamps in the task's `phase-evidence.json`, so retries keep one stable latency record.
-That evidence is stored at `$FM_HOME/state/no-mistakes-workers/<task>/<generation>/phase-evidence.json` as epoch milliseconds. Subtract each phase's `*_started` value from its `*_completed` value to measure admission, guest execution, and cleanup independently; a missing completion timestamp means that phase has not durably finished and must not be reported as complete.
-No caller chooses an Azure account, sees a credential, invokes `fm-azure-runner.sh`, or bypasses lifecycle cleanup.
 
 ### Production latency evidence
 
@@ -429,7 +361,7 @@ That run was cancelled through the owner-fixes-only path after its reviewer foun
 These figures are operational observations, not timeout targets; later comparisons must use the same durable phase evidence and report cleanup residue separately.
 
 The failed retained proof `azr-763d70ab8206` used the generic Azure runner, reached runtime dependency installation, then exited 125 at `guest bootstrap: isolated executor failed` without any structured result.
-That is not evidence about a no-mistakes verdict.
+That is not evidence about an application-level verdict.
 This wrapper avoids that failure shape by using the worker supervisor's digest-bound execution record and returns a closed failed envelope when the guest produces no semantic artifact.
 Live Azure usability remains unclaimed until this exact wrapper/runtime/lifecycle path completes a billable zero-to-zero proof.
 

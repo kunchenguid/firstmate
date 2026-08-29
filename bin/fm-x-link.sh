@@ -43,9 +43,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 
 usage() {
   echo "usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch> [--carry-platform <x|discord>] [--carry-max <n>]]" >&2

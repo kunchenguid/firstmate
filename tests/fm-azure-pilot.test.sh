@@ -963,7 +963,7 @@ run_documentation_contract_checks() {
   assert_grep 'Herdr is the required primary' "$DOC" "Herdr primary boundary is missing"
   assert_grep 'tmux exists only as a recovery fallback' "$DOC" "tmux recovery-only boundary is missing"
   assert_grep 'downloaded self-contained form artifact' "$DOC" "Lavish file contract is missing"
-  assert_grep 'complete Azure no-mistakes run' "$DOC" "isolated no-mistakes acceptance gate is missing"
+  assert_grep 'policy-grade Azure Crosscheck' "$DOC" "isolated Crosscheck acceptance gate is missing"
   assert_grep 'policy-grade Azure Crosscheck' "$DOC" "isolated Crosscheck acceptance gate is missing"
   assert_grep 'existing 10-vCPU Dasv6 allowance' "$DOC" "immediate runner and pilot quota contract is missing"
   assert_grep 'currently unavailable because its live family limit is 10' "$DOC" "unavailable homogeneous capacity is not explicit"

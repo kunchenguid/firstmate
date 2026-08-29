@@ -23,10 +23,6 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
-  cat > "$fb/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -74,7 +70,7 @@ SH
 echo "gh-axi $*" >> "$NET_LOG"
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi"
+  chmod +x "$fb/tmux" "$fb/gh" "$fb/gh-axi"
   printf '%s\n' "$fb"
 }
 
@@ -110,7 +106,7 @@ EOF
     "project=firstmate" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'working: building the thing\n' > "$home/state/ship-task.status"
   fm_write_meta "$home/state/scout-x.meta" \
@@ -138,7 +134,7 @@ EOF
     "project=firstmate" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   printf 'paused: declared external-wait for upstream release\n' > "$home/state/external-wait.status"
   # The secondmate's OWN home backlog records a merge it managed. This lands in the
   # secondmate home, never the main backlog, so landed-work views only see it via the

@@ -86,7 +86,7 @@ Operation routing:
   The bordered row is classified through the shared composer classifier; a bare shell prompt has no genuine composer row and reads `unknown`, not confirmed empty.
 - `fm-send.sh --key Enter` and `--key C-c` are supported.
 - `fm-watch.sh` treats Orca as a pull backend with no native busy-state primitive, so it falls back to the same terminal-tail busy regex used for tmux, zellij, and cmux.
-- `fm-crew-state.sh` reads the recorded Orca terminal when no no-mistakes run-step applies.
+- `fm-crew-state.sh` reads the recorded Orca terminal and task status log.
 
 The guarded teardown design, exercised only in the synthetic authority lab, is:
 

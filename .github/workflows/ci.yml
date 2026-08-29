@@ -12,7 +12,6 @@ permissions:
 jobs:
   lint:
     name: Lint shell scripts
-    needs: behavior-test-plan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -23,59 +22,15 @@ jobs:
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      # Single owner of the lint definition (file set + config + version). Do not
-      # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
+      # Single owner of the lint definition (file set + config + version).
+      # Do not re-spell the shellcheck command here.
       - run: bin/fm-lint.sh
-        if: needs.behavior-test-plan.outputs.mode == 'full'
-      - name: Lint changed Azure service shell files
-        if: needs.behavior-test-plan.outputs.mode == 'focused'
-        shell: bash
-        run: |
-          set -euo pipefail
-          files=()
-          while IFS= read -r path; do
-            [ -n "$path" ] && files+=("$path")
-          done < <(python3 bin/fm-azure-service-test-scope.py shell \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}")
-          if [ "${#files[@]}" -gt 0 ]; then
-            bin/fm-lint.sh "${files[@]}"
-          else
-            echo "No changed shell files in focused Azure service diff"
-          fi
       # ShellCheck cannot see the .mjs tools, and nothing else parsed them: a
       # syntax error in one reached main green.
       - run: bin/fm-lint-node.sh
 
-  behavior-test-plan:
-    name: Behavior test shard plan
-    runs-on: ubuntu-latest
-    outputs:
-      mode: ${{ steps.scope.outputs.mode }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Select focused or full behavior coverage
-        id: scope
-        shell: bash
-        run: |
-          set -euo pipefail
-          mode=full
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            mode=$(python3 bin/fm-azure-service-test-scope.py mode \
-              "${{ github.event.pull_request.base.sha }}" \
-              "${{ github.event.pull_request.head.sha }}")
-          fi
-          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
-          printf 'FM_BEHAVIOR_MODE %s\n' "$mode"
-      - name: Prove complete, disjoint shard coverage
-        run: bin/fm-behavior-shards.sh --check 8
-
   behavior-tests:
     name: Behavior tests (shard ${{ matrix.shard }}/8)
-    needs: behavior-test-plan
-    if: needs.behavior-test-plan.outputs.mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -155,47 +110,16 @@ jobs:
           if-no-files-found: warn
           overwrite: true
 
-  behavior-tests-focused:
-    name: Behavior tests (focused Azure service)
-    needs: behavior-test-plan
-    if: needs.behavior-test-plan.outputs.mode == 'focused'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-      - name: Run focused Azure service behavior tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          tests=()
-          while IFS= read -r path; do
-            [ -n "$path" ] && tests+=("$path")
-          done < <(python3 bin/fm-azure-service-test-scope.py list)
-          [ "${#tests[@]}" -gt 0 ]
-          FM_TEST_SKIP_HERDR=1 tests/run.sh "${tests[@]}"
-
   behavior-tests-complete:
     # Preserve the historical required-check name while proving the union of
     # what the eight runners actually executed, not only the planned inventory.
     name: Behavior tests
-    needs: [behavior-test-plan, behavior-tests, behavior-tests-focused]
+    needs: behavior-tests
     if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Require one selected behavior mode
-        env:
-          BEHAVIOR_MODE: ${{ needs.behavior-test-plan.outputs.mode }}
-        run: |
-          case "$BEHAVIOR_MODE" in
-            full|focused) ;;
-            *) echo "invalid behavior mode: $BEHAVIOR_MODE" >&2; exit 1 ;;
-          esac
       - name: Download executed-test manifests
-        if: needs.behavior-test-plan.outputs.mode == 'full'
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -203,18 +127,10 @@ jobs:
           path: ${{ runner.temp }}/behavior-manifests
           merge-multiple: true
       - name: Verify complete execution union
-        if: needs.behavior-test-plan.outputs.mode == 'full'
         run: bin/fm-behavior-shards.sh --verify 8 "$RUNNER_TEMP/behavior-manifests"
-      - name: Verify focused execution
-        if: needs.behavior-test-plan.outputs.mode == 'focused'
-        env:
-          FOCUSED_RESULT: ${{ needs.behavior-tests-focused.result }}
-        run: test "$FOCUSED_RESULT" = success
 
   agent-fleet:
     name: Agent Fleet package
-    needs: behavior-test-plan
-    if: needs.behavior-test-plan.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -246,7 +162,7 @@ jobs:
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
-          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          tracked=$(git ls-files -- data state config projects)
           if [ -n "$tracked" ]; then
             echo "::error::Personal fleet paths are tracked in git:"
             printf '%s\n' "$tracked"

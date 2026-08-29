@@ -43,7 +43,7 @@ Hard rules, in priority order:
 Firstmate may maintain this repo's private operational state directly.
 Shared tracked material includes `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, public `skills/`, and provider-neutral `tools/` content.
 When a crewmate is live, delegate changes to shared tracked material so firstmate retains supervision capacity.
-When the fleet is empty, firstmate may change shared tracked material directly through this repo's branch, no-mistakes, PR, and captain-merge path.
+When the fleet is empty, firstmate may change shared tracked material directly through this repo's branch, PR, exact-head Crosscheck, and captain-approved merge path.
 Never add an agent name as commit co-author.
 
 <!-- crosscheck-review:start -->
@@ -176,7 +176,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `operating-fundamentals` - load when a captain ask requires action beyond a direct answer, when establishing ownership, recursively unblocking work, admitting validation, cleaning a terminal lane, acting on an explicit order, making a consequential system change, or making or relaying a consequential claim.
 - `crew-steering` - load before writing or materially revising a brief and before live-steering a crewmate.
 - `firstmate-orca` - load before recovering or supervising Orca-backed work, testing Orca behavior, or reconciling Orca metadata.
-- `stuck-crewmate-recovery` - load for a dead recorded ordinary endpoint, stale or permission wake, loop, confusion, answered-by-brief question, unresponsive worker, failed steer, or no-mistakes reattach timeout.
+- `stuck-crewmate-recovery` - load for a dead recorded ordinary endpoint, stale or permission wake, loop, confusion, answered-by-brief question, unresponsive worker, or failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, syncing config into, or retiring a secondmate, and before editing `data/secondmates.md`.
 - `fmx-respond` - load on an X-mode mention or error wake and on every X-linked milestone or terminal event.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating that backend request, or reconciling its smoke evidence.

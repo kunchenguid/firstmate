@@ -466,6 +466,48 @@ def snapshot(url: str) -> dict[str, Any]:
     return result
 
 
+def checks_green(url: str, expected_head: str) -> str:
+    if SHA_RE.fullmatch(expected_head) is None:
+        raise GitHubContractError("expected CI head is not one full SHA")
+    before = fetch_pr_api(url)
+    if before["head_sha"] != expected_head:
+        raise GitHubContractError(
+            f"PR head moved from expected {expected_head} to {before['head_sha']} before CI inspection"
+        )
+    if before["merged"] or before["state"] != "open":
+        raise GitHubContractError("CI inspection requires one open PR")
+    if before["draft"] is not False:
+        raise GitHubContractError("CI inspection requires a provably non-draft PR")
+    raw = run_gh_axi(
+        ["pr", "checks", str(before["number"]), "--repo", f"{before['owner']}/{before['repo']}"]
+    )
+    summary = re.search(
+        r'^summary:\s*"?([0-9]+) passed, ([0-9]+) failed,'
+        r'(?: ([0-9]+) skipped,)? ([0-9]+) total"?\s*$',
+        raw,
+        re.MULTILINE,
+    )
+    if summary is None:
+        raise GitHubContractError("gh-axi checks document has no exact summary")
+    passed = int(summary.group(1))
+    failed = int(summary.group(2))
+    skipped = int(summary.group(3) or 0)
+    total = int(summary.group(4))
+    if total < 1:
+        raise GitHubContractError("PR has no CI checks to prove green")
+    if failed != 0 or passed + skipped != total:
+        raise GitHubContractError(
+            "PR CI is not green: "
+            f"{passed} passed, {failed} failed, {skipped} skipped, {total} total"
+        )
+    after = fetch_pr_api(url)
+    if after["head_sha"] != expected_head:
+        raise GitHubContractError(
+            f"PR head moved from expected {expected_head} to {after['head_sha']} during CI inspection"
+        )
+    return expected_head
+
+
 def parse_root_toon_array(document: str) -> None:
     lines = document.splitlines()
     if not lines:
@@ -684,6 +726,9 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("snapshot", "head", "state"):
         command = subparsers.add_parser(name)
         command.add_argument("pr_url")
+    checks = subparsers.add_parser("checks")
+    checks.add_argument("pr_url")
+    checks.add_argument("expected_head")
     return parser
 
 
@@ -697,6 +742,8 @@ def main() -> int:
         elif args.command == "state":
             state = fetch_pr_api(args.pr_url)
             print("MERGED" if state["merged"] else str(state["state"]).upper())
+        elif args.command == "checks":
+            print(checks_green(args.pr_url, args.expected_head))
         else:
             raise AssertionError(f"unhandled command {args.command}")
     except GitHubContractError as exc:

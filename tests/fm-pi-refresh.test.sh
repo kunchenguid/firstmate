@@ -360,13 +360,13 @@ PY
 
   # Bootstrap must surface an unhealthy schedule, and the real bootstrap must
   # be the thing that does it.
-  out=$(cd "$ROOT" && FM_GATE_REFUSE_BYPASS=1 FM_PI_REFRESH_BOOTSTRAP_TEST=1 \
+  out=$(cd "$ROOT" && FM_BOOTSTRAP_BACKGROUND_BYPASS=1 FM_PI_REFRESH_BOOTSTRAP_TEST=1 \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     bash "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
   assert_contains "$out" "PI_AUTH_REFRESH" \
     "the real bootstrap stayed silent about a missing schedule when asked not to"
 
-  out=$(cd "$ROOT" && FM_GATE_REFUSE_BYPASS=1 \
+  out=$(cd "$ROOT" && FM_BOOTSTRAP_BACKGROUND_BYPASS=1 \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     bash "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
   assert_not_contains "$out" "PI_AUTH_REFRESH" \

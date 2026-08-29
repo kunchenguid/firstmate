@@ -10,7 +10,7 @@ Each seatbelt's own document defines its scope; they do not share the turn-end g
 
 `bin/fm-guard.sh` is pull-based: it warns whenever some other supervision script happens to run, and prints nothing otherwise.
 The primary can otherwise end a turn after handling wakes without resuming supervision, then sit blind until another fleet command happens to run.
-On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
+On 2026-07-04, that exact gap left parked work unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
 When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to resume the session-start supervision protocol for its harness.

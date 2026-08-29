@@ -13,8 +13,7 @@ fm_test_tmproot_into TMP_ROOT fm-macos-permissions-tests
 
 make_world() {
   local world="$TMP_ROOT/$1" fakebin
-  mkdir -p "$world/home/Library/Mail" "$world/home/.no-mistakes/bin"
-  : > "$world/home/.no-mistakes/bin/no-mistakes"
+  mkdir -p "$world/home/Library/Mail"
   fakebin=$(fm_fakebin "$world")
 
   cat > "$fakebin/uname" <<'SH'
@@ -58,34 +57,10 @@ case "$*" in
     fi
     ;;
   *kTCCServiceScreenCapture*)
-    if [ "${FM_FAKE_MIXED_IDENTITIES:-no}" = yes ] && [[ "$*" != *com.kunchenguid.no-mistakes* ]]; then
-      printf '0\n'
-    else
-      printf '2\n'
-    fi
+    printf '2\n'
     ;;
   *kTCCServiceAccessibility*) printf '0\n' ;;
   *'SELECT 1 FROM access LIMIT 1;'*) printf '1\n' ;;
-esac
-SH
-  cat > "$fakebin/launchctl" <<'SH'
-#!/usr/bin/env bash
-[ "${FM_FAKE_DAEMON_AUTHORITATIVE:-yes}" = yes ] || exit 1
-case "${2:-}" in
-  */com.kunchenguid.no-mistakes.daemon.test)
-    printf '%s\n' \
-      'state = running' \
-      "program = $HOME/.no-mistakes/bin/no-mistakes" \
-      'arguments = {' \
-      "    $HOME/.no-mistakes/bin/no-mistakes" \
-      '    daemon' \
-      '    run' \
-      '}' \
-      'pid = 1234'
-    ;;
-  *)
-    printf '%s\n' '1234 0 com.kunchenguid.no-mistakes.daemon.test'
-    ;;
 esac
 SH
   cat > "$fakebin/codesign" <<'SH'
@@ -116,8 +91,7 @@ SH
 printf '%s\n' 'tccutil must never be invoked' >> "$FM_FAKE_MUTATION_LOG"
 exit 99
 SH
-  chmod +x "$fakebin"/* "$world/home/.no-mistakes/bin/no-mistakes"
-  ln -s "$world/home/.no-mistakes/bin/no-mistakes" "$fakebin/no-mistakes"
+  chmod +x "$fakebin"/*
   printf '%s\n' "$world"
 }
 
@@ -125,7 +99,6 @@ run_report() {
   local world=$1
   shift
   HOME="$world/home" PATH="$world/fakebin:$BASE_PATH" \
-    FM_FAKE_DAEMON_AUTHORITATIVE="${FM_FAKE_DAEMON_AUTHORITATIVE:-yes}" \
     __CFBundleIdentifier=com.mitchellh.ghostty "$SCRIPT" "$@"
 }
 
@@ -142,8 +115,6 @@ test_missing_probe_is_honest() {
     'undetectable grants were guessed'
   assert_contains "$out" 'Automation status is always PER TARGET' \
     'Automation was presented as a blanket grant'
-  assert_contains "$out" 'configured path cannot prove the running process image entitlement' \
-    'daemon filesystem state was promoted to loaded-image capability'
   pass 'missing and undetectable grants are reported honestly'
 }
 
@@ -177,14 +148,13 @@ test_permission_guidance_requires_observed_attribution() {
 }
 
 test_readable_database_reports_stored_rows() {
-  local world out ghostty_section daemon_section
+  local world out ghostty_section
   world=$(make_world readable)
   mkdir -p "$world/home/Library/Application Support/com.apple.TCC"
   : > "$world/home/Library/Application Support/com.apple.TCC/TCC.db"
 
   out=$(FM_FAKE_FDA=granted FM_FAKE_TCC_READABLE=yes run_report "$world")
   ghostty_section=$(printf '%s\n' "$out" | sed -n '/^Ghostty (terminal launcher)/,/^$/p')
-  daemon_section=$(printf '%s\n' "$out" | sed -n '/^no-mistakes daemon configured target/,/^$/p')
 
   assert_contains "$out" 'current invocation protected-path probe: ACCESSIBLE' \
     'successful behavioral Full Disk Access probe was lost'
@@ -192,35 +162,9 @@ test_readable_database_reports_stored_rows() {
     'stored Ghostty Screen Recording allow was presented as effective'
   assert_contains "$ghostty_section" 'status=UNKNOWN (STORED DENIAL ONLY)' \
     'stored Ghostty Accessibility denial was presented as effective'
-  printf '%s\n' "$daemon_section" \
-    | grep -E 'Screen Recording +requirement=REQUIRED FOR COMPUTER USE +status=UNKNOWN' >/dev/null \
-    || fail 'daemon Screen Recording identity was inferred from stored or cross-service evidence'
-  printf '%s\n' "$daemon_section" \
-    | grep -E 'Accessibility +requirement=REQUIRED FOR COMPUTER USE +status=UNKNOWN' >/dev/null \
-    || fail 'daemon Accessibility identity was inferred from stored or cross-service evidence'
-  assert_contains "$daemon_section" 'exact Screen Recording entry macOS observes' \
-    'daemon Screen Recording guidance lacked a service-specific identity boundary'
-  assert_contains "$daemon_section" 'exact Accessibility entry macOS observes' \
-    'daemon Accessibility guidance reused another service identity'
   assert_contains "$out" 'com.mitchellh.ghostty -> com.apple.systemevents: UNKNOWN (STORED ALLOW ONLY)' \
     'stored Ghostty-to-System Events relationship was presented as effective'
   pass 'stored TCC rows remain unknown effective status'
-}
-
-test_mixed_identity_evidence_is_unknown() {
-  local world out daemon_section
-  world=$(make_world mixed-identities)
-  mkdir -p "$world/home/Library/Application Support/com.apple.TCC"
-  : > "$world/home/Library/Application Support/com.apple.TCC/TCC.db"
-
-  out=$(FM_FAKE_FDA=granted FM_FAKE_TCC_READABLE=yes FM_FAKE_MIXED_IDENTITIES=yes \
-    run_report "$world")
-  daemon_section=$(printf '%s\n' "$out" | sed -n '/^no-mistakes daemon/,/^$/p')
-
-  printf '%s\n' "$daemon_section" \
-    | grep -E 'Screen Recording +requirement=REQUIRED FOR COMPUTER USE +status=UNKNOWN' >/dev/null \
-    || fail 'mixed candidate identities produced a conclusive stored status'
-  pass 'mixed candidate identity evidence remains unknown'
 }
 
 test_partial_database_evidence_is_unknown() {
@@ -313,51 +257,15 @@ test_bundle_hint_does_not_override_stored_evidence() {
   pass 'bundle environment hint never controls permission attribution'
 }
 
-test_daemon_path_requires_running_launch_job() {
-  local world out daemon_section
-  world=$(make_world daemon-unresolved)
-
-  out=$(FM_FAKE_DAEMON_AUTHORITATIVE=no run_report "$world")
-  daemon_section=$(printf '%s\n' "$out" | sed -n '/^no-mistakes daemon/,/^$/p')
-
-  assert_contains "$daemon_section" 'UNKNOWN: active launch job not resolved' \
-    'interactive PATH was presented as the daemon identity'
-  assert_contains "$daemon_section" 'authoritative launch job: UNKNOWN' \
-    'missing launch-job evidence was not disclosed'
-  printf '%s\n' "$daemon_section" | grep -E 'status=(ENTITLEMENT NOT PRESENT|PER TARGET)' >/dev/null \
-    && fail 'unresolved daemon path produced a conclusive entitlement status'
-  pass 'daemon identity requires one running authoritative launch job'
-}
-
-test_active_daemon_entitlement_stays_unknown() {
-  local world out daemon_section codesign_log
-  world=$(make_world daemon-entitlement)
-  codesign_log="$world/codesign.log"
-
-  out=$(FM_FAKE_AUTOMATION_ENTITLEMENT=present FM_FAKE_CODESIGN_LOG="$codesign_log" \
-    run_report "$world")
-  daemon_section=$(printf '%s\n' "$out" | sed -n '/^no-mistakes daemon configured target/,/^$/p')
-
-  printf '%s\n' "$daemon_section" \
-    | grep -E 'Automation +requirement=CONDITIONAL +status=UNKNOWN' >/dev/null \
-    || fail 'configured daemon path produced a conclusive loaded-image capability'
-  [ ! -e "$codesign_log" ] || fail 'configured daemon path was inspected as the loaded process image'
-  pass 'active daemon entitlement remains unknown without live-image proof'
-}
-
 test_path_absence_is_not_installation_status() {
   local world out
   world=$(make_world path-absence)
-  unlink "$world/fakebin/no-mistakes"
-
   out=$(run_report "$world")
 
   assert_contains "$out" 'Claude Code PATH command target (UNKNOWN: not found on PATH)' \
     'Claude PATH absence was reported as installation state'
   assert_contains "$out" 'Codex PATH command target (UNKNOWN: not found on PATH)' \
     'Codex PATH absence was reported as installation state'
-  assert_contains "$out" 'no-mistakes CLI PATH entry (UNKNOWN: not found on PATH)' \
-    'no-mistakes PATH absence was reported as installation state'
   case "$out" in
     *'not installed'*) fail 'PATH absence was reported as not installed' ;;
   esac
@@ -439,14 +347,11 @@ test_non_macos_refuses() {
 test_missing_probe_is_honest
 test_permission_guidance_requires_observed_attribution
 test_readable_database_reports_stored_rows
-test_mixed_identity_evidence_is_unknown
 test_partial_database_evidence_is_unknown
 test_failed_entitlement_probe_is_unknown
 test_entitlement_boolean_is_parsed
 test_partial_automation_query_is_unknown
 test_bundle_hint_does_not_override_stored_evidence
-test_daemon_path_requires_running_launch_job
-test_active_daemon_entitlement_stays_unknown
 test_path_absence_is_not_installation_status
 test_conflicting_automation_rows_are_unknown
 test_exact_settings_urls_and_no_other_mutation

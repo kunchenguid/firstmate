@@ -17,7 +17,6 @@
 # Isolation: every state artifact lives under a disposable directory inside
 # this worktree.
 set -u
-export FM_GATE_REFUSE_BYPASS=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 START="$ROOT/bin/fm-afk-start.sh"

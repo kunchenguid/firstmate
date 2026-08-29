@@ -215,9 +215,6 @@ if [ -n "$SCHEDULER_GENERATION" ] && [ "${#SCHEDULER_GENERATION}" -ne 32 ]; then
   exit 2
 fi
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-process-tree-lib.sh
 . "$SCRIPT_DIR/fm-process-tree-lib.sh"
 

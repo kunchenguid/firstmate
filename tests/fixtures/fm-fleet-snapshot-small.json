@@ -47,7 +47,7 @@
       "id": "alpha-task",
       "kind": "ship",
       "harness": "codex",
-      "mode": "no-mistakes",
+      "mode": "direct-PR",
       "yolo": "off",
       "project": "alpha",
       "backend": "tmux",

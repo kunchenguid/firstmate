@@ -150,11 +150,6 @@ CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-process-tree-lib.sh
 . "$SCRIPT_DIR/fm-process-tree-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
-# down a worktree (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-account-routing-lib.sh
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
 # shellcheck source=bin/fm-treehouse-lib.sh
@@ -236,6 +231,7 @@ require_safe_task_metadata || exit 1
 TEARDOWN_ACCOUNT_LOCKS=('')
 MANAGED_ACCOUNT_LOCK=
 ACCOUNT_DELETE_LOCK=
+PR_REGISTRATION_LOCK=
 SECONDMATE_HOME_LIFECYCLE_LOCK=
 SECONDMATE_REGISTRY_LOCK=
 PREPARED_REGISTRY_PATH=
@@ -246,6 +242,10 @@ PREPARED_REGISTRY_LOCK=
 
 release_teardown_account_locks() {
   local lock
+  if [ -n "$PR_REGISTRATION_LOCK" ]; then
+    fm_account_meta_lock_release "$PR_REGISTRATION_LOCK" >/dev/null 2>&1 || true
+    PR_REGISTRATION_LOCK=
+  fi
   for lock in "${TEARDOWN_ACCOUNT_LOCKS[@]}"; do
     [ -n "$lock" ] || continue
     fm_account_lifecycle_lock_release "$lock" >/dev/null 2>&1 || true
@@ -441,7 +441,7 @@ if [ "$REAP_DEAD" -eq 1 ] && [ "$KIND" != ship ]; then
   exit 2
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
-[ -n "$MODE" ] || MODE=no-mistakes
+[ -n "$MODE" ] || MODE=direct-PR
 REPORT_GATED=0
 SCOUT_SCRATCH_RELEASABLE=0
 REPORT_REQUIRED_COUNT=$(grep -c '^report_required=' "$META" 2>/dev/null || true)
@@ -2721,7 +2721,7 @@ validate_child_worktree_landed_state() {
   local WT=$child_worktree PROJ=$child_project ID=$child_id KIND=ship FORCE=
   local MODE PR_URL TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=
   MODE=$(meta_value "$child_meta" mode)
-  [ -n "$MODE" ] || MODE=no-mistakes
+  [ -n "$MODE" ] || MODE=direct-PR
   PR_URL=$(meta_value "$child_meta" pr)
   stash_list=$(git -C "$WT" stash list 2>/dev/null) || {
     echo "REFUSED: child worktree stash state is uninspectable at $WT" >&2
@@ -5775,6 +5775,23 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
 fi
 
+# The worktree is now safely returned (or the provider worktree is gone), but
+# task metadata still supplies the exact generation. Stop the detached
+# coordinator before removing that identity and its task-local state. Use the
+# same task-local fence as PR registration and retain it through state removal,
+# so a new coordinator cannot be published between cancellation and unlink.
+PR_REGISTRATION_LOCK=$(fm_account_lock_acquire "$STATE" "$ID" pr-registration \
+  "PR registration retirement" "${FM_ACCOUNT_META_LOCK_WAIT_SECONDS:-10}") || exit 1
+if [ -e "$STATE/$ID.crosscheck-autostart.request.json" ] \
+    || [ -e "$STATE/$ID.crosscheck-autostart.json" ] \
+    || [ -e "$STATE/.$ID.crosscheck-autostart.lock" ]; then
+  [ -n "$TASK_GENERATION" ] || {
+    echo "error: Crosscheck coordinator state has no exact task generation for $ID" >&2
+    exit 1
+  }
+  "$FM_ROOT/bin/fm-crosscheck-autostart.py" cancel "$ID" "$TASK_GENERATION" || exit 1
+fi
+
 if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ -n "$DIRECT_SPAWN_BACKUP" ]; then
   case "$DIRECT_SPAWN_BACKUP" in
     ".$ID.meta.rollback."*) ;;
@@ -5851,7 +5868,12 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the exact recorded per-generation task temp root, including gotmp.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -z "$TASK_TMP" ] || safe_remove_task_tmp "$TASK_TMP" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.provision.log"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.provision.log" \
+  "$STATE/$ID.crosscheck-autostart.request.json" "$STATE/$ID.crosscheck-autostart.json" \
+  "$STATE/$ID.crosscheck-autostart.log" "$STATE/.$ID.crosscheck-autostart-handoff.lock" \
+  "$STATE/.$ID.crosscheck-autostart.lock"
+[ -z "$PR_REGISTRATION_LOCK" ] || fm_account_meta_lock_release "$PR_REGISTRATION_LOCK" >/dev/null 2>&1 || true
+PR_REGISTRATION_LOCK=
 [ -z "$ACCOUNT_DELETE_LOCK" ] || fm_account_lifecycle_lock_release "$ACCOUNT_DELETE_LOCK" >/dev/null 2>&1 || true
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

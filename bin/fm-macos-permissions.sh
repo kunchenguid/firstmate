@@ -231,42 +231,6 @@ resolved_command() {
   resolved_path "$command_path"
 }
 
-no_mistakes_daemon_label=""
-no_mistakes_daemon_program=""
-no_mistakes_binary=""
-
-resolve_no_mistakes_daemon() {
-  local uid domain labels label label_count service state pid program arguments resolved
-  command -v launchctl >/dev/null 2>&1 || return
-  uid=$(id -u 2>/dev/null) || return
-  domain=$(launchctl print "gui/$uid" 2>/dev/null) || return
-  labels=$(printf '%s\n' "$domain" \
-    | sed -n 's/.*\(com\.kunchenguid\.no-mistakes\.daemon\.[A-Za-z0-9._-]*\).*/\1/p' \
-    | sort -u)
-  label_count=$(printf '%s\n' "$labels" | awk 'NF { count++ } END { print count + 0 }')
-  [ "$label_count" -eq 1 ] || return
-  label=$labels
-  service=$(launchctl print "gui/$uid/$label" 2>/dev/null) || return
-  state=$(printf '%s\n' "$service" | sed -n 's/^[[:space:]]*state = //p' | sed -n '1p')
-  pid=$(printf '%s\n' "$service" | sed -n 's/^[[:space:]]*pid = //p' | sed -n '1p')
-  program=$(printf '%s\n' "$service" | sed -n 's/^[[:space:]]*program = //p' | sed -n '1p')
-  arguments=$(printf '%s\n' "$service" \
-    | sed -n '/^[[:space:]]*arguments = {/,/^[[:space:]]*}/p' \
-    | sed '1d;$d;s/^[[:space:]]*//;s/[[:space:]]*$//')
-  [ "$state" = running ] || return
-  case "$pid" in ''|*[!0-9]*) return ;; esac
-  [ "$pid" -gt 0 ] || return
-  case "$program" in /*) ;; *) return ;; esac
-  [ -x "$program" ] || return
-  printf '%s\n' "$arguments" | grep -Fx daemon >/dev/null || return
-  printf '%s\n' "$arguments" | grep -Fx run >/dev/null || return
-  resolved=$(resolved_path "$program")
-  [ -n "$resolved" ] && [ -x "$resolved" ] || return
-  no_mistakes_daemon_label=$label
-  no_mistakes_daemon_program=$program
-  no_mistakes_binary=$resolved
-}
-
 has_apple_events_entitlement() {
   local executable=$1 entitlements compact key
   [ -n "$executable" ] && [ -e "$executable" ] || { printf 'UNKNOWN'; return; }
@@ -296,8 +260,6 @@ claude_command=$(command -v claude 2>/dev/null || true)
 claude_binary=$(resolved_command claude)
 codex_command=$(command -v codex 2>/dev/null || true)
 codex_binary=$(resolved_command codex)
-no_mistakes_command=$(command -v no-mistakes 2>/dev/null || true)
-resolve_no_mistakes_daemon
 computer_use_app="$HOME/.codex/computer-use/Codex Computer Use.app"
 codex_automation_entitlement=$(has_apple_events_entitlement "$codex_binary")
 case "$codex_automation_entitlement" in
@@ -332,9 +294,6 @@ codex_screen=$(stored_status kTCCServiceScreenCapture \
   codex "$codex_command" "$codex_binary" com.openai.sky.CUAService "$computer_use_app")
 codex_accessibility=$(stored_status kTCCServiceAccessibility \
   codex "$codex_command" "$codex_binary" com.openai.sky.CUAService "$computer_use_app")
-no_mistakes_fda=UNKNOWN
-no_mistakes_screen=UNKNOWN
-no_mistakes_accessibility=UNKNOWN
 
 printf '%s\n' 'firstmate macOS permission report'
 printf '  unverified bundle environment hint: %s (not used for attribution)\n' \
@@ -383,40 +342,11 @@ print_permission 'Accessibility' 'REQUIRED FOR COMPUTER USE' "$codex_accessibili
   'Native Computer Use needs Accessibility for the exact responsible entry macOS observes.'
 printf '\n'
 
-printf 'no-mistakes CLI PATH entry (%s)\n' "${no_mistakes_command:-UNKNOWN: not found on PATH}"
-print_permission 'All four permissions' 'NOT NEEDED BY CLI CORE' 'N/A' \
-  'The CLI coordinates with the daemon; child-agent capabilities belong to the exact service-specific entry macOS observes.'
-printf '\n'
-
-printf 'no-mistakes daemon configured target (%s)\n' \
-  "${no_mistakes_binary:-UNKNOWN: active launch job not resolved}"
-if [ -n "$no_mistakes_daemon_label" ]; then
-  printf '  authoritative launch job: %s\n' "$no_mistakes_daemon_label"
-else
-  printf '%s\n' '  authoritative launch job: UNKNOWN'
-fi
-print_permission 'Full Disk Access' 'CONDITIONAL' "$no_mistakes_fda" \
-  'A daemon-launched agent may need it for protected paths, but the responsible identity is unknown until macOS identifies it for this service.'
-print_permission 'Automation' 'CONDITIONAL' 'UNKNOWN' \
-  'The configured path cannot prove the running process image entitlement, so target-specific capability remains unknown.'
-print_permission 'Screen Recording' 'REQUIRED FOR COMPUTER USE' "$no_mistakes_screen" \
-  'Daemon-launched Computer Use needs capture, but the responsible identity is unknown; use the exact Screen Recording entry macOS observes.'
-print_permission 'Accessibility' 'REQUIRED FOR COMPUTER USE' "$no_mistakes_accessibility" \
-  'Daemon-launched Computer Use needs UI control, but the responsible identity is unknown; use the exact Accessibility entry macOS observes.'
-printf '\n'
-
 printf '%s\n' 'Stored Automation candidate relationships (not proof of responsibility)'
 print_automation_pairs 'Ghostty' com.mitchellh.ghostty "$ghostty_binary"
 print_automation_pairs 'Claude Code' com.anthropic.claude-code "$claude_command" "$claude_binary"
 print_automation_pairs 'Codex' codex "$codex_command" "$codex_binary" \
   com.openai.sky.CUAService "$computer_use_app"
-if [ -n "$no_mistakes_binary" ]; then
-  print_automation_pairs 'no-mistakes daemon' com.kunchenguid.no-mistakes \
-    "$no_mistakes_daemon_program" "$no_mistakes_binary"
-else
-  printf '%s\n' '  no-mistakes daemon:'
-  printf '%s\n' '    UNKNOWN (active launch job not resolved)'
-fi
 printf '\n'
 
 printf '%s\n' 'No grant was changed.'

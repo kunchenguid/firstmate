@@ -238,7 +238,7 @@ Local credential changes are transactional, but provider-side token rotation or 
 
 ## Verification entrypoint
 
-`tests/bridge-cutover-python.test.sh` is the single Python 3.11 test entrypoint used by both CI and the repository no-mistakes behavior-test command.
+`tests/bridge-cutover-python.test.sh` is the single Python 3.11 entrypoint used by CI.
 
 `tests/test_build_quota_axi_offline_real_inputs.py` is an opt-in macOS host integration gate.
 With its six retained-input variables and two rehearsal-artifact variables set, it uses the real UV CPython 3.11.9 runtime, a retained Node 20 runtime, exact candidate and rollback Git worktrees, and real npm/compiler/dependency closures.

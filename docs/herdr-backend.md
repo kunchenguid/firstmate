@@ -413,15 +413,14 @@ Verified this eliminates the flake across repeated full smoke-test runs.
 ## Verified gap: `agent.get` reads idle during a long foreground tool call
 
 `herdr agent get <pane>` -> `.result.agent.agent_status` was verified against a short interactive `claude` exchange (see "Busy state" above): `working` while the model streams a turn, `done` once it stops.
-That verification did not cover a crewmate blocked on its OWN long-running foreground tool call - e.g. `no-mistakes axi run` without `--yes`, which blocks synchronously for the whole pipeline (minutes to tens of minutes) until a gate or outcome, as described by the loaded no-mistakes skill and current `axi run --help`.
+That verification did not cover a crewmate blocked on its own long-running foreground tool call, such as a test suite or deployment command that blocks synchronously for minutes.
 For that entire span the model is not generating - it already finished the turn that invoked the tool and is waiting on the tool's result - so `agent_status` reads `idle` (or `blocked`, which the adapter also maps to `idle`), even though the pane's own rendered text keeps showing the harness's busy banner (`BUSY_REGEX`, e.g. `esc to interrupt`) the whole time, exactly as it would in a plain tmux pane.
 
 This surfaced as a real fleet incident (2026-07-02): `bin/fm-watch.sh`'s absorb-only-when-provably-working stale path, whose contract is owned by [architecture.md](architecture.md#event-driven-supervision), treated a herdr `idle` verdict from `crew_pane_is_busy` as final, so it skipped the shared tail-regex corroboration that `unknown` already got.
-At the same time, an independent no-mistakes run-step attribution fallback could miss this crewmate's branch when `axi status` reported another branch; current `bin/fm-crew-state.sh` falls back to top-level `no-mistakes runs --limit ${FM_CREW_STATE_RUNS_LIMIT:-200}` for that coarse cross-branch verdict.
-Together, those gaps let a genuinely still-working herdr crewmate read as not provably working, triggering an immediate stale wake instead of the intended absorb-then-escalate behavior.
+That gap let a genuinely still-working Herdr crewmate read as not provably working, triggering an immediate stale wake instead of the intended absorb-then-escalate behavior.
 
 **Fix:** `bin/fm-crew-state.sh`'s `crew_pane_is_busy` now corroborates BOTH `idle` and unknown/unparseable native verdicts with the shared tail-regex before concluding "not busy" - only a bare `busy` verdict is trusted outright.
-The cross-branch attribution fallback now uses the real `no-mistakes runs` command, and the watcher checks provably-working evidence before a stale status-log verb can make a stale pane terminal.
+The watcher checks provably-working backend evidence before a stale status-log verb can make a stale pane terminal.
 This does not mask a genuinely human-blocked agent (a permission dialog, not mid-tool-call): that pane does not render the busy banner, so the corroboration still correctly reports not-busy for it.
 
 ## Slash/`$` autocomplete popup hazard (confirmed, same mitigation as tmux)
@@ -434,7 +433,7 @@ This confirms the same hazard tmux already mitigates: submitting immediately aft
 
 ## Incident (2026-07-03): a slash command left fully typed but unsubmitted, silently
 
-Two grok/herdr crewmates were each sent `/no-mistakes` via `fm-send.sh`.
+Two Grok/Herdr crewmates were each sent an argument-taking slash command via `fm-send.sh`.
 In both panes the command sat fully typed in the composer, unsubmitted (footer still read `Enter:send`), for minutes, until a manual `FM_HOME=<home> fm-send.sh <target> --key Enter` landed it instantly.
 `fm-send.sh` had exited 0 both times - no failure surfaced to the caller.
 
@@ -442,7 +441,7 @@ Root cause, reproduced live against real grok 0.2.82 on an isolated herdr sessio
 For an argument-taking slash command, the FIRST Enter does not submit - it closes the completion popup and, for a command like `/compact [context]`, EXPANDS the composer text into an argument-hint placeholder (`/compact` -> `/compact compaction instructions`).
 The popup disappearing and the composer text changing is a real, visible content change, so the old delta check declared "submitted" after exactly one Enter, even though the composer still held real, unsubmitted text and the footer still read `Enter:send`.
 A genuine second Enter was required to actually submit - exactly the manual recovery that worked both times in the incident.
-Plain (non-argument) commands like `/new` did submit on the first Enter in the same live test, so the false-positive was specific to commands whose popup selection fills an argument placeholder rather than submitting outright - `/no-mistakes` (optional task-first argument) is exactly that shape.
+Plain commands like `/new` did submit on the first Enter in the same live test, so the false-positive was specific to commands whose popup selection fills an argument placeholder rather than submitting outright.
 
 The tmux backend was NOT affected by this incident: `fm_tmux_composer_state` reads the actual cursor row and classifies it as pending whenever real text remains, so its retry loop correctly issued the second Enter and landed the same live repro; this was confirmed side-by-side against the same real grok pane.
 

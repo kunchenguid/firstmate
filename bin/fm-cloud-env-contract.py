@@ -82,12 +82,9 @@ SUPPLIER = "bin/fm-azure-worker-provider.py"
 # persisted set EQUALS the contract rather than merely contains it.
 #
 # Empty today: no name any of the READERS currently takes is secret-bearing.
-# That is a fact about today's readers, NOT a property of the scan. The fleet
-# environment really does hold key material under this prefix -
-# FM_AZURE_VALIDATION_CREDENTIAL_KEY_FILE, FM_AZURE_VALIDATION_WORKTREE_KEY_FILE
-# and FM_AZURE_GITHUB_TOKEN_FILE (bin/fm-azure-validation.py) - and those stay
-# out only because no scanned reader names them. A comment would be enough to
-# change that, and this tuple is where the answer goes when it does.
+# That is a fact about today's readers, NOT a property of the scan. A comment
+# naming a future secret-bearing variable would be enough to change that, and
+# this tuple is where the answer goes when it does.
 SECRET_BEARING_EXCLUSIONS: tuple[str, ...] = ()
 
 NAME = re.compile(r"FM_AZURE_[A-Z0-9_]+")

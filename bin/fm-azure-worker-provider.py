@@ -2904,6 +2904,7 @@ def mutate_deallocate(controller, action):
 
 
 def service_cancel_allows_missing_task_command(action):
+    """Backward-compatible cleanup proof for a retired service worker."""
     proof = action.get("service_cancel_proof")
     if not isinstance(proof, dict):
         return False
@@ -3742,8 +3743,7 @@ def mutate_execute(controller, action):
         "--script", script, "--async-execution", "false",
         # Without this the managed run command takes Azure's own default while
         # the CLI waits out the whole wall, so a long task dies guest-side with
-        # the client still blocked. bin/fm-azure-runner.py and
-        # bin/fm-azure-validation.py both set it for the same reason.
+        # the client still blocked. Every runner producer sets it for the same reason.
         "--timeout-in-seconds", str(int(request["wall_seconds"]) + GUEST_RUN_SLACK_SECONDS),
         "--tags",
     ] + [

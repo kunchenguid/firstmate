@@ -22,8 +22,8 @@
 #       project list, and omitting both still fails loudly. A project-less seed
 #       refuses a home with project clones or project-registry entries, so it
 #       never converts populated homes in place. The charter brief
-#       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, an ignored .fm-secondmate-home identity marker is written, and
+#       is copied to data/charter.md, an ignored .fm-secondmate-home identity
+#       marker is written, and
 #       data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
@@ -53,9 +53,6 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 # shellcheck source=bin/fm-account-routing-lib.sh
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -525,7 +522,7 @@ clone_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
+    echo "error: project $project is local-only; secondmate routes support only direct-PR projects" >&2
     return 1
   fi
   if [ -e "$dst" ]; then
@@ -552,7 +549,7 @@ validate_seed_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
+    echo "error: project $project is local-only; secondmate routes support only direct-PR projects" >&2
     return 1
   fi
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
@@ -779,28 +776,6 @@ sync_project_registry() {
   done
   if [ -L "$sub_reg" ] || { [ -e "$sub_reg" ] && [ ! -f "$sub_reg" ]; }; then rm -f "$tmp"; return 1; fi
   mv "$tmp" "$sub_reg"
-}
-
-initialize_no_mistakes_project() {
-  local home=$1 project=$2 created=$3 mode dst
-  mode=$(project_mode_in_home "$home" "$project")
-  [ "$mode" = no-mistakes ] || return 0
-  dst=$(validate_project_destination "$home" "$project") || return 1
-  if git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
-    return 0
-  fi
-  if [ "$created" != 1 ]; then
-    echo "error: seeded project $project at $dst is not initialized for no-mistakes; refusing to mutate preexisting clone" >&2
-    return 1
-  fi
-  command -v no-mistakes >/dev/null 2>&1 || {
-    echo "error: no-mistakes command not found; cannot initialize $project in $home" >&2
-    return 1
-  }
-  ( cd "$dst" && no-mistakes init && no-mistakes doctor ) || {
-    echo "error: failed to initialize no-mistakes for $project at $dst" >&2
-    return 1
-  }
 }
 
 write_registry() {
@@ -1109,15 +1084,6 @@ seed_home() {
     clone_project "$project" "$home"
   done
   sync_project_registry "$home" "$@"
-  for project in "$@"; do
-    project_dst=$(validate_project_destination "$home" "$project") || return 1
-    if seed_project_was_created "$project_dst"; then
-      initialize_no_mistakes_project "$home" "$project" 1
-    else
-      initialize_no_mistakes_project "$home" "$project" 0
-    fi
-  done
-
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")

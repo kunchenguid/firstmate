@@ -181,10 +181,8 @@ FM_SHARD_ADMISSION_LOG="$shard_admissions" \
   || fail "shard execution and timing refresh did not each cross tests/run.sh"
 pass "shard execution and timing refresh routes cross the authoritative runner"
 
-for route in .no-mistakes.yaml CONTRIBUTING.md; do
-  grep -F 'tests/run.sh' "$ROOT/$route" >/dev/null \
-    || fail "$route does not route behavior tests through tests/run.sh"
-done
+grep -F 'tests/run.sh' "$ROOT/CONTRIBUTING.md" >/dev/null \
+  || fail "CONTRIBUTING.md does not route behavior tests through tests/run.sh"
 grep -F 'bin/fm-behavior-shards.sh --run' "$ROOT/.github/workflows/ci.yml" >/dev/null \
   || fail "CI does not route behavior tests through the sealed shard runner"
 grep -F 'FM_TEST_SKIP_HERDR=1' "$ROOT/.github/workflows/ci.yml" >/dev/null \
@@ -192,7 +190,4 @@ grep -F 'FM_TEST_SKIP_HERDR=1' "$ROOT/.github/workflows/ci.yml" >/dev/null \
 # shellcheck disable=SC2016  # The runner variables are a literal shell source needle.
 grep -F '"$ROOT/tests/run.sh" "$ROOT/$path"' "$ROOT/bin/fm-behavior-shards.sh" >/dev/null \
   || fail "the shard runner bypasses tests/run.sh"
-if grep -F 'tests/run.sh --skip-herdr' "$ROOT/.no-mistakes.yaml" >/dev/null; then
-  fail "no-mistakes silently skips the real-Herdr admission path"
-fi
-pass "no-mistakes, sharded CI, and documented local execution cross the authoritative runner"
+pass "sharded CI and documented local execution cross the authoritative runner"

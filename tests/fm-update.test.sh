@@ -335,7 +335,6 @@ test_repo_gitignores_local_roots() {
 state|state/example|nested/state/example
 data|data/example|nested/data/example
 projects|projects/example|nested/projects/example
-.no-mistakes|.no-mistakes/example|nested/.no-mistakes/example
 .lavish|.lavish/example|nested/.lavish/example
 .fm-secondmate-home|.fm-secondmate-home|nested/.fm-secondmate-home
 config|config/example|nested/config/example

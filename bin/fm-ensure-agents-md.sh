@@ -15,11 +15,6 @@
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
-
 usage() {
   echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
 }

@@ -109,7 +109,7 @@ EOF
     "worktree=$home/worktree" \
     'kind=ship' \
     'pr=https://github.com/example/firstmate/pull/123' \
-    'mode=no-mistakes'
+    'mode=direct-PR'
   printf '%s\n' 'needs-decision: PR held for captain merge [key=merge-hold]' > "$home/state/active-1.status"
 
   capture "$root" "$home" manual

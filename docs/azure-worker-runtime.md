@@ -55,7 +55,6 @@ version. Rationale: workers are egress-sealed by posture; per-boot registry
 downloads are both a provenance hole and a boot-time failure mode, while the
 image is a cache of a recorded provenance chain (the bake doc's own model).
 Ordinary author workers do not stage the local Pi extension pack because one worker runs one leased account.
-The specialized no-mistakes role instead uses the sealed runtime documented in `docs/azure-workers.md`, which includes only fast mode and Ketch and still excludes multi-pass and OAuth material.
 
 ### D2. One payload archive per assignment, over the private staging lane
 
@@ -114,7 +113,7 @@ decision when the soak data says the round-trip is too slow.
 
 For `placement=azure` tasks, the digest-bound return carries the authorized report, status, visuals, repository commits, and scratch in one provider-neutral Git bundle.
 The local monitor validates and publishes those bytes, reconstructs the required `fm/<task>` branch for ship work, synthesizes a truthful terminal status, and then mints `fm.worker-release/v2` while the task metadata and worktree still exist.
-The receipt's landing authority proves local custody, not remote forge landing, so remote worker capacity can be released before no-mistakes and the later ordinary teardown continue locally.
+The receipt's landing authority proves local custody, not remote forge landing, so remote worker capacity can be released before the later ordinary teardown continues locally.
 Release and reconcile are idempotent retries, and local credential staging is removed only after the controller queue entry is complete.
 
 ## Sequencing
@@ -134,7 +133,7 @@ Release and reconcile are idempotent retries, and local credential staging is re
 ## Non-goals
 
 - No account rotation or OAuth material inside a worker runtime bundle.
-- Ordinary author workers keep their existing extension-free runtime; the no-mistakes role has only its sealed fast-mode and Ketch extensions.
+- Ordinary author workers keep their existing extension-free runtime.
 - No public egress from workers; every transfer stays on the private lane.
 - No captain-on-cloud changes; that is its own phase with its own custody
   design (setup-token) and is tracked outside this document.

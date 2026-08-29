@@ -2,8 +2,7 @@
 # Automatically reap terminal crewmate resources through fm-teardown.sh.
 #
 # `task <id> <pr-merged|scout-done|local-merged>` validates the terminal event,
-# reaps an exactly-attributed no-mistakes run when necessary, and delegates all
-# endpoint, cleanliness, landing, report, and Treehouse-return proofs to ordinary
+# delegates endpoint, cleanliness, landing, report, and Treehouse-return proofs to ordinary
 # teardown without --force.
 #
 # `maintenance` recovers pre-metadata Treehouse acquisitions left by a crashed
@@ -22,9 +21,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 AUTO_REAP_STALE_SECS=${FM_AUTO_REAP_STALE_SECS:-300}
 AUTO_REAP_COMMAND_TIMEOUT=${FM_AUTO_REAP_COMMAND_TIMEOUT:-20}
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-account-routing-lib.sh
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
 # shellcheck source=bin/fm-checkout-lock-lib.sh
@@ -168,85 +164,6 @@ pr_is_merged() {  # <meta>
   }
 }
 
-reap_no_mistakes_run() {  # <meta>
-  local meta=$1 worktree branch branch_status nm captured run_branch run_id run_status outcome runs_output row status rest row_branch
-  [ "$(meta_value "$meta" mode)" = no-mistakes ] || return 0
-  worktree=$(meta_value "$meta" worktree)
-  [ -n "$worktree" ] || {
-    refuse "no-mistakes run attribution requires a recorded worktree"
-    return 1
-  }
-  branch_status=0
-  branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch_status=$?
-  # git symbolic-ref exits 1 only for detached HEAD; a scout has no no-mistakes run to attribute.
-  if [ "$(meta_value "$meta" kind)" = scout ] && [ "$branch_status" -eq 1 ]; then
-    return 0
-  fi
-  [ "$branch" = "fm/$AUTO_REAP_ID" ] || {
-    refuse "no-mistakes run attribution requires exact branch fm/$AUTO_REAP_ID"
-    return 1
-  }
-  nm=$(auto_reap_tool FM_AUTO_REAP_NO_MISTAKES_BIN no-mistakes) || {
-    refuse "no-mistakes is unavailable for exact run reaping"
-    return 1
-  }
-  if run_capture captured env -C "$worktree" "$nm" axi status; then :; else return 1; fi
-  [ "$RUN_CAPTURE_STATUS" -eq 0 ] || {
-    refuse "no-mistakes status could not be inspected safely"
-    return 1
-  }
-  run_branch=$(printf '%s\n' "$captured" | sed -n 's/^[[:space:]]*branch:[[:space:]]*//p' | head -1)
-  run_branch=${run_branch#\"}
-  run_branch=${run_branch%\"}
-  if [ "$run_branch" = "$branch" ]; then
-    run_id=$(printf '%s\n' "$captured" | sed -n 's/^[[:space:]]*id:[[:space:]]*//p' | head -1)
-    run_id=${run_id#\"}
-    run_id=${run_id%\"}
-    run_status=$(printf '%s\n' "$captured" | sed -n 's/^[[:space:]]*status:[[:space:]]*//p' | head -1)
-    run_status=${run_status#\"}
-    run_status=${run_status%\"}
-    outcome=$(printf '%s\n' "$captured" | sed -n 's/^[[:space:]]*outcome:[[:space:]]*//p' | head -1)
-    outcome=${outcome#\"}
-    outcome=${outcome%\"}
-    [ -n "$run_id" ] || {
-      refuse "matching no-mistakes run has no exact run ID"
-      return 1
-    }
-    if [ -z "$outcome" ] && [ "$run_status" != completed ] \
-      && [ "$run_status" != cancelled ] && [ "$run_status" != failed ]; then
-      if run_capture captured "$nm" axi abort --run "$run_id"; then :; else return 1; fi
-      [ "$RUN_CAPTURE_STATUS" -eq 0 ] || {
-        refuse "failed to cancel exact no-mistakes run $run_id"
-        return 1
-      }
-      log_result "cancelled no-mistakes run $run_id for $AUTO_REAP_ID"
-    fi
-    return 0
-  fi
-  if run_capture runs_output env -C "$worktree" "$nm" runs --limit 200; then :; else return 1; fi
-  [ "$RUN_CAPTURE_STATUS" -eq 0 ] || {
-    refuse "cross-branch no-mistakes attribution could not be inspected"
-    return 1
-  }
-  while IFS= read -r row; do
-    row=$(printf '%s' "$row" | sed 's/^[[:space:]]*//')
-    [ -n "$row" ] || continue
-    status=${row%%[[:space:]]*}
-    rest=${row#"$status"}
-    rest=$(printf '%s' "$rest" | sed 's/^[[:space:]]*//')
-    row_branch=${rest%%[[:space:]]*}
-    [ "$row_branch" = "$branch" ] || continue
-    case "$status" in
-      running)
-        refuse "branch still has an active no-mistakes run but its exact run ID is unavailable"
-        return 1
-        ;;
-    esac
-    return 0
-  done <<EOF
-$runs_output
-EOF
-}
 
 run_teardown() {  # <task>
   local task=$1 teardown output
@@ -271,6 +188,8 @@ reap_task() {  # <task> <trigger>
   kind=$(meta_value "$meta" kind)
   [ -n "$kind" ] || kind=ship
   mode=$(meta_value "$meta" mode)
+  [ "$mode" != no-mistakes ] \
+    || refuse "retired no-mistakes task custody requires explicit operator recovery"
   [ -z "$(meta_value "$meta" x_request)" ] || refuse "X-linked tasks require their final follow-up before teardown"
   [ "$kind" != secondmate ] || refuse "persistent secondmates are never auto-reaped"
   [ "$(status_last_verb "$id")" = "done" ] || refuse "last task status is not terminal done"
@@ -281,9 +200,8 @@ reap_task() {  # <task> <trigger>
       ;;
     scout-done:scout:*) ;;
     local-merged:ship:local-only) ;;
-    *) refuse "trigger $trigger does not match kind=$kind mode=${mode:-no-mistakes}" ;;
+    *) refuse "trigger $trigger does not match kind=$kind mode=${mode:-direct-PR}" ;;
   esac
-  reap_no_mistakes_run "$meta" || return 1
   run_teardown "$id"
 }
 
@@ -521,7 +439,7 @@ recover_acquisition() {  # <record>
     printf 'worktree=%s\n' "$worktree"
     printf 'project=%s\n' "$project"
     printf 'harness=unknown\nkind=ship\n'
-    printf 'mode=%s\n' "$(single_meta_value "$record" mode 2>/dev/null || printf no-mistakes)"
+    printf 'mode=%s\n' "$(single_meta_value "$record" mode 2>/dev/null || printf direct-PR)"
     printf 'yolo=%s\n' "$(single_meta_value "$record" yolo 2>/dev/null || printf off)"
     printf 'tasktmp=%s\ntasktmp_phase=%s\nmodel=default\neffort=default\n' "$tasktmp" "$tasktmp_phase"
     printf 'generation_id=%s\n' "$generation"

@@ -119,9 +119,10 @@ BASE_REF=$(resolve_base_ref) \
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
-# five source - all unchanged by this task, so the real files are exactly
-# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
+# (extracted from BASE_REF), plus every OTHER sibling script those five source.
+# Siblings still present use the live file; dependencies retired by this task
+# are extracted from BASE_REF so the historical comparison remains runnable.
+# FM_ROOT_OVERRIDE pointed at this dir's
 # root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
 # of the five REFACTORED scripts sources; it must be a real, reachable file in
@@ -162,10 +163,14 @@ old_bin_walk_sources() {  # <bin-dir> <seed names...> -> transitive closure
     pending="$*"
     case " $OLD_BIN_REFACTORED " in *" $name "*) continue ;; esac
     case "$seen" in *" $name "*) continue ;; esac
-    [ -f "$bin_dir/$name" ] \
-      || fail "old-bin sibling deriver: $bin_dir/$name is sourced but does not exist"
     seen="$seen$name "
-    kids=$(old_bin_direct_sources < "$bin_dir/$name")
+    if [ -f "$bin_dir/$name" ]; then
+      kids=$(old_bin_direct_sources < "$bin_dir/$name")
+    elif git -C "$ROOT" cat-file -e "$BASE_REF:bin/$name" 2>/dev/null; then
+      kids=$(git -C "$ROOT" show "$BASE_REF:bin/$name" | old_bin_direct_sources)
+    else
+      fail "old-bin sibling deriver: $bin_dir/$name is absent now and at $BASE_REF"
+    fi
     pending="$pending $kids"
   done
   printf '%s\n' "$seen"
@@ -189,7 +194,12 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   bin="$root/bin"
   mkdir -p "$bin"
   for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    ln -s "$ROOT/bin/$f" "$bin/$f"
+    if [ -f "$ROOT/bin/$f" ]; then
+      ln -s "$ROOT/bin/$f" "$bin/$f"
+    else
+      git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
+      chmod +x "$bin/$f"
+    fi
   done
   ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
@@ -1352,9 +1362,9 @@ EOF
   mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
 
   fm_write_meta "$state_old/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off"
   fm_write_meta "$state_new/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off"
   touch "$state_old/.last-watcher-beat" "$state_new/.last-watcher-beat"
 
   log_old="$TMP_ROOT/teardown-old.log"; log_new="$TMP_ROOT/teardown-new.log"

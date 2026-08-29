@@ -32,8 +32,6 @@ TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
 TEARDOWN="${FM_TREEHOUSE_REAP_TEARDOWN:-$SCRIPT_DIR/fm-teardown.sh}"
 TEARDOWN_REAP_SAFETY_REFUSAL=77
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-process-tree-lib.sh
 . "$SCRIPT_DIR/fm-process-tree-lib.sh"
 
@@ -461,7 +459,6 @@ EOF
 
 reap() {
   local failed=0 meta id
-  fm_refuse_if_gate_agent || return $?
   [ -x "$TEARDOWN" ] || {
     echo "TREEHOUSE_REAP: operational-error reason=teardown-unavailable path=$TEARDOWN" >&2
     return 1

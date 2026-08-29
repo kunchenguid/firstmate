@@ -18,8 +18,6 @@ set -u
 GATE="$ROOT/tests/host-capability-gate.sh"
 REGISTRY="$ROOT/tests/host-capabilities.tsv"
 CI="$ROOT/.github/workflows/ci.yml"
-BRIDGE="$ROOT/bin/fm-azure-validation-shard-bridge.py"
-VALIDATION="$ROOT/bin/fm-azure-validation.py"
 RUN_SH="$ROOT/tests/run.sh"
 
 # The exact number of host-coupled units in the sealed suite. Adding or removing
@@ -207,46 +205,6 @@ test_ci_never_declares_a_capability_absent() {
   pass "CI declares nothing absent, so every host-coupled unit still runs there"
 }
 
-test_the_validation_cell_declares_exactly_the_measured_absences() {
-  # Behavioral, not textual: import both modules and compare the constants the
-  # bridge SENDS and the host REFUSES, then check each declared name against the
-  # registry. A declaration is only worth anything if both sides agree on it and
-  # every name in it is a capability the gate knows.
-  python3 - "$BRIDGE" "$VALIDATION" "$REGISTRY" <<'PY' \
-    || fail "the cell's host-capability declaration is missing, mismatched between bridge and host, or names an unknown capability"
-import importlib.util, pathlib, sys
-
-def load(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-bridge = load(sys.argv[1], "fm_shard_bridge_probe")
-host = load(sys.argv[2], "fm_validation_probe")
-sent = bridge.CELL_HOST_CAPABILITY_DECLARATION
-refused = host.CELL_HOST_CAPABILITY_DECLARATION
-if sent != refused:
-    print("bridge sends %r but the host pins %r" % (sent, refused), file=sys.stderr)
-    raise SystemExit(1)
-prefix = "FM_TEST_HOST_CAPABILITIES_ABSENT="
-if not sent.startswith(prefix) or not sent[len(prefix):]:
-    print("declaration is not a non-empty %s assignment: %r" % (prefix, sent), file=sys.stderr)
-    raise SystemExit(1)
-known = {
-    line.split("\t")[1]
-    for line in pathlib.Path(sys.argv[3]).read_text(encoding="utf-8").splitlines()
-    if line.startswith("capability\t")
-}
-unknown = [n for n in sent[len(prefix):].split(",") if n not in known]
-if unknown:
-    print("declaration names unknown capabilities: %s" % unknown, file=sys.stderr)
-    raise SystemExit(1)
-PY
-  pass "the cell's declaration is one constant, pinned on both sides, naming only real capabilities"
-}
-
 test_registry_and_call_sites_are_the_same_set
 test_gated_unit_count_is_pinned_to_a_literal
 test_every_referenced_capability_is_defined_once
@@ -257,4 +215,3 @@ test_unsupported_platform_skips_without_any_declaration
 test_unknown_capability_names_are_refused_not_skipped
 test_suite_runner_announces_a_reduced_run
 test_ci_never_declares_a_capability_absent
-test_the_validation_cell_declares_exactly_the_measured_absences

@@ -11,30 +11,16 @@
 > fresh `-aN` lineage attempt is allowed after a plain VM-existence check.
 
 This document owns the architecture, state, security, restart, and operator contract for the private one-shot command substrate.
-[`bin/fm-azure-runner.sh`](../bin/fm-azure-runner.sh) owns exact command mechanics, [`bin/fm-azure-runner-dispatch.sh`](../bin/fm-azure-runner-dispatch.sh) owns local-versus-Azure selection, and [`docs/azure-runner/invocation.json`](azure-runner/invocation.json) owns the invocation VM declaration.
+[`bin/fm-azure-runner.sh`](../bin/fm-azure-runner.sh) owns exact command mechanics, and [`docs/azure-runner/invocation.json`](azure-runner/invocation.json) owns the invocation VM declaration.
+Configured operators source `~/.fm-azure/fleet.env` and export the intended `FM_HOME`; the runner binds all local state and admission evidence to that canonical home.
 
 ## Boundary
 
 The runner offloads one uncredentialed repository command to one disposable private Azure VM while Firstmate and interactive agents remain local.
 It is suitable for review-independent test, lint, documentation checks, behavior suites, and Crosscheck evidence commands whose complete dependency closure is available in the exact repository snapshot or the selected runner image.
-It does not run Firstmate, an author agent, a model reviewer, a browser, a no-mistakes coordinator, a fixer, branch mutation, push, CI control, or merge authority.
-It does not make uncredentialed execution alone a complete Azure no-mistakes or policy-grade Crosscheck environment.
-The credentialed no-mistakes control compartment is implemented by [`docs/azure-validation.md`](azure-validation.md) and consumes this substrate through its snapshot, request, result, identity, and cleanup contract.
+It does not run Firstmate, an author agent, a model reviewer, a browser, a fixer, branch mutation, push, CI control, or merge authority.
+It does not make uncredentialed execution alone a complete policy-grade Crosscheck environment.
 The policy reviewer compartment remains separate.
-
-The tracked no-mistakes command entries call the dispatch wrapper.
-The wrapper executes locally by default.
-Inside a no-mistakes gate worktree, an operator opts in through the run-owned file at `~/.fm-azure/runner-routing/<run-id>.json`; the daemon step discovers the run id from its own Git top-level and does not rely on `FM_HOME` or any operator-shell export reaching it.
-`FM_AZURE_RUNNER_REMOTE_CLASSES` remains the compatibility selector for a direct invocation whose process actually inherits that environment; it is not the no-mistakes per-run recipe.
-An absent per-run file executes the class locally and writes `executed LOCALLY` plus the absence reason into that step's stderr.
-A present file that is unreadable, partial, malformed, expired, exhausted, wrongly bound, or otherwise unusable refuses by name and runs the command nowhere.
-Once either selector validly chooses remote execution, the command never falls back to the Mac after any cloud, identity, quota, staging, execution, or integrity failure.
-`FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` is the only explicit local recovery selection.
-
-C2 no-mistakes run `01M0T2PJB0EZX8AA94WQV0WXA9` exposed the remaining production blocker before VM creation because its gate worktree was detached.
-Direct diagnostic invocations `azr-0a4691b5bbae` and `azr-949b35e79a57` both returned command exit 1 and safely cleaned their invocation compute to zero.
-Those attempts are failed evidence, not acceptance.
-A new billable acceptance remains blocked until this exact repair is on public `main` and the operator explicitly approves the exact subscription and run.
 
 ## Request and snapshot contract
 
@@ -47,9 +33,9 @@ A caller may additionally bind one or more exact `--public-ancestor` commits; pu
 Crosscheck evidence for a private GitHub repository supplies `--private-snapshot-bundle` without a parent reservation: the trusted host packages its clean exact-head review checkout, binds the authenticated PR ref and base ancestor, and stages only that digest-bound Git bundle so the evidence VM receives no GitHub credential.
 When that arbitrary repository does not contain Firstmate's Agent Fleet lock, the `crosscheck-tool` class uses only the sealed base toolchain and records an empty Python-wheel closure instead of requiring Firstmate-specific files.
 An Azure validation cell additionally supplies `--private-snapshot-bundle` with its parent-cell reservation so an unpushed pipeline-fix head can execute without prematurely changing the task branch on GitHub.
-The per-run no-mistakes route instead supplies `--private-snapshot-from-head` with the deterministic private ref `refs/heads/fm-no-mistakes/<run-id>`.
-That direct mode seals the exact clean detached gate HEAD and its complete non-shallow ancestry into one self-contained bundle without guessing or pushing a task branch and without claiming a validation-cell parent.
-All three private modes bind one exact source ref/head, a one-ref Git bundle, digest, size, and private staging object.
+The direct private route may instead supply `--private-snapshot-from-head` with a deterministic private ref.
+That mode seals the exact clean detached HEAD and its complete non-shallow ancestry into one self-contained bundle without guessing or pushing a task branch and without claiming a parent cell.
+All private modes bind one exact source ref/head, a one-ref Git bundle, digest, size, and private staging object.
 The parent mode additionally binds its exact cell and reservation.
 The public proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; all modes repeat their exact public/private source proof immediately before compute creation and retry.
 No live worktree, primary home, provider account home, browser profile, or peer storage is mounted or copied.
@@ -143,19 +129,19 @@ This distinction prevents remote failure from becoming a pass.
 
 After a verified result is collected, the runner writes one summary into the command step's own stderr beside its verdict.
 That run-owned proof names the invocation, exit result, immutable Azure `vm_instance_id`, and verified guest `boot_id`.
-The earlier `selected REMOTE ... (dispatching)` line proves only selection; it is never evidence that Azure executed the command.
-Conversely, every local path writes `executed LOCALLY` into the same step-owned log, so a routing file written after the selected step began is visible as a local run rather than being mistaken for remote execution.
+That verified summary is the Azure execution proof. Selection or routing messages are not execution evidence.
+Explicit local mode has its own local command result and never produces the Azure VM identity proof.
 
 ## Admission, parallelism, and cost
 
 There is no queue daemon and no warm runner compute.
 An empty local queue means zero runner VMs.
 Every invocation receives a separate VM, so admitted shards run concurrently without sharing process, memory, disk, temp, ports, locks, terminal servers, or task state.
-The validation-cell dispatcher may request up to eight mixed-family invocations for the long behavior suite, while each invocation still passes this runner's own global admission, exact-family quota, cost, identity, and cleanup gates.
-A validation-owned invocation carries an exact `capacity-parent` cell id and complete parent vCPU reservation so the cell's pre-reserved processor shape and the child VM inventory cannot be double-counted or mistaken for unrelated capacity.
+An approved compartment dispatcher may request multiple mixed-family invocations, while each invocation still passes this runner's own global admission, exact-family quota, cost, identity, and cleanup gates.
+A compartment-owned invocation carries an exact `capacity-parent` cell id and complete parent vCPU reservation so the cell's pre-reserved processor shape and the child VM inventory cannot be double-counted or mistaken for unrelated capacity.
 Before admission and again before VM creation, the runner proves one live parent cell with the exact owner, deployment generation, home, lifecycle, id, and processor-reservation tags, then refuses a child beyond the reserved `(vCPUs - 8) / 4` slots.
 Each child still receives its own durable first-day reservation for its direct compute, storage, network, monitoring, and control meters; only the already-accounted $210 shared foundation reserve is omitted from that child reservation.
-A direct private no-mistakes bundle has no validation parent and therefore takes the ordinary standalone shared-capacity reservation and complete foundation cost bound exactly once.
+A direct private bundle has no compartment parent and therefore takes the ordinary standalone shared-capacity reservation and complete foundation cost bound exactly once.
 
 Immediately before reservation and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, zero-data admission-control account/container and ETag, controller UAMI and its sole exact effective container role including inherited/group expansion, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
 It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, the exact unambiguous Linux on-demand Consumption retail meter (never Spot, Low Priority, Windows, dev/test, reservation, or savings pricing), and active runner count.
@@ -293,99 +279,11 @@ bin/fm-azure-runner.sh run \
   -- bin/fm-azure-runner-command.sh bash -c 'tests/run.sh --skip-herdr'
 ```
 
-### Per-run no-mistakes routing
-
-The no-mistakes daemon is launched with only `HOME` and `PATH`.
-An `export FM_AZURE_RUNNER_REMOTE_CLASSES=...` in the operator shell therefore does not reach a gate step and must not be used as the no-mistakes routing recipe.
-Start the run without a machine-global selector, then, once its 26-character run id exists and before the class to offload begins, write exactly one operator-owned file at `~/.fm-azure/runner-routing/<run-id>.json`.
-The full schema and exit-code contract are owned by [`bin/fm-azure-runner-routing.py`](../bin/fm-azure-runner-routing.py); the required document shape is:
-
-```json
-{
-  "schema": "fm.azure-runner-routing/v1",
-  "run_id": "<exact 26-character run id>",
-  "classes": {
-    "test": "behavior-heavy",
-    "lint": "validation-standard"
-  },
-  "fm_home": "/absolute/operator/firstmate-home",
-  "subscription": "<exact Azure subscription UUID>",
-  "expires_at": "<short exact UTC expiry, YYYY-MM-DDTHH:MM:SSZ>",
-  "max_dispatches": 2
-}
-```
-
-Only those seven required fields and the resolver-owned optional `dispatched` counter are allowed at the top level, duplicate JSON keys are refused, and `expires_at` must use the literal UTC `Z` form shown above.
-
-Create the routing directory and file outside every checkout, with every lexical component from `HOME` through the file owned by the invoking uid, free of symlinks, and not group- or world-writable; the file itself is a regular mode-`0600` file no larger than 64 KiB.
-Publish a complete file with an atomic rename rather than writing the live path in place.
-A checkout-carried `.fm-azure/runner-routing` tree is never consulted, and a symlink from the HOME-owned path into a checkout is refused.
-The resolver opens with no-follow semantics and reads only the exact device/inode it checked, under the fixed byte ceiling; FIFOs, oversized files, and pathname replacement races refuse before selection.
-Each selected dispatch consumes one `max_dispatches` slot under a stable sibling lock and durably records the new count before the runner starts.
-Delete the exact run file after the run; expiry and the dispatch budget remain fail-closed backstops, not garbage collection.
-
-The no-mistakes test owner must choose between its ordinary capability-derived local Herdr set and the remote-non-Herdr/local-Herdr split before it has a payload to dispatch.
-It asks `bin/fm-azure-runner-dispatch.sh --inspect-selection test` for that decision.
-Inspection applies the same complete routing-document, local-recovery, and dual-authority checks but never consumes a dispatch slot, and returns an exact selection binding.
-The subsequent real remote dispatch must present that binding, refuses if the route was deleted, unselected, or replaced, revalidates under the stable lock, and is the only budget consumer.
-A local inspection writes the exact local reason into the test step's own stderr before the local host set starts, while a malformed present authority refuses before either local or remote tests start.
-
-The selected daemon step then asks the resolver to read the landed Azure host configuration from the provenance-checked regular file `~/.fm-azure/fleet.env`.
-That file must supply `FM_AZURE_TENANT_ID`, `FM_AZURE_SUBSCRIPTION_ID`, `FM_AZURE_NAMING_PREFIX`, `FM_AZURE_STORAGE_NAME`, `FM_AZURE_OWNER_TAG`, `FM_AZURE_DEPLOYMENT_GENERATION`, and `FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID`.
-The resolver opens and reads the validated inode once, evaluates those exact bounded bytes, and returns only an explicit infrastructure allowlist in encoded form rather than a mutable pathname for the dispatch shell to source later.
-That allowlist covers the required identities plus the runner's documented resource-group, private data-plane, image, concurrency, budget, cost-mode, cell, SKU, and untrained-forecast infrastructure settings; unrelated `FM_AZURE_*` names are ignored.
-Per-run selectors, routing roots, task/generation identity, subscription confirmation, and every `*_STATE_DIR` control are refused if `fleet.env` declares them.
-Its subscription must exactly equal the routing document's explicit `subscription`, which becomes `FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION`; the routing document's explicit `fm_home` becomes `FM_HOME` and therefore selects the spend ledger.
-For a routing-file dispatch, ambient runner/shared/worker state-directory overrides are cleared, so this exact `fm_home` is the sole ledger authority.
-Missing, unsafe, incomplete, or disagreeing configuration refuses before runner preparation.
-
-The `FM_AZURE_RUNNER_TASK` / `FM_AZURE_RUNNER_GENERATION` exports shown for a direct run above are an operator override, not a requirement of the no-mistakes path: `bin/fm-azure-runner-dispatch.sh` derives the per-run bindings from the ambient no-mistakes run when they are not exported.
-The task and generation come from the run's own identity - the
-`$FM_HOME/state/<task>.meta` whose `worktree=` records the command's Git
-top-level, or, inside a no-mistakes gate worktree
-(`<nm-home>/worktrees/<repo-id>/<run-id>`), the run id as `nm-<run-id>` with
-the exact snapshot HEAD as the generation.
-For a per-run file, the subscription confirmation and spend-ledger home come only from that written operator act and are never guessed.
-For the compatibility environment selector, confirmation still passes through from the invoking process's `FM_AZURE_SUBSCRIPTION_ID` and is never synthesized.
-Explicit values are honored only as a task/generation pair; half a hand-set
-identity refuses.
-A binding that cannot be derived fails closed with an exact error naming what
-is missing, and the selected command then runs nowhere - there is no silent
-local fallback, and `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` remains the only
-explicit local opt-out.
-
-The lint payload preserves the tracked shell owner and locked Agent Fleet command unchanged inside the dispatched argv.
-For the per-run no-mistakes route, the dispatcher binds the detached gate HEAD to `refs/heads/fm-no-mistakes/<run-id>` and asks the runner to build the complete one-ref private bundle inside its protected payload directory.
-That source ref is a deterministic run identity, not a guess at the author's branch.
-The direct route uses ordinary shared-capacity accounting and carries no validation-cell parent.
-For a validation-owned feature branch, the caller passes its exact current `refs/heads/<branch>` identity plus the one-ref private snapshot bundle and parent reservation.
-The runner binds and privately stages either unpushed commit, while a changed local bundle/head/tree or public default base refuses before compute creation.
-The ordinary test path runs the capability-derived real-Herdr host set locally and leaves complete behavior-inventory verification to required CI, as defined in [`configuration.md`](configuration.md#gate-defaults-no-mistakesyaml).
-When the `test` class is explicitly remote, `bin/fm-no-mistakes-test-command.sh` runs the sealed non-Herdr behavior inventory plus locked Agent Fleet checks on one Azure VM while every real-Herdr declaration runs through owned guarded labs on the Mac; a failed Azure shard is never replayed locally.
-The remote command declares exactly `real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress` absent and emits the existing loud per-unit skips rather than adding failures to the skip inventory.
-The guest materializes complete source and default-branch history, so admitted non-Herdr fixtures retain their parent and historical-path graph instead of operating from a shallow root.
-Model review, document generation that requires a model, fixes, Git mutation, push, PR creation, CI monitoring, and gate decisions remain in no-mistakes' existing owner.
-A configured uncredentialed documentation command may use this runner like any other command, but this bridge never moves a model document step by implication.
-
-Select an explicit local recovery for one class only when the operator deliberately accepts Mac load:
-
-```sh
-export FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES='lint'
-```
-
-Inspect concise state:
-
-```sh
-bin/fm-azure-runner.sh queue
-bin/fm-azure-runner.sh status --invocation <id>
-bin/fm-azure-runner.sh cost
-```
 
 ## Acceptance after explicit apply
 
 The implementation tests use fake Azure APIs and local executor fixtures only.
 They create no Azure resource and incur no charge.
-Acceptance for the per-run no-mistakes repair remains blocked until this exact code lands on public `main` and one fresh routed `test=behavior-heavy` run passes on real Azure compute with exact remote execution proof and zero cleanup.
 Do not spend on an unlanded build, and do not weaken the foundation's `require_landed_code` gate to accelerate that acceptance.
 Real usability remains unclaimed until the approved deployment performs this bounded acceptance:
 

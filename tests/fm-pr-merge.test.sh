@@ -30,7 +30,7 @@ make_case() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   install_gh_axi_fake "$case_dir"
   seed_clear_ledger "$case_dir"
   printf '%s\n' "$case_dir"
@@ -70,6 +70,15 @@ case "${1:-} ${2:-}" in
   "pr view")
     [ "$*" = "pr view 72 --repo ruby-dlee/firstmate --full" ] || exit 97
     cat "$FM_TEST_CLAIMS_FIXTURE"
+    ;;
+  "pr checks")
+    [ "$*" = "pr checks 72 --repo ruby-dlee/firstmate" ] || exit 97
+    case "${FM_TEST_CHECKS_MODE:-green}" in
+      green) printf '%s\n' 'summary: "2 passed, 0 failed, 2 total"' ;;
+      pending) printf '%s\n' 'summary: "1 passed, 0 failed, 2 total"' ;;
+      failed) printf '%s\n' 'summary: "1 passed, 1 failed, 2 total"' ;;
+      *) exit 98 ;;
+    esac
     ;;
   "api PUT")
     case " $* " in
@@ -217,6 +226,7 @@ run_pr_merge() {
   FM_TEST_CLAIMS_FIXTURE="$CLAIMS_FIXTURE" \
   FM_TEST_MERGE_FIXTURE="$MERGE_FIXTURE" \
   FM_TEST_QUEUE_RULE="${FM_TEST_QUEUE_RULE:-absent}" \
+  FM_TEST_CHECKS_MODE="${FM_TEST_CHECKS_MODE:-green}" \
   FM_TEST_HEAD="${FM_TEST_HEAD:-$HEAD_SHA}" \
   FM_TEST_BASE="$BASE_SHA" \
     "$PR_MERGE" "$@"
@@ -263,7 +273,7 @@ test_merge_queue_acceptance_is_enqueued_unconfirmed() {
   case "$output" in
     *'"merged": true'*) fail "queue submission claimed merged success" ;;
   esac
-  [ "$(grep -c '^api /repos/ruby-dlee/firstmate/pulls/72$' "$case_dir/gh-axi.log")" -eq 5 ] \
+  [ "$(grep -c '^api /repos/ruby-dlee/firstmate/pulls/72$' "$case_dir/gh-axi.log")" -eq 9 ] \
     || fail "queue submission did not add exactly one independent PR readback"
   assert_grep 'api /repos/ruby-dlee/firstmate/rules/branches/main' "$case_dir/gh-axi.log" \
     "queue submission did not inspect the active base-branch rules"
@@ -276,10 +286,37 @@ test_merge_queue_acceptance_is_enqueued_unconfirmed() {
   pass "merge queue acceptance is enqueued/unconfirmed, not merged or failed"
 }
 
-test_draft_and_undeterminable_status_refuse_before_merge() {
+test_non_green_ci_refuses_before_review_or_merge() {
   local mode case_dir rc
+  for mode in pending failed; do
+    case_dir=$(make_case "ci-$mode")
+    : > "$case_dir/gh-axi.log"
+    set +e
+    FM_TEST_CHECKS_MODE=$mode run_pr_merge "$case_dir" task-x1 "$PR_URL" \
+      > "$case_dir/out" 2> "$case_dir/err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$mode CI"
+    assert_grep 'PR CI is not green' "$case_dir/err" \
+      "$mode CI refusal was not actionable"
+    assert_no_grep '^api PUT ' "$case_dir/gh-axi.log" \
+      "$mode CI reached the merge mutation"
+    [ ! -e "$case_dir/state/task-x1.check.sh" ] \
+      || fail "$mode CI armed Crosscheck supervision before becoming green"
+  done
+  pass "pending or failed CI cannot start Crosscheck or reach merge"
+}
+
+test_draft_and_undeterminable_status_refuse_before_merge() {
+  local mode case_dir rc prior_pr prior_head
+  prior_pr=https://github.com/ruby-dlee/firstmate/pull/71
+  prior_head=7171717171717171717171717171717171717171
   for mode in draft missing; do
     case_dir=$(make_case "draft-$mode")
+    printf '%s\n' \
+      'generation_id=generation-task-x1' \
+      "pr=$prior_pr" \
+      "pr_head=$prior_head" >> "$case_dir/state/task-x1.meta"
     : > "$case_dir/gh-axi.log"
     set +e
     FM_TEST_DRAFT_MODE=$mode run_pr_merge "$case_dir" task-x1 "$PR_URL" \
@@ -287,18 +324,22 @@ test_draft_and_undeterminable_status_refuse_before_merge() {
     rc=$?
     set -e
     expect_code 1 "$rc" "draft mode $mode"
-    assert_grep "pr=$PR_URL" "$case_dir/state/task-x1.meta" \
-      "draft mode $mode did not preserve PR metadata before refusal"
-    assert_grep "pr_head=$HEAD_SHA" "$case_dir/state/task-x1.meta" \
-      "draft mode $mode did not preserve the live head before refusal"
+    assert_grep "pr=$prior_pr" "$case_dir/state/task-x1.meta" \
+      "draft mode $mode replaced the prior admitted PR before refusal"
+    assert_grep "pr_head=$prior_head" "$case_dir/state/task-x1.meta" \
+      "draft mode $mode replaced the prior admitted head before refusal"
+    assert_no_grep "pr=$PR_URL" "$case_dir/state/task-x1.meta" \
+      "draft mode $mode published an inadmissible replacement PR"
+    assert_no_grep "pr_head=$HEAD_SHA" "$case_dir/state/task-x1.meta" \
+      "draft mode $mode published an inadmissible replacement head"
     assert_no_grep '^api PUT ' "$case_dir/gh-axi.log" \
       "draft mode $mode reached the merge mutation"
   done
-  assert_grep 'because it is a draft' "$TMP_ROOT/draft-draft/err" \
-    "draft merge refusal did not name the draft"
-  assert_grep 'draft status could not be determined' "$TMP_ROOT/draft-missing/err" \
+  assert_grep 'requires a provably non-draft PR' "$TMP_ROOT/draft-draft/err" \
+    "draft CI admission did not name the non-draft requirement"
+  assert_grep 'requires a provably non-draft PR' "$TMP_ROOT/draft-missing/err" \
     "undeterminable draft status did not fail closed"
-  pass "draft and undeterminable draft status refuse after recording, before merge"
+  pass "draft and undeterminable status preserve the prior admitted registration"
 }
 
 test_missing_or_malformed_ledger_blocks_merge() {
@@ -451,6 +492,7 @@ test_missing_meta_and_malformed_url_fail_fast() {
 test_exact_head_is_recorded_and_merged_atomically
 test_draft_and_undeterminable_status_refuse_before_merge
 test_merge_queue_acceptance_is_enqueued_unconfirmed
+test_non_green_ci_refuses_before_review_or_merge
 test_missing_or_malformed_ledger_blocks_merge
 test_clear_without_reviewer_bash_receipt_blocks_merge
 test_changed_head_blocks_before_merge

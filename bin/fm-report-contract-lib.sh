@@ -12,7 +12,7 @@ fm_completion_report_contract() {  # <data-dir> <task-id>
     'When a section genuinely does not apply, say so in a sentence under the heading rather than omitting the heading.' \
     'Make it stand alone for the captain: explain the outcome, name important files or links, record the validation performed, and call out remaining risk or decisions.' \
     "Put screenshots, diagrams, or other visual artifacts under \`$data/$task/visuals/\` and reference them from the report when they materially help review." \
-    "If review or the no-mistakes pipeline changes the implementation after the report is first written, refresh the report before the later final \`done:\` status." \
+    "If review changes the implementation after the report is first written, refresh the report before the later final \`done:\` status." \
     'These completion-report paths and the status file are the only authorized writes outside the worktree.'
 }
 

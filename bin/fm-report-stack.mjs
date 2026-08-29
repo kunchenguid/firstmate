@@ -77,34 +77,6 @@ function fail(message) {
   process.exit(1);
 }
 
-function gitCommonDirectory(checkout) {
-  try {
-    const raw = execFileSync("git", ["-C", checkout, "rev-parse", "--git-common-dir"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (!raw) return "";
-    return fs.realpathSync(path.isAbsolute(raw) ? raw : path.resolve(checkout, raw));
-  } catch {
-    return "";
-  }
-}
-
-function refuseIfGateAgent() {
-  if (process.env.FM_GATE_REFUSE_BYPASS === "1") return;
-  if (Object.prototype.hasOwnProperty.call(process.env, "NO_MISTAKES_GATE")) {
-    console.error("error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)");
-    process.exit(3);
-  }
-  for (const checkout of [process.cwd(), fmRoot]) {
-    const common = gitCommonDirectory(checkout);
-    if (/(?:^|[\\/])\.no-mistakes[\\/]repos[\\/][^\\/]+\.git$/.test(common)) {
-      console.error(`error: refusing fleet lifecycle from inside a no-mistakes gate worktree (${common})`);
-      process.exit(3);
-    }
-  }
-}
-
 function parseMeta(content) {
   const result = {};
   for (const line of content.split(/\r?\n/)) {
@@ -1873,7 +1845,7 @@ function publish(taskId, legacy) {
         summary: firstSummary(markdown, lastStatus(status)),
         completedAt: sameGeneration ? previousManifest.completedAt : new Date().toISOString(),
         kind: meta.kind || "ship",
-        mode: meta.mode || "no-mistakes",
+        mode: meta.mode || "direct-PR",
         project: meta.project ? path.basename(meta.project) : "unknown",
         harness: meta.harness || "unknown",
         accountProfile: meta.account_profile || "",
@@ -1970,8 +1942,6 @@ function resolveReportPath(taskId) {
   }
   return path.join(configuredStackRoot, "entries", matches[0].retentionCohort, matches[0].reportId, "report.html");
 }
-
-refuseIfGateAgent();
 
 try {
   if (command === "publish") {

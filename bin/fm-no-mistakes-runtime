@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# Build the credential-free Pi runtime used by the Azure no-mistakes worker.
-set -euo pipefail
-
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-exec python3 "$SCRIPT_DIR/fm-no-mistakes-runtime.py" "$@"

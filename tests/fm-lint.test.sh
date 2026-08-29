@@ -3,17 +3,13 @@
 . "$(dirname "$0")/test-entry.sh"
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
-# (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
-# commands.lint) invoke, so the local lint can never diverge from CI again.
-# Regression origin: with no commands.lint configured, the local no-mistakes
-# lint step never ran the deterministic
-# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
-# validation yet failed that exact check in CI on info/warning findings such as
+# bin/fm-lint.sh is the single owner invoked locally and by CI, so those paths
+# cannot diverge. It runs the deterministic
+# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` and catches findings such as
 # SC2015, SC1007, and SC2034. A second axis was tool-version skew: CI's
 # ShellCheck floated with the runner image and still emitted SC2015, which
 # ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
-# gates resolve it, so command, file set, config, AND version all match.
+# environments resolve it, so command, file set, config, AND version all match.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -21,9 +17,6 @@ set -u
 
 LINT="$ROOT/bin/fm-lint.sh"
 CI="$ROOT/.github/workflows/ci.yml"
-NM="$ROOT/.no-mistakes.yaml"
-NM_COMMAND="$ROOT/bin/fm-no-mistakes-lint-command.sh"
-SCOPE="$ROOT/bin/fm-azure-service-test-scope.py"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The authoritative file set the one owner must run.
 # The canonical set is these globs, spelled in the owner and nowhere else. The
@@ -70,74 +63,7 @@ test_ci_invokes_the_owner() {
   pass "CI lint job calls the one-owner script, not an inline command"
 }
 
-test_nomistakes_invokes_the_owner() {
-  assert_grep 'else exec bin/fm-azure-runner-dispatch.sh lint -- bin/fm-azure-runner-command.sh' "$NM" "no-mistakes commands.lint must preserve the local/default dispatch owner"
-  # shellcheck disable=SC2016  # The literal gate command must preserve runtime expansion.
-  assert_grep 'exec "$FM_AZURE_VALIDATION_SHARD_BRIDGE" lint -- bin/fm-azure-runner-command.sh' "$NM" "Azure validation must move lint to the credential-free shard bridge"
-  [ "$(grep -Fc "bin/fm-no-mistakes-lint-command.sh" "$NM")" -eq 1 ] || fail "no-mistakes lint must preserve one exact scoped lint command"
-  assert_grep 'bin/fm-lint.sh' "$NM_COMMAND" "the scoped no-mistakes command must retain the shell-lint owner"
-  assert_grep 'uv run --directory tools/agent-fleet --locked ruff check .' "$NM_COMMAND" "the scoped no-mistakes command must retain locked Agent Fleet lint"
-  assert_grep 'exec "$@"' "$ROOT/bin/fm-azure-runner-dispatch.sh" "Azure dispatch must preserve local execution as the default"
-  pass "no-mistakes pre-push lint preserves CI scope locally and delegates it from Azure cells"
-}
 
-test_nomistakes_scope_matches_ci() {
-  local tmp repo fakebin log base out
-  fm_test_tmproot_into tmp fm-lint-scope
-  repo="$tmp/repo"
-  fakebin="$tmp/bin"
-  log="$tmp/calls.log"
-  mkdir -p "$repo/bin" "$repo/tools/agent-fleet" "$fakebin"
-  cp "$NM_COMMAND" "$repo/bin/fm-no-mistakes-lint-command.sh"
-  cp "$SCOPE" "$repo/bin/fm-azure-service-test-scope.py"
-  cat > "$repo/bin/fm-lint.sh" <<'SH'
-#!/usr/bin/env bash
-printf 'lint' >> "$FM_TEST_LOG"
-if [ "$#" -gt 0 ]; then
-  printf ' %s' "$@" >> "$FM_TEST_LOG"
-fi
-printf '\n' >> "$FM_TEST_LOG"
-SH
-  cat > "$fakebin/uv" <<'SH'
-#!/usr/bin/env bash
-printf 'uv %s\n' "$*" >> "$FM_TEST_LOG"
-SH
-  chmod +x "$repo/bin/"*.sh "$repo/bin/fm-azure-service-test-scope.py" "$fakebin/uv"
-  git -C "$repo" init -q -b main
-  git -C "$repo" config user.name fixture
-  git -C "$repo" config user.email fixture@example.invalid
-  printf 'base\n' > "$repo/bin/fm-azure-worker-provider.py"
-  git -C "$repo" add .
-  git -C "$repo" commit -qm base
-  base=$(git -C "$repo" rev-parse HEAD)
-  git -C "$repo" update-ref refs/remotes/origin/main "$base"
-  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
-  git -C "$repo" checkout -qb feature
-
-  printf 'focused\n' >> "$repo/bin/fm-azure-worker-provider.py"
-  git -C "$repo" commit -qam focused
-  : > "$log"
-  FM_TEST_LOG="$log" PATH="$fakebin:$PATH" "$repo/bin/fm-no-mistakes-lint-command.sh"
-  out=$(cat "$log")
-  assert_not_contains "$out" "lint" "focused non-shell diff ran the full shell inventory"
-  assert_contains "$out" "uv run --directory tools/agent-fleet --locked ruff check ." "focused diff skipped locked Agent Fleet lint"
-
-  printf '#!/usr/bin/env bash\n' > "$repo/bin/fm-worker-lifecycle.sh"
-  git -C "$repo" add bin/fm-worker-lifecycle.sh
-  git -C "$repo" commit -qm focused-shell
-  : > "$log"
-  FM_TEST_LOG="$log" PATH="$fakebin:$PATH" "$repo/bin/fm-no-mistakes-lint-command.sh"
-  out=$(cat "$log")
-  assert_contains "$out" "lint bin/fm-worker-lifecycle.sh" "focused diff did not lint its exact changed shell file"
-
-  printf 'unknown\n' > "$repo/README.md"
-  git -C "$repo" add README.md
-  git -C "$repo" commit -qm unknown
-  : > "$log"
-  FM_TEST_LOG="$log" PATH="$fakebin:$PATH" "$repo/bin/fm-no-mistakes-lint-command.sh"
-  [ "$(head -1 "$log")" = lint ] || fail "unknown diff did not fail closed to the full shell inventory"
-  pass "no-mistakes lint matches focused CI and fails unknown diffs closed to full lint"
-}
 
 test_pins_an_explicit_version() {
   [ -n "$REQUIRED" ] || fail "fm-lint.sh --required-version printed nothing"
@@ -261,8 +187,6 @@ SH
 test_owner_exists_and_executable
 test_owner_defines_canonical_set
 test_ci_invokes_the_owner
-test_nomistakes_invokes_the_owner
-test_nomistakes_scope_matches_ci
 test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version
 test_rejects_wrong_shellcheck_version

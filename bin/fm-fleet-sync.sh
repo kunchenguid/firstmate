@@ -62,9 +62,6 @@ if [ -e "$PROJECTS" ]; then
 fi
 CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-process-tree-lib.sh
@@ -472,7 +469,7 @@ sync_project() (
   PROJ=$canonical
   label=$(project_label)
   registry_name=$(basename "$PROJ")
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$registry_name" 2>/dev/null || echo "no-mistakes off")
+  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$registry_name" 2>/dev/null || echo "direct-PR off")
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"

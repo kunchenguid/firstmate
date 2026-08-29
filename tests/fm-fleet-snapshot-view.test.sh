@@ -17,10 +17,6 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
-  cat > "$fb/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -67,7 +63,7 @@ PY
 fi
 printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/fm-crew-state.sh"
+  chmod +x "$fb/tmux" "$fb/fm-crew-state.sh"
   printf '%s\n' "$fb"
 }
 
@@ -154,7 +150,7 @@ EOF
     "project=alpha" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "yolo=off"
   printf 'working: implementing fix\n' > "$home/state/alpha-task.status"
   fakebin=$(make_fakebin "$home")
@@ -195,7 +191,7 @@ test_large_task_fleet_exceeds_argv_limit_without_omissions() {
       "project=synthetic" \
       "harness=codex" \
       "kind=ship" \
-      "mode=no-mistakes"
+      "mode=direct-PR"
     i=$((i + 1))
   done
 
@@ -243,7 +239,7 @@ PY
     "project=synthetic" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   : > "$home/state/decision-heavy.status"
   i=1
   while [ "$i" -le "$count" ]; do

@@ -16,493 +16,9 @@ AUTHORITY="$ROOT/bin/fm-worker-authority.py"
 DOC="$ROOT/docs/azure-workers.md"
 SUB=11111111-1111-4111-8111-111111111111
 
-service_complete_front_door() {
-  local tmp help
-  fm_test_tmproot_into tmp fm-worker-service-complete-front-door
-  mkdir -p "$tmp/home"
-  help=$(FM_HOME="$tmp/home" "$WRAPPER" service-complete --help) \
-    || fail "supported lifecycle wrapper rejected service-complete"
-  case "$help" in
-    *--request-digest*--confirm-subscription*) ;;
-    *) fail "service-complete help lost its exact execution binding" ;;
-  esac
-  help=$(FM_HOME="$tmp/home" "$WRAPPER" service-cancel --help) \
-    || fail "supported lifecycle wrapper rejected service-cancel"
-  case "$help" in
-    *--assignment-generation*--confirm-cancel*--confirm-subscription*) ;;
-    *) fail "service-cancel help lost its exact assignment binding" ;;
-  esac
-  help=$(FM_HOME="$tmp/home" "$WRAPPER" service-reconcile --help) \
-    || fail "supported lifecycle wrapper rejected service-reconcile"
-  case "$help" in
-    *--task*--task-generation*--confirm-subscription*) ;;
-    *) fail "service-reconcile help lost its exact task binding" ;;
-  esac
-  pass "supported lifecycle wrapper exposes exact service reconciliation, completion, and cancellation"
-}
 
-service_reconcile_scope_contract() {
-  python3 - "$CONTROLLER" <<'PY' || fail "exact service reconcile scope contract failed"
-import contextlib
-import importlib.util
-import io
-import json
-from types import SimpleNamespace
-import sys
 
-spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
 
-env = {
-    "max_workers": 4, "deployment_generation": "dep", "owner": "owner",
-    "subscription": "subscription",
-}
-inventory = {
-    "metrics": {}, "workers": [], "capacity_reservations": [],
-    "conflicts": [{"slot": 1, "kind": "run-command", "reason": "unrelated"}],
-}
-module.roll_daily_baseline = lambda *_args, **_kwargs: None
-module.active_count = lambda *_args, **_kwargs: 1
-module.choose_free_slot = lambda *_args, **_kwargs: 2
-admitted = []
-def exact_admission(_env, _state, _inventory, item, slot, now=None):
-    admitted.append((item["task"], item["task_generation"], slot))
-    return {"type": "create", "slot": slot, "request": item}
-module.create_admission_action = exact_admission
-
-# An unrelated slot has a stranded slow mutation and an older queue entry.
-# Exact service admission still chooses the named task and never plans either.
-state = {
-    "queue": {
-        "older@author": {
-            "task": "older", "task_generation": "author", "role": "author",
-            "status": "queued", "eligible": True,
-        },
-        "service@generation": {
-            "task": "service", "task_generation": "generation", "role": "no-mistakes",
-            "status": "queued", "eligible": True,
-        },
-    },
-    "workers": {"1": {"queue_key": "unrelated@generation", "slot": 1}},
-    "pending_actions": {"1": {"type": "delete-compute", "slot": 1}},
-}
-action = module.next_service_reconcile_action(
-    env, state, inventory, "service", "generation"
-)
-assert action["type"] == "create" and admitted == [("service", "generation", 2)], action
-
-# Conflict isolation is exact. A malformed provider conflict with no slot
-# remains a global refusal because the controller cannot contain it safely.
-try:
-    module.next_service_reconcile_action(
-        env, state, dict(inventory, conflicts=[{"kind": "run-command"}]),
-        "service", "generation",
-    )
-except module.LifecycleError as exc:
-    assert "not bound to one exact worker slot" in str(exc), exc
-else:
-    raise AssertionError("an unscoped provider conflict was treated as isolated")
-
-def worker(task, generation, slot, status):
-    key = module.request_key(task, generation)
-    item = {
-        "task": task, "task_generation": generation, "role": "no-mistakes",
-        "status": status, "eligible": True, "slot": slot,
-    }
-    record = {
-        "slot": slot, "role": "no-mistakes", "queue_key": key,
-        "assignment_generation": "asg-{:08d}".format(slot),
-        "sku": "sku", "sku_family": "family", "cloud_generation": 1,
-        "bindings": {"task": task, "task_generation": generation},
-        "resources": {}, "cloud_instance_id": "vm-{}".format(slot),
-        "reservation_usd": 1.0, "release_proof": {"proof_digest": "f" * 64},
-    }
-    return key, item, record
-
-# Recovery replays only the target slot. It returns before provider inventory,
-# so the unrelated pending action cannot become synchronous work.
-key, item, target = worker("service", "generation", 2, "assigned")
-state = {
-    "queue": {key: item}, "workers": {
-        "1": {"slot": 1, "queue_key": "unrelated@generation"}, "2": target,
-    },
-    "pending_actions": {
-        "1": {"type": "delete-compute", "slot": 1},
-        "2": {"type": "execute", "slot": 2},
-    },
-}
-module.controller_lock = lambda _env: contextlib.nullcontext()
-module.load_state = lambda _env: state
-module.provider_call = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-    AssertionError("exact replay inventoried unrelated fleet work")
-)
-drained = []
-def exact_drain(_env, slot=None, strict=True):
-    drained.append((slot, strict))
-    return ([slot], [])
-module.drain_pending = exact_drain
-output = io.StringIO()
-with contextlib.redirect_stdout(output):
-    module.command_service_reconcile(env, SimpleNamespace(
-        task="service", task_generation="generation",
-        confirm_subscription="subscription", json=True,
-    ))
-assert drained == [("2", True)], drained
-assert json.loads(output.getvalue())["actions"] == [{"slot": 2, "type": "replay"}]
-
-# A service cancellation can predate the action field that transports its
-# proof. If compute is now exactly absent and no execution was ever recorded,
-# retire only that legacy delete claim so task-scoped reconcile can reset the
-# retained disks instead of refusing forever.
-key, item, target = worker("service", "generation", 2, "releasing")
-target["bindings"].update({
-    "assignment_generation": target["assignment_generation"],
-})
-proof = {
-    "schema": "fm.worker-service-cancel/v1", "task": "service",
-    "task_generation": "generation",
-    "assignment_generation": target["assignment_generation"],
-    "verdict": "cancelled-before-execution",
-}
-proof["proof_digest"] = module.digest_value(proof)
-target.update({
-    "release_proof": proof, "last_execution_digest": None,
-})
-item["service_completion_receipt"] = proof
-legacy = {
-    "type": "delete-compute", "slot": 2,
-    "bindings": dict(target["bindings"]),
-    "release_proof_digest": proof["proof_digest"],
-}
-state = {
-    "queue": {key: item}, "workers": {"2": target},
-    "pending_actions": {"2": legacy}, "executions": {},
-    "cleanup_refusals": [],
-}
-original_inventory_by_slot = module.inventory_by_slot
-original_classify_worker = module.classify_worker
-module.inventory_by_slot = lambda _inventory: {2: {"slot": 2, "resources": {}}}
-module.classify_worker = lambda _worker, _cloud, now=None: (
-    "orphaned-safe-to-delete", "exact released residual data capacity"
-)
-assert module.adopt_observed_service_cancel_cleanup(
-    state, "service", "generation", inventory
-)
-assert "2" not in state["pending_actions"], state
-assert "adopted observed cancelled state" in state["cleanup_refusals"][-1]["note"]
-
-# Actual or recorded output is never adopted away.
-state["pending_actions"]["2"] = dict(legacy)
-state["executions"]["request"] = {
-    "task": "service", "task_generation": "generation",
-    "assignment_generation": target["assignment_generation"],
-}
-assert not module.adopt_observed_service_cancel_cleanup(
-    state, "service", "generation", inventory
-)
-assert state["pending_actions"]["2"] == legacy
-module.inventory_by_slot = original_inventory_by_slot
-module.classify_worker = original_classify_worker
-
-# Cleanup likewise plans only the named released worker while an unrelated
-# slot retains its own pending action.
-key, item, target = worker("service", "generation", 2, "releasing")
-state = {
-    "queue": {key: item}, "workers": {
-        "1": {"slot": 1, "queue_key": "unrelated@generation"}, "2": target,
-    },
-    "pending_actions": {"1": {"type": "delete-compute", "slot": 1}},
-}
-module.classify_worker = lambda candidate, _cloud, now=None: (
-    ("assigned", "exact target") if candidate.get("queue_key") == key
-    else ("retained-for-investigation", "unrelated")
-)
-action = module.next_service_reconcile_action(
-    env, state, inventory, "service", "generation"
-)
-assert action["type"] == "deallocate" and action["slot"] == 2, action
-
-# A conflict on the target slot still refuses that exact service mutation.
-try:
-    module.next_service_reconcile_action(
-        env, state,
-        dict(inventory, conflicts=[{"slot": 2, "kind": "run-command"}]),
-        "service", "generation",
-    )
-except module.LifecycleError as exc:
-    assert "inside service worker slot 2" in str(exc), exc
-else:
-    raise AssertionError("a conflicted service slot was adopted")
-
-# The operator's ordinary reconciler keeps its existing fleet-wide policy.
-# It still selects a released ordinary worker before queued admission.
-ordinary = dict(target)
-ordinary.update({
-    "slot": 1, "role": "author", "queue_key": "ordinary@generation",
-    "release_proof": {"proof_digest": "a" * 64},
-})
-ordinary_state = {
-    "queue": {
-        "ordinary@generation": {
-            "task": "ordinary", "task_generation": "generation", "role": "author",
-            "status": "releasing", "eligible": True,
-        },
-        key: item,
-    },
-    "workers": {"1": ordinary}, "pending_actions": {},
-}
-module.classify_worker = lambda *_args, **_kwargs: ("assigned", "released ordinary")
-ordinary_inventory = dict(
-    inventory,
-    conflicts=[{"slot": 2, "kind": "run-command", "reason": "unrelated"}],
-)
-action = module.next_reconcile_action(env, ordinary_state, ordinary_inventory)
-assert action["type"] == "deallocate" and action["slot"] == 1, action
-PY
-  pass "exact service admission, recovery, and cleanup ignore unrelated slow fleet work"
-}
-
-service_complete_replay_contract() {
-  python3 - "$CONTROLLER" <<'PY' || fail "service completion replay contract failed"
-import contextlib
-import copy
-import importlib.util
-from types import SimpleNamespace
-import sys
-
-spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-
-bindings = {
-    "home_binding": "1" * 64,
-    "task": "service-task",
-    "task_generation": "service-generation",
-    "assignment_generation": "asg-00000001",
-    "account_binding": "2" * 64,
-    "worktree_binding": "3" * 64,
-    "repository_binding": "4" * 64,
-    "repository_generation": "repository-generation",
-}
-request_digest = "5" * 64
-result_digest = "6" * 64
-item = {
-    **bindings,
-    "role": "no-mistakes",
-    "status": "assigned",
-    "slot": 1,
-}
-worker = {
-    "role": "no-mistakes",
-    "queue_key": "service-task@service-generation",
-    "assignment_generation": bindings["assignment_generation"],
-    "bindings": bindings,
-    "cloud_instance_id": "worker-instance",
-    "resources": {"vm": {"id": "/exact/vm"}},
-    "last_execution_digest": result_digest,
-    "release_proof": None,
-}
-execution = {
-    "request_digest": request_digest,
-    "result_digest": result_digest,
-    "assignment_generation": bindings["assignment_generation"],
-}
-state = {
-    "queue": {"service-task@service-generation": item},
-    "workers": {"1": worker},
-    "executions": {request_digest: execution},
-}
-module.controller_lock = lambda _env: contextlib.nullcontext()
-module.load_state = lambda _env: state
-module.save_state = lambda _env, _state: None
-args = SimpleNamespace(
-    task="service-task",
-    task_generation="service-generation",
-    assignment_generation=bindings["assignment_generation"],
-    request_digest=request_digest,
-    confirm_subscription="subscription",
-)
-env = {"subscription": "subscription"}
-
-# Crash window one: the first call durably moved the item to releasing, but
-# the caller died before observing success. The exact retry is idempotent.
-module.command_service_complete(env, args)
-assert item["status"] == "releasing", item
-assert item["service_completion_receipt"] == worker["release_proof"], item
-module.command_service_complete(env, args)
-
-# Crash window two: reconcile completed the reset and removed the worker, but
-# the caller died before publishing the cached result. The queue-owned exact
-# receipt survives reset and admits only the same bound completion request.
-item["status"] = "complete"
-# The released slot may already belong to a later task. Its presence cannot
-# invalidate the old queue item's exact, self-digested completion receipt.
-replacement_worker = {
-    "queue_key": "later-task@later-generation",
-    "role": "author",
-    "assignment_generation": "asg-00000002",
-    "release_proof": None,
-}
-state["workers"] = {"1": replacement_worker}
-replacement_before = copy.deepcopy(replacement_worker)
-module.command_service_complete(env, args)
-assert replacement_worker == replacement_before, replacement_worker
-wrong = SimpleNamespace(**vars(args))
-wrong.assignment_generation = "asg-99999999"
-try:
-    module.command_service_complete(env, wrong)
-except module.LifecycleError as exc:
-    assert "identity differs" in str(exc), exc
-else:
-    raise AssertionError("completed service receipt admitted a foreign assignment")
-
-# The provider-side regression below emits this exact terminal shape. Prove
-# the lifecycle consumer recognizes it as terminal (rather than malformed),
-# fails closed, and leaves the durable execute claim available for explicit
-# abandonment/recovery.
-terminal_action = {
-    "type": "execute",
-    "slot": 1,
-    "request_digest": "7" * 64,
-    "idempotency_key": "8" * 64,
-    "resources": {"task-command": {"id": "/exact/task-command"}},
-}
-terminal_state = {
-    "queue": {"terminal-task@terminal-generation": {"status": "assigned"}},
-    "workers": {"1": {"queue_key": "terminal-task@terminal-generation"}},
-    "executions": {},
-    "pending_actions": {"1": terminal_action},
-    "completed_worker_seconds": 0.0,
-}
-state = terminal_state
-terminal_result = {"execution": {
-    "schema": "fm.worker-execution-terminal/v1",
-    "request_digest": terminal_action["request_digest"],
-    "idempotency_key": terminal_action["idempotency_key"],
-    "disposition": "provider-terminal",
-    "provisioning_state": "Succeeded",
-    "execution_state": "Failed",
-    "exit_code": 2,
-    "task_command_id": "/exact/task-command",
-}}
-try:
-    module.apply_pending(env, terminal_action, terminal_result)
-except module.LifecycleError as exc:
-    assert "provider-terminal" in str(exc) and "failed" in str(exc), exc
-else:
-    raise AssertionError("failed guest execution was applied as a successful result")
-assert terminal_state["pending_actions"]["1"] == terminal_action, terminal_state
-PY
-  pass "service completion replays across releasing and completed crash windows"
-}
-
-service_cancel_replay_contract() {
-  python3 - "$CONTROLLER" "$AZURE" <<'PY' || fail "service cancellation replay contract failed"
-import contextlib
-import copy
-import importlib.util
-from types import SimpleNamespace
-import sys
-
-spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-provider_spec = importlib.util.spec_from_file_location("azure_provider", sys.argv[2])
-provider = importlib.util.module_from_spec(provider_spec)
-provider_spec.loader.exec_module(provider)
-
-bindings = {
-    "home_binding": "1" * 64,
-    "task": "cancel-task",
-    "task_generation": "cancel-generation",
-    "assignment_generation": "asg-00000001",
-    "account_binding": "2" * 64,
-    "worktree_binding": "3" * 64,
-    "repository_binding": "4" * 64,
-    "repository_generation": "repository-generation",
-}
-item = {**bindings, "role": "no-mistakes", "status": "assigned", "slot": 1}
-worker = {
-    "slot": 1,
-    "role": "no-mistakes",
-    "queue_key": "cancel-task@cancel-generation",
-    "assignment_generation": bindings["assignment_generation"],
-    "bindings": bindings,
-    "cloud_instance_id": "worker-instance",
-    "resources": {"vm": {"id": "/exact/vm"}},
-    "last_execution_digest": None,
-    "release_proof": None,
-}
-state = {
-    "queue": {"cancel-task@cancel-generation": item},
-    "workers": {"1": worker},
-    "executions": {},
-    "pending_actions": {},
-}
-module.controller_lock = lambda _env: contextlib.nullcontext()
-module.load_state = lambda _env: state
-module.save_state = lambda _env, _state: None
-args = SimpleNamespace(
-    task="cancel-task",
-    task_generation="cancel-generation",
-    assignment_generation=bindings["assignment_generation"],
-    confirm_cancel=True,
-    confirm_subscription="subscription",
-)
-env = {"subscription": "subscription"}
-
-module.command_service_cancel(env, args)
-assert item["status"] == "releasing", item
-assert item["service_completion_receipt"] == worker["release_proof"], item
-assert worker["release_proof"]["verdict"] == "cancelled-before-execution", worker
-action_env = {"deployment_generation": "deployment", "owner": "owner"}
-worker.update({"sku": "Standard_D4as_v6", "sku_family": "standardDav6Family", "cloud_generation": 1, "reservation_usd": 1.0})
-delete_action = module.make_action(action_env, "delete-compute", worker=worker)
-assert delete_action["service_cancel_proof"] == worker["release_proof"], delete_action
-assert provider.service_cancel_allows_missing_task_command(delete_action)
-foreign_cancel = copy.deepcopy(delete_action)
-foreign_cancel["service_cancel_proof"]["task"] = "foreign-task"
-assert not provider.service_cancel_allows_missing_task_command(foreign_cancel)
-module.command_service_cancel(env, args)
-
-item["status"] = "complete"
-replacement = {"queue_key": "later@task", "release_proof": None}
-state["workers"] = {"1": replacement}
-replacement_before = copy.deepcopy(replacement)
-module.command_service_cancel(env, args)
-assert replacement == replacement_before, replacement
-
-valid_receipt = item["service_completion_receipt"]
-item["service_completion_receipt"] = "corrupt"
-try:
-    module.command_service_cancel(env, args)
-except module.LifecycleError as exc:
-    assert "receipt identity differs" in str(exc), exc
-else:
-    raise AssertionError("malformed service cancellation receipt escaped as valid")
-item["service_completion_receipt"] = valid_receipt
-
-item["status"] = "assigned"
-item.pop("service_completion_receipt")
-state["workers"] = {"1": worker}
-worker["release_proof"] = None
-state["executions"] = {"5" * 64: {
-    "task": args.task,
-    "task_generation": args.task_generation,
-    "assignment_generation": args.assignment_generation,
-}}
-try:
-    module.command_service_cancel(env, args)
-except module.LifecycleError as exc:
-    assert "executed" in str(exc), exc
-else:
-    raise AssertionError("service cancellation discarded a recorded execution")
-assert item["status"] == "assigned", item
-assert worker["release_proof"] is None, worker
-PY
-  pass "service cancellation releases only an exact never-executed assignment and replays"
-}
 
 static_contract() {
   python3 - "$CONTROLLER" "$AZURE" "$SUPERVISOR" "$AUTHORITY" "$DOC" <<'PY' || fail "elastic worker static contract failed"
@@ -639,7 +155,7 @@ for marker in (
     "no power-on lane exists",
     "least-active usable profile", "assignment-private projection",
     "maximum of sixteen", "`fireworks-glm`",
-    "consume no worker slot and no Codex/Pi worker profile",
+    "consumes no worker slot and no Codex/Pi worker profile",
 ):
     assert marker in doc, marker
 assert "hosted form service" in doc and "force-delete" in doc
@@ -653,6 +169,173 @@ for marker in (
     assert marker in doc, marker
 PY
   pass "provider seam, Azure identity fencing, cost boundary, Lavish contract, and acceptance controls are documented"
+}
+
+retired_role_upgrade_contract() {
+  python3 - "$CONTROLLER" "$AZURE" <<'PY' || fail "retired worker-role upgrade contract failed"
+import copy
+import contextlib
+import importlib.util
+import sys
+import types
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+lifecycle = load("retired_lifecycle", sys.argv[1])
+provider = load("retired_provider", sys.argv[2])
+env = {
+    "home_binding": "a" * 64,
+    "subscription": "11111111-1111-4111-8111-111111111111",
+    "deployment_generation": "dep",
+    "owner": "owner",
+    "prefix": "fixture",
+    "state_path": "/fixture/controller.json",
+}
+state = lifecycle.empty_state(env)
+item = {
+    "schema": lifecycle.REQUEST_SCHEMA,
+    "task": "legacy-review",
+    "task_generation": "generation-1",
+    "repository_generation": "repo-1",
+    "home_binding": "b" * 64,
+    "account_binding": "c" * 64,
+    "worktree_binding": "d" * 64,
+    "repository_binding": "e" * 64,
+    "owner_kind": "primary",
+    "role": "no-mistakes",
+    "eligible": True,
+    "status": "queued",
+    "enqueued_at": "2026-08-29T00:00:00Z",
+}
+state["queue"]["legacy-review@generation-1"] = item
+lifecycle.read_json = lambda *_args: copy.deepcopy(state)
+lifecycle._LOCK_STATE.update({"held": True, "epoch": 7})
+loaded = lifecycle.load_state(env)
+retired = loaded["queue"]["legacy-review@generation-1"]
+assert retired["status"] == "retired"
+assert retired["eligible"] is False
+assert retired["retired_role"] is True
+assert lifecycle.queued_items(loaded) == []
+
+action = {"type": "create", "role": "no-mistakes", "slot": 1}
+loaded["pending_actions"]["1"] = action
+observed = {"slot": 1}
+calls = []
+lifecycle.apply_result_transactionally = lambda _env, _state, _action, result: calls.append(result)
+assert lifecycle.adopt_observed_retired_create(
+    env, loaded, {"workers": [observed]}
+)
+assert calls == [{"worker": observed}]
+assert "1" not in loaded["pending_actions"]
+
+resume_action = {"type": "resume", "role": "no-mistakes", "slot": 1}
+loaded["pending_actions"]["1"] = resume_action
+assert lifecycle.adopt_observed_retired_create(
+    env, loaded, {"workers": [observed]}
+)
+assert calls[-1] == {"worker": observed}
+assert "1" not in loaded["pending_actions"]
+
+proof = {
+    "schema": "fm.worker-service-cancel/v1",
+    "verdict": "cancelled-before-execution",
+    "task": "legacy-review",
+    "task_generation": "generation-1",
+    "assignment_generation": "asg-1",
+    "cloud_instance_id": "cloud-1",
+}
+proof["proof_digest"] = provider.hashlib.sha256(
+    provider.canonical_bytes(proof)
+).hexdigest()
+cleanup_action = {
+    "bindings": {
+        "task": "legacy-review",
+        "task_generation": "generation-1",
+        "assignment_generation": "asg-1",
+    },
+    "cloud_instance_id": "cloud-1",
+    "service_cancel_proof": proof,
+}
+assert provider.service_cancel_allows_missing_task_command(cleanup_action)
+cleanup_action["cloud_instance_id"] = "different"
+assert not provider.service_cancel_allows_missing_task_command(cleanup_action)
+
+legacy_delete = {
+    "type": "delete-compute",
+    "role": "no-mistakes",
+    "slot": 1,
+    "idempotency_key": "f" * 64,
+}
+loaded["workers"]["1"] = {"release_proof": proof}
+loaded["pending_actions"]["1"] = legacy_delete
+saved = []
+lifecycle.save_state = lambda _env, value: saved.append(copy.deepcopy(value))
+enriched = lifecycle.enrich_legacy_service_cleanup_claim(
+    env, loaded, "1", legacy_delete
+)
+assert enriched["service_cancel_proof"] == proof
+assert enriched["idempotency_key"] == lifecycle.action_id(enriched)
+assert enriched["idempotency_key"] != legacy_delete["idempotency_key"]
+assert saved and loaded["pending_actions"]["1"] == enriched
+
+queue_key = "legacy-review@generation-1"
+retired_item = dict(item, status="retired", eligible=False, retired_role=True)
+retired_create = {
+    "type": "create",
+    "role": "no-mistakes",
+    "slot": 1,
+    "idempotency_key": "e" * 64,
+}
+retire_state = {
+    "queue": {queue_key: retired_item},
+    "workers": {"1": {
+        "slot": 1,
+        "role": "no-mistakes",
+        "queue_key": queue_key,
+        "cloud_instance_id": None,
+        "resources": {},
+        "assignment_generation": "asg-1",
+    }},
+    "pending_actions": {"1": retired_create},
+    "cleanup_refusals": [],
+}
+lifecycle.controller_lock = lambda _env: contextlib.nullcontext()
+lifecycle.load_state = lambda _env: retire_state
+lifecycle.provider_call = lambda _env, operation: {
+    "inventory": {"workers": []}
+} if operation == "inventory" else (_ for _ in ()).throw(AssertionError(operation))
+cleaned = []
+lifecycle.cleanup_placement_projection = lambda _env, value: cleaned.append(value)
+lifecycle.save_state = lambda _env, value: saved.append(copy.deepcopy(value))
+assert lifecycle.retire_unsubmitted_retired_create(env, retired_create) == "retired"
+assert retire_state["pending_actions"] == {}
+assert retire_state["workers"] == {}
+assert retire_state["queue"] == {}
+assert cleaned == [retired_item]
+assert retire_state["cleanup_refusals"][-1]["note"].startswith(
+    "retired create abandoned after two exact Azure absence observations"
+)
+
+withdraw_state = {
+    "queue": {queue_key: retired_item},
+    "workers": {},
+    "pending_actions": {},
+}
+lifecycle.load_state = lambda _env: withdraw_state
+lifecycle.command_withdraw(env, types.SimpleNamespace(
+    task="legacy-review",
+    task_generation="generation-1",
+    confirm_withdraw=True,
+    confirm_subscription=env["subscription"],
+    task_home_out=None,
+))
+assert withdraw_state["queue"] == {}
+PY
+  pass "retired worker roles cannot admit fresh capacity and retain exact cleanup compatibility"
 }
 
 classification_and_admission_matrix() {
@@ -1743,9 +1426,8 @@ capacity, no_ledger_family = module.specialized_capacity_inventory(
 assert no_ledger_family["standardDav6Family"] == 4, no_ledger_family
 
 # Both real producer shapes must pass. bin/fm-azure-runner.py defaults to
-# ("none","0") for a standalone shard, while bin/fm-azure-validation.py launches
-# one with a REAL parent and a real reserved count. Matching only the first shape
-# was tried and left the outage live for every validation-cell run.
+# ("none","0") for a standalone shard, while a reserved multi-compartment shape
+# launches one with a real parent and reserved count.
 for parent, reserved in (("none", "0"), ("azv-0000000000ab", "40")):
     lane_vm = copy.deepcopy(specialized_vm)
     lane_vm["tags"]["invocation-binding"] = "azr-0000000000fe"
@@ -9570,12 +9252,9 @@ PY
 }
 
 static_contract
+retired_role_upgrade_contract
 independent_cleanup_contract
 targeted_slot_inventory_contract
-service_complete_front_door
-service_reconcile_scope_contract
-service_complete_replay_contract
-service_cancel_replay_contract
 compartment_payload_contract
 classification_and_admission_matrix
 azure_provider_refusal_matrix

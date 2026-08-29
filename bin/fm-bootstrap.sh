@@ -47,12 +47,10 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
-#          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but incompatible build
-#          reports MISSING like no-mistakes. When
+#          reports MISSING. When
 #          config/backlog-backend is not manual and tasks-axi is compatible,
 #          bootstrap prints TASKS_AXI: available. quota-axi is required because
 #          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
@@ -116,15 +114,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-account-routing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-lavish-version-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-lavish-version-lib.sh"
-fm_refuse_if_gate_agent
 
 report_retention_ensure() {
   local out
-  if [ "${FM_GATE_REFUSE_BYPASS:-0}" = 1 ] && [ -z "${FM_REPORT_STACK_ROOT:-}" ]; then
+  if [ "${FM_BOOTSTRAP_BACKGROUND_BYPASS:-0}" = 1 ] && [ -z "${FM_REPORT_STACK_ROOT:-}" ]; then
     return 0
   fi
   if ! out=$("$SCRIPT_DIR/fm-report-retention.sh" ensure 2>&1); then
@@ -160,7 +155,7 @@ checkout_refresh_ensure() {
   local out
   [ "$(uname)" = Darwin ] || return 0
   [ -x "$SCRIPT_DIR/fm-checkout-refresh.sh" ] || return 0
-  if [ "${FM_GATE_REFUSE_BYPASS:-0}" = 1 ] && [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" != 1 ]; then
+  if [ "${FM_BOOTSTRAP_BACKGROUND_BYPASS:-0}" = 1 ] && [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" != 1 ]; then
     return 0
   fi
   if ! out=$("$SCRIPT_DIR/fm-checkout-refresh.sh" ensure 2>&1); then
@@ -181,7 +176,7 @@ pi_auth_refresh_ensure() {
   # checkout-refresh and report-retention use: this reports one machine-global
   # owner, so without the seam every bootstrap assertion in the suite would
   # carry its absence.
-  if [ "${FM_GATE_REFUSE_BYPASS:-0}" = 1 ] && [ "${FM_PI_REFRESH_BOOTSTRAP_TEST:-0}" != 1 ]; then
+  if [ "${FM_BOOTSTRAP_BACKGROUND_BYPASS:-0}" = 1 ] && [ "${FM_PI_REFRESH_BOOTSTRAP_TEST:-0}" != 1 ]; then
     return 0
   fi
   # Machine-global, not per-home: one Pi credential pool serves every home, so
@@ -195,7 +190,7 @@ pi_auth_refresh_ensure() {
 fleet_sync_origin_backed_project_count() {
   local count proj
   if [ -x "$FM_ROOT/bin/fm-checkout-refresh.sh" ] \
-    && { [ "${FM_GATE_REFUSE_BYPASS:-0}" != 1 ] || [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" = 1 ]; }; then
+    && { [ "${FM_BOOTSTRAP_BACKGROUND_BYPASS:-0}" != 1 ] || [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" = 1 ]; }; then
     count=$("$FM_ROOT/bin/fm-checkout-refresh.sh" discover 2>/dev/null | awk 'NF { n += 1 } END { print n + 0 }')
     echo "$count"
     return 0
@@ -258,7 +253,7 @@ fleet_sync() {
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
   if [ -x "$FM_ROOT/bin/fm-checkout-refresh.sh" ] \
-    && { [ "${FM_GATE_REFUSE_BYPASS:-0}" != 1 ] || [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" = 1 ]; }; then
+    && { [ "${FM_BOOTSTRAP_BACKGROUND_BYPASS:-0}" != 1 ] || [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" = 1 ]; }; then
     "$FM_ROOT/bin/fm-checkout-refresh.sh" run-once --force --verbose --session >"$tmp" 2>&1 &
   else
     [ -d "$PROJECTS" ] || { rm -f "$tmp"; return 0; }
@@ -515,7 +510,6 @@ install_cmd() {
     python3) echo "brew install python  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
-    no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     lavish-axi) echo "npm install -g '$FM_ROOT/tools/lavish' && lavish-axi configure-wake --home '$FM_HOME' --command '$FM_ROOT/bin/fm-lavish-wake.sh'" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
@@ -546,7 +540,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node python3 git gh perl no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node python3 git gh perl gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -554,31 +548,9 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN_MAJOR=1
-NO_MISTAKES_MIN_MINOR=31
-NO_MISTAKES_MIN_PATCH=2
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
-}
-
-no_mistakes_version_parts() {
-  local output
-  command -v no-mistakes >/dev/null 2>&1 || return 1
-  output=$(no-mistakes --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1
-}
-
-no_mistakes_compatible() {
-  local parts major minor patch extra
-  parts=$(no_mistakes_version_parts) || return 1
-  IFS=' ' read -r major minor patch extra <<< "$parts"
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  [ "$major" -gt "$NO_MISTAKES_MIN_MAJOR" ] && return 0
-  [ "$major" -eq "$NO_MISTAKES_MIN_MAJOR" ] || return 1
-  [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
-  [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
-  [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
 lavish_axi_compatible() {
@@ -954,9 +926,6 @@ done
 if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
-fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
-  echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
 if command -v lavish-axi >/dev/null 2>&1 && ! lavish_axi_compatible; then
   echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"

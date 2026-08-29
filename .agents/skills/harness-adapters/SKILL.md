@@ -109,7 +109,6 @@ Do not manually reproduce backend-specific timing.
 
 Use `stuck-crewmate-recovery` for the full escalation ladder.
 A low context indicator is not evidence of a stuck agent.
-Do not change shared daemon lifecycle while recovering a no-mistakes task.
 
 ## Verifying a new adapter
 

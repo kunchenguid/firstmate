@@ -14,30 +14,24 @@ They also include recognized mid-run Claude or Codex permission prompts and busy
 The permission-prompt matcher and the explicitly heuristic macOS system-dialog fallback are detailed in [permission-stall-detection.md](permission-stall-detection.md).
 Repeated unchanged wedge or permission-stall escalations add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
-No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crewmate is still working: an actively running no-mistakes step for that crewmate's branch or a backend busy signature.
+No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crewmate is still working through its backend.
 A crewmate that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
-A pause is a statement about the work rather than about the terminal, so wake classification honours it whether the crewmate's pane is alive, idle, or gone, and whatever its attributed no-mistakes run reports - parked, failed or cancelled, or unreadable.
-That classification never transfers custody of an in-flight validation run: the [`operating-fundamentals`](../.agents/skills/operating-fundamentals/SKILL.md) skill owns validation custody, and [`crew-steering`](../.agents/skills/crew-steering/SKILL.md) owns the corresponding correction.
-The single exception is an actively `working` run-step or busy pane, which supersedes the declaration because the crewmate resumed after making it.
+A pause is a statement about the work rather than about the terminal, so wake classification honours it whether the crewmate's pane is alive, idle, or gone.
+A busy pane supersedes the declaration because the crewmate resumed after making it.
 Absorption is gated on two proofs taken from one immutable read of the crewmate's current durable status stream: the pause verb carrying no failure vocabulary in its headline, and an empty keyed open/resolved fold, so a pause can never mask a still-unanswered decision.
 The Herdr native blocked-transition edge does not yet honour this invariant, which is a known defect tracked as `herdr-push-transition-pause-gate-h8`: on that edge a lane that owes an unanswered keyed decision can be silently absorbed and go quiet.
 A crewmate with no locatable status stream is refused rather than absorbed, and stopped crewmates without a declared pause surface immediately.
 Pause cadence markers remain in force while the latest durable status still declares the pause and are cleared only after that status resumes, so every continuously declared pause still re-surfaces on the bounded long cadence.
 Each normal-mode cycle reconciles declared pauses before any exit-capable check or signal scan, so an actionable sibling wake cannot starve marker registration or the bounded recheck by ending the watcher before its later pane sweep.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
-Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
+Fresh stale panes use the same current-state read before trusting the status log, so a busy pane outranks an old captain-relevant status-log line.
 Heartbeats are benign only when the fleet scan finds neither an unsurfaced captain-relevant status nor a `dead` or `unknown` command-step liveness observation.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 At each drain boundary, `fm-wake-drain.sh` first intakes durable Lavish answers, then drains queued wakes and runs the same liveness guard as the supervision scripts, so unreceipted answers recover and a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crewmate status files are append-only wake-event logs, not current-state fields.
-`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes the matching no-mistakes run, active or terminal, to the crewmate's own branch and keeps that run-step authoritative even if the pane has closed; the pause precedence above belongs to the watcher's absorb classification and does not change this general current-state precedence.
-When a terminal run reports `outcome: passed`, the helper verifies the PR detail through a bounded `gh-axi` query instead of inferring GitHub state from the pipeline outcome.
-An open-PR `passed` or `checks-passed` outcome and a checks-green CI marker are classified by the exact remote-only currentness contract in `bin/fm-crew-state.sh`'s header; only `done` authorizes the PR-ready workflow.
-During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
-The most recent recognized ci log marker wins, so checks-green monitoring supplies the ready claim while a later re-arm, failed-check, or issue marker returns the crewmate to working before remote currentness is considered.
-Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
+`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review. It reads the task's backend endpoint first, then a recognized status-log event only when the endpoint is readable and idle. A dead endpoint reports unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 For herdr, that pane fallback trusts a native `busy` verdict outright, but corroborates native `idle` or unknown verdicts against the rendered busy signature before deciding the crewmate is not working.
@@ -47,7 +41,6 @@ The script header owns the exact JSON schema.
 Optional X mode rides the same check path: the locked session-start bootstrap step drops a local `state/x-watch.check.sh` shim only after the user opts in with `FMX_PAIRING_TOKEN`, and non-X homes keep the default watcher behavior.
 The same supervision loop continuously reaps terminal task resources through `bin/fm-auto-reap.sh`.
 A merged PR check, an approved local-only merge, or a completed scout delegates to ordinary `bin/fm-teardown.sh`, so endpoint removal, report publication, kind-specific worktree safety, landed-work proof, and Treehouse return keep one fail-closed authority.
-Before that teardown, an exactly attributed active no-mistakes run is canceled by run ID; a cross-branch run whose exact ID is unavailable is retained rather than guessed.
 X-mode-linked tasks wait for their final follow-up, and persistent secondmates are never auto-reaped.
 Every spawn writes an owner-stamped Treehouse acquisition record before leasing a slot and removes it once task metadata takes authority.
 The watcher examines a stranded pre-metadata acquisition only after the record exceeds `FM_AUTO_REAP_STALE_SECS` and the recorded PID plus process start time proves dead or reused.
@@ -126,17 +119,10 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
 
-## No-mistakes gate authority boundary
-
-Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
-The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot enable its own project instructions during validation.
-Independently, every directly invocable fleet, project, X-mode, watcher, wake-drain, report-stack, and merge mutator uses `bin/fm-gate-refuse-lib.sh`'s boundary and exits with status 3 before mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
-A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
-The helper's header owns the exact guarded-entrypoint decision list, signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
 
 ## Two task shapes
 
-Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`), then leave a completion report at `data/<id>/completion.md`.
+Ship tasks change projects and ship by project mode (`direct-PR` or `local-only`), then leave a completion report at `data/<id>/completion.md`.
 Scout tasks investigate, plan, reproduce bugs, or audit, then leave their report at `data/<id>/report.md` and never push.
 For tasks created after the report-stack cutover, both reports follow the same completion sections and publish through fail-closed teardown to the machine-global stack described in [report-stack.md](report-stack.md).
 
@@ -170,14 +156,14 @@ The legacy Agent Fleet pool-summary selector is inactive deferred code tracked b
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
-`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
+`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
 For a domain whose subject is the firstmate repo itself, a deliberate `--no-projects` seed creates a project-less home whose crewmates take pooled worktrees of that repo instead of separate clones.
 The signal cannot be mixed with project names or omitted accidentally, and a populated home cannot be converted in place; the full seed contract is in [configuration.md](configuration.md#secondmate-routes-datasecondmatesmd).
 On the herdr backend, a secondmate launch lands in that secondmate home's labeled workspace, and crewmates spawned from that home land in the same workspace.
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
 If returning the lease fails during teardown, firstmate leaves the route and home intact instead of hiding a still-held lease.
-Seeding is transactional: if validation, cloning, initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
+Seeding is transactional: if validation, cloning, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.
 The same project may appear in multiple secondmate homes when their scopes differ, such as issue triage versus feature development.
 Secondmates are idle by default: after startup recovery reconciles only work already in their own home, an empty queue waits silently for routed tasks, and they never self-initiate surveys or audits.
@@ -208,10 +194,8 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 ## Project modes are explicit
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
-`no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+`direct-PR` projects use focused local verification, green CI, and exact-head Crosscheck before Firstmate merges. `local-only` projects stay local until Firstmate performs an approved fast-forward merge.
 Review diffs go through `bin/fm-review-diff.sh`, which refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
-For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crewmate branch until the evidence-hosting design changes.
-The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and the live `pr_head=` through `bin/fm-pr-check.sh`, requires a clear crosscheck ledger for that exact head and claims digest, and submits the reviewed SHA through GitHub's atomic expected-head merge or enqueue API.
 [`crosscheck.md`](crosscheck.md) owns the finding lifecycle, executed evidence, independent-reviewer, installed-tool, and exact-head contracts.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, uses an active base-branch merge queue when no method is explicit and otherwise defaults to `squash`, preserves supported immediate merge options, and rejects malformed URLs, repo overrides, asynchronous auto-merge, or branch deletion before recording merge state.
@@ -291,7 +275,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 ## Restart-proof
 
-Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
+Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.

@@ -8,7 +8,7 @@
 # fm-fleet-sync.sh: never force, never create a merge commit, never stash;
 # advance a target only when it is a clean fast-forward, otherwise skip and
 # report. A tracked-files fast-forward never touches the gitignored operational
-# dirs (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
+# dirs (data/, state/, config/, projects/), so a secondmate's
 # in-flight work is never disrupted. Worktrees of this repo share one object
 # store, so a single fetch refreshes them all; standalone-clone homes are
 # fetched on their own. Secondmate homes are leased at a detached HEAD on the
@@ -36,9 +36,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 

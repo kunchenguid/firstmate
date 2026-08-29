@@ -3,7 +3,7 @@
 # disposable, identity-less Azure VM.
 #
 # This is an opt-in uncredentialed command substrate, not a remote Firstmate,
-# no-mistakes coordinator, Crosscheck reviewer, author worker, or browser node.
+# Crosscheck reviewer, author worker, or browser node.
 # It never falls back to local execution after a class is selected for Azure.
 # Every billable run needs an exact subscription confirmation and the landed
 # private Azure foundation described in docs/azure-pilot.md.

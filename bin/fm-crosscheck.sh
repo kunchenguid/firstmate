@@ -9,8 +9,7 @@
 #   fm-crosscheck.sh economics <task-id>
 #   fm-crosscheck.sh merge <task-id> <full GitHub PR URL> <reviewed SHA> <method> [--allow-queue]
 #
-# `run` is intentionally independent of no-mistakes so both reviews can be in
-# flight together once a PR exists. The task-local PR-registration coordinator
+# `run` is available once a PR exists. The task-local PR-registration coordinator
 # uses `--expected-head` to refuse a moved head before reviewer or Azure spend.
 # `verify` is the merge-gate operation: it
 # re-reads live GitHub state, requires the latest attempt for that exact head
@@ -29,9 +28,6 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 
 # shellcheck source=bin/fm-crosscheck-python-lib.sh
 . "$SCRIPT_DIR/fm-crosscheck-python-lib.sh"

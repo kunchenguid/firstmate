@@ -54,6 +54,8 @@ STATE_SCHEMA = "fm.worker-lifecycle/v2"
 # it refuses loudly instead, cured by rolling forward.
 LEGACY_PENDING_SENTINEL = "superseded-by-pending-actions"
 REQUEST_SCHEMA = "fm.worker-request/v1"
+ACTIVE_WORKER_ROLES = ("author", "secondmate")
+RETIRED_WORKER_ROLES = ("no-mistakes",)
 EXECUTION_SCHEMA = "fm.worker-execution/v1"
 EXECUTION_RESULT_SCHEMA = "fm.worker-execution-result/v1"
 EXECUTION_TERMINAL_SCHEMA = "fm.worker-execution-terminal/v1"
@@ -770,6 +772,14 @@ def load_state(env):
     state.setdefault("executions", {})
     state.setdefault("pending_actions", {})
     state.setdefault("revision", 0)
+    for item in state["queue"].values():
+        if isinstance(item, dict) and item.get("role") in RETIRED_WORKER_ROLES:
+            # Upgrade compatibility only: retired service requests remain
+            # visible but can never become fresh Azure admissions.
+            item["eligible"] = False
+            item["retired_role"] = True
+            if item.get("status") in ("queued", "projecting"):
+                item["status"] = "retired"
     for worker in state["workers"].values():
         if isinstance(worker, dict):
             worker.setdefault("placement", "azure")
@@ -839,8 +849,8 @@ def verify_request(request):
     for field in ("home_binding", "account_binding", "worktree_binding", "repository_binding"):
         require_binding(field, request.get(field))
     role = request.get("role")
-    if role not in ("author", "secondmate", "no-mistakes"):
-        raise LifecycleError("worker request role must be author, secondmate, or no-mistakes")
+    if role not in ACTIVE_WORKER_ROLES:
+        raise LifecycleError("worker request role must be author or secondmate")
     if request.get("owner_kind") not in ("primary", "secondmate"):
         raise LifecycleError("worker request owner_kind must be primary or secondmate")
     if role == "secondmate" and request.get("owner_kind") != "primary":
@@ -850,8 +860,6 @@ def verify_request(request):
         raise LifecycleError(
             "a secondmate compartment is requested only by the primary; "
             "secondmates own author crewmates, never another secondmate")
-    if role == "no-mistakes" and request.get("owner_kind") != "primary":
-        raise LifecycleError("a no-mistakes worker is requested only by the primary")
     parent = request.get("parent_task")
     parent_generation = request.get("parent_task_generation")
     if (parent is None) != (parent_generation is None):
@@ -2027,7 +2035,12 @@ def admission_result(env, state, inventory, slot, item=None, provisional=()):
 
 def queued_items(state):
     return sorted(
-        [item for item in state["queue"].values() if item.get("status") == "queued" and item.get("eligible")],
+        [
+            item for item in state["queue"].values()
+            if item.get("role") in ACTIVE_WORKER_ROLES
+            and item.get("status") == "queued"
+            and item.get("eligible")
+        ],
         key=lambda item: (item.get("enqueued_at", ""), item["task"], item["task_generation"]),
     )
 
@@ -2035,7 +2048,9 @@ def queued_items(state):
 def desired_count(env, state, inventory):
     total_work = sum(
         1 for item in state["queue"].values()
-        if item.get("status") in ("queued", "assigning", "assigned") and item.get("eligible")
+        if item.get("role") in ACTIVE_WORKER_ROLES
+        and item.get("status") in ("queued", "assigning", "assigned")
+        and item.get("eligible")
     )
     actual = active_count(state, inventory)
     waiting = queued_items(state)
@@ -2103,6 +2118,33 @@ def make_action(env, action_type, worker=None, item=None, **fields):
     action.update(fields)
     action["idempotency_key"] = action_id(action)
     return action
+
+
+def enrich_legacy_service_cleanup_claim(env, state, slot, action):
+    """Copy an exact retired-service cancellation proof into an old claim.
+
+    The custom worker release predates delete-compute carrying this proof.
+    Enrichment happens only while the slot lease and controller lock are both
+    held, so replacing the idempotency key cannot race an older mutation.
+    """
+    if action.get("type") != "delete-compute" or action.get(
+        "service_cancel_proof"
+    ) is not None:
+        return action
+    worker = state.get("workers", {}).get(str(slot))
+    proof = worker.get("release_proof") if isinstance(worker, dict) else None
+    if not (
+        isinstance(proof, dict)
+        and proof.get("schema") == "fm.worker-service-cancel/v1"
+        and proof.get("verdict") == "cancelled-before-execution"
+    ):
+        return action
+    enriched = copy.deepcopy(action)
+    enriched["service_cancel_proof"] = copy.deepcopy(proof)
+    enriched["idempotency_key"] = action_id(enriched)
+    state["pending_actions"][str(slot)] = enriched
+    save_state(env, state)
+    return enriched
 
 
 def next_assignment_generation(state):
@@ -2331,6 +2373,16 @@ def drain_pending(env, slot=None, strict=True, skip_slots=None):
             continue
         if slot is not None and slot_key != str(slot):
             continue
+        if (
+            action.get("role") in RETIRED_WORKER_ROLES
+            and action.get("type") in ("create", "resume", "execute", "steer")
+        ):
+            refusals.append({
+                "type": "replay-refused",
+                "slot": int(slot_key),
+                "reason": "retired worker role cannot replay a provisioning or execution action",
+            })
+            continue
         try:
             with slot_lease(env, slot_key) as lease:
                 # The snapshot may be stale: another process can have applied
@@ -2339,9 +2391,21 @@ def drain_pending(env, slot=None, strict=True, skip_slots=None):
                 # second time for nothing and its absence then reads as a
                 # refusal.
                 with controller_lock(env):
-                    current = load_state(env).get("pending_actions", {}).get(slot_key)
-                if not isinstance(current, dict) or current.get("idempotency_key") != action.get("idempotency_key"):
+                    live = load_state(env)
+                    current = live.get("pending_actions", {}).get(slot_key)
+                    if (
+                        isinstance(current, dict)
+                        and current.get("idempotency_key")
+                        == action.get("idempotency_key")
+                    ):
+                        current = enrich_legacy_service_cleanup_claim(
+                            env, live, slot_key, current
+                        )
+                    else:
+                        current = None
+                if not isinstance(current, dict):
                     continue
+                action = current
                 result = provider_mutate(env, action, lease)
                 with controller_lock(env):
                     apply_pending(env, action, result)
@@ -2519,31 +2583,6 @@ def apply_action_result(env, state, action, result):
                 raise LifecycleError(
                     "provider execution working-tree disposition is malformed"
                 )
-        if execution_request.get("service_return_contract"):
-            present = execution.get("service_return_present")
-            if not isinstance(present, bool):
-                raise LifecycleError(
-                    "provider execution reports no no-mistakes service return disposition")
-            if present:
-                if execution.get("return_present") is not True:
-                    raise LifecycleError("no-mistakes service artifact has no return bundle")
-                expected_return_ref = "refs/fm-return/{}".format(
-                    action["request_digest"][:32])
-                if execution.get("return_ref") != expected_return_ref:
-                    raise LifecycleError("no-mistakes service return ref is not exact")
-                for field in (
-                    "return_commit", "outcome_tip", "return_manifest_sha256",
-                    "step_outcome_sha256",
-                ):
-                    if not re.fullmatch(r"[0-9a-f]{40}" if field in (
-                        "return_commit", "outcome_tip") else r"[0-9a-f]{64}",
-                        str(execution.get(field)),
-                    ):
-                        raise LifecycleError(
-                            "no-mistakes service return {} is malformed".format(field))
-            elif execution.get("step_outcome_sha256") not in (None, ""):
-                raise LifecycleError(
-                    "absent no-mistakes service return asserted a step outcome digest")
         state["executions"][action["request_digest"]] = execution
         worker["last_execution_digest"] = supplied
         worker["last_execution_at"] = iso_utc()
@@ -2620,15 +2659,6 @@ def create_admission_action(env, state, inventory, item, slot, now=None):
     )
 
 
-def service_worker_for_key(state, key):
-    matches = [
-        (slot, worker) for slot, worker in state["workers"].items()
-        if worker.get("queue_key") == key
-    ]
-    if len(matches) > 1:
-        raise LifecycleError("service request has multiple durable worker owners")
-    return matches[0] if matches else (None, None)
-
 
 def next_reconcile_action(env, state, inventory, now=None):
     now = now or now_utc()
@@ -2663,6 +2693,12 @@ def next_reconcile_action(env, state, inventory, now=None):
         classification, note = classify_worker(worker, current, now=now)
         worker["last_classification"] = classification
         worker["classification_note"] = note
+        if worker.get("role") in RETIRED_WORKER_ROLES and not worker.get("release_proof"):
+            # An already-created retired worker may be made dark, but it is
+            # never destroyed without its historical exact release proof.
+            if classification == "assigned":
+                return make_action(env, "deallocate", worker=worker, retired_role=True)
+            continue
         if not worker.get("release_proof"):
             # C3 idle release: an assigned worker whose recorded task ended
             # long ago gets its compute DEALLOCATED unattended - reversible,
@@ -2710,76 +2746,32 @@ def next_reconcile_action(env, state, inventory, now=None):
     return create_admission_action(env, state, inventory, waiting[0], slot, now=now)
 
 
-def next_service_reconcile_action(env, state, inventory, task, generation, now=None):
-    """Plan at most one mutation for one exact No-Mistakes task generation.
+def adopt_observed_retired_create(env, state, inventory):
+    """Adopt already-present retired capacity without replaying create/resume.
 
-    This deliberately does not converge another queue entry or released
-    worker. A service caller may wait for capacity, but an unrelated slow
-    provider action must never become work the caller synchronously owns.
+    A pre-upgrade provisioning claim is ambiguous: absence may mean it never
+    ran or Azure has not exposed it yet. Keep it inert on absence. When the
+    exact tagged worker is visible, apply the observed result locally so the
+    next pass can deallocate it without issuing create or resume again.
     """
-    now = now or now_utc()
-    conflicted_slots = inventory_conflict_slots(inventory)
-    key = request_key(task, generation)
-    item = state["queue"].get(key)
-    if item is None or item.get("role") != "no-mistakes":
-        raise LifecycleError("service reconcile requires one exact no-mistakes request")
-    status = item.get("status")
-    if status == "complete":
-        return None
-    if status == "queued":
-        roll_daily_baseline(state, inventory["metrics"].get("actual_usd"), now)
-        if not item.get("eligible"):
-            raise LifecycleError("service reconcile refuses an ineligible request")
-        if active_count(state, inventory) >= env["max_workers"]:
-            return None
-        slot = choose_free_slot(env, state, inventory)
-        if slot is None:
-            return None
-        return create_admission_action(env, state, inventory, item, slot, now=now)
-    if status not in ("assigning", "assigned", "releasing"):
-        raise LifecycleError("service reconcile request status is unsupported: {}".format(status))
-    slot_key, worker = service_worker_for_key(state, key)
-    if worker is None:
-        raise LifecycleError("service reconcile task has no exact durable worker owner")
-    if worker.get("role") != "no-mistakes":
-        raise LifecycleError("service reconcile worker role differs")
-    if worker["slot"] in conflicted_slots:
-        raise LifecycleError(
-            "provider found a conflict inside service worker slot {}; the exact slot was not adopted".format(
-                worker["slot"]
-            )
-        )
-    if slot_key in (state.get("pending_actions") or {}):
-        # The command drains this exact claim before planning. Seeing it here
-        # means another process still owns the slot lease; wait without
-        # touching another slot.
-        return None
-    cloud = inventory_by_slot(inventory).get(worker["slot"])
-    classification, note = classify_worker(worker, cloud, now=now)
-    worker["last_classification"] = classification
-    worker["classification_note"] = note
-    if status == "assigning":
-        raise LifecycleError("service assignment has no durable create claim")
-    if status == "assigned":
-        return None
-    if not worker.get("release_proof"):
-        raise LifecycleError("releasing service worker has no exact release proof")
-    if classification == "assigned":
-        return make_action(env, "deallocate", worker=worker)
-    if classification == "deallocated":
-        worker["cooldown_started_at"] = worker.get("cooldown_started_at") or iso_utc(now)
-        return make_action(
-            env, "delete-compute", worker=worker,
-            release_proof_digest=worker["release_proof"]["proof_digest"],
-        )
-    if classification == "orphaned-safe-to-delete":
-        return make_action(
-            env, "reset", worker=worker,
-            release_proof_digest=worker["release_proof"]["proof_digest"],
-        )
-    if classification == "retained-for-investigation":
-        return None
-    raise LifecycleError("service cleanup classification is unsupported: {}".format(note))
+    cloud = inventory_by_slot(inventory)
+    changed = False
+    for slot_key, action in sorted(
+        (state.get("pending_actions") or {}).items(), key=lambda pair: int(pair[0])
+    ):
+        if (
+            action.get("role") not in RETIRED_WORKER_ROLES
+            or action.get("type") not in ("create", "resume")
+        ):
+            continue
+        observed = cloud.get(int(slot_key))
+        if observed is None:
+            continue
+        apply_result_transactionally(env, state, action, {"worker": observed})
+        state["pending_actions"].pop(slot_key, None)
+        changed = True
+    return changed
+
 
 
 def reconcile(env, apply, confirm_subscription):
@@ -2801,6 +2793,9 @@ def reconcile(env, apply, confirm_subscription):
             with controller_lock(env):
                 state = load_state(env)
                 state["last_metrics"] = metrics_from_inventory(inventory)
+                if adopt_observed_retired_create(env, state, inventory):
+                    save_state(env, state)
+                    continue
                 refresh_classifications(state, inventory)
                 action = next_reconcile_action(env, state, inventory)
                 if action is None:
@@ -3242,8 +3237,7 @@ def parser():
     request.add_argument("--repository-binding", help=argparse.SUPPRESS)
     request.add_argument("--repository-generation", help=argparse.SUPPRESS)
     request.add_argument("--owner-kind", choices=("primary", "secondmate"), required=True)
-    request.add_argument(
-        "--role", choices=("author", "secondmate", "no-mistakes"), default="author")
+    request.add_argument("--role", choices=("author", "secondmate"), default="author")
     request.add_argument("--parent-task", default=None)
     request.add_argument("--parent-task-generation", default=None)
     request.add_argument(
@@ -3297,15 +3291,6 @@ def parser():
     reconcile_parser.add_argument("--apply", action="store_true")
     reconcile_parser.add_argument("--confirm-subscription")
     reconcile_parser.add_argument("--json", action="store_true")
-
-    service_reconcile = sub.add_parser(
-        "service-reconcile",
-        help="advance only one exact no-mistakes request or its own pending claim",
-    )
-    service_reconcile.add_argument("--task", required=True)
-    service_reconcile.add_argument("--task-generation", required=True)
-    service_reconcile.add_argument("--confirm-subscription", required=True)
-    service_reconcile.add_argument("--json", action="store_true")
 
     proof = sub.add_parser("proof-template", help="print the exact release-receipt skeleton")
     proof.add_argument("--task", required=True)
@@ -3378,26 +3363,6 @@ def parser():
     release.add_argument("--task", required=True)
     release.add_argument("--task-generation", required=True)
     release.add_argument("--proof-file", required=True)
-
-    service_complete = sub.add_parser(
-        "service-complete",
-        help="release one no-mistakes service worker after its exact execution is recorded",
-    )
-    service_complete.add_argument("--task", required=True)
-    service_complete.add_argument("--task-generation", required=True)
-    service_complete.add_argument("--assignment-generation", required=True)
-    service_complete.add_argument("--request-digest", required=True)
-    service_complete.add_argument("--confirm-subscription", required=True)
-
-    service_cancel = sub.add_parser(
-        "service-cancel",
-        help="release one cancelled no-mistakes worker before any execution started",
-    )
-    service_cancel.add_argument("--task", required=True)
-    service_cancel.add_argument("--task-generation", required=True)
-    service_cancel.add_argument("--assignment-generation", required=True)
-    service_cancel.add_argument("--confirm-cancel", action="store_true")
-    service_cancel.add_argument("--confirm-subscription", required=True)
 
     resume = sub.add_parser("resume", help="reattach exact retained dirty task capacity")
     resume.add_argument("--task", required=True)
@@ -3883,185 +3848,7 @@ def public_action(action):
     return value
 
 
-def service_task_projection(state, task, generation):
-    key = request_key(task, generation)
-    item = state["queue"].get(key)
-    if item is None:
-        raise LifecycleError("service reconcile requires one exact no-mistakes request")
-    slot_key, worker = service_worker_for_key(state, key)
-    return {
-        "task": task,
-        "task_generation": generation,
-        "status": item.get("status"),
-        "slot": int(slot_key) if slot_key is not None else None,
-        "assignment_generation": (
-            worker.get("assignment_generation") if worker is not None
-            else item.get("assignment_generation")
-        ),
-        "pending_action": (
-            ((state.get("pending_actions") or {}).get(slot_key) or {}).get("type")
-            if slot_key is not None else None
-        ),
-    }
 
-
-def adopt_observed_service_cancel_cleanup(state, task, generation, inventory):
-    """Retire a legacy delete claim after exact cancelled state is observable."""
-    key = request_key(task, generation)
-    item = state["queue"].get(key)
-    if item is None or item.get("role") != "no-mistakes" or item.get("status") != "releasing":
-        return False
-    slot_key, worker = service_worker_for_key(state, key)
-    if slot_key is None or worker is None:
-        return False
-    action = (state.get("pending_actions") or {}).get(slot_key)
-    if (
-        not isinstance(action, dict)
-        or action.get("type") != "delete-compute"
-        or action.get("service_cancel_proof") is not None
-        or action.get("bindings") != worker.get("bindings")
-    ):
-        return False
-    proof = worker.get("release_proof")
-    if not isinstance(proof, dict) or item.get("service_completion_receipt") != proof:
-        return False
-    unsigned = copy.deepcopy(proof)
-    supplied = unsigned.pop("proof_digest", None)
-    bindings = worker.get("bindings") or {}
-    if (
-        proof.get("schema") != "fm.worker-service-cancel/v1"
-        or proof.get("verdict") != "cancelled-before-execution"
-        or supplied != digest_value(unsigned)
-        or action.get("release_proof_digest") != supplied
-        or proof.get("task") != task
-        or proof.get("task_generation") != generation
-        or proof.get("assignment_generation") != worker.get("assignment_generation")
-        or bindings.get("task") != task
-        or bindings.get("task_generation") != generation
-        or worker.get("last_execution_digest") is not None
-    ):
-        return False
-    executions = [
-        execution for execution in (state.get("executions") or {}).values()
-        if isinstance(execution, dict)
-        and execution.get("task") == task
-        and execution.get("task_generation") == generation
-        and execution.get("assignment_generation") == worker.get("assignment_generation")
-    ]
-    if executions:
-        return False
-    cloud = inventory_by_slot(inventory).get(int(slot_key))
-    classification, _note = classify_worker(worker, cloud)
-    if classification != "orphaned-safe-to-delete":
-        return False
-    record_refusal(state, worker, LifecycleError(
-        "adopted observed cancelled state: legacy delete-compute claim omitted the exact "
-        "service-cancel proof after compute was already absent; no recorded execution exists"
-    ))
-    state["pending_actions"].pop(slot_key, None)
-    return True
-
-
-def command_service_reconcile(env, args):
-    """Advance only one service request, never unrelated fleet convergence."""
-    if args.confirm_subscription != env["subscription"]:
-        raise LifecycleError(
-            "--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
-    task = require_id("task", args.task)
-    generation = require_id("task generation", args.task_generation)
-    key = request_key(task, generation)
-
-    # Replay belongs to the same narrow command, but only for the target's
-    # exact slot. If the original owner is still alive, drain_pending skips it
-    # and this invocation returns without inventorying or touching the fleet.
-    with controller_lock(env):
-        state = load_state(env)
-        item = state["queue"].get(key)
-        if item is None or item.get("role") != "no-mistakes":
-            raise LifecycleError("service reconcile requires one exact no-mistakes request")
-        slot_key, worker = service_worker_for_key(state, key)
-        pending = (
-            (state.get("pending_actions") or {}).get(slot_key)
-            if slot_key is not None else None
-        )
-    inventory = None
-    if pending is not None and pending.get("type") == "delete-compute":
-        if worker is None or slot_key is None:
-            raise LifecycleError("service reconcile task has no exact durable worker owner")
-        inventory = provider_slot_inventory(env, worker["slot"])
-        with controller_lock(env):
-            state = load_state(env)
-            if adopt_observed_service_cancel_cleanup(
-                state, task, generation, inventory
-            ):
-                save_state(env, state)
-                pending = None
-    if pending is not None:
-        drained, _ = drain_pending(env, slot=slot_key, strict=True)
-        with controller_lock(env):
-            state = load_state(env)
-            projection = service_task_projection(state, task, generation)
-        output = {
-            "actions": ([{"type": "replay", "slot": int(slot_key)}] if drained else []),
-            "task": projection,
-        }
-        if args.json:
-            print(json.dumps(output, sort_keys=True, separators=(",", ":")))
-        elif drained:
-            print("replay: slot={} task={}@{}".format(slot_key, task, generation))
-        else:
-            print("pending: slot={} task={}@{}".format(slot_key, task, generation))
-        return
-
-    if inventory is None:
-        if item.get("status") == "queued":
-            inventory = provider_call(env, "inventory")["inventory"]
-        else:
-            if worker is None or slot_key is None:
-                raise LifecycleError("service reconcile task has no exact durable worker owner")
-            inventory = provider_slot_inventory(env, worker["slot"])
-    action = None
-    with contextlib.ExitStack() as stack:
-        with controller_lock(env):
-            state = load_state(env)
-            if item.get("status") == "queued":
-                state["last_metrics"] = metrics_from_inventory(inventory)
-            action = next_service_reconcile_action(
-                env, state, inventory, task, generation
-            )
-            if action is None or action.get("type") == "admission-refused":
-                save_state(env, state)
-            else:
-                lease = stack.enter_context(slot_lease(env, action["slot"]))
-                claim_pending(env, state, action)
-        if action is not None and action.get("type") != "admission-refused":
-            try:
-                result = provider_mutate(env, action, lease)
-                with controller_lock(env):
-                    apply_pending(env, action, result)
-            except LifecycleError as exc:
-                with controller_lock(env):
-                    clean = load_state(env)
-                    record_refusal(
-                        clean, clean["workers"].get(str(action.get("slot"))), exc
-                    )
-                    save_state(env, clean)
-                raise
-    with controller_lock(env):
-        state = load_state(env)
-        projection = service_task_projection(state, task, generation)
-    actions = [public_action(action)] if action is not None else []
-    output = {"actions": actions, "task": projection}
-    if args.json:
-        print(json.dumps(output, sort_keys=True, separators=(",", ":")))
-    elif action is None:
-        print("waiting: {}@{} status={}".format(task, generation, projection["status"]))
-    elif action["type"] == "admission-refused":
-        print("admission refused: {}".format(action["reason"]))
-    else:
-        print("{}: slot={} task={}@{}".format(
-            action["type"], action.get("slot"), task, generation
-        ))
 
 
 def command_reconcile(env, args):
@@ -4585,11 +4372,6 @@ COMPARTMENT_PAYLOAD_REQUIRED = PAYLOAD_REQUIRED + (
     "fm-secondmate-session.py",
     "fm-secondmate-spawn.pi-ext.ts",
 )
-NO_MISTAKES_PAYLOAD_FILE_BOUNDS = {
-    **PAYLOAD_FILE_BOUNDS,
-    "runtime.tar.gz": 1024 * 1024 * 1024,
-}
-NO_MISTAKES_PAYLOAD_REQUIRED = PAYLOAD_REQUIRED + ("runtime.tar.gz",)
 ACCOUNT_TOTAL_BOUND = 1024 * 1024
 
 
@@ -4603,8 +4385,6 @@ def payload_contract(role):
     """
     if role == "secondmate":
         return COMPARTMENT_PAYLOAD_FILE_BOUNDS, COMPARTMENT_PAYLOAD_REQUIRED
-    if role == "no-mistakes":
-        return NO_MISTAKES_PAYLOAD_FILE_BOUNDS, NO_MISTAKES_PAYLOAD_REQUIRED
     return PAYLOAD_FILE_BOUNDS, PAYLOAD_REQUIRED
 
 
@@ -4745,15 +4525,6 @@ def command_execute(env, args):
                 "visuals_path": "data/{}/visuals".format(args.task),
                 "branch": "fm/{}".format(args.task) if args.return_kind == "ship" else "",
             }
-        if worker.get("role") == "no-mistakes":
-            if args.outcome_dir is None:
-                raise LifecycleError("a no-mistakes execution requires an outcome directory")
-            request["worker_role"] = "no-mistakes"
-            request["service_return_contract"] = {
-                "schema": "fm.no-mistakes-worker-return/v1",
-                "step_outcome_path": "outcome.json",
-                "step_outcome_max_bytes": 1024 * 1024,
-            }
         request["request_digest"] = digest_value(request)
         existing = state["executions"].get(request["request_digest"])
         if existing is not None:
@@ -4854,183 +4625,6 @@ def command_release(env, args):
     print("release proofs recorded; only exact idle capacity is now eligible for deallocation and reset")
 
 
-def command_service_complete(env, args):
-    """Release a service assignment from execution evidence the lifecycle owns.
-
-    Ordinary crewmates return through task reports and landing receipts.  A
-    no-mistakes worker instead returns a digest-bound service envelope to its
-    controller, so asking it to manufacture ordinary task authority would be
-    ceremony and, worse, a false claim.  This narrow role-owned boundary only
-    accepts an execution already stored under the exact assigned worker.
-    """
-    if args.confirm_subscription != env["subscription"]:
-        raise LifecycleError(
-            "--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
-    request_digest = require_binding("execution request digest", args.request_digest)
-    with controller_lock(env):
-        state = load_state(env)
-        key = request_key(
-            require_id("task", args.task),
-            require_id("task generation", args.task_generation),
-        )
-        item = state["queue"].get(key)
-        if item is None or item.get("role") != "no-mistakes":
-            raise LifecycleError("service completion is owned by no-mistakes workers only")
-        execution = state["executions"].get(request_digest)
-        if not isinstance(execution, dict):
-            raise LifecycleError("service completion has no exact recorded execution")
-        receipt = item.get("service_completion_receipt")
-        if receipt is not None:
-            if item.get("status") not in ("releasing", "complete"):
-                raise LifecycleError("service completion receipt exists in an invalid queue state")
-            if not isinstance(receipt, dict):
-                raise LifecycleError("service completion receipt is malformed")
-            unsigned_receipt = dict(receipt)
-            receipt_digest = unsigned_receipt.pop("proof_digest", None)
-            if (
-                receipt.get("schema") != "fm.worker-service-release/v1"
-                or receipt.get("task") != args.task
-                or receipt.get("task_generation") != args.task_generation
-                or receipt.get("assignment_generation") != args.assignment_generation
-                or receipt.get("request_digest") != request_digest
-                or receipt.get("result_digest") != execution.get("result_digest")
-                or execution.get("request_digest") != request_digest
-                or execution.get("assignment_generation") != args.assignment_generation
-                or receipt.get("verdict") != "proved"
-                or receipt_digest != digest_value(unsigned_receipt)
-            ):
-                raise LifecycleError("service completion receipt identity differs")
-            worker = state["workers"].get(str(item.get("slot")))
-            worker_owns_item = (
-                worker is not None and worker.get("queue_key") == key
-            )
-            if item.get("status") == "releasing" and not worker_owns_item:
-                raise LifecycleError("releasing service completion lost its exact worker")
-            if worker_owns_item and (
-                worker.get("role") != "no-mistakes"
-                or worker.get("assignment_generation") != args.assignment_generation
-                or worker.get("release_proof") != receipt
-            ):
-                raise LifecycleError("service completion worker receipt identity differs")
-            print("service release proof already recorded with exact identity")
-            return
-        worker = state["workers"].get(str(item.get("slot")))
-        if item.get("status") != "assigned" or worker is None:
-            raise LifecycleError("service completion requires one exact assigned worker")
-        if worker.get("role") != "no-mistakes":
-            raise LifecycleError("service completion is owned by no-mistakes workers only")
-        if worker.get("assignment_generation") != args.assignment_generation:
-            raise LifecycleError("service completion assignment generation is not exact")
-        if (
-            execution.get("request_digest") != request_digest
-            or execution.get("result_digest") != worker.get("last_execution_digest")
-            or execution.get("assignment_generation") != args.assignment_generation
-        ):
-            raise LifecycleError("service completion execution identity differs")
-        proof = {
-            "schema": "fm.worker-service-release/v1",
-            **worker["bindings"],
-            "assignment_generation": args.assignment_generation,
-            "cloud_instance_id": worker["cloud_instance_id"],
-            "resources": worker["resources"],
-            "request_digest": request_digest,
-            "result_digest": execution["result_digest"],
-            "verdict": "proved",
-        }
-        proof["proof_digest"] = digest_value(proof)
-        held = worker.get("release_proof")
-        if held is not None:
-            if held != proof:
-                raise LifecycleError("worker already has a different service release proof")
-            print("service release proof already recorded with exact identity")
-            return
-        worker["release_proof"] = copy.deepcopy(proof)
-        worker["released_at"] = iso_utc()
-        worker["phase"] = "release-proved"
-        item["service_completion_receipt"] = copy.deepcopy(proof)
-        item["status"] = "releasing"
-        save_state(env, state)
-    print("service execution proved; exact idle capacity is eligible for cleanup")
-
-
-def command_service_cancel(env, args):
-    """Release a cancelled no-mistakes assignment that never executed."""
-    if not args.confirm_cancel:
-        raise LifecycleError("--confirm-cancel is required")
-    if args.confirm_subscription != env["subscription"]:
-        raise LifecycleError(
-            "--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
-    task = require_id("task", args.task)
-    generation = require_id("task generation", args.task_generation)
-    assignment = require_id("assignment generation", args.assignment_generation)
-    with controller_lock(env):
-        state = load_state(env)
-        key = request_key(task, generation)
-        item = state["queue"].get(key)
-        if item is None or item.get("role") != "no-mistakes":
-            raise LifecycleError("service cancellation is owned by no-mistakes workers only")
-        receipt = item.get("service_completion_receipt")
-        if receipt is not None:
-            if not isinstance(receipt, dict):
-                raise LifecycleError("service cancellation receipt identity differs")
-            unsigned = dict(receipt)
-            proof_digest = unsigned.pop("proof_digest", None)
-            if (
-                item.get("status") not in ("releasing", "complete")
-                or receipt.get("schema") != "fm.worker-service-cancel/v1"
-                or receipt.get("task") != task
-                or receipt.get("task_generation") != generation
-                or receipt.get("assignment_generation") != assignment
-                or receipt.get("verdict") != "cancelled-before-execution"
-                or proof_digest != digest_value(unsigned)
-            ):
-                raise LifecycleError("service cancellation receipt identity differs")
-            worker = state["workers"].get(str(item.get("slot")))
-            if item.get("status") == "releasing" and (
-                worker is None or worker.get("queue_key") != key
-                or worker.get("release_proof") != receipt
-            ):
-                raise LifecycleError("releasing service cancellation lost its exact worker")
-            print("service cancellation already recorded with exact identity")
-            return
-        if item.get("status") != "assigned":
-            raise LifecycleError("service cancellation requires one exact assigned worker")
-        worker = state["workers"].get(str(item.get("slot")))
-        if worker is None or worker.get("queue_key") != key:
-            raise LifecycleError("service cancellation has no exact durable worker owner")
-        if worker.get("role") != "no-mistakes":
-            raise LifecycleError("service cancellation worker role differs")
-        if worker.get("assignment_generation") != assignment:
-            raise LifecycleError("service cancellation assignment generation is not exact")
-        if (state.get("pending_actions") or {}).get(str(worker["slot"])) is not None:
-            raise LifecycleError("service cancellation worker has a pending provider action")
-        executions = [
-            execution for execution in (state.get("executions") or {}).values()
-            if isinstance(execution, dict)
-            and execution.get("task") == task
-            and execution.get("task_generation") == generation
-            and execution.get("assignment_generation") == assignment
-        ]
-        if worker.get("last_execution_digest") is not None or executions:
-            raise LifecycleError("service cancellation refuses a worker that executed")
-        proof = {
-            "schema": "fm.worker-service-cancel/v1",
-            **worker["bindings"],
-            "assignment_generation": assignment,
-            "cloud_instance_id": worker["cloud_instance_id"],
-            "resources": worker["resources"],
-            "verdict": "cancelled-before-execution",
-        }
-        proof["proof_digest"] = digest_value(proof)
-        if worker.get("release_proof") is not None:
-            raise LifecycleError("worker already has a different release proof")
-        worker["release_proof"] = copy.deepcopy(proof)
-        worker["released_at"] = iso_utc()
-        worker["phase"] = "release-proved"
-        item["service_completion_receipt"] = copy.deepcopy(proof)
-        item["status"] = "releasing"
-        save_state(env, state)
-    print("service cancellation proved; exact idle capacity is eligible for cleanup")
 
 
 def command_withdraw(env, args):
@@ -5065,7 +4659,7 @@ def command_withdraw(env, args):
         if item is None:
             raise LifecycleError("withdraw requires one exact queued task generation")
         status = item.get("status")
-        if status not in ("queued", "projecting"):
+        if status not in ("queued", "projecting", "retired"):
             # Anything past the queue has cloud capacity or a live assignment
             # behind it, and dropping the entry would strand that worker with no
             # queue owner. Those go out through release.
@@ -5121,6 +4715,67 @@ def command_withdraw(env, args):
     print("FM-WITHDREW {} {}".format(args.task, args.task_generation))
     write_task_home_receipt(getattr(args, "task_home_out", None), withdrawn)
     print("withdrew queued request {}".format(key))
+
+
+def retire_unsubmitted_retired_create(env, action):
+    """Resolve one retired create claim without ever submitting a create.
+
+    Two fresh exact inventories must agree. Stable observed capacity is
+    adopted for ordinary darkening; stable absence retires only the provisional
+    local owner and its private credential projection. Any disagreement stays
+    fail-closed behind the original durable claim.
+    """
+    slot = str(action.get("slot", ""))
+    first = inventory_by_slot(provider_call(env, "inventory")["inventory"]).get(
+        int(slot)
+    )
+    second = inventory_by_slot(provider_call(env, "inventory")["inventory"]).get(
+        int(slot)
+    )
+    if (first is None) != (second is None):
+        raise LifecycleError(
+            "retired create absence changed between fresh Azure inventories"
+        )
+    if first is not None and digest_value(first) != digest_value(second):
+        raise LifecycleError(
+            "retired create identity changed between fresh Azure inventories"
+        )
+    with controller_lock(env):
+        state = load_state(env)
+        current = state.get("pending_actions", {}).get(slot)
+        if not isinstance(current, dict) or current.get("idempotency_key") != action.get(
+            "idempotency_key"
+        ):
+            raise LifecycleError("retired create claim changed while resolving it")
+        worker = state.get("workers", {}).get(slot)
+        if not isinstance(worker, dict) or worker.get("role") not in RETIRED_WORKER_ROLES:
+            raise LifecycleError("retired create has no exact provisional worker owner")
+        if first is not None:
+            apply_result_transactionally(env, state, current, {"worker": second})
+            state["pending_actions"].pop(slot, None)
+            save_state(env, state)
+            return "adopted"
+        if worker.get("cloud_instance_id") is not None or worker.get("resources"):
+            raise LifecycleError(
+                "absent retired create has non-provisional durable cloud identity"
+            )
+        queue_key = worker.get("queue_key")
+        item = state.get("queue", {}).get(queue_key)
+        if not isinstance(item, dict) or item.get("status") != "retired":
+            raise LifecycleError("absent retired create has no exact retired queue owner")
+        cleanup_placement_projection(env, item)
+        record_refusal(
+            state,
+            worker,
+            LifecycleError(
+                "retired create abandoned after two exact Azure absence observations"
+            ),
+        )
+        state["pending_actions"].pop(slot, None)
+        state["workers"].pop(slot, None)
+        state["queue"].pop(queue_key, None)
+        save_state(env, state)
+    return "retired"
 
 
 def write_task_home_receipt(path, item, worker=None):
@@ -5479,6 +5134,18 @@ def command_abandon_claim(env, args):
             current = (load_state(env).get("pending_actions") or {}).get(slot)
         if not isinstance(current, dict) or current.get("idempotency_key") != action["idempotency_key"]:
             raise LifecycleError("slot {} claim changed while abandoning; retry".format(slot))
+        if (
+            action.get("role") in RETIRED_WORKER_ROLES
+            and action.get("type") == "create"
+        ):
+            disposition = retire_unsubmitted_retired_create(env, action)
+            print("FM-ABANDONED-CLAIM {} {}".format(
+                slot, action["idempotency_key"]
+            ))
+            print(
+                "retired create resolved without provisioning: {}".format(disposition)
+            )
+            return
         identity_refusal = None
         replay_failure = None
         try:
@@ -5889,16 +5556,10 @@ def main(argv=None):
         command_authority_receipt(env, args)
     elif args.command == "reconcile":
         command_reconcile(env, args)
-    elif args.command == "service-reconcile":
-        command_service_reconcile(env, args)
     elif args.command == "proof-template":
         command_proof_template(env, args)
     elif args.command == "release":
         command_release(env, args)
-    elif args.command == "service-complete":
-        command_service_complete(env, args)
-    elif args.command == "service-cancel":
-        command_service_cancel(env, args)
     elif args.command == "withdraw":
         command_withdraw(env, args)
     elif args.command == "surrender":

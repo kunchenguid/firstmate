@@ -35,9 +35,6 @@
 #   fm-worker-lifecycle.sh capacity-release <exact fence and cleanup receipt>
 #   fm-worker-lifecycle.sh execute <exact assignment flags> [--existing-task-disk --return-kind <ship|scout> --outcome-dir <dir>] -- <argv...>
 #   fm-worker-lifecycle.sh authority-receipt <exact assignment flags> --output <json>
-#   fm-worker-lifecycle.sh service-complete <exact no-mistakes execution binding>
-#   fm-worker-lifecycle.sh service-cancel <exact never-executed no-mistakes assignment binding>
-#   fm-worker-lifecycle.sh service-reconcile <exact no-mistakes task binding>
 #   fm-worker-lifecycle.sh proof-template --task <id> --task-generation <id>
 #   fm-worker-lifecycle.sh release --task <id> --task-generation <id> --proof-file <json>
 #   fm-worker-lifecycle.sh withdraw --task <id> --task-generation <id> --confirm-withdraw --confirm-subscription <uuid>
@@ -54,8 +51,6 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-cloud-state-lib.sh
 . "$SCRIPT_DIR/fm-cloud-state-lib.sh"
 
@@ -141,12 +136,10 @@ fm_worker_receipt_credential_remains() {  # <task home file> <task id> <controll
 }
 
 case "${1:-}" in
-  request|release|resume|steer|execute|authority-receipt|service-complete|service-cancel|service-reconcile|capacity-reserve|capacity-reserve-shape|capacity-release|capacity-retire-fence|abandon-claim|message-put|message-collect|compartment-chain-tip)
-    fm_refuse_if_gate_agent
+  request|release|resume|steer|execute|authority-receipt|capacity-reserve|capacity-reserve-shape|capacity-release|capacity-retire-fence|abandon-claim|message-put|message-collect|compartment-chain-tip)
     exec python3 "$SCRIPT_DIR/fm-worker-lifecycle.py" "$@"
     ;;
   withdraw)
-    fm_refuse_if_gate_agent
     # A withdrawn request leaves no durable owner for the convergence artifacts
     # bin/fm-spawn.sh staged for it, including the COPIED PROVIDER CREDENTIAL at
     # $STATE/<id>.cloud-account/auth.json. fm-spawn's own rollback removes them
@@ -184,7 +177,6 @@ case "${1:-}" in
     exit 0
     ;;
   surrender)
-    fm_refuse_if_gate_agent
     # A surrendered task's local cloud state has the same no-owner problem as a
     # withdrawn one: its endpoint, metadata and teardown are already gone (that
     # is what made surrender necessary), so nothing else will ever remove the
@@ -216,7 +208,6 @@ case "${1:-}" in
   reconcile)
     for argument in "$@"; do
       if [ "$argument" = --apply ]; then
-        fm_refuse_if_gate_agent
         break
       fi
     done

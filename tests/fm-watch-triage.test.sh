@@ -255,9 +255,9 @@ test_failure_pause_is_failure_classifier() {
   # (1) The three REAL absorbed-failure lines from the incident. Each must stop
   # being a pause and start being captain-relevant, exactly like blocked:/failed:.
   local -a real=(
-    'paused: error: "drive run: reconcile run 01KYQ8QXTVR5KDRPSR49ZF422B: read response: read unix ->/Users/x/.no-mistakes/socket: i/o timeout"'
-    'paused: no-mistakes v1.41.2 fresh run error: drive run: reconcile run 01KYQ8QXTVR5KDRPSR49ZF422B: read response: read unix ->/Users/x/.no-mistakes/socket: i/o timeout'
-    'paused: run 01KYQ8NGB3YTQC9PS82P3E6C81 drive failed on no-mistakes v1.41.2: drive run: reconcile run 01KYQ8NGB3YTQC9PS82P3E6C81: read response'
+    'paused: error: "drive run: reconcile run 01KYQ8QXTVR5KDRPSR49ZF422B: read response: read unix ->/Users/x/.review/socket: i/o timeout"'
+    'paused: review v1.41.2 fresh run error: drive run: reconcile run 01KYQ8QXTVR5KDRPSR49ZF422B: read response: read unix ->/Users/x/.review/socket: i/o timeout'
+    'paused: run 01KYQ8NGB3YTQC9PS82P3E6C81 drive failed on review v1.41.2: drive run: reconcile run 01KYQ8NGB3YTQC9PS82P3E6C81: read response'
   )
   for line in "${real[@]}"; do
     status_pause_is_failure "$line" || fail "a real failure-pause was not detected: $line"
@@ -515,7 +515,7 @@ test_working_note_not_working_surfaced() {
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
   printf 'working: compiling step 2\n' > "$status_file"
-  # A non-no-mistakes crewmate (no run) whose pane went idle: fm-crew-state falls back
+  # A non-review crewmate (no run) whose pane went idle: fm-crew-state falls back
   # to the stale working: status-log line. That is NOT positive evidence, so the
   # wake must surface - these users must never be left hanging.
   export FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling step 2'
@@ -855,7 +855,7 @@ test_terminal_stale_surfaced() {
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crewmate's own status
-# log gets no new entry once firstmate hands it to a no-mistakes validation
+# log gets no new entry once firstmate hands it to a review validation
 # (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
 # pre-validation "done:" line as the LAST line for the run's entire (possibly
 # many-minutes) duration. stale_is_terminal alone has no run-step awareness and
@@ -868,15 +868,15 @@ test_stale_terminal_status_overridden_by_active_run() {
   dir=$(make_case terminal-stale-overridden); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-validating"
-  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  printf 'review axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
-  # The crewmate reported done BEFORE firstmate triggered no-mistakes validation;
+  # The crewmate reported done BEFORE firstmate triggered review validation;
   # this line never gets superseded by a newer status-log entry while the
   # pipeline itself runs.
   printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  pane_hash=$(hash_text "review axi run: validating...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
@@ -970,7 +970,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
 # The key requirement: a crewmate with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
 # It must surface at once, never wait out the wedge timer, so these users (a
-# non-no-mistakes crewmate, or any crewmate with no running pipeline) are never left hanging.
+# non-review crewmate, or any crewmate with no running pipeline) are never left hanging.
 
 test_nonterminal_stale_not_working_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
@@ -1011,7 +1011,7 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
-# A terminal no-mistakes run-step remains authoritative current-state evidence,
+# A terminal review run-step remains authoritative current-state evidence,
 # but for stale-pane ABSORB classification a newer durable declared pause says why
 # the finished crewmate is intentionally idle. The pause must therefore enter the
 # long-cadence path without losing cadence markers from an earlier watcher cycle.
@@ -1177,7 +1177,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 
 # --- non-terminal stale, crewmate reported a FAILURE under the pause verb --------
 # The 2026-07-24 incident, end to end: six crewmates appended "paused: <failure>" when
-# their no-mistakes runs died on a socket timeout, and the watcher absorbed all of them
+# their review runs died on a socket timeout, and the watcher absorbed all of them
 # as declared external waits, re-surfacing at most once an hour. The fleet sat stalled
 # for 2.5 hours. A failure-pause must take the ordinary surface path immediately -
 # never .paused-<key>, never the hour-long recheck cadence - while the deliberate-pause
@@ -1190,7 +1190,7 @@ test_failure_pause_stale_surfaced_not_absorbed() {
   printf 'idle after the run died' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/failpause.meta"
   # The exact shape from the incident: the pause verb carrying a failure report.
-  printf 'paused: run 01KYQ8NGB3YTQC9PS82P3E6C81 drive failed on no-mistakes v1.41.2: drive run: reconcile run: read response\n' \
+  printf 'paused: run 01KYQ8NGB3YTQC9PS82P3E6C81 drive failed on review v1.41.2: drive run: reconcile run: read response\n' \
     > "$state/failpause.status"
   sig=$(seen_sig "$state/failpause.status"); printf '%s' "$sig" > "$state/.seen-failpause_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1199,7 +1199,7 @@ test_failure_pause_stale_surfaced_not_absorbed() {
   printf '1\n' > "$state/.count-$key"
   # fm-crew-state.sh maps a failure-pause log line to `failed` (map_log_state), so
   # crew_absorb_class reports `none` - the crewmate has stopped.
-  export FM_FAKE_CREW_STATE='state: failed · source: status-log · run 01KY drive failed on no-mistakes v1.41.2'
+  export FM_FAKE_CREW_STATE='state: failed · source: status-log · run 01KY drive failed on review v1.41.2'
 
   # A generous pause cadence must not help it hide: the failure surfaces at once.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \

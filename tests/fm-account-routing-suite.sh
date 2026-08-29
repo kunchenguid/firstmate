@@ -831,14 +831,14 @@ test_unmanaged_postinstall_failure_restores_prior_state() {
     "project=$PROJ_DIR" \
     "harness=pi" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "custom_extension=retain-me"
   expected="$CASE_DIR/original.meta"
   lock_root="$CASE_DIR/checkout-refresh-locks"
   mkdir -p "$lock_root"
   lock_marker="$CASE_DIR/checkout-return-held-lock"
   cp "$HOME_DIR/state/$id.meta" "$expected"
-  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token crosscheck-autostart.request.json crosscheck-autostart.json crosscheck-autostart.log; do
     printf 'prior-%s\n' "$artifact" > "$HOME_DIR/state/$id.$artifact"
   done
 
@@ -853,7 +853,7 @@ test_unmanaged_postinstall_failure_restores_prior_state() {
   [ "$status" -ne 0 ] || fail "post-metadata unmanaged launch failure unexpectedly succeeded"
   cmp -s "$HOME_DIR/state/$id.meta" "$expected" \
     || fail "post-metadata unmanaged failure did not restore prior metadata"
-  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token crosscheck-autostart.request.json crosscheck-autostart.json crosscheck-autostart.log; do
     [ "$(cat "$HOME_DIR/state/$id.$artifact" 2>/dev/null)" = "prior-$artifact" ] \
       || fail "post-metadata unmanaged failure did not restore prior $artifact state"
   done
@@ -935,7 +935,7 @@ test_unmanaged_rollback_waits_for_metadata_lock() {
     "project=$PROJ_DIR" \
     "harness=pi" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "custom_extension=retain-me"
   marker="$CASE_DIR/gotmp-send-started"
   release="$CASE_DIR/gotmp-send-release"
@@ -1579,7 +1579,7 @@ test_unmanaged_respawn_preserves_report_cutover_state() {
     "project=$PROJ_DIR" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "tasktmp=$prior_task_tmp" \
     "generation_id=spawn:a111111111111111" \
     "pr=418" \
@@ -1611,14 +1611,14 @@ test_failed_managed_respawn_restores_unmanaged_metadata() {
     "project=$PROJ_DIR" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "tasktmp=$prior_task_tmp" \
     "generation_id=spawn:a222222222222222" \
     "pr=417" \
     "custom_extension=preserve-me"
   expected="$CASE_DIR/original.meta"
   cp "$HOME_DIR/state/$id.meta" "$expected"
-  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token crosscheck-autostart.request.json crosscheck-autostart.json crosscheck-autostart.log; do
     printf 'prior-%s\n' "$artifact" > "$HOME_DIR/state/$id.$artifact"
   done
   out=$(FM_FAKE_AF_SESSION_MISSING=1 run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew)
@@ -1630,7 +1630,7 @@ test_failed_managed_respawn_restores_unmanaged_metadata() {
     diff -u "$expected" "$HOME_DIR/state/$id.meta" >&2 || true
     fail "failed managed respawn did not restore the original unmanaged metadata"
   fi
-  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token crosscheck-autostart.request.json crosscheck-autostart.json crosscheck-autostart.log; do
     [ "$(cat "$HOME_DIR/state/$id.$artifact" 2>/dev/null)" = "prior-$artifact" ] \
       || fail "failed managed respawn did not restore prior $artifact state"
   done
@@ -1806,7 +1806,7 @@ test_preinstall_managed_failure_restores_artifact_snapshot() {
     "project=$PROJ_DIR" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   artifact="$HOME_DIR/state/$id.pi-ext.ts"
   printf 'prior-state\n' > "$artifact"
   expected="$CASE_DIR/original.meta"
@@ -2700,7 +2700,7 @@ test_duplicate_spawn_preserves_original_endpoint_and_lease() {
   rec=$(make_case duplicate claude "$id")
   read_case "$rec"
   run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew >/dev/null || fail "initial duplicate test spawn failed"
-  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token crosscheck-autostart.request.json crosscheck-autostart.json crosscheck-autostart.log; do
     printf 'existing-%s\n' "$artifact" > "$HOME_DIR/state/$id.$artifact"
   done
   clear_case_logs
@@ -2710,7 +2710,7 @@ test_duplicate_spawn_preserves_original_endpoint_and_lease() {
   [ ! -s "$AF_LOG" ] || fail "duplicate managed spawn touched the original lease: $(cat "$AF_LOG")"
   assert_not_grep '^kill-window ' "$TMUX_LOG" "duplicate managed spawn killed the original endpoint"
   assert_present "$CASE_DIR/endpoint-live" "duplicate managed spawn removed the original endpoint marker"
-  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token crosscheck-autostart.request.json crosscheck-autostart.json crosscheck-autostart.log; do
     [ "$(cat "$HOME_DIR/state/$id.$artifact" 2>/dev/null)" = "existing-$artifact" ] \
       || fail "duplicate managed spawn removed the existing $artifact sidecar"
   done
@@ -3125,7 +3125,7 @@ test_failed_secondmate_respawn_rollback_restores_prior_state() {
     "custom_extension=preserve-secondmate"
   expected="$CASE_DIR/original-secondmate.meta"
   cp "$HOME_DIR/state/$id.meta" "$expected"
-  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token crosscheck-autostart.request.json crosscheck-autostart.json crosscheck-autostart.log; do
     printf 'prior-%s\n' "$artifact" > "$HOME_DIR/state/$id.$artifact"
   done
 
@@ -3140,7 +3140,7 @@ test_failed_secondmate_respawn_rollback_restores_prior_state() {
   status=$?
   [ "$status" -ne 0 ] || fail "secondmate rollback cleanup continued through a restored generation"
   cmp -s "$HOME_DIR/state/$id.meta" "$expected" || fail "secondmate rollback cleanup deleted or changed restored metadata"
-  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token crosscheck-autostart.request.json crosscheck-autostart.json crosscheck-autostart.log; do
     [ "$(cat "$HOME_DIR/state/$id.$artifact" 2>/dev/null)" = "prior-$artifact" ] \
       || fail "secondmate rollback cleanup deleted restored $artifact state"
   done
@@ -3192,7 +3192,7 @@ test_enforced_orca_is_rejected_before_owned_resource_creation() {
     "project=$PROJ_DIR" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "yolo=off"
   out=$(run_spawn "$id" "$PROJ_DIR" --backend orca --account-pool claude-crew)
   status=$?
@@ -3313,89 +3313,6 @@ PY
   assert_grep "session remove --task $old_task" "$AF_LOG" "$harness continuation did not remove its predecessor mapping"
   assert_grep "agent_fleet_task=$new_task" "$HOME_DIR/data/$id/account-attempts.md" "$harness continuation lineage lost the new attempt"
   pass "$harness can continue safely under a different account profile"
-}
-
-test_continuation_delivery_refreshes_custody() {
-  local harness=$1 mode=${2:-no-mistakes} id launch delivered
-  local FM_TEST_CONTINUATION_CASE_SUFFIX="-delivery-$mode"
-  test_cross_profile_continuation_for_harness "$harness" "$harness-2" "$harness-3" "$harness"
-  id="account-continue-$harness-z21"
-  printf 'mode=%s\n' "$mode" >> "$HOME_DIR/state/$id.meta"
-  git -C "$WT_DIR" checkout -qb "fm/delivery-$harness"
-  delivered="$CASE_DIR/delivered-prompt"
-  launch=$(cat "$LAUNCH_LOG")
-  cat > "$FAKEBIN_DIR/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-case "$1:$2" in
-  axi:status)
-    printf 'run:\n  id: run-delivery\n  branch: %s\n  status: running\n  head: %s\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    fix,fixing,1s,now,321,1\n' \
-      "$(git -C "$FM_DELIVERY_WORKTREE" branch --show-current)" "$(git -C "$FM_DELIVERY_WORKTREE" rev-parse HEAD)"
-    ;;
-  runs:--limit) printf 'running %s %s\n' "$(git -C "$FM_DELIVERY_WORKTREE" branch --show-current)" "$(git -C "$FM_DELIVERY_WORKTREE" rev-parse HEAD)" ;;
-  *) exit 2 ;;
-esac
-SH
-  cat > "$FAKEBIN_DIR/agent-fleet" <<'SH'
-#!/usr/bin/env bash
-printf '%s' "${!#}" > "$FM_DELIVERY_PROMPT"
-SH
-  chmod +x "$FAKEBIN_DIR/no-mistakes" "$FAKEBIN_DIR/agent-fleet"
-  FM_DELIVERY_WORKTREE="$WT_DIR" FM_DELIVERY_PROMPT="$delivered" \
-    FM_HOME="$HOME_DIR" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
-    PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "$harness delayed continuation launch failed"
-  assert_grep 'run-delivery' "$delivered" "$harness delivery omitted the newly active pipeline"
-  # Match literal Markdown backticks.
-  # shellcheck disable=SC2016
-  assert_grep '`may mutate now`: **no**' "$delivered" "$harness delivery granted mutation"
-  # Match literal Markdown backticks.
-  # shellcheck disable=SC2016
-  assert_grep '`supervise only`: **yes**' "$delivered" "$harness delivery omitted supervised custody"
-  assert_grep 'done: external side effect alpha; do not rerun' "$delivered" "$harness delivery lost captured resumability context"
-  assert_not_grep 'replacement launch generation' "$delivered" "$harness delivery reread the replaced snapshot"
-  pass "$harness executable continuation refreshes custody after capture and before provider delivery"
-}
-
-test_herdr_continuation_successor_delivery() {
-  local harness=$1 owner=$2 id delivered launch
-  local FM_TEST_CONTINUATION_CASE_SUFFIX="-herdr-$2"
-  test_cross_profile_continuation_for_harness "$harness" "$harness-2" "$harness-3" "$harness" herdr
-  id="account-continue-$harness-z21"
-  git -C "$WT_DIR" checkout -qb "fm/herdr-delivery-$harness"
-  delivered="$CASE_DIR/herdr-delivered"
-  launch=$(cat "$LAUNCH_LOG")
-  cat > "$FAKEBIN_DIR/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-case "$1:$2" in
-  axi:status) exit 1 ;;
-  runs:--limit)
-    if [ "$FM_DELIVERY_OWNER" = pipeline ]; then
-      printf 'running %s %s\n' "$(git -C "$FM_DELIVERY_WORKTREE" branch --show-current)" "$(git -C "$FM_DELIVERY_WORKTREE" rev-parse HEAD)"
-    fi
-    ;;
-  *) exit 2 ;;
-esac
-SH
-  cat > "$FAKEBIN_DIR/agent-fleet" <<'SH'
-#!/usr/bin/env bash
-[ -z "${FM_HANDOFF_SUCCESSOR_TARGET:-}" ] || exit 71
-printf '%s' "${!#}" > "$FM_DELIVERY_PROMPT"
-SH
-  chmod +x "$FAKEBIN_DIR/no-mistakes" "$FAKEBIN_DIR/agent-fleet"
-  FM_DELIVERY_OWNER="$owner" FM_DELIVERY_WORKTREE="$WT_DIR" FM_DELIVERY_PROMPT="$delivered" \
-    FM_HOME="$HOME_DIR" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
-    FM_FAKE_TMUX_LABEL_FILE="$CASE_DIR/tmux-label" PATH="$FAKEBIN_DIR:$PATH" \
-    bash -c "$launch" || fail "$harness Herdr provider delivery failed"
-  if [ "$owner" = none ]; then
-    # Match literal Markdown backticks.
-    # shellcheck disable=SC2016
-    assert_grep '`may mutate now`: **yes**' "$delivered" "$harness successor was mistaken for predecessor"
-  else
-    # Match literal Markdown backticks.
-    # shellcheck disable=SC2016
-    assert_grep '`supervise only`: **yes**' "$delivered" "$harness newly active pipeline was ignored"
-  fi
-  assert_grep 'done: external side effect alpha; do not rerun' "$delivered" "$harness Herdr delivery lost resumability"
-  pass "$harness Herdr continuation delivers refreshed custody with owner=$owner"
 }
 
 test_cross_provider_continuation_uses_target_default_pool() {
@@ -3932,82 +3849,6 @@ test_oversized_continuation_stops_before_mutation() {
   assert_not_grep '^new-window ' "$TMUX_LOG" "oversized continuation created a replacement endpoint"
   assert_not_grep 'lease choose\|lease acquire' "$AF_LOG" "oversized continuation acquired an Agent Fleet lease"
   pass "continuation packet size is bounded before external mutation"
-}
-
-test_continuation_bounds_no_mistakes_status_snapshot() {
-  local id rec out status packet
-  id=account-continuation-status-timeout-z28a
-  rec=$(make_case continuation-status-timeout claude "$id")
-  read_case "$rec"
-  run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew >/dev/null || fail "continuation timeout precondition spawn failed"
-  cat > "$FAKEBIN_DIR/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-printf 'partial status that must not survive timeout\n'
-trap '' TERM
-sleep 10
-SH
-  chmod +x "$FAKEBIN_DIR/no-mistakes"
-  rm -f "$CASE_DIR/endpoint-live"
-  clear_case_logs
-
-  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
-    FM_FAKE_TMUX_LOG="$TMUX_LOG" FM_ACCOUNT_CONTINUATION_STATUS_TIMEOUT=1 \
-    PATH="$FAKEBIN_DIR:$PATH" "$CONTINUATION" "$id" status-timeout 2>&1)
-  status=$?
-  [ "$status" -eq 0 ] || fail "continuation failed instead of degrading a timed-out no-mistakes snapshot: $out"
-  packet=$(printf '%s\n' "$out" | tail -1)
-  assert_present "$packet" "timed-out status continuation packet was not persisted"
-  assert_grep '## No-mistakes state' "$packet" "timed-out continuation packet lost the no-mistakes section"
-  if ! grep -qxF unavailable "$packet"; then
-    sed -n '/## No-mistakes state/,+6p' "$packet" >&2
-    fail "timed-out no-mistakes snapshot did not degrade to unavailable"
-  fi
-  pass "continuation bounds no-mistakes status collection and degrades on timeout"
-}
-
-test_continuation_caps_informational_snapshots_only() {
-  local id rec out status packet packet_bytes brief_bytes
-  id=account-continuation-snapshot-cap-z28b
-  rec=$(make_case continuation-snapshot-cap claude "$id")
-  read_case "$rec"
-  run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew >/dev/null || fail "continuation snapshot cap precondition spawn failed"
-  cat > "$FAKEBIN_DIR/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-trap '' PIPE
-head -c 100000 /dev/zero | tr '\0' s
-exit 42
-SH
-  chmod +x "$FAKEBIN_DIR/no-mistakes"
-  rm -f "$CASE_DIR/endpoint-live"
-
-  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
-    FM_FAKE_TMUX_LOG="$TMUX_LOG" PATH="$FAKEBIN_DIR:$PATH" \
-    "$CONTINUATION" "$id" capped-snapshot 2>&1)
-  status=$?
-  [ "$status" -eq 0 ] || fail "oversized informational snapshot was not capped: $out"
-  packet=$out
-  assert_present "$packet" "capped informational snapshot packet was not installed"
-  assert_grep '[Snapshot truncated at 8192 bytes.]' "$packet" "capped informational snapshot had no visible truncation marker"
-  packet_bytes=$(wc -c < "$packet" | tr -d '[:space:]')
-  [ "$packet_bytes" -le 65536 ] || fail "capped informational snapshot exceeded the packet budget ($packet_bytes bytes)"
-
-  dd if=/dev/zero bs=70000 count=1 2>/dev/null | tr '\0' b > "$HOME_DIR/data/$id/brief.md"
-  brief_bytes=$(wc -c < "$HOME_DIR/data/$id/brief.md" | tr -d '[:space:]')
-  set +e
-  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
-    FM_FAKE_TMUX_LOG="$TMUX_LOG" PATH="$FAKEBIN_DIR:$PATH" \
-    "$CONTINUATION" "$id" oversized-brief 2>&1)
-  status=$?
-  set -e
-  [ "$status" -ne 0 ] || fail "oversized task-owned continuation source was truncated instead of rejected"
-  assert_contains "$out" 'maximum is 65536' "oversized task-owned continuation rejection did not report its bound"
-  assert_absent "$HOME_DIR/data/$id/continuation-oversized-brief.md" "oversized task-owned continuation source installed a truncated packet"
-  [ "$(wc -c < "$HOME_DIR/data/$id/brief.md" | tr -d '[:space:]')" = "$brief_bytes" ] \
-    || fail "oversized task-owned continuation source was modified"
-  pass "continuation caps informational snapshots and rejects task-owned overflow"
 }
 
 test_continuation_rejects_symlinked_packet_destination() {
@@ -5063,33 +4904,6 @@ PY
   assert_not_grep 'lease choose\|lease acquire' "$AF_LOG" "continuation copy race acquired a replacement lease"
   assert_not_grep '^continuation_packet=' "$HOME_DIR/state/$id.meta" "continuation copy race installed a partial packet"
   pass "continuation load-bearing copies bind one validated source identity"
-}
-
-test_continuation_appends_the_validated_brief_snapshot() {
-  local id rec brief packet
-  id=account-continuation-brief-snapshot-z28g
-  rec=$(make_case continuation-brief-snapshot claude "$id")
-  read_case "$rec"
-  run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew >/dev/null \
-    || fail "brief snapshot continuation precondition spawn failed"
-  rm -f "$CASE_DIR/endpoint-live"
-  brief="$HOME_DIR/data/$id/brief.md"
-  printf 'validated original brief bytes\n' > "$brief"
-  cat > "$FAKEBIN_DIR/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-printf 'replacement brief bytes\n' > "$FM_MUTATE_CONTINUATION_BRIEF"
-printf 'status after mutation\n'
-SH
-  chmod +x "$FAKEBIN_DIR/no-mistakes"
-  packet=$(FM_MUTATE_CONTINUATION_BRIEF="$brief" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" FM_FAKE_TMUX_LOG="$TMUX_LOG" \
-    PATH="$FAKEBIN_DIR:$PATH" "$CONTINUATION" "$id" brief-snapshot) \
-    || fail "continuation could not publish its validated brief snapshot"
-  assert_grep 'validated original brief bytes' "$packet" "continuation discarded the validated brief snapshot"
-  assert_not_grep 'replacement brief bytes' "$packet" "continuation reopened the replaced brief"
-  assert_grep 'replacement brief bytes' "$brief" "brief snapshot race hook did not mutate the source"
-  pass "continuation appends the exact validated brief snapshot"
 }
 
 test_continuation_reads_descendants_through_the_pinned_root() {
@@ -6406,6 +6220,14 @@ if [ "${FM_TEST_FOCUSED:-}" = stale-reclaim-generation ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = crosscheck-artifact-rollback ]; then
+  run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
+  run_isolated_test test_failed_managed_respawn_restores_unmanaged_metadata
+  run_isolated_test test_duplicate_spawn_preserves_original_endpoint_and_lease
+  run_isolated_test test_failed_secondmate_respawn_rollback_restores_prior_state
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = checkout-freshness-cleanup ]; then
   run_isolated_test test_failed_freshness_proof_rolls_back_unmanaged_resources
   run_isolated_test test_local_only_spawn_uses_local_default_tip
@@ -6450,7 +6272,6 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-12-ownership ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = continuation-status-timeout ]; then
-  run_isolated_test test_continuation_bounds_no_mistakes_status_snapshot
   exit 0
 fi
 
@@ -6636,18 +6457,10 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-15 ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = handoff-delivery-mode ]; then
-  run_isolated_test test_continuation_delivery_refreshes_custody claude local-only
-  run_isolated_test test_continuation_delivery_refreshes_custody codex local-only
   exit 0
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = handoff-custody ]; then
-  run_isolated_test test_herdr_continuation_successor_delivery claude none
-  run_isolated_test test_herdr_continuation_successor_delivery codex none
-  run_isolated_test test_herdr_continuation_successor_delivery claude pipeline
-  run_isolated_test test_herdr_continuation_successor_delivery codex pipeline
-  run_isolated_test test_continuation_delivery_refreshes_custody claude
-  run_isolated_test test_continuation_delivery_refreshes_custody codex
   exit 0
 fi
 
@@ -6683,7 +6496,6 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-20 ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-21 ]; then
-  run_isolated_test test_continuation_appends_the_validated_brief_snapshot
   run_isolated_test test_session_sync_all_has_one_total_task_timeout_budget
   exit 0
 fi
@@ -6973,8 +6785,6 @@ run_isolated_test test_explicit_secondmate_profile_ignores_configured_pool
 run_isolated_test test_enforced_orca_is_rejected_before_owned_resource_creation
 run_isolated_test test_cross_profile_continuation_for_harness claude claude-2 claude-3 claude
 run_isolated_test test_cross_profile_continuation_for_harness codex codex-2 codex-3 codex
-run_isolated_test test_continuation_delivery_refreshes_custody claude
-run_isolated_test test_continuation_delivery_refreshes_custody codex
 run_isolated_test test_cross_provider_continuation_uses_target_default_pool claude codex
 run_isolated_test test_cross_provider_continuation_uses_target_default_pool codex claude
 run_isolated_test test_continuation_refuses_unknown_endpoint_state
@@ -6991,8 +6801,6 @@ run_isolated_test test_native_resume_accepts_regressed_wallclock_when_event_sequ
 run_isolated_test test_session_sync_metadata_publish_failure_is_closed
 run_isolated_test test_session_sync_lineage_failure_restores_unbound_metadata
 run_isolated_test test_oversized_continuation_stops_before_mutation
-run_isolated_test test_continuation_bounds_no_mistakes_status_snapshot
-run_isolated_test test_continuation_caps_informational_snapshots_only
 run_isolated_test test_continuation_rejects_symlinked_packet_destination
 run_isolated_test test_continuation_pins_packet_destination_directory
 run_isolated_test test_continuation_revalidates_repository_anchor_before_install

@@ -24,7 +24,7 @@ write_task() {
     "project=$TMP_ROOT/projects/example" \
     "harness=codex" \
     "kind=$kind" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "report_required=1" \
     "generation_id=generation-$id" \
     "account_profile=codex-2" \
@@ -2606,7 +2606,7 @@ printf '%s\n' "$*" >> "$FM_FAKE_LAUNCHCTL_LOG"
 case "${1:-}" in print|bootstrap|kickstart) exit 0 ;; bootout) exit 1 ;; esac
 SH
   chmod +x "$fakebin/launchctl"
-  FM_GATE_REFUSE_BYPASS=1 FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
+  FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
     FM_REPORT_RETENTION_INTERVAL=1 FM_REPORT_RETENTION_PROGRESS_INTERVAL=1 \
     FM_REPORT_RETENTION_INSTALL_ROOT="$install_root" FM_REPORT_RETENTION_LAUNCH_AGENTS_DIR="$agents" \
     FM_REPORT_RETENTION_LAUNCHCTL="$fakebin/launchctl" FM_FAKE_LAUNCHCTL_LOG="$log" \
@@ -2627,7 +2627,7 @@ SH
   assert_absent "$(dirname "$entry")" "installed retention owner did not enforce retention"
   heartbeat="$STACK/.retention-heartbeat"
   assert_present "$heartbeat" "installed retention owner did not record a successful-prune heartbeat"
-  FM_GATE_REFUSE_BYPASS=1 FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
+  FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
     FM_REPORT_RETENTION_INTERVAL=1 FM_REPORT_RETENTION_PROGRESS_INTERVAL=1 \
     FM_REPORT_RETENTION_INSTALL_ROOT="$install_root" FM_REPORT_RETENTION_LAUNCH_AGENTS_DIR="$agents" \
     FM_REPORT_RETENTION_LAUNCHCTL="$fakebin/launchctl" FM_FAKE_LAUNCHCTL_LOG="$log" \
@@ -2635,7 +2635,7 @@ SH
   temp="$heartbeat.tmp"
   { printf '1\n'; sed -n '2p' "$heartbeat"; } > "$temp"
   mv "$temp" "$heartbeat"
-  if out=$(FM_GATE_REFUSE_BYPASS=1 FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
+  if out=$(FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
     FM_REPORT_RETENTION_INTERVAL=1 FM_REPORT_RETENTION_PROGRESS_INTERVAL=1 \
     FM_REPORT_RETENTION_INSTALL_ROOT="$install_root" FM_REPORT_RETENTION_LAUNCH_AGENTS_DIR="$agents" \
     FM_REPORT_RETENTION_LAUNCHCTL="$fakebin/launchctl" FM_FAKE_LAUNCHCTL_LOG="$log" \
@@ -3355,7 +3355,7 @@ test_report_contract_and_task_transaction_reject_fifos_without_blocking() {
   local root="$TMP_ROOT/task-special" fifo output pid status
   mkdir -p "$root/data/task"
   fifo="$root/data/task/brief.md"; mkfifo "$fifo"; output="$root/out"
-  FM_GATE_REFUSE_BYPASS=1 bash -c '. "$1/bin/fm-report-contract-lib.sh"; fm_completion_report_contract_present "$2"' \
+  bash -c '. "$1/bin/fm-report-contract-lib.sh"; fm_completion_report_contract_present "$2"' \
     _ "$ROOT" "$fifo" > "$output" 2>&1 &
   pid=$!
   for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.02; done
@@ -3938,7 +3938,7 @@ test_retention_generations_survive_install_interruptions() {
   assert_present "$old_program" "retention precondition generation is missing"
   saved="$TMP_ROOT/retention-old.plist"
   cp "$plist" "$saved"
-  if out=$(FM_GATE_REFUSE_BYPASS=1 FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
+  if out=$(FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
     FM_REPORT_RETENTION_INTERVAL=1 FM_REPORT_RETENTION_PROGRESS_INTERVAL=1 \
     FM_REPORT_RETENTION_INSTALL_ROOT="$install_root" FM_REPORT_RETENTION_LAUNCH_AGENTS_DIR="$agents" \
     FM_REPORT_RETENTION_LAUNCHCTL="$fakebin/launchctl" FM_FAKE_LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log" \
@@ -3948,7 +3948,7 @@ test_retention_generations_survive_install_interruptions() {
   cmp -s "$saved" "$plist" || fail "publishing an immutable generation changed the authoritative job early"
   assert_present "$old_program" "generation publication moved the runnable prior owner"
 
-  if out=$(FM_GATE_REFUSE_BYPASS=1 FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
+  if out=$(FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
     FM_REPORT_RETENTION_INTERVAL=1 FM_REPORT_RETENTION_PROGRESS_INTERVAL=1 \
     FM_REPORT_RETENTION_INSTALL_ROOT="$install_root" FM_REPORT_RETENTION_LAUNCH_AGENTS_DIR="$agents" \
     FM_REPORT_RETENTION_LAUNCHCTL="$fakebin/launchctl" FM_FAKE_LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log" \
@@ -3966,7 +3966,7 @@ test_retention_install_reclaims_positively_stale_lock() {
   local fakebin="$TMP_ROOT/retention-launchctl" install_root="$TMP_ROOT/retention-install"
   local agents="$TMP_ROOT/LaunchAgents" lock="$TMP_ROOT/retention-install/.install-lock"
   printf '999999\nMon Jan  1 00:00:00 2001\nstale-install-token\n' > "$lock"
-  FM_GATE_REFUSE_BYPASS=1 FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
+  FM_REPORT_RETENTION_PLATFORM=Darwin FM_REPORT_STACK_ROOT="$STACK" \
     FM_REPORT_RETENTION_INTERVAL=1 FM_REPORT_RETENTION_PROGRESS_INTERVAL=1 \
     FM_REPORT_RETENTION_INSTALL_ROOT="$install_root" FM_REPORT_RETENTION_LAUNCH_AGENTS_DIR="$agents" \
     FM_REPORT_RETENTION_LAUNCHCTL="$fakebin/launchctl" FM_FAKE_LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log" \

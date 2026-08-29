@@ -1376,7 +1376,15 @@ fm_account_restore_artifacts() {
   fm_account_valid_id "${backup_name#".$task.artifacts.rollback."}" || return 1
   backup="$state/$backup_name"
   [ -d "$backup" ] && [ ! -L "$backup" ] || return 1
-  for name in "$task.status" "$task.turn-ended" "$task.check.sh" "$task.pi-ext.ts" "$task.grok-turnend-token"; do
+  for name in \
+    "$task.status" \
+    "$task.turn-ended" \
+    "$task.check.sh" \
+    "$task.pi-ext.ts" \
+    "$task.grok-turnend-token" \
+    "$task.crosscheck-autostart.request.json" \
+    "$task.crosscheck-autostart.json" \
+    "$task.crosscheck-autostart.log"; do
     fm_account_system_exec "$FM_ACCOUNT_SYSTEM_RM_BIN" -f "$state/$name" || return 1
     source="$backup/$name"
     if [ -e "$source" ] || [ -L "$source" ]; then

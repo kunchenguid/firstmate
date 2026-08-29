@@ -1,54 +1,10 @@
 #!/usr/bin/env bash
-# fm-crew-state.sh - deterministic read of a crewmate's CURRENT state.
+# fm-crew-state.sh - deterministic read of a crewmate's current state.
 #
-# Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
-# Crewmates append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
-# and nothing when they silently resume, so `tail -1` of that log reports the
-# last EVENT, not the current STATE. After firstmate resolves a needs-decision
-# or blocked and the crewmate resumes (responds to the gate, the pipeline fixes, it
-# re-validates), the log's last line stays stale. This helper never infers the
-# current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crewmate's branch, else the pane
-# busy-signature) and reconciles the possibly-stale log against it.
-#
-# The determinism lives entirely here - bounded run-step, GitHub PR-state, pane,
-# and log reads plus fixed mapping logic, no heuristics and no LLM. Output is one
-# stable, parseable, token-tight line firstmate can read every heartbeat:
-#
-#   state: <working|parked|done|stale|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
-#   ... · liveness: <alive|dead|unknown> · step: <name>
-#
-# Logic, in order:
-#   1. Resolve worktree + backend target + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crewmate's branch, active or terminal
-#      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
-#      The run-step is AUTHORITATIVE for active, parked, and failed states:
-#      running/fixing -> working, ci -> working, awaiting_approval/fix_review ->
-#      parked (with gate findings), and failed/cancelled -> failed. A PR-ready
-#      passed/checks-passed claim becomes done only after GitHub resolves the
-#      rendered run head to one full remote commit, that identity exactly matches
-#      the live PR head, and a completed snapshot is still the newest branch run.
-#      Local Git objects and a PR URL found only in the append-only status log are
-#      never publication-currentness evidence.
-#      Missing remote proof -> unknown and a mismatch or newer run -> stale.
-#      While the active step is ci, `axi status` alone cannot tell "still waiting
-#      on checks" from "checks green, waiting on merge" (see nm_ci_checks_state),
-#      so a ci-step log-tail marker supplies the ready claim before the same
-#      remote-currentness checks decide whether it is done.
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
-#      the run-step shows the run moved on, the log is deterministically stale and
-#      is flagged superseded. A genuinely parked run plus a needs-decision log
-#      agree, and are reported as parked.
-#   4. No run for this crewmate (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crewmate, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
-#
-# Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# A task status file is an append-only event log, so a live backend endpoint is
+# the primary source for active work. Recognized terminal or pause events are
+# used only after the endpoint is readable and idle. This keeps supervision
+# local, bounded, and independent of any external review service.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,34 +24,14 @@ ID=${1:-}
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
-NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-20}
-case "$NM_TIMEOUT" in
-  ''|*[!0-9]*) NM_TIMEOUT=20 ;;
-  *) case "$NM_TIMEOUT" in *[1-9]*) ;; *) NM_TIMEOUT=20 ;; esac ;;
-esac
-NM_LIVENESS_BIN=${FM_CREW_STATE_NM_LIVENESS_BIN:-$SCRIPT_DIR/fm-nm-step-liveness.sh}
-GH_TIMEOUT=${FM_CREW_STATE_GH_TIMEOUT:-10}
-case "$GH_TIMEOUT" in
-  ''|*[!0-9]*) GH_TIMEOUT=10 ;;
-  *) case "$GH_TIMEOUT" in *[1-9]*) ;; *) GH_TIMEOUT=10 ;; esac ;;
-esac
-# How many of the most recent `no-mistakes runs` rows the cross-branch fallback
-# (nm_runs_status_for_branch, below) scans. Generous enough to still find a
-# branch's own run on a busy multi-crewmate fleet without listing the entire
-# history every call.
-FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
-case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
 }
-
-# --- meta resolution --------------------------------------------------------
 
 [ -f "$META" ] || emit unknown none "no metadata for $ID"
 
@@ -106,27 +42,14 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
+[ -n "$WT" ] && [ -d "$WT" ] \
+  || emit unknown none "worktree gone (torn down?)"
 
-# A torn-down (or never-created) worktree has no current state to read.
-if [ -z "$WT" ] || [ ! -d "$WT" ]; then
-  emit unknown none "worktree gone (torn down?)"
-fi
-
-# --- status log ------------------------------------------------------------
-
-# Last non-empty status line, and its leading verb (the word before the colon).
 log_last_line() {
   [ -f "$LOG" ] || return 1
   grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
 }
-# Map a status-log verb onto a canonical state for the fallback path. `paused` is
-# the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
-# a crewmate with no active run and an idle pane that declared a known external wait
-# reports `paused` distinctly, so a supervisor reading this sees a declared pause
-# and its reason rather than a wedge-suspect idle. A line that uses the pause verb to
-# report a FAILURE is not a pause (fm-classify-lib.sh's status_pause_is_failure); it
-# maps to `failed` so a supervisor reads the failure it actually is, and so
-# crew_absorb_class refuses to absorb it, instead of falling through to `unknown`.
+
 map_log_state() {  # <line>
   if status_is_paused "$1"; then
     echo paused
@@ -137,789 +60,65 @@ map_log_state() {  # <line>
     return
   fi
   case "$(status_line_verb "$1")" in
-    working)        echo working ;;
+    working) echo working ;;
     needs-decision) echo parked ;;
-    blocked)        echo blocked ;;
-    done)           echo "done" ;;
-    failed)         echo failed ;;
-    *)              echo unknown ;;
+    blocked) echo blocked ;;
+    done) printf '%s\n' "done" ;;
+    failed) echo failed ;;
+    *) echo unknown ;;
   esac
 }
 
 LOG_LINE=$(log_last_line || true)
-LOG_VERB=$(status_line_verb "$LOG_LINE")
-
-# pane_readable is consulted ONLY in the no-run fallback below. The run-step path
-# stays authoritative regardless of pane liveness - judge by the run-step, not the
-# shell - so a finished crewmate whose endpoint has closed still reports its run-step
-# state (e.g. done) instead of being masked as unknown. Backend-aware
-# (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
-# herdr task is read through fm_backend_capture instead of a bare tmux probe.
+LOG_STATE=$(map_log_state "$LOG_LINE")
+OPEN_DECISION=$(status_open_decisions "$LOG" | tail -1)
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 RECORDED_SCOPED_TARGET=$(fm_meta_get "$META" tmux_session_target)
-pane_readable() {  # <target>
-  fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" "$RECORDED_SCOPED_TARGET" >/dev/null 2>&1
-}
-# crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
-# fm_backend_busy_state's native semantic state (herdr's agent.get) when
-# available, else the shared tmux pane-regex reader (fm_pane_is_busy,
-# bin/fm-tmux-lib.sh) unchanged for tmux/unknown.
-#
-# `busy` alone is trusted outright. Both `idle` and unknown/unparseable fall
-# through to the shared tail-regex corroboration, NOT just unknown: herdr's
-# agent.get reports generation state ("working" while the model is streaming
-# a turn, "done"/"idle" once it is not - docs/herdr-backend.md "Busy state"),
-# which is a narrower signal than "this crewmate's turn/tool call is still in
-# progress". A crewmate blocked on its own long-running foreground tool call (e.g.
-# `no-mistakes axi run` without --yes, which blocks synchronously until a gate
-# or outcome - AGENTS.md section 11) is not generating for that whole span, so
-# agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
-# while the pane's own rendered text still shows the harness's busy banner
-# (BUSY_REGEX, e.g. "esc to interrupt") for the entire tool call, exactly like
-# tmux's regex-only reader would correctly report. Trusting herdr's `idle`
-# outright (skipping that corroboration) is what let a still-working crewmate read
-# as not-busy here, and - combined with a no-mistakes run-step lookup that also
-# missed attribution (see nm_runs_status_for_branch) - as not provably working in
-# fm-classify-lib.sh, triggering an immediate (non-wedge) stale wake instead of
-# the absorb-then-escalate path. A genuinely human-blocked agent (a permission
-# dialog, not mid-tool-call) does not render the busy banner, so this
-# corroboration does not mask that case: it stays correctly not-busy.
-crew_pane_is_busy() {  # <target>
-  local bs tail40
-  bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" "$EXPECTED_LABEL" 2>/dev/null)
-  case "$bs" in
-    busy) return 0 ;;
-    *)
-      tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" "$RECORDED_SCOPED_TARGET" 2>/dev/null) || return 1
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-        | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
-      ;;
-  esac
-}
 
-# --- no-mistakes run lookup (authoritative when a run matches this branch) --
-
-trim() {
-  local s=${1:-}
-  s="${s#"${s%%[![:space:]]*}"}"
-  s="${s%"${s##*[![:space:]]}"}"
-  printf '%s' "$s"
-}
-strip_quotes() {
-  local s
-  s=$(trim "${1:-}")
-  case "$s" in
-    \"*\") s=${s#\"}; s=${s%\"} ;;
-  esac
-  trim "$s"
-}
-
-# Bounded no-mistakes call in the worktree; stdout only, never fails the script.
-HAVE_TIMEOUT=none
-if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
-elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
-elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
-fi
-nm_run() {  # <args...>
-  case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    *)        true ;;
-  esac
-}
-
-# Bounded, read-only GitHub query in the worktree; stdout only, never fails the
-# script. gh-axi is the repository's required GitHub interface.
-gh_axi_run() {  # <args...>
-  case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$GH_TIMEOUT" gh-axi "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$GH_TIMEOUT" gh-axi "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$GH_TIMEOUT" gh-axi "$@" ) 2>/dev/null || true ;;
-    *)        true ;;
-  esac
-}
-
-# Scalar value of a TOON key in the captured run output ($RUN_OUT).
-RUN_OUT=""
-nm_field() {  # <key>
-  printf '%s\n' "$RUN_OUT" | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1
-}
-# Finding count from a findings[N]{...} table header; empty when none.
-nm_findings_count() {
-  printf '%s\n' "$RUN_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
-}
-nm_gate_step_row() {
-  local row step rest status findings
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,' | head -1)
-  [ -n "$row" ] || return 0
-  row=$(trim "$row")
-  step=$(trim "${row%%,*}")
-  rest=${row#*,}
-  status=$(strip_quotes "$(trim "${rest%%,*}")")
-  rest=${rest#*,}
-  findings=$(trim "${rest%%,*}")
-  printf '%s|%s|%s' "$step" "$status" "$findings"
-}
-nm_gate_status() {
-  local s row
-  s=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$' | head -1)
-  if [ -n "$s" ]; then
-    s=$(strip_quotes "$(trim "${s#*:}")")
-    printf '%s' "$s"
-    return
-  fi
-  row=$(nm_gate_step_row)
-  [ -n "$row" ] && { row=${row#*|}; printf '%s' "${row%%|*}"; }
-}
-nm_has_gate() {
-  printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*gate:[[:space:]]*'
-}
-nm_gate_line_name() {
-  local gate step
-  gate=$(strip_quotes "$(nm_field gate)")
-  [ -n "$gate" ] && { printf '%s' "$gate"; return; }
-  step=$(printf '%s\n' "$RUN_OUT" | sed -n '/^[[:space:]]*gate:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]*step:[[:space:]]*\(.*\)/\1/p' | head -1)
-  step=$(strip_quotes "$step")
-  [ -n "$step" ] && printf '%s' "$step"
-}
-nm_gate_name() {
-  local gate row
-  gate=$(nm_gate_line_name)
-  [ -n "$gate" ] && { printf '%s' "$gate"; return; }
-  row=$(nm_gate_step_row)
-  [ -n "$row" ] && printf '%s' "${row%%|*}"
-}
-nm_gate_findings_count() {
-  local f row rest
-  f=$(nm_findings_count)
-  [ -n "$f" ] && { printf '%s' "$f"; return; }
-  row=$(nm_gate_step_row)
-  [ -n "$row" ] || return 0
-  rest=${row#*|}
-  rest=${rest#*|}
-  rest=${rest%%|*}
-  case "$rest" in ''|*[!0-9]*) return 0 ;; esac
-  printf '%s' "$rest"
-}
-
-# Query the PR URL emitted by no-mistakes and return one normalized state:
-# open, closed, merged, missing, or unknown. A terminal pipeline outcome is not
-# itself evidence of GitHub state.
-nm_pr_state() {  # <pr-url>
-  local pr_url=$1 owner repo number out state
-  [ -n "$pr_url" ] || { printf 'missing'; return; }
-  command -v gh-axi >/dev/null 2>&1 || { printf 'unknown'; return; }
-  if [[ "$pr_url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)/?$ ]]; then
-    owner=${BASH_REMATCH[1]}
-    repo=${BASH_REMATCH[2]}
-    number=${BASH_REMATCH[3]}
-  else
-    printf 'unknown'
-    return
-  fi
-  out=$(gh_axi_run pr view "$number" --repo "$owner/$repo")
-  state=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*state:[[:space:]]*\(.*\)/\1/p' | head -1)
-  state=$(strip_quotes "$state")
-  case "$state" in
-    open|OPEN)     printf 'open' ;;
-    closed|CLOSED) printf 'closed' ;;
-    merged|MERGED) printf 'merged' ;;
-    *)             printf 'unknown' ;;
-  esac
-}
-
-# Resolve the live head SHA for a GitHub PR through gh-axi's API surface.
-# `gh-axi pr view` deliberately omits the head SHA, so this targeted read is the
-# only way to prove that a completed run-step still describes the code currently
-# published in the open PR.
-nm_pr_head() {  # <pr-url>
-  local pr_url=$1 owner repo number out head
-  [ -n "$pr_url" ] || return 0
-  command -v gh-axi >/dev/null 2>&1 || return 0
-  if [[ "$pr_url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)/?$ ]]; then
-    owner=${BASH_REMATCH[1]}
-    repo=${BASH_REMATCH[2]}
-    number=${BASH_REMATCH[3]}
-  else
-    return 0
-  fi
-  out=$(gh_axi_run api "/repos/$owner/$repo/pulls/$number")
-  head=$(printf '%s\n' "$out" \
-    | sed -n '/^[[:space:]]*head:[[:space:]]*$/,/^[[:space:]]*base:[[:space:]]*$/s/^[[:space:]]*sha:[[:space:]]*\(.*\)/\1/p' \
-    | head -1)
-  strip_quotes "$head"
-}
-
-# Resolve no-mistakes' rendered run head in the PR's remote repository and
-# return GitHub's full commit identity. The rendered head may be abbreviated,
-# so comparing it directly would be a prefix test rather than an identity test.
-# Local Git objects are intentionally irrelevant here: fetching an unrelated
-# remote must never change a publication-currentness verdict.
-nm_remote_commit_head() {  # <pr-url> <commit-ref>
-  local pr_url=$1 commit_ref=$2 owner repo out head
-  [ -n "$pr_url" ] && [[ "$commit_ref" =~ ^[0-9a-fA-F]{7,64}$ ]] || return 0
-  command -v gh-axi >/dev/null 2>&1 || return 0
-  if [[ "$pr_url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/[0-9]+/?$ ]]; then
-    owner=${BASH_REMATCH[1]}
-    repo=${BASH_REMATCH[2]}
-  else
-    return 0
-  fi
-  out=$(gh_axi_run api "/repos/$owner/$repo/commits/$commit_ref")
-  head=$(printf '%s\n' "$out" | sed -n 's/^sha:[[:space:]]*\(.*\)/\1/p' | head -1)
-  strip_quotes "$head"
-}
-
-# A PR-ready result is merge input, so branch equality is insufficient: a
-# branch can have a newer PR head while `axi status` still renders an earlier
-# completed run for that branch. Resolve both facts through GitHub, compare
-# exact full identities, and fail closed when either remote proof is unavailable.
-verify_ready_head_or_emit() {  # <run-id> <validated-head> <pr-url>
-  local run_id=$1 validated_head=$2 pr_url=$3 live_head resolved_head
-  if [ -z "$run_id" ]; then
-    emit unknown run-step "PR-ready current run identity is unavailable; do not merge"
-  fi
-  if [ -z "$validated_head" ] || [ -z "$pr_url" ]; then
-    emit unknown run-step "PR-ready run-step currentness is unavailable; do not merge"
-  fi
-  live_head=$(nm_pr_head "$pr_url")
-  if [ -z "$live_head" ]; then
-    emit unknown run-step "PR-ready run-step could not verify the live PR head; do not merge"
-  fi
-  resolved_head=$(nm_remote_commit_head "$pr_url" "$validated_head")
-  if ! [[ "$resolved_head" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
-    emit unknown run-step "PR-ready run-step could not resolve validated head $validated_head through GitHub; do not merge"
-  fi
-  if ! [[ "$live_head" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
-    emit unknown run-step "PR-ready run-step received an invalid live PR head; do not merge"
-  fi
-  if [ "$resolved_head" != "$live_head" ]; then
-    emit stale run-step "stale run-step: validated head $validated_head resolves remotely to ${resolved_head:0:8}, not PR head ${live_head:0:8}; do not merge"
-  fi
-}
-
-# `axi status` may return an earlier completed run even after another run has
-# started for the same branch. The newest-first `no-mistakes runs` view is the
-# independent currentness check for that case. A completed result must never be
-# treated as merge input while the newest branch run is still active, even when
-# both runs validate the same commit and the live PR-head comparison therefore
-# cannot distinguish them.
-verify_no_newer_active_run_or_emit() {  # <branch>
-  local branch=$1 newest newest_status newest_rest newest_head
-  newest=$(nm_runs_status_for_branch "$branch")
-  if [ -z "$newest" ]; then
-    emit unknown run-step "PR-ready run-step could not verify the newest branch run; do not merge"
-  fi
-  newest_status=${newest%%|*}
-  newest_rest=${newest#*|}
-  newest_head=${newest_rest%%|*}
-  [ -n "$newest_head" ] || newest_head=unknown
-  case "$newest_status" in
-    completed) return 0 ;;
-    running) emit stale run-step "stale run-step: a newer active run exists for $branch at $newest_head; do not merge" ;;
-    failed|cancelled) emit stale run-step "stale run-step: the newest run for $branch is $newest_status at $newest_head; do not merge" ;;
-    *) emit unknown run-step "PR-ready run-step has unverifiable newest-run status $newest_status; do not merge" ;;
-  esac
-}
-
-log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
-  case "$(status_line_note "$LOG_LINE")" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-nm_ci_step_status() {
-  local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
-  [ -n "$row" ] || return 0
-  row=$(trim "$row")
-  rest=${row#*,}
-  strip_quotes "$(trim "${rest%%,*}")"
-}
-
-nm_effective_ci_step_status() {
-  local step_status
-  if [ "${RUN_STATUS:-}" = fixing ]; then
-    printf 'fixing'
-    return 0
-  fi
-  step_status=$(nm_ci_step_status)
-  if [ -n "$step_status" ]; then
-    printf '%s' "$step_status"
-    return 0
-  fi
-  if [ "${RUN_STATUS:-}" = ci ]; then
-    printf 'running'
-  fi
-}
-
-# Root cause of the PR #252 incident (2026-07): for a repo where merge is left
-# to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
-# stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
-# never distinguishes "still waiting on checks" from "checks green, waiting on
-# merge": both read as plain `ci,running,...`. The only place that transition is
-# recorded is the ci step's own log text, e.g. "all CI checks passed - still
-# monitoring until merged or closed" or "no CI checks reported - still
-# monitoring until merged or closed" (verified against 360+ real run logs under
-# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
-# for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
-nm_ci_checks_state() {
-  local run_id log_tail marker
-  run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
-  [ -n "$log_tail" ] || { printf 'unknown'; return; }
-  marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
-    | tail -1)
-  case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
-    *) printf 'unknown' ;;
-  esac
-}
-# Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
-# reports the active-or-most-recent run for the CURRENT branch when one
-# exists, else falls back to some other branch's run purely as informational
-# display (verified empirically: querying a worktree with its own active run
-# reliably returns that run, even under concurrent load from several other
-# validating crewmates on the same underlying repo). A crewmate whose branch genuinely
-# has no run yet therefore sees another branch's answer here.
-#
-# This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
-# expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
-# matched id via `axi status --run <id>`. Verified against the real installed
-# CLI (v1.32.2): the `axi` surface exposes only abort/logs/respond/run/status -
-# there is no runs-listing subcommand under `axi` at all, so that table never
-# appears and the lookup was silently dead code; whenever the bare `axi
-# status` answer was not this crewmate's own branch, attribution always failed and
-# the caller fell straight through to the pane/log fallback below. (The
-# PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
-# a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
-# file's history - but this cross-branch path was independently confirmed
-# dead code and is worth having actually work.)
-#
-# The real run-listing command is the top-level `no-mistakes runs` (verified:
-# `no-mistakes --help` lists it separately from `axi`). It is plain, human-
-# oriented text - no run id, no JSON/TOON, newest-first, columns
-# "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
-# spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-# True when `axi status` renders the active step as quiet. A configured shell
-# command step (commands.test / commands.lint) ALWAYS renders quiet for its whole
-# duration, because no-mistakes flushes that step's log only when the step ends
-# (2026-08-02 incident; docs/postmortems/nm-quiet-test-step.md). So quiet here is
-# a prompt to check real liveness, never on its own evidence that anything died.
-nm_step_is_quiet() {
-  printf '%s\n' "$RUN_OUT" | grep -qE 'quiet[[:space:]]+[0-9]'
-}
-
-# Name of the step in the active_steps table, e.g. `test`. Empty when absent.
-nm_active_step_name() {
-  local row
-  row=$(printf '%s\n' "$RUN_OUT" | sed -n '/^[[:space:]]*active_steps\[/,$p' | sed -n '2p')
-  row=$(trim "$row")
-  [ -n "$row" ] || return 0
-  strip_quotes "$(trim "${row%%,*}")"
-}
-
-# One-line liveness verdict for the active step's own processes. A one-second
-# in-invocation membership sample lets this one-shot caller establish child
-# turnover without paying the 20-second window CPU rates require. Stable process
-# membership falls back to the probe's preserved long-window CPU baseline. This
-# consumer accepts exactly three verdicts: alive, dead, or unknown. A missing,
-# failed, empty, or malformed probe is unknown, never silence and never evidence
-# of health or death.
-nm_step_liveness() {
-  local run_id out status=0 verdict procs doing grade detail detail_fields line rest reported_run structured_detail
-  run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || { printf 'unknown (probe unreadable: run id unavailable)'; return; }
-  [ -x "$NM_LIVENESS_BIN" ] || { printf 'unknown (probe unreadable: executable unavailable)'; return; }
-  case "$HAVE_TIMEOUT" in
-    timeout)  out=$(timeout "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 1 2>/dev/null) || status=$? ;;
-    gtimeout) out=$(gtimeout "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 1 2>/dev/null) || status=$? ;;
-    # Same bounded perl fallback nm_run already uses. Without this case, a host
-    # with neither timeout nor gtimeout - the ordinary macOS default, including
-    # this one - fell through to an UNBOUNDED probe call, so a slow lsof or
-    # process scan could block the supervision read for as long as it took.
-    perl)     out=$(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
-                  "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 1 2>/dev/null) || status=$? ;;
-    *)        printf 'unknown (probe unreadable: no bounded runner available)'; return ;;
-  esac
-  case "$status" in
-    0) ;;
-    124) printf 'unknown (probe timed out after %ss)' "$NM_TIMEOUT"; return ;;
-    *) printf 'unknown (probe unreadable: exited %s)' "$status"; return ;;
-  esac
-  [ -n "$out" ] || { printf 'unknown (probe unreadable: empty result)'; return; }
-  # Compact the probe's own line to `<verdict> (<n> procs) on <unit> (<age>)`.
-  # This rides on every heartbeat read, so it stays token-tight - but the unit of
-  # work and its age are the two fields that separate SLOW from HUNG, and this
-  # line is the read firstmate actually makes. Omitting them would leave the
-  # follow-up question ("alive, but stuck on the same script for three hours?")
-  # needing a second command on every heartbeat.
-  # `doing:` is unstructured, truncated argv. Parse every structured field only
-  # from the prefix before it: argv may legitimately contain strings such as
-  # `procs:` or `grade:`, which must not override the fields they describe.
-  case "$out" in
-    *$'\n'*) printf 'unknown (probe protocol unreadable: multiline result)'; return ;;
-  esac
-  detail_fields=${out%%"$SEP"doing: *}
-  case "$detail_fields" in
-    liveness:\ *) ;;
-    *) printf 'unknown (probe protocol unreadable: verdict missing or invalid)'; return ;;
-  esac
-  rest=${detail_fields#liveness: }
-  case "$rest" in
-    *"$SEP"*) verdict=${rest%%"$SEP"*}; rest=${rest#*"$SEP"} ;;
-    *) printf 'unknown (probe protocol unreadable: structured prefix invalid)'; return ;;
-  esac
-  case "$rest" in
-    run:\ *) reported_run=${rest#run: } ;;
-    *) printf 'unknown (probe protocol unreadable: structured prefix invalid)'; return ;;
-  esac
-  case "$reported_run" in
-    *"$SEP"*) rest=${reported_run#*"$SEP"}; reported_run=${reported_run%%"$SEP"*} ;;
-    *) printf 'unknown (probe protocol unreadable: structured prefix invalid)'; return ;;
-  esac
-  [ "$reported_run" = "$run_id" ] \
-    || { printf 'unknown (probe protocol unreadable: run identity mismatch)'; return; }
-  case "$rest" in
-    procs:\ *) rest=${rest#procs: } ;;
-    *) printf 'unknown (probe protocol unreadable: structured prefix invalid)'; return ;;
-  esac
-  case "$rest" in
-    *"$SEP"*) procs=${rest%%"$SEP"*}; structured_detail=${rest#*"$SEP"} ;;
-    *) procs=$rest; structured_detail="" ;;
-  esac
-  grade=""
-  case "$structured_detail" in
-    grade:\ *) grade=${structured_detail#grade: }; grade=${grade%%"$SEP"*} ;;
-  esac
-  case "$verdict" in
-    alive|dead|unknown) ;;
-    *) printf 'unknown (probe protocol unreadable: verdict missing or invalid)'; return ;;
-  esac
-  case "$procs" in
-    ''|*[!0-9]*)
-      printf 'unknown (probe protocol unreadable: numeric process count missing or invalid)'
-      return
-      ;;
-  esac
-  case "$verdict" in
-    alive)
-      case "$procs" in
-        *[1-9]*) ;;
-        *) printf 'unknown (probe protocol unreadable: alive verdict requires processes)'; return ;;
-      esac
-      ;;
-    dead)
-      case "$procs" in
-        *[!0]*) printf 'unknown (probe protocol unreadable: dead verdict requires zero processes)'; return ;;
-      esac
-      ;;
-  esac
-  # `doing: <argv> (<etime>)` is the probe's last field when it could name one.
-  # The probe already truncates argv, so take it verbatim rather than re-parsing
-  # a command line whose shape varies by whatever the step happens to be running.
-  doing=${out##*doing: }
-  [ "$doing" = "$out" ] && doing=""
-  line="$verdict ($procs procs)"
-  if [ "$verdict" = unknown ]; then
-    case "$grade" in
-      unreadable|present-unproven|present-no-progress|transition) ;;
-      '') grade=ungraded ;;
-      *) grade=unreadable ;;
-    esac
-    detail=${detail_fields##*"$SEP"}
-    case "$detail" in
-      "$detail_fields"|grade:*) detail="probe reported unknown" ;;
-    esac
-    line="unknown (grade: $grade; $procs procs; $detail)"
-  fi
-  [ -n "$doing" ] && line="$line on $doing"
-  printf '%s' "$line"
-}
-
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br head pr field
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
-  [ -n "$out" ] || return 0
-  while IFS= read -r row; do
-    row=$(trim "$row")
-    [ -n "$row" ] || continue
-    st=${row%% *}
-    rest=${row#* }
-    rest=$(trim "$rest")
-    br=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # The human-oriented runs row is whitespace-delimited and always starts
-      # with status, branch, and short head. Preserve the optional PR URL so a
-      # coarse branch match can still verify a checks-green status-log event.
-      # shellcheck disable=SC2086 # Intentional whitespace tokenization of CLI output.
-      set -- $row
-      head=${3:-}
-      pr=
-      for field in "$@"; do
-        case "$field" in https://github.com/*/*/pull/[0-9]*) pr=$field ;; esac
-      done
-      printf '%s|%s|%s' "$st" "$head" "$pr"
-      return 0
-    fi
-  done <<< "$out"
-  return 0
-}
-
-# CREW_BRANCH is empty at detached HEAD (a just-spawned crewmate, or a scout's
-# scratch worktree); with no branch there is no run to attribute to this crewmate.
-CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-
-HAVE_RUN=0
-# RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
-# $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
-# a bare status word came back from the runs-list fallback above, so the
-# run-step block below skips the TOON field parsing entirely for this crewmate.
-RUN_SOURCE=full
-COARSE_STATUS=""
-# Scouts and secondmates never drive a no-mistakes validation of their own
-# worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
-    run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
-      HAVE_RUN=1
-    else
-      # The active-or-most-recent run is for another branch (the CLI is alive
-      # and answered; only the attribution missed) - try the coarse fallback.
-      # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
-      # primary call means the CLI itself did not respond, so retrying it
-      # immediately with a second bounded call would just double the wait
-      # for no better answer.
-      coarse_run=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$coarse_run" ]; then
-        COARSE_STATUS=${coarse_run%%|*}
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
-      fi
-    fi
-  fi
-fi
-
-# --- run-step authoritative path -------------------------------------------
-
-if [ "$HAVE_RUN" = 1 ]; then
-  RUN_STATE=working
-  RUN_DETAIL=""
-  CI_STEP_STATUS=""
-  CI_LOG_STATE=""
-  RUN_STATUS=""
-  RUN_ID=""
-  RUN_HEAD=""
-  RUN_PR=""
-  READY_CLAIM=0
-  if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crewmate genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
-    case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed)
-        RUN_STATE=unknown
-        RUN_DETAIL="completed runs-list result lacks exact current run identity; do not merge"
-        ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-      *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
-    esac
-  else
-    status=$(strip_quotes "$(nm_field status)")
-    RUN_STATUS=$status
-    RUN_ID=$(strip_quotes "$(nm_field id)")
-    RUN_HEAD=$(strip_quotes "$(nm_field head)")
-    RUN_PR=$(strip_quotes "$(nm_field pr)")
-    outcome=$(strip_quotes "$(nm_field outcome)")
-    awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
-    gate_status=$(nm_gate_status)
-    has_gate=0
-    nm_has_gate && has_gate=1
-
-    if [ -n "$outcome" ]; then
-      case "$outcome" in
-        passed)
-          RUN_STATE="done"
-          pr_url=$(strip_quotes "$(nm_field pr)")
-          pr_state=$(nm_pr_state "$pr_url")
-          case "$pr_state" in
-            merged)  RUN_DETAIL="run passed: PR merged (verified)" ;;
-            closed)  RUN_DETAIL="run passed: PR closed without merge (verified)" ;;
-            open)    RUN_DETAIL="run passed: PR open (not merged)"; READY_CLAIM=1 ;;
-            missing) RUN_DETAIL="run passed: no PR to verify" ;;
-            *)       RUN_DETAIL="run passed: PR state unavailable (not verified)" ;;
-          esac
-          ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"; READY_CLAIM=1 ;;
-        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
-        *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
-      esac
-    elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
-      if [ "$has_gate" = 1 ]; then
-        gate=$(nm_gate_line_name)
-      else
-        gate=$(nm_gate_name)
-      fi
-      [ -n "$gate" ] || gate=$status
-      [ -n "$gate" ] || gate=gate
-      RUN_STATE=parked
-      RUN_DETAIL="parked at $gate"
-      fcount=$(nm_gate_findings_count)
-      [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
-      if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
-        RUN_DETAIL="$RUN_DETAIL (ask-user: captain decision)"
-      fi
-    else
-      case "$status" in
-        ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
-        running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE=unknown; RUN_DETAIL="completed run has no terminal outcome; do not merge" ;;
-        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-        "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
-        *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
-      esac
-      if [ "$RUN_STATE" = working ]; then
-        CI_STEP_STATUS=$(nm_effective_ci_step_status)
-        case "$CI_STEP_STATUS" in
-          running)
-            CI_LOG_STATE=$(nm_ci_checks_state)
-            if [ "$CI_LOG_STATE" = green ]; then
-              RUN_STATE="done"
-              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
-              READY_CLAIM=1
-            fi
-            ;;
-          fixing)
-            CI_LOG_STATE=not-ready
-            ;;
-        esac
-      fi
-    fi
-  fi
-
-  if [ "$RUN_STATE" = "done" ] && [ "$READY_CLAIM" = 1 ]; then
-    if [ "$RUN_SOURCE" = full ] && [ "$RUN_STATUS" = completed ]; then
-      verify_no_newer_active_run_or_emit "$CREW_BRANCH"
-    fi
-    verify_ready_head_or_emit "$RUN_ID" "$RUN_HEAD" "$RUN_PR"
-  fi
-
-  # A quiet working step is the exact reading that made firstmate abort two
-  # healthy runs on 2026-08-02, so answer "dead or just slow?" here instead of
-  # leaving it to a hand check that gets it wrong. The verdict is APPENDED as an
-  # observation and never overrides RUN_STATE: a step momentarily between
-  # processes would otherwise be misreported as dead, which is the very failure
-  # mode this exists to end. The ci step is excluded because its monitoring runs
-  # inside the daemon with no worktree process at all, so `dead` there is
-  # meaningless rather than informative.
-  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ] && nm_step_is_quiet; then
-    ACTIVE_STEP=$(nm_active_step_name)
-    case "$ACTIVE_STEP" in
-      ci) ;;
-      '') RUN_DETAIL="$RUN_DETAIL${SEP}liveness: unknown (probe unreadable: active step unavailable)${SEP}step: unknown" ;;
-      *)
-        LIVENESS=$(nm_step_liveness)
-        RUN_DETAIL="$RUN_DETAIL${SEP}liveness: $LIVENESS${SEP}step: $ACTIVE_STEP"
-        ;;
-    esac
-  fi
-
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    if [ "$RUN_SOURCE" = coarse ]; then
-      emit unknown status-log "checks-green runs-list result lacks exact current run identity; do not merge"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      verify_ready_head_or_emit "$RUN_ID" "$RUN_HEAD" "$RUN_PR"
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-  fi
-
-  # Reconcile the status log. A needs-decision/blocked log line that the run-step
-  # has moved past (anything but a genuinely parked run) is deterministically
-  # stale: the gate resolved and the run resumed or finished.
-  case "$LOG_VERB" in
-    needs-decision|blocked)
-      if [ "$RUN_STATE" != parked ]; then
-        if [ "$RUN_STATE" = working ]; then
-          RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
-        else
-          RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
-        fi
-      fi
-      ;;
-  esac
-
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
-fi
-
-# --- fallback: no run attributed to this crewmate ------------------------------
-# The run-step path above already handled any crewmate with a run, regardless of pane
-# liveness, so a finished-but-pane-closed crewmate never reaches here. Down here there
-# is no run to consult, so a dead/unreadable target means the crewmate is gone: report
-# unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 1 "$EXPECTED_LABEL" \
+  "$RECORDED_SCOPED_TARGET" >/dev/null 2>&1 \
+  || emit unknown none "backend target gone: $BACKEND_TARGET"
 
-# Secondmates idle on their own watcher (idle pane = healthy), so the busy
-# signature is not meaningful for them; read their state from the status log only.
-if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
+crew_endpoint_is_busy() {
+  local state tail40
+  state=$(fm_backend_busy_state "$TASK_BACKEND" "$BACKEND_TARGET" \
+    "$EXPECTED_LABEL" 2>/dev/null)
+  [ "$state" = busy ] && return 0
+  tail40=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 \
+    "$EXPECTED_LABEL" "$RECORDED_SCOPED_TARGET" 2>/dev/null) || return 1
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+}
+
+# Secondmates normally idle in their watcher. Their declared status is more
+# meaningful than a terminal busy signature.
+if [ "$KIND" != secondmate ] && crew_endpoint_is_busy; then
   emit working pane "harness busy"
 fi
 
-if log_reports_ci_ready; then
-  emit unknown status-log "checks-green currentness is unavailable; do not merge"
+# A scout's terminal event means its one deliverable has been returned. Its
+# earlier gate may remain in the append-only history, but it must not reopen a
+# completed report as a pending captain decision. Persistent secondmates keep
+# the full keyed fold because one concern can finish while another stays open.
+if [ "$KIND" = scout ] && { [ "$LOG_STATE" = "done" ] || [ "$LOG_STATE" = "failed" ]; }; then
+  emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
 fi
 
-# Fall back to the status log's last line, but ONLY when its verb maps to a real
-# run-state. A decision-closing event - resolved: (fm-classify-lib.sh's
-# FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
-# it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
-# resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crewmate (typically a secondmate, which
-# has no busy check above) fall through to the idle default instead of rendering
-# `unknown` with the resolution note as `doing`. map_log_state is the single owner of
-# the verb->state mapping (including the configurable paused verb), so reusing its
-# `unknown` verdict as the "not a state" test needs no second verb list here.
-if [ -n "$LOG_VERB" ]; then
-  LOG_STATE=$(map_log_state "$LOG_LINE")
-  if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
-  fi
+if [ -n "$OPEN_DECISION" ]; then
+  IFS=$'\t' read -r _OPEN_KEY OPEN_VERB OPEN_NOTE <<EOF
+$OPEN_DECISION
+EOF
+  case "$OPEN_VERB" in
+    needs-decision) emit parked status-log "$OPEN_NOTE" ;;
+    blocked) emit blocked status-log "$OPEN_NOTE" ;;
+  esac
 fi
 
-emit unknown none "no current-state source available"
+if [ "$LOG_STATE" != unknown ]; then
+  emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+fi
+
+emit unknown none "backend idle with no current-state event"

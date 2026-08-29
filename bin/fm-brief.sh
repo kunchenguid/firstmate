@@ -13,9 +13,6 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 
 usage() {
   awk '
@@ -76,8 +73,6 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
-FM_HOME_ARG=$(shell_quote "$FM_HOME")
-NM_REATTACH_HELPER=$(shell_quote "$FM_ROOT/bin/fm-no-mistakes-reattach.sh")
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -237,7 +232,8 @@ case "$MODE" in
 Commit the implementation on your branch.
 $USABILITY_CONTRACT
 Push the branch, open a PR with \`gh-axi\`, append \`done: PR {url}\`, and remain available for corrections.
-Do not run no-mistakes; the captain owns merge approval.
+This transfers implementation custody to Firstmate; it is not task completion.
+Firstmate owns green-CI proof, the final exact-head Crosscheck, merge admission, and merged-state verification.
 EOF
 )
     ;;
@@ -253,23 +249,7 @@ Append \`done: ready in branch fm/$ID\` and remain available for review correcti
 EOF
 )
     ;;
-  *)
-    SETUP2="
-2. Run \`no-mistakes doctor\`; run \`no-mistakes init\` only when this worktree is not initialized."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-Commit the implementation on your branch.
-$USABILITY_CONTRACT
-Append \`done: {summary}\` for focused implementation review by firstmate, and do not start no-mistakes until firstmate instructs you.
-Once validation starts, own every synchronous gate return through CI green, failure with evidence, or a new decision.
-Use the loaded no-mistakes skill, current \`axi run --help\`, and response \`help\` for mechanics.
-Do not hand-edit or commit around pipeline-owned fixes, answer your own ask-user finding, or use \`--yes\`.
-After an ask-user decision returns, send it through \`no-mistakes axi respond\` and continue the same run.
-At the first CI-green return, append \`done: PR {url} checks green\`; do not wait for merge monitoring.
-EOF
-)
-    ;;
+  *) echo "error: unsupported project mode: $MODE" >&2; exit 1 ;;
 esac
 
 REPORT_CONTRACT=$(fm_completion_report_contract "$DATA" "$ID")
@@ -299,9 +279,6 @@ $RULE1
    Use \`$PAUSED_VERB: {why}\` only for a known external wait expected to clear on its own, never for active validation.
 5. Treat blockers recursively: try safe in-scope alternatives while unaffected work continues, and use \`blocked:\` only when firstmate action is required or materially independent safe routes are exhausted with evidence.
 6. Use \`needs-decision:\` only for a human-owned choice, then append matching \`resolved: {how}\` with the same optional \`[key=<slug>]\` when work resumes.
-7. Never stop, restart, or update the shared no-mistakes daemon.
-   For the exact reconciliation socket-read timeout, run \`FM_HOME=$FM_HOME_ARG $NM_REATTACH_HELPER $ID\`; append \`blocked:\` only if it exhausts retries or a different daemon error remains.
-
 $REPORT_CONTRACT
 
 # Project memory

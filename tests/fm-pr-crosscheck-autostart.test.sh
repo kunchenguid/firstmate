@@ -33,6 +33,13 @@ EOF
       starting:[1-9]*|running:[1-9]*) /bin/kill -TERM -- "-$pid" >/dev/null 2>&1 || true ;;
     esac
   done < <(find "$TMP_ROOT" -name '*.crosscheck-autostart.json' -type f 2>/dev/null)
+  while IFS= read -r record; do
+    [ -f "$record" ] || continue
+    pid=$(cat "$record" 2>/dev/null || true)
+    case "$pid" in
+      [1-9]*) /bin/kill -KILL "$pid" >/dev/null 2>&1 || true ;;
+    esac
+  done < <(find "$TMP_ROOT" -name 'stubborn-child-pid' -type f 2>/dev/null)
   fm_test_cleanup
 }
 trap cleanup_autostart_workers EXIT
@@ -66,6 +73,14 @@ url=$2
 number=${url##*/}
 case "$command" in
   head) cat "$FM_TEST_CONTROL/head-$number" ;;
+  checks)
+    if [ -f "$FM_TEST_CONTROL/assert-meta-unlocked-$number" ]; then
+      [ ! -e "$FM_STATE_OVERRIDE/.account-meta-$FM_TEST_TASK.lock" ] || exit 43
+      touch "$FM_TEST_CONTROL/observed-meta-unlocked-$number"
+    fi
+    [ ! -f "$FM_TEST_CONTROL/fail-checks-$number" ] || exit 42
+    cat "$FM_TEST_CONTROL/head-$number"
+    ;;
   state)
     if [ -f "$FM_TEST_CONTROL/merged-$number" ]; then
       printf 'MERGED\n'
@@ -112,6 +127,14 @@ case "$verb" in
     ;;
   run)
     touch "$control/started-$task-$head"
+    if [ -f "$control/spawn-stubborn-$task-$head" ]; then
+      (
+        trap '' TERM
+        while :; do sleep 1; done
+      ) &
+      printf '%s\n' "$!" > "$control/stubborn-child-pid"
+      wait "$!"
+    fi
     while [ -f "$control/block-$task-$head" ] \
       && [ ! -f "$control/release-$task-$head" ]; do
       sleep 0.05
@@ -138,7 +161,7 @@ seed_task() {
     "worktree=$case_dir/worktrees/$task" \
     "project=$case_dir/projects/$task" \
     'kind=ship' \
-    'mode=no-mistakes' \
+    'mode=direct-PR' \
     "generation_id=generation-$task"
 }
 
@@ -157,6 +180,7 @@ run_pr_check() {
   FM_CROSSCHECK_AUTOSTART_ACTIVE_WAIT_SECONDS=10 \
   FM_CROSSCHECK_AUTOSTART_COMMAND_TIMEOUT_SECONDS=20 \
   FM_TEST_CONTROL="$case_dir/control" \
+  FM_TEST_TASK="$task" \
     "$PR_CHECK" "$task" "https://github.com/example/repo/pull/$pull"
 }
 
@@ -381,6 +405,83 @@ test_dead_coordinator_is_visible_and_retryable() {
   pass "a dead task-local coordinator surfaces and retries its queued exact head"
 }
 
+test_exact_generation_cancel() {
+  local case_dir task=cancelled pull=12 state_file pid out rc i
+  case_dir=$(make_case cancel)
+  seed_task "$case_dir" "$task"
+  set_head "$case_dir" "$pull" "$HEAD_ONE"
+  touch "$case_dir/control/block-$task-$HEAD_ONE"
+  run_pr_check "$case_dir" "$task" "$pull" >/dev/null \
+    || fail "cancel fixture did not register"
+  fm_test_wait_for_file "$case_dir/control/started-$task-$HEAD_ONE" '' 0.02 \
+    || fail "cancel fixture never entered Crosscheck"
+  state_file="$case_dir/home/state/$task.crosscheck-autostart.json"
+  wait_for_state "$state_file" running "$HEAD_ONE" 1 \
+    || fail "cancel fixture never recorded its coordinator"
+  pid=$(json_field "$state_file" pid)
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$case_dir/root" FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/home/state" \
+    "$(dirname "$PR_CHECK")/fm-crosscheck-autostart.py" cancel "$task" wrong-generation 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cross-generation cancellation"
+  assert_contains "$out" 'different task generation' \
+    "cross-generation cancellation did not fail closed"
+  /bin/kill -0 "$pid" >/dev/null 2>&1 \
+    || fail "cross-generation refusal killed the live coordinator"
+
+  out=$(FM_ROOT_OVERRIDE="$case_dir/root" FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/home/state" \
+    FM_CROSSCHECK_AUTOSTART_CANCEL_WAIT_SECONDS=2 \
+    "$(dirname "$PR_CHECK")/fm-crosscheck-autostart.py" cancel \
+      "$task" "generation-$task") \
+    || fail "exact-generation coordinator cancellation failed: $out"
+  assert_contains "$out" 'cancelled exact generation' \
+    "coordinator cancellation did not report exact-generation completion"
+  i=0
+  while /bin/kill -0 "$pid" >/dev/null 2>&1 && [ "$i" -lt 100 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  /bin/kill -0 "$pid" >/dev/null 2>&1 \
+    && fail "exact-generation cancellation left the coordinator alive"
+  [ "$(json_field "$state_file" state)" = failed ] \
+    || fail "exact-generation cancellation did not leave terminal state"
+  pass "task teardown can cancel only its exact detached Crosscheck generation"
+}
+
+test_cancel_kills_descendants_after_coordinator_exit() {
+  local case_dir task=cancel-descendant pull=13 child out i
+  case_dir=$(make_case cancel-descendant)
+  seed_task "$case_dir" "$task"
+  set_head "$case_dir" "$pull" "$HEAD_ONE"
+  touch "$case_dir/control/spawn-stubborn-$task-$HEAD_ONE"
+  run_pr_check "$case_dir" "$task" "$pull" >/dev/null \
+    || fail "descendant cancellation fixture did not register"
+  fm_test_wait_for_file "$case_dir/control/stubborn-child-pid" '' 0.02 \
+    || fail "descendant cancellation fixture never spawned its stubborn child"
+  child=$(cat "$case_dir/control/stubborn-child-pid")
+  /bin/kill -0 "$child" >/dev/null 2>&1 \
+    || fail "stubborn descendant was not alive before cancellation"
+
+  out=$(FM_ROOT_OVERRIDE="$case_dir/root" FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/home/state" \
+    FM_CROSSCHECK_AUTOSTART_CANCEL_WAIT_SECONDS=1 \
+    "$(dirname "$PR_CHECK")/fm-crosscheck-autostart.py" cancel \
+      "$task" "generation-$task") \
+    || fail "descendant cancellation failed: $out"
+  i=0
+  while /bin/kill -0 "$child" >/dev/null 2>&1 && [ "$i" -lt 100 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  /bin/kill -0 "$child" >/dev/null 2>&1 \
+    && fail "cancellation declared completion while a descendant survived"
+  pass "Crosscheck cancellation proves the entire coordinator process group is gone"
+}
+
 test_new_head_restarts_without_prompt_wait() {
   local case_dir task=newhead pull=4 state_file out calls
   case_dir=$(make_case new-head)
@@ -529,12 +630,14 @@ test_registration_capture_order() {
   case_dir=$(make_case capture-order)
   seed_task "$case_dir" "$task"
   set_head "$case_dir" "$pull" "$HEAD_ONE"
-  cat > "$case_dir/root/bin/fm-github-pr.py" <<'SH'
+cat > "$case_dir/root/bin/fm-github-pr.py" <<'SH'
 #!/usr/bin/env bash
-if [ "$1" != head ]; then
-  echo OPEN
-  exit 0
-fi
+case "$1" in
+  state) echo OPEN; exit 0 ;;
+  checks) printf '%s\n' "$3"; exit 0 ;;
+  head) ;;
+  *) exit 97 ;;
+esac
 head=$(cat "$FM_TEST_CONTROL/head-8")
 if [ "${FM_TEST_CAPTURE_FIRST:-}" = 1 ]; then
   touch "$FM_TEST_CONTROL/captured-first"
@@ -707,19 +810,66 @@ test_repeated_pr_registration_replaces_metadata() {
   pass "a later PR atomically replaces all earlier PR metadata for one task"
 }
 
+test_non_green_replacement_preserves_reviewed_registration() {
+  local case_dir task=preserve pull=14 state_file request_file meta check_file rc
+  case_dir=$(make_case preserve-non-green)
+  seed_task "$case_dir" "$task"
+  set_head "$case_dir" "$pull" "$HEAD_ONE"
+  run_pr_check "$case_dir" "$task" "$pull" >/dev/null \
+    || fail "initial reviewed registration failed"
+  state_file="$case_dir/home/state/$task.crosscheck-autostart.json"
+  request_file="$case_dir/home/state/$task.crosscheck-autostart.request.json"
+  meta="$case_dir/home/state/$task.meta"
+  check_file="$case_dir/home/state/$task.check.sh"
+  wait_for_state "$state_file" clear "$HEAD_ONE" 1 \
+    || fail "initial registration never reached CLEAR"
+  cp "$state_file" "$state_file.before"
+  cp "$request_file" "$request_file.before"
+  cp "$meta" "$meta.before"
+  cp "$check_file" "$check_file.before"
+
+  set_head "$case_dir" "$pull" "$HEAD_TWO"
+  touch "$case_dir/control/fail-checks-$pull" \
+    "$case_dir/control/assert-meta-unlocked-$pull"
+  set +e
+  run_pr_check "$case_dir" "$task" "$pull" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "non-green replacement registration succeeded"
+  [ -f "$case_dir/control/observed-meta-unlocked-$pull" ] \
+    || fail "CI lookup ran while the task metadata lock was held"
+  cmp -s "$meta.before" "$meta" \
+    || fail "non-green replacement changed admitted PR metadata"
+  cmp -s "$check_file.before" "$check_file" \
+    || fail "non-green replacement changed the merge checker"
+  cmp -s "$request_file.before" "$request_file" \
+    || fail "non-green replacement changed the Crosscheck request"
+  cmp -s "$state_file.before" "$state_file" \
+    || fail "non-green replacement changed the Crosscheck verdict state"
+  pass "non-green replacement heads preserve the last reviewed registration without holding metadata during CI"
+}
+
 case "${FM_TEST_AUTOSTART_CASE:-all}" in
   retirement) test_retirement_handoff ;;
-  registration) test_registration_capture_order; test_repeated_pr_registration_replaces_metadata ;;
+  registration)
+    test_registration_capture_order
+    test_repeated_pr_registration_replaces_metadata
+    test_non_green_replacement_preserves_reviewed_registration
+    ;;
   status) test_status_completion_race ;;
   consumer) test_configuration_failures_are_visible_and_retryable ;;
+  cancel) test_exact_generation_cancel; test_cancel_kills_descendants_after_coordinator_exit ;;
   all)
     test_retirement_handoff
     test_registration_capture_order
     test_repeated_pr_registration_replaces_metadata
+    test_non_green_replacement_preserves_reviewed_registration
     test_status_completion_race
     test_prompt_return_active_and_clear_dedupe
     test_configuration_failures_are_visible_and_retryable
     test_dead_coordinator_is_visible_and_retryable
+    test_exact_generation_cancel
+    test_cancel_kills_descendants_after_coordinator_exit
     test_new_head_restarts_without_prompt_wait
     test_unrelated_prs_start_concurrently
     ;;

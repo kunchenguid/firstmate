@@ -2788,13 +2788,9 @@ setup_spawn_world() {
   fm_secondmate_write_pi_pool "$SP_DIR/pi-agent-home/auth.json" 3
   fm_git_init_commit "$SP_HOME/projects/alpha"
   fm_git_add_origin "$SP_HOME/projects/alpha" "$SP_DIR/remotes/alpha.git"
-  # direct-PR mode: an untagged project defaults to no-mistakes mode, whose
-  # seeding requires the no-mistakes binary (absent on CI runners). The fake
-  # is still pinned onto PATH so a mode drift fails deterministically instead
-  # of reaching whatever binary the host happens to carry.
+  # Pin the project to direct-PR so the seed preserves its delivery policy.
   printf -- '- alpha [direct-PR] - alpha project (added 2026-06-22)\n' > "$SP_HOME/data/projects.md"
   SP_FAKEBIN=$(make_fake_tmux "$SP_DIR/fake")
-  make_fake_no_mistakes "$SP_DIR/fake" >/dev/null
   chmod 755 "$SP_DIR/fake" "$SP_FAKEBIN"
   write_fake_herdr "$SP_FAKEBIN"
   write_role_fixture_provider "$SP_DIR/provider.py"

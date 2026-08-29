@@ -5,14 +5,10 @@
 # severity (which reports info, warning, and error - the levels CI fails on).
 # The lint command, the file set, the config, AND the pinned ShellCheck version
 # live here and ONLY here, so the gates cannot drift apart: both invoke this
-# script with the same full-or-focused Azure-service scope.
+# script with the same complete inventory.
 #   - CI:       .github/workflows/ci.yml installs the version this script prints
 #               via `--required-version`, then runs `bin/fm-lint.sh`.
-#   - Pre-push: .no-mistakes.yaml `commands.lint` routes through
-#               `bin/fm-no-mistakes-lint-command.sh`, which applies CI's
-#               selector and invokes this script for the complete inventory or
-#               exact changed shell files. Unknown scope fails closed to the
-#               complete inventory.
+#   - Local:    contributors invoke this script directly before pushing.
 #
 # Version parity: CI's ShellCheck used to float with the runner image, and
 # ShellCheck retired SC2015 in 0.11.0, so an older CI ShellCheck rejected an

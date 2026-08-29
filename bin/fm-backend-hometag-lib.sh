@@ -7,7 +7,7 @@
 # title/name, two firstmate homes (two secondmates, a primary plus a
 # secondmate, or two independent primary installations) whose task ids
 # happen to collide can send/peek/close each other's tabs - the gap a
-# captain-directed no-mistakes review gate caught for cmux
+# independent review caught for cmux
 # (docs/cmux-backend.md) and this same tag mechanism was later ported to
 # zellij to close for the same reason (docs/zellij-backend.md "Home-scoped
 # tab titles").

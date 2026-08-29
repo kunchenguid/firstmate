@@ -31,9 +31,8 @@
 # appearance - terminal line-wrapping looks like newlines but isn't.
 set -u
 
-# This isolated test drives the guarded daemon from the no-mistakes gate
+# This isolated test drives the guarded daemon from the review gate
 # worktree, so opt into the same suite-only lifecycle exemption as tests/lib.sh.
-export FM_GATE_REFUSE_BYPASS=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"

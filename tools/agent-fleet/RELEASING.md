@@ -17,7 +17,7 @@ Release tags use `agent-fleet-v<version>` and point at the Firstmate merge commi
    uv build --out-dir dist
    ```
 
-4. Ship the Firstmate branch through no-mistakes and merge only after the repository checks are green and the owner authorizes the merge.
+4. Open a Firstmate PR, wait for green repository checks, run exact-head Crosscheck, and merge only the admitted head after owner authorization.
 
 ## Tag and verify the release
 

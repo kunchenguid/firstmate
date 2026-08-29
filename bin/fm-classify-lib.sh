@@ -15,8 +15,8 @@
 #
 # The one exception is the absorb classification (crew_absorb_class and its
 # working/paused wrappers). It is NOT a pure status-file read: it reuses
-# bin/fm-crew-state.sh, which may make bounded no-mistakes and GitHub PR-state
-# calls, to decide whether a crewmate that just stopped its turn or went stale is
+# bin/fm-crew-state.sh, which reads the task backend and status log, to decide
+# whether a crewmate that just stopped its turn or went stale is
 # working, deliberately paused, or neither. Signal and stale callers keep those
 # reads bounded to the paths that need them; heartbeat readers inspect the fleet
 # only on their backoff cadence.
@@ -27,8 +27,8 @@
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
 
 # The crewmate current-state reader used for the "provably working" decision.
-# Overridable so tests can stub the run-step/pane verdict without a real worktree
-# or no-mistakes install; absent, it points at the real sibling script.
+# Overridable so tests can stub the backend/status verdict without a real
+# worktree; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
 # Captain-relevant status verbs. A status line carrying any of these is work
@@ -61,8 +61,8 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # failure as a deliberate external wait. That is not hypothetical: six crewmates
 # once sat absorbed for hours behind lines shaped like
 #   paused: error: "drive run: reconcile run <id>: read response: ... i/o timeout"
-#   paused: no-mistakes vX fresh run error: drive run: reconcile run <id>: ...
-#   paused: run <id> drive failed on no-mistakes vX: drive run: ...
+#   paused: external review failed: request timed out
+#   paused: validation command crashed with exit code 1
 # Every one of those is a failure report, not a wait, and each must escalate like
 # blocked:/failed: instead of being absorbed on the hour-long pause cadence.
 #
@@ -370,9 +370,7 @@ _fm_status_file_sig() {
 
 # Classify WHY an idle/stale crewmate MIGHT be safely absorbed instead of surfaced.
 # Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crewmate is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
+#   working - a busy backend endpoint; the crewmate is legitimately mid-work;
 #   paused  - the crewmate declared an external wait and nothing is outstanding
 #             (crew_declared_pause_absorbable), so its pane is EXPECTED to idle;
 #   none    - neither, so the wake must surface.
@@ -404,10 +402,7 @@ _fm_status_file_sig() {
 # argument lets stale-pane triage pass the status line it already read; omitted, the
 # pause is read from the durable stream, so no call site can accidentally decide a
 # pause case without the pause.
-# NOT a pure local read: fm-crew-state.sh may make bounded no-mistakes and GitHub
-# PR-state calls, so signal and stale callers run it only on no-verb signal and
-# first-sighting stale paths. Heartbeat callers use it only on their backoff
-# cadence.
+# The read is bounded to local task metadata, backend state, and the status log.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_state_line() {  # <id>
   local line

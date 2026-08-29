@@ -7676,11 +7676,6 @@ def merge_crosschecked(
     body: str | None,
     allow_queue: bool,
 ) -> int:
-    require(
-        os.environ.get("FM_GATE_REFUSE_BYPASS") == "1"
-        or "NO_MISTAKES_GATE" not in os.environ,
-        "no-mistakes gate agent must not invoke the merge primitive",
-    )
     require(SHA_RE.fullmatch(expected_sha) is not None, "expected merge head must be one 40-hex SHA")
     reviewed_head = verified_crosscheck_head(root, home, task_id, url)
     require(

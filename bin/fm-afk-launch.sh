@@ -60,8 +60,6 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervisor-target-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$FM_AFK_LAUNCH_DIR/fm-gate-refuse-lib.sh"
 # fm-afk-start.sh provides the daemon-lock liveness helpers and
 # fm_afk_clear_stale_artifacts; it is sourceable (BASH_SOURCE guard) and its
 # main does not run on source. It sets `set -eu`, so turn errexit back off for
@@ -1310,7 +1308,6 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_refuse_if_gate_agent
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM

@@ -7,7 +7,7 @@
 # It requires a dead recorded endpoint, an inspectable original worktree/home,
 # a non-empty original brief or charter, and a verified repository snapshot.
 # It carries available task-owned status, reports, decisions, steering,
-# checkpoint, account-lineage, PR, and no-mistakes state without reading or
+# checkpoint, account-lineage, and PR state without reading or
 # copying provider homes, credentials, or transcripts.
 # The continuation precedence is live external state, verified repository
 # state, checkpoint/handoff intent, then recalled provider context.
@@ -18,9 +18,6 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 PACKET_TMP=
 PACKET_PRIOR_TMP=
 PACKET_PRIOR_ID=
@@ -35,7 +32,6 @@ STATUS_REVALIDATION_TMP=
 LOG_SNAPSHOT_TMP=
 META_SNAPSHOT_TMP=
 BRIEF_SNAPSHOT_TMP=
-NO_MISTAKES_STATUS_TMP=
 TASK_SNAPSHOT_DIR=
 MAX_PACKET_BYTES=65536
 MAX_SNAPSHOT_BYTES=8192
@@ -43,7 +39,6 @@ MAX_REPOSITORY_FINGERPRINT_FILES=${FM_ACCOUNT_CONTINUATION_FINGERPRINT_FILES:-10
 MAX_REPOSITORY_FINGERPRINT_BYTES=${FM_ACCOUNT_CONTINUATION_FINGERPRINT_BYTES:-268435456}
 MAX_REPOSITORY_ENUMERATION_BYTES=${FM_ACCOUNT_CONTINUATION_ENUMERATION_BYTES:-33554432}
 MAX_REPOSITORY_FINGERPRINT_SECONDS=${FM_ACCOUNT_CONTINUATION_FINGERPRINT_SECONDS:-30}
-NO_MISTAKES_STATUS_TIMEOUT=${FM_ACCOUNT_CONTINUATION_STATUS_TIMEOUT:-5}
 path_identity() {
   if [ "$(uname)" = Darwin ]; then
     stat -f '%d:%i' "$1" 2>/dev/null
@@ -156,7 +151,6 @@ cleanup_packet_tmp() {
   [ -z "$LOG_SNAPSHOT_TMP" ] || rm -f "$LOG_SNAPSHOT_TMP"
   [ -z "$META_SNAPSHOT_TMP" ] || rm -f "$META_SNAPSHOT_TMP"
   [ -z "$BRIEF_SNAPSHOT_TMP" ] || rm -f "$BRIEF_SNAPSHOT_TMP"
-  [ -z "$NO_MISTAKES_STATUS_TMP" ] || rm -f "$NO_MISTAKES_STATUS_TMP"
   [ -z "$TASK_SNAPSHOT_DIR" ] || rm -rf "$TASK_SNAPSHOT_DIR"
   packet_lock_release
 }
@@ -169,9 +163,6 @@ trap cleanup_packet_tmp EXIT
 ID=${1:-}
 ATTEMPT=${2:-}
 [ -n "$ID" ] && [ -n "$ATTEMPT" ] || { echo "usage: fm-account-continuation.sh <task-id> <new-attempt-id>" >&2; exit 2; }
-case "$NO_MISTAKES_STATUS_TIMEOUT" in
-  ''|*[!0-9]*|0) echo "error: FM_ACCOUNT_CONTINUATION_STATUS_TIMEOUT must be a positive integer" >&2; exit 2 ;;
-esac
 case "$MAX_REPOSITORY_FINGERPRINT_FILES" in
   ''|*[!0-9]*|0) echo "error: FM_ACCOUNT_CONTINUATION_FINGERPRINT_FILES must be a positive integer" >&2; exit 2 ;;
 esac
@@ -517,9 +508,7 @@ packet_check_budget
 
 STATUS_SNAPSHOT_TMP=$(mktemp "$TASK_DIR/.continuation-status.XXXXXX") || STATUS_SNAPSHOT_TMP=
 LOG_SNAPSHOT_TMP=$(mktemp "$TASK_DIR/.continuation-log.XXXXXX") || LOG_SNAPSHOT_TMP=
-NO_MISTAKES_STATUS_TMP=$(mktemp "$TASK_DIR/.continuation-no-mistakes.XXXXXX") || NO_MISTAKES_STATUS_TMP=
-if [ -z "$STATUS_SNAPSHOT_TMP" ] || [ -z "$LOG_SNAPSHOT_TMP" ] \
-  || [ -z "$NO_MISTAKES_STATUS_TMP" ]; then
+if [ -z "$STATUS_SNAPSHOT_TMP" ] || [ -z "$LOG_SNAPSHOT_TMP" ]; then
   echo "error: cannot safely stage continuation snapshots for $ID" >&2
   exit 1
 fi
@@ -533,22 +522,6 @@ capture_command_snapshot "$LOG_SNAPSHOT_TMP" fatal git_pinned log --oneline --de
 append_snapshot_section "Recent repository history" "$LOG_SNAPSHOT_TMP"
 
 append_snapshot_section "Recorded task metadata" "$META_SNAPSHOT_TMP"
-
-if NO_MISTAKES_BIN=$(command -v no-mistakes 2>/dev/null); then
-  run_no_mistakes_status() {
-    local current_id
-    cd "$WORKTREE_REAL" || return 1
-    current_id=$(path_identity . 2>/dev/null || true)
-    [ "$current_id" = "$WORKTREE_ID" ] || return 1
-    fm_account_run_bounded "$NO_MISTAKES_STATUS_TIMEOUT" "$NO_MISTAKES_BIN" axi status
-  }
-  capture_command_snapshot "$NO_MISTAKES_STATUS_TMP" unavailable run_no_mistakes_status \
-    || { echo "error: cannot bound continuation no-mistakes snapshot for $ID" >&2; exit 1; }
-  [ -s "$NO_MISTAKES_STATUS_TMP" ] || printf 'unavailable\n' > "$NO_MISTAKES_STATUS_TMP"
-else
-  printf 'unavailable\n' > "$NO_MISTAKES_STATUS_TMP"
-fi
-append_snapshot_section "No-mistakes state" "$NO_MISTAKES_STATUS_TMP"
 
 append_staged_file_section "Original brief or charter" "$BRIEF_SNAPSHOT_TMP"
 append_file_section "Wake-event and progress status" "$STATE" "$STATE/$ID.status"

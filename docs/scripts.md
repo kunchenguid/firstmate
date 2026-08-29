@@ -3,7 +3,6 @@
 The first mate drives these; interactive entrypoints work by hand too, while `*-lib.sh` files are sourced helpers.
 Each row is one purpose clause only: the script's own header comment is the authoritative description of its behavior, flags, and contracts, so read the header before first use.
 If you have changed away from the firstmate home in an interactive shell, invoke these scripts by absolute path through the repo's `bin/` directory; the scripts self-locate internally after they start.
-The shared no-mistakes gate refusal used by every directly invocable mutating control-plane entrypoint is summarized in [architecture.md](architecture.md#no-mistakes-gate-authority-boundary); `fm-gate-refuse-lib.sh`'s header owns its exact guarded and excluded scope.
 
 | Script                   | Purpose                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
@@ -59,7 +58,6 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-merge-local.sh`      | Fast-forward an approved `local-only` branch and immediately invoke terminal auto-reaping |
 | `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
-| `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
@@ -69,17 +67,13 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-supervisor-target-lib.sh` | Resolve the compatibility injection target and backend for the daemon and launcher |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, complete native tasks or inject compatibility digests |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crewmate                            |
-| `fm-no-mistakes-reattach.sh` | Retry one home-scoped existing run after its transient reconciliation timeout    |
 | `fm-azure-pilot.sh`      | Validate, preview, apply, inspect, recover, or explicitly remove the private Azure foundation |
 | `fm-azure-runner.sh`     | Run one credential-free exact repository command on one private disposable Azure VM |
-| `fm-azure-validation.sh` | Queue and control exact-head no-mistakes runs in isolated elastic Azure cells        |
 | `fm-credential-expiry.py`  | Classify one account profile's provider credential by expiry without emitting token material |
-| `fm-azure-validation-shard-bridge.py` | Exchange exact behavior/lint requests and independent Azure runner receipts inside one cell |
 | `fm-pi-account-home.py` | Project one Pi profile from the pooled `auth.json` into the single-profile account home its consumers read |
 | `fm-pi-refresh.py` | Renew Pi credentials before they expire, republish them into their account homes, and verify the result |
 | `fm-pi-refresh.mjs` | Rotate one Pi credential through Pi's own OAuth refresh and its own credential lock (the actuator `fm-pi-refresh.py` drives) |
 | `fm-lint-node.sh` | Parse every JavaScript tool in `bin/`, the lane ShellCheck's shell-only file set cannot cover |
-| `fm-nm-step-liveness.sh` | Read a no-mistakes step's processes as alive, dead, or graded unknown                |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
@@ -117,9 +111,8 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-harness.sh`          | Detect the running harness and resolve crewmate or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-session-lock-lib.sh` | Shared session-lock format, holder liveness, and home-bound supervisor route proof    |
-| `fm-lint.sh`             | Single owner of the shell-lint definition used by CI and the no-mistakes gate       |
+| `fm-lint.sh`             | Single owner of the shell-lint definition used locally and in CI                     |
 | `fm-install-shellcheck.sh` | Install CI's pinned, checksum-verified ShellCheck build                            |
-| `fm-no-mistakes-lint-command.sh` | Match CI's full-or-focused shell scope, fail closed to full lint, and always run locked Agent Fleet lint |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash pending mentions, print `x-mention <request_id>`     |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed X-mode reply or follow-up                         |

@@ -13,7 +13,6 @@ import io
 import json
 import os
 from pathlib import Path
-import pwd
 import re
 import shutil
 import subprocess
@@ -30,7 +29,6 @@ MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESULT_BYTES = 8 * 1024 * 1024
 MAX_WALL_SECONDS = 6 * 60 * 60
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
-MAX_NO_MISTAKES_RUNTIME_FILES = 20000
 
 
 class SupervisorError(RuntimeError):
@@ -133,25 +131,9 @@ def read_request(path):
     if existing_task_disk and (return_contract is None or not outcome_expected):
         raise SupervisorError("existing task-disk recovery requires an authorized return outcome")
     worker_role = request.get("worker_role", "author")
-    if worker_role not in ("author", "no-mistakes"):
+    if worker_role != "author":
         raise SupervisorError("execution worker role is not supported")
-    service_contract = request.get("service_return_contract")
-    if worker_role == "no-mistakes":
-        role = argv[4] if len(argv) == 9 else ""
-        if role not in ("review", "repair", "test") or argv != [
-            "no-mistakes", "worker", "run", "--role", role,
-            "--brief", "brief.md", "--result", "outcome.json",
-        ]:
-            raise SupervisorError("no-mistakes service argv is not exact")
-        if service_contract != {
-            "schema": "fm.no-mistakes-worker-return/v1",
-            "step_outcome_path": "outcome.json",
-            "step_outcome_max_bytes": 1024 * 1024,
-        }:
-            raise SupervisorError("no-mistakes service return contract is not exact")
-        if not outcome_expected or not isinstance(request.get("payload_files"), dict):
-            raise SupervisorError("no-mistakes execution requires staged outcome transport")
-    elif service_contract is not None:
+    if request.get("service_return_contract") is not None:
         raise SupervisorError("ordinary execution cannot select a service return contract")
     if outcome_expected:
         # An ordinary outcome is bundled from the repository this request
@@ -359,170 +341,7 @@ def stage_payload(request, worktree, account_home):
     head = git_in(repo, "rev-parse", "HEAD", timeout=GIT_HEAD_TIMEOUT)
     if head.returncode != 0 or head.stdout.decode().strip() != request["repository_generation"]:
         raise SupervisorError("staged repository head differs from the bound repository generation")
-    if request.get("worker_role") == "no-mistakes":
-        stage_no_mistakes_runtime(staging / "runtime.tar.gz", worktree / ".fm-runtime")
     return repo
-
-
-def stage_no_mistakes_runtime(source, target, enforce_linux=True):
-    """Extract and re-verify the sealed credential-free runtime in the guest."""
-    if source.is_symlink() or not source.is_file():
-        raise SupervisorError("no-mistakes runtime bundle is unavailable or redirected")
-    if target.exists():
-        if target.is_symlink() or not target.is_dir():
-            raise SupervisorError("no-mistakes runtime target is unsafe")
-        shutil.rmtree(target)
-    target.mkdir(mode=0o755)
-    target.chmod(0o755)
-    extracted = {}
-    total = 0
-    try:
-        with tarfile.open(source, mode="r:gz") as archive:
-            members = archive.getmembers()
-            if not members or len(members) > MAX_NO_MISTAKES_RUNTIME_FILES:
-                raise SupervisorError("no-mistakes runtime member inventory is unbounded")
-            for member in members:
-                parts = Path(member.name).parts
-                if (
-                    not member.isreg() or not parts or member.name.startswith("/")
-                    or any(part in ("", ".", "..") for part in parts)
-                    or member.mode not in (0o644, 0o755)
-                    or member.name in extracted
-                ):
-                    raise SupervisorError(
-                        "no-mistakes runtime member is unsafe: {}".format(member.name))
-                handle = archive.extractfile(member)
-                body = handle.read() if handle else b""
-                total += len(body)
-                if total > 2 * 1024 * 1024 * 1024:
-                    raise SupervisorError("no-mistakes runtime expands beyond its bound")
-                destination = target.joinpath(*parts)
-                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-                destination.write_bytes(body)
-                destination.chmod(member.mode)
-                extracted[member.name] = body
-    except tarfile.TarError as exc:
-        raise SupervisorError("no-mistakes runtime archive is malformed: {}".format(exc))
-    try:
-        manifest = json.loads(extracted["runtime.json"].decode("utf-8"))
-    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SupervisorError("no-mistakes runtime manifest is unreadable: {}".format(exc))
-    records = manifest.get("files") if isinstance(manifest, dict) else None
-    manifest_fields = {
-        "schema", "provider", "no_mistakes_version", "no_mistakes_source_commit",
-        "owner_decision_protocol", "no_mistakes_path", "provider_path", "gh_path",
-        "node_path", "gh_axi_path", "gh_axi_entrypoint", "gh_axi_closure", "files",
-    }
-    if (
-        not isinstance(manifest, dict)
-        or set(manifest) != manifest_fields
-        or manifest.get("schema") != "fm.azure-validation-runtime/v1"
-        or manifest.get("provider") != "pi"
-        or manifest.get("no_mistakes_path") != "bin/no-mistakes"
-        or manifest.get("provider_path") != "bin/pi"
-        or manifest.get("node_path") != "bin/node"
-        or manifest.get("gh_path") != ""
-        or manifest.get("gh_axi_path") != ""
-        or manifest.get("gh_axi_entrypoint") != ""
-        or manifest.get("gh_axi_closure") != []
-        or manifest.get("owner_decision_protocol") != "fm.azure-validation-owner-decision/v1"
-        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", str(manifest.get("no_mistakes_version", "")))
-        or not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("no_mistakes_source_commit", "")))
-        or not isinstance(records, list) or not records
-    ):
-        raise SupervisorError("no-mistakes runtime manifest identity is not exact")
-    expected = {"runtime.json"}
-    for record in records:
-        if not isinstance(record, dict) or set(record) != {"path", "digest"}:
-            raise SupervisorError("no-mistakes runtime file record is malformed")
-        path = record.get("path")
-        digest_claim = record.get("digest")
-        if (
-            not isinstance(path, str) or path in expected or path not in extracted
-            or Path(path).name.lower() in {
-                ".env", ".netrc", ".npmrc", "auth.json", "credentials.json",
-                "credentials", "id_rsa", "id_ed25519",
-            }
-            or not isinstance(digest_claim, str) or not digest_claim.startswith("sha256:")
-            or hashlib.sha256(extracted[path]).hexdigest() != digest_claim[7:]
-        ):
-            raise SupervisorError("no-mistakes runtime file inventory differs")
-        expected.add(path)
-    required_executables = ("bin/no-mistakes", "bin/node", "bin/pi")
-    if (
-        set(extracted) != expected
-        or any(not os.access(target / path, os.X_OK) for path in required_executables)
-        or "lib/pi/dist/cli.js" not in extracted
-        or "extensions/pi-openai-fast-mode/src/index.ts" not in extracted
-        or "extensions/fast-mode-all-codex-accounts.ts" not in extracted
-        or "extensions/pi-ketch/src/index.ts" not in extracted
-    ):
-        raise SupervisorError("no-mistakes runtime is not exactly inventoried and executable")
-    if enforce_linux:
-        for path in ("bin/no-mistakes", "bin/node"):
-            header = extracted[path][:20]
-            if not (
-                len(header) == 20 and header[:4] == b"\x7fELF"
-                and header[4] == 2 and header[5] == 1
-                and int.from_bytes(header[18:20], "little") == 62
-            ):
-                raise SupervisorError(
-                    "no-mistakes runtime {} is not Linux amd64".format(path))
-    for directory, directories, _ in os.walk(target):
-        Path(directory).chmod(0o755)
-        for name in directories:
-            child = Path(directory) / name
-            if child.is_symlink():
-                raise SupervisorError("no-mistakes runtime contains a redirected directory")
-            child.chmod(0o755)
-
-
-def no_mistakes_execution_identity():
-    try:
-        identity = pwd.getpwnam("fmworker") if os.geteuid() == 0 else pwd.getpwuid(os.geteuid())
-    except KeyError:
-        raise SupervisorError("no-mistakes service user is unavailable") from None
-    if identity.pw_uid == 0 or identity.pw_gid == 0:
-        raise SupervisorError("no-mistakes service user is privileged")
-    return identity
-
-
-def chown_tree(root, uid, gid):
-    root = Path(root)
-    if root.is_symlink() or not root.is_dir():
-        raise SupervisorError("no-mistakes writable root is unavailable or redirected")
-    os.chown(root, uid, gid, follow_symlinks=False)
-    for directory, directories, files in os.walk(root, followlinks=False):
-        base = Path(directory)
-        os.chown(base, uid, gid, follow_symlinks=False)
-        for name in directories + files:
-            os.chown(base / name, uid, gid, follow_symlinks=False)
-
-
-def prepare_no_mistakes_execution(worktree, worktree_root, account_home, brief):
-    identity = no_mistakes_execution_identity()
-    if os.geteuid() == 0:
-        chown_tree(worktree, identity.pw_uid, identity.pw_gid)
-        chown_tree(account_home, identity.pw_uid, identity.pw_gid)
-    account_home.chmod(0o700)
-    runtime = worktree_root / ".fm-runtime"
-    if runtime.is_symlink() or not runtime.is_dir():
-        raise SupervisorError("no-mistakes runtime root is unavailable or redirected")
-    for directory, directories, _ in os.walk(runtime, followlinks=False):
-        Path(directory).chmod(0o755)
-        for name in directories:
-            child = Path(directory) / name
-            if child.is_symlink():
-                raise SupervisorError("no-mistakes runtime contains a redirected directory")
-            child.chmod(0o755)
-    worktree_root.chmod(0o711)
-    brief.parent.chmod(0o711)
-    if os.geteuid() == 0:
-        os.chown(brief, identity.pw_uid, identity.pw_gid, follow_symlinks=False)
-    brief.chmod(0o400)
-    if os.geteuid() == 0:
-        return {"user": identity.pw_uid, "group": identity.pw_gid, "extra_groups": []}
-    return {}
 
 
 def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT, input_bytes=None, env=None):
@@ -752,8 +571,7 @@ def collect_outcome(request, repo, worktree_root):
             )
         )
     contract = request.get("return_contract")
-    service_contract = request.get("service_return_contract")
-    if commits == 0 and contract is None and service_contract is None:
+    if commits == 0 and contract is None:
         return {
             "outcome_present": False, "outcome_sha256": "", "outcome_bytes": 0,
             "outcome_commits": 0, "outcome_sink": "",
@@ -831,69 +649,6 @@ def collect_outcome(request, repo, worktree_root):
             "return_manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
             "outcome_tip": manifest["outcome_tip"],
         }
-    elif service_contract is not None:
-        outcome_path = repo / service_contract["step_outcome_path"]
-        outcome_body = None
-        if outcome_path.exists():
-            if outcome_path.is_symlink() or not outcome_path.is_file():
-                raise SupervisorError("no-mistakes step outcome is redirected or not regular")
-            outcome_body = outcome_path.read_bytes()
-            if not outcome_body or len(outcome_body) > service_contract["step_outcome_max_bytes"]:
-                raise SupervisorError("no-mistakes step outcome is empty or oversized")
-        if outcome_body is not None:
-            manifest = {
-                "schema": "fm.no-mistakes-worker-return/v1",
-                "task": request["task"],
-                "task_generation": request["task_generation"],
-                "assignment_generation": request["assignment_generation"],
-                "request_digest": request["request_digest"],
-                "repository_generation": base,
-                "outcome_commits": commits,
-                "outcome_tip": git_in(
-                    repo, "rev-parse", "HEAD", timeout=GIT_HEAD_TIMEOUT
-                ).stdout.decode().strip(),
-                "step_outcome_sha256": hashlib.sha256(outcome_body).hexdigest(),
-            }
-            manifest_body = canonical(manifest) + b"\n"
-            return_commit = _return_commit(
-                repo, base,
-                {"manifest.json": manifest_body, "step-outcome.json": outcome_body},
-                request,
-            )
-            return_ref = "refs/fm-return/{}".format(request["request_digest"][:32])
-            if git_in(
-                repo, "update-ref", return_ref, return_commit, timeout=GIT_HEAD_TIMEOUT
-            ).returncode != 0:
-                raise SupervisorError("no-mistakes service return ref could not be created")
-            bundle_refs.append(return_ref)
-            if commits:
-                outcome_ref = "refs/fm-outcome/{}".format(request["request_digest"][:32])
-                if git_in(
-                    repo, "update-ref", outcome_ref, manifest["outcome_tip"],
-                    timeout=GIT_HEAD_TIMEOUT,
-                ).returncode != 0:
-                    raise SupervisorError("no-mistakes outcome ref could not be created")
-                bundle_refs.append(outcome_ref)
-            bundle_refs.append("^{}".format(base))
-            returned = {
-                "return_present": True,
-                "return_ref": return_ref,
-                "return_commit": return_commit,
-                "return_manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
-                "outcome_tip": manifest["outcome_tip"],
-                "service_return_present": True,
-                "step_outcome_sha256": manifest["step_outcome_sha256"],
-            }
-        elif commits:
-            bundle_refs.append("{}..HEAD".format(base))
-            returned = {"service_return_present": False, "step_outcome_sha256": ""}
-        else:
-            return {
-                "outcome_present": False, "outcome_sha256": "", "outcome_bytes": 0,
-                "outcome_commits": 0, "outcome_sink": "",
-                "outcome_uncommitted_changes": bool(dirty.stdout.strip()),
-                "service_return_present": False, "step_outcome_sha256": "",
-            }
     elif commits:
         bundle_refs.append("{}..HEAD".format(base))
 
@@ -971,42 +726,21 @@ def write_atomic(path, value):
 
 
 def execute(request, worktree, worktree_root):
-    path = "/usr/local/bin:/usr/bin:/bin"
-    if request.get("worker_role") == "no-mistakes":
-        path = str((worktree_root / ".fm-runtime" / "bin").resolve()) + ":" + path
     account_home = Path(os.environ.get("FM_WORKER_ACCOUNT_HOME", "/nonexistent")).resolve()
     safe_env = {
         "HOME": str(account_home),
         "PI_CODING_AGENT_DIR": str(account_home / "pi-agent"),
-        "PATH": path,
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "/bin/false",
     }
-    argv = request["argv"]
-    execution_identity = {}
-    if request.get("worker_role") == "no-mistakes":
-        # The no-mistakes guest is already the isolated Azure test boundary.
-        # Its project command uses this fixed marker to avoid recursively
-        # dispatching another Azure validation fleet from inside the worker.
-        safe_env["FM_NO_MISTAKES_AZURE_WORKER"] = "1"
-        # The repository must stay at the exact clean dispatched head, so the
-        # controller-owned brief lives beside it in the verified staging root.
-        # Resolve only the one argv field whose logical control-plane name is
-        # `brief.md`; the result remains repository-relative for collection.
-        brief = worktree_root / ".fm-task" / "brief.md"
-        if brief.is_symlink() or not brief.is_file():
-            raise SupervisorError("no-mistakes staged brief is unavailable or redirected")
-        argv = list(argv)
-        argv[6] = str(brief.resolve())
-        execution_identity = prepare_no_mistakes_execution(
-            worktree, worktree_root, account_home, brief)
     try:
         completed = subprocess.run(
-            argv, cwd=str(worktree), env=safe_env,
+            request["argv"], cwd=str(worktree), env=safe_env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=request["wall_seconds"], check=False, **execution_identity,
+            timeout=request["wall_seconds"], check=False,
         )
         timed_out = False
         exit_code = completed.returncode

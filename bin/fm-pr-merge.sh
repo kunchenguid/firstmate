@@ -3,8 +3,7 @@
 # head and PR claims, while always recording pr= and any available pr_head=.
 #
 # Why this exists: the normal trigger for running fm-pr-check.sh is the crewmate's
-# `done: PR <url> checks green` line, which no-mistakes only emits once its CI
-# step turns green. Repos that intentionally run no CI on PRs (CI only on
+# `done: PR <url> checks green` line. Repos that intentionally run no CI on PRs (CI only on
 # pushes to the default branch) never emit that line, so a merge performed by
 # hand-running `gh-axi pr merge` - the common shape of a yolo-authorized merge -
 # can skip the recording step entirely. Teardown then has nothing to look up for
@@ -29,9 +28,6 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 
 ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <atomic merge options>]}
 URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <atomic merge options>]}
@@ -127,6 +123,11 @@ REVIEWED_HEAD=$("$SCRIPT_DIR/fm-crosscheck.sh" verify "$ID" "$URL") || exit 1
 }
 grep -qxF "pr_head=$REVIEWED_HEAD" "$META" || {
   echo "error: fm-pr-check did not record the reviewed live head in $META" >&2
+  exit 1
+}
+CI_HEAD=$("$SCRIPT_DIR/fm-github-pr.py" checks "$URL" "$REVIEWED_HEAD") || exit 1
+[ "$CI_HEAD" = "$REVIEWED_HEAD" ] || {
+  echo "error: final CI verification did not return the exact reviewed SHA" >&2
   exit 1
 }
 

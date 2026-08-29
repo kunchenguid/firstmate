@@ -9,7 +9,7 @@
 # reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
 # git identity and fixture builders, state/<id>.meta writers, and the common
 # string/exit-code/file assertions. It deliberately does NOT bundle the
-# behavior-specific fake tmux/treehouse/no-mistakes mocks: those encode terminal
+# behavior-specific fake tmux/treehouse mocks: those encode terminal
 # and lifecycle assumptions that differ per suite and belong with the tests that
 # own them.
 #
@@ -25,14 +25,10 @@ if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
 fi
 FM_TEST_LIB_SOURCED=1
 
-# Exempt firstmate's own test suite from the gate-lifecycle refusal
-# (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
-# worktree - the exact environment that guard refuses - so without this every
-# test that drives the real fm-spawn/fm-send/fm-teardown would be refused during
-# firstmate's own validation. A confused gate agent never sources this helper, so
-# the boundary against the real hazard is unaffected. tests/fm-gate-refuse.test.sh
-# strips this to verify real refusal.
-export FM_GATE_REFUSE_BYPASS=1
+# Behavior tests drive bootstrap and related entrypoints against isolated homes.
+# Keep machine background-service management out of those fixtures while leaving
+# every explicit service test free to opt in through its dedicated test seam.
+export FM_BOOTSTRAP_BACKGROUND_BYPASS=1
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.

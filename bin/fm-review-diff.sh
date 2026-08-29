@@ -6,7 +6,7 @@
 # the default branch, and local-only projects against the local default branch.
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
 # head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
-# stays current after no-mistakes fix rounds push to the PR; if the PR head
+# stays current after follow-up fixes push to the PR; if the PR head
 # cannot be resolved, the script falls back to the local branch with a warning.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
@@ -16,9 +16,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {

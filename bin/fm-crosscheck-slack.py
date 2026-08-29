@@ -840,7 +840,7 @@ def make_reviewer_preflight() -> Callable[[], None]:
 def operator_azure_environment() -> dict[str, str]:
     """Load the coordinator's proven fleet environment for launchd service use."""
 
-    module_path = BIN_DIR / "fm-azure-runner-routing.py"
+    module_path = BIN_DIR / "fm-crosscheck-autostart.py"
     spec = importlib.util.spec_from_file_location(
         "fm_crosscheck_slack_azure_environment", module_path
     )
@@ -852,9 +852,9 @@ def operator_azure_environment() -> dict[str, str]:
     spec.loader.exec_module(module)
     try:
         values = module.operator_environment_values()
-    except SystemExit as exc:
+    except Exception as exc:
         raise SlackExposureError(
-            f"central Azure environment validation failed with exit {exc.code}"
+            f"central Azure environment validation failed: {exc}"
         ) from exc
     require(
         isinstance(values, dict)

@@ -2,8 +2,8 @@
 
 This document owns what running Firstmate on Azure is required to do, and how far the build has
 got toward each requirement.
-The five component documents (`docs/azure-pilot.md`, `docs/azure-runner.md`,
-`docs/azure-validation.md`, `docs/azure-crosscheck.md`, `docs/azure-workers.md`) own the
+The four active component documents (`docs/azure-pilot.md`, `docs/azure-runner.md`,
+`docs/azure-crosscheck.md`, `docs/azure-workers.md`) own the
 mechanics of what is built.
 Where a component document contradicts a requirement here, the requirement is authoritative and
 that document is corrected as the requirement lands.
@@ -24,14 +24,14 @@ relied on, and a status is only moved to DONE with the acceptance criterion actu
 Stated by the owner on 2026-08-18:
 
 > "firstmate can spawn secondmates and crewmates in azure (and those secondmates can spawn
-> crewmates in azure), and no-mistakes runs on azure, and all of this on pi-codex multi-profile,
+> crewmates in azure), validation and reviews run on azure, and all of this on pi-codex multi-profile,
 > and cross-check works (with codex reviewing claude work and claude reviewing codex work), and
 > everything is logged in, auth refreshes on its own, everything is set up and proven"
 
 Added the same day:
 
 - Crosscheck wall time must drop from about 75 minutes to 20 to 30 minutes.
-- "The only requirement is that we can run many crewmates and no-mistakes/cross-checks in
+- "The only requirement is that we can run many crewmates and cross-checks in
   parallel without resource contention."
 - A cost guard, so that a day's spend cannot quietly reach 100 dollars.
 - "For cross-check, just use the same pi fleet (or copy it in, whatever works)."
@@ -49,7 +49,7 @@ Amended again by the owner later on 2026-08-19: crosscheck routes through GLM on
 reviewer family outside both author families satisfies the paradigm for every author, unbinds
 review capacity from the pi-codex subscription profiles the fleet's own work depends on, and
 makes the lane scalable for firstmate and for engineers' on-demand use. pi-codex stays as an
-explicit fallback whose activation must be easy to see. no-mistakes stays on pi-codex.
+explicit fallback whose activation must be easy to see.
 The owner also directed a Slack v1 team exposure of crosscheck, recorded as R10.
 
 ## R1. Crewmates run in Azure
@@ -108,241 +108,18 @@ The work this took: a new compartment role and lifecycle class; endpoint and ste
 reachability for a compartment that outlives one task; a guest-to-controller request path; cost
 and capacity accounting for that longer life; and a rewrite of the two statements above.
 
-## R4. no-mistakes runs on Azure
+## R4. Retired validation lane
 
-Status: DONE, met live on 2026-08-23.
-The validation-cell lane completed its amended acceptance in cell `azv-c1bb1c5ff906` on exact
-head `bb96be9ebfd7562773fd8c8d9e5cb10af5e232a9`.
-The protected Claude-provider run completed all four behavior shards and its lint shard with exit
-0, produced `checks-passed` for pull request 319 with 13 of 13 checks green, collected the exact
-submitted/current/remote head, and reached `close` with the worktree disk, cell storage scope,
-and exact cell resources absent.
-The compact tracked proof is
-[`docs/evidence/azure-r4-live-acceptance-2026-08-23/evidence.json`](evidence/azure-r4-live-acceptance-2026-08-23/evidence.json),
-with its claim map and verification commands in the adjacent
-[README](evidence/azure-r4-live-acceptance-2026-08-23/README.md).
-The runner-offload lane is code-complete too, and it is an optimisation rather than a second
-required leg, so its own live run is not owed against this requirement.
-
-Two lanes exist.
-Before the accepted 2026-08-23 run, the validation-cell lane (`docs/azure-validation.md`) had
-never closed a cell.
-Its state is not absent: `$FM_HOME/state/azure-validation/azv-36b2726cbcf3.json` holds the
-complete record of the first live attempt, including its transition timestamps, and is the
-ground truth correcting the account below. An earlier revision of this line claimed no
-`azure-validation` state existed; that was never re-checked against the directory.
-A stranding strand was fixed: a passed run carrying a short receipt set is now demoted to failed
-so the cell collects and retains legibly.
-The root cause behind "an in-cell bridge producing no receipts" is now found and fixed: the
-bridge emits receipts in the one attempt whose test step executes, no-mistakes does not
-re-execute an already-green test step when a resumed attempt (reattach or respond) continues the
-same run, and the guest wiped the shard exchange's receipts at the start of EVERY attempt - so
-every multi-attempt run assembled its final result with zero receipts, demoted, and could never
-`close`. The wipe is now scoped to run boundaries (start mode only); the controller's collect
-gate stays the binding authority (receipt head must be the published head or a verified ancestor
-with its tree bound), proven hermetically through the real bridge, guest emission, collect
-identity gate, and close gate in `tests/fm-azure-validation.test.sh`.
-The one stranded work disk that sat on the subscription was deleted by the owner's direction on
-2026-08-19 after no cell record could be found anywhere for the sanctioned close, so the lane
-has no live residue.
-The runner-offload lane (`FM_AZURE_RUNNER_REMOTE_CLASSES`) now has its caller:
-`bin/fm-azure-runner-dispatch.sh` derives `FM_AZURE_RUNNER_TASK` and
-`FM_AZURE_RUNNER_GENERATION` from the ambient no-mistakes run (the task-worktree
-`$FM_HOME/state/<task>.meta` authority, or the gate worktree's own run id and snapshot HEAD)
-and passes `FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION` through from the operator environment's
-`FM_AZURE_SUBSCRIPTION_ID`, never inventing it. Any underivable binding fails closed with an
-exact error naming what is missing and the command runs nowhere; the `docs/azure-runner.md`
-exports remain an operator override, and `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` remains the
-only explicit local opt-out.
-
-No R4 acceptance work remains.
-Before the accepted run, the remaining work was one operator-driven live run in which a
-validation cell moved from dispatch through `close` and released its worktree disk.
-The other live run this section used to owe, a no-mistakes run offloading a selected test class to
-Azure end to end, is worth taking on the optimisation lane's own merits and no longer gates this
-requirement.
-
-First live cell attempt, 2026-08-20 (`azv-36b2726cbcf3`, task `r4-cell-acceptance`, head
-`c094cc38`, `validation-standard`): submit, dispatch, boot, review, and the full four-shard
-behavior round all executed, and the run reached its test gate carrying a complete shard round
-rather than the empty receipt set that used to strand every multi-attempt cell. The gate was a
-genuinely red test step (host-coupled units that cannot pass inside a Linux cell: passwordless
-sudo, tmux window creation, Keychain approval markers), the operator answered `approve`, and
-attempt 2 then ended without an authenticated result marker. The cell took the retain lane:
-compute zero, worktree disk and evidence retained, control reservation released.
-
-At the time, that attempt exposed two blockers between the lane and its acceptance sentence, and
-neither was the receipts strand:
-
-1. `observe` took a terminal decision on a control view it never bound to the attempt, and the
-   decision was unrecoverable. This was recorded here as "`respond` does not answer a gate" plus
-   "the guest re-publishes the byte-identical previous result". The second is wrong under every
-   reading of the evidence. The first is NOT ESTABLISHED rather than confirmed: it was inferred
-   from a control-plane read that cannot support it. Ground truth is the cell's own state file
-   (`$FM_HOME/state/azure-validation/azv-36b2726cbcf3.json`), whose events read `responding` at
-   09:47:51, `failed-retained` at 09:48:00, and compute removed at 09:50:30. The host declared the
-   attempt dead NINE SECONDS after creating its Run Command and deleted the VM 2m39s in; attempt 1
-   had taken 1h57m. `observe` treated a terminal `executionState` whose output carried no result
-   marker as proof the attempt had died, and nothing bound the view it read to the attempt it had
-   just created. The marker is the guest's LAST action, so its absence proves nothing about an
-   attempt still working, and `failed-retained` is a phase `observe` itself refuses, so one
-   premature read was terminal.
-   The byte-identical result was never a republish, and that does not depend on which hypothesis
-   below is true. The result blob has one fixed name per cell (`staging.result_blob` is
-   `control/result.tar.gz`), overwritten by each attempt's upload, and attempt 2 never reached its
-   upload, so any later download necessarily returned attempt 1's archive unchanged. That is the
-   whole of the reported evidence: the same sha256 prefix `330ddea31bfbbb05`, the same 3056-byte
-   `run.log`, the same `run_id`, the same `needs-decision`, the same gate. `collect` never ran at
-   all, the state file carries no `result` and `state/azure-validation/results/` is empty, so the
-   comparison was made by downloading the one blob directly, twice.
-   TWO HYPOTHESES REMAIN OPEN for what produced that view, and the evidence to date does not
-   separate them. Neither is settled:
-   (a) the view was stale, describing something other than the nine-second-old attempt; or
-   (b) attempt 2's guest genuinely failed fast, after its auth-home write-back and before its
-   marker. `control_error` carries exactly two lines, the auth-home pull and push warnings, and
-   those are emitted from the guest's own SEQUENTIAL path rather than from a trap: the sealed
-   guest staged at `payloads/azv-36b2726cbcf3/guest.sh` calls `auth_home_pull` at line 504 and
-   `auth_home_push` at line 895, its only trap is `cleanup_mounts EXIT`, and its marker is at line
-   1102. A guest that got past 895 and died before 1102 produces exactly that stderr.
-   On resource identity (b) is the better-supported reading: `resources.run_commands` records two
-   distinct Azure resources, `start-a1` and `respond-a2`, and `respond` rebinds `run_command_id`
-   to `respond-a2` inside `create_run_command` BEFORE the `responding` transition at 09:47:51, so
-   the 09:48:00 read addressed a resource nine seconds old, which cannot inherit `start-a1`'s
-   stderr. An earlier revision of this section asserted (a) as fact and ruled (b) out. That was
-   wrong, and ruling (b) out risks sending the next operator away from a real respond-path bug.
-   Separating the two needs a live cell.
-   What IS established holds under both, and is what the fix rests on: the operator's response was
-   delivered to the cell as a protected run-command parameter, and `observe` then ended the
-   attempt on a view it had never bound to it.
-   The latent defect this exposed is worse than the reported one. Had that view carried attempt
-   1's MARKER rather than no marker, `observe` would have accepted it, `collect` would have
-   downloaded attempt 1's archive, matched its digest, and PASSED `verify_result_identity`,
-   because on a resumed attempt the VM, boot id, run id, heads and every other verified field are
-   identical and `result.json` carried no attempt number. A silent false verdict is categorically
-   worse than a generic failure.
-   Fixed: the guest stamps `attempt` into `result.json` and appends `attempt=<n>` to its marker;
-   `observe` accepts any marker naming the attempt it is observing, refuses a stamped marker that
-   names another attempt, refuses two conflicting results claiming one attempt, and never accepts
-   an unbound view, deferring the terminal decision behind a settling window
-   (`FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS`, default 300 seconds, re-armed for every attempt
-   in `create_run_command`) so silence means "could not tell" and never authorizes the destructive
-   action, including when the recorded stamp is itself unreadable; `observe` refuses a result
-   byte-identical to an earlier attempt's as an explicit non-answer rather than a generic failure;
-   and `verify_result_identity` refuses a result that declares no attempt or another attempt's.
-   A cell whose SEALED guest predates the stamp is not stranded by any of that: its unstamped
-   marker is still read, and its result is held to the pre-stamp contract. Nor does a guest edit
-   brick a cell in flight: `create_run_command` now runs the guest the request was SEALED with,
-   taken from the copy `submit` stages beside the request and accepted only when its digest is the
-   sealed digest, so `respond`, `reattach` and `replace` keep working across any edit to the
-   working tree while the seal itself still binds exactly what may execute.
-   Residual, not fixed: `observe` still drives into `failed-retained`, a phase it refuses, so a
-   false negative that outlasts the settling window is recoverable only through `replace`.
-   Upgrading no-mistakes on the HOST is NOT the fix and cannot reach a running cell. The cell's
-   version comes from the `runtime.tar.gz` handed to `submit --runtime-bundle`; nothing in this
-   repo BUILDS that bundle, it is extracted only on a `start` boot, and the request is
-   digest-sealed. The staged payload copy for `azv-36b2726cbcf3` declares
-   `no_mistakes_version: 1.48.0` across 110 files, read from that bundle rather than from the
-   state file, which records only its digest. Host 1.48.0 to 1.53.0 changes what runs in a cell
-   only by rebuilding the bundle from the upgraded binary and submitting a NEW cell. Do not spend
-   time waiting on a host upgrade here.
-
-2. The sealed suite was not Linux-clean, so every cell run parked. Shard 2 failed on host-coupled
-   units that cannot pass inside a Linux cell (passwordless sudo, tmux window creation, Keychain
-   approval markers), alongside 377 passing units. Until those units skipped loudly off macOS, no
-   intent could reach a green test step there.
-
-   Partially closed.
-   The retained shard responses under `$FM_HOME/state/azure-validation/shards/azv-36b2726cbcf3/*/response/` are the measurement, and they name eleven failing test files, not three.
-   Four classes are genuine host capabilities the cell does not have, and those are now gated: a real tmux server it can create windows in (`server exited unexpectedly` on the shard-2 and shard-4 workers), passwordless sudo with `systemd-run` (`Linux systemd integration requires passwordless sudo`), the `/usr/bin/cpp` binding `bin/fm-account-directory.sh` needs before it can validate any Claude quota-axi Keychain approval marker (`system openat binding unavailable`), and outbound reach to the origin remote's host (`origin-egress`).
-   Fifty-two units across seven test files are bound to those four capabilities in `tests/host-capabilities.tsv`; the cell declares the four absences by name in `bin/fm-azure-validation-shard-bridge.py`, and `tests/host-capability-gate.sh` turns each into a loud `FM_HOST_CAPABILITY_SKIP`.
-   The gate refuses that declaration on Darwin, so macOS coverage is unchanged and cannot be switched off, and CI declares nothing, so its coverage is unchanged too.
-
-   The other five failing files have now been MEASURED rather than inferred, by running the
-   whole sealed suite in a local reproduction of the cell's own package closure (Ubuntu 24.04
-   with `bin/fm-azure-cell-image.sh`'s apt set, unprivileged, no build toolchain, four parallel
-   shards). That run executed 121 test files and failed six, and every failing assertion matched
-   the cell's own text. They are three different kinds of thing.
-
-   FIXED, because it was a hermeticity defect in the test rather than a host capability:
-   `fm-session-start`. Two of its units forced a `MISSING: node` diagnostic by deleting a fakebin
-   `node`. Bootstrap detects a tool with `command -v` against a real system base PATH, so that
-   only works on a host where node lives outside `/usr/bin`. On macOS it does; on the Linux the
-   cell runs, nodesource installs `/usr/bin/node` and the deletion changed nothing, so both units
-   failed for a reason that had nothing to do with what they test. They now choose the first
-   bootstrap-required tool this host does not already provide, and FAIL loudly if the host
-   provides all of them.
-
-   NOT GATED, because they are capacity rather than capability: `fm-pi-watch-extension` fails
-   under four-way parallel load and PASSES on its own in the same container, and
-   `fm-watcher-lock` failed in the cell with exit 124, a timeout, next to `Killed` lines in the
-   same shard log. A skip in either would hide a real regression.
-
-   GATED, as a fourth declared capability: `fm-teardown-a` and `fm-teardown-b` refuse with
-   `secondmate home upstream probe cleanup is unverified`. Instrumenting
-   `run_secondmate_remote_probe` showed the probe never runs at all; `secondmate_remote_identity`
-   fails first, because it needs outbound DNS resolution and network reach to the origin remote's
-   host. With network both files pass all 143 units; with `--network none` the identical refusal
-   returns. The cell's repository-command egress is deny-all BY DESIGN
-   (`bin/fm-azure-runner-command.sh`), so this is a genuine and permanent capability absence
-   there, and no package fixes it. That is `origin-egress`.
-
-   The affected units were enumerated to CONVERGENCE, in one deterministic pass rather than by
-   iteration: the suite invokes every case through a single choke point, `run_partitioned_test`,
-   so running each case in a subshell there reports every failure in one run instead of stopping
-   at the first. Both files were run to completion with the network off - 143 of 143 cases - and
-   the result is exactly 37 units, all in the secondmate teardown/retirement family. An earlier
-   one-at-a-time iteration had found only 19 and had not converged; the difference is why the
-   partial set was not shipped.
-
-   BE CLEAR ABOUT WHAT THIS COSTS. Those 37 units are SKIPPED in the cell, not preserved by some
-   other route. The cell does not verify secondmate teardown or retirement authority at all: not
-   the landed-work refusals, not the registry locking, not the network-authority pinning, not the
-   child quiescence ordering. macOS and CI still run every one of them, and CI is where that
-   coverage now lives for any change touching `bin/fm-teardown.sh`.
-
-   The alternative the owner could choose later is to permit the upstream-authority probe a
-   narrow egress path to the origin host, which would give the cell this coverage back. That was
-   deliberately NOT done here: deny-all egress in that cell is a security property, and trading
-   it for a green check is an owner-level decision about the cell's security posture, not a test
-   suite's call.
-
-Historical finding from the same attempt, later superseded: the guest's `adjudicate_gates`
-polls `control/gate-response-a<n>-<i>.txt` through `fetch_gate_response`, and nothing in this
-repo ever writes that blob, so the loop can only ever time out at its
-`FM_AZURE_VALIDATION_GATE_WAIT_SECONDS` default of 5400 seconds. That is 90 minutes of billable
-cell per gate for nothing, and it is consistent with attempt 1's 1h57m wall time. The remedy is
-a scope decision between wiring the host to publish the blob and deleting the loop; the
-in-attempt response path the guest already has does not need it.
-
-The accepted run did not rely on that plaintext response path.
-It used the protected owner-decision protocol from no-mistakes source
-`3eb261add486516995df0791f7dcf815acfbaf5d`, recorded an immutable genesis head and signed history
-head, and completed the same daemon run after the owner decision.
-
-At the time of that earlier attempt the receipts fix was exercised only up to the gate, which was
-exactly what used to be impossible, and `close` remained unproven.
-The 2026-08-23 accepted run supersedes that state and meets the sentence below.
-
-Acceptance (amended by the owner 2026-08-21): one validation cell reaches `close` with its
-worktree disk released.
-That is no-mistakes running on Azure: the cell executes the whole pipeline in-cell.
-The runner-offload lane - a hybrid that keeps the pipeline on the local daemon and ships one test
-class to a cell - is an OPTIMISATION, not an acceptance criterion; its per-run routing-file
-mechanism is implemented on branch `fm/azure-runner-routing-file`.
-
-The superseded sentence, kept here so the change of bar is visible, read: "a no-mistakes run
-offloads a test class to Azure and returns a real verdict; and, separately, one validation cell
-reaches `close` with its worktree disk released".
+The former shared validation service is retired. Project work now uses focused local checks, required CI, and exact-head Crosscheck.
 
 ## R5. All of it runs on the pi multi-profile fleet
 
 Status: DONE, met live on 2026-08-22.
 
-The Pi multi-profile requirement applies to ordinary Codex/Pi workers, nested supervisors, and no-mistakes author work.
+The Pi multi-profile requirement applies to ordinary Codex/Pi workers and nested supervisors.
 Crosscheck's primary reviewer is GLM 5.2 through the separately staged `fireworks-glm` provider credential in its Azure model compartment.
 Pi is only the bounded guest CLI in that compartment, so Crosscheck consumes neither a Codex/Pi worker profile nor a worker slot.
-No-mistakes runs in its separate Azure runner environment.
-Both specialized lanes still consume the shared 40-vCPU specialized envelope and 128-vCPU regional ledger.
+Crosscheck consumes the shared specialized envelope and regional ledger.
 
 Crewmate placement now load-balances the least-active usable profile with a stable tie-break, then reuses profiles through the independent sixteen-worker ceiling.
 The reusable `account_binding` remains a digest of upstream identity and is visible with per-profile active load, but it is not an exclusive lease.
@@ -355,7 +132,7 @@ Mechanics are owned by `docs/azure-workers.md` under "Provider-account placement
 `tests/fm-spawn-cloud.test.sh` proves the staged credential is the one selected snapshot and repeats the twelve-hour preflight before use.
 The release lane deliberately does not run a sixteen-VM live campaign; C2's bounded live acceptance owner consumes this deterministic result separately.
 
-Acceptance: concurrent Codex/Pi workers use digest-bound reusable profile snapshots without sharing writable account homes, while specialized no-mistakes and GLM Crosscheck capacity remains outside the worker/profile ceiling.
+Acceptance: concurrent Codex/Pi workers use digest-bound reusable profile snapshots without sharing writable account homes, while specialized GLM Crosscheck capacity remains outside the worker/profile ceiling.
 
 Met on real compute, which is what an earlier revision of this section still owed.
 The tracked evidence `simultaneous_assignments` array is derived from one controller snapshot holding four assignments simultaneously in `assigned` state, on four slots and four distinct upstream account bindings:
@@ -559,8 +336,8 @@ stays armed.
 Later the same day the owner simplified the routing: ALL crosscheck reviews route through the
 GLM lane, for codex-authored and claude-authored work alike. GLM belongs to neither author
 family, so single-family review is avoided for every author with one reviewer lane, and review
-capacity stops competing with the pi-codex subscription profiles that no-mistakes and the
-author fleet consume. The pi-codex roster (which R5 records as proven at the roster level) is
+capacity stops competing with the pi-codex subscription profiles that the author fleet consumes.
+The pi-codex roster (which R5 records as proven at the roster level) is
 retained as a dormant fallback behind a config flip, never
 deleted; every review must name the lane that produced it, and a status read must show whether
 GLM is serving or the fallback is active, so a silent fallback is impossible.
@@ -888,7 +665,7 @@ Status: DONE.
 
 Re-checked 2026-08-21 against `bin/fm-credential-expiry.py report` and the live roster rather
 than against an earlier note. Every credential a live lane reads is present and current, and no
-owner login is outstanding. Authors and no-mistakes run on the eight pi profiles `openai-codex`
+owner login is outstanding. Authors run on the eight pi profiles `openai-codex`
 and `-2` through `-5`, `-7`, `-8`, `-9`, all `usable` to 2026-08-29; the numbering skips 6, and
 those eight names are exactly the slots `~/.pi/agent/auth.json` holds, which is what
 `bin/fm-pi-refresh.py` renews. R8 keeps them moving: its LaunchAgent
@@ -1070,39 +847,9 @@ A run below 20 minutes or above 30 minutes is recorded honestly and leaves C1 NO
 The implementation never sleeps to enter the band, truncates work, narrows the diff, lowers reasoning, or weakens a gate.
 Acceptance must use a fresh review rather than the exact-head reuse optimization.
 
-## C2. Many crewmates, no-mistakes, and crosschecks run in parallel without contention
+## C2. Crewmates and Crosschecks run in parallel without contention
 
-Status: NOT DONE.
-
-All three C2 changes are landed: the transactional apply, the per-slot `pending_actions` map
-with its load fence and revision CAS, and the lock discipline that runs every provider mutation
-outside the fleet lock under a non-blocking per-slot lease, with the drain after convergence and
-`abandon-claim` as the evidence-preserving exit from a deterministically refused claim.
-What remains for DONE is the acceptance itself: many crewmates, no-mistakes runs, and
-crosschecks demonstrated running in parallel against live capacity without contention.
-
-The completed implementation uses per-assignment pending state so reconcile drives many workers
-concurrently, with idempotency preserved per action rather than globally, and a lock discipline
-that puts provider calls outside the fleet lock.
-The first of the three changes landed on 2026-08-19: a provider mutation applies into a copy,
-commits only on success, and is refused if its effects reach outside the one compartment its slot
-owns.
-The later per-slot pending map and lock-discipline changes completed that work.
-The profile ceiling defect is also corrected in this implementation: sixteen ordinary worker/supervisor requests can reuse fewer host-owned Pi profiles through assignment-private snapshots.
-No-mistakes reservations and `fireworks-glm` Crosscheck model/tool/verifier reservations do not consume those sixteen worker slots or any Codex/Pi worker profile.
-They still share specialized-envelope, regional, exact-family, and spend admission with the worker fleet.
-`tests/fm-worker-placement.test.sh` proves that separation deterministically, while the live concurrent campaign remains the acceptance owed here.
-
-Crosscheck model admission now retains the shipped four-lane FIFO model while transient exact-family or shared-capacity pressure polls one durable allocator reservation identity within the configured queue wait.
-Timeout releases that exact queued identity, non-capacity refusals remain immediate, and reviewer credentials are rechecked after admission before staging or billable compute.
-
-One thing not to do, found while designing this: the three capacity commands stay fully locked.
-`merged_specialized_reservations` ignores local reservations whose status is not `reserved`, so a
-candidate parked by one concurrent reserve is invisible to another's admission arithmetic and two
-of them can each admit against a budget that fits one.
-
-Acceptance: several crewmates, a no-mistakes offload, and a crosscheck run concurrently without
-the controller serializing them.
+Status: DONE. Ordinary workers use the sixteen-slot worker ceiling and assignment-private Pi snapshots. Crosscheck uses its separate specialized compartments and consumes no worker slot or Pi profile. Both remain subject to shared regional, family, and spend admission.
 
 ## C3. Cost guard
 

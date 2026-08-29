@@ -54,13 +54,13 @@ The separate `full` configuration declares slots 1 through 16 and an exact SKU f
 Omitted workers consume no VM charge, and incremental slot deployment can create or reconcile one worker without deleting resources for other slots.
 The fallback `commissioning` profile declares only slots 1 and 2.
 
-Dedicated private subnets, managed identities, and non-public evidence containers reserve separate boundaries for no-mistakes credentialed control cells, uncredentialed validation shards, Crosscheck credentialed reviewer/model cells, Crosscheck uncredentialed tool cells, and fresh networkless verifier cells.
+Dedicated private subnets, managed identities, and non-public evidence containers reserve separate boundaries for Crosscheck credentialed reviewer/model cells, Crosscheck uncredentialed tool cells, and fresh networkless verifier cells.
 The verifier subnet has no NAT attachment, disables default outbound access, and uses its own NSG with explicit deny-all inbound and outbound rules, including VNet and private-endpoint destinations.
 No validation, reviewer, tool, or verifier VM is created by this template.
 Those workload classes must scale to zero and may not mount a control home; subnet and identity separation never implies pre-provisioned compute.
 The policy reviewer identity is separate from the browser/tool identity so the follow-up can preserve a credentialed-reviewer and uncredentialed-tool boundary.
 The template does not claim that moving a shared singleton daemon into Azure solves contention.
-The isolated per-run daemon, database, cache, process, credential, worktree, and lifecycle behavior is owned by [`docs/azure-validation.md`](azure-validation.md).
+Generic isolated invocation behavior is owned by [`docs/azure-runner.md`](azure-runner.md), and review-specific compartment behavior is owned by [`docs/azure-crosscheck.md`](azure-crosscheck.md).
 
 The live 128-vCPU regional limit can cover a 2-vCPU supervisor, sixteen 4-vCPU mixed-family author workers, and a 62-vCPU landing reserve.
 That headroom is reserved for isolated validation, Crosscheck, browser, replacement, recovery, and ancillary capacity.
@@ -140,8 +140,7 @@ One Dasv6 supervisor plus two continuous Dasv6 workers is about $332/month for V
 The full mixed plan's average worker rate is about $0.218/hour, making the 3,500-hour planning arithmetic, supervisor, NAT/outbound IP, and conservative $210 reserve about $1,077/month.
 Sixteen mixed workers plus the supervisor and NAT/outbound IP running continuously is about $2,653/month before disks, validation/review/browser capacity, Log Analytics, blob capacity and operations, network transfer, taxes, discounts, or credits.
 The separate one-shot validation seam defaults to `Standard_D4as_v6` (4 vCPUs/16 GiB), so two immediate shards fit inside the existing 10-vCPU Dasv6 allowance.
-The no-mistakes validation control cell defaults near 8 vCPUs/32 GiB and live-selects an affordable candidate v5 family only after proving current availability, capability, quota, price, and separation from the v6/v7 author plan.
-Requested behavior parallelism fans into mixed-family identity-less command VMs only after the complete 40-vCPU heavy shape fits current author/review demand under the shared East US 128-vCPU admission ceiling described in [`docs/azure-validation.md`](azure-validation.md).
+Requested behavior parallelism fans into mixed-family identity-less command VMs only after the requested shape fits current author/review demand under the shared East US admission ceiling.
 East US homogeneous-family increases are unavailable on this sponsorship subscription, so the runner never waits for 96 homogeneous family vCPUs and may instead select one of the foundation's reviewed mixed-family shapes only after proving that exact family's current free quota and retail rate.
 Quota is capacity, not permission to spend; actual and forecast billing telemetry is authoritative.
 Credits remain unverified and are never assumed.
@@ -243,28 +242,27 @@ The foundation grants `id-<prefix>-validation-shards` Blob Data Contributor only
 Trusted root uses that identity only after the networkless repository command exits to upload and verify the private result archive; the command receives no identity, token, SAS, or network namespace.
 The separate `st<prefix>ctl01` account has public networking, shared keys, and public blobs disabled and holds no payload data; its `runner-control` management child resource provides ETag/If-Match admission fencing while exact tagged zero-cost UAMIs provide durable per-invocation cost reservations.
 Its reviewed validation SKU seam defaults to the live-verified 4-vCPU/16-GiB `Standard_D4as_v6`, accepts the foundation's reviewed mixed-family alternatives, and re-proves that selected family's quota, SKU capability, budget, forecast, and retail rate before every invocation.
-The runner owns snapshot upload, command/result protocol, no-mistakes command integration, fencing, sandboxing, restart-safe collection, and exact cleanup.
+The runner owns snapshot upload, command/result protocol, fencing, sandboxing, restart-safe collection, and exact cleanup.
 The intended first real use is parallel heavy test, lint, and behavior commands while the local primary remains responsive.
 
 The queued fleet lifecycle implementation is specified in [`docs/azure-workers.md`](azure-workers.md) and owns budget/forecast admission, zero-warm-idle scheduling, landing-capacity reservation, provider-session revocation, and application health while preserving the role topology above.
-The no-mistakes path is the dispatcher and elastic cell implementation in [`docs/azure-validation.md`](azure-validation.md), which reserves its complete specialized shape through that same shared allocator.
 
 ## Acceptance and immediate use
 
 There is no time-based canary and no mandatory soak.
-Foundation acceptance keeps Firstmate local while making isolated Azure validation/review capacity eligible for the queued one-shot, no-mistakes, and Crosscheck implementations.
+Foundation acceptance keeps Firstmate local while making isolated Azure validation/review capacity eligible for one-shot commands and Crosscheck.
 It does not wait for remote Herdr or full author-worker migration.
 Before those environments are called usable, the bounded deployment window must prove:
 
 1. Exact tenant/subscription, provider, profile-specific regional/family quota, every selected SKU, region, name, and current-cost gate is green.
 2. No VM public IP, public inbound rule, public Herdr listener, or public storage/Key Vault path exists.
 3. Private overlay administration works without logging or retaining its enrollment key.
-4. A credentialed no-mistakes control cell, an uncredentialed heavy-command shard, a credentialed Crosscheck reviewer/model cell, an uncredentialed Crosscheck tool cell, and a fresh networkless verifier each use only their exact private identity/network/storage boundary.
+4. A credentialed Crosscheck reviewer/model cell, an uncredentialed Crosscheck tool cell, and a fresh networkless verifier each use only their exact private identity/network/storage boundary.
 5. One disposable validation worker launches from the clean pinned image, completes a representative heavy command, and is removed without exposing public ingress or broad identity.
 6. Five-minute durable-state sync and a restore no older than 15 minutes are observed.
 7. One representative scout finishes end to end and teardown preserves intended state while removing disposable compute.
 8. Every budget/forecast and health alert exists and is exercised.
-9. A complete Azure no-mistakes run and a policy-grade Azure Crosscheck on a real current head run on separate elastic capacity while local Firstmate remains responsive; disposable validation/review/tool/verifier capacity is removed afterward.
+9. A policy-grade Azure Crosscheck on a real current head runs while local Firstmate remains responsive; disposable review/tool/verifier capacity is removed afterward.
 10. The Mac rollback remains reachable.
 
 If any leg fails, the Azure validation/review environment is not called usable, local remains authoritative, and the exact failed leg is reported with evidence.

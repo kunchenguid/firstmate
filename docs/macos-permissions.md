@@ -32,7 +32,6 @@ TCC grants the responsible application or executable, which is not always the le
 
 macOS may attribute `claude`, `codex`, or descendant requests to Ghostty, but command ancestry alone does not establish the responsible identity for any service.
 
-The no-mistakes daemon is launched independently by launchd, so a Ghostty grant does not by itself establish access for gate agents spawned by that daemon.
 
 For every service, grant only the responsible entry macOS observes and preserve the controller-to-target relationship shown for Automation.
 
@@ -91,24 +90,6 @@ Apple recommends the TCC attribution log for finding that responsible app or bin
 - **Accessibility - captain must click for native Codex Computer Use.**
   This unlocks the accessibility tree and native input control for the responsible entry shown by macOS.
 
-## no-mistakes and its daemon
-
-- **The interactive no-mistakes CLI needs no separate grant for its core coordination work.**
-  It communicates with an independently launched daemon, but neither process ancestry nor its configured path establishes the responsible identity for a child agent's TCC request.
-- **Full Disk Access - captain must click when a daemon-launched gate agent needs protected data.**
-  The helper can identify one running launch job and its configured program target, but it cannot prove that a replaced file or retargeted symlink still matches the process image already loaded by that job.
-  Use the exact responsible entry shown by macOS or TCC attribution, and treat the configured path printed by the helper as diagnostic evidence only.
-  A Ghostty Full Disk Access grant does not by itself establish protected-path access for the independently launched daemon tree.
-- **Automation - captain approval is necessary but not sufficient for daemon-launched Apple Events.**
-  Trigger the required operation and use the first-use Allow dialog to identify the exact controller-to-target pair macOS observes.
-  The helper reports the running daemon capability as `UNKNOWN` because inspecting the configured path cannot establish the entitlement of an already loaded process image.
-  Apple documents the entitlement as target-signing-dependent, so a separate current-image inspection is required before making any capability claim.
-- **Screen & System Audio Recording - captain must approve for daemon-launched Codex Computer Use.**
-  A dated TCC observation on 2026-07-21 identified `~/.no-mistakes/bin/no-mistakes` for one ScreenCaptureKit request, but it does not establish the current responsible identity.
-  Approve a first-use dialog if macOS presents one, or add and enable the exact current entry shown by macOS rather than assuming a Ghostty, Codex, configured launch-job, or interactive no-mistakes path covers it.
-- **Accessibility - captain must click for daemon-launched Codex Computer Use.**
-  The helper reports the responsible Accessibility identity as `UNKNOWN` because Screen Recording evidence cannot establish another service's attribution.
-  Open the Accessibility pane and add or enable only the exact responsible entry observed for that service.
 
 ## Check and open the panes
 
@@ -165,5 +146,3 @@ The deep links below were verified on macOS 26.5.2 build 25F84 on 2026-07-22 by 
 System Settings may require the affected application to quit and reopen before a new grant becomes effective.
 
 A pre-existing tmux server can retain its original TCC responsibility context, so restart it only after preserving all sessions and unlanded work.
-
-Restart the shared no-mistakes daemon only when no pipeline is active, and never let this helper do that automatically.

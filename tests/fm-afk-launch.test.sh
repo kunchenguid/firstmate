@@ -20,7 +20,6 @@
 #   sleeper replaces the real daemon (FM_AFK_LAUNCH_ENTRY) so the test observes
 #   only the terminal lifecycle.
 set -u
-export FM_GATE_REFUSE_BYPASS=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"

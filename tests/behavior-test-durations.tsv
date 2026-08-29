@@ -22,9 +22,6 @@
 1000	tests/fm-azure-cell-image.test.sh
 1000	tests/fm-azure-pilot.test.sh
 5000	tests/fm-azure-runner.test.sh
-1000	tests/fm-azure-service-test-scope.test.sh
-25000	tests/fm-azure-runtime-bundle.test.sh
-8000	tests/fm-azure-validation.test.sh
 20	tests/fm-backend-autodetect-smoke.test.sh
 20	tests/fm-backend-cmux-smoke.test.sh
 3400	tests/fm-backend-cmux.test.sh
@@ -66,7 +63,6 @@
 156	tests/fm-ensure-agents-md.test.sh
 3009	tests/fm-fleet-snapshot-view.test.sh
 50266	tests/fm-fleet-sync.test.sh
-8940	tests/fm-gate-refuse.test.sh
 4809	tests/fm-github-pr.test.sh
 24000	tests/fm-handoff.test.sh
 25	tests/fm-gotmp.test.sh
@@ -76,10 +72,6 @@
 98	tests/fm-lint.test.sh
 187	tests/fm-lock.test.sh
 1686	tests/fm-macos-permissions.test.sh
-3428	tests/fm-nm-step-liveness.test.sh
-1560	tests/fm-no-mistakes-reattach.test.sh
-2770	tests/fm-no-mistakes-runtime.test.sh
-7260	tests/fm-no-mistakes-worker.test.sh
 2000	tests/fm-pi-account-home.test.sh
 2500	tests/fm-pi-author-snapshot.test.sh
 4500	tests/fm-pi-direct-continuity-types.test.sh

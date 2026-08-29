@@ -202,7 +202,7 @@ The launch agent is `~/Library/LaunchAgents/com.firstmate.crosscheck-slack.plist
 Logs are `$FM_HOME/logs/crosscheck-slack.log` and `$FM_HOME/logs/crosscheck-slack.error.log`.
 The launch agent contains no credential values.
 The launch agent persists the resolved absolute Python interpreter, executable PATH, HOME, and service configuration.
-At preflight and every launch, the listener loads the existing owner-only `~/.fm-azure/fleet.env` through the Azure runner's bounded provenance-checked parser and passes only its allowlisted `FM_AZURE_*` values to Crosscheck children.
+At preflight and every launch, the listener loads the existing owner-only `~/.fm-azure/fleet.env` through Crosscheck autostart's bounded provenance-checked parser and passes only its allowlisted `FM_AZURE_*` values to Crosscheck children.
 No Azure value is copied into the launch agent.
 Install and start execute selftest and credential preflight with exactly the emitted environment and require Keychain access, ignoring inherited token variables.
 Installation refuses before replacing an existing plist if validation fails.

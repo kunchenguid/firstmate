@@ -145,7 +145,7 @@ firstmate uses **one cmux workspace per task**, keyed by the caller-facing `fm-<
 The caller-facing task label stays `fm-<id>`, but the visible cmux workspace title is `fm-<home-label>-<id>`.
 The home label keeps the same readable identity as herdr's workspace split - `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id - and appends a short stable hash of the resolved `FM_ROOT` path.
 That yields labels like `firstmate-<8hex>` or `2ndmate-<id>-<8hex>`, making the visible workspace title `fm-firstmate-<8hex>-<id>` or `fm-2ndmate-<id>-<8hex>-<task>`.
-This was hardened in two captain-directed no-mistakes review gate follow-ups: first by adding the home tag for primary-vs-secondmate collisions, then by adding the `FM_ROOT` hash so two distinct primary installations cannot collide either.
+This was hardened in two independent review follow-ups: first by adding the home tag for primary-vs-secondmate collisions, then by adding the `FM_ROOT` hash so two distinct primary installations cannot collide either.
 Physically moving or relocating a firstmate installation changes its tag, so workspaces titled under the old tag stop matching after a move.
 That is acceptable because a task's own recorded worktree path in `state/<id>.meta` does not survive a repo relocation either, so this is consistent with an existing, already accepted limitation, not a new one.
 There is still no per-home cmux container split (unlike herdr's later refinement); the home tag is a title discriminator only.

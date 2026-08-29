@@ -1699,7 +1699,7 @@ REAL_MODELS_PATH = (
 
 
 class SyntheticAgentFleetSchemaDriftTest(unittest.TestCase):
-    """Regression gate for no-mistakes finding synthetic-agent-fleet-schema-drift.
+    """Regression gate for review finding synthetic-agent-fleet-schema-drift.
 
     MODELS_SOURCE is a deliberate hand-copy of the real agent_fleet.models
     dataclasses so the synthetic pipeline under test never imports the real

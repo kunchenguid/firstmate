@@ -379,7 +379,7 @@ PY
     --reservation-id azr-validation001 --fence-binding "$(printf 'a%.0s' {1..64})" \
     --role validation --sku Standard_D4as_v7 --sku-family StandardDasv7Family \
     --vcpus 4 --amount-usd 1 --confirm-subscription "$SUB" > /dev/null \
-    || fail "no-mistakes specialized capacity was counted as a worker slot"
+    || fail "Crosscheck specialized capacity was counted as a worker slot"
   run_placement "$world" capacity-reserve \
     --reservation-id azr-crosscheck001 --fence-binding "$(printf 'b%.0s' {1..64})" \
     --role crosscheck --sku Standard_D4s_v6 --sku-family StandardDsv6Family \
@@ -401,7 +401,7 @@ assert {row["workload_role"] for row in state["capacity_reservations"].values()}
 }, state
 assert len(status["account_placements"]) == 16, status
 PY
-  pass "sixteen workers reuse three profiles while no-mistakes and Crosscheck reserve specialized capacity independently"
+  pass "sixteen workers reuse three profiles while Crosscheck and Crosscheck reserve specialized capacity independently"
 }
 
 placements_reuse_after_every_profile_is_active() {

@@ -19,8 +19,8 @@ set -u
 fm_test_tmproot_into TMP_ROOT fm-brief
 
 # The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# issue #166: a stray apostrophe in either DOD heredoc body
+# (direct-PR/local-only) breaks `bash -n` on the whole file.
 test_script_parses() {
   bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails bash -n (heredoc/quote regression)"
   pass "fm-brief.sh: bash -n succeeds"
@@ -34,7 +34,7 @@ test_help_includes_entire_header() {
 }
 
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
-# exercised. A project absent from the registry defaults to no-mistakes.
+# exercised. A project absent from the registry defaults to direct-PR.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
@@ -54,7 +54,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in "brief-default-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -65,35 +65,9 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  pass "fm-brief.sh: direct-PR/local-only briefs generate cleanly"
 }
 
-# Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
-# reference must render as plain prose with no dangling apostrophe artifact.
-test_no_mistakes_dod_wording() {
-  local home id brief
-  home="$TMP_ROOT/wording-home"
-  mkdir -p "$home/data"
-  id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_present "$brief" "brief was not scaffolded"
-  assert_grep "Use the loaded no-mistakes skill" "$brief" \
-    "no-mistakes DOD lost its version-matched guidance owner"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  assert_grep "FM_HOME='$home' '$ROOT/bin/fm-no-mistakes-reattach.sh' $id" "$brief" \
-    "no-mistakes brief does not route the exact reconciliation timeout through the task helper"
-  assert_grep "For the exact reconciliation socket-read timeout" "$brief" \
-    "no-mistakes brief lost the bounded retry boundary"
-  assert_grep "Never stop, restart, or update the shared no-mistakes daemon" "$brief" \
-    "no-mistakes brief lost the shared-daemon lifecycle prohibition"
-  assert_grep "Once validation starts, own every synchronous gate return" "$brief" \
-    "no-mistakes brief lost live validation ownership"
-  assert_grep "At the first CI-green return" "$brief" \
-    "no-mistakes brief waits beyond the bounded ready point"
-  pass "fm-brief.sh: no-mistakes DOD preserves live bounded validation"
-}
 
 test_ship_project_memory_wording() {
   local home id brief
@@ -151,8 +125,8 @@ test_ship_completion_report_contract() {
     "ship brief permits inapplicable report sections to be omitted"
   assert_grep "data/$id/visuals/" "$brief" "ship brief has no visual evidence path"
   assert_grep "Before the final \`done:\` status" "$brief" "ship brief does not order report publication before done"
-  assert_grep "no-mistakes pipeline changes the implementation" "$brief" \
-    "ship brief does not require a post-gate report refresh"
+  assert_grep "If review changes the implementation" "$brief" \
+    "ship brief does not require a post-review report refresh"
   pass "fm-brief.sh: ship tasks require a structured completion report and visuals"
 }
 
@@ -482,7 +456,6 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
-test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_briefs_require_recursive_unblocking
 test_ship_completion_report_contract

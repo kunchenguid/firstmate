@@ -111,7 +111,6 @@ export FM_AUTO_REAP_E2E_WORKTREE="$WORKTREE"
 export FM_AUTO_REAP_E2E_PROJECT="$PROJECT"
 export FM_AUTO_REAP_E2E_TREEHOUSE_STATE="$TREEHOUSE_STATE"
 export FM_AUTO_REAP_E2E_TREEHOUSE_LOG="$TREEHOUSE_LOG"
-export FM_GATE_REFUSE_BYPASS=1
 
 fm_backend_source herdr || fail "could not load the production Herdr adapter"
 WORKSPACE_LABEL=$(fm_backend_herdr_workspace_label_for_home "$HOME_DIR")

@@ -169,9 +169,6 @@ PY
 FM_AFK_NATIVE_RECORD_PID=
 FM_AFK_NATIVE_RECORD_IDENTITY=
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$FM_AFK_START_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"

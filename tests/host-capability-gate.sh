@@ -21,8 +21,7 @@
 #     1. the platform (`uname -s`), against the PLATFORMS column of
 #        tests/host-capabilities.tsv; and
 #     2. an explicit, by-name declaration of absence that the ENVIRONMENT makes
-#        about itself in FM_TEST_HOST_CAPABILITIES_ABSENT (the Azure validation
-#        cell declares its own absences in bin/fm-azure-validation-shard-bridge.py).
+#        about itself in FM_TEST_HOST_CAPABILITIES_ABSENT.
 #
 #   Everything else RUNS. A host that is on a listed platform and declares
 #   nothing runs the unit, and the unit FAILS if the capability is really

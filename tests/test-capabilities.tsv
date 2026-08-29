@@ -14,9 +14,6 @@ fm-autocompact.test.sh	hermetic
 fm-azure-cell-image.test.sh	hermetic
 fm-azure-pilot.test.sh	hermetic
 fm-azure-runner.test.sh	hermetic
-fm-azure-service-test-scope.test.sh	hermetic
-fm-azure-runtime-bundle.test.sh	hermetic
-fm-azure-validation.test.sh	hermetic
 fm-backend-autodetect-smoke.test.sh	herdr-lab
 fm-backend-cmux-smoke.test.sh	hermetic
 fm-backend-cmux.test.sh	hermetic
@@ -59,7 +56,6 @@ fm-dispatch-select.test.sh	hermetic
 fm-ensure-agents-md.test.sh	hermetic
 fm-fleet-snapshot-view.test.sh	hermetic
 fm-fleet-sync.test.sh	hermetic
-fm-gate-refuse.test.sh	hermetic
 fm-github-pr.test.sh	hermetic
 fm-handoff.test.sh	hermetic
 fm-gotmp.test.sh	hermetic
@@ -69,10 +65,6 @@ fm-host-capability-gate.test.sh	hermetic
 fm-lint.test.sh	hermetic
 fm-lock.test.sh	hermetic
 fm-macos-permissions.test.sh	hermetic
-fm-nm-step-liveness.test.sh	hermetic
-fm-no-mistakes-reattach.test.sh	hermetic
-fm-no-mistakes-runtime.test.sh	hermetic
-fm-no-mistakes-worker.test.sh	hermetic
 fm-pi-account-home.test.sh	hermetic
 fm-pi-author-snapshot.test.sh	hermetic
 fm-pi-direct-continuity.test.sh	hermetic

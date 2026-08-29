@@ -4,9 +4,6 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
 usage() {

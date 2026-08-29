@@ -45,7 +45,7 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **Visible crewmates** - every new crewmate works in its own tmux window, experimental herdr/zellij tab, or cmux workspace you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each new ship or scout task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
-- **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
+- **Explicit project modes** - each project ships through a CI-backed pull request or an approved local-only merge, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, supervising project clones or a project-less firstmate-repo domain, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
 - **Optional multi-account routing** - route Claude and Codex crewmates through explicit or pooled [Agent Fleet](tools/agent-fleet/) profiles while preserving sticky recovery and provider-neutral continuation.
 - **Durable completion reports** - every new ship and scout task publishes a detailed, visual, searchable report to one machine-global stack through fail-closed teardown.

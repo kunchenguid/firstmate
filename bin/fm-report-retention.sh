@@ -11,9 +11,6 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 
 STACK_ROOT="${FM_REPORT_STACK_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/firstmate/report-stack}"
 INTERVAL=${FM_REPORT_RETENTION_INTERVAL:-300}
@@ -34,7 +31,7 @@ INSTALL_RECLAIM="$INSTALL_ROOT/.install-lock-reclaim"
 CANDIDATE_FENCE="$INSTALL_ROOT/.candidate-fence"
 OWNER_HANDOFF_FENCE="$INSTALL_ROOT/.owner-handoff-fence"
 INSTALL_LOCK_TOKEN=
-SOURCE_FILES=(fm-report-retention.sh fm-report-stack.mjs fm-markdown-structure.cjs fm-contained-read.py fm-gate-refuse-lib.sh)
+SOURCE_FILES=(fm-report-retention.sh fm-report-stack.mjs fm-markdown-structure.cjs fm-contained-read.py)
 
 case "$INTERVAL" in ''|*[!0-9]*|0) echo "error: FM_REPORT_RETENTION_INTERVAL must be a positive integer" >&2; exit 2 ;; esac
 case "$PROGRESS_INTERVAL" in ''|*[!0-9]*|0) echo "error: FM_REPORT_RETENTION_PROGRESS_INTERVAL must be a positive integer" >&2; exit 2 ;; esac

@@ -92,18 +92,6 @@ Native tracked delivery does not use these channels because a due batch complete
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
-## Gate defaults (.no-mistakes.yaml)
-
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and preserves `bin/fm-no-mistakes-test-command.sh` as the ordinary local test owner.
-Inside an admitted Azure validation cell, the trusted default-branch command string instead invokes the root-owned bridge from `docs/azure-validation.md`, which runs lint and requested behavior shards on separate credential-free Azure command VMs without exposing the cell's provider or GitHub lease.
-That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-The ordinary local command requires `tmux` on `PATH`, prints `tmux -V`, derives every `herdr-lab` and `herdr-mixed` path directly from [`tests/test-capabilities.tsv`](../tests/test-capabilities.tsv), and runs two concurrent lanes: one serial [`tests/run.sh`](../tests/run.sh) invocation for those files and one locked Agent Fleet pytest-and-compileall invocation.
-It does not maintain a second file list or duplicate hermetic-only behavior files on the Mac.
-The required `Behavior tests` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) uses the duration-balanced sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh) to run and verify the complete behavior inventory across eight isolated runners.
-CI selects the explicit non-Herdr path because its disposable image carries no Herdr, so it runs every hermetic body and the hermetic portion of the mixed file while the local host admits the complete `herdr-lab` and `herdr-mixed` set through owned labs.
-The exact behavioral coverage contract is the 123-file union of that capability-derived local host set and the required CI executed-manifest union across eight shards, not a claim that all 123 files run serially before push.
-The tracked pytest proof adapter `tests/test_azure_proof_contracts.py::test_local_required_ci_coverage_contract` executes the public `tests/fm-azure-runner.test.sh` behavior suite, which fails if a hermetic-only registry entry is added to the production local selector or if `.no-mistakes.yaml` stops routing ordinary local tests to `bin/fm-no-mistakes-test-command.sh` and admitted validation-cell tests to the required shard bridge.
-Both routes cross the same sealed admission boundary, and the local serial route holds real-Herdr labs to one at a time.
 
 ## Crosscheck reviewer
 
@@ -144,8 +132,7 @@ A project-less seed requires no existing project clones or `data/projects.md` en
 A preexisting project-bearing charter is also refused until it is re-scaffolded with `--no-projects` or removed.
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
-Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
-For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+Secondmate routes cover `direct-PR` projects; `local-only` projects remain main-firstmate work.
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses In flight, Done, or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 Each seed writes an `.fm-secondmate-home` identity marker at the home root.
@@ -485,11 +472,11 @@ Bootstrap never installs this job on its own: a background owner that writes cre
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, Python 3.11 or newer, git, gh with GitHub auth via `gh auth login`, Perl, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, the firstmate-owned Lavish store-and-forward fork, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+The universal toolchain is node, Python 3.11 or newer, git, gh with GitHub auth via `gh auth login`, Perl, gh-axi, chrome-devtools-axi, the firstmate-owned Lavish store-and-forward fork, compatible tasks-axi per "Backlog backend" above, and quota-axi.
 Bootstrap only checks that some `python3` exists, so that floor is enforced where it matters at the merge gate: `bin/fm-crosscheck.sh` probes `python3.14`, `python3.13`, `python3.12`, `python3.11`, and `python3` for a conforming interpreter instead of assuming the ambient `python3` is new enough, which makes it immune to `PATH` ordering.
 Set `FM_CROSSCHECK_PYTHON` to a command or absolute path to select a specific interpreter; an unavailable or pre-3.11 explicit selection is refused rather than silently replaced.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, the `lavish` and `lavish-axi` commands provide durable decision capture without a browser or resident process, and tasks-axi plus quota-axi back backlog mutations and quota-balanced dispatch.
+In that list, gh-axi and chrome-devtools-axi cover GitHub and browser operations, the `lavish` and `lavish-axi` commands provide durable decision capture without a browser or resident process, and tasks-axi plus quota-axi back backlog mutations and quota-balanced dispatch.
 `config/lavish-wake-command` is the local, gitignored absolute path to this checkout's narrow wake adapter; `bin/fm-bootstrap.sh install lavish-axi` writes it after installing the fork, and it is intentionally not inherited because another firstmate home can use a different checkout.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, `nohup` for Herdr's portable detached `setsid` server launcher, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
@@ -638,7 +625,6 @@ FM_ACCOUNT_SESSION_SYNC_TIMEOUT=5  # seconds allowed for each watcher reconcilia
 FM_ACCOUNT_SESSION_SYNC_TOTAL_TIMEOUT=8  # seconds allowed per rotating watcher reconciliation worker
 FM_ACCOUNT_SESSION_MAX_PARALLEL=4  # maximum managed mappings attempted in one rotating watcher batch
 FM_ACCOUNT_NATIVE_READY_WAIT_SECONDS=5  # seconds sticky recovery waits for its native provider wrapper launch gate
-FM_ACCOUNT_CONTINUATION_STATUS_TIMEOUT=5  # seconds allowed for the no-mistakes status snapshot in a provider-neutral continuation packet
 FM_ACCOUNT_CONTINUATION_FINGERPRINT_FILES=100000  # maximum repository entries verified for a provider-neutral continuation
 FM_ACCOUNT_CONTINUATION_FINGERPRINT_BYTES=268435456  # maximum repository content bytes verified for a provider-neutral continuation
 FM_ACCOUNT_CONTINUATION_ENUMERATION_BYTES=33554432  # maximum bytes used to enumerate repository identity inputs
@@ -674,13 +660,7 @@ FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode poll shim)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
-FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
-FM_CREW_STATE_GH_TIMEOUT=10   # seconds allowed per GitHub PR-state or remote-currentness query inside fm-crew-state.sh
-FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
-FM_NM_REATTACH_MAX_ATTEMPTS=5   # maximum running-daemon preflight and reattach attempts for fm-no-mistakes-reattach.sh
-FM_NM_REATTACH_BACKOFF_BASE=2   # initial seconds for its bounded exponential retry delay
-FM_NM_REATTACH_BACKOFF_CAP=30   # maximum retry delay in seconds after deterministic task jitter
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env

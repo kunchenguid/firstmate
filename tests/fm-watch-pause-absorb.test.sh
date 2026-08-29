@@ -3,7 +3,7 @@
 . "$(dirname "$0")/test-entry.sh"
 # tests/fm-watch-pause-absorb.test.sh - a DECLARED pause must be honoured on its
 # own evidence, independent of what the crewmate's terminal or its attributed
-# no-mistakes run happens to be doing.
+# review run happens to be doing.
 #
 # The 2026-08-03 incident this suite pins down: lane priors-882-rebase-c8 declared
 # `paused: work complete and verified; waiting on the merge of PR 882` with its one

@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -33,9 +34,41 @@ MAX_RECORD_BYTES = 64 * 1024
 MAX_FLEET_ENV_BYTES = 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
 MAX_LOG_BYTES = 2 * 1024 * 1024
+MAX_OPERATOR_ENVIRONMENT_BYTES = 64 * 1024
 DEFAULT_ACTIVE_WAIT_SECONDS = 4 * 60 * 60
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 4 * 60 * 60
 MAX_HEAD_RESTARTS = 16
+AZURE_REQUIRED_ENVIRONMENT_NAMES = (
+    "FM_AZURE_TENANT_ID",
+    "FM_AZURE_SUBSCRIPTION_ID",
+    "FM_AZURE_NAMING_PREFIX",
+    "FM_AZURE_STORAGE_NAME",
+    "FM_AZURE_OWNER_TAG",
+    "FM_AZURE_DEPLOYMENT_GENERATION",
+    "FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID",
+)
+AZURE_ALLOWED_ENVIRONMENT_NAMES = frozenset(AZURE_REQUIRED_ENVIRONMENT_NAMES) | {
+    "FM_AZURE_OPERATOR_DATA_PLANE_IP",
+    "FM_AZURE_RESOURCE_GROUP",
+    "FM_AZURE_RUNNER_BUDGET_LIMIT_USD",
+    "FM_AZURE_RUNNER_CELL_ORDINAL",
+    "FM_AZURE_RUNNER_COST_ADMISSION_MODE",
+    "FM_AZURE_RUNNER_MAX_CONCURRENCY",
+    "FM_AZURE_RUNNER_SKU",
+    "FM_AZURE_VM_IMAGE_ID",
+    "FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST",
+}
+AZURE_FORBIDDEN_ENVIRONMENT_NAMES = frozenset(
+    {
+        "FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION",
+        "FM_AZURE_RUNNER_GENERATION",
+        "FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES",
+        "FM_AZURE_RUNNER_REMOTE_CLASSES",
+        "FM_AZURE_RUNNER_ROUTING_ROOT",
+        "FM_AZURE_RUNNER_TASK",
+    }
+)
+AZURE_ENVIRONMENT_NAME_RE = re.compile(r"^FM_AZURE_[A-Z0-9_]+$")
 
 
 class AutostartError(RuntimeError):
@@ -272,6 +305,103 @@ def open_fleet_environment(path: Path) -> int:
     except Exception:
         os.close(descriptor)
         raise
+
+
+def operator_environment_values() -> Dict[str, str]:
+    """Load the launchd-safe Azure values used by Crosscheck services."""
+
+    home = Path.home()
+    if not home.is_absolute():
+        fail("Crosscheck operator home must be absolute")
+    path = home / ".fm-azure" / "fleet.env"
+    current = path
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            fail(f"Crosscheck fleet environment path is unreadable at {current}: {exc}")
+        if stat.S_ISLNK(metadata.st_mode):
+            fail(f"Crosscheck fleet environment path contains a symlink: {current}")
+        if metadata.st_uid != os.getuid():
+            fail(f"Crosscheck fleet environment path is not operator-owned: {current}")
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            fail(f"Crosscheck fleet environment path is group/world writable: {current}")
+        if current == home:
+            break
+        current = current.parent
+        if home not in current.parents and current != home:
+            fail("Crosscheck fleet environment path escaped the operator home")
+
+    descriptor = open_fleet_environment(path)
+    try:
+        chunks = []
+        remaining = MAX_OPERATOR_ENVIRONMENT_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError as exc:
+        fail(f"Crosscheck fleet environment could not be read: {exc}")
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_OPERATOR_ENVIRONMENT_BYTES:
+        fail("Crosscheck fleet environment exceeds its service byte bound")
+    if b"\0" in raw:
+        fail("Crosscheck fleet environment contains a NUL byte")
+
+    script = r"""
+set -e
+for name in "$@"; do unset "$name"; done
+set -a
+. /dev/stdin >/dev/null
+set +a
+/usr/bin/env -0
+"""
+    try:
+        evaluated = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script, "fleet.env"]
+            + list(AZURE_REQUIRED_ENVIRONMENT_NAMES),
+            input=raw,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+            env={"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(f"Crosscheck fleet environment could not be evaluated exactly: {exc}")
+    if evaluated.returncode != 0:
+        fail("Crosscheck fleet environment could not be evaluated exactly")
+
+    values: Dict[str, str] = {}
+    try:
+        for field in evaluated.stdout.split(b"\0"):
+            if not field:
+                continue
+            encoded_name, separator, encoded_value = field.partition(b"=")
+            if not separator:
+                fail("Crosscheck fleet environment returned a malformed value")
+            name = encoded_name.decode("ascii")
+            if AZURE_ENVIRONMENT_NAME_RE.fullmatch(name) is None:
+                continue
+            value = encoded_value.decode("utf-8")
+            if len(value) > 512 or any(
+                ord(character) < 32 or ord(character) == 127 for character in value
+            ):
+                fail(f"Crosscheck fleet environment declares an unsafe value for {name}")
+            if name in AZURE_FORBIDDEN_ENVIRONMENT_NAMES or name.endswith("_STATE_DIR"):
+                fail(f"Crosscheck fleet environment may not declare per-run control {name}")
+            if name in AZURE_ALLOWED_ENVIRONMENT_NAMES:
+                values[name] = value
+    except UnicodeDecodeError as exc:
+        fail(f"Crosscheck fleet environment returned non-UTF-8 values: {exc}")
+    missing = [name for name in AZURE_REQUIRED_ENVIRONMENT_NAMES if not values.get(name)]
+    if missing:
+        fail("Crosscheck fleet environment is missing required values: " + ", ".join(missing))
+    return values
 
 
 def crosscheck_command(root: Path) -> Path:
@@ -794,6 +924,164 @@ def status_locked(
     return 0
 
 
+def coordinator_command(pid: int) -> str:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(f"cannot inspect Crosscheck coordinator process {pid}: {exc}")
+    if result.returncode != 0 or not result.stdout.strip():
+        fail(f"Crosscheck coordinator process {pid} is not inspectable")
+    return result.stdout.strip()
+
+
+def process_group_is_active(process_group: int) -> bool:
+    """Return whether a non-zombie process remains in one exact group."""
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pgid=,stat="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(f"cannot inspect Crosscheck process group {process_group}: {exc}")
+    if result.returncode != 0:
+        fail(f"cannot inspect Crosscheck process group {process_group}")
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        if int(fields[0]) == process_group and not fields[1].startswith("Z"):
+            return True
+    return False
+
+
+def cancel(task_id: str, generation: str) -> int:
+    """Stop one exact task generation's detached coordinator and process group."""
+    if ID_RE.fullmatch(task_id) is None:
+        fail(f"invalid task id: {task_id!r}")
+    if (
+        not generation
+        or len(generation.encode("utf-8")) > 512
+        or any(character in generation for character in "\0\r\n")
+    ):
+        fail("invalid task generation identity")
+    _root, _home, state = runtime_paths()
+    paths = task_paths(state, task_id)
+    with task_handoff(paths):
+        request = load_json(paths["request"], REQUEST_SCHEMA)
+        record = load_json(paths["state"], SCHEMA)
+        if request is None and record is None:
+            print(f"crosscheck autostart: no coordinator state for {task_id}")
+            return 0
+        for label, value in (("request", request), ("state", record)):
+            if value is None:
+                continue
+            stored_task = value.get("task_id")
+            stored_url = value.get("pull_request")
+            stored_head = value.get("head_sha")
+            stored_generation = value.get("generation_id")
+            if not all(
+                isinstance(field, str)
+                for field in (stored_task, stored_url, stored_head, stored_generation)
+            ):
+                fail(f"Crosscheck autostart {label} has malformed identity")
+            validate_identity(stored_task, stored_url, stored_head, stored_generation)
+            if stored_task != task_id or stored_generation != generation:
+                fail(f"Crosscheck autostart {label} belongs to a different task generation")
+        if not lock_is_active(paths["coordinator_lock"]):
+            print(f"crosscheck autostart: coordinator already inactive for {task_id}")
+            return 0
+
+        deadline = time.monotonic() + 5
+        while True:
+            record = load_json(paths["state"], SCHEMA)
+            pid = record.get("pid") if record is not None else None
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                break
+            if not lock_is_active(paths["coordinator_lock"]):
+                print(f"crosscheck autostart: coordinator already inactive for {task_id}")
+                return 0
+            if time.monotonic() >= deadline:
+                fail("active Crosscheck coordinator did not publish its process identity")
+            time.sleep(0.05)
+
+        command = coordinator_command(pid)
+        script = str(Path(__file__).resolve())
+        if script not in command or " worker " not in f" {command} " or task_id not in command:
+            fail(f"Crosscheck coordinator process {pid} has a different executable identity")
+        try:
+            process_group = os.getpgid(pid)
+        except ProcessLookupError:
+            if not lock_is_active(paths["coordinator_lock"]):
+                print(f"crosscheck autostart: coordinator already inactive for {task_id}")
+                return 0
+            fail(f"Crosscheck coordinator process {pid} disappeared while its lock remained active")
+        if process_group != pid:
+            fail(f"Crosscheck coordinator process {pid} is not its isolated process-group leader")
+
+        os.killpg(process_group, signal.SIGTERM)
+        wait_seconds = positive_int_environment(
+            "FM_CROSSCHECK_AUTOSTART_CANCEL_WAIT_SECONDS", 10
+        )
+        if wait_seconds > 60:
+            fail("FM_CROSSCHECK_AUTOSTART_CANCEL_WAIT_SECONDS must not exceed 60")
+        deadline = time.monotonic() + wait_seconds
+        while (
+            lock_is_active(paths["coordinator_lock"])
+            or process_group_is_active(process_group)
+        ) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if process_group_is_active(process_group):
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 5
+            while (
+                lock_is_active(paths["coordinator_lock"])
+                or process_group_is_active(process_group)
+            ) and time.monotonic() < deadline:
+                time.sleep(0.05)
+        if lock_is_active(paths["coordinator_lock"]) or process_group_is_active(
+            process_group
+        ):
+            fail("Crosscheck coordinator process group did not terminate within its bound")
+
+        latest = load_json(paths["state"], SCHEMA) or record
+        assert latest is not None
+        latest_url = latest.get("pull_request")
+        latest_head = latest.get("head_sha")
+        if not isinstance(latest_url, str) or not isinstance(latest_head, str):
+            fail("Crosscheck coordinator state lost its exact PR identity after cancellation")
+        validate_identity(task_id, latest_url, latest_head, generation)
+        write_state(
+            paths["state"],
+            task_id,
+            latest_url,
+            latest_head,
+            generation,
+            "failed",
+            int(latest.get("attempt", 1)),
+            "exact-generation coordinator cancelled before task teardown",
+            0,
+            paths["log"],
+        )
+        print(f"crosscheck autostart: cancelled exact generation for {task_id}")
+        return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -804,6 +1092,9 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("pr_url")
         command.add_argument("head_sha")
         command.add_argument("generation_id")
+    cancel_parser = subparsers.add_parser("cancel")
+    cancel_parser.add_argument("task_id")
+    cancel_parser.add_argument("generation_id")
     worker_parser = subparsers.add_parser("worker")
     worker_parser.add_argument("lock_descriptor", type=int)
     worker_parser.add_argument("task_id")
@@ -828,6 +1119,8 @@ def main() -> int:
                 args.head_sha,
                 args.generation_id,
             )
+        if args.command == "cancel":
+            return cancel(args.task_id, args.generation_id)
         return worker(args.lock_descriptor, args.task_id, args.attempt)
     except AutostartError as exc:
         print(

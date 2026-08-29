@@ -55,7 +55,7 @@ No empirical evidence surfaced during verification that forces a different conta
 ## Home-scoped tab titles (cross-home collision fix)
 
 Because every task in every firstmate home - primary or secondmate - shares this ONE session's tab bar with no per-home container split, and zellij enforces no tab-name uniqueness at all (verified: two tabs can share a name), two firstmate homes whose task ids happen to collide could send/peek/close each other's tabs.
-This is the exact gap a captain-directed no-mistakes review gate caught for the cmux backend (`docs/cmux-backend.md` "Task container shape") - cmux's fix was ported here for the identical reason, sharing its tag-derivation code (`bin/fm-backend-hometag-lib.sh`).
+This is the exact gap an independent review caught for the cmux backend (`docs/cmux-backend.md` "Task container shape") - cmux's fix was ported here for the identical reason, sharing its tag-derivation code (`bin/fm-backend-hometag-lib.sh`).
 
 The caller-facing task label stays `fm-<id>` in meta and briefs; task-selector resolution is the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend").
 The actual zellij tab title a NEW task's tab is created with is home-scoped: `fm-<home-label>-<id>`.

@@ -3238,7 +3238,7 @@ def print_logs_and_summary(state, result):
     # vm_instance_id and boot_id are the only evidence that this command ran on
     # Azure rather than through the dispatch's local fallback, and they used to
     # live ONLY in $FM_HOME/state/azure-runner/<invocation>.json. That left the
-    # step's own log, and the no-mistakes run record built from it, unable to
+    # step's own log and the caller's run record unable to
     # distinguish a real cell execution from a local one. The proof of WHERE the
     # work ran belongs in the same artifact as the verdict, so it is printed
     # here, on the step's own stderr.

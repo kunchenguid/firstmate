@@ -3,7 +3,7 @@
 . "$(dirname "$0")/test-entry.sh"
 # Tests for bin/fm-review-diff.sh: when a task has an open PR recorded in meta,
 # the review diff must compare the authoritative base against the PR head, not a
-# stale local branch left behind after no-mistakes fix rounds push to the PR.
+# stale local branch left behind after review fix rounds push to the PR.
 #
 # Matrix:
 #   (a) pr= + reachable pr_head= -> diff uses PR head, not the lagging local branch

@@ -66,6 +66,18 @@ case "$*" in
       *) exit 98 ;;
     esac
     ;;
+  "pr checks 72 --repo ruby-dlee/firstmate")
+    case "${FM_TEST_CHECKS_MODE:-green}" in
+      green) printf '%s\n' 'summary: "3 passed, 0 failed, 3 total"' ;;
+      green-skipped) printf '%s\n' 'summary: "3 passed, 0 failed, 2 skipped, 5 total"' ;;
+      pending) printf '%s\n' 'summary: "2 passed, 0 failed, 3 total"' ;;
+      pending-skipped) printf '%s\n' 'summary: "2 passed, 0 failed, 1 skipped, 4 total"' ;;
+      failed) printf '%s\n' 'summary: "2 passed, 1 failed, 3 total"' ;;
+      empty) printf '%s\n' 'summary: "0 passed, 0 failed, 0 total"' ;;
+      malformed) printf '%s\n' 'checks unavailable' ;;
+      *) exit 98 ;;
+    esac
+    ;;
   "api PUT /repos/ruby-dlee/firstmate/pulls/72/merge --field sha=c9cbe79154013efcec9aa478f1476d0eff6c63df --field merge_method=squash")
     case "${FM_TEST_MERGE_MODE:-merged}" in
       merged) cat "$FM_TEST_MERGE_FIXTURE" ;;
@@ -157,6 +169,38 @@ test_lookup_errors_fail_closed() {
   assert_grep 'missing head.sha' "$TMP_ROOT/malformed.err" \
     "malformed API output was not rejected"
   pass "GitHub lookup errors and malformed documents fail closed"
+}
+
+test_exact_head_checks_must_be_green() {
+  local mode rc output
+  : > "$FM_TEST_GH_AXI_LOG"
+  output=$("$ADAPTER" checks "$PR_URL" c9cbe79154013efcec9aa478f1476d0eff6c63df) \
+    || fail "green exact-head checks were rejected"
+  [ "$output" = c9cbe79154013efcec9aa478f1476d0eff6c63df ] \
+    || fail "green checks did not return the exact admitted head"
+  [ "$(grep -c '^api /repos/ruby-dlee/firstmate/pulls/72$' "$FM_TEST_GH_AXI_LOG")" -eq 2 ] \
+    || fail "CI admission did not fence checks with before-and-after head reads"
+  assert_grep 'pr checks 72 --repo ruby-dlee/firstmate' "$FM_TEST_GH_AXI_LOG" \
+    "CI admission did not use the supported gh-axi checks surface"
+
+  output=$(FM_TEST_CHECKS_MODE=green-skipped "$ADAPTER" checks "$PR_URL" \
+    c9cbe79154013efcec9aa478f1476d0eff6c63df) \
+    || fail "green checks with skipped jobs were rejected"
+  [ "$output" = c9cbe79154013efcec9aa478f1476d0eff6c63df ] \
+    || fail "green checks with skipped jobs did not return the admitted head"
+
+  for mode in pending pending-skipped failed empty malformed; do
+    set +e
+    FM_TEST_CHECKS_MODE=$mode "$ADAPTER" checks "$PR_URL" \
+      c9cbe79154013efcec9aa478f1476d0eff6c63df \
+      > "$TMP_ROOT/checks-$mode.out" 2> "$TMP_ROOT/checks-$mode.err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$mode CI checks"
+    assert_grep 'GitHub state is unreviewed' "$TMP_ROOT/checks-$mode.err" \
+      "$mode CI checks did not fail closed"
+  done
+  pass "CI admission accepts terminal skipped jobs but rejects pending or failed exact-head checks"
 }
 
 test_public_merge_subcommand_is_unavailable() {
@@ -307,6 +351,7 @@ fi
 
 test_snapshot_uses_observed_contract
 test_lookup_errors_fail_closed
+test_exact_head_checks_must_be_green
 test_public_merge_subcommand_is_unavailable
 test_malformed_array_subtrees_fail_closed
 test_boolean_pr_numbers_fail_closed

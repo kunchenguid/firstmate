@@ -16,9 +16,6 @@ LOCK="$STATE/.lock"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 mkdir -p "$STATE"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: unsafe state directory at $STATE" >&2; exit 1; }
 

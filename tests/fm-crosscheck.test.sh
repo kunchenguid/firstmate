@@ -104,7 +104,7 @@ JSON
     "worktree=$repo" \
     "project=$repo" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "harness=claude" \
     "model=claude-opus-5" \
     "account_home=$case_dir/author-home"

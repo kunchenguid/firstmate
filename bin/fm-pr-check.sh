@@ -17,9 +17,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-account-routing-lib.sh
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -92,6 +89,15 @@ if ! PR_HEAD_LOOKUP=$("$FM_ROOT/bin/fm-github-pr.py" head "$URL" 2>&1); then
   exit 1
 fi
 PR_HEAD=$PR_HEAD_LOOKUP
+if ! CI_HEAD=$("$FM_ROOT/bin/fm-github-pr.py" checks "$URL" "$PR_HEAD" 2>&1); then
+  CI_DIAGNOSTIC=$(printf '%s' "$CI_HEAD" | tr '\r\n' '  ')
+  printf 'UNREVIEWED: PR CI is not green: %.500s\n' "$CI_DIAGNOSTIC" >&2
+  exit 1
+fi
+[ "$CI_HEAD" = "$PR_HEAD" ] || {
+  echo "UNREVIEWED: CI verification did not return the exact live PR head" >&2
+  exit 1
+}
 META_LOCK=$(fm_account_meta_lock_acquire "$STATE" "$ID") || exit 1
 if [ -f "$META" ]; then
   CURRENT_GENERATION=$(fm_account_meta_value "$META" generation_id)
