@@ -256,8 +256,6 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -329,6 +327,14 @@ test_no_mistakes_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  assert_grep "The task is complete only after \`/no-mistakes\` reports CI green." "$brief" \
+    "no-mistakes DOD must have CI-green as its sole definition of done"
+  assert_grep "When implementation is committed, immediately invoke \`/no-mistakes\` to validate and ship the PR." "$brief" \
+    "no-mistakes DOD must enter the pipeline without a separate firstmate instruction"
+  assert_no_grep "append \`done: {summary}\` to the status file and stop" "$brief" \
+    "no-mistakes DOD must not report a terminal done before validation"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD must not wait for a separate pipeline instruction"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
