@@ -1107,6 +1107,41 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+# Side-band ledger publication, detached from the poll loop.
+#
+# The poll loop owns the liveness beacon below, and fm-guard.sh reads that
+# beacon's freshness as proof that supervision is alive. Publication is a
+# side-band nicety bounded by FM_HOME_SUMMARY_TIMEOUT, but that bound is far
+# larger than one poll and, in a home whose publication keeps failing, it is
+# paid on every poll - so running it inline puts up to a full publication
+# deadline between two beacon touches and can starve the guard's grace. Nothing
+# in the poll depends on the ledger, so start it and move on: the beacon keeps
+# advancing no matter how slow the publication is.
+#
+# One at a time. HOME_SUMMARY_PID holds the in-flight publication, and a poll
+# that finds it still running starts nothing, so a slow publication cannot
+# accumulate a queue of clones waiting on its own home-local lock. bash reaps
+# the finished child on its own, after which kill -0 fails and the recorded
+# wait collects its status.
+#
+# The trade the detachment makes: a reader can briefly see a ledger that
+# predates the event this poll just surfaced, where the inline call published
+# first. Publication is eventually consistent by design and every reader
+# re-derives current state from the owning home anyway, while beacon freshness
+# is what the whole supervision chain rests on.
+HOME_SUMMARY_PID=
+home_summary_refresh_detached() {
+  if [ -n "$HOME_SUMMARY_PID" ]; then
+    if kill -0 "$HOME_SUMMARY_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$HOME_SUMMARY_PID" 2>/dev/null || true
+    HOME_SUMMARY_PID=
+  fi
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+  HOME_SUMMARY_PID=$!
+}
+
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -1196,7 +1231,7 @@ while :; do
   touch "$STATE/.last-watcher-beat"
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    home_summary_refresh_detached
   fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
@@ -1327,10 +1362,11 @@ while :; do
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
-    # trigger for this home's published summary. Refresh before either
-    # surfacing or absorbing the signal so an actionable exit cannot leave the
-    # ledger behind the event it reports. Publication failure stays side-band.
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    # trigger for this home's published summary. Start it before either
+    # surfacing or absorbing the signal, but never wait on it: see
+    # home_summary_refresh_detached for why publication stays off the beacon's
+    # path. Publication failure stays side-band.
+    home_summary_refresh_detached
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue

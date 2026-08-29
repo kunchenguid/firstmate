@@ -487,3 +487,241 @@ then
   fail "best-effort failure reporting was not fully bounded"
 fi
 pass "best-effort refresh bounds failure reporting fallback"
+
+# --- publication cost, beacon isolation, and failure discoverability ---------
+#
+# The three regressions below all came from one live incident: in a real home
+# whose tasks had accumulated ordinary status history, the producer needed
+# minutes, so publication burned its whole deadline on every attempt, never
+# published, starved the watcher's liveness beacon while it did, and said
+# nothing about any of it because --best-effort is deliberately non-fatal.
+
+# Publication cost must scale with what a home actually accumulates. Status
+# history is append-only and unbounded, and the producer folds every task's
+# whole stream, so an ordinary long-lived home is the real input - not the
+# one-line log a freshly seeded fixture has. This home carries a status log of
+# realistic width and depth and must still publish inside a deadline well under
+# the default one.
+COST_HOME="$TMP_ROOT/cost-home"
+mkdir -p "$COST_HOME/state" "$COST_HOME/data" "$COST_HOME/config" \
+  "$COST_HOME/projects/task"
+printf '# Seeded Firstmate home\n' > "$COST_HOME/AGENTS.md"
+printf 'cost\n' > "$COST_HOME/.fm-secondmate-home"
+fm_git_init_commit "$COST_HOME/projects/task"
+cat > "$COST_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] cost-task - Publish from an accumulated home (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$COST_HOME/state/cost-task.meta" \
+  "window=fmtest:fm-cost-task" \
+  "worktree=$COST_HOME/projects/task" \
+  "project=firstmate" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes" \
+  "spawn_gen=fm.cost123456"
+cost_busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$COST_HOME/state" cost-task)
+"$ROOT/bin/fm-busy-event.sh" apply "$COST_HOME/state" cost-task idle \
+  --gen "$cost_busy_gen" --source claude-hook --event stop
+python3 - "$COST_HOME/state/cost-task.status" <<'PY'
+import sys
+note = ("the crewmate ran validation and reported checks on the branch "
+        "after review ") * 25
+with open(sys.argv[1], "w") as handle:
+    for i in range(300):
+        handle.write(f"working: {note}({i})\n")
+    handle.write("needs-decision [key=cost-gate]: which base to rebuild from\n")
+PY
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$COST_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_HOME_SUMMARY_TIMEOUT=30 "$WRITER" --best-effort \
+  || fail "accumulated-home publication changed the best-effort caller result"
+[ -f "$COST_HOME/state/home-summary.json" ] \
+  || fail "an accumulated home did not publish within a 30-second deadline: $(cat "$COST_HOME/state/.home-summary-refresh.log" 2>/dev/null)"
+jq -e --arg home "$COST_HOME" '
+  .schema == "fm-secondmate-home-summary.v1"
+  and .home == $home
+  and any(.decisions_open[]; .key == "cost-gate")
+' "$COST_HOME/state/home-summary.json" >/dev/null \
+  || fail "the accumulated home published a ledger missing its open decision"
+pass "publication completes on a home carrying accumulated status history"
+
+# One unreachable home must not extend publication without limit. A remote
+# secondmate's current state is read over ssh, and ssh's own dead-peer detection
+# deliberately never kills a slow-but-alive remote command, so nothing under the
+# producer bounds that read on its own. Point the transport at a stub that never
+# answers and require the producer to return anyway, reporting that home as
+# unknown rather than waiting on it.
+REMOTE_HOME="$TMP_ROOT/remote-home"
+mkdir -p "$REMOTE_HOME/state" "$REMOTE_HOME/data" "$REMOTE_HOME/config" \
+  "$REMOTE_HOME/projects" "$TMP_ROOT/sshbin"
+printf '# Seeded Firstmate home\n' > "$REMOTE_HOME/AGENTS.md"
+printf 'remote\n' > "$REMOTE_HOME/.fm-secondmate-home"
+cat > "$REMOTE_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+cat > "$REMOTE_HOME/data/secondmates.md" <<'EOF'
+- rsm - remote test domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote testing; projects: alpha; added 2026-08-02)
+EOF
+fm_write_meta "$REMOTE_HOME/state/rsm.meta" \
+  "window=remote:rsm" \
+  "endpoint_task_id=rsm" \
+  "worktree=/remote/home/never-locally-present" \
+  "harness=claude" \
+  "kind=secondmate" \
+  "mode=secondmate" \
+  "home=/remote/home" \
+  "remote_host=remote-mac" \
+  "remote_root=/remote/root" \
+  "remote_backend=herdr" \
+  "remote_herdr_session=fm-remote" \
+  "remote_target=fm-remote:w1:p1"
+cat > "$TMP_ROOT/sshbin/stalled-ssh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+sleep 60
+SH
+chmod +x "$TMP_ROOT/sshbin/stalled-ssh"
+started=$(date +%s)
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REMOTE_HOME" \
+  FM_SSH_BIN="$TMP_ROOT/sshbin/stalled-ssh" \
+  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
+  FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 FM_SNAPSHOT_SECONDMATE_TIMEOUT=2 \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/stalled-summary.json" \
+  || fail "an unreachable remote home failed the whole producer"
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 40 ] \
+  || fail "the producer waited $elapsed seconds on one unreachable remote home"
+jq -e '.schema == "fm-secondmate-home-summary.v1"' \
+  "$TMP_ROOT/stalled-summary.json" >/dev/null \
+  || fail "an unreachable remote home produced a malformed document"
+pass "producer bounds each per-task current-state read"
+
+# The watcher's beacon is what the rest of supervision reads as proof it is
+# alive. Publication is side-band, so no matter how long it takes, the beacon
+# must keep advancing. Hold the publication lock for the whole window so every
+# refresh this watcher starts blocks for its full (deliberately long) deadline,
+# then require the beacon to keep ticking anyway.
+BEAT_HOME="$TMP_ROOT/beat-home"
+mkdir -p "$BEAT_HOME/state" "$BEAT_HOME/data" "$BEAT_HOME/config" \
+  "$BEAT_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$BEAT_HOME/AGENTS.md"
+printf 'beat\n' > "$BEAT_HOME/.fm-secondmate-home"
+cat > "$BEAT_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+BEAT_LOCK_MARKER="$TMP_ROOT/beat-lock-held"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BEAT_HOME" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
+  : > "$3"
+  sleep 120
+' _ "$ROOT" "$BEAT_HOME" "$BEAT_LOCK_MARKER" &
+LOCK_HOLDER_PID=$!
+i=0
+while [ ! -e "$BEAT_LOCK_MARKER" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$LOCK_HOLDER_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$BEAT_LOCK_MARKER" ] || fail "could not stall publication for beacon coverage"
+PATH="$FAKEBIN:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BEAT_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=1 FM_HOME_SUMMARY_TIMEOUT=90 \
+  FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
+  "$WATCH" > "$TMP_ROOT/beat-watch.out" 2> "$TMP_ROOT/beat-watch.err" &
+WATCH_PID=$!
+i=0
+while [ ! -e "$BEAT_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 200 ]; do
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$BEAT_HOME/state/.last-watcher-beat" ] \
+  || fail "the stalled-publication watcher never beat: $(cat "$TMP_ROOT/beat-watch.err" 2>/dev/null)"
+beat_mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$1"; }
+seen=0
+last=$(beat_mtime "$BEAT_HOME/state/.last-watcher-beat")
+i=0
+while [ "$seen" -lt 3 ] && [ "$i" -lt 200 ]; do
+  kill -0 "$WATCH_PID" 2>/dev/null \
+    || fail "the stalled-publication watcher exited: $(cat "$TMP_ROOT/beat-watch.err" 2>/dev/null)"
+  sleep 0.1
+  now=$(beat_mtime "$BEAT_HOME/state/.last-watcher-beat")
+  if [ "$now" != "$last" ]; then
+    seen=$((seen + 1))
+    last=$now
+  fi
+  i=$((i + 1))
+done
+[ "$seen" -ge 3 ] \
+  || fail "the beacon advanced only $seen time(s) in 20 seconds while publication was stalled"
+kill "$WATCH_PID" >/dev/null 2>&1 || true
+wait "$WATCH_PID" >/dev/null 2>&1 || true
+WATCH_PID=
+kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+LOCK_HOLDER_PID=
+pass "a stalled publication does not delay the watcher liveness beacon"
+
+# A publication that keeps failing is deliberately non-fatal to its caller, so
+# the only way an operator learns about it is a session start saying so. Seed
+# the home-local failure record a real failing home would have, and require the
+# check a session start already runs to name it - then go quiet once the ledger
+# is published again.
+REPORT_HOME="$TMP_ROOT/report-home"
+mkdir -p "$REPORT_HOME/state" "$REPORT_HOME/data" "$REPORT_HOME/config" \
+  "$REPORT_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$REPORT_HOME/AGENTS.md"
+printf 'report\n' > "$REPORT_HOME/.fm-secondmate-home"
+cat > "$REPORT_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+cat > "$REPORT_HOME/state/.home-summary-refresh.log" <<'EOF'
+[2026-08-28T09:58:00Z] refresh exceeded its 60-second deadline
+[2026-08-28T09:59:00Z] refresh exceeded its 60-second deadline
+EOF
+run_bootstrap_detect() {
+  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$1" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+}
+report_out=$(run_bootstrap_detect "$REPORT_HOME")
+printf '%s\n' "$report_out" \
+  | grep -F 'HOME_SUMMARY: this home has never published state/home-summary.json' \
+    >/dev/null \
+  || fail "a home that never published its ledger was reported as silent: $report_out"
+printf '%s\n' "$report_out" \
+  | grep -F '2 failed attempt(s)' >/dev/null \
+  || fail "the publication report omitted the recorded failure count: $report_out"
+printf '%s\n' "$report_out" \
+  | grep -F 'refresh exceeded its 60-second deadline' >/dev/null \
+  || fail "the publication report omitted the recorded reason: $report_out"
+
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REPORT_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  "$WRITER" || fail "could not publish the ledger that clears the report"
+report_out=$(run_bootstrap_detect "$REPORT_HOME")
+case "$report_out" in
+  *HOME_SUMMARY:*)
+    fail "a published ledger still reported stale publication failures: $report_out"
+    ;;
+esac
+pass "repeated publication failure is reported at session start until it clears"
