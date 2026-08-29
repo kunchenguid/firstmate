@@ -19,7 +19,7 @@ A visible thread that cannot report into Firstmate's normal lifecycle is not a c
 
 ## Current blocker
 
-Firstmate backend scripts are shell entry points and can call tmux, Herdr, Zellij, Orca, and cmux directly.
+Firstmate backend scripts are shell entry points and can call tmux, Herdr, Zellij, Orca, cmux, and thurbox directly.
 Codex Desktop host tools are available to a Desktop conversation, not to arbitrary Firstmate subprocesses.
 The missing component is a Codex Desktop-supported shell-callable transport, not another local ledger.
 

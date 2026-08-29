@@ -38,7 +38,7 @@ The pane the probe reads is re-resolved from the session UUID inside that same c
 
 3. **Select the backend**, either explicitly (`config/backend`, `FM_BACKEND`, `--backend thurbox`) or by letting auto-detection do it (below).
 
-`config/thurbox-agent` names a different agents.toml entry when `shell` is taken; the default is `shell`. A missing entry is refused at `container_ensure` with the exact TOML to paste, rather than surfacing as a mystifying agent launch.
+   `config/thurbox-agent` names a different agents.toml entry when `shell` is taken; the default is `shell`. A missing entry is refused at `container_ensure` with the exact TOML to paste, rather than surfacing as a mystifying agent launch.
 
 4. **Optionally wire an agent-state signal.** This step is what makes thurbox's native busy verdict produce anything, and firstmate does not do it for you. Because the agent entry above is a bare shell, thurbox launches no agent of its own and therefore wires none of the lifecycle hooks that normally write `hook_state`; firstmate never calls `session signal` either. So `hook_state` stays null for a firstmate task's whole life unless your harness's own hooks call:
 

@@ -25,9 +25,9 @@ If the pane shows the exit banner, use the verified resume path above.
 While OpenCode 1.18.4 is mid-turn, its composer accepts Enter as a "send when the turn ends" keystroke but does not clear the typed text until the turn finishes.
 Without a conversion, every typed-plane send to a busy OpenCode pane falsely reports "Enter swallowed", and a daemon escalation that lands while the primary is mid-turn appears wedged.
 
-Tmux and Herdr delegate this exception to the one `fm_composer_queued_enter_verdict` policy in `../../../bin/fm-composer-lib.sh`.
-Backend-specific signals are documented in `../../../docs/tmux-backend.md` and `../../../docs/herdr-backend.md`.
-Regression coverage is `../../../tests/fm-tmux-submit-busy.test.sh`, `../../../tests/fm-composer-lib.test.sh`, and `../../../tests/fm-backend-herdr.test.sh`.
+Tmux, Herdr, and thurbox delegate this exception to the one `fm_composer_queued_enter_verdict` policy in `../../../bin/fm-composer-lib.sh`.
+Backend-specific signals are documented in `../../../docs/tmux-backend.md`, `../../../docs/herdr-backend.md`, and `../../../docs/thurbox-backend.md`; thurbox's signal is inert until an operator wires it, so a thurbox pane behaves today as if the conversion were absent.
+Regression coverage is `../../../tests/fm-tmux-submit-busy.test.sh`, `../../../tests/fm-composer-lib.test.sh`, `../../../tests/fm-backend-herdr.test.sh`, and `../../../tests/fm-backend-thurbox.test.sh`.
 The live Herdr guard is `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 ../../../tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
 
 ## Primary integration
