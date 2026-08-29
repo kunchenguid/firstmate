@@ -141,12 +141,26 @@ Rules that keep the contract unambiguous:
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown` or its `invalidity` reports an inventory mismatch.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
-- The chat follows `AGENTS.md` section 9 and carries one scannable line per item.
+- The chat follows `AGENTS.md` section 9 in every section.
+- Recently Landed, Underway, and Charted Next carry one scannable line per item.
+- Captain's Call items get room to be answerable without a follow-up question: up to two or three short sentences that name what the item is in plain words, give one clause of why it exists, and state the exact ask: the word to say, the click to make, or the thing to paste.
+- Use that room only when an item genuinely needs the context; a self-evident Captain's Call item stays one line, no item runs past three sentences, and the room is for the ask and its provenance, never the full decision record or options list.
+- Example of the shape: "The refund fix is ready and waiting on your merge word, captain. It came out of the double-charge bug you flagged Tuesday, and checks are green. Say 'merge it', or open https://github.com/acme/pay/pull/482 to look first."
 - Detailed decisions, plans, full gate reasons, and evidence stay out of chat; file mode puts them in the report, while lavish mode puts only its payload-backed interactive detail on the board.
 - In file mode, include the report path or link inside the four-section digest without adding another heading.
 - In lavish mode, include the board URL inside the four-section digest the same way.
 
 ## Tone and content rules
+
+Write every digest, in all three modes, in plain, direct prose.
+These practices apply to the Captain's Call sentences, the one-line items in the other three sections, the file-mode report, and the board copy alike; the `/unslop` skill holds the fuller catalog if you want it.
+
+- Cut puffery, hedging, and filler such as "it is important to note", "in order to", "could potentially", and generic wrap-up lines; state what happened and what to do instead.
+- Drop chatbot and sycophancy phrases such as "I hope this helps", "great question", "of course", and "let me know if".
+- Keep sentences short with one idea each, and name concrete nouns and the actor rather than a feeling, so "the staging login expired" beats "there may be an authentication concern".
+- Skip AI-vocabulary filler such as "additionally", "crucial", "delve", "leverage", and "utilize", and skip the forced rule of three; use the natural number of items and the plain word.
+- Use plain dashes, never em dashes, and a colon only before a list or example.
+- Keep the required direct address to the captain, but do not pad prose to reach it.
 
 - The optional file-mode report is a private, captain-facing internal artifact that lives in gitignored `data/`, so unlike normal captain chat it MAY reference task ids, PR URLs, and repo names.
 - The captain works with those directly and needs them to resume; keep the report organized and scannable, not a raw dump.
