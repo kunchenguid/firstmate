@@ -350,6 +350,32 @@ test_interrupted_local_env_seed_leaves_the_slot_acquirable() {
   pass "an interrupted local environment seed leaves the pool slot clean and acquirable"
 }
 
+# If firstmate cannot publish the ownership record, it must not leave a copy that
+# teardown cannot safely identify. Make the record path unusable and assert that
+# acquisition refuses after removing only the copy it just staged.
+test_unrecordable_local_env_seed_refuses_without_leaving_a_copy() {
+  local rec id out status gitdir record_path
+  id='pool-env-local-unrecordable'
+  rec=$(make_case env-local-unrecordable "$id")
+  read_case_record "$rec"
+
+  ignore_local_env_file
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
+  gitdir=$(git -C "$POOL_DIR" rev-parse --absolute-git-dir)
+  record_path="$gitdir/fm-env-local-seed-record"
+  mkdir "$record_path"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 1 "$status" "spawn should refuse when it cannot record the seeded copy"
+  [ ! -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn left an unrecorded .env.local in the acquired pool slot"
+  assert_contains "$out" "could not record its ownership" \
+    "spawn did not explain why the unrecorded copy was removed"
+  pass "an unrecordable local environment seed refuses without leaving a copy"
+}
+
 staged_scratch_count() {
   local gitdir
   gitdir=$(git -C "$POOL_DIR" rev-parse --absolute-git-dir)
@@ -1243,6 +1269,7 @@ test_acquired_worktree_is_seeded_with_local_env_file
 test_acquired_worktree_refreshes_a_stale_local_env_file
 test_acquired_worktree_retires_a_local_env_file_the_captain_deleted
 test_interrupted_local_env_seed_leaves_the_slot_acquirable
+test_unrecordable_local_env_seed_refuses_without_leaving_a_copy
 test_interrupted_seed_scratch_does_not_outlive_revocation
 test_scratch_is_swept_even_when_the_retire_phase_refuses
 test_cross_filesystem_layout_degrades_to_a_loud_skip
