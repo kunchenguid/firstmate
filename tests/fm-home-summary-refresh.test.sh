@@ -563,6 +563,7 @@ printf '# Seeded Firstmate home\n' > "$REMOTE_HOME/AGENTS.md"
 printf 'remote\n' > "$REMOTE_HOME/.fm-secondmate-home"
 cat > "$REMOTE_HOME/data/backlog.md" <<'EOF'
 ## In flight
+- [ ] rsm - Read remote current state (repo: firstmate) (kind: ship) (since 2026-08-28)
 
 ## Queued
 
@@ -600,16 +601,21 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REMOTE_HOME" \
 elapsed=$(( $(date +%s) - started ))
 [ "$elapsed" -lt 40 ] \
   || fail "the producer waited $elapsed seconds on one unreachable remote home"
-jq -e '.schema == "fm-secondmate-home-summary.v1"' \
-  "$TMP_ROOT/stalled-summary.json" >/dev/null \
-  || fail "an unreachable remote home produced a malformed document"
+jq -e '
+  .schema == "fm-secondmate-home-summary.v1"
+  and .valid == false
+  and .state == "unknown"
+  and .invalidity.kind == "child_current_unavailable"
+  and (.invalidity.ids == ["rsm"])
+  and any(.endpoints[]; .id == "rsm" and .state == "unknown")
+' "$TMP_ROOT/stalled-summary.json" >/dev/null \
+  || fail "an unreachable remote task was not reported as unknown"
 pass "producer bounds each per-task current-state read"
 
 # The watcher's beacon is what the rest of supervision reads as proof it is
 # alive. Publication is side-band, so no matter how long it takes, the beacon
-# must keep advancing. Hold the publication lock for the whole window so every
-# refresh this watcher starts blocks for its full (deliberately long) deadline,
-# then require the beacon to keep ticking anyway.
+# must keep advancing. Hold the publication lock for the whole observation
+# window, then require the beacon to keep ticking anyway.
 BEAT_HOME="$TMP_ROOT/beat-home"
 mkdir -p "$BEAT_HOME/state" "$BEAT_HOME/data" "$BEAT_HOME/config" \
   "$BEAT_HOME/projects"
@@ -677,6 +683,119 @@ wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 LOCK_HOLDER_PID=
 pass "a stalled publication does not delay the watcher liveness beacon"
 
+RESTART_HOME="$TMP_ROOT/restart-home"
+mkdir -p "$RESTART_HOME/state" "$RESTART_HOME/data" "$RESTART_HOME/config" \
+  "$RESTART_HOME/projects/task"
+printf '# Seeded Firstmate home\n' > "$RESTART_HOME/AGENTS.md"
+printf 'restart\n' > "$RESTART_HOME/.fm-secondmate-home"
+fm_git_init_commit "$RESTART_HOME/projects/task"
+cat > "$RESTART_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] restart-task - Preserve publication single flight (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$RESTART_HOME/state/restart-task.meta" \
+  "window=fmtest:fm-restart-task" \
+  "worktree=$RESTART_HOME/projects/task" \
+  "project=firstmate" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes" \
+  "spawn_gen=fm.restart123456"
+RESTART_LOCK_MARKER="$TMP_ROOT/restart-lock-held"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
+  : > "$3"
+  sleep 30
+' _ "$ROOT" "$RESTART_HOME" "$RESTART_LOCK_MARKER" &
+LOCK_HOLDER_PID=$!
+i=0
+while [ ! -e "$RESTART_LOCK_MARKER" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$LOCK_HOLDER_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$RESTART_LOCK_MARKER" ] || fail "could not hold the publication lock for restart coverage"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
+  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 FM_HOME_SUMMARY_TIMEOUT=2 \
+  FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
+  "$WATCH" > "$TMP_ROOT/restart-watch-one.out" 2> "$TMP_ROOT/restart-watch-one.err" &
+WATCH_PID=$!
+i=0
+while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
+  || fail "the first restart watcher did not begin polling"
+printf 'needs-decision [key=restart-gate]: restart the watcher\n' \
+  > "$RESTART_HOME/state/restart-task.status"
+i=0
+while kill -0 "$WATCH_PID" 2>/dev/null && [ "$i" -lt 100 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+kill -0 "$WATCH_PID" 2>/dev/null \
+  && fail "the first restart watcher did not surface its actionable signal"
+wait "$WATCH_PID" >/dev/null 2>&1 || true
+WATCH_PID=
+rm -f "$RESTART_HOME/state/.last-watcher-beat"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
+  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 FM_HOME_SUMMARY_TIMEOUT=2 \
+  FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
+  "$WATCH" > "$TMP_ROOT/restart-watch-two.out" 2> "$TMP_ROOT/restart-watch-two.err" &
+WATCH_PID=$!
+i=0
+while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
+  || fail "the replacement restart watcher did not begin polling"
+sleep 4
+[ ! -s "$RESTART_HOME/state/.home-summary-refresh.log" ] \
+  || fail "watcher restart queued refreshes behind a live publication lock: $(cat "$RESTART_HOME/state/.home-summary-refresh.log")"
+if ! kill -0 "$WATCH_PID" 2>/dev/null; then
+  wait "$WATCH_PID" >/dev/null 2>&1 || true
+  rm -f "$RESTART_HOME/state/.last-watcher-beat"
+  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
+    FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 FM_HOME_SUMMARY_TIMEOUT=2 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
+    "$WATCH" > "$TMP_ROOT/restart-watch-three.out" 2> "$TMP_ROOT/restart-watch-three.err" &
+  WATCH_PID=$!
+  i=0
+  while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
+    kill -0 "$WATCH_PID" 2>/dev/null || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
+    || fail "the recovery replacement watcher did not begin polling"
+fi
+kill -KILL "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+LOCK_HOLDER_PID=
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
+  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
+  || fail "stale-lock recovery changed the best-effort caller result"
+i=0
+while [ ! -e "$RESTART_HOME/state/home-summary.json" ] && [ "$i" -lt 200 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$RESTART_HOME/state/home-summary.json" ] \
+  || fail "a dead publication lock wedged publication"
+kill "$WATCH_PID" >/dev/null 2>&1 || true
+wait "$WATCH_PID" >/dev/null 2>&1 || true
+WATCH_PID=
+pass "publication remains single-flight across watcher restart"
+
 # A publication that keeps failing is deliberately non-fatal to its caller, so
 # the only way an operator learns about it is a session start saying so. Seed
 # the home-local failure record a real failing home would have, and require the
@@ -703,6 +822,50 @@ run_bootstrap_detect() {
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
+
+SAME_SECOND_HOME="$TMP_ROOT/same-second-home"
+mkdir -p "$SAME_SECOND_HOME/state" "$SAME_SECOND_HOME/data" \
+  "$SAME_SECOND_HOME/config" "$SAME_SECOND_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$SAME_SECOND_HOME/AGENTS.md"
+printf 'same-second\n' > "$SAME_SECOND_HOME/.fm-secondmate-home"
+cat > "$SAME_SECOND_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+same_second_publish() {
+  local stamp=$1
+  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SAME_SECOND_HOME" \
+    FM_HOME_SUMMARY_STAMP_OVERRIDE="$stamp" FM_SNAPSHOT_NOW="$stamp" \
+    FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" "$WRITER"
+}
+same_second_fail() {
+  local stamp=$1
+  PATH="$FAILBIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$SAME_SECOND_HOME" FM_HOME_SUMMARY_STAMP_OVERRIDE="$stamp" \
+    FM_SNAPSHOT_NOW="$stamp" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+    "$WRITER" --best-effort
+}
+same_second_publish '2026-08-28T10:00:00.500000Z' \
+  || fail "could not seed the same-second ledger"
+same_second_fail '2026-08-28T10:00:00.600000Z' \
+  || fail "the first same-second failure changed its caller result"
+same_second_fail '2026-08-28T10:00:00.700000Z' \
+  || fail "the second same-second failure changed its caller result"
+same_second_out=$(run_bootstrap_detect "$SAME_SECOND_HOME")
+printf '%s\n' "$same_second_out" | grep -F '2 failed attempt(s)' >/dev/null \
+  || fail "same-second publication failures were not reported: $same_second_out"
+same_second_publish '2026-08-28T10:00:00.800000Z' \
+  || fail "could not republish inside the same second"
+same_second_out=$(run_bootstrap_detect "$SAME_SECOND_HOME")
+case "$same_second_out" in
+  *HOME_SUMMARY:*)
+    fail "same-second republish did not clear earlier failures: $same_second_out"
+    ;;
+esac
+pass "same-second publication ordering remains observable"
 
 # A timed-out attempt can finish recording after a newer ledger is published.
 # Its record must retain the attempt's ordering rather than look like a failure
@@ -754,8 +917,8 @@ done
 order_started=$(python3 -c 'import time; print(time.time())')
 PATH="$ORDER_DATE_BIN:$FAKEBIN:$PATH" FM_TEST_REAL_DATE="$REAL_DATE" \
   FM_TEST_ORDER_START="$order_started" FM_TEST_ORDER_EARLY="$NOW_ONE" \
-  FM_TEST_ORDER_LATE="$NOW_THREE" FM_ROOT_OVERRIDE="$ROOT" \
-  FM_HOME="$ORDER_HOME" FM_HOME_SUMMARY_TIMEOUT=2 \
+  FM_TEST_ORDER_LATE="$NOW_THREE" FM_HOME_SUMMARY_STAMP_OVERRIDE="$NOW_ONE" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ORDER_HOME" FM_HOME_SUMMARY_TIMEOUT=2 \
   "$WRITER" --best-effort \
   || fail "ordered timeout changed the best-effort caller result"
 kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true

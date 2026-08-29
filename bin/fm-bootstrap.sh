@@ -1302,9 +1302,15 @@ detect_home_summary_publication() {
   # and keep the newest message. Both stamps are the same UTC ISO-8601 format,
   # so a plain string comparison orders them.
   counted=$(LC_ALL=C awk -v since="$since" '
-    match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\]/) {
+    function ordered_stamp(stamp) {
+      sub(/Z$/, "", stamp)
+      if (stamp !~ /\./) stamp = stamp ".000000"
+      return stamp
+    }
+    BEGIN { since_ordered = ordered_stamp(since) }
+    match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9](\.[0-9]+)?Z\]/) {
       stamp = substr($0, 2, RLENGTH - 2)
-      if (since == "" || stamp > since) {
+      if (since == "" || ordered_stamp(stamp) > since_ordered) {
         n += 1
         last = substr($0, RLENGTH + 2)
       }

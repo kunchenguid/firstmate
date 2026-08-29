@@ -1118,12 +1118,6 @@ fi
 # in the poll depends on the ledger, so start it and move on: the beacon keeps
 # advancing no matter how slow the publication is.
 #
-# One at a time. HOME_SUMMARY_PID holds the in-flight publication, and a poll
-# that finds it still running starts nothing, so a slow publication cannot
-# accumulate a queue of clones waiting on its own home-local lock. bash reaps
-# the finished child on its own, after which kill -0 fails and the recorded
-# wait collects its status.
-#
 # The trade the detachment makes: a reader can briefly see a ledger that
 # predates the event this poll just surfaced, where the inline call published
 # first. Publication is eventually consistent by design and every reader
@@ -1138,7 +1132,8 @@ home_summary_refresh_detached() {
     wait "$HOME_SUMMARY_PID" 2>/dev/null || true
     HOME_SUMMARY_PID=
   fi
-  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+  FM_HOME_SUMMARY_IF_IDLE=1 \
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
   HOME_SUMMARY_PID=$!
 }
 

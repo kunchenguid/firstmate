@@ -38,6 +38,7 @@ ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
+HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
@@ -71,6 +72,10 @@ esac
 case "$HOME_SUMMARY_TIMEOUT" in
   ''|*[!0-9]*|0) HOME_SUMMARY_TIMEOUT=60 ;;
 esac
+case "$HOME_SUMMARY_IF_IDLE" in
+  0|1) ;;
+  *) HOME_SUMMARY_IF_IDLE=0 ;;
+esac
 
 if [ "$HOME_SUMMARY_MODE" != parent ]; then
   # shellcheck source=bin/fm-wake-lib.sh
@@ -93,8 +98,23 @@ home_summary_fail() {
   return 1
 }
 
+home_summary_timestamp() {
+  if [ -n "${FM_HOME_SUMMARY_STAMP_OVERRIDE:-}" ]; then
+    printf '%s\n' "$FM_HOME_SUMMARY_STAMP_OVERRIDE"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MTime::HiRes=time -MPOSIX=strftime -e '
+      $now = time; $seconds = int($now);
+      printf "%s.%06dZ\n", strftime("%Y-%m-%dT%H:%M:%S", gmtime($seconds)), int(($now - $seconds) * 1000000);
+    '
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))'
+  else
+    date -u +%Y-%m-%dT%H:%M:%SZ
+  fi
+}
+
 home_summary_refresh_once() {
-  local producer_rc producer_error
+  local producer_rc producer_error snapshot_stamp
   if ! mkdir -p "$STATE" 2>/dev/null; then
     home_summary_fail "state directory is unavailable: $STATE"
     return 1
@@ -103,8 +123,17 @@ home_summary_refresh_once() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  fm_lock_acquire_wait "$REFRESH_LOCK"
+  if [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ]; then
+    fm_lock_try_acquire "$REFRESH_LOCK" || return 0
+  else
+    fm_lock_acquire_wait "$REFRESH_LOCK"
+  fi
   HOME_SUMMARY_LOCK_HELD=1
+  if [ -z "${FM_SNAPSHOT_NOW:-}" ]; then
+    snapshot_stamp=$(home_summary_timestamp 2>/dev/null) || snapshot_stamp=
+    FM_SNAPSHOT_NOW=$snapshot_stamp
+    export FM_SNAPSHOT_NOW
+  fi
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
     return 1
@@ -180,7 +209,7 @@ home_summary_refresh_once() {
 home_summary_log_failure() {
   local size stamp tmp
   stamp=$HOME_SUMMARY_FAILURE_STAMP
-  [ -n "$stamp" ] || stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  [ -n "$stamp" ] || stamp=$(home_summary_timestamp)
   if ! printf '[%s] %s\n' "$stamp" "$HOME_SUMMARY_ERROR" >> "$ERROR_LOG" 2>/dev/null; then
     printf 'fm-home-summary-refresh: %s\n' "$HOME_SUMMARY_ERROR" >&2
     return 0
@@ -205,9 +234,10 @@ if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
 fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
-  attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
+  attempt_stamp=$(home_summary_timestamp 2>/dev/null) || attempt_stamp=
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
+    FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_worker; then
     exit 0
   else
