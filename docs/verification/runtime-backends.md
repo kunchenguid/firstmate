@@ -838,8 +838,8 @@ The full argv is the load-bearing part, and it is what retires this adapter's ow
 | Styled capture | `session capture --ansi` | Styling preserved in `.output`; plain remains the default, so existing `--text | grep` callers are unaffected. |
 | Liveness | `session capture <uuid> --lines 1 --json` | Exit 1 for a missing or malformed uuid, so the exit status alone is a sound liveness answer. |
 
-Superseded by the above: the 2.9-era rows recording that `session send` could not express unsubmitted input, that no named-key command existed, and that capture returned plain text only.
-Those facts held on 2.9 and are why the adapter once drove tmux directly; they no longer describe a supported build.
+The rows these replaced are kept under "Retired 2.9-era rows" below rather than deleted: they record what the socket-level revision was built on, and why 2.10 is the floor rather than a preference.
+Those facts held on 2.9 and no longer describe a supported build.
 
 ```sh
 thurbox-cli version --json
@@ -864,14 +864,19 @@ Current active CLI findings:
 | Liveness | `session get <uuid> --json` | Exit 1 for a missing **and** a malformed UUID; exit 0 with the row otherwise. |
 | Pane identity | `session get --json .backend_id` | `%20` - a tmux pane id on thurbox's own socket, with `backend_type: "local-tmux"`. |
 | Restart churn | `session restart <uuid>` | Pane moved `%23` -> `%24` while the UUID was unchanged. |
-| Literal send | `tmux -L thurbox send-keys -t <pane> -l` | Left text unsubmitted. |
-| CLI send counterexample | `session send <uuid> <text>` | Always appended Enter, so it cannot serve unsubmitted input. |
-| Keys | `tmux -L thurbox send-keys -t <pane> Enter\|Escape\|C-c\|C-u` | All shared key operations worked. |
-| Styled capture | `tmux -L thurbox capture-pane -e -p -t <pane>` | Returned ANSI-preserving output; `#{cursor_y}` returned the cursor row. |
-| Plain capture | `session capture <uuid> --lines N --json` | Payload in `.output`; `--lines` is a SCROLLBACK count, not a cap - see the row/cursor alignment finding below. |
-| Nested cwd | `tmux -L thurbox display-message '#{pane_current_path}'` | Tracked the live foreground process - no marker probe needed, unlike zellij and cmux. |
+| CLI send counterexample | `session send <uuid> <text>` | Always appends Enter, which is why every literal send passes `--no-enter`. |
+| Plain capture | `session capture <uuid> --lines N --json` | Payload in `.output`; `--lines` is a SCROLLBACK count, not a cap - see the row/cursor alignment finding above. |
 | Native state | `session signal --state working --session <uuid>` then `session get` | Round-tripped into `hook_state`; null before any agent signals. |
 | Teardown | `session delete <uuid> --force --json` | `"killed_window": true`; the non-forced form only soft-deletes the row. |
+
+Retired 2.9-era rows. Each was observed on 2.9.2 and each is now served by the 2.10 surface above, so none of these command shapes appears in the adapter any more:
+
+| Superseded guarantee | 2.9-era command shape | Now served by |
+| --- | --- | --- |
+| Literal send | `tmux -L thurbox send-keys -t <pane> -l` | `session send <uuid> --no-enter -- <text>` |
+| Keys | `tmux -L thurbox send-keys -t <pane> Enter\|Escape\|C-c\|C-u` | `session key <uuid> <name>` |
+| Styled capture | `tmux -L thurbox capture-pane -e -p -t <pane>`, cursor row from `#{cursor_y}` | `session capture --ansi --json`, cursor row from `cursor_row` |
+| Nested cwd | `tmux -L thurbox display-message '#{pane_current_path}'` | `foreground_cwd` on that same capture; both track the live foreground process, so neither needs the marker probe zellij and cmux inject |
 
 A plain `command = "bash"` agent produced a pane that executed sent commands but rendered no prompt and no echo; `args = ["-i"]` was required for the interactive rendering every composer read depends on.
 

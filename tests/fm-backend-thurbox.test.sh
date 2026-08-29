@@ -1009,6 +1009,66 @@ test_forced_secondmate_teardown_kills_thurbox_child_with_child_home_tag() {
   pass "forced secondmate teardown reclaims a thurbox child session under the child home tag"
 }
 
+test_peek_send_and_crew_state_route_through_thurbox_meta() {
+  reset_world
+  # The OPERATOR-LEVEL path, driven through the real commands rather than the
+  # adapter functions: a task recorded as backend=thurbox must be readable with
+  # fm-peek, steerable with fm-send, and reportable with fm-crew-state without
+  # any of them knowing thurbox exists. Every other case here calls the adapter
+  # directly, so nothing so far proves the dispatcher actually routes a
+  # backend=thurbox meta into this adapter - which is the whole point of the
+  # registration work - nor that the doorbell reaches the pane through the 2.10
+  # primitives (`session send --no-enter` then `session key enter`) rather than
+  # a tmux send-keys.
+  local wt state id out record body
+  id=t1
+  wt="$TMP_ROOT/io-wt"
+  fm_git_init_commit "$wt"
+  state="$TMP_ROOT/io-state"; mkdir -p "$state"
+  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  printf 'harness output line\n' > "$FM_TB_CAPTURE"
+  # An empty composer box: the post-Enter read that tells fm-send the doorbell
+  # was submitted rather than left sitting unsent.
+  printf '%s\n' '╭─────────╮' '│ > │' '╰─────────╯' > "$FM_TB_SCREEN"
+  export FM_TB_CURSOR_ROW=1
+  fm_write_meta "$state/$id.meta" \
+    "window=$UUID:%20" "endpoint_task_id=$id" "backend=thurbox" \
+    "thurbox_session_id=$UUID" "thurbox_pane_id=%20" \
+    "worktree=$wt" "project=$wt" "harness=claude" "kind=scout"
+  touch "$state/.last-watcher-beat"
+
+  out=$( FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-peek.sh" "fm-$id" 10 )
+  assert_contains "$out" "harness output line" \
+    "fm-peek did not read the thurbox pane through the recorded backend meta"
+
+  out=$( FM_HOME="$FM_ROOT_OVERRIDE" FM_STATE_OVERRIDE="$state" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0.01 \
+    "$ROOT/bin/fm-send.sh" "$id" "hello thurbox" 2>&1 ) \
+    || fail "fm-send refused a steer to a backend=thurbox task: $out"
+  record="$state/$id.inbox/001.msg"
+  [ -f "$record" ] || fail "fm-send did not enqueue through the task inbox"
+  body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$record")
+  [ "$body" = "hello thurbox" ] \
+    || fail "the thurbox task inbox did not preserve the send body, got '$body'"
+  assert_no_grep 'hello thurbox' "$FM_TB_LOG" \
+    "fm-send typed the payload into the pane instead of recording it durably"
+  assert_grep $'session\x1fsend\x1f'"$UUID"$'\x1f--no-enter\x1f--\x1fFirstmate instruction waiting' \
+    "$FM_TB_LOG" "fm-send did not ring the doorbell through session send --no-enter"
+  assert_grep $'session\x1fkey\x1f'"$UUID"$'\x1fenter' "$FM_TB_LOG" \
+    "fm-send did not submit the doorbell through session key enter"
+
+  out=$( FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" 2>&1 )
+  assert_contains "$out" "source: pane" \
+    "fm-crew-state did not reach the thurbox pane for a backend=thurbox task: $out"
+  assert_not_contains "$out" "backend target gone" \
+    "fm-crew-state could not resolve the recorded thurbox endpoint: $out"
+
+  [ ! -s "$FM_TB_TMUXLOG" ] \
+    || fail "the operator path shelled out to tmux: $(cat "$FM_TB_TMUXLOG")"
+  pass "fm-peek/fm-send/fm-crew-state route through backend=thurbox meta and its durable inbox"
+}
+
 test_list_live_filters_and_skips_unaddressable() {
   reset_world
   add_row "$UUID" "$TITLE" "%20" local-tmux -
@@ -1203,6 +1263,7 @@ test_kill_refuses_recycled_uuid
 test_kill_reclaims_the_row_when_the_window_is_already_gone
 test_kill_still_refuses_a_recycled_uuid_with_no_pane
 test_forced_secondmate_teardown_kills_thurbox_child_with_child_home_tag
+test_peek_send_and_crew_state_route_through_thurbox_meta
 test_list_live_filters_and_skips_unaddressable
 test_backend_is_known_and_spawn_capable
 test_endpoint_validation_accepts_consistent_meta
