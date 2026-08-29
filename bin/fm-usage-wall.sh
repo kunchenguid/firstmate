@@ -485,8 +485,11 @@ cmd_headroom() {
     esac
     local pstatus pauth resets verdict detail hint='' runway_resets
     # A gauge that emits only the singular field bounds both answers with it,
-    # which is the case this labelling was correct for all along.
-    [ -n "$win" ] || win=$runway_win
+    # which is the case this labelling was correct for all along. The marker for
+    # an absent field is "-", never an empty string, so a `[ -n ... ]` guard here
+    # is always true and leaves the percentage with no window and no reset - the
+    # same absent-field idiom the runway branch below already uses.
+    case "$win" in ''|'-') win=$runway_win ;; esac
     pstatus=$(printf '%s\n' "$providers" | awk -F'\t' -v p="$provider" '$1 == p { print $2; exit }')
     pauth=$(printf '%s\n' "$providers" | awk -F'\t' -v p="$provider" '$1 == p { print $3; exit }')
     [ -n "$pstatus" ] || pstatus='-'

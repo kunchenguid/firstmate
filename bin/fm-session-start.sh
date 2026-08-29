@@ -867,10 +867,19 @@ fi
 # who sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
 HEADROOM_INNER_TIMEOUT=$((SESSION_START_HEADROOM_TIMEOUT * 3 / 4))
 [ "$HEADROOM_INNER_TIMEOUT" -ge 1 ] || HEADROOM_INNER_TIMEOUT=1
-if ! FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER_TIMEOUT} \
-  fm_run_timed "$SESSION_START_HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null; then
-  printf 'HEADROOM: (all providers) unknown reason=the headroom read did not complete within %ss\n' \
-    "$SESSION_START_HEADROOM_TIMEOUT"
+# The status is captured from the run itself, not read inside an `if !` branch,
+# where `$?` is the negation's own status and always 0 - which would report
+# every failure as `exited 0`, the same false-reason defect this fallback exists
+# to remove.
+FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER_TIMEOUT} \
+  fm_run_timed "$SESSION_START_HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null
+SESSION_START_HEADROOM_RC=$?
+if [ "$SESSION_START_HEADROOM_RC" -ne 0 ]; then
+  # Same fallback as bin/fm-fleet-view.sh, from the same owner: only 124 is a
+  # timeout, and an unknown that names a reason which can be false is worse than
+  # one that names the real exit.
+  printf 'HEADROOM: (all providers) unknown reason=%s\n' \
+    "$(fm_run_timed_reason "$SESSION_START_HEADROOM_RC" "$SESSION_START_HEADROOM_TIMEOUT" 'headroom read')"
   printf 'HEADROOM_NOTE: headroom is UNMEASURED, not healthy - treat every provider as unproven when deciding what to dispatch.\n'
 fi
 

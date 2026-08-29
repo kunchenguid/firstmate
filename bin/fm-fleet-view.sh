@@ -62,13 +62,7 @@ HEADROOM_INNER=$((HEADROOM_TIMEOUT * 3 / 4))
 HEADROOM=$(FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER} \
   fm_run_timed "$HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) || {
   headroom_rc=$?
-  case "$headroom_rc" in
-    124) headroom_reason="the headroom read did not complete within ${HEADROOM_TIMEOUT}s" ;;
-    2) headroom_reason="the headroom read was refused as a usage error (exit 2); check FM_USAGE_WALL_QUOTA_TIMEOUT" ;;
-    126) headroom_reason="$SCRIPT_DIR/fm-usage-wall.sh is not executable (exit 126)" ;;
-    127) headroom_reason="$SCRIPT_DIR/fm-usage-wall.sh could not be found to run (exit 127)" ;;
-    *) headroom_reason="the headroom read exited $headroom_rc" ;;
-  esac
+  headroom_reason=$(fm_run_timed_reason "$headroom_rc" "$HEADROOM_TIMEOUT" 'headroom read')
   # The note travels with the fallback: an unknown that loses it reads as absent
   # rather than unmeasured, which is the confusion this whole surface refuses.
   HEADROOM="HEADROOM: (all providers) unknown reason=$headroom_reason

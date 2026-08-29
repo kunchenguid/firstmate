@@ -1528,6 +1528,35 @@ EOF
 # The relationship is asserted here rather than reasoned about in prose, so an
 # edit to ANY of the three - the headroom timeout, the wall budget, or the
 # session-start timeout - fails this rather than passing quietly.
+# The digest reports an unmeasurable gauge as an unknown, and that unknown must
+# carry a reason that is TRUE. Every non-zero exit used to be called a timeout,
+# which sends a reader to wait out a bound that was never the problem; exit 2 is
+# a usage error and is reachable here because FM_USAGE_WALL_QUOTA_TIMEOUT is
+# passed through from the operator's environment. The status is also captured
+# from the run rather than read inside an `if !` branch, where `$?` is the
+# negation's own status and would report every failure as `exited 0`.
+test_digest_headroom_fallback_states_a_true_reason() {
+  local rec root home fakebin out
+  rec=$(new_world headroom-reason)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  out=$(FM_USAGE_WALL_QUOTA_TIMEOUT=not-a-number run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "usage error (exit 2)" \
+    "a usage error must be named as one rather than reported as a timeout"
+  assert_not_contains "$out" "did not complete within" \
+    "the digest must not claim a timeout that did not happen"
+  assert_not_contains "$out" "exited 0" \
+    "the reason must come from the run's own status, not from the negation's"
+  assert_contains "$out" "UNMEASURED, not healthy" \
+    "the unknown keeps the note that it is unmeasured rather than fine"
+  pass "the digest headroom fallback states the real reason and keeps the unmeasured note"
+}
+
 test_fleet_state_stage_fits_its_share_of_the_session_bound() {
   local rec root home fakebin out
   rec=$(new_world fleet-bounds)
@@ -2700,6 +2729,7 @@ test_wall_scan_covers_an_endpoint_with_no_window
 test_wall_scan_budget_covers_no_window_endpoints
 test_wall_scan_budget_leaves_a_healthy_fleet_alone
 test_fleet_state_stage_fits_its_share_of_the_session_bound
+test_digest_headroom_fallback_states_a_true_reason
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched

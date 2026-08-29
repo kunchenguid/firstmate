@@ -139,3 +139,25 @@ fm_run_timed() {  # <seconds> <command...>
     *) return 124 ;;
   esac
 }
+
+# fm_run_timed_reason <rc> <bound-secs> <what>
+#   Print the concrete reason a bounded run failed, for a caller that must
+#   report an unknown rather than a result.
+#
+# Only 124 is a timeout. Reporting every non-zero exit as one states a reason
+# that can be false, and a false reason is worse than a vague one: it sends a
+# reader to wait out a bound that was never the problem. `fm-usage-wall.sh`
+# exits 2 for a usage error, which callers reach whenever they pass an operator
+# supplied value through to it, and 126/127 mean the script could not be run at
+# all. This lives here, beside the bound itself, because the same fallback is
+# written in more than one caller and the copies drift apart otherwise.
+fm_run_timed_reason() {  # <rc> <bound-secs> <what>
+  local rc=${1:-1} bound=${2:-0} what=${3:-the read}
+  case "$rc" in
+    124) printf 'the %s did not complete within %ss\n' "$what" "$bound" ;;
+    2) printf 'the %s was refused as a usage error (exit 2)\n' "$what" ;;
+    126) printf 'the %s could not be executed (exit 126)\n' "$what" ;;
+    127) printf 'the %s could not be found to run (exit 127)\n' "$what" ;;
+    *) printf 'the %s exited %s\n' "$what" "$rc" ;;
+  esac
+}

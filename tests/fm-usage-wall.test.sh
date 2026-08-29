@@ -70,7 +70,7 @@ fm_git_identity
 # header deliberately reproduces the vendor's own quirk of declaring a count
 # that does not match its field list, so the parser is pinned against the real
 # shape rather than a tidied one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-effective|reordered|divergent>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-effective|reordered|divergent|singular-only>
   case "$1" in
     no-effective)
       cat <<'EOF'
@@ -96,6 +96,20 @@ EOF
       return 0
       ;;
   esac
+  if [ "$1" = singular-only ]; then
+    # Only `limitingWindowId`; no plural field at all. Both answers are bounded
+    # by the one window, so there is nothing to name separately.
+    cat <<'EOF'
+bin: /fake/quota-axi
+providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
+  claude,max,oauth,fresh,unknown,none
+windows[1]{provider,id,label,percentRemaining,resetsAt,pace,state}:
+  claude,five_hour,session,84,"2026-08-27T02:19:59Z",ahead,fresh
+effective[7]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowId,runway,usableRunwaySeconds,projectionConfidence}:
+  claude,all_models,84,five_hour,five_hour,projected_exhaustion,14400,early
+EOF
+    return 0
+  fi
   if [ "$1" = divergent ]; then
     # The two windows answer different questions and disagree loudly: the
     # five-hour window is nearly full while the SEVEN-DAY window is the one
@@ -189,8 +203,11 @@ CASE="$TMP_ROOT/hr-healthy"; mkdir -p "$CASE"
 fake_quota "$CASE/fakebin" healthy
 OUT=$(run_headroom "$CASE/fakebin")
 assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'a measurable provider reports ok with its percent'
-assert_contains "$OUT" 'bound=five_hour' 'the reading names the bounding window'
-assert_contains "$OUT" 'resets=2026-08-27T02:19:59Z' 'the reading names when the bounding window resets'
+# Anchored on the whole sequence on purpose: a bare `bound=five_hour` is a
+# SUBSTRING of `runway_bound=five_hour`, so the loose form passed while the
+# percentage carried no window at all.
+assert_contains "$OUT" 'pct=84 bound=five_hour resets=2026-08-27T02:19:59Z' \
+  'the percentage names its bounding window and that window reset, not the runway label'
 assert_contains "$OUT" 'runway=4h0m' 'the reading converts usable runway to whole units'
 assert_contains "$OUT" 'confidence=early' 'the reading carries the projection confidence'
 assert_contains "$OUT" 'verdict=ok measured=2 tight=0 wall=0 unknown=0' 'all-measured all-ok summarizes as ok'
@@ -220,6 +237,25 @@ assert_contains "$OUT" 'runway_resets=2026-08-29T04:09:59Z' \
 assert_not_contains "$OUT" 'pct=35 bound=five_hour' \
   'the percentage must never be attributed to a window sitting at 85 percent'
 pass 'headroom labels the percentage and the runway with their own windows and resets'
+
+# --- headroom: a gauge that emits only the singular limiting window -----------
+#
+# `toon_block` yields "-" for a field absent from the block header, never an
+# empty string, so a guard written as `[ -n "$win" ]` is always true and the
+# fallback below it is dead code. The percentage then printed with NO window and
+# NO reset at all - worse than the mislabel this pair of fixes started from. The
+# assertion is anchored on the whole sequence because the loose form is a
+# substring of the runway label and passed straight through the defect.
+CASE="$TMP_ROOT/hr-singular-only"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" singular-only
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'pct=84 bound=five_hour resets=2026-08-27T02:19:59Z' \
+  'a singular-only gauge still binds the percentage to that window and its reset'
+assert_not_contains "$OUT" 'bound=-' 'the percentage must never print an absent-field marker as its window'
+assert_not_contains "$OUT" 'resets=-' 'nor an absent-field marker as its reset'
+assert_not_contains "$OUT" 'runway_bound=' \
+  'with one window in play there is no second window to name'
+pass 'headroom binds the percentage when the gauge emits only the singular window'
 
 # --- headroom: tight and exhausted are distinguishable ----------------------
 
@@ -365,7 +401,8 @@ CASE="$TMP_ROOT/hr-reordered"; mkdir -p "$CASE"
 fake_quota "$CASE/fakebin" reordered
 OUT=$(run_headroom "$CASE/fakebin")
 assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'a reordered report still yields the same percent'
-assert_contains "$OUT" 'bound=five_hour' 'a reordered report still yields the same bounding window'
+assert_contains "$OUT" 'pct=84 bound=five_hour' \
+  'a reordered report still binds the percentage to its own window, not to the runway label'
 assert_contains "$OUT" 'runway=4h0m' 'a reordered report still yields the same runway'
 pass 'headroom survives upstream field reordering and additions'
 

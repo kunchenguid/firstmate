@@ -124,9 +124,13 @@ The negative stays `no-signature`, which is still not proof that the work crashe
 
 The rule is whole-evidence rather than proximity or window based, because a narrowed window would trade a real detection for an accident of layout.
 The residual it leaves open is stated rather than hidden.
-The residual is larger than one page, and it was understated here before it was measured.
-Sliding the default 200-line capture window over this repository's tracked files and running the shipped rule over each window, two files still read as a wall: `docs/verification/usage-limits.md`, which quotes a real step log verbatim, and `bin/fm-usage-wall.sh` itself, whose header quotes a limit phrasing while a later line carries an independent exit phrase.
+The residual is larger than one page, and it was understated here twice before it was measured properly.
+Three tracked files still read as a wall: `docs/verification/usage-limits.md`, which quotes a real step log verbatim; `bin/fm-usage-wall.sh` itself, whose header quotes a limit phrasing while a later line carries an independent exit phrase; and `tests/fm-usage-wall.test.sh`, whose fixtures build the vendor lines from the same real text.
 The detector's own source tripping the detector is the sharpest form of the defect class named above, and it is why the scope belongs here in measured terms rather than as an example.
+
+How that number is established matters as much as the number, because the first answer here was wrong by sampling.
+A 200-line window reads as a wall exactly when some limit line and some exit line that does not itself carry a limit phrasing lie within 199 lines of each other, which is decidable per file from the two line-number sets without sliding a window at all.
+An earlier count slid a window in fifty-line steps, never landed on the offsets that trip the third file, and reported two - a number produced by a method that could not have found the third.
 Closing it would mean either degrading a record whose value depends on quoting real evidence, or guessing from layout, and both are worse trades than the residual.
 
 Revisit this if the vendor emits the phrasing and the exit on one line, if a real transcript turns up a multi-line wall being missed, or if either file's text drifts so that a window over some third file starts reading as a wall.
