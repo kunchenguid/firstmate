@@ -40,6 +40,8 @@ The pane the probe reads is re-resolved from the session UUID inside that same c
 
    `config/thurbox-agent` names a different agents.toml entry when `shell` is taken; the default is `shell`. A missing entry is refused at `container_ensure` with the exact TOML to paste, rather than surfacing as a mystifying agent launch.
 
+   `config/thurbox-agent` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md), alongside `config/backend`. Both travel together deliberately: a secondmate that inherited `backend=thurbox` but not the agent name would fall back to the `shell` default, and on a home that already binds `shell` to a real coding agent that fallback launches the wrong program with no error.
+
 4. **Optionally wire an agent-state signal.** This step is what makes thurbox's native busy verdict produce anything, and firstmate does not do it for you. Because the agent entry above is a bare shell, thurbox launches no agent of its own and therefore wires none of the lifecycle hooks that normally write `hook_state`; firstmate never calls `session signal` either. So `hook_state` stays null for a firstmate task's whole life unless your harness's own hooks call:
 
    ```sh

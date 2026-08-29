@@ -375,26 +375,40 @@ test_dead_endpoint_overrides() {
   pass "endpoint death is the only process-level override and yields dead, never busy"
 }
 
-test_herdr_native_busy_only() {
-  local state out
-  state=$(new_state_dir herdr-native)
+# Every backend whose native verdict shares herdr's working/blocked/done/idle
+# vocabulary is trusted the same way, and each emits its OWN source token, so a
+# gate that silently narrowed back to one backend fails here.
+FM_NATIVE_BUSY_BACKENDS="herdr thurbox"
+
+test_native_busy_only() {
+  local state out backend
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
   fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
+  for backend in $FM_NATIVE_BUSY_BACKENDS; do
+    state=$(new_state_dir "$backend-native")
+    FAKE_NATIVE=busy
+    out=$(fm_busy_classify "$backend" s:p claude t1 "$state")
+    [ "$out" = "busy $backend-native" ] \
+      || fail "$backend native busy with no record must classify 'busy $backend-native', got '$out'"
+    FAKE_NATIVE=idle
+    out=$(fm_busy_classify "$backend" s:p claude t1 "$state")
+    [ "$out" = "unknown missing" ] || fail "$backend native idle must NOT classify idle, got '$out'"
+    # A valid record outranks the native verdict.
+    local gen
+    gen=$("$EV" arm "$state" t1)
+    "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
+    FAKE_NATIVE=busy
+    out=$(fm_busy_classify "$backend" s:p claude t1 "$state")
+    [ "$out" = "idle claude-hook" ] \
+      || fail "the adapter record must outrank $backend's native verdict, got '$out'"
+  done
+  # A backend outside the gate never consults the native verdict at all.
+  state=$(new_state_dir cmux-native)
   FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
-  [ "$out" = "busy herdr-native" ] || fail "native busy with no record must classify busy, got '$out'"
-  FAKE_NATIVE=idle
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
-  [ "$out" = "unknown missing" ] || fail "native idle must NOT classify idle, got '$out'"
-  # A valid record outranks the native verdict.
-  local gen
-  gen=$("$EV" arm "$state" t1)
-  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
-  FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
-  [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
+  out=$(fm_busy_classify cmux s:p claude t1 "$state")
+  [ "$out" = "unknown missing" ] || fail "a non-native backend must ignore the native verdict, got '$out'"
   unset -f fm_backend_busy_state
-  pass "herdr's native verdict is trusted for busy only, and records outrank it"
+  pass "each native-vocabulary backend is trusted for busy only, under its own source token, and records outrank it"
 }
 
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
@@ -458,7 +472,7 @@ test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
-test_herdr_native_busy_only
+test_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

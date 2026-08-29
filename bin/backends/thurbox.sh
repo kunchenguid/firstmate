@@ -209,9 +209,8 @@ fm_backend_thurbox_socket() {
 # here, so no call site can accidentally address the operator's own tmux server
 # (or firstmate's own "firstmate" session) instead of thurbox's.
 fm_backend_thurbox_tmux() {  # <tmux-args...>
-  local sock
-  sock=$(fm_backend_thurbox_socket) || return 1
-  tmux -L "$sock" "$@"
+  fm_backend_thurbox_socket >/dev/null || return 1
+  tmux -L "$FM_BACKEND_THURBOX_SOCKET_CACHE" "$@"
 }
 
 # fm_backend_thurbox_agent: the thurbox agent entry firstmate launches its
