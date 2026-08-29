@@ -664,6 +664,18 @@ HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+HERDR_MISSING_RELAUNCH=0
+HERDR_MISSING_RELAUNCH_PUBLISHED=0
+HERDR_MISSING_RELAUNCH_CANDIDATE=
+HERDR_MISSING_RELAUNCH_CANDIDATE_SAFE=0
+HERDR_MISSING_RELAUNCH_SIDECAR=
+# Preserve the invoking process's Herdr ancestry before relaunch metadata
+# reuses the task endpoint variables below.
+SPAWN_CALLER_HERDR_PANE_ID=${HERDR_PANE_ID:-}
+SPAWN_CALLER_HERDR_TAB_ID=${HERDR_TAB_ID:-}
+SPAWN_CALLER_HERDR_WORKSPACE_ID=${HERDR_WORKSPACE_ID:-}
+SPAWN_CALLER_HERDR_SESSION=${HERDR_SESSION:-}
+SPAWN_CALLER_HERDR_SOCKET_PATH=${HERDR_SOCKET_PATH:-}
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 SPAWN_CONTROL_LOCK=
@@ -701,7 +713,31 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? published_meta=
+  [ -z "${ID:-}" ] || published_meta="$STATE/$ID.meta"
+  if [ "$HERDR_MISSING_RELAUNCH" = 1 ] \
+     && [ -n "$published_meta" ] \
+     && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] \
+     && [ "$(fm_meta_get "$published_meta" control_relaunch_tx)" = "$FM_CONTROL_RELAUNCH_TX" ]; then
+    HERDR_MISSING_RELAUNCH_PUBLISHED=1
+  fi
+  if [ "$HERDR_MISSING_RELAUNCH" = 1 ] \
+     && [ "$HERDR_MISSING_RELAUNCH_PUBLISHED" != 1 ]; then
+    if [ -n "$HERDR_MISSING_RELAUNCH_CANDIDATE" ]; then
+      if [ "$HERDR_MISSING_RELAUNCH_CANDIDATE_SAFE" = 1 ] \
+         && fm_backend_herdr_missing_relaunch_cleanup \
+           "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" \
+           "$HERDR_MISSING_RELAUNCH_CANDIDATE" "$RELAUNCH_WT"; then
+        rm -f -- "$HERDR_MISSING_RELAUNCH_SIDECAR" 2>/dev/null || true
+      else
+        echo "warning: response-derived Herdr recovery candidate '$HERDR_MISSING_RELAUNCH_CANDIDATE' is quarantined for task $ID; inspect $HERDR_MISSING_RELAUNCH_SIDECAR before retrying" >&2
+      fi
+      HERDR_MISSING_RELAUNCH_CANDIDATE=
+    elif [ -n "$HERDR_MISSING_RELAUNCH_SIDECAR" ] \
+       && { [ -e "$HERDR_MISSING_RELAUNCH_SIDECAR" ] || [ -L "$HERDR_MISSING_RELAUNCH_SIDECAR" ]; }; then
+      echo "warning: Herdr recovery create did not return a complete candidate for task $ID; $HERDR_MISSING_RELAUNCH_SIDECAR is quarantined" >&2
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -1005,6 +1041,43 @@ FIRSTMATE_HOME=
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_IDENTITY=
+RELAUNCH_HERDR_WORKSPACE_ID=
+relaunch_identity_snapshot() {  # <meta>
+  local meta=$1 key
+  for key in window endpoint_task_id worktree project harness kind mode yolo \
+    model effort backend herdr_session herdr_workspace_id herdr_tab_id \
+    herdr_pane_id home projects; do
+    printf '%s=%s\n' "$key" "$(fm_meta_get "$meta" "$key")"
+  done
+}
+
+relaunch_same_worktree_task_absent() {  # <worktree>
+  local expected candidate other id
+  expected=$(real_path_or_raw "$1")
+  for candidate in "$STATE"/*.meta; do
+    [ -e "$candidate" ] || continue
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || {
+      echo "error: task metadata '$candidate' is unreadable while checking recovery worktree ownership" >&2
+      return 1
+    }
+    [ "$candidate" != "$RELAUNCH_META" ] || continue
+    other=$(fm_meta_get "$candidate" worktree)
+    [ -z "$other" ] || [ ! -d "$other" ] || {
+      if [ "$(real_path_or_raw "$other")" = "$expected" ]; then
+        id=${candidate##*/}
+        id=${id%.meta}
+        echo "error: task $id already records recovery worktree '$1'; refusing a second endpoint for the same copy" >&2
+        return 1
+      fi
+    }
+  done
+}
+
+relaunch_identity_still_matches() {
+  [ "$(relaunch_identity_snapshot "$RELAUNCH_META")" = "$RELAUNCH_IDENTITY" ]
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1020,24 +1093,47 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_state_verified "$BACKEND" || {
-    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
-    exit 1
-  }
+  # A relaunch ordinarily needs a positively dead endpoint. The only exception
+  # is the authenticated child of fm-control for a local Herdr ship/scout whose
+  # old endpoint is authoritatively missing.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+  RELAUNCH_IDENTITY=$(relaunch_identity_snapshot "$RELAUNCH_META")
+  case "$RELAUNCH_STATE" in
+    dead) ;;
+    missing)
+      if [ "$SPAWN_CONTROL_PARENT" = 1 ] \
+         && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] \
+         && [ "$BACKEND" = herdr ] \
+         && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } \
+         && [ -f "$STATE/$ID.control-relaunch" ] \
+         && [ ! -L "$STATE/$ID.control-relaunch" ] \
+         && [ -f "$STATE/$ID.control-relaunch.meta-prior" ] \
+         && [ ! -L "$STATE/$ID.control-relaunch.meta-prior" ] \
+         && [ "$(relaunch_identity_snapshot "$STATE/$ID.control-relaunch.meta-prior")" = "$RELAUNCH_IDENTITY" ] \
+         && [ "$(fm_meta_get "$STATE/$ID.control-relaunch" task)" = "$ID" ] \
+         && [ "$(fm_meta_get "$STATE/$ID.control-relaunch" phase)" = launching ] \
+         && [ "$(fm_meta_get "$STATE/$ID.control-relaunch" backend)" = herdr ] \
+         && [ "$(fm_meta_get "$STATE/$ID.control-relaunch" endpoint_state)" = missing ] \
+         && [ "$(fm_meta_get "$STATE/$ID.control-relaunch" endpoint)" = "$RELAUNCH_TARGET" ] \
+         && [ "$(fm_meta_get "$STATE/$ID.control-relaunch" worktree)" = "$RELAUNCH_WT" ] \
+         && [ "$(fm_meta_get "$STATE/$ID.control-relaunch" relaunch_tx)" = "$FM_CONTROL_RELAUNCH_TX" ]; then
+        HERDR_MISSING_RELAUNCH=1
+      else
+        echo "error: task $ID's endpoint reads 'missing'; only the owning fm-control relaunch transaction may recreate a missing Herdr ship/scout endpoint" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+      ;;
+  esac
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
@@ -1054,7 +1150,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   if [ "$BACKEND" = herdr ]; then
     HERDR_SES=$(fm_meta_get "$RELAUNCH_META" herdr_session)
-    HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
+    RELAUNCH_HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
+    HERDR_WORKSPACE_ID=$RELAUNCH_HERDR_WORKSPACE_ID
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
   fi
@@ -1917,16 +2014,108 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
-  # Adopt the recorded endpoint instead of creating one. This is what keeps a
-  # relaunch a REPLACEMENT rather than a second copy of the task: no new
-  # terminal, no second worktree, and every uncommitted change left exactly
-  # where the previous agent left it.
-  T=$RELAUNCH_TARGET
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
-  WT_TARGET=$T
-  SES=${T%%:*}
+  # Adopt the recorded endpoint instead of creating one. Missing Herdr recovery
+  # replaces this target below with its response-derived endpoint.
+  T=$RELAUNCH_TARGET
+  if [ "$HERDR_MISSING_RELAUNCH" = 1 ]; then
+    # Recreate only inside the existing named session/workspace. Hold the
+    # canonical session lock from absence proof through launch submission.
+    fm_backend_herdr_session_running "$HERDR_SES" || {
+      echo "error: missing-endpoint recovery requires named Herdr session '$HERDR_SES' to be running and readable" >&2
+      exit 1
+    }
+    spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+      echo "error: missing-endpoint recovery could not acquire the named Herdr session lock" >&2
+      exit 1
+    }
+    HERDR_MISSING_RELAUNCH_SIDECAR="$STATE/$ID.control-relaunch.candidate"
+    if [ -e "$HERDR_MISSING_RELAUNCH_SIDECAR" ] || [ -L "$HERDR_MISSING_RELAUNCH_SIDECAR" ]; then
+      echo "error: task $ID has an unreconciled Herdr recovery candidate; refusing another create" >&2
+      exit 1
+    fi
+    {
+      echo "v1"
+      echo "task=$ID"
+      echo "relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+      echo "phase=intent"
+      echo "session=$HERDR_SES"
+      echo "old_endpoint=$RELAUNCH_TARGET"
+      echo "worktree=$RELAUNCH_WT"
+    } > "$HERDR_MISSING_RELAUNCH_SIDECAR.tmp" \
+      && mv -f "$HERDR_MISSING_RELAUNCH_SIDECAR.tmp" "$HERDR_MISSING_RELAUNCH_SIDECAR" || exit 1
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$RELAUNCH_META") || exit 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+    relaunch_identity_still_matches || {
+      echo "error: task $ID identity changed before missing-endpoint creation; refusing publication" >&2
+      exit 1
+    }
+    [ "$(fm_backend_agent_state herdr "$RELAUNCH_TARGET")" = missing ] || {
+      echo "error: task $ID's old Herdr endpoint is no longer authoritatively missing; refusing recovery create" >&2
+      exit 1
+    }
+    relaunch_same_worktree_task_absent "$RELAUNCH_WT" || exit 1
+    HERDR_PARENT_WORKSPACE_ID=$( \
+      FM_HOME="$FM_HOME" \
+      HERDR_PANE_ID="$SPAWN_CALLER_HERDR_PANE_ID" \
+      HERDR_TAB_ID="$SPAWN_CALLER_HERDR_TAB_ID" \
+      HERDR_WORKSPACE_ID="$SPAWN_CALLER_HERDR_WORKSPACE_ID" \
+      HERDR_SESSION="$SPAWN_CALLER_HERDR_SESSION" \
+      HERDR_SOCKET_PATH="$SPAWN_CALLER_HERDR_SOCKET_PATH" \
+      fm_backend_herdr_missing_relaunch_parent_workspace \
+        "$HERDR_SES" "$RELAUNCH_HERDR_WORKSPACE_ID" \
+    ) || exit 1
+    fm_backend_herdr_missing_relaunch_inventory_safe \
+      "$HERDR_SES" "$RELAUNCH_WT" "$W" "${RELAUNCH_TARGET#*:}" || {
+      echo "error: named Herdr session inventory could not prove duplicate recovery risk absent" >&2
+      exit 1
+    }
+    if ! fm_backend_herdr_missing_relaunch_create \
+      "$HERDR_SES" "$HERDR_PARENT_WORKSPACE_ID" "$W" "$RELAUNCH_WT"; then
+      HERDR_WORKSPACE_ID=$HERDR_PARENT_WORKSPACE_ID
+      HERDR_TAB_ID=$FM_BACKEND_HERDR_MISSING_RELAUNCH_TAB_ID
+      HERDR_MISSING_RELAUNCH_CANDIDATE=$FM_BACKEND_HERDR_MISSING_RELAUNCH_PANE_ID
+      HERDR_MISSING_RELAUNCH_CANDIDATE_SAFE=$FM_BACKEND_HERDR_MISSING_RELAUNCH_CLEANUP_SAFE
+      if [ -n "$HERDR_MISSING_RELAUNCH_CANDIDATE" ]; then
+        {
+          echo "v1"
+          echo "task=$ID"
+          echo "relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+          echo "phase=response-unverified"
+          echo "session=$HERDR_SES"
+          echo "workspace=$HERDR_WORKSPACE_ID"
+          echo "tab=$HERDR_TAB_ID"
+          echo "pane=$HERDR_MISSING_RELAUNCH_CANDIDATE"
+          echo "worktree=$RELAUNCH_WT"
+        } > "$HERDR_MISSING_RELAUNCH_SIDECAR.tmp" \
+          && mv -f "$HERDR_MISSING_RELAUNCH_SIDECAR.tmp" "$HERDR_MISSING_RELAUNCH_SIDECAR" || true
+      fi
+      echo "error: Herdr recovery endpoint creation or response validation failed" >&2
+      exit 1
+    fi
+    HERDR_TAB_ID=$FM_BACKEND_HERDR_MISSING_RELAUNCH_TAB_ID
+    HERDR_PANE_ID=$FM_BACKEND_HERDR_MISSING_RELAUNCH_PANE_ID
+    HERDR_WORKSPACE_ID=$HERDR_PARENT_WORKSPACE_ID
+    HERDR_MISSING_RELAUNCH_CANDIDATE=$HERDR_PANE_ID
+    HERDR_MISSING_RELAUNCH_CANDIDATE_SAFE=1
+    fm_backend_herdr_missing_relaunch_inventory_safe \
+      "$HERDR_SES" "$RELAUNCH_WT" "$W" "${RELAUNCH_TARGET#*:}" \
+      "$HERDR_TAB_ID" "$HERDR_PANE_ID" || {
+      echo "error: Herdr recovery duplicate-risk proof changed after candidate creation" >&2
+      exit 1
+    }
+    T="$HERDR_SES:$HERDR_PANE_ID"
+    WT_TARGET=$T
+    SES=$HERDR_SES
+  else
+    # Ordinary relaunch adopts the exact recorded endpoint.
+    T=$RELAUNCH_TARGET
+    WT_TARGET=$T
+    SES=${T%%:*}
+  fi
 else
 case "$BACKEND" in
   tmux)
@@ -1964,7 +2153,7 @@ case "$BACKEND" in
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
-      HERDR_LAUNCHER_RELATIONSHIP=other-home
+      HERDR_LAUNCHER_RELATIONSHIP='other-home'
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
@@ -2693,9 +2882,26 @@ META_WINDOW=$T
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
-  SPAWN_META_LOCK_HELD=1
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+  fi
+  if [ "$HERDR_MISSING_RELAUNCH" = 1 ]; then
+    HERDR_MISSING_RELAUNCH_SIDECAR="$STATE/$ID.control-relaunch.candidate"
+    {
+      echo "v1"
+      echo "task=$ID"
+      echo "relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+      echo "phase=validated"
+      echo "session=$HERDR_SES"
+      echo "workspace=$HERDR_WORKSPACE_ID"
+      echo "tab=$HERDR_TAB_ID"
+      echo "pane=$HERDR_PANE_ID"
+      echo "worktree=$RELAUNCH_WT"
+    } > "$HERDR_MISSING_RELAUNCH_SIDECAR.tmp" \
+      && mv -f "$HERDR_MISSING_RELAUNCH_SIDECAR.tmp" "$HERDR_MISSING_RELAUNCH_SIDECAR" || exit 1
+  fi
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
 fi
@@ -2751,6 +2957,21 @@ preserve_relaunch_meta() {
     echo "projects=$SECONDMATE_PROJECTS"
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
+    if [ "$HERDR_MISSING_RELAUNCH" = 1 ]; then
+      if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+        SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+        fm_lock_acquire_wait "$SPAWN_META_LOCK"
+        SPAWN_META_LOCK_HELD=1
+      fi
+      relaunch_identity_still_matches || {
+        echo "error: task $ID identity changed before missing-endpoint publication; refusing publication" >&2
+        exit 1
+      }
+      [ "$(fm_backend_agent_state herdr "$RELAUNCH_TARGET")" = missing ] || {
+        echo "error: task $ID's old Herdr endpoint is no longer authoritatively missing; refusing publication" >&2
+        exit 1
+      }
+    fi
     preserve_relaunch_meta
   fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
@@ -2760,6 +2981,21 @@ preserve_relaunch_meta() {
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  if [ "$HERDR_MISSING_RELAUNCH" = 1 ]; then
+    HERDR_MISSING_RELAUNCH_PUBLISHED=1
+    {
+      echo "v1"
+      echo "task=$ID"
+      echo "relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+      echo "phase=published"
+      echo "session=$HERDR_SES"
+      echo "workspace=$HERDR_WORKSPACE_ID"
+      echo "tab=$HERDR_TAB_ID"
+      echo "pane=$HERDR_PANE_ID"
+      echo "worktree=$RELAUNCH_WT"
+    } > "$HERDR_MISSING_RELAUNCH_SIDECAR.tmp" \
+      && mv -f "$HERDR_MISSING_RELAUNCH_SIDECAR.tmp" "$HERDR_MISSING_RELAUNCH_SIDECAR" || exit 1
+  fi
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
@@ -2884,6 +3120,9 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HERDR_MISSING_RELAUNCH" = 1 ]; then
+  spawn_herdr_presentation_order_lock_release
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

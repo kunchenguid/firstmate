@@ -1947,6 +1947,193 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
+# A missing-endpoint recovery may create exactly one task tab in an existing
+# workspace. It never creates a workspace, allocates a worktree, or infers
+# ownership from labels. Callers must hold the task and named-session locks.
+fm_backend_herdr_session_running() {  # <session>
+  local session=$1 out
+  out=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e '.server.running == true' >/dev/null 2>&1
+}
+
+fm_backend_herdr_physical_path() {  # <path>
+  local path=$1 dir base
+  [ -n "$path" ] || return 1
+  if [ -d "$path" ]; then
+    (CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || return 1
+    return 0
+  fi
+  dir=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  [ -d "$dir" ] || return 1
+  dir=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s' "$dir" "$base"
+}
+
+# Resolve one existing workspace. A live launcher identity wins; otherwise
+# the home label must resolve uniquely. A recorded workspace id is checked only
+# for readability and is never treated as placement authority by itself.
+fm_backend_herdr_missing_relaunch_parent_workspace() {  # <session> <recorded-workspace>
+  local session=$1 recorded=$2 presence status parent label
+  presence=$(fm_backend_herdr_workspace_presence_state "$session" "$recorded")
+  case "$presence" in
+    present|dead) ;;
+    *)
+      echo "error: recorded herdr workspace '$recorded' is unreadable; refusing missing-endpoint recovery" >&2
+      return 1
+      ;;
+  esac
+  fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
+  case "$status" in
+    0) parent=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
+    2)
+      label=$(fm_backend_herdr_workspace_label)
+      parent=$(fm_backend_herdr_projection_parent_workspace_exact "$session" "$label" 2>/dev/null) || {
+        echo "error: herdr home workspace '$label' is absent or ambiguous; refusing to create a recovery endpoint in a guessed parent" >&2
+        return 1
+      }
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$parent" ] || return 1
+  printf '%s' "$parent"
+}
+
+# Read all named-session inventories and refuse any same-worktree or duplicate
+# task candidate. Unknown or malformed responses are ambiguity, never proof of
+# safety. The optional candidate ids are the only response-derived exception.
+fm_backend_herdr_missing_relaunch_inventory_safe() {  # <session> <worktree> <task-label> <old-pane> [<candidate-tab> <candidate-pane>]
+  local session=$1 worktree=$2 task_label=$3 old_pane=$4 candidate_tab=${5:-} candidate_pane=${6:-}
+  local expected panes tabs agents rows pane tab cwd foreground canonical seen_candidate_pane=0 seen_candidate_tab=0
+  expected=$(fm_backend_herdr_physical_path "$worktree") || return 1
+  panes=$(fm_backend_herdr_cli "$session" pane list 2>/dev/null) || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || return 1
+  agents=$(fm_backend_herdr_cli "$session" agent list 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$agents" | jq -e '(.result.agents | type) == "array"' >/dev/null 2>&1 || return 1
+
+  rows=$(printf '%s' "$panes" | jq -r '.result.panes[] | [(.pane_id // ""), (.tab_id // ""), (.cwd // ""), (.foreground_cwd // "")] | @tsv' 2>/dev/null) || return 1
+  while IFS=$'\t' read -r pane tab cwd foreground; do
+    [ -n "$pane$tab$cwd$foreground" ] || continue
+    [ -n "$pane" ] && [ -n "$tab" ] && [ -n "$cwd$foreground" ] || return 1
+    [ "$pane" != "$old_pane" ] || return 1
+    if [ -n "$candidate_pane" ] && [ "$pane" = "$candidate_pane" ]; then
+      [ "$tab" = "$candidate_tab" ] || return 1
+      seen_candidate_pane=$((seen_candidate_pane + 1))
+      continue
+    fi
+    for canonical in "$cwd" "$foreground"; do
+      [ -n "$canonical" ] || continue
+      canonical=$(fm_backend_herdr_physical_path "$canonical") || return 1
+      [ "$canonical" != "$expected" ] || {
+        echo "error: herdr pane '$pane' already uses task worktree '$worktree'; refusing a duplicate recovery endpoint" >&2
+        return 1
+      }
+    done
+  done <<EOF
+$rows
+EOF
+
+  rows=$(printf '%s' "$tabs" | jq -r '.result.tabs[] | [(.tab_id // ""), (.label // "")] | @tsv' 2>/dev/null) || return 1
+  while IFS=$'\t' read -r tab label; do
+    [ -n "$tab$label" ] || continue
+    [ -n "$tab" ] || return 1
+    if [ "$label" = "$task_label" ]; then
+      if [ -n "$candidate_tab" ] && [ "$tab" = "$candidate_tab" ]; then
+        seen_candidate_tab=$((seen_candidate_tab + 1))
+      else
+        echo "error: herdr tab '$tab' already carries task label '$task_label'; refusing duplicate recovery" >&2
+        return 1
+      fi
+    fi
+  done <<EOF
+$rows
+EOF
+
+  rows=$(printf '%s' "$agents" | jq -r '.result.agents[] | [(.pane_id // ""), (.cwd // ""), (.foreground_cwd // "")] | @tsv' 2>/dev/null) || return 1
+  while IFS=$'\t' read -r pane cwd foreground; do
+    [ -n "$pane$cwd$foreground" ] || continue
+    [ -n "$pane" ] && [ -n "$cwd$foreground" ] || return 1
+    [ "$pane" != "$candidate_pane" ] || return 1
+    for canonical in "$cwd" "$foreground"; do
+      [ -n "$canonical" ] || continue
+      canonical=$(fm_backend_herdr_physical_path "$canonical") || return 1
+      [ "$canonical" != "$expected" ] || {
+        echo "error: herdr agent in pane '$pane' already uses task worktree '$worktree'; refusing duplicate recovery" >&2
+        return 1
+      }
+    done
+  done <<EOF
+$rows
+EOF
+  if [ -n "$candidate_pane" ]; then
+    [ "$seen_candidate_pane" -eq 1 ] && [ "$seen_candidate_tab" -eq 1 ] || return 1
+  fi
+}
+
+# Create and fully round-trip one recovery tab/pane. Response-derived ids are
+# exported even on later verification failure so cleanup can remain exact.
+fm_backend_herdr_missing_relaunch_create() {  # <session> <workspace> <task-label> <worktree>
+  local session=$1 workspace=$2 task_label=$3 worktree=$4 out info expected cwd state
+  FM_BACKEND_HERDR_MISSING_RELAUNCH_TAB_ID=
+  FM_BACKEND_HERDR_MISSING_RELAUNCH_PANE_ID=
+  export FM_BACKEND_HERDR_MISSING_RELAUNCH_CLEANUP_SAFE=0
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$workspace" --cwd "$worktree" --label "$task_label" --no-focus 2>/dev/null) || return 1
+  FM_BACKEND_HERDR_MISSING_RELAUNCH_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_MISSING_RELAUNCH_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  [ -n "$FM_BACKEND_HERDR_MISSING_RELAUNCH_TAB_ID" ] && [ -n "$FM_BACKEND_HERDR_MISSING_RELAUNCH_PANE_ID" ] || return 1
+  # Response validation is complete only when the created candidate is known
+  # safe to clean up if a later publication step fails.
+  FM_BACKEND_HERDR_MISSING_RELAUNCH_CLEANUP_SAFE=1
+  export FM_BACKEND_HERDR_MISSING_RELAUNCH_CLEANUP_SAFE
+  info=$(fm_backend_herdr_cli "$session" tab get "$FM_BACKEND_HERDR_MISSING_RELAUNCH_TAB_ID" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg tab "$FM_BACKEND_HERDR_MISSING_RELAUNCH_TAB_ID" --arg workspace "$workspace" --arg label "$task_label" '
+    .result.tab.tab_id == $tab and .result.tab.workspace_id == $workspace and .result.tab.label == $label
+  ' >/dev/null 2>&1 || return 1
+  info=$(fm_backend_herdr_cli "$session" pane get "$FM_BACKEND_HERDR_MISSING_RELAUNCH_PANE_ID" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_MISSING_RELAUNCH_PANE_ID" --arg tab "$FM_BACKEND_HERDR_MISSING_RELAUNCH_TAB_ID" --arg workspace "$workspace" '
+    .result.pane.pane_id == $pane and .result.pane.tab_id == $tab and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1 || return 1
+  expected=$(fm_backend_herdr_physical_path "$worktree") || return 1
+  cwd=$(printf '%s' "$info" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+  [ -n "$cwd" ] || return 1
+  cwd=$(fm_backend_herdr_physical_path "$cwd") || return 1
+  [ "$cwd" = "$expected" ] || return 1
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$FM_BACKEND_HERDR_MISSING_RELAUNCH_PANE_ID")
+  [ "$state" = no-agent ]
+}
+
+# Close only a response-derived, exact-cwd, no-agent candidate. Any uncertainty
+# leaves it for reconciliation rather than guessing at destructive cleanup.
+fm_backend_herdr_missing_relaunch_cleanup() {  # <session> <workspace> <tab> <pane> <worktree>
+  local session=$1 workspace=$2 tab=$3 pane=$4 worktree=$5 expected cwd state info tabs before active_tab
+  [ -n "$workspace" ] && [ -n "$tab" ] && [ -n "$pane" ] || return 1
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  case "$state" in
+    dead) return 0 ;;
+    no-agent) ;;
+    *) return 1 ;;
+  esac
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+    .result.pane.pane_id == $pane and .result.pane.tab_id == $tab and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1 || return 1
+  expected=$(fm_backend_herdr_physical_path "$worktree") || return 1
+  cwd=$(printf '%s' "$info" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+  [ -n "$cwd" ] || return 1
+  cwd=$(fm_backend_herdr_physical_path "$cwd") || return 1
+  [ "$cwd" = "$expected" ] || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e --arg tab "$tab" '(.result.tabs | type) == "array" and (.result.tabs | length) > 1 and ([.result.tabs[] | select(.tab_id == $tab)] | length) == 1' >/dev/null 2>&1 || return 1
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  active_tab=${before#*$'\t'}
+  [ "$active_tab" != "$tab" ] || return 1
+  fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || return 1
+  fm_backend_herdr_projection_focus_restore "$session" "$before" "missing-relaunch candidate close" || return 1
+  [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" = dead ]
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate

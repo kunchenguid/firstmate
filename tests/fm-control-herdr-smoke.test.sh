@@ -19,26 +19,39 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
+[ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 herdr_forget_inherited_pane
 
-SESSION="fm-lab-control-smoke-$$"
-export HERDR_SESSION="$SESSION"
+SESSION=$(PATH="$PATH" "$HERDR_LAB_HELPER" name fm-control-smoke)
+INITIAL_SESSION=$SESSION
+export HERDR_LAB_HELPER HERDR_LAB_SESSION="$SESSION" HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
+  local status=0
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
-  herdr_safe_stop_and_delete "$SESSION"
+  for lab_session in "${INITIAL_SESSION:-}" "${RECOVERY_SESSION:-}"; do
+    [ -n "$lab_session" ] || continue
+    [ -f "$(fm_herdr_lab_tripwire_path "$lab_session")" ] || continue
+    PATH="$ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$lab_session" || status=1
+  done
+  return "$status"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+PATH="$PATH" "$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
+
+lab() {
+  PATH="$ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$SESSION" "$@"
+}
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
@@ -46,7 +59,31 @@ HOME_DIR="$SCRATCH/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/hsmoke"
 printf '# brief\n' > "$HOME_DIR/data/hsmoke/brief.md"
 
-# A real git worktree so the control plane's checkpoint has a real local copy.
+REAL_HERDR=$(command -v herdr)
+ORIGINAL_PATH=$PATH
+FAKEBIN="$SCRATCH/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --version ]; then
+  exec env PATH="$HERDR_ORIGINAL_PATH" "$REAL_HERDR" "$@"
+fi
+args=("$@")
+last=$((${#args[@]} - 1))
+if [ "${#args[@]}" -ge 2 ] && [ "${args[$last-1]}" = --session ] \
+   && [ "${args[$last]}" = "$HERDR_LAB_SESSION" ]; then
+  unset 'args[last]' 'args[last-1]'
+fi
+for arg in "${args[@]}"; do
+  case "$arg" in
+    --session|--session=*) exit 2 ;;
+  esac
+done
+exec env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "${args[@]}"
+SH
+chmod +x "$FAKEBIN/herdr"
+export HERDR_ORIGINAL_PATH="$ORIGINAL_PATH" REAL_HERDR PATH="$FAKEBIN:$ORIGINAL_PATH"
 PROJ="$SCRATCH/proj"
 WT="$SCRATCH/wt"
 mkdir -p "$PROJ"
@@ -95,7 +132,12 @@ run_control() {
     "$ROOT/bin/fm-control.sh" "$@" 2>&1
 }
 
-# --- no registered agent: the endpoint exists but hosts no agent ------------
+run_spawn_missing() {
+  env PATH="$PATH" FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$SCRATCH/grokhome" \
+    "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
+}
+
 
 OUT=$(run_control hsmoke exit) || fail "exit against an agent-free herdr pane should be idempotent success: $OUT"
 case "$OUT" in
@@ -115,9 +157,10 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 
 # --- a registered agent: classification flips, and the verbs follow ---------
 
-herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
-  --state idle --session "$SESSION" >/dev/null 2>&1 \
-  || fail "could not register a live agent on the task pane"
+if ! lab pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
+  --state idle >/dev/null 2>&1; then
+  fail "could not register a live agent on the task pane"
+fi
 
 STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
 [ "$STATE" = alive ] || fail "herdr should classify a registered agent as alive, got '$STATE'"
@@ -129,7 +172,7 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
 
-herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+  lab pane get "$PANE_ID" >/dev/null 2>&1 \
   || fail "the control plane must never remove the endpoint it was operating on"
 [ -d "$WT" ] || fail "the control plane must never remove the task's local copy"
 pass "real herdr: no control verb removed the endpoint or the task's local copy"
@@ -145,5 +188,100 @@ case "$OUT" in
   *) fail "the exit failure should say the agent did not stop, got: $OUT" ;;
 esac
 pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
+
+# --- authenticated missing-endpoint recovery -------------------------------
+# Use a fresh named lab after the stop-failure smoke. The old scenario is
+# intentionally terminal: its failed exit may leave the prior workspace in a
+# state that is unsuitable for a second independent assertion.
+PATH="$ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$INITIAL_SESSION" \
+  || fail "could not retire the first isolated Herdr smoke session"
+INITIAL_SESSION=
+RECOVERY_SESSION=$(PATH="$ORIGINAL_PATH" "$HERDR_LAB_HELPER" name fm-control-recovery)
+SESSION=$RECOVERY_SESSION
+export HERDR_LAB_SESSION="$SESSION" HERDR_SESSION="$SESSION"
+PATH="$ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$SESSION" \
+  || fail "could not provision the recovery Herdr lab session"
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WT") \
+  || fail "recovery container_ensure failed"
+CONTAINER=${CONTAINER_RAW%%$'\t'*}
+SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
+WORKSPACE_ID=${CONTAINER#*:}
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-hsmoke" "$WT" "$SEEDED_TAB_ID") \
+  || fail "recovery create_task failed"
+read -r TAB_ID PANE_ID <<EOF
+$TASK_IDS
+EOF
+{
+  echo "window=$SESSION:$PANE_ID"
+  echo "endpoint_task_id=hsmoke"
+  echo "worktree=$WT"
+  echo "project=$PROJ"
+  echo "harness=historical-unsupported"
+  echo "kind=ship"
+  echo "mode=no-mistakes"
+  echo "yolo=off"
+  echo "model=default"
+  echo "effort=default"
+  echo "backend=herdr"
+  echo "herdr_session=$SESSION"
+  echo "herdr_workspace_id=$WORKSPACE_ID"
+  echo "herdr_tab_id=$TAB_ID"
+  echo "herdr_pane_id=$PANE_ID"
+} > "$HOME_DIR/state/hsmoke.meta"
+# The fresh task pane is agent-free by construction. Closing it below creates
+# the authoritative missing endpoint without invoking lifecycle control on the
+# deliberately unsupported historical harness.
+# Keep an anchor tab so closing the retired task tab cannot remove the named
+# workspace. Its cwd is deliberately not the task worktree, so the duplicate
+# worktree inventory remains a meaningful guard.
+lab tab create --workspace "$WORKSPACE_ID" --cwd "$ROOT" --label fm-control-anchor --no-focus \
+  >/dev/null || fail "could not create the non-task workspace anchor"
+cat > "$FAKEBIN/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane report-agent "$HERDR_PANE_ID" \
+  --source fm-control-relaunch-smoke --agent fm-control-relaunch-agent --state idle >/dev/null
+while :; do sleep 1; done
+SH
+chmod +x "$FAKEBIN/claude"
+lab pane close "$PANE_ID" >/dev/null || fail "could not remove the retired task pane"
+awk -F= 'BEGIN { OFS="=" } $1 == "harness" { $2="historical-unsupported" } { print }' \
+  "$HOME_DIR/state/hsmoke.meta" > "$HOME_DIR/state/hsmoke.meta.tmp"
+mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
+OUT=$(run_control hsmoke relaunch --harness claude --note "recover the missing Herdr endpoint") \
+  || fail "authenticated missing Herdr recovery should succeed: $OUT"
+case "$OUT" in
+  *"endpoint-recreated="*) : ;;
+  *) fail "recovery outcome should identify the recreated endpoint, got: $OUT" ;;
+esac
+NEW_PANE=$(grep '^herdr_pane_id=' "$HOME_DIR/state/hsmoke.meta" | cut -d= -f2-)
+NEW_TAB=$(grep '^herdr_tab_id=' "$HOME_DIR/state/hsmoke.meta" | cut -d= -f2-)
+NEW_WORKSPACE=$(grep '^herdr_workspace_id=' "$HOME_DIR/state/hsmoke.meta" | cut -d= -f2-)
+[ "$NEW_WORKSPACE" = "$WORKSPACE_ID" ] || fail "recovery must preserve the recorded workspace"
+[ "$NEW_PANE" != "$PANE_ID" ] || fail "recovery must publish the new response-derived pane"
+[ "$NEW_TAB" != "$TAB_ID" ] || fail "recovery must publish the new response-derived tab"
+[ "$(fm_backend_agent_state herdr "$SESSION:$NEW_PANE")" = alive ] \
+  || fail "the replacement agent must be alive on the recreated pane"
+[ "$(cat "$HOME_DIR/state/hsmoke.control-relaunch.candidate" 2>/dev/null || true)" = "" ] \
+  || fail "a completed recovery must retire its candidate sidecar"
+[ "$(grep '^harness=' "$HOME_DIR/state/hsmoke.meta")" = harness=claude ] \
+  || fail "recovery must publish the explicit verified replacement harness"
+pass "real herdr: authenticated relaunch recreates a missing task endpoint in the recorded workspace"
+
+# Direct fm-spawn relaunch is not an authorization path. Remove the replacement
+# pane, leave its metadata intact, and prove a direct missing-endpoint attempt
+# refuses without creating another tab.
+lab pane close "$NEW_PANE" >/dev/null || fail "could not remove the recovered pane for bypass testing"
+DIRECT_BEFORE_TABS=$(lab tab list --workspace "$WORKSPACE_ID")
+if DIRECT_OUT=$(run_spawn_missing hsmoke --relaunch --harness claude 2>&1); then
+  fail "direct fm-spawn relaunch must refuse a missing Herdr endpoint: $DIRECT_OUT"
+fi
+case "$DIRECT_OUT" in
+  *"only the owning fm-control relaunch transaction"*) : ;;
+  *) fail "direct missing-endpoint refusal should name fm-control ownership: $DIRECT_OUT" ;;
+esac
+AFTER_TABS=$(lab tab list --workspace "$WORKSPACE_ID")
+[ "$AFTER_TABS" = "$DIRECT_BEFORE_TABS" ] || fail "direct missing-endpoint refusal must not create a Herdr tab"
+pass "real herdr: direct fm-spawn relaunch cannot bypass authenticated missing-endpoint recovery"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

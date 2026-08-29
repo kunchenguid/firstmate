@@ -30,19 +30,31 @@ CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
-# fm_test_tmproot's own cleanup trap fires when its command substitution exits,
-# so recreate the root before resolving it and clean it up from this file's trap.
-TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
-mkdir -p "$TMP_ROOT"
-TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
-TASK_TMPS=()
+relaunch_fixture_root() {
+  local root
+  root=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-relaunch.XXXXXX") || return 1
+  if ! printf '%s\n' "fm-control-relaunch-fixture.v1:$root" > "$root/.fm-test-fixture"; then
+    rm -rf -- "$root"
+    return 1
+  fi
+  printf '%s\n' "$root"
+}
+
+RELAUNCH_FIXTURE_ROOT=$(cd "$(relaunch_fixture_root)" && pwd -P)
+TMP_ROOT=$RELAUNCH_FIXTURE_ROOT
+
+relaunch_cleanup_root() {  # <fixture-root>
+  local root=$1 marker
+  [ -n "$root" ] || return 0
+  [ -d "$root" ] && [ ! -L "$root" ] || return 0
+  marker="$root/.fm-test-fixture"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  [ "$(cat "$marker" 2>/dev/null)" = "fm-control-relaunch-fixture.v1:$root" ] || return 0
+  rm -rf -- "$root"
+}
 
 relaunch_cleanup() {
-  local d
-  for d in "${TASK_TMPS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
-  done
-  rm -rf "$TMP_ROOT"
+  relaunch_cleanup_root "${RELAUNCH_FIXTURE_ROOT:-}"
 }
 trap relaunch_cleanup EXIT
 
@@ -151,13 +163,13 @@ add_ship_task() {
     echo "kind=ship"
     echo "mode=no-mistakes"
     echo "yolo=off"
-    echo "tasktmp=/tmp/fm-$id"
+    echo "tasktmp=$dir/tasktmp/$id"
     echo "model=default"
     echo "effort=default"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
-  TASK_TMPS+=("/tmp/fm-$id")
+  mkdir -p "$dir/tasktmp/$id"
 }
 
 run_control() {  # <case-dir> <args...>
@@ -188,6 +200,77 @@ meta_field() {  # <case-dir> <id> <key>
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
+
+run_cleanup_probe() {  # <success|assertion|early|single|truncated>
+  local mode=$1 external result fixture_path rc expected
+  external=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-relaunch-real-task.XXXXXX") \
+    || fail "could not create external cleanup probe root"
+  mkdir -p "$external/repository/tasktmp"
+  printf 'external live-copy sentinel\n' > "$external/repository/tasktmp/sentinel"
+  result="$external/probe-result"
+  fixture_path="$external/fixture-path"
+  case "$mode" in
+    success|single) expected=0 ;;
+    assertion|early|truncated) expected=nonzero ;;
+    *) rm -rf -- "$external"; fail "unknown cleanup probe mode '$mode'" ;;
+  esac
+  export -f relaunch_cleanup_root
+  PROBE_MODE="$mode" PROBE_EXTERNAL="$external" PROBE_RESULT="$result" PROBE_FIXTURE_PATH="$fixture_path" \
+    bash -c '
+      set -eu
+      make_fixture_root() {
+        local root
+        root=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-relaunch-fixture.XXXXXX")
+        printf "fm-control-relaunch-fixture.v1:%s\\n" "$root" > "$root/.fm-test-fixture"
+        printf "%s\\n" "$root"
+      }
+      FIXTURE_ROOT=$(make_fixture_root)
+      printf "%s\\n" "$FIXTURE_ROOT" > "$PROBE_FIXTURE_PATH"
+      TASK_TMPS="$PROBE_EXTERNAL/repository/tasktmp"
+      cleanup() {
+        relaunch_cleanup_root "$FIXTURE_ROOT"
+        [ ! -e "$FIXTURE_ROOT" ] && printf "cleaned\\n" > "$PROBE_RESULT"
+      }
+      trap cleanup EXIT
+      one_case() {
+        [ -f "$TASK_TMPS/sentinel" ]
+      }
+      case "$PROBE_MODE" in
+        success) exit 0 ;;
+        assertion) false ;;
+        early) exit 73 ;;
+        single) one_case; exit 0 ;;
+        truncated) kill -KILL $$ ;;
+      esac
+    '
+  rc=$?
+  if [ "$expected" = 0 ]; then
+    [ "$rc" -eq 0 ] || { rm -rf -- "$external"; fail "$mode cleanup probe returned $rc"; }
+  else
+    [ "$rc" -ne 0 ] || { rm -rf -- "$external"; fail "$mode cleanup probe unexpectedly succeeded"; }
+  fi
+  if [ "$mode" = truncated ]; then
+    fixture=$(cat "$fixture_path" 2>/dev/null || true)
+    [ -d "$fixture" ] || { rm -rf -- "$external"; fail "truncated cleanup probe unexpectedly ran its trap"; }
+    rm -rf -- "$fixture"
+  else
+    [ "$(cat "$result" 2>/dev/null || true)" = cleaned ] \
+      || { rm -rf -- "$external"; fail "$mode cleanup did not remove only its exact disposable fixture root"; }
+  fi
+  [ -f "$external/repository/tasktmp/sentinel" ] \
+    || { rm -rf -- "$external"; fail "$mode cleanup removed an external live-copy sentinel"; }
+  rm -rf -- "$external"
+  pass "relaunch cleanup: external sentinel survives $mode subprocess execution"
+}
+
+test_relaunch_cleanup_isolated_from_external_task_roots() {
+  run_cleanup_probe success
+  run_cleanup_probe assertion
+  run_cleanup_probe early
+  run_cleanup_probe single
+  run_cleanup_probe truncated
+}
+
 
 make_git_failure_stub() {  # <case-dir>
   cat > "$1/fakebin/git" <<'SH'
@@ -298,7 +381,7 @@ test_relaunch_preserves_durable_task_metadata() {
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
-  local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
+  local dir control_pid link_pid rc i=0 traceparent prepare ready exported release wait_attempts=1000
   dir=$(new_case metadata-race rl28)
   add_ship_task "$dir" rl28 claude
   printf '%s\n' "$$" > "$dir/home/state/.lock"
@@ -314,7 +397,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_EXPORTED="$exported" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$prepare" ] && [ "$i" -lt "$wait_attempts" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -332,7 +415,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
       --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
   link_pid=$!
   i=0
-  while { [ ! -e "$ready" ] || [ ! -e "$exported" ]; } && [ "$i" -lt 200 ]; do
+  while { [ ! -e "$ready" ] || [ ! -e "$exported" ]; } && [ "$i" -lt "$wait_attempts" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -1312,6 +1395,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_relaunch_cleanup_isolated_from_external_task_roots
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication

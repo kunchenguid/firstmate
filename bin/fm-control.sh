@@ -31,10 +31,13 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
-#   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. With no explicit axis, a secondmate re-resolves its
+#   relaunch   Transactionally replace the running agent with a new one in the
+#              SAME worktree, on the same or a newly chosen harness/model/
+#              effort - so switching harness is one ordinary use of this verb.
+#              The endpoint is also reused except for one narrow recovery: an
+#              authoritatively missing Herdr ship/scout endpoint is recreated
+#              inside the existing worktree by the owning control transaction.
+#              With no explicit axis, a secondmate re-resolves its
 #              durable config/secondmate-harness pin (harness plus its optional
 #              model and effort tokens) exactly as any other respawn does, while
 #              a ship or scout keeps the exact adapter already recorded for it.
@@ -301,12 +304,26 @@ KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
 
-HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
-  || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
-fm_control_harness_supported "$HARNESS" \
-  || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
-
 fm_backend_validate "$BACKEND" || exit 1
+
+# A missing local Herdr endpoint has no old agent to control. For that one
+# recovery shape, an explicit verified replacement harness is sufficient even
+# when the retired record names an adapter whose control mechanics are no
+# longer supported. Every other verb and endpoint state still requires the
+# recorded harness to be controllable.
+if [ "$VERB" = relaunch ] && [ "$HARNESS_SET" = 1 ] \
+   && [ "$BACKEND" = herdr ] \
+   && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } \
+   && [ "$(fm_backend_agent_state "$BACKEND" "$T")" = missing ] \
+   && fm_control_harness_supported "$NEW_HARNESS" \
+   && fm_control_harness_supports_kind "$NEW_HARNESS" "$KIND"; then
+  HARNESS=$NEW_HARNESS
+else
+  HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
+    || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
+  fm_control_harness_supported "$HARNESS" \
+    || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
+fi
 
 # --- shared helpers ---------------------------------------------------------
 
@@ -508,6 +525,10 @@ RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
 RELAUNCH_BRIEF=
+RELAUNCH_ENDPOINT_STATE=
+RELAUNCH_FROM_ENDPOINT=$T
+RELAUNCH_TO_ENDPOINT=$T
+RELAUNCH_ENDPOINT_RECREATED=0
 PRIOR_HARNESS=$HARNESS
 PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
 CONFIG_HARNESS=
@@ -809,21 +830,56 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  RELAUNCH_ENDPOINT_STATE=$(agent_state)
+  case "$RELAUNCH_ENDPOINT_STATE" in
+    alive|dead) ;;
+    missing)
+      if [ "$BACKEND" != herdr ] \
+         || { [ "$KIND" != ship ] && [ "$KIND" != scout ]; }; then
+        die "task $ID's recorded endpoint is missing, but endpoint recreation is defined only for a local Herdr ship or scout"
+      fi
+      RELAUNCH_ENDPOINT_RECREATED=1
+      ;;
+    *)
+      die "task $ID's endpoint reads '$RELAUNCH_ENDPOINT_STATE' rather than a positively classified state; refusing relaunch"
+      ;;
+  esac
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
-  journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
+  journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "from_endpoint=$RELAUNCH_FROM_ENDPOINT" "endpoint_state=$RELAUNCH_ENDPOINT_STATE"
 
   record_note
-  journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
+  journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "from_endpoint=$RELAUNCH_FROM_ENDPOINT" "endpoint_state=$RELAUNCH_ENDPOINT_STATE"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
-  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  # Re-check the endpoint immediately before any control key is sent. A
+  # missing snapshot may only authorize recreation; it must never authorize
+  # sending the newly selected harness's keys to a resurrected agent.
+  if [ "$RELAUNCH_ENDPOINT_STATE" = missing ]; then
+    state=$(agent_state)
+    [ "$state" = missing ] || {
+      die "task $ID's endpoint changed from missing to '$state' before relaunch control; refusing to send the replacement harness's lifecycle keys"
+    }
+  fi
+  if [ "$RELAUNCH_ENDPOINT_RECREATED" = 1 ]; then
+    exit_result=already-missing
+    journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" \
+      "from_endpoint=$RELAUNCH_FROM_ENDPOINT" "endpoint_state=missing" "exit_result=$exit_result"
+  else
+    journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line" \
+      "from_endpoint=$RELAUNCH_FROM_ENDPOINT" "endpoint_state=$RELAUNCH_ENDPOINT_STATE"
+    exit_result=$(do_exit)
+    journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" \
+      "from_endpoint=$RELAUNCH_FROM_ENDPOINT" "endpoint_state=$RELAUNCH_ENDPOINT_STATE" "exit_result=$exit_result"
+  fi
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
-  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "from_endpoint=$RELAUNCH_FROM_ENDPOINT" "endpoint_state=$RELAUNCH_ENDPOINT_STATE" \
+    "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
@@ -836,14 +892,30 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
+  fm_backend_validate_task_endpoint "$META" "$ID" || \
+    die "the replacement publication for $ID did not preserve a valid task endpoint"
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$BACKEND" ] || \
+    die "the replacement publication for $ID changed backend identity"
+  T=$FM_BACKEND_VALIDATED_TARGET
+  RELAUNCH_TO_ENDPOINT=$T
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
-    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
+    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (published endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "from_endpoint=$RELAUNCH_FROM_ENDPOINT" "to_endpoint=$RELAUNCH_TO_ENDPOINT" \
+    "endpoint_state=$RELAUNCH_ENDPOINT_STATE" "exit_result=$exit_result"
+  if [ "$RELAUNCH_ENDPOINT_RECREATED" = 1 ]; then
+    rm -f -- "$JOURNAL.candidate" || \
+      die "the replacement is running, but its completed Herdr recovery record could not be retired"
+  fi
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  if [ "$RELAUNCH_ENDPOINT_RECREATED" = 1 ]; then
+    echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint-recreated=$RELAUNCH_FROM_ENDPOINT->$T worktree=$WT"
+  else
+    echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  fi
 }
 
 # --- verbs ------------------------------------------------------------------
