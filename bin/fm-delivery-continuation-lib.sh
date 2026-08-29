@@ -22,18 +22,26 @@ fm_delivery_receipt_contract_kind() {  # <brief>
   fi
 }
 
-fm_delivery_receipt_state() {  # <status> <canonical|historical>
-  local status=$1 kind=$2 line parsed state= head=
+fm_delivery_receipt_state() {  # <status> <canonical|historical> [spawn-gen]
+  local status=$1 kind=$2 spawn_gen=${3:-} line parsed parsed_head parsed_gen state= head=
   case "$kind" in canonical|historical) ;; *) return 1 ;; esac
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       'done: PR '*|'done: merged'*) state=terminal; head=; continue ;;
+      'failed:'*|'failed ['*']:'*) state=failed; head=; continue ;;
     esac
     if [ "$kind" = canonical ]; then
-      parsed=$(printf '%s\n' "$line" | sed -n 's/^done:[[:space:]]*committed[[:space:]]\([0-9A-Fa-f][0-9A-Fa-f]*\)\([[:space:]].*\)\{0,1\}$/\1/p')
+      parsed=$(printf '%s\n' "$line" | sed -n 's/^done:[[:space:]]*committed[[:space:]]\([0-9A-Fa-f][0-9A-Fa-f]*\)[[:space:]]\[spawn-gen=\([A-Za-z0-9._-][A-Za-z0-9._-]*\)\]\([[:space:]].*\)\{0,1\}$/\1|\2/p')
       if [ -n "$parsed" ]; then
-        state=committed
-        head=$parsed
+        parsed_head=${parsed%%|*}
+        parsed_gen=${parsed#*|}
+        if [ -n "$spawn_gen" ] && [ "$parsed_gen" = "$spawn_gen" ]; then
+          state=committed
+          head=$parsed_head
+        else
+          state=incarnation-mismatch
+          head=
+        fi
       fi
     else
       case "$line" in
@@ -43,7 +51,7 @@ fm_delivery_receipt_state() {  # <status> <canonical|historical>
   done < "$status"
   case "$state" in
     committed) printf 'committed\t%s\n' "$head" ;;
-    historical|terminal) printf '%s\n' "$state" ;;
+    historical|terminal|failed|incarnation-mismatch) printf '%s\n' "$state" ;;
     *) return 1 ;;
   esac
 }

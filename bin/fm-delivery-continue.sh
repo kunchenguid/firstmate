@@ -80,11 +80,13 @@ RECEIPT_KIND=$(fm_delivery_receipt_contract_kind "$BRIEF") || refuse delivery-co
 
 STATUS="$STATE/$TASK.status"
 [ -f "$STATUS" ] && [ ! -L "$STATUS" ] || refuse missing-committed-receipt
-RECEIPT_STATE=$(fm_delivery_receipt_state "$STATUS" "$RECEIPT_KIND" 2>/dev/null || true)
+RECEIPT_STATE=$(fm_delivery_receipt_state "$STATUS" "$RECEIPT_KIND" "$SPAWN_GEN" 2>/dev/null || true)
 case "$RECEIPT_STATE" in
   committed$'\t'*) HEAD_SHORT=${RECEIPT_STATE#*$'\t'} ;;
   historical) HEAD_SHORT= ;;
   terminal) refuse attributable-validation-terminal-receipt ;;
+  failed) refuse terminal-task-failure ;;
+  incarnation-mismatch) refuse committed-receipt-incarnation-mismatch ;;
   *) refuse missing-committed-receipt ;;
 esac
 

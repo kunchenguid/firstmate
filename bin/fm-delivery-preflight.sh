@@ -97,6 +97,7 @@ for meta in "$STATE"/*.meta; do
   case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
   kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
   mode=$(sed -n 's/^mode=//p' "$meta" | tail -1)
+  spawn_gen=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
   [ "$kind" = ship ] && [ "$mode" = no-mistakes ] || continue
   status="$STATE/$task.status"
   [ -f "$status" ] && [ ! -L "$status" ] || continue
@@ -104,7 +105,7 @@ for meta in "$STATE"/*.meta; do
   [ -f "$brief" ] && [ ! -L "$brief" ] || continue
   receipt_kind=$(fm_delivery_receipt_contract_kind "$brief" 2>/dev/null || true)
   [ -n "$receipt_kind" ] || continue
-  receipt_state=$(fm_delivery_receipt_state "$status" "$receipt_kind" 2>/dev/null || true)
+  receipt_state=$(fm_delivery_receipt_state "$status" "$receipt_kind" "$spawn_gen" 2>/dev/null || true)
   case "$receipt_state" in
     committed$'\t'*|historical) printf '%s\n' "$task" >> "$TASKS_TMP" || exit 1 ;;
   esac

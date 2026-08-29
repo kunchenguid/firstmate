@@ -260,8 +260,8 @@ test_ship_mode_is_explicit_not_registry() {
     || fail "explicit no-mistakes brief omitted the committed-head receipt contract"
   assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
-  assert_grep 'done: committed $(git rev-parse HEAD) {summary}' "$brief" \
-    "explicit no-mistakes brief did not require the canonical committed-head receipt"
+  assert_grep 'done: committed $(git rev-parse HEAD) [spawn-gen=$(sed -n '\''s/^spawn_gen=//p'\''' "$brief" \
+    "explicit no-mistakes brief did not require the incarnation-bound committed-head receipt"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \

@@ -84,7 +84,6 @@ esac
 . "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 COMMITTED_RECEIPT_CONTRACT=$(fm_delivery_committed_receipt_contract)
-COMMITTED_RECEIPT_EVENT='done: committed $(git rev-parse HEAD) {summary}'
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -186,6 +185,8 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+META_FILE=$(shell_quote "$STATE/$ID.meta")
+COMMITTED_RECEIPT_EVENT="done: committed \$(git rev-parse HEAD) [spawn-gen=\$(sed -n 's/^spawn_gen=//p' $META_FILE | tail -1)] {summary}"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 
 # The receive-and-ack half of the steering-inbox contract, included in every

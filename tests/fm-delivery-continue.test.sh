@@ -21,11 +21,11 @@ make_fixture() {
   git -C "$wt" checkout -qb fm/ship
   head=$(git -C "$wt" rev-parse HEAD)
   fm_write_meta "$home/state/ship.meta" "window=fm:fm-ship" "worktree=$wt" "project=sample" "harness=codex" "kind=ship" "mode=no-mistakes" "spawn_gen=g1"
-  printf 'done: committed %s implementation committed and focused checks passed\n' "$head" > "$home/state/ship.status"
+  printf 'done: committed %s [spawn-gen=g1] implementation committed and focused checks passed\n' "$head" > "$home/state/ship.status"
   cat > "$home/data/ship/brief.md" <<'EOF'
 Delivery contract: mode=no-mistakes
 Delivery receipt contract: committed-head-v1
-When you believe it is complete, append `done: committed $(git rev-parse HEAD) {summary}` to the status file and stop.
+When you believe it is complete, append `done: committed $(git rev-parse HEAD) [spawn-gen=$(sed -n 's/^spawn_gen=//p' state/ship.meta | tail -1)] {summary}` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 EOF
   cat > "$home/data/backlog.md" <<'EOF'
@@ -125,7 +125,7 @@ test_current_brief_requires_canonical_receipt() {
   cat > "$home/data/ship/brief.md" <<'EOF'
 Delivery contract: mode=no-mistakes
 Delivery receipt contract: committed-head-v1
-When you believe it is complete, append `done: committed $(git rev-parse HEAD) {summary}` to the status file and stop.
+When you believe it is complete, append `done: committed $(git rev-parse HEAD) [spawn-gen=$(sed -n 's/^spawn_gen=//p' state/ship.meta | tail -1)] {summary}` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 EOF
   printf 'done: validation complete\n' > "$home/state/ship.status"
@@ -134,7 +134,7 @@ EOF
     || fail "current brief accepted a noncanonical receipt: $out"
   [ ! -d "$home/state/ship.inbox" ] || fail "current noncanonical receipt created an inbox delivery"
   head=$(git -C "$home/projects/ship" rev-parse HEAD)
-  printf 'done: committed %s validation complete\n' "$head" > "$home/state/ship.status"
+  printf 'done: committed %s [spawn-gen=g1] validation complete\n' "$head" > "$home/state/ship.status"
   out=$(run_continue "$home" "$send" "$state") || fail "canonical current receipt execution failed"
   [ "$out" = 'result=sent task=ship' ] || fail "current canonical receipt did not deliver: $out"
   pass "current briefs require canonical committed-head receipts"
@@ -187,10 +187,24 @@ test_identity_and_committed_head_requirements() {
   [[ "$out" == *'reason=uncommitted-worktree'* ]] || fail "committed receipt did not require a clean worktree: $out"
   rm "$home/projects/ship/uncommitted.txt"
   head=$(git -C "$home/projects/ship" rev-parse HEAD)
-  printf 'done: committed %s canonical receipt\n' "$head" > "$home/state/ship.status"
+  printf 'done: committed %s [spawn-gen=g1] canonical receipt\n' "$head" > "$home/state/ship.status"
   out=$(run_continue "$home" "$send" "$state") || fail "canonical receipt execution failed"
   [ "$out" = 'result=sent task=ship' ] || fail "canonical committed receipt did not deliver: $out"
   pass "continuation requires an incarnation and a clean canonical committed head"
+}
+
+test_replacement_incarnation_rejects_prior_receipt() {
+  local dir home send state out
+  dir="$TMP_ROOT/replacement-incarnation"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  sed 's/^spawn_gen=g1$/spawn_gen=g2/' "$home/state/ship.meta" > "$home/state/ship.meta.next"
+  mv "$home/state/ship.meta.next" "$home/state/ship.meta"
+  out=$(run_continue "$home" "$send" "$state") || fail "replacement-incarnation execution failed"
+  [ "$out" = 'result=refused task=ship reason=committed-receipt-incarnation-mismatch' ] \
+    || fail "prior incarnation receipt reached its replacement worker: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "replacement worker received prior incarnation validation"
+  pass "committed receipts cannot authorize replacement incarnations"
 }
 
 test_historical_receipt_requires_exact_head_provenance() {
@@ -230,7 +244,11 @@ test_terminal_receipt_and_existing_lease_retry() {
   out=$(run_continue "$home" "$send" "$state") || fail "terminal receipt execution failed"
   [[ "$out" == *'reason=attributable-validation-terminal-receipt'* ]] || fail "terminal PR receipt was treated as committed-ready: $out"
   head=$(git -C "$home/projects/ship" rev-parse HEAD)
-  printf 'done: committed %s implementation committed and focused checks passed\n' "$head" > "$home/state/ship.status"
+  printf 'done: committed %s [spawn-gen=g1] implementation committed and focused checks passed\nfailed: validation prerequisites unavailable\n' "$head" > "$home/state/ship.status"
+  out=$(run_continue "$home" "$send" "$state") || fail "terminal failure execution failed"
+  [ "$out" = 'result=refused task=ship reason=terminal-task-failure' ] \
+    || fail "later terminal failure was ignored after committed readiness: $out"
+  printf 'done: committed %s [spawn-gen=g1] implementation committed and focused checks passed\n' "$head" > "$home/state/ship.status"
   printf '%s\n' "$$" > "$home/state/.lock"
   PI_CODING_AGENT=true FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_LEASE_HOLDER_PID=$$ \
     "$ROOT/bin/fm-lease.sh" claim ship >/dev/null || fail "fixture main lease claim failed"
@@ -239,7 +257,7 @@ test_terminal_receipt_and_existing_lease_retry() {
   PI_CODING_AGENT=true FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-lease.sh" check ship >/dev/null \
     || fail "continuation released the pre-existing lease"
   PI_CODING_AGENT=true FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-lease.sh" release ship >/dev/null
-  pass "terminal receipts stop and existing supervision custody remains a retry obligation"
+  pass "terminal receipts and failures stop while existing custody remains retryable"
 }
 
 test_killed_delivery_operation_does_not_strand_session_lease() {
@@ -443,7 +461,7 @@ test_advanced_head_surfaces_continuation_conflict() {
   run_continue "$home" "$send" "$state" >/dev/null || fail "initial head continuation failed"
   git -C "$home/projects/ship" commit -q --allow-empty -m advance
   head=$(git -C "$home/projects/ship" rev-parse HEAD)
-  printf 'done: committed %s advanced head\n' "$head" > "$home/state/ship.status"
+  printf 'done: committed %s [spawn-gen=g1] advanced head\n' "$head" > "$home/state/ship.status"
   out=$(run_continue "$home" "$send" "$state") || fail "advanced head execution failed"
   [[ "$out" == *'reason=continuation-head-mismatch'* ]] || fail "old delivery was accepted for the advanced head: $out"
   fakebin=$(fm_fakebin "$dir")
@@ -536,6 +554,7 @@ test_current_brief_requires_canonical_receipt
 test_inbox_failure_remains_retryable
 test_strict_run_attribution_distinguishes_absence_from_query_failure
 test_identity_and_committed_head_requirements
+test_replacement_incarnation_rejects_prior_receipt
 test_historical_receipt_requires_exact_head_provenance
 test_terminal_receipt_and_existing_lease_retry
 test_killed_delivery_operation_does_not_strand_session_lease
