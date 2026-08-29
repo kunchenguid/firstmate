@@ -2257,7 +2257,6 @@ test_leaked_tasktmp_process_is_reaped() {
   # Teardown scans - and removes - only the root bin/fm-task-tmp-lib.sh derives
   # for this task under this home, so the fixture records exactly that path
   # instead of an arbitrary one. run_teardown resolves FM_HOME the same way.
-  # shellcheck disable=SC2031 # reading the ambient FM_HOME, not the one fm_test_task_tmp_root sets in its own subshell
   task_tmp=$(fm_test_task_tmp_root "${FM_HOME:-$ROOT}" task-x1)
   printf '%s\n' "tasktmp=$task_tmp" >> "$case_dir/state/task-x1.meta"
   mkdir -p "$task_tmp"

@@ -526,7 +526,6 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   # The temp root is home-scoped, so derive it through its owning library rather
   # than spelling the shape out here; the assertion stays an exact whole-argument
   # match so a wrong path is still caught.
-  # shellcheck disable=SC2031 # reading the ambient FM_HOME, not the one fm_test_task_tmp_root sets in its own subshell
   task_tmp=$(fm_test_task_tmp_root "${FM_HOME:-$ROOT}" "$id")
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f'"export GOTMPDIR='$task_tmp/gotmp'"$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
