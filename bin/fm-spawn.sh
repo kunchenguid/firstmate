@@ -134,6 +134,8 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   They also refuse when another task's durable metadata already claims that
+#   resolved worktree, without consulting process or treehouse occupancy state.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -727,6 +729,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -836,6 +839,12 @@ spawn_abort_cleanup() {
             || true
         fi
       fi
+    fi
+  fi
+  if [ "$SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=0
+    if ! fm_backend_kill "$BACKEND" "$T"; then
+      echo "warning: could not retire the new endpoint after refusing claimed worktree '$WT'" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1825,6 +1834,27 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+assert_spawn_worktree_unclaimed() {
+  local wt_real meta owner recorded recorded_real
+  wt_real=$(real_path_or_raw "$WT")
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    owner=${meta##*/}
+    owner=${owner%.meta}
+    [ "$owner" != "$ID" ] || continue
+    recorded=$(fm_meta_get "$meta" worktree)
+    [ -n "$recorded" ] || continue
+    recorded_real=$(real_path_or_raw "$recorded")
+    [ "$recorded_real" != "$wt_real" ] || {
+      if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+        SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=1
+      fi
+      echo "error: allocated worktree '$WT' is already claimed by live task $owner; refusing to launch task $ID" >&2
+      return 1
+    }
+  done
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -2468,6 +2498,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+if [ "$KIND" != secondmate ]; then
+  assert_spawn_worktree_unclaimed || exit 1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1

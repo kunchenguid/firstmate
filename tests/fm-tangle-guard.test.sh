@@ -187,7 +187,82 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
-# --- GUARD 1c: fm-spawn tmux window construction ----------------------------
+# --- GUARD 1c: fm-spawn durable worktree claims ----------------------------
+
+test_spawn_durable_worktree_claims() {
+  local home proj claimed free own alias fakebin rec out status
+  home="$TMP_ROOT/spawn-claim-home"
+  mkdir -p "$home/data" "$home/state"
+  proj=$(make_repo "$TMP_ROOT/spawn-claim-proj")
+  claimed="$TMP_ROOT/spawn-claim-wt"
+  free="$TMP_ROOT/spawn-free-wt"
+  own="$TMP_ROOT/spawn-own-wt"
+  alias="$TMP_ROOT/spawn-claim-alias"
+  git -C "$proj" worktree add -q --detach "$claimed" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$free" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$own" >/dev/null 2>&1
+  ln -s "$claimed" "$alias"
+  fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/spawn-claim-fake")
+  rec="$TMP_ROOT/spawn-claim.log"
+  : > "$rec"
+
+  {
+    echo 'window=firstmate:fm-incumbent'
+    echo 'endpoint_task_id=incumbent'
+    echo "worktree=$alias/"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+  } > "$home/state/incumbent.meta"
+
+  out=$(FM_TMUX_REC="$rec" run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "spawn into another live task's worktree should refuse"
+  assert_contains "$out" "already claimed by live task incumbent" \
+    "the collision refusal did not name the incumbent task"
+  assert_absent "$home/state/collision-gg7.meta" "a collision refusal must not publish contender metadata"
+  assert_grep 'kill-window -t =firstmate:=fm-collision-gg7' "$rec" \
+    "a collision refusal must retire the new endpoint so treehouse can reallocate the slot"
+  assert_no_grep 'send-keys -t firstmate:fm-collision-gg7 -l' "$rec" \
+    "a collision refusal must not type an agent launch command"
+
+  rm "$home/state/incumbent.meta"
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 0 "$status" "the same spawn should be retryable after the durable claim retires"
+  assert_contains "$out" 'spawned collision-gg7' "the retry did not launch after the claim retired"
+
+  out=$(FM_TMUX_REC="$rec" run_spawn "$home" free-hh8 "$proj" "$free" "$fakebin")
+  status=$?
+  expect_code 0 "$status" "a different, genuinely free worktree should remain launchable"
+  assert_contains "$out" 'spawned free-hh8' "the free-worktree spawn did not report success"
+
+  fm_test_spawn_brief "$home" own-ii9 brief
+  {
+    echo 'window=firstmate:fm-own-ii9'
+    echo 'endpoint_task_id=own-ii9'
+    echo "worktree=$own/"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'tasktmp=/tmp/fm-own-ii9'
+    echo 'model=default'
+    echo 'effort=default'
+  } > "$home/state/own-ii9.meta"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_WINDOWS='fm-own-ii9' FM_FAKE_PANE_COMMAND=zsh \
+    fm_test_run_spawn "$home" "$own" "$fakebin" own-ii9 --relaunch)
+  status=$?
+  expect_code 0 "$status" "a relaunch into the task's own recorded worktree should remain allowed"
+  assert_contains "$out" 'spawned own-ii9' "the own-worktree relaunch did not report success"
+  assert_not_contains "$out" 'already claimed by live task' \
+    "the own-worktree relaunch treated its own metadata as a collision"
+  pass "fm-spawn: durable canonical worktree claims refuse collisions, release retries, and leave free slots launchable"
+}
+
+# --- GUARD 1d: fm-spawn tmux window construction ----------------------------
 
 # The prevention guard also depends on fm-spawn building robust tmux commands
 # under a non-default tmux config (base-index 1, automatic-rename on). A RECORDING
@@ -211,11 +286,12 @@ set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-zsh}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) [ -z "${FM_FAKE_WINDOWS:-}" ] || printf '%s\n' "$FM_FAKE_WINDOWS"; exit 0 ;;
   has-session|new-session|send-keys|set-window-option) exit 0 ;;
 esac
 exit 0
@@ -274,4 +350,5 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_durable_worktree_claims
 test_spawn_tmux_window_construction

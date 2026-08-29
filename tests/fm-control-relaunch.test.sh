@@ -829,6 +829,8 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   [ "$(meta_field "$dir" rl21 harness)" = claude ] \
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
   assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"
+  assert_not_contains "$out" "already claimed by live task" \
+    "a relaunch must not treat its own recorded worktree as another task's claim"
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
