@@ -16,9 +16,9 @@
 # captured endpoint, while a failed classification reports no committable endpoint.
 # An absent status file is a successful empty span, while an existing status object
 # that cannot be read or identified is a classification failure.
-# One durable receipt per task suppresses repeats of the same failure fingerprint,
-# and a changed object or successful classification clears that suppression.
-# Consumers never advance a position for either a new or repeated failure.
+# Consumers never advance a classification position after a failed read.
+# The watcher still advances its per-file wake signature after reporting the failure,
+# which bounds that signal-path report to one per distinct file state.
 #
 # There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
