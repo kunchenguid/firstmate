@@ -1030,6 +1030,44 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   pass "fm-teardown.sh backend=orca: ship teardown requires a matching Orca id path"
 }
 
+test_ship_teardown_accepts_real_composite_orca_worktree_id() {
+  # Regression: the live Orca CLI records orca_worktree_id as the composite
+  # "<pty-id>::<absolute-worktree-path>". Every other test in this file uses a
+  # simplified id, so the real shape was never exercised and endpoint validation
+  # rejected it, making every Orca task spawnable but never tearable down.
+  local proj wt data state config id out rc neutral wtid
+  id="orcacompositez1"
+  proj="$TMP_ROOT/composite-project"
+  wt="$TMP_ROOT/composite-wt"
+  data="$TMP_ROOT/composite-data"
+  state="$TMP_ROOT/composite-state"
+  config="$TMP_ROOT/composite-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  wtid="c3bcc5b7-c52e-415c-97d4-99b0e08024df::$wt"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$wtid"
+  orca_case composite
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$wtid" "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  case "$out" in
+    *"malformed or inconsistent"*)
+      fail "composite Orca worktree id was rejected as malformed: $out" ;;
+  esac
+  expect_code 0 "$rc" "Orca teardown should accept the real composite worktree id"$'\n'"$out"
+  assert_absent "$state/$id.meta" "successful composite teardown should remove task metadata"
+  pass "fm-teardown.sh backend=orca: accepts the real <pty-id>::<path> worktree id"
+}
+
 test_ship_teardown_refuses_orca_unresolvable_worktree_id() {
   local proj wt data state config id out rc neutral
   id="orcashipunresolvedz1"
@@ -1347,6 +1385,7 @@ test_teardown_preserves_metadata_when_orca_remove_error_json
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
+test_ship_teardown_accepts_real_composite_orca_worktree_id
 test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
