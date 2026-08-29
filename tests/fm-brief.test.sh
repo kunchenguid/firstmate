@@ -710,62 +710,51 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
-assert_redzone_fence() {
-  local brief=$1 label=$2 path
-  assert_grep "# Red Zone prohibition - permanent safety boundary" "$brief" \
-    "$label brief missing the Red Zone fence heading"
-  assert_grep "1. The rule. Never edit, and never make a read that leads to a write, anywhere in Red Zone. This is permanent until the captain personally lifts it." "$brief" \
-    "$label brief missing the permanent Red Zone rule"
-  for path in \
-    'app/(sales)/sales-hub/redzone/**' \
-    'app/api/sales/redzone/**' \
-    'app/api/redzone/**' \
-    'app/api/cron/redzone-followups-sweep/**' \
-    'components/sales-hub/redzone/**' \
-    'lib/sales-hub/redzone/**' \
-    'docs/sales-hub/redzone/**' \
-    'docs/adr/0044-unify-suite-redzone-action-architecture.md'; do
-    assert_grep "$path" "$brief" "$label brief missing named Red Zone path: $path"
-  done
-  assert_grep 'docs/sales-hub/redzone/**` including the n8n pipeline JSON' "$brief" \
-    "$label brief missing the n8n pipeline JSON note"
-  assert_grep "3. The check that actually works. Ask whether Red Zone RENDERS this file, not whether the path contains \`redzone\`." "$brief" \
+assert_off_limits_module_fence() {
+  local brief=$1 label=$2 home=$3
+  assert_grep "# Off-limits module prohibition - permanent safety boundary" "$brief" \
+    "$label brief missing the off-limits module fence heading"
+  assert_grep "1. The rule. Honour every off-limits module prohibition recorded by this brief's operator. Never edit, and never make a read that leads to a write, anywhere in a fenced module. This is permanent until the operator personally lifts it." "$brief" \
+    "$label brief missing the permanent module rule"
+  assert_grep "2. The operator's concrete prohibition. Read the operator's own private preferences file at $home/data/captain.md" "$brief" \
+    "$label brief missing the private preferences pointer"
+  assert_grep "for the concrete fenced-module list before inspecting or changing code that might be fenced. Do not copy that private list into this shared template." "$brief" \
+    "$label brief missing the private list boundary"
+  assert_grep "3. The check that actually works. Ask whether the fenced module RENDERS this file, not whether the path looks like it belongs to that module." "$brief" \
     "$label brief missing the renders-this-file check"
-  assert_grep 'Red Zone renders shared components that live outside its own directory' "$brief" \
+  assert_grep 'Fenced modules can render shared components that live outside their own directories' "$brief" \
     "$label brief missing the shared-component warning"
-  assert_grep "4. The escape. If a task appears to REQUIRE a Red Zone change, that is NOT a green light - append \`blocked: {why}\` and return it to the captain." "$brief" \
+  assert_grep "4. The escape. If a task appears to REQUIRE touching a fenced module, that is NOT a green light - append \`blocked: {why}\` and return it to the operator." "$brief" \
     "$label brief missing the blocked escape"
   assert_grep 'Never resolve it by editing, and never by inventing a fork on your own judgement.' "$brief" \
     "$label brief missing the no-fork escape"
-  assert_grep 'The Red Zone tab in the product UI is off limits to QA-style work.' "$brief" \
+  assert_grep 'QA boundary. Fenced modules are off limits to QA-style work.' "$brief" \
     "$label brief missing the QA boundary"
-  assert_grep 'Do not exercise it, click through it, or file tickets against it.' "$brief" \
+  assert_grep 'Do not exercise them, click through them, file tickets against them, or continue a journey that routes into them; stop at the boundary and say so.' "$brief" \
     "$label brief missing the QA prohibitions"
-  assert_grep 'A journey that routes into it stops at the boundary and says so.' "$brief" \
-    "$label brief missing the journey boundary"
 }
 
-test_redzone_fence_is_in_every_scaffold() {
+test_off_limits_module_fence_is_in_every_scaffold() {
   local home brief
-  home="$TMP_ROOT/redzone-fence-home"
+  home="$TMP_ROOT/off-limits-module-fence-home"
   mkdir -p "$home/data"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" redzone-fence-ship firstmate --mode no-mistakes >/dev/null 2>&1 \
-    || fail "ship brief with Red Zone fence exited non-zero"
-  brief="$home/data/redzone-fence-ship/brief.md"
-  assert_redzone_fence "$brief" ship
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" off-limits-module-ship firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "ship brief with off-limits module fence exited non-zero"
+  brief="$home/data/off-limits-module-ship/brief.md"
+  assert_off_limits_module_fence "$brief" ship "$home"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" redzone-fence-scout firstmate --scout >/dev/null 2>&1 \
-    || fail "scout brief with Red Zone fence exited non-zero"
-  brief="$home/data/redzone-fence-scout/brief.md"
-  assert_redzone_fence "$brief" scout
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" off-limits-module-scout firstmate --scout >/dev/null 2>&1 \
+    || fail "scout brief with off-limits module fence exited non-zero"
+  brief="$home/data/off-limits-module-scout/brief.md"
+  assert_off_limits_module_fence "$brief" scout "$home"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" redzone-fence-charter --secondmate --no-projects >/dev/null 2>&1 \
-    || fail "secondmate charter with Red Zone fence exited non-zero"
-  brief="$home/data/redzone-fence-charter/brief.md"
-  assert_redzone_fence "$brief" secondmate
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" off-limits-module-charter --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate charter with off-limits module fence exited non-zero"
+  brief="$home/data/off-limits-module-charter/brief.md"
+  assert_off_limits_module_fence "$brief" secondmate "$home"
 
-  pass "fm-brief.sh: Red Zone fence renders in ship, scout, and secondmate scaffolds"
+  pass "fm-brief.sh: off-limits module fence renders in ship, scout, and secondmate scaffolds"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -828,6 +817,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
-test_redzone_fence_is_in_every_scaffold
+test_off_limits_module_fence_is_in_every_scaffold
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

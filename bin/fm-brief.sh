@@ -52,9 +52,9 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Every scaffold also carries the captain's standing Red Zone prohibition; the
-# generated section below owns its exact protected paths, render-based check,
-# blocked return and no-fork response, and product QA boundary.
+# Every scaffold also carries the operator's standing off-limits module
+# prohibition; the generated section below owns its private-preferences pointer,
+# render-based check, blocked return, no-fork response, and QA boundary.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -198,30 +198,20 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
-# This fence is included in every scaffold kind because Red Zone safety survives
+# This fence is included in every scaffold kind because module safety survives
 # hand-offs only when it travels with the worker's instructions.
-IFS= read -r -d '' REDZONE_SECTION <<'EOF' || true
-# Red Zone prohibition - permanent safety boundary
-1. The rule. Never edit, and never make a read that leads to a write, anywhere in Red Zone. This is permanent until the captain personally lifts it.
-2. The named paths.
-- `app/(sales)/sales-hub/redzone/**`
-- `app/api/sales/redzone/**`
-- `app/api/redzone/**`
-- `app/api/cron/redzone-followups-sweep/**`
-- `components/sales-hub/redzone/**`
-- `lib/sales-hub/redzone/**`
-- `docs/sales-hub/redzone/**` including the n8n pipeline JSON
-- `docs/adr/0044-unify-suite-redzone-action-architecture.md`
-3. The check that actually works. Ask whether Red Zone RENDERS this file, not whether the path contains `redzone`.
-Red Zone renders shared components that live outside its own directory, so every "is this under redzone/" test passed while four changes altered what Red Zone displayed.
-4. The escape. If a task appears to REQUIRE a Red Zone change, that is NOT a green light - append `blocked: {why}` and return it to the captain.
+IFS= read -r -d '' OFF_LIMITS_MODULE_SECTION <<EOF || true
+# Off-limits module prohibition - permanent safety boundary
+1. The rule. Honour every off-limits module prohibition recorded by this brief's operator. Never edit, and never make a read that leads to a write, anywhere in a fenced module. This is permanent until the operator personally lifts it.
+2. The operator's concrete prohibition. Read the operator's own private preferences file at $FM_HOME/data/captain.md for the concrete fenced-module list before inspecting or changing code that might be fenced. Do not copy that private list into this shared template.
+3. The check that actually works. Ask whether the fenced module RENDERS this file, not whether the path looks like it belongs to that module.
+Fenced modules can render shared components that live outside their own directories, so every "is this under the module directory/" test can pass while a change alters what a fenced module displays.
+4. The escape. If a task appears to REQUIRE touching a fenced module, that is NOT a green light - append \`blocked: {why}\` and return it to the operator.
 Never resolve it by editing, and never by inventing a fork on your own judgement.
 
-The Red Zone tab in the product UI is off limits to QA-style work.
-Do not exercise it, click through it, or file tickets against it.
-A journey that routes into it stops at the boundary and says so.
+QA boundary. Fenced modules are off limits to QA-style work. Do not exercise them, click through them, file tickets against them, or continue a journey that routes into them; stop at the boundary and say so.
 EOF
-REDZONE_SECTION=${REDZONE_SECTION%$'\n'}
+OFF_LIMITS_MODULE_SECTION=${OFF_LIMITS_MODULE_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -250,7 +240,7 @@ You are a persistent second mate managed by the main firstmate. Work on your own
 # Charter
 $SECONDMATE_CHARTER
 
-$REDZONE_SECTION
+$OFF_LIMITS_MODULE_SECTION
 
 # Routing scope
 $SECONDMATE_SCOPE
@@ -356,7 +346,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$REDZONE_SECTION
+$OFF_LIMITS_MODULE_SECTION
 
 $HERDR_SECTION
 
@@ -471,7 +461,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$REDZONE_SECTION
+$OFF_LIMITS_MODULE_SECTION
 
 $HERDR_SECTION
 
