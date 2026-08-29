@@ -172,14 +172,14 @@ fm_env_local_seeded_copy_intact() {  # <worktree>
 # write.
 fm_env_local_write_seed_record() {  # <worktree> <seeded-file>
   local record digest
-  record=$(fm_env_local_seed_record_path "$1") || return 0
+  record=$(fm_env_local_seed_record_path "$1") || return 1
   digest=$(fm_env_local_digest "$2") || digest=""
   if [ -z "$digest" ]; then
     rm -f "$record" 2>/dev/null || true
-    return 0
+    return 1
   fi
   ( umask 077; printf 'sha256=%s\n' "$digest" > "$record" ) 2>/dev/null \
-    || rm -f "$record" 2>/dev/null || true
+    || { rm -f "$record" 2>/dev/null || true; return 1; }
 }
 
 fm_env_local_drop_seed_record() {  # <worktree>
@@ -380,5 +380,9 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
     echo "error: could not publish the seeded .env.local in '$worktree'" >&2
     return 1
   fi
-  fm_env_local_write_seed_record "$worktree" "$target"
+  if ! fm_env_local_write_seed_record "$worktree" "$target"; then
+    rm -f "$target"
+    echo "error: seeded .env.local in '$worktree' but could not record its ownership; removed the copy and refusing the acquisition" >&2
+    return 1
+  fi
 }
