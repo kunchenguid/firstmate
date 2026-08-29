@@ -2896,9 +2896,15 @@ test_missing_task_metadata_starts_new_dispatch() {
     "a brand-new task did not complete after its reviewer dispatched"
   assert_present "$case_dir/codex.log" \
     "reviewer dispatch never began for a brand-new task"
-  assert_absent "$case_dir/state/task-x1.meta" \
-    "Crosscheck invented author identity metadata for a brand-new task"
-  pass "a brand-new task ID dispatches without hidden pre-created metadata"
+  assert_grep 'crosscheck_schema=firstmate.crosscheck-task.v1' \
+    "$case_dir/state/task-x1.meta" \
+    "a brand-new task did not persist its managed identity"
+  assert_grep "crosscheck_pull_request=$PR_URL" \
+    "$case_dir/state/task-x1.meta" \
+    "a brand-new task did not bind its pull request"
+  assert_no_grep 'harness=' "$case_dir/state/task-x1.meta" \
+    "managed task metadata invented author provenance"
+  pass "a brand-new task ID persists managed identity and dispatches"
 }
 
 test_missing_default_state_directory_starts_new_dispatch() {
@@ -2916,9 +2922,34 @@ test_missing_default_state_directory_starts_new_dispatch() {
     "reviewer dispatch never began for a fresh home"
   assert_present "$case_dir/home/state/.task-x1.crosscheck.lock" \
     "the default state directory was not initialized for a fresh home"
-  assert_absent "$case_dir/home/state/task-x1.meta" \
-    "Crosscheck invented author identity metadata for a fresh home"
-  pass "a fresh home initializes its default state directory and dispatches"
+  assert_grep 'crosscheck_task_id=task-x1' \
+    "$case_dir/home/state/task-x1.meta" \
+    "a fresh home did not persist the managed task identity"
+  assert_no_grep 'model=' "$case_dir/home/state/task-x1.meta" \
+    "managed task metadata invented an author model"
+  pass "a fresh home initializes state, persists task identity, and dispatches"
+}
+
+test_managed_task_metadata_identity_mismatch_fails_closed() {
+  local record case_dir base head rc
+  record=$(make_case managed-task-metadata-mismatch)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  printf '%s\n' \
+    'crosscheck_schema=firstmate.crosscheck-task.v1' \
+    'crosscheck_task_id=task-x1' \
+    'crosscheck_pull_request=https://github.com/ruby-dlee/firstmate/pull/999' \
+    > "$case_dir/state/task-x1.meta"
+  set +e
+  run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "managed task metadata identity mismatch"
+  assert_grep 'task metadata identity mismatch' "$case_dir/err" \
+    "mismatched managed task metadata was not rejected"
+  assert_absent "$case_dir/codex.log" \
+    "reviewer launched with mismatched managed task metadata"
+  pass "managed task metadata identity mismatches fail closed before dispatch"
 }
 
 test_mismatched_state_without_metadata_fails_closed() {
@@ -6599,6 +6630,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_set_runtime_overrides_remain_authoritative|\
     test_missing_task_metadata_starts_new_dispatch|\
     test_missing_default_state_directory_starts_new_dispatch|\
+    test_managed_task_metadata_identity_mismatch_fails_closed|\
     test_mismatched_state_without_metadata_fails_closed|\
     test_missing_metadata_for_existing_task_fails_closed|\
     test_existing_task_author_identity_is_ignored|\
@@ -6752,6 +6784,7 @@ test_empty_environment_fallback_is_generic
 test_set_runtime_overrides_remain_authoritative
 test_missing_task_metadata_starts_new_dispatch
 test_missing_default_state_directory_starts_new_dispatch
+test_managed_task_metadata_identity_mismatch_fails_closed
 test_mismatched_state_without_metadata_fails_closed
 test_missing_metadata_for_existing_task_fails_closed
 test_existing_task_author_identity_is_ignored

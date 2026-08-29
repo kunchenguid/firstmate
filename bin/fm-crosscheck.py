@@ -69,6 +69,8 @@ PI_SYSTEM_PROMPT = (
     "as the final tool call."
 )
 TELEMETRY_SCHEMA = "firstmate.crosscheck-run-telemetry.v1"
+CROSSCHECK_TASK_META_SCHEMA = "firstmate.crosscheck-task.v1"
+MAX_TASK_META_BYTES = 64 * 1024
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # `utc_now()` is the only producer of a run's `at` stamp and has only ever
 # emitted this shape. Pinning it keeps a free-form string out of the rendered
@@ -1476,7 +1478,7 @@ def git(cwd: Path, *arguments: str, timeout: float = 60) -> str:
     return result.stdout.strip()
 
 
-def parse_meta(path: Path) -> dict[str, str] | None:
+def parse_meta(path: Path, task_id: str, url: str) -> dict[str, str] | None:
     """Report task metadata presence without reading author declarations.
 
     Existing task metadata still distinguishes a managed task from a new
@@ -1485,12 +1487,62 @@ def parse_meta(path: Path) -> dict[str, str] | None:
     """
 
     try:
-        path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
     except FileNotFoundError:
         return None
     except OSError as exc:
         fail(f"task metadata inspection failed at {path}: {exc}")
-    return {}
+    try:
+        metadata_stat = os.fstat(descriptor)
+        require(
+            stat.S_ISREG(metadata_stat.st_mode),
+            f"task metadata is not a regular file at {path}",
+        )
+        raw = os.read(descriptor, MAX_TASK_META_BYTES + 1)
+    except OSError as exc:
+        fail(f"task metadata inspection failed at {path}: {exc}")
+    finally:
+        os.close(descriptor)
+    require(
+        len(raw) <= MAX_TASK_META_BYTES,
+        f"task metadata exceeds the {MAX_TASK_META_BYTES}-byte limit at {path}",
+    )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"task metadata is not UTF-8 at {path}: byte {exc.start}")
+
+    reserved: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.startswith("crosscheck_"):
+            continue
+        key, separator, value = line.partition("=")
+        require(separator == "=", f"malformed Crosscheck task metadata at {path}")
+        require(key not in reserved, f"duplicate {key} in task metadata at {path}")
+        reserved[key] = value
+    if not reserved:
+        return {}
+    expected = {
+        "crosscheck_schema": CROSSCHECK_TASK_META_SCHEMA,
+        "crosscheck_task_id": task_id,
+        "crosscheck_pull_request": url,
+    }
+    require(
+        reserved == expected,
+        f"Crosscheck task metadata identity mismatch at {path}",
+    )
+    return reserved
+
+
+def render_crosscheck_task_meta(task_id: str, url: str) -> str:
+    return (
+        f"crosscheck_schema={CROSSCHECK_TASK_META_SCHEMA}\n"
+        f"crosscheck_task_id={task_id}\n"
+        f"crosscheck_pull_request={url}\n"
+    )
 
 
 def require_new_task_if_meta_missing(
@@ -6987,7 +7039,7 @@ def run_crosscheck(
     report_path = data / task_id / "crosscheck.md"
     with timer.phase("snapshot"):
         try:
-            meta = parse_meta(meta_path)
+            meta = parse_meta(meta_path, task_id, url)
             require_new_task_if_meta_missing(
                 meta,
                 state,
@@ -7008,6 +7060,19 @@ def run_crosscheck(
                 "registered PR head changed before Crosscheck launch: expected "
                 f"{expected_head}, observed {snapshot_value['head_sha']}"
             )
+        if meta is None:
+            try:
+                atomic_write(
+                    meta_path,
+                    render_crosscheck_task_meta(task_id, url),
+                )
+            except OSError as exc:
+                tool_fail(f"Crosscheck task metadata creation failed at {meta_path}: {exc}")
+            meta = {
+                "crosscheck_schema": CROSSCHECK_TASK_META_SCHEMA,
+                "crosscheck_task_id": task_id,
+                "crosscheck_pull_request": url,
+            }
     with timer.phase("ledger"):
         try:
             ledger = load_ledger(ledger_path, task_id, url)
