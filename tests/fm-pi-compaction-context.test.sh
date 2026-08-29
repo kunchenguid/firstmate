@@ -244,7 +244,8 @@ make_project() {  # <name> <digest-bytes> <auto:on|off>
   printf '%s\n' 'AGENTS_MARKER=initial' > "$project/AGENTS.md"
   printf '%s\n' "$digest_bytes" > "$home/state/.test-digest-bytes"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$project/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-operational-input.sh" "$project/bin/"
   cat > "$project/bin/fm-sessionstart-run.sh" <<SH
 #!/usr/bin/env bash
@@ -344,7 +345,7 @@ sleep 1
 send_line auto AUTO_NEXT
 wait_for_text auto AUTO_NEXT_OK || fail "auto: next normal prompt did not succeed"
 [ "$(normal_count)" -eq 2 ] || fail "auto: unexpected number of normal provider requests after the next prompt"
-auto_compactions=$(grep -Fxc -- '--source compact' "$auto_home/state/.test-sessionstart-sources" || true)
+auto_compactions=$(grep -Fc -- '--source compact --pi-prerequisite' "$auto_home/state/.test-sessionstart-sources" || true)
 [ "$auto_compactions" -eq 1 ] || fail "auto: expected one compact event, observed $auto_compactions"
 [ "$(last_normal_field current_instructions)" = true ] || fail "auto: next prompt did not receive current AGENTS.md instructions"
 [ "$(last_normal_field truncated_refresh)" = true ] || fail "auto: large digest was not bounded with model-readable omission accounting"

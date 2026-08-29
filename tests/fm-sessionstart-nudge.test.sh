@@ -527,9 +527,11 @@ const state = `${process.env.FM_HOME}/state`;
 const runner = `${process.env.FM_HOME}/bin/fm-sessionstart-run.sh`;
 const handlers = new Map();
 const sent = [];
+const entries = [];
 const pi = {
   on(event, handler) { handlers.set(event, handler); },
   sendMessage(message) { sent.push(message); },
+  appendEntry(customType, data) { entries.push({ customType, data }); },
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?generation=${Date.now()}`);
 extension.default(pi);
@@ -717,12 +719,14 @@ assert(truncatedResult?.message?.content.includes("TRUNCATION_PREFIX_14"), "trun
 assert(truncatedResult.message.content.includes("PI SESSION-START DELIVERY TRUNCATED"), "truncated digest was not loud");
 assert(!truncatedResult.message.content.includes("TRUNCATION_SUFFIX_14"), "truncated digest exceeded its bound");
 
-// Compaction keeps its supported asynchronous transport for retry-without-
-// preflight, but it shares the same generation cancellation and exactly-once claim.
+// Compaction shares the same generation cancellation and exactly-once claim as
+// startup, but never delivers through sendMessage or before_agent_start: it
+// stores a durable refresh entry that the context hook injects later instead.
 plan(15, "success");
 const compactContext = ctx("session-truncated");
 await handlers.get("session_compact")({}, compactContext);
-assert(sent.length === 1 && sent[0].content.includes("GENERATION_DIGEST_15"),
+assert(sent.length === 0, "compaction used sendMessage instead of a durable refresh entry");
+assert(entries.length === 1 && entries[0].data.raw.includes("GENERATION_DIGEST_15"),
   "compaction lost its existing persistent delivery");
 assert((await handlers.get("before_agent_start")({ prompt: "post compact" }, compactContext)) === undefined,
   "compaction delivered the same context twice");
@@ -735,7 +739,8 @@ const compactPid = pidFor(16);
 const compactGrandchild = grandchildFor(16);
 await handlers.get("session_shutdown")({ reason: "quit" }, compactContext);
 await compactPending;
-assert(sent.length === 1, "cancelled compaction delivered stale context");
+assert(sent.length === 0, "cancelled compaction used sendMessage");
+assert(entries.length === 1, "cancelled compaction delivered stale context");
 await waitDead(compactPid, "shutdown left the compaction child alive");
 await waitDead(compactGrandchild, "shutdown left a compaction grandchild alive");
 JS
