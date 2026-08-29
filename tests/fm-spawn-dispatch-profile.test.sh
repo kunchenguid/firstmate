@@ -556,17 +556,41 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
 
+test_cursor_accepts_parameterized_auto_from_plain_auto_catalog() {
+  local optimize_for model rec id out status launch
+
+  for optimize_for in balanced cost intelligence; do
+    model="auto-smart[optimize_for=$optimize_for]"
+    id="profile-cursor-auto-$optimize_for"
+    rec=$(make_spawn_case "$id" cursor "$id")
+    read_case_record "$rec"
+
+    FM_TEST_CURSOR_MODELS='Available models\nauto - Auto' \
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+        --model "$model")
+    status=$?
+    expect_code 0 "$status" "cursor spawn should accept the $optimize_for auto optimization"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "--model '$model'" \
+      "cursor launch did not preserve the $optimize_for auto optimization"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" cursor "$model" default
+  done
+
+  pass "cursor accepts every supported auto optimization from its plain auto catalog entry"
+}
+
 test_cursor_refuses_model_absent_from_live_catalog() {
   local rec id out status
   id=profile-cursor-unsupported-z6d
   rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model cursor-grok-4.5)
+  FM_TEST_CURSOR_MODELS='Available models\nauto - Auto' \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model cursor-junk-model)
   status=$?
   expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
-  assert_contains "$out" "Cursor model 'cursor-grok-4.5' is not available" \
+  assert_contains "$out" "Cursor model 'cursor-junk-model' is not available" \
     "cursor model refusal did not identify the unavailable model"
   assert_contains "$out" "--list-models" \
     "cursor model refusal did not tell the caller how to find valid ids"
@@ -844,6 +868,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_accepts_parameterized_auto_from_plain_auto_catalog
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
