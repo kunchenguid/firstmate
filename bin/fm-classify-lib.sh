@@ -12,14 +12,20 @@
 # FM_CAPTAIN_RE override. Consumers layer their own dedup/marker state on top (the
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
-# A successful span classification reports every actionable event through its
-# captured endpoint, while a failed classification reports no committable endpoint.
-# An absent status file is a successful empty span, while an existing status object
-# that cannot be read or identified is a classification failure.
-# A presentation marker stores both the last reported file signature and the last
-# successfully classified position.
+# Status-span classification captures one file endpoint and reports every
+# actionable event through that endpoint before the endpoint may be committed.
+# An absent status file is a successful empty span, while an existing status
+# object that cannot be read or identified is a classification failure with no
+# committable endpoint.
+# A presentation marker independently stores the last reported file signature
+# and the last successfully classified position.
+# Successful classification advances both facts through the captured endpoint;
+# after a failure is reported, only the reported signature advances, so the same
+# observed state alarms once while every unclassified byte remains for recovery.
 # The reported signature includes path type, mode, symlink target, and observable
-# failure kind, while failed reads leave every unclassified byte for recovery.
+# failure kind, so a readability change is a new state that triggers another read.
+# A missing, malformed, identity-mismatched, or past-end classified position reads
+# from byte 0, preferring a bounded duplicate over a lost event.
 #
 # There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
@@ -1413,35 +1419,24 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
-# Print the FIRST still-live captain-relevant event in the bytes of an append-only
-# status log at or after <start-offset>, and return 0; return 1 when the span
-# carries none, or return 2 when the classification snapshot cannot be read.
+# Capture the bytes of an append-only status log at or after <start-offset> under
+# one size-and-identity snapshot.
+# The record form prints `<endpoint>\t<identity>\t<events>` and returns 0 when
+# the span has actionable events, joining every such event in source order with
+# ` ; ` so callers report the complete captured span before committing it.
+# It returns 1 after a successful classification with no actionable event; an
+# existing log still prints its committable endpoint and identity, while an absent
+# log is the ordinary empty case and prints no record.
+# It returns 2 with no committable endpoint when an existing status object cannot
+# be classified.
+# The simpler wrapper prints only the event field, and the predicate discards the
+# record; all three inherit the library-header contract above.
 #
-# This is the read model every supervisor's per-wake classification must use.
-# Asking "is the LAST line captain-relevant?" cannot answer "did an actionable
-# event arrive?" over an append-only EVENT log: one later routine append - a
-# `working:` progress note landing while a supervisor lingers its signal grace
-# window - moves the last line past a `needs-decision`, `blocked`, `failed`, or
-# `done` event that nothing else will ever re-read, and the event is classified
-# routine and absorbed. status_open_decisions above already fixed exactly that
-# masking for the durable decision fold; this is the same correction for the
-# classification path, so a decision, blocker, or finish cannot go silent.
-#
-# <start-offset> is the position the CALLER has already classified. Each
-# supervisor owns its own position record (bin/fm-watch.sh reads the size in its
-# .seen-* signature, bin/fm-supervise-daemon.sh its .subsuper-seen-status-<task>
-# marker) because the always-on watcher and the away-mode daemon classify the
-# same stream independently and must not consume one shared cursor. An offset of
-# 0, a malformed offset, or an offset past the current size reads the whole file,
-# so a truncated, replaced, or never-classified log surfaces its events rather
-# than losing them.
-#
-# A `needs-decision`/`blocked` event in the span is skipped only when the fold
-# over the WHOLE file proves its key is no longer open - the worker self-closed
-# it, or the answering firstmate closed it at answer time. status_open_decisions
-# is the single owner of that open/closed rule, including its same-key reopening
-# behavior, so this never re-derives it. Every other captain-relevant event
-# (`done`, `failed`, a legacy bare line) is terminal and always actionable.
+# A `needs-decision` or `blocked` event is included only when the whole-file fold
+# still names that exact opening as live.
+# status_open_decisions is the single owner of the open/closed rule, including
+# same-key reopening and reserved-key handling.
+# Every other captain-relevant event is terminal and always actionable.
 _fm_decision_origin_drop() {  # <origins> <key>
   local origin
   while IFS= read -r origin; do

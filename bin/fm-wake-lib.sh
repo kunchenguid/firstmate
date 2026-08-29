@@ -1516,14 +1516,13 @@ fm_wake_print_deduped() {
 #
 # The watcher's per-file signal scan (bin/fm-watch.sh scan_signals) detects a
 # status or turn-ended change by comparing a file signature against a persisted
-# state/.seen-* marker, and advances that marker only after the change has been
-# surfaced to firstmate or deliberately absorbed by the signal triage.
-# Status markers independently retain the last reported signature and the last
-# classified position, while turn-ended markers retain their legacy signature.
-# These helpers plus the guarded append below are the ONE owner of that marker
-# behavior, shared by the scan, drain-time staleness checks, and bookkeeping writers.
+# state/.seen-* marker.
+# fm-classify-lib.sh's header owns the status marker contract, including its
+# independent reported signature and classified position.
+# These helpers own wake-facing marker routing, the legacy turn-ended signature,
+# drain-time staleness checks, and guarded bookkeeping writes.
 
-fm_wake_signal_sig() {  # <file> -> "size:mtime"
+fm_wake_signal_sig() {  # <file> -> reported-state signature
   case "$1" in
     *.status)
       status_observed_signature "$1"
@@ -1563,10 +1562,12 @@ fm_wake_signal_seen_size() {  # <state> <file>
   esac
 }
 
-# 0 when <file>'s current signature exactly matches its recorded seen marker,
-# meaning every byte in it was already surfaced or deliberately absorbed.
-# A missing marker or unreadable signature is NOT a match, so uncertainty reads
-# as "unannounced bytes present".
+# 0 when <file>'s current signature matches its recorded reported state.
+# For a status file this means the current state was already reported, not that
+# every byte was successfully classified; the separate classified position owns
+# that fact.
+# A missing marker or unreadable signature is not a match, so uncertainty reads
+# as an unreported state.
 fm_wake_signal_seen_current() {  # <state> <file>
   local sig marker
   sig=$(fm_wake_signal_sig "$2") || return 1

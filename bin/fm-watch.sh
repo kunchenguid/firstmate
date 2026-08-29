@@ -13,7 +13,7 @@
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
-#                          has a captain-relevant verb OR a no-verb signal's crew
+#                          span has a captain-relevant event OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
@@ -155,10 +155,9 @@ if [ "$(uname)" = Darwin ]; then
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
-# The size:mtime signal signature and .seen-* marker format are owned by
-# bin/fm-wake-lib.sh (fm_wake_signal_sig, fm_wake_signal_seen_path), shared
-# with the drain's annotation staleness check and this home's own bookkeeping
-# writers' guarded self-announced append.
+# bin/fm-classify-lib.sh owns status reported-state signatures and presentation
+# markers, while bin/fm-wake-lib.sh owns their wake-facing routing, the legacy
+# turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
@@ -792,14 +791,16 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
-# Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
-# compared against a persisted size:mtime signature (.seen-*) rather than
-# mtime-vs-a-startup-touch, so signals that land while no watcher is running
-# are caught by the next one, and same-second writes cannot slip through a
-# strict -nt comparison. Pure read: prints one "<seen-file>\t<sig>\t<file>"
-# line per changed file. .seen-* is updated only after the wake is either
-# surfaced or intentionally absorbed, so a watcher killed mid-cycle never
-# swallows a signal.
+# Layer 2 + 3 signal scan: status files and turn-end markers.
+# Each file is compared against its persisted reported signature in .seen-* rather
+# than mtime-vs-a-startup-touch, so signals that land while no watcher is running
+# are caught by the next one and same-second writes cannot slip through a strict
+# -nt comparison.
+# Status signatures include observable file and readability state, while turn-end
+# markers retain their size-and-mtime signature.
+# Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
+# The caller records reported state only after surfacing or intentional absorption,
+# and commits a status classification position only after a successful span read.
 scan_signals() {
   local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
@@ -948,10 +949,10 @@ run_check_capture() {
 }
 
 # 0 when any signaled status file carries a captain-relevant event in the bytes
-# appended since this watcher last classified it. The start offset is the size in
-# that file's own .seen-* signature (bin/fm-wake-lib.sh owns that format), and
-# fm-classify-lib.sh's status_span_has_actionable owns what counts as actionable
-# in the span. Reading the SPAN rather than the last line is what stops a later
+# appended since this watcher last classified it. The start offset is the
+# classified-position field in that file's .seen-* marker, and fm-classify-lib.sh's
+# status-span contract owns both that format and what counts as actionable in
+# the span. Reading the SPAN rather than the last line is what stops a later
 # routine append - a `working:` note landing inside SIGNAL_GRACE below - from
 # hiding the `needs-decision`, `blocked`, `failed`, or `done` event that arrived
 # just before it: the .seen-* marker advances either way, so an event absorbed

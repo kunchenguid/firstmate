@@ -113,8 +113,8 @@ _hb_surfaced_path() {
 }
 
 # The byte offset in <task>'s status log that the heartbeat backstop has already
-# surfaced to firstmate, or 0 when it never has. A POSITION rather than the
-# surfaced line: the backstop exists to catch an event the per-wake path missed,
+# classified, or 0 when it has no usable position. A position rather than an
+# event line lets the backstop catch an event the per-wake path missed,
 # and comparing the last line cannot see an event a later routine append moved
 # past - exactly the masking fm-classify-lib.sh's span read exists to stop. An
 # absent or malformed marker (including one an older watcher wrote as a status
@@ -124,8 +124,7 @@ hb_surfaced_offset() {  # <task>
   status_presentation_marker_offset "$(_hb_surfaced_path "$1")" "$STATE/$1.status"
 }
 
-# Record a status log as surfaced through the captured classification endpoint
-# after its durable wake has been enqueued.
+# Record a status log as successfully classified through the captured endpoint.
 mark_surfaced() {  # <status-file> <captured-end-offset> <captured-identity>
   local f=$1 task
   case "$f" in *.status) ;; *) return 0 ;; esac

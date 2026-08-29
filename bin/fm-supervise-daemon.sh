@@ -168,7 +168,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_DAEMON_DIR/fm-operational-input.sh"
 
 # Shared wake classifier (last_status_line, status_is_captain_relevant,
-# window_to_task, status_span_first_actionable). The SAME library backs the
+# window_to_task, and the status-span reader). The SAME library backs the
 # always-on watcher's triage, so the captain-relevant verb set and the
 # classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
@@ -208,7 +208,7 @@ WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
 # The captain-relevant verb set and the status classifiers (last_status_line,
-# status_is_captain_relevant, window_to_task, status_span_first_actionable) now
+# status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
 # Composer-empty detection, submit acknowledgement, and the harness-scoped
 # supervisor-pane busy guard live in bin/fm-tmux-lib.sh.
@@ -331,8 +331,8 @@ _collapse_newlines() {  # <text>
 # pass the captain pane in as FM_SUPERVISOR_TARGET.
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
-# last_status_line, status_is_captain_relevant, window_to_task, and
-# status_span_first_actionable come from bin/fm-classify-lib.sh (sourced above),
+# last_status_line, status_is_captain_relevant, window_to_task, and the
+# status-span reader come from bin/fm-classify-lib.sh (sourced above),
 # the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
 # and dedup state below layer the daemon's escalation-digest concerns on top.
 #
@@ -564,25 +564,18 @@ _seen_status_path() {  # <state> <task>
   status_daemon_seen_marker_path "$1" "$2"
 }
 
-# The byte offset in <task>'s status log up to which this daemon has already
-# escalated, or 0 when it never has. A POSITION rather than the escalated line,
-# because a status log is an append-only event stream: comparing the last line
-# both re-reads events that a later routine append has already moved past - the
-# masked-decision failure fm-classify-lib.sh's status_span_has_actionable exists
-# to stop - and silently swallows a genuinely new event whose text happens to
-# repeat an old one. An absent or malformed marker reads 0, so the whole log is
-# classified and an escalation is never lost to unreadable dedup state. A marker
-# written by an older daemon holds a status line rather than a number and reads
-# 0 the same way: the events it covered are re-offered to the captain once,
-# which is the safe direction on the very boundary this fix protects.
+# The byte offset in <task>'s status log through which this daemon has
+# successfully classified content, or 0 when it has no usable position.
+# A position rather than an event line prevents both a later routine append from
+# hiding earlier events and repeated event text from suppressing a new occurrence.
+# An absent, malformed, identity-mismatched, or legacy marker reads 0, so the
+# whole log is classified and uncertainty prefers a duplicate over event loss.
 status_seen_offset() {  # <state> <task>
   status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status"
 }
 
-# Advance <task>'s escalated-through offset to the end of its status log, so the
-# heartbeat catch-all scan does not re-fire the events just escalated. The single
-# source of truth for the .subsuper-seen-status-<task> dedup state: called from
-# both the per-wake escalate path and the catch-all scan.
+# Commit <task>'s successfully classified endpoint, so the heartbeat catch-all
+# scan does not re-read events already handled by the per-wake or scan path.
 mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
   status_presentation_marker_commit "$(_seen_status_path "$1" "$2")" \
     "$1/$2.status" "$3" "$4"
@@ -1142,7 +1135,7 @@ housekeeping() {  # <state>
   #     every log rather than only those whose LAST line looks captain-relevant,
   #     because the event this backstop most needs to catch is precisely one a
   #     later routine append has already moved past; fm-classify-lib.sh's span
-  #     read decides relevance, and the escalated-through offset is the dedup.
+  #     read decides relevance, and the classified-through offset is the dedup.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
     local event record rest endpoint ident rc
