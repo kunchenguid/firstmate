@@ -1166,7 +1166,7 @@ test_teardown_still_refuses_a_task_authored_local_env_file() {
   expect_code 0 "$status" "spawn should seed the slot before the task rewrites the file"
   land_task_branch_without_the_ignore_rule "$id"
   # The task then wrote its own content over the seeded copy, so it is real work.
-  : > "$POOL_DIR/.env.local"
+  printf 'task-authored change\n' > "$POOL_DIR/.env.local"
 
   out=$(run_teardown "$id")
   status=$?
