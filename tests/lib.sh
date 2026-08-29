@@ -34,6 +34,13 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep spawn tests independent of the CI host's load. Capacity's own tests
+# override these per case. A live probe runs only when these are unset.
+export FM_CAPACITY_NPROC="${FM_CAPACITY_NPROC:-16}"
+export FM_CAPACITY_MEM_AVAIL_MB="${FM_CAPACITY_MEM_AVAIL_MB:-24576}"
+export FM_CAPACITY_LOAD1="${FM_CAPACITY_LOAD1:-0.4}"
+export FM_CAPACITY_SKIP_REMOTE="${FM_CAPACITY_SKIP_REMOTE:-1}"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
