@@ -1221,8 +1221,14 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
     "persistent-index-lock: teardown removed a non-stale lock"
   [ -e "$lock" ] || fail "persistent-index-lock: lock file was removed"
-  [ -f "$case_dir/state/task-x1.meta" ] \
-    || fail "persistent-index-lock: teardown completed despite persistent lock"
+  [ -d "$case_dir/wt" ] || fail "persistent-index-lock: failed return removed the worktree"
+  # Provider return is after metadata retirement on purpose: a leaked reservation
+  # is recoverable, while releasing first can let another live task inherit the
+  # worktree. The lock refusal must still abort the return.
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "persistent-index-lock: provider return must run only after task metadata retires"
+  assert_grep "treehouse return failed" "$case_dir/stderr" \
+    "persistent-index-lock: teardown did not abort on the failed return"
   pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
 }
 

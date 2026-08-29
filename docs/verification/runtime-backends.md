@@ -922,7 +922,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 
 A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` on a real cursor worker and driven to completion:
 
-1. the launch delivered its brief positionally and the agent executed it;
+1. the launch delivered its positional prompt and the agent executed it;
 2. `state/<id>.cursor-session` was written with the task worktree;
 3. the transcript fold read `busy` mid-turn and `idle` after it;
 4. `bin/fm-send.sh` delivered a steer through the then-current typed path and exited 0;

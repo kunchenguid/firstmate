@@ -867,7 +867,7 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
 }
 
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
-  local dir state data config home project fb out status child_title
+  local dir state data config home project fb out status child_title parent_title
   dir="$TMP_ROOT/teardown-zellij-secondmate-child"; state="$dir/state"; data="$dir/data"; config="$dir/config"; home="$dir/secondmate-home"; project="$dir/project"
   mkdir -p "$state" "$data" "$config" "$home/state" "$home/data" "$home/config" "$home/projects" "$project" "$dir/responses"
   printf 'smz\n' > "$home/.fm-secondmate-home"
@@ -894,9 +894,18 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
     "project=$project" \
     "kind=scout"
   child_title=$(zellij_expected_scoped_title fm-childz "$home" "$home")
+  parent_title=$(zellij_expected_scoped_title fm-smz)
   zellij_pane_response "$dir" 1 7 4
   zellij_tab_response "$dir" 2 4 "$child_title"
   printf '[]\n' > "$dir/responses/3.out"
+  # Teardown now confirms structural absence from list-tabs --json. Empty
+  # stdout is unreadable, not missing, so each post-close inventory must be a
+  # valid empty array. Calls 5-8 are the parent tab's matching close+confirm.
+  printf '[]\n' > "$dir/responses/4.out"
+  zellij_pane_response "$dir" 5 99 99
+  zellij_tab_response "$dir" 6 99 "$parent_title"
+  printf '[]\n' > "$dir/responses/7.out"
+  printf '[]\n' > "$dir/responses/8.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ROOT_OVERRIDE="$ROOT" \

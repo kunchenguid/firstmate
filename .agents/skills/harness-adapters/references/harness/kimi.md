@@ -22,8 +22,8 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
 
 ## Readiness-gated start
 
-`../../../bin/fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
-This launch-then-send shape is mandatory because Kimi rejects positional instructions as an unknown command.
+`../../../bin/fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, types the shared launch pointer after that readiness gate, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+This launch-then-send shape is mandatory because Kimi rejects a positional prompt as an unknown command.
 The path must be absolute because the instructions live outside the task worktree and Kimi reads them there without `--add-dir`.
 
 Sending before readiness was reproduced as a silent drop with zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.

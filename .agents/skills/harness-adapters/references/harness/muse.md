@@ -8,7 +8,7 @@ The router owns Muse's task-kind boundary.
 | Fact | Value |
 |---|---|
 | Binary | Absolute `muse` from `PATH`, refused if absent; launcher `~/.local/bin/muse` execs versioned `muse-bin-<version>`, so live process name changes on update. |
-| Launch | Positional instructions, like Grok or Pi. |
+| Launch | Positional prompt, like Grok or Pi; `../../../bin/fm-spawn.sh` owns the pointer-shaped template. |
 | Models | `--model <model>`; only provider `meta`. |
 | Busy | Durable session event log folded by `../../../bin/fm-busy-lib.sh`; no hook or plugin writer, arming, or seeded busy record. |
 | Exit | `/exit`, one Enter; prints `To continue this session, run muse resume <session-uuid>`. |

@@ -26,7 +26,7 @@ The observed signed process tree has an exact `pi-signed` wrapper parent with th
 The installed plain `pi` command also execs that signed launcher.
 The router's Detection section owns how launch markers and ancestry select between the identities.
 
-Keep the instructions as one positional argument.
+Keep the launch pointer as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
 A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree.
