@@ -238,6 +238,66 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+# The delivery contract only protects a worker that actually receives it. A promoted
+# scout used to get a free-form hint instead of the mode-specific Definition of done,
+# so it never saw the ask-user escalation rule or the --yes ban that every briefed
+# worker gets. This drives the real promotion path, then runs the delivery command it
+# prints against a capturing fm-send.sh, and asserts on the message the worker would
+# actually receive - for every supported mode.
+test_promotion_delivers_the_real_definition_of_done() {
+  local home meta out sendroot payload mode id
+  home="$TMP_ROOT/promote-dod/home"
+  sendroot="$TMP_ROOT/promote-dod/sendroot"
+  mkdir -p "$home/state" "$sendroot/bin"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+# Capture the message a promoted worker would receive, instead of steering one.
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    meta="$home/state/$id.meta"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
+      || fail "$mode: promotion should succeed"
+
+    payload="$TMP_ROOT/promote-dod/payload-$id"
+    # Run the delivery command promotion printed, so the assertions below are made
+    # against the message the worker receives rather than the script's own text.
+    ( cd "$sendroot" \
+      && FM_TEST_CAPTURE="$payload" \
+         eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+      || fail "$mode: promotion's delivery command did not run"
+    assert_present "$payload" "$mode: promotion delivered no message to the worker"
+
+    grep -qx "Delivery contract: mode=$mode" "$payload" \
+      || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
+    assert_grep "# Definition of done" "$payload" \
+      "$mode: promoted worker did not receive a Definition of done"
+    assert_grep "git checkout -b fm/$id" "$payload" \
+      "$mode: promoted worker was not told to leave the scratch base for its ship branch"
+  done
+
+  payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
+  assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
+    "promoted no-mistakes worker did not receive the ask-user escalation rule"
+  assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
+    "promoted no-mistakes worker did not receive the --yes prohibition"
+  assert_grep "It is banned fleet-wide" "$payload" \
+    "promoted no-mistakes worker did not receive the fleet-wide ban wording"
+
+  # The faster paths keep their own contracts rather than inheriting the pipeline's.
+  assert_grep "Do NOT run /no-mistakes" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
+    "promoted direct-PR worker lost its no-pipeline contract"
+  assert_grep "Do NOT push, do NOT open a PR, do NOT merge" "$TMP_ROOT/promote-dod/payload-promote-dod-local-only" \
+    "promoted local-only worker lost its no-remote contract"
+  assert_no_grep "no-mistakes axi respond" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
+    "promoted direct-PR worker received the pipeline gate contract"
+  pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -278,5 +338,6 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"
