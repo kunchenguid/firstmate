@@ -1432,10 +1432,12 @@ window_to_task() {
 # The simpler wrapper prints only the event field, and the predicate discards the
 # record; all three inherit the library-header contract above.
 #
-# A `needs-decision` or `blocked` event is included only when the whole-file fold
-# still names that exact opening as live.
-# status_open_decisions is the single owner of the open/closed rule, including
-# same-key reopening and reserved-key handling.
+# A keyed `needs-decision` or `blocked` transition accepted by the whole-file
+# fold is included only when that fold still names the exact opening as live.
+# A transition rejected by the reserved-key vocabulary is surfaced instead as a
+# reconciliation signal and never treated here as an open decision.
+# status_open_decisions remains the single owner of open/closed semantics,
+# including same-key reopening and reserved-key handling.
 # Every other captain-relevant event is terminal and always actionable.
 _fm_decision_origin_drop() {  # <origins> <key>
   local origin
