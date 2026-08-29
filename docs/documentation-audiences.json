@@ -105,6 +105,14 @@
     {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
+    },
+    {
+      "source": "docs/configuration.md",
+      "target": "docs/verification/pi-custom-providers.md"
+    },
+    {
+      "source": ".agents/skills/harness-adapters/SKILL.md",
+      "target": "docs/verification/pi-custom-providers.md"
     }
   ],
   "surfaces": [
@@ -358,6 +366,10 @@
     },
     {
       "path": "docs/verification/muse.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/pi-custom-providers.md",
       "audience": "maintainer-verification"
     },
     {
