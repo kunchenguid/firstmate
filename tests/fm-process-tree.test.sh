@@ -95,6 +95,18 @@ assert_group_absent() {
   [ -z "$members" ] || fail "$label left process group $group behind: $members"
 }
 
+wait_for_group_absent() {
+  local group=$1 label=$2 count=0
+  while [ "$count" -lt 400 ]; do
+    if ! "$REAL_PS" -axo pgid= | awk -v group="$group" '$1 == group { found = 1 } END { exit found ? 0 : 1 }'; then
+      return 0
+    fi
+    sleep 0.01
+    count=$((count + 1))
+  done
+  assert_group_absent "$group" "$label"
+}
+
 assert_no_runner_channels() {
   local case_dir=$1 count
   count=$(find "$case_dir" -type f -name 'fm-process-tree-*' | wc -l | tr -d '[:space:]')
@@ -141,6 +153,9 @@ set -eu
 if [ "$*" = '-axo pid=,pgid=' ]; then
   group=$(cat "$FM_PROCESS_TREE_GUARD_FILE")
   printf '%s %s\n' "$group" "$group"
+  # A scanner launched by the anchor temporarily shares its group and must not
+  # make a genuinely childless anchor look live forever.
+  printf '%s %s\n' "$$" "$group"
   printf '%s\n' "$$" > "$FM_PROCESS_TREE_PS_PID_FILE"
   : > "$FM_PROCESS_TREE_PS_ENTERED_FILE"
   while [ ! -e "$FM_PROCESS_TREE_PS_RELEASE_FILE" ]; do
@@ -237,6 +252,71 @@ test_signal_after_command_reap_does_not_hang() {
   pass "a signal after command reap exits promptly with verified cleanup"
 }
 
+write_live_command_fixture() {
+  local fixture=$TMP/live-command-fixture.sh
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$1
+case_dir=$2
+export TMPDIR=$case_dir
+export FM_PROCESS_TREE_GUARD_FILE=$case_dir/process-group.guard
+# shellcheck source=bin/fm-process-tree-lib.sh
+. "$root/bin/fm-process-tree-lib.sh"
+status=0
+fm_run_bounded 30 perl -MPOSIX=getpgrp -e '
+  $SIG{TERM} = "IGNORE";
+  open my $file, ">", $ARGV[0] or exit 90;
+  print {$file} "$$ ", getpgrp(), "\n";
+  close $file;
+  select undef, undef, undef, 30;
+' "$case_dir/command.pid" || status=$?
+printf '%s\t%s\n' "$status" "$FM_PROCESS_TREE_CLEANUP_STATUS" > "$case_dir/outcome"
+SH
+  chmod +x "$fixture"
+  printf '%s\n' "$fixture"
+}
+
+test_controller_loss_cleans_live_owned_group() {
+  local case_dir=$TMP/controller-loss-live fixture anchor controller caller record command group controller_parent
+  mkdir -p "$case_dir"
+  fixture=$(write_live_command_fixture)
+  ACTIVE_CASE=$case_dir
+  "$fixture" "$ROOT" "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  ACTIVE_CALLER=$!
+  wait_for_file "$case_dir/process-group.guard" "$ACTIVE_CALLER"
+  wait_for_file "$case_dir/command.pid" "$ACTIVE_CALLER"
+  anchor=$(cat "$case_dir/process-group.guard")
+  ACTIVE_ANCHOR=$anchor
+  record=$(cat "$case_dir/command.pid")
+  command=${record%% *}
+  group=${record#* }
+  ACTIVE_COMMAND=$command
+  controller=$("$REAL_PS" -o ppid= -p "$anchor" | tr -d '[:space:]')
+  ACTIVE_CONTROLLER=$controller
+  controller_parent=$("$REAL_PS" -o ppid= -p "$controller" | tr -d '[:space:]')
+  caller=$ACTIVE_CALLER
+  [ "$controller_parent" = "$caller" ] \
+    || fail "live fixture controller $controller is not owned by caller $caller"
+  [ "$group" = "$anchor" ] \
+    || fail "live fixture command $command is not in anchored group $anchor: group=$group"
+
+  # This is the fleet-sync teardown failure in miniature: an outer owner can
+  # disappear while the bounded command ignores TERM. The anchor must notice
+  # finish-pipe EOF and finish cleaning its exact group without ambient scans.
+  kill -KILL "$controller"
+  ACTIVE_CONTROLLER=
+  wait_for_exact_exit "$caller" "controller-loss bounded caller"
+  wait "$caller" 2>/dev/null || true
+  ACTIVE_CALLER=
+  wait_for_group_absent "$anchor" "controller-loss cleanup"
+  ACTIVE_ANCHOR=
+  ACTIVE_COMMAND=
+  assert_no_runner_channels "$case_dir"
+  clear_active_fixture
+  pass "controller loss cleans the exact live TERM-resistant process group"
+}
+
 test_real_bounded_path_preserves_status_and_cleans_live_commands() {
   local status=0 case_dir=$TMP/end-to-end command_pid group record
   mkdir -p "$case_dir"
@@ -272,5 +352,6 @@ test_real_bounded_path_preserves_status_and_cleans_live_commands() {
 
 test_finish_pipe_eof_exits_exact_orphaned_anchor
 test_signal_after_command_reap_does_not_hang
+test_controller_loss_cleans_live_owned_group
 test_real_bounded_path_preserves_status_and_cleans_live_commands
 printf 'fm-process-tree tests passed\n'

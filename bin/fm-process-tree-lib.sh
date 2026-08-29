@@ -2,8 +2,8 @@
 # Shared bounded command runner for operations whose descendants must be
 # terminated and reaped before the caller releases lifecycle or Git locks.
 # Usage: fm_run_bounded <positive-seconds> <command> [args...]
-# After command reap, controller-pipe EOF releases the anchor unless an
-# unverified cleanup explicitly retains it as the guarded group identity.
+# Controller-pipe EOF makes the anchor clean its remaining owned group; after
+# command reap, a childless anchor exits unless unverified cleanup retains it.
 # After every call, FM_PROCESS_TREE_CLEANUP_STATUS is verified, unverified, or
 # not-started, while the function return preserves the wrapped command status.
 
@@ -50,7 +50,7 @@ fm_run_bounded() {
     return "$FM_PROCESS_TREE_SETUP_FAILURE_STATUS"
   }
   # shellcheck disable=SC2016
-  if FM_PROCESS_TREE_RESULT_FILE=$result_file perl -MPOSIX=:sys_wait_h -MErrno=EINTR -e '
+  if FM_PROCESS_TREE_RESULT_FILE=$result_file perl -MPOSIX=:sys_wait_h -MErrno=EINTR -MIO::Select -e '
     sub record_cleanup {
       my ($state) = @_;
       my $path = $ENV{FM_PROCESS_TREE_RESULT_FILE} || return;
@@ -61,10 +61,11 @@ fm_run_bounded() {
     sub group_members {
       my ($group) = @_;
       my @members;
-      open my $ps, "-|", "ps", "-axo", "pid=,pgid=" or return;
+      my $scanner = open my $ps, "-|", "ps", "-axo", "pid=,pgid=" or return;
       while (<$ps>) {
         my ($pid, $pgid) = /^\s*(\d+)\s+(\d+)\s*$/;
-        push @members, $pid if defined $pgid && $pgid == $group;
+        push @members, $pid
+          if defined $pgid && $pgid == $group && $pid != $scanner;
       }
       close $ps or return;
       return \@members;
@@ -126,6 +127,37 @@ fm_run_bounded() {
     sub shell_status {
       my ($status) = @_;
       return ($status & 127) ? 128 + ($status & 127) : $status >> 8;
+    }
+    sub retain_anchor {
+      my ($finish_read) = @_;
+      close $finish_read;
+      while (1) { select undef, undef, undef, 1 }
+    }
+    sub cleanup_after_controller_eof {
+      my ($group, $anchor, $command, $finish_read) = @_;
+      my $members = anchored_members($group, $anchor);
+      if (!defined $members) {
+        print STDERR "error: bounded command controller disappeared and owned cleanup could not be verified for anchored group $group; retaining its guard and identity anchor\n";
+        retain_anchor($finish_read);
+      }
+      exit 0 unless @$members;
+      kill "TERM", -$group;
+      for (1 .. 10) {
+        select undef, undef, undef, 0.1;
+        waitpid $command, WNOHANG;
+        $members = anchored_members($group, $anchor);
+        if (!defined $members) {
+          print STDERR "error: bounded command controller disappeared during owned cleanup for anchored group $group; retaining its guard and identity anchor\n";
+          retain_anchor($finish_read);
+        }
+        exit 0 unless @$members;
+      }
+      # The anchor deliberately shares the exact guarded group. KILL therefore
+      # ends the anchor as well as every TERM-resistant member; no unverified
+      # process is allowed to outlive controller loss under a reused identity.
+      kill "KILL", -$group;
+      print STDERR "error: bounded command controller disappeared and KILL cleanup failed for anchored group $group; retaining its guard and identity anchor\n";
+      retain_anchor($finish_read);
     }
     sub finish_anchor {
       my ($anchor, $finish_write) = @_;
@@ -195,10 +227,32 @@ fm_run_bounded() {
         exit 127;
       }
       my $waited;
-      do {
-        $waited = waitpid $command, 0;
-      } while ($waited == -1 && $! == EINTR);
-      my $command_status = $waited == $command ? shell_status($?) : 127;
+      my $command_status;
+      my $finish_select = IO::Select->new($finish_read);
+      while (!defined $command_status) {
+        $waited = waitpid $command, WNOHANG;
+        if ($waited == $command) {
+          $command_status = shell_status($?);
+          last;
+        }
+        next if $waited == -1 && $! == EINTR;
+        if ($waited == -1) {
+          $command_status = 127;
+          last;
+        }
+        next unless $finish_select->can_read(0.1);
+        my $finish = "";
+        my $finish_count = sysread $finish_read, $finish, 1;
+        next if !defined $finish_count && $! == EINTR;
+        if (!defined $finish_count) {
+          print STDERR "error: bounded command process-group anchor finish handshake read failed while the command was live: $!\n";
+          retain_anchor($finish_read);
+        }
+        cleanup_after_controller_eof($$, $$, $command, $finish_read) if $finish_count == 0;
+        retain_anchor($finish_read) if $finish_count == 1 && $finish eq "R";
+        print STDERR "error: bounded command process-group anchor received an invalid early finish acknowledgement\n";
+        retain_anchor($finish_read);
+      }
       syswrite $status_write, "$command_status\n";
       close $status_write;
       while (1) {
@@ -210,13 +264,13 @@ fm_run_bounded() {
           exit $setup_failure;
         }
         # The only writer is the controller, and the command is already reaped.
-        # EOF therefore leaves no owned process for this anchor to supervise.
-        exit 0 if $finish_count == 0;
+        # EOF therefore releases a childless anchor, while any remaining owned
+        # descendants are cleaned before its exact group identity disappears.
+        cleanup_after_controller_eof($$, $$, $command, $finish_read) if $finish_count == 0;
         exit 0 if $finish_count == 1 && $finish eq "F";
         if ($finish_count == 1 && $finish eq "R") {
           # An unverified cleanup deliberately retains this identity anchor.
-          close $finish_read;
-          while (1) { select undef, undef, undef, 1 }
+          retain_anchor($finish_read);
         }
         print STDERR "error: bounded command process-group anchor received an invalid finish acknowledgement\n";
         exit $setup_failure;
