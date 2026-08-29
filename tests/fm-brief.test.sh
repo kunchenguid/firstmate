@@ -739,12 +739,13 @@ test_off_limits_module_fence_is_in_every_scaffold() {
   home="$TMP_ROOT/off-limits-module-fence-home"
   mkdir -p "$home/data"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" off-limits-module-ship firstmate --mode no-mistakes >/dev/null 2>&1 \
+  # Keep this fixture neutral so the shared public template exposes no one operator's private codebase identifiers, including application route paths, product name, third-party module name, or person's name.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" off-limits-module-ship example-project --mode no-mistakes >/dev/null 2>&1 \
     || fail "ship brief with off-limits module fence exited non-zero"
   brief="$home/data/off-limits-module-ship/brief.md"
   assert_off_limits_module_fence "$brief" ship "$home"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" off-limits-module-scout firstmate --scout >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" off-limits-module-scout example-project --scout >/dev/null 2>&1 \
     || fail "scout brief with off-limits module fence exited non-zero"
   brief="$home/data/off-limits-module-scout/brief.md"
   assert_off_limits_module_fence "$brief" scout "$home"
