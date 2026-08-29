@@ -2840,9 +2840,11 @@ test_procevent_marker_failure_exits_and_replays() {
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
-  local dir state fakebin out pid i
+  local dir state fakebin out pid i sig
   dir=$(make_case heartbeat-absorb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
-  # A truly quiet fleet (no windows, no statuses) with a fast heartbeat cadence.
+  printf 'working: routine heartbeat history\n' > "$state/routine.status"
+  sig=$(seen_sig "$state/routine.status"); printf '%s' "$sig" > "$state/.seen-routine_status"
+  # A quiet fleet with a fast heartbeat cadence.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
@@ -2862,6 +2864,10 @@ test_heartbeat_no_change_absorbed() {
   [ ! -s "$out" ] || fail "no-change heartbeat printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "no-change heartbeat enqueued a durable wake record"
   [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] || fail "heartbeat backoff streak did not advance while absorbing"
+  case "$(cat "$state/.hb-surfaced-routine" 2>/dev/null || true)" in
+    "$(size_of "$state/routine.status")"@*) ;;
+    *) fail "routine heartbeat classification did not commit its captured endpoint" ;;
+  esac
   reap "$pid"
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
 }

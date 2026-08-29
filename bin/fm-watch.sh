@@ -984,14 +984,15 @@ signal_files_actionable() {  # <status-file> ...
 # scan. Called after the backstop enqueues its wake, so the same events are not
 # re-surfaced by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f endpoint ident
+  local f endpoint ident rc=0
   [ "${FM_HEARTBEAT_SCAN_ERROR:-0}" -eq 0 ] || return 0
   while IFS=$(printf '\t') read -r f endpoint ident; do
     [ -n "$f" ] || continue
-    mark_surfaced "$f" "$endpoint" "$ident"
+    mark_surfaced "$f" "$endpoint" "$ident" || rc=1
   done <<EOF
 $FM_HEARTBEAT_SURFACE_ENDPOINTS
 EOF
+  return "$rc"
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
@@ -1018,11 +1019,9 @@ heartbeat_scan_finds_actionable() {
       found=0
       continue
     fi
-    if [ "$rc" -eq 0 ]; then
-      endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
-      FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
-      found=0
-    fi
+    endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+    FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
+    [ "$rc" -eq 0 ] && found=0
   done
   return "$found"
 }
@@ -1679,9 +1678,14 @@ EOF
       # this wake sends firstmate to the whole fleet, so every log is read.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
+      mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
     else
+      if ! mark_all_captain_relevant_surfaced; then
+        fm_wake_append heartbeat heartbeat heartbeat || exit 1
+        touch "$STATE/.last-heartbeat"
+        wake "heartbeat"
+      fi
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"

@@ -135,9 +135,9 @@ hb_surfaced_offset() {  # <task>
 mark_surfaced() {  # <status-file> <captured-end-offset> <captured-identity>
   local f=$1 size=$2 ident=$3 task current
   case "$f" in *.status) ;; *) return 0 ;; esac
-  case "$size" in ''|*[!0-9]*) return 0 ;; esac
-  current=$(_fm_open_decisions_file_ident "$f") || return 0
-  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 0
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  current=$(_fm_open_decisions_file_ident "$f") || return 1
+  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
   task=$(basename "$f"); task="${task%.status}"
   printf '%s@%s' "$size" "$ident" > "$(_hb_surfaced_path "$task")"
 }

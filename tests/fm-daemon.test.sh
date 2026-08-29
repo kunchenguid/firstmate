@@ -293,6 +293,48 @@ test_status_read_failure_surfaces_without_advancing_seen() {
   pass "a status read failure surfaces without advancing the daemon suppressor"
 }
 
+test_catchall_advances_routine_then_surfaces_append() {
+  local dir state key marker out
+  dir=$(make_supercase catchall-routine); state="$dir/state"
+  printf 'working: routine history\nworking: still routine\n' > "$state/routine-r6.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  key=$(printf '%s' routine-r6 | tr ':/.' '___'); marker="$state/.subsuper-seen-status-$key"
+  case "$(cat "$marker" 2>/dev/null || true)" in "$(log_size "$state/routine-r6.status")"@*) ;;
+    *) fail "routine catch-all classification did not advance its captured endpoint" ;;
+  esac
+  printf 'blocked: appended after routine endpoint\n' >> "$state/routine-r6.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: appended after routine endpoint"*) ;;
+    *) fail "an actionable append after the routine endpoint did not surface: $out" ;;
+  esac
+  pass "catch-all routine scans advance before later actionable appends"
+}
+
+test_durable_wake_failure_retains_entire_batch() {
+  local dir state fakebin attempts
+  dir=$(make_supercase durable-failure); state="$dir/state"; fakebin="$dir/daemon-bin"; attempts="$dir/attempts"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf ack > "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\ttask.status\tsignal: first\n1\t2\theartbeat\theartbeat\theartbeat\n'
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 2 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  (
+    FM_DAEMON_DIR="$fakebin"
+    handle_wake() { printf '%s\n' "$1" >> "$attempts"; [ "$1" != 'signal: first' ]; }
+    ! handle_durable_wakes fallback "$state"
+  ) || fail "a failed wake classification was acknowledged"
+  [ "$(wc -l < "$attempts" | tr -d ' ')" = 2 ] \
+    || fail "a failed wake prevented later batch entries from being accounted"
+  [ ! -e "$dir/acked" ] || fail "a partially handled durable batch was acknowledged"
+  pass "classification failure retains the complete durable wake batch"
+}
+
 test_catchall_scan_surfaces_a_masked_event() {
   local dir state
   dir=$(make_supercase catchall-masked)
@@ -2393,6 +2435,8 @@ test_stale_read_failure_surfaces_without_advancing_seen
 test_recreated_status_rejects_captured_identity
 test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
+test_catchall_advances_routine_then_surfaces_append
+test_durable_wake_failure_retains_entire_batch
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging

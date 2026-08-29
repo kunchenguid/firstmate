@@ -587,22 +587,23 @@ status_seen_offset() {  # <state> <task>
 # both the per-wake escalate path and the catch-all scan.
 mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
   local state=$1 task=$2 size=$3 ident=$4 current
-  case "$size" in ''|*[!0-9]*) return 0 ;; esac
-  current=$(_fm_open_decisions_file_ident "$state/$task.status") || return 0
-  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 0
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  current=$(_fm_open_decisions_file_ident "$state/$task.status") || return 1
+  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
   printf '%s@%s' "$size" "$ident" > "$(_seen_status_path "$state" "$task")"
 }
 
 # Advance the offset for every task a per-wake classification escalated, so the
 # catch-all scan does not re-escalate the same events within HEARTBEAT_SCAN_SECS.
 mark_escalated_seen() {  # <state> <captured-endpoint-file>
-  local state=$1 capture=$2 task endpoint ident
-  [ -f "$capture" ] || return 0
+  local state=$1 capture=$2 task endpoint ident rc=0
+  [ -f "$capture" ] || return 1
   grep -q '^ERROR' "$capture" 2>/dev/null && return 0
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
-    mark_status_seen "$state" "$task" "$endpoint" "$ident"
+    mark_status_seen "$state" "$task" "$endpoint" "$ident" || rc=1
   done < "$capture"
+  return "$rc"
 }
 
 # Busy and composer-empty detection form the injection boundary.
@@ -1150,11 +1151,15 @@ housekeeping() {  # <state>
         escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
         continue
       fi
-      [ "$rc" -eq 0 ] || continue
       endpoint=${record%%$'\t'*}
-      rest=${record#*$'\t'}; ident=${rest%%$'\t'*}; event=${rest#*$'\t'}
-      escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"
-      mark_status_seen "$state" "$task" "$endpoint" "$ident"
+      rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+      if [ "$rc" -eq 0 ]; then
+        event=${rest#*$'\t'}
+        escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"
+        mark_status_seen "$state" "$task" "$endpoint" "$ident" || true
+      elif ! mark_status_seen "$state" "$task" "$endpoint" "$ident"; then
+        escalate_add "$state" "$(basename "$f"): status position commit failed (catch-all scan)"
+      fi
     done
   fi
 }
@@ -1390,12 +1395,15 @@ handle_wake() {  # <reason> <state>
       log "self-handle: $reason -> $distilled"
       ;;
   esac
+  if [ "$action" = self ] && { [ "$kind" = signal ] || [ "$kind" = stale ]; }; then
+    mark_escalated_seen "$state" "$capture" || { rm -f "$capture"; return 1; }
+  fi
   rm -f "$capture"
 }
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 ack_through ack_generation
+  local handled=0 failed=0 ack_through ack_generation
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1409,15 +1417,19 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
     case "$sequence" in ''|*[!0-9]*) continue ;; esac
     case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
-    handle_wake "$payload" "$state"
+    handle_wake "$payload" "$state" || failed=1
     handled=$((handled + 1))
   done < "$out"
-  [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
+  if [ "$handled" -eq 0 ]; then handle_wake "$fallback_reason" "$state" || failed=1; fi
 
   ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
   ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
   rm -f "$out" "$err"
+  if [ "$failed" -ne 0 ]; then
+    log "wake classification failed; retaining durable wakes"
+    return 1
+  fi
   if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
     log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
     return 1
