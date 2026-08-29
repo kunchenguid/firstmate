@@ -41,20 +41,34 @@ EOF
   printf '%s\t%s\n' "$head_field" "$delivery_field"
 }
 
-fm_delivery_continuation_state() {  # <state-dir> <task> <spawn-gen>
-  local state=$1 task=$2 spawn_gen=$3 dir record parsed
+fm_delivery_continuation_state() {  # <state-dir> <task> <spawn-gen> [expected-head]
+  local state=$1 task=$2 spawn_gen=$3 expected_head=${4:-} dir record parsed parsed_head mismatch=''
   dir="$state/$task.inbox"
   for record in "$dir"/*.msg; do
     [ -f "$record" ] || continue
     parsed=$(fm_delivery_continuation_parse_record "$record" "$task" "$spawn_gen") || continue
+    parsed_head=${parsed%%$'\t'*}
+    if [ -n "$expected_head" ] && [ "$parsed_head" != "$expected_head" ]; then
+      [ -n "$mismatch" ] || mismatch="pending"$'\t'"$parsed"
+      continue
+    fi
     printf 'pending\t%s\n' "$parsed"
     return 0
   done
   for record in "$dir"/handled/*.msg; do
     [ -f "$record" ] || continue
     parsed=$(fm_delivery_continuation_parse_record "$record" "$task" "$spawn_gen") || continue
+    parsed_head=${parsed%%$'\t'*}
+    if [ -n "$expected_head" ] && [ "$parsed_head" != "$expected_head" ]; then
+      [ -n "$mismatch" ] || mismatch="acknowledged"$'\t'"$parsed"
+      continue
+    fi
     printf 'acknowledged\t%s\n' "$parsed"
     return 0
   done
+  if [ -n "$mismatch" ]; then
+    printf 'head-mismatch\t%s\n' "$mismatch"
+    return 0
+  fi
   return 1
 }

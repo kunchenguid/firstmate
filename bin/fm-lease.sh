@@ -14,6 +14,9 @@
 #       claim refreshes its own lease). Refuses with exit 6 while the other
 #       actor holds a live lease. A stale lease (dead pid, or a torn record)
 #       is cleared and re-claimed.
+#   fm-lease.sh claim-new <task> [--actor main|branch]
+#       Take the lease only when no actor currently holds it. Unlike claim,
+#       this refuses a same-actor live lease instead of refreshing it.
 #   fm-lease.sh release <task> [--actor main|branch]
 #       Drop the calling actor's lease. Releasing a lease the actor does not
 #       hold is a silent no-op, so a retry after a partial failure is safe.
@@ -32,7 +35,7 @@
 #
 # The default actor is $FM_SUPERVISION_ACTOR (else main); when --actor is
 # supplied for a mutation, it must name that calling actor. Exit codes: 0 ok,
-# 1 check-miss, 2 usage, 6 refused (other actor holds or actor mismatch).
+# 1 check-miss, 2 usage, 6 refused (live lease conflict or actor mismatch).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +53,7 @@ fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
 trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
 
 usage() {
-  echo "usage: fm-lease.sh claim|release <task> [--actor main|branch] | release-actor --actor main|branch | check <task> | sweep" >&2
+  echo "usage: fm-lease.sh claim|claim-new|release <task> [--actor main|branch] | release-actor --actor main|branch | check <task> | sweep" >&2
   exit 2
 }
 
@@ -58,7 +61,7 @@ CMD=${1:-}
 shift 2>/dev/null || true
 
 case "$CMD" in
-  claim|release)
+  claim|claim-new|release)
     TASK=${1:-}
     shift 2>/dev/null || true
     fm_lease_valid_id "$TASK" || usage
@@ -102,7 +105,7 @@ case "$CMD" in
 esac
 
 case "$CMD" in
-  claim)
+  claim|claim-new)
     # Loud accidental-override guard: a claim naming the OTHER actor than the
     # caller's own injected identity is a wiring mistake, never a role change.
     # Release and bulk release enforce the same caller authorization below.
@@ -112,9 +115,11 @@ case "$CMD" in
       exit "$FM_LEASE_REFUSE_EXIT"
     fi
     LEASE=$(fm_lease_path "$TASK")
-    if fm_lease_live "$TASK" && [ "$FM_LEASE_ACTOR" != "$ACTOR" ]; then
-      echo "error: claim refused - task '$TASK' is leased to the $FM_LEASE_ACTOR supervision actor (state/.lease-$TASK)" >&2
-      exit "$FM_LEASE_REFUSE_EXIT"
+    if fm_lease_live "$TASK"; then
+      if [ "$CMD" = claim-new ] || [ "$FM_LEASE_ACTOR" != "$ACTOR" ]; then
+        echo "error: $CMD refused - task '$TASK' is leased to the $FM_LEASE_ACTOR supervision actor (state/.lease-$TASK)" >&2
+        exit "$FM_LEASE_REFUSE_EXIT"
+      fi
     fi
     # The lease outlives this CLI call, so its liveness pid must be the
     # long-lived supervising process: FM_LEASE_HOLDER_PID when the caller

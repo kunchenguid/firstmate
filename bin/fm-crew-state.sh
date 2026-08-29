@@ -17,6 +17,9 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
+# `--run-attribution` prints exactly one of active, parked, terminal, absent,
+# or unavailable and never falls back to endpoint or status-log inference.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
@@ -67,8 +70,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
+RUN_ATTRIBUTION=0
+if [ "${1:-}" = --run-attribution ]; then
+  RUN_ATTRIBUTION=1
+  shift
+fi
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] && [ "$#" -eq 1 ] || { echo "usage: fm-crew-state.sh [--run-attribution] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -84,6 +92,16 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
+  if [ "$RUN_ATTRIBUTION" = 1 ]; then
+    case "$2:$1" in
+      run-step:working) printf 'run-attribution: active\n' ;;
+      run-step:parked) printf 'run-attribution: parked\n' ;;
+      run-step:done|run-step:failed) printf 'run-attribution: terminal\n' ;;
+      run-attribution-absent:*) printf 'run-attribution: absent\n' ;;
+      *) printf 'run-attribution: unavailable\n' ;;
+    esac
+    exit 0
+  fi
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
@@ -376,9 +394,8 @@ nm_ci_checks_state() {
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+nm_runs_status_for_branch() {  # <branch> <runs-output>
+  local branch=$1 out=$2 row st rest br sha
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -397,7 +414,7 @@ nm_runs_status_for_branch() {  # <branch>
         # An UNRESOLVABLE head is unknown attribution, not a proven
         # mismatch. Stop instead of surfacing an older, superseded row;
         # the caller's pane/log fallback can answer without misattribution.
-        fm_nm_head_resolvable "$WT" "$sha" || return 0
+        fm_nm_head_resolvable "$WT" "$sha" || { printf '__unavailable__'; return 0; }
         continue
       fi
       printf '%s' "$st"
@@ -428,6 +445,7 @@ nm_coarse_head_matches_worktree() {  # <short-sha>
 }
 
 HAVE_RUN=0
+RUN_QUERY_VERDICT=unavailable
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
 # a bare status word came back from the runs-list fallback above, so the
@@ -436,8 +454,10 @@ RUN_SOURCE=full
 COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
+if [ "$KIND" != ship ] || [ -z "$CREW_BRANCH" ]; then
+  RUN_QUERY_VERDICT=absent
+elif command -v no-mistakes >/dev/null 2>&1; then
+  RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status 2>/dev/null) || RUN_OUT=
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     # Head equality, or the pipeline-owned-active exemption: while the
@@ -447,6 +467,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
       && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
       HAVE_RUN=1
+      RUN_QUERY_VERDICT=found
     else
       # The active-or-most-recent run is for another branch, or its same-branch
       # attribution failed (the CLI is alive and answered) - try the coarse
@@ -455,10 +476,30 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      if RUNS_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" runs --limit "$FM_CREW_STATE_RUNS_LIMIT" 2>/dev/null); then
+        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH" "$RUNS_OUT")
+        if [ "$COARSE_STATUS" = __unavailable__ ]; then
+          RUN_QUERY_VERDICT=unavailable
+        elif [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+          RUN_QUERY_VERDICT=found
+        else
+          RUN_QUERY_VERDICT=absent
+        fi
+      fi
+    fi
+  elif [ "$RUN_ATTRIBUTION" = 1 ]; then
+    if RUNS_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" runs --limit "$FM_CREW_STATE_RUNS_LIMIT" 2>/dev/null); then
+      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH" "$RUNS_OUT")
+      if [ "$COARSE_STATUS" = __unavailable__ ]; then
+        RUN_QUERY_VERDICT=unavailable
+      elif [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
+        RUN_QUERY_VERDICT=found
+      else
+        RUN_QUERY_VERDICT=absent
       fi
     fi
   fi
@@ -584,6 +625,12 @@ if [ "$HAVE_RUN" = 1 ]; then
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
+if [ "$RUN_ATTRIBUTION" = 1 ]; then
+  if [ "$RUN_QUERY_VERDICT" = absent ]; then
+    emit unknown run-attribution-absent
+  fi
+  emit unknown none
+fi
 # The run-step path above already handled any crew with a run, regardless of pane
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
 # is no run to consult, so a dead/unreadable target means the crew is gone: report

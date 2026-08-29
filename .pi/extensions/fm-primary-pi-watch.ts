@@ -340,7 +340,7 @@ export default function (pi: ExtensionAPI) {
       const line = (result.stdout || "").trim();
       if (
         result.status !== 0 ||
-        !/^result=(sent|already-delivered|already-active|refused) task=[A-Za-z0-9._-]+(?: reason=[A-Za-z0-9._-]+)?$/.test(line)
+        !/^result=(sent|already-delivered|already-active|retry|refused) task=[A-Za-z0-9._-]+(?: reason=[A-Za-z0-9._-]+)?$/.test(line)
       ) {
         const detail = (result.stderr || "").trim();
         throw new Error(`delivery continuation failed for ${task}: ${detail || line || `status=${result.status ?? "none"}`}`);
@@ -369,13 +369,20 @@ export default function (pi: ExtensionAPI) {
       }
     }
     let continuationResults: string[] = [];
-    try {
-      continuationResults = runDeliveryContinuations();
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      await sendWake(owner, `${message}\n\nwatcher: FAILED - ${detail}`);
-      return;
+    let continuationAttempt = 0;
+    while (generationIsLive(owner)) {
+      try {
+        continuationResults = runDeliveryContinuations();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        await sendWake(owner, `${message}\n\nwatcher: FAILED - ${detail}`);
+        return;
+      }
+      if (!continuationResults.some((line) => line.startsWith("result=retry "))) break;
+      continuationAttempt += 1;
+      await waitForRetry(continuationAttempt);
     }
+    if (!generationIsLive(owner)) return;
     const handlingMessage = continuationResults.length > 0
       ? `${message}\n\nDeterministic delivery continuation preflight:\n${continuationResults.join("\n")}`
       : message;

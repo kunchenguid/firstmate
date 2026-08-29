@@ -111,10 +111,10 @@
 # it armed rather than dropping it, and only a proven send failure discards it.
 # Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
 # for an already-open expectation so a second record is not created. Direct
-# unmarked captain input never creates one. A recorded task instruction sent
-# with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
-# without creating a reply expectation; its stable body identity makes retries
-# idempotent while allowing a later distinct instruction to remain distinct.
+# unmarked captain input never creates one. A marked secondmate instruction
+# sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
+# without creating a reply expectation; its delivery id makes uncertain retries
+# idempotent while allowing a later identical instruction to be distinct.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) that writes the message as a
@@ -548,8 +548,8 @@ fm_send_hold_resolved_id() {  # <task-id> <decision-key>
 if [ -n "$FIRE_AND_FORGET_ID" ]; then
   printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' \
     || { echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2; exit 1; }
-  [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] \
-    || { echo "error: --fire-and-forget requires a recorded task selector" >&2; exit 1; }
+  [ "$MARK_FROM_FIRSTMATE" = 1 ] \
+    || { echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2; exit 1; }
   [ -z "$RESOLVE_KEYS" ] \
     || { echo "error: --fire-and-forget cannot accompany --resolve-key" >&2; exit 1; }
 fi
@@ -689,12 +689,6 @@ else
   if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -n "$FIRE_AND_FORGET_ID" ]; then
     fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
     MESSAGE="${FM_FROMFIRST_MARK}delivery=${FIRE_AND_FORGET_ID} ${MESSAGE#"$FM_FROMFIRST_MARK"}"
-    FM_SEND_IDEMPOTENT=1
-  elif [ -n "$FIRE_AND_FORGET_ID" ]; then
-    # A local crewmate also needs exact-once durable delivery when a caller has
-    # supplied a stable fire-and-forget identity. The identity is already in
-    # the caller's message body, so the inbox's exact-body dedup primitive can
-    # safely converge a replay without changing ordinary steers.
     FM_SEND_IDEMPOTENT=1
   elif [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a

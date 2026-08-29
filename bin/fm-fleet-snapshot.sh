@@ -454,7 +454,7 @@ task_json_lines() {
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json continuation_tsv continuation_state continuation_head continuation_delivery continuation_json continuation_unverified_busy
+  local open_decisions_tsv open_decisions_json continuation_tsv continuation_state continuation_head continuation_delivery continuation_json continuation_unverified_busy continuation_current_head continuation_record_state
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -501,21 +501,31 @@ task_json_lines() {
     continuation_state=
     continuation_head=
     continuation_delivery=
+    continuation_current_head=
+    continuation_record_state=
     continuation_unverified_busy=false
-    continuation_tsv=$(fm_delivery_continuation_state "$STATE" "$id" "$spawn_gen" 2>/dev/null || true)
+    if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+      continuation_current_head=$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null || true)
+    fi
+    continuation_tsv=$(fm_delivery_continuation_state "$STATE" "$id" "$spawn_gen" "$continuation_current_head" 2>/dev/null || true)
     if [ -n "$continuation_tsv" ]; then
-      IFS=$(printf '\t') read -r continuation_state continuation_head continuation_delivery <<EOF
+      IFS=$(printf '\t') read -r continuation_state continuation_record_state continuation_head continuation_delivery <<EOF
 $continuation_tsv
 EOF
+      if [ "$continuation_state" != head-mismatch ]; then
+        continuation_delivery=$continuation_head
+        continuation_head=$continuation_record_state
+        continuation_record_state=$continuation_state
+      fi
       if [ "$continuation_state" = pending ] && [ "$current_source" != run-step ] \
         && { [ "$current_state" = working ] || [ "$current_state" = unknown ]; }; then
         continuation_unverified_busy=true
       fi
       continuation_json=$(jq -n \
-        --arg state "$continuation_state" --arg head "$continuation_head" --arg delivery "$continuation_delivery" \
+        --arg state "$continuation_state" --arg record_state "$continuation_record_state" --arg head "$continuation_head" --arg current_head "$continuation_current_head" --arg delivery "$continuation_delivery" \
         --arg worker_state "$current_state" --arg worker_source "$current_source" \
         --argjson worker_unverified_busy "$continuation_unverified_busy" \
-        '{state:$state,head:$head,delivery:$delivery,worker_state:$worker_state,worker_source:$worker_source,worker_unverified_busy:$worker_unverified_busy}')
+        '{state:$state,record_state:$record_state,head:$head,current_head:($current_head | if . == "" then null else . end),delivery:$delivery,worker_state:$worker_state,worker_source:$worker_source,worker_unverified_busy:$worker_unverified_busy}')
     else
       continuation_json=null
     fi

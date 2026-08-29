@@ -40,6 +40,11 @@ install_pi_watch_extension_fixture() {
   cat > "$repo/bin/fm-delivery-continue.sh" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_DELIVERY_LOG:-}" ] || printf 'delivery=%s\n' "$1" >> "$FM_DELIVERY_LOG"
+if [ -n "${FM_DELIVERY_RETRY_MARK:-}" ] && [ ! -e "$FM_DELIVERY_RETRY_MARK" ]; then
+  : > "$FM_DELIVERY_RETRY_MARK"
+  printf 'result=retry task=%s reason=supervision-owner-active\n' "$1"
+  exit 0
+fi
 printf 'result=refused task=%s reason=fixture-stop\n' "$1"
 SH
   chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-delivery-continue.sh"
@@ -447,7 +452,7 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
 if [ "$count" -eq 1 ]; then
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  printf 'signal: branch-offer synthetic wake\n'
+  printf 'stale: default:wG:pQ\n'
   exit 0
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
@@ -455,7 +460,7 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELIVERY_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELIVERY_LOG="$log" FM_DELIVERY_RETRY_MARK="$repo/retried" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -511,17 +516,20 @@ async function runScenario(withAcceptor) {
 }
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-writeFileSync(`${process.env.FM_HOME}/state/branch-offer.meta`, "project=/projects/approved\nwindow=fm-branch-offer\n");
-writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tbranch-offer.status\tsignal: branch-offer synthetic wake\n");
+writeFileSync(`${process.env.FM_HOME}/state/branch-offer.meta`, "project=/projects/approved\nwindow=default:wG:pQ\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tstale\tdefault:wG:pQ\tstale: default:wG:pQ\n");
 const accepted = await runScenario(true);
 if (accepted.offers.length !== 1) {
   throw new Error(`expected one branch offer, got ${accepted.offers.length}; main=${accepted.mainPrompt}; rows=${accepted.rows.join(" | ")}`);
 }
-if (!accepted.offers[0].message.includes("signal: branch-offer synthetic wake")) {
+if (!accepted.offers[0].message.includes("stale: default:wG:pQ")) {
   throw new Error(`offer missed the wake reason: ${accepted.offers[0].message}`);
 }
 if (!accepted.offers[0].message.includes("result=refused task=branch-offer reason=fixture-stop")) {
   throw new Error(`branch offer missed the common continuation result: ${accepted.offers[0].message}`);
+}
+if (accepted.rows.filter((row) => row === "delivery=branch-offer").length !== 2) {
+  throw new Error(`lease retry did not converge before the branch offer: ${accepted.rows.join(" | ")}`);
 }
 if (JSON.stringify(accepted.offers[0].projects) !== JSON.stringify(["/projects/approved"])) {
   throw new Error(`offer did not carry the queued task project: ${JSON.stringify(accepted.offers[0].projects)}`);
@@ -535,7 +543,7 @@ if (declined.offers.length !== 0) throw new Error("no-acceptor scenario recorded
 if (!declined.mainPrompt.includes("FIRSTMATE WATCHER WAKE")) {
   throw new Error(`unaccepted offer did not fall back to main: ${declined.mainPrompt}`);
 }
-if (!declined.mainPrompt.includes("signal: branch-offer synthetic wake")) {
+if (!declined.mainPrompt.includes("stale: default:wG:pQ")) {
   throw new Error(`fallback wake lost the reason line: ${declined.mainPrompt}`);
 }
 if (!declined.mainPrompt.includes("result=refused task=branch-offer reason=fixture-stop")) {

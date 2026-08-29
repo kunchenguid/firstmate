@@ -9,9 +9,9 @@
 # whose generated brief grants that validation handoff, and whose current
 # durable state leaves no decision, safety stop, or attributed pipeline run.
 #
-# Output is one factual record: result=sent|already-delivered|already-active|refused.
-# The task lease serializes main and Pi-branch replays. Every exit releases a
-# successful claim; a live opposite owner is refused and never bypassed.
+# Output is one factual record: result=sent|already-delivered|already-active|retry|refused.
+# The task lease serializes main and Pi-branch replays. Every exit releases an
+# exclusively acquired claim; any existing live owner is a retry obligation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,10 +40,11 @@ trap 'cleanup; exit 143' TERM
 
 result() { printf 'result=%s task=%s%s\n' "$1" "$TASK" "${2:+ reason=$2}"; }
 refuse() { result refused "$1"; exit 0; }
+retry() { result retry "$1"; exit 0; }
 
-claim_out=$("$LEASE_BIN" claim "$TASK" 2>&1) || {
+claim_out=$("$LEASE_BIN" claim-new "$TASK" 2>&1) || {
   claim_rc=$?
-  if [ "$claim_rc" -eq 6 ]; then refuse other-supervision-owner; fi
+  if [ "$claim_rc" -eq 6 ]; then retry supervision-owner-active; fi
   printf '%s\n' "$claim_out" >&2
   refuse lease-unavailable
 }
@@ -72,6 +73,9 @@ if [ -n "$HEAD_SHORT" ]; then
   HEAD=$(git -C "$WORKTREE" rev-parse --verify "${HEAD_SHORT}^{commit}" 2>/dev/null) || refuse invalid-committed-head
   [ "$HEAD" = "$CURRENT" ] || refuse committed-head-mismatch
 else
+  case "$LAST" in
+    'done: PR '*|'done: merged'*) refuse attributable-validation-terminal-receipt ;;
+  esac
   case "$LAST" in 'done: '*) ;; *) refuse missing-committed-receipt ;; esac
   HEAD=$CURRENT
 fi
@@ -90,13 +94,15 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 [ -z "$(status_open_decisions "$STATUS")" ] || refuse open-decision-or-blocker
 
-# A run-step is authoritative for pipeline custody. An unknown busy source is
-# deliberately not enough to hide this durable continuation obligation.
-CREW_STATE=$("$CREW_STATE_BIN" "$TASK" 2>/dev/null || true)
+# The strict run-attribution read distinguishes proven absence from an
+# unavailable no-mistakes query before any durable instruction is created.
+CREW_STATE=$("$CREW_STATE_BIN" --run-attribution "$TASK" 2>/dev/null || true)
 case "$CREW_STATE" in
-  'state: working · source: run-step ·'*) result already-active; exit 0 ;;
-  'state: parked · source: run-step ·'*) refuse attributable-validation-parked ;;
-  'state: done · source: run-step ·'*|'state: failed · source: run-step ·'*) refuse attributable-validation-terminal ;;
+  'run-attribution: active'*) result already-active; exit 0 ;;
+  'run-attribution: parked'*) refuse attributable-validation-parked ;;
+  'run-attribution: terminal'*) refuse attributable-validation-terminal ;;
+  'run-attribution: absent'*) ;;
+  *) refuse validation-attribution-unavailable ;;
 esac
 
 # shellcheck source=bin/fm-task-inbox-lib.sh
@@ -107,10 +113,11 @@ esac
 . "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 DELIVERY=$(fm_delivery_continuation_id "$TASK" "$HEAD" "$SPAWN_GEN")
 MESSAGE=$(fm_delivery_continuation_message "$TASK" "$HEAD" "$SPAWN_GEN" "$DELIVERY")
-if fm_delivery_continuation_state "$STATE" "$TASK" "$SPAWN_GEN" >/dev/null; then
-  result already-delivered
-  exit 0
-fi
+DELIVERY_STATE=$(fm_delivery_continuation_state "$STATE" "$TASK" "$SPAWN_GEN" "$HEAD" 2>/dev/null || true)
+case "$DELIVERY_STATE" in
+  pending$'\t'*|acknowledged$'\t'*) result already-delivered; exit 0 ;;
+  head-mismatch$'\t'*) refuse continuation-head-mismatch ;;
+esac
 
 FM_SEND_IDEMPOTENT=1 FM_SEND_EXPECTED_SPAWN_GEN="$SPAWN_GEN" \
   "$SEND_BIN" "$TASK" "$MESSAGE" >/dev/null || refuse inbox-delivery-failed

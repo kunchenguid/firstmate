@@ -49,6 +49,30 @@ export interface UnreadWakeScope {
 const EMPTY_SCOPE: UnreadWakeScope = { status: "empty", eligible: false, projects: [], eligibleSeqs: [], corrupted: false };
 const UNSAFE_SCOPE: UnreadWakeScope = { status: "unsafe", eligible: false, projects: [], eligibleSeqs: [], corrupted: true };
 
+type TaskMetadata = {
+  projectByKey: Map<string, string>;
+  taskByKey: Map<string, string>;
+};
+
+function readTaskMetadata(state: string): TaskMetadata {
+  const projectByKey = new Map<string, string>();
+  const taskByKey = new Map<string, string>();
+  for (const name of readdirSync(state)) {
+    if (!name.endsWith(".meta")) continue;
+    const task = name.slice(0, -5);
+    const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
+    const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
+    const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
+    taskByKey.set(task, task);
+    if (window) taskByKey.set(window, task);
+    if (project) {
+      projectByKey.set(task, project);
+      if (window) projectByKey.set(window, project);
+    }
+  }
+  return { projectByKey, taskByKey };
+}
+
 // scopeForUnreadWake is the single owner of branch-eligibility classification
 // (docs/pi-supervision-branch.md "Autonomy"; docs/watcher-continuity.md
 // "Per-actor acknowledgement"). bin/fm-wake-drain.sh never reclassifies a row
@@ -90,19 +114,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   if (rows.length === 0) return EMPTY_SCOPE;
 
   const projects = new Set<string>();
-  const metadata = new Map<string, string>();
+  let metadata: TaskMetadata;
   try {
-    for (const name of readdirSync(state)) {
-      if (!name.endsWith(".meta")) continue;
-      const task = name.slice(0, -5);
-      const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
-      const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
-      const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
-      if (project) {
-        metadata.set(task, project);
-        if (window) metadata.set(window, project);
-      }
-    }
+    metadata = readTaskMetadata(state);
   } catch {
     return UNSAFE_SCOPE;
   }
@@ -127,9 +141,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     let project = "";
     if (kind === "signal") {
       const task = key.replace(/\.(?:status|turn-ended)$/, "");
-      project = metadata.get(task) ?? "";
+      project = metadata.projectByKey.get(task) ?? "";
     } else if (kind === "stale") {
-      project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
+      project = metadata.projectByKey.get(key) ?? metadata.projectByKey.get(key.replace(/^fm-/, "")) ?? "";
     } else {
       // A kind fm_wake_append never emits: structural corruption, not an
       // ordinary main-only row.
@@ -234,6 +248,7 @@ export interface BranchDispatchOffer {
 
 export function deliveryTasksForUnreadWake(state: string): string[] {
   const queue = readFileSync(`${state}/.wake-queue`, "utf8");
+  const metadata = readTaskMetadata(state);
   const tasks = new Set<string>();
   for (const row of queue.split(/\r?\n/)) {
     if (!row) continue;
@@ -244,8 +259,9 @@ export function deliveryTasksForUnreadWake(state: string): string[] {
       if (!/^[A-Za-z0-9._-]+$/.test(task)) throw new Error("the unread signal task identity is malformed");
       tasks.add(task);
     } else if (fields[2] === "stale") {
-      const task = fields[3].replace(/^fm-/, "");
-      if (!/^[A-Za-z0-9._-]+$/.test(task)) throw new Error("the unread stale task identity is malformed");
+      const key = fields[3];
+      const task = metadata.taskByKey.get(key) ?? metadata.taskByKey.get(key.replace(/^fm-/, "")) ?? "";
+      if (!task) throw new Error("the unread stale task identity is unresolvable");
       tasks.add(task);
     }
   }

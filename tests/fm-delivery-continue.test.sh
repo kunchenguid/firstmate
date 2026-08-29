@@ -47,7 +47,7 @@ SH
 
 make_state_stub() {
   local path=$1 state=$2
-  printf '#!/usr/bin/env bash\nprintf %s\\n %q\n' "'state: $state · source: none · unverified endpoint'" > "$path"
+  printf '#!/usr/bin/env bash\nprintf '\''run-attribution: %%s\\n'\'' %q\n' "$state" > "$path"
   chmod +x "$path"
 }
 
@@ -61,7 +61,7 @@ test_exactly_once_delivery_and_replay() {
   local dir home send state first second count due
   dir="$TMP_ROOT/exactly-once"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
-  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" unknown
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
   first=$(run_continue "$home" "$send" "$state") || fail "initial continuation failed"
   second=$(run_continue "$home" "$send" "$state") || fail "replay continuation failed"
   count=$(find "$home/state/ship.inbox" -name '*.msg' | wc -l | tr -d ' ')
@@ -78,7 +78,7 @@ test_refusals_preserve_stop() {
   local dir home send state out
   dir="$TMP_ROOT/refusals"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
-  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" unknown
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
   { printf 'blocked [key=real]: waiting for authority\n'; cat "$home/state/ship.status"; } > "$home/state/ship.status.next"
   mv "$home/state/ship.status.next" "$home/state/ship.status"
   out=$(run_continue "$home" "$send" "$state") || fail "blocked result execution failed"
@@ -87,27 +87,44 @@ test_refusals_preserve_stop() {
   pass "an open canonical blocker remains stopped"
 }
 
-test_active_run_and_head_mismatch_refuse() {
+test_active_run_and_unavailable_attribution_refuse() {
   local dir home send state out
   dir="$TMP_ROOT/active-and-mismatch"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
-  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" working
-  # This state stub is deliberately unverified, so it cannot hide delivery.
-  out=$(run_continue "$home" "$send" "$state") || fail "unknown busy execution failed"
-  [[ "$out" == 'result=sent task=ship' ]] || fail "unverified busy source hid continuation: $out"
-  rm -rf "$home/state/ship.inbox"
-  make_state_stub "$state" working
-  sed -i.bak 's/source: none/source: run-step/' "$state"; rm -f "$state.bak"
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" active
   out=$(run_continue "$home" "$send" "$state") || fail "active run execution failed"
   [[ "$out" == 'result=already-active task=ship' ]] || fail "active run was not recognized: $out"
-  pass "unverified busy does not mask delivery while an attributed run does"
+  make_state_stub "$state" unavailable
+  out=$(run_continue "$home" "$send" "$state") || fail "unavailable attribution execution failed"
+  [[ "$out" == *'reason=validation-attribution-unavailable'* ]] || fail "unavailable run query did not fail closed: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "unavailable run attribution received validation delivery"
+  pass "active validation and unavailable attribution both prevent duplicate delivery"
+}
+
+test_strict_run_attribution_distinguishes_absence_from_query_failure() {
+  local dir home fakebin out
+  dir="$TMP_ROOT/strict-attribution"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit "${FM_FAKE_NM_EXIT:-0}"
+SH
+  chmod +x "$fakebin/no-mistakes"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_FAKE_NM_EXIT=1 \
+    "$ROOT/bin/fm-crew-state.sh" --run-attribution ship)
+  [ "$out" = 'run-attribution: unavailable' ] || fail "failed run query was not unavailable: $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_FAKE_NM_EXIT=0 \
+    "$ROOT/bin/fm-crew-state.sh" --run-attribution ship)
+  [ "$out" = 'run-attribution: absent' ] || fail "successful empty run inventory was not proven absent: $out"
+  pass "strict run attribution separates proven absence from query unavailability"
 }
 
 test_identity_and_committed_head_requirements() {
   local dir home send state out head
   dir="$TMP_ROOT/identity-and-head"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
-  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" unknown
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
   sed '/^spawn_gen=/d' "$home/state/ship.meta" > "$home/state/ship.meta.next"
   mv "$home/state/ship.meta.next" "$home/state/ship.meta"
   out=$(run_continue "$home" "$send" "$state") || fail "missing-incarnation execution failed"
@@ -124,11 +141,31 @@ test_identity_and_committed_head_requirements() {
   pass "continuation requires an incarnation and proves both legacy and canonical committed heads"
 }
 
+test_terminal_receipt_and_existing_lease_retry() {
+  local dir home send state out
+  dir="$TMP_ROOT/terminal-and-lease"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  printf 'done: PR https://example.invalid/pull/1 checks green\n' > "$home/state/ship.status"
+  out=$(run_continue "$home" "$send" "$state") || fail "terminal receipt execution failed"
+  [[ "$out" == *'reason=attributable-validation-terminal-receipt'* ]] || fail "terminal PR receipt was treated as committed-ready: $out"
+  printf 'done: implementation committed and focused checks passed\n' > "$home/state/ship.status"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  PI_CODING_AGENT=true FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim ship >/dev/null || fail "fixture main lease claim failed"
+  out=$(PI_CODING_AGENT=true run_continue "$home" "$send" "$state") || fail "borrowed lease execution failed"
+  [[ "$out" == 'result=retry task=ship reason=supervision-owner-active' ]] || fail "borrowed same-actor lease was not retained as retry: $out"
+  PI_CODING_AGENT=true FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-lease.sh" check ship >/dev/null \
+    || fail "continuation released the pre-existing lease"
+  PI_CODING_AGENT=true FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-lease.sh" release ship >/dev/null
+  pass "terminal receipts stop and existing supervision custody remains a retry obligation"
+}
+
 test_fleet_and_bearings_project_pending_continuation() {
   local dir home send state fakebin snapshot bearings
   dir="$TMP_ROOT/fleet-projection"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
-  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" unknown
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
   run_continue "$home" "$send" "$state" >/dev/null || fail "projection continuation failed"
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/no-mistakes" <<'SH'
@@ -153,9 +190,46 @@ SH
   pass "fleet and Bearings project the pending continuation and unverified worker activity"
 }
 
+test_advanced_head_surfaces_continuation_conflict() {
+  local dir home send state out head snapshot bearings fakebin
+  dir="$TMP_ROOT/head-conflict"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  run_continue "$home" "$send" "$state" >/dev/null || fail "initial head continuation failed"
+  git -C "$home/projects/ship" commit -q --allow-empty -m advance
+  head=$(git -C "$home/projects/ship" rev-parse HEAD)
+  printf 'done: committed %s advanced head\n' "$head" > "$home/state/ship.status"
+  out=$(run_continue "$home" "$send" "$state") || fail "advanced head execution failed"
+  [[ "$out" == *'reason=continuation-head-mismatch'* ]] || fail "old delivery was accepted for the advanced head: $out"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf 'fm-ship\n' ;;
+  display-message) printf 'codex\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+SH
+  chmod +x "$fakebin/no-mistakes" "$fakebin/tmux"
+  snapshot=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$snapshot" | jq -e '.tasks[] | select(.id == "ship") | .delivery_continuation.state == "head-mismatch" and .delivery_continuation.head != .delivery_continuation.current_head' >/dev/null \
+    || fail "fleet snapshot hid the exact-head continuation conflict: $snapshot"
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bearings-snapshot.sh" --json)
+  printf '%s' "$bearings" | jq -e '.in_flight[] | select(.id == "ship") | .state == "validation_conflict"' >/dev/null \
+    || fail "Bearings hid the exact-head continuation conflict: $bearings"
+  pass "advanced committed heads refuse stale delivery and surface the conflict"
+}
+
 test_exactly_once_delivery_and_replay
 test_refusals_preserve_stop
-test_active_run_and_head_mismatch_refuse
+test_active_run_and_unavailable_attribution_refuse
+test_strict_run_attribution_distinguishes_absence_from_query_failure
 test_identity_and_committed_head_requirements
+test_terminal_receipt_and_existing_lease_retry
 test_fleet_and_bearings_project_pending_continuation
+test_advanced_head_surfaces_continuation_conflict
 echo "all fm-delivery-continue tests passed"
