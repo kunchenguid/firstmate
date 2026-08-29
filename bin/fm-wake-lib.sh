@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
 
-FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
+FM_WAKE_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+FM_WAKE_DEFAULT_ROOT="$(cd -- "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
@@ -314,11 +314,18 @@ fm_lock_role() {
   cat "$1/role" 2>/dev/null
 }
 
+# basename, dirname and cd take `--` here because they are reached from the
+# ancestry walk, where a login shell's own argv[0] arrives dash-prefixed and BSD
+# basename would otherwise reject it as an option bundle. The readlink calls
+# below deliberately do NOT: every lock path is built under the home's state
+# directory from FM_HOME and is absolute, so none can begin with a dash, and
+# adding a separator there would be hardening beyond the defect at the cost of
+# depending on `--` support in one more BSD tool.
 fm_lock_abs_path() {
   local path=$1 dir base
-  dir=$(dirname "$path")
-  base=$(basename "$path")
-  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  dir=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  dir=$(cd -- "$dir" 2>/dev/null && pwd -P) || return 1
   printf '%s/%s\n' "$dir" "$base"
 }
 
@@ -342,7 +349,7 @@ fm_lock_link_owner() {
   [ -n "$owner" ] || return 1
   case "$owner" in
     /*) printf '%s\n' "$owner" ;;
-    *) printf '%s/%s\n' "$(dirname "$lockdir")" "$owner" ;;
+    *) printf '%s/%s\n' "$(dirname -- "$lockdir")" "$owner" ;;
   esac
 }
 
@@ -361,7 +368,7 @@ fm_lock_discard_owner() {
 
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
-  stray="$lockdir/$(basename "$ownerdir")"
+  stray="$lockdir/$(basename -- "$ownerdir")"
   if [ -L "$stray" ] && [ "$(readlink "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
     rm -f "$stray" 2>/dev/null || true
   fi
@@ -1528,7 +1535,7 @@ fm_wake_signal_sig() {  # <file> -> "size:mtime"
 }
 
 fm_wake_signal_seen_path() {  # <state> <file>
-  printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
+  printf '%s/.seen-%s' "$1" "$(basename -- "$2" | tr '.' '_')"
 }
 
 # 0 when <file>'s current signature exactly matches its recorded seen marker,

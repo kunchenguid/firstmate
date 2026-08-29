@@ -227,6 +227,44 @@ test_lock_single_winner_under_concurrency() {
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
 
+# The owner-link helpers resolve a lock symlink through readlink, which is
+# deliberately called WITHOUT a `--` separator: every lock path is built under
+# the home's state directory from FM_HOME and is absolute, so a dash-prefixed
+# lock path is outside the contract these helpers accept and is not pinned here.
+# What is in contract is the ordinary absolute owner link, which nothing else
+# exercises directly: an acquired lock must report the owner directory it points
+# at, agree only with that directory, and stop resolving once released.
+test_lock_helpers_resolve_owner_link_for_absolute_lock_path() {
+  local dir state out
+  dir=$(make_case lock-owner-link)
+  state="$dir/state"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lockdir="$2/.owner-link.lock"
+    fm_lock_try_acquire "$lockdir" || { printf "acquire-failed\n"; exit 1; }
+    owner=$(fm_lock_link_owner "$lockdir") || { printf "unreadable\n"; exit 1; }
+    case "$owner" in
+      /*) ;;
+      *) printf "not-absolute:%s\n" "$owner"; exit 1 ;;
+    esac
+    [ -d "$owner" ] || { printf "owner-missing:%s\n" "$owner"; exit 1; }
+    fm_lock_points_to_owner "$lockdir" "$owner" || { printf "mismatch\n"; exit 1; }
+    if fm_lock_points_to_owner "$lockdir" "$owner.other"; then
+      printf "false-match\n"
+      exit 1
+    fi
+    fm_lock_release "$lockdir"
+    if fm_lock_link_owner "$lockdir" >/dev/null 2>&1; then
+      printf "still-linked\n"
+      exit 1
+    fi
+    printf "ok\n"
+  ' _ "$LIB" "$state" 2>&1)
+  [ "$out" = ok ] \
+    || fail "an absolute lock path must resolve, match only its own owner, and clear on release, got: $out"
+  pass "lock helpers resolve and clear an absolute lock path's owner link"
+}
+
 test_lock_steals_dead_pid_lock() {
   local dir state lockdir dead rc newpid
   dir=$(make_case lock-dead-steal)
@@ -1130,6 +1168,7 @@ test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
+test_lock_helpers_resolve_owner_link_for_absolute_lock_path
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed

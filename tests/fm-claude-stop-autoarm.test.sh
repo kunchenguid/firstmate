@@ -1149,6 +1149,98 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+# A login shell carries its own executable PATH as argv[0] with a leading dash
+# ("-/bin/zsh" under macOS `login`, "-/bin/bash" here), and that string reaches
+# every ancestry-walking path tool as an ordinary argument. BSD basename and
+# dirname parse a leading dash as an option bundle and reject it, so an
+# unguarded call printed a diagnostic ahead of every hook message the primary
+# session saw. These run the real hook and the real lock acquisition beneath
+# such an ancestor and require both a working outcome and a silent one.
+
+# Build a two-stage shim: stage 1 re-execs itself with a login-shell-shaped
+# argv[0], stage 2 runs $1 beneath the fake harness holding the fixture lock.
+write_login_shell_shim() {
+  local shim=$1
+  cat > "$shim" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_LOGIN_SHELL_STAGE:-0}" = 0 ]; then
+  FM_LOGIN_SHELL_STAGE=1 exec -a "-$BASH" "$BASH" "$0" "$@"
+fi
+# Record what this platform's ps actually exposes, so the test can prove the
+# dash-prefixed path really reached the walk instead of passing vacuously.
+LC_ALL=C ps -o comm= -p $$ > "$FM_HOME/state/ancestor-comm" 2>/dev/null
+LC_ALL=C ps -o args= -p $$ > "$FM_HOME/state/ancestor-args" 2>/dev/null
+# No exec below: this process must SURVIVE as the dash-named ancestor, and the
+# harness must be its own pid, or the whole chain collapses into a single
+# process and the ancestry walk never sees a login shell at all.
+# The trailing `exit` on each level defeats bash's last-command exec
+# optimization, which would otherwise replace this shell (and the harness
+# shell) in place and collapse the whole chain into one pid with no login
+# shell left to walk past.
+"$FAKE_CLAUDE" -c '
+  printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+  "$@"
+  exit $?
+' fm-login-shell-shim "$@"
+exit $?
+SH
+  chmod +x "$shim"
+}
+
+# 0 when either ps field recorded by the shim carries the dash-prefixed path.
+# macOS ps reports argv[0] in comm=; procps reports the kernel exec name there
+# and exposes argv[0] only through args=, so either field satisfies this.
+assert_login_shell_argv0_reached_walk() {
+  local dir=$1 comm args
+  comm=$(cat "$dir/state/ancestor-comm" 2>/dev/null || true)
+  args=$(cat "$dir/state/ancestor-args" 2>/dev/null || true)
+  case "$comm$args" in
+    *-/*) return 0 ;;
+  esac
+  fail "no ps field carried the login-shell argv[0]; comm='$comm' args='$args'"
+}
+
+assert_no_path_tool_diagnostic() {
+  local out=$1 what=$2
+  case "$out" in
+    *"illegal option"*|*"basename:"*|*"dirname:"*|*"usage: basename"*|*"usage: dirname"*)
+      fail "$what printed a path-tool diagnostic: $out"
+      ;;
+  esac
+}
+
+test_rewake_is_clean_under_login_shell_ancestor() {
+  local dir shim out status
+  dir=$(make_primary_dir "$TMP_ROOT/login-shell-rewake")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  shim="$TMP_ROOT/login-shell-rewake-shim.sh"
+  write_login_shell_shim "$shim"
+  status=0
+  out=$(printf '%s\n' '{"session_id":"sess-login-shell","stop_hook_active":false}' \
+    | FM_HOME="$dir" "$shim" "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1) || status=$?
+  assert_login_shell_argv0_reached_walk "$dir"
+  assert_no_path_tool_diagnostic "$out" "the Stop-owned auto-arm"
+  expect_code 2 "$status" "an actionable close must still rewake beneath a login-shell ancestor"
+  assert_contains "$out" "firstmate watcher wake" "the rewake banner must still be delivered"
+  pass "auto-arm: rewake beneath a login-shell ancestor carries no path-tool diagnostic"
+}
+
+test_lock_acquire_is_clean_under_login_shell_ancestor() {
+  local dir shim out status
+  dir=$(make_primary_dir "$TMP_ROOT/login-shell-lock")
+  shim="$TMP_ROOT/login-shell-lock-shim.sh"
+  write_login_shell_shim "$shim"
+  status=0
+  out=$(FM_HOME="$dir" "$shim" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  assert_login_shell_argv0_reached_walk "$dir"
+  assert_no_path_tool_diagnostic "$out" "session-lock acquisition"
+  expect_code 0 "$status" "lock acquisition must succeed beneath a login-shell ancestor"
+  assert_contains "$out" "lock acquired: harness pid" "the lock must still report its harness pid"
+  pass "fm-lock: acquisition beneath a login-shell ancestor carries no path-tool diagnostic"
+}
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -1188,3 +1280,5 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_fm_lock_status_still_works_with_shared_lib
+test_rewake_is_clean_under_login_shell_ancestor
+test_lock_acquire_is_clean_under_login_shell_ancestor
