@@ -13,13 +13,15 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 
-Fresh-worktree or first-machine launch may show a workspace-trust dialog: `--dangerously-skip-permissions` bypasses PERMISSION checks only, never that separate gate.
-`../../../bin/fm-spawn.sh` now clears it automatically on every launch and relaunch whose backend can deliver Down; a backend without that capability leaves Claude alive on the dialog and emits and records one blocked human-keystroke diagnostic instead of attempting a rejected key.
-The dialog is cancel-first and cancel-focused by default (verified live, Claude Code 2.1.251): a bare Enter selects "No, exit" and quits claude immediately, so never accept it with a plain `--key Enter` - the detector and the required Down-then-Enter sequence live in `../../../bin/fm-composer-lib.sh` (`fm_composer_claude_trust_dialog_state`) and `fm-spawn.sh`'s claude launch path, the one owner for both.
-Accepting the dialog for a git worktree persists under the repository's own checkout path in `~/.claude.json`, never the worktree's own path, so every other worktree of an already-trusted repository launches with no dialog at all; firstmate never edits that file itself.
-On a capable backend, a spawn that observes the dialog but cannot clear it or confirm that the launch brief resumed processing fails loudly in `state/<id>.status` rather than leaving a silently idle pane.
-An unreadable detection window fails separately because a dialog may still be pending, while a definitely already-trusted launch retains the existing spawn path without a new processing requirement.
-Treat either failure like any other failed spawn by inspecting the pane and using `stuck-crewmate-recovery` if it recurs.
+Fresh-worktree or first-machine launch may show a workspace-trust dialog because `--dangerously-skip-permissions` bypasses permission checks only, not that separate gate.
+`../../../bin/fm-spawn.sh` automatically handles the dialog on launches and relaunches whose backend can deliver Down, and it requires both a cleared dialog and evidence that Claude resumed processing the launch brief.
+The dialog is cancel-focused by default, so a bare Enter selects "No, exit" and quits Claude; never accept it with a plain `--key Enter`.
+The shared detector is `fm_composer_claude_trust_dialog_state` in `../../../bin/fm-composer-lib.sh`, while the Claude launch path in `../../../bin/fm-spawn.sh` owns navigation, postcondition verification, and failure reporting.
+A backend without Down support leaves Claude alive on the dialog and records one actionable `blocked:` diagnostic in `state/<id>.status` instead of attempting an unsupported key.
+On a capable backend, an uncleared dialog, an unconfirmed processing transition, or an unreadable settle window records a `failed:` status rather than leaving a silently idle pane.
+Inspect the pane and use `stuck-crewmate-recovery` if a blocked or failed trust launch recurs.
+Trust acceptance is a one-time repository cost rather than a per-worktree cost, and Firstmate never writes or pre-seeds Claude's managed trust store.
+`../../../docs/verification/runtime-backends.md` owns the dated Claude version, persistence evidence, and live-refresh boundary for these facts.
 A genuinely fresh isolated `CLAUDE_CONFIG_DIR` requires a human-completed OAuth login before Claude Code shows repository trust and does not inherit the machine's existing Keychain credentials.
 Testing a fresh isolated store therefore needs that human login before the repository-trust check; the ordinary Firstmate deployment shares its already-onboarded and authenticated `CLAUDE_CONFIG_DIR` with Claude workers.
 The first-run theme picker is outside this automatic trust handling because selecting a theme still leads to the same human login wall and cannot make a fresh isolated store unattended.

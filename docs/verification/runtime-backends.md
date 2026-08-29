@@ -178,25 +178,30 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Claude workspace trust
 
-Claude Code 2.1.251 was verified on 2026-08-29 through real `fm-spawn.sh` launches in isolated tmux windows and scratch git worktrees.
+Claude Code 2.1.251 was verified manually on 2026-08-29 through real `fm-spawn.sh` launches in isolated tmux windows and throwaway scratch git worktrees.
 The first worktree of a never-trusted repository rendered `Accessing workspace:` with `No, exit` focused, and a bare Enter returned the pane to its shell.
 Moving Down before Enter accepted the dialog, removed it, and let Claude process the launch brief.
 A before-and-after diff of Claude's managed trust store recorded `hasTrustDialogAccepted` under the repository checkout path and no entry under the worktree path.
 A second worktree of the same repository then launched without a dialog or another trust-store entry, so acceptance is a one-time repository cost rather than a per-worktree cost.
-The opt-in guard also launches an unrelated repository and requires a fresh dialog there, ruling out global trust as the explanation.
-Firstmate never writes or pre-seeds Claude's trust store; the opt-in guard redirects Claude to an isolated config directory and drives the real launch path.
+An unrelated scratch repository still required trust, ruling out global trust as the explanation.
+These observations are dated, version-pinned manual evidence rather than an automated proof.
+Portable regressions in `tests/fm-composer-lib.test.sh` and `tests/fm-claude-harness.test.sh` pin the classifier and spawn-path behavior without depending on Claude credentials.
+Firstmate never writes or pre-seeds Claude's trust store.
 
-Refresh the live proof with:
+The opt-in guard creates a fresh isolated config directory and proceeds to the real launch path only when Claude reports that profile authenticated:
 
 ```sh
 FM_CLAUDE_TRUST_DIALOG_LIVE=1 bin/fm-test-run.sh tests/fm-claude-trust-dialog-live-e2e.test.sh
 ```
 
-Bounded output from the verified behavior:
+A genuinely fresh isolated config directory requires human-completed OAuth login and does not inherit existing machine credentials.
+When that authentication is unavailable, the guard exits with an explicit `EVIDENCE_INCOMPLETE` skip that is not a verification pass.
+The checked-in guard cannot complete that human login itself, so the 2026-08-29 manual result above remains the proof of record when the isolated profile is unauthenticated.
+
+Bounded output when isolated-profile authentication is unavailable:
 
 ```text
-ok - Claude 2.1.251 (Claude Code): fresh trust was accepted and both worktree briefs were processed without human input
-ok - Claude 2.1.251 (Claude Code): the same repository skipped trust while an unrelated repository required it
+skip: EVIDENCE_INCOMPLETE - isolated-profile authentication unavailable; Claude 2.1.251 (Claude Code) repository trust not verified here
 ```
 
 ### Cleanup endpoint identity
