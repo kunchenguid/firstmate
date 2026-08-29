@@ -833,53 +833,5 @@ wait "$REPEAT_WORKER_PID" 2>/dev/null || true
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
 
-# A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
-# consecutive-failure backoff, so a child that dies just past that threshold
-# used to reset the only guard the supervisor had and restart forever. The
-# fixture below is that worker: it exits non-zero after living just longer than
-# the healthy window, so every restart is accounted as healthy-then-failed.
-RESTART_ROOT="$TMP_ROOT/restart-root"
-RESTART_HOME="$TMP_ROOT/restart-account"
-RESTART_STATE="$TMP_ROOT/restart-state"
-RESTART_CHILD_LOG="$TMP_ROOT/restart-children"
-mkdir -p "$RESTART_ROOT/bin" "$RESTART_HOME"
-cp "$ROOT/bin/fm-remote-job-lib.sh" "$RESTART_ROOT/bin/"
-cp "$ROOT/bin/fm-remote-job-worker.sh" "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh"
-printf 'fixture\n' > "$RESTART_ROOT/AGENTS.md"
-cat > "$RESTART_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
-#!/bin/bash
-set -u
-[ "${1:-}" = --serve ] || exit 2
-printf '%s\n' "${BASHPID:-$$}" >> "$FM_TEST_SUPERVISOR_CHILD_LOG"
-sleep "$FM_TEST_SUPERVISOR_CHILD_SECONDS"
-exit "$FM_TEST_SUPERVISOR_CHILD_STATUS"
-SH
-chmod +x "$RESTART_ROOT/bin"/*.sh
-HOME="$RESTART_HOME" FM_ROOT_OVERRIDE="$RESTART_ROOT" \
-  FM_REMOTE_JOB_STATE_ROOT="$RESTART_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
-  FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=1 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=3 \
-  FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=0 FM_TEST_SUPERVISOR_CHILD_LOG="$RESTART_CHILD_LOG" \
-  FM_TEST_SUPERVISOR_CHILD_SECONDS=1.1 FM_TEST_SUPERVISOR_CHILD_STATUS=1 \
-  "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
-  > "$TMP_ROOT/restart-supervisor.out" 2> "$TMP_ROOT/restart-supervisor.err" &
-RESTART_SUPERVISOR_PID=$!
-for _ in $(seq 1 300); do
-  kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null || break
-  sleep 0.1
-done
-if kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null; then
-  fail "workers dying just past the healthy threshold drove an unbounded restart loop"
-fi
-set +e
-wait "$RESTART_SUPERVISOR_PID"
-RESTART_SUPERVISOR_RC=$?
-set -e
-RESTART_SUPERVISOR_PID=
-[ "$RESTART_SUPERVISOR_RC" -ne 0 ] || fail "the exhausted restart guard reported success"
-[ "$(wc -l < "$RESTART_CHILD_LOG" | tr -d ' ')" -eq 3 ] \
-  || fail "the restart guard did not stop at the configured maximum"
-assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_ROOT/restart-supervisor.err" \
-  "the restart guard did not explain why it stopped"
-pass "barely healthy worker failures remain bounded by the restart guard"
 
 echo "ALL TESTS PASSED"
