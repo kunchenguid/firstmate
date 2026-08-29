@@ -241,7 +241,10 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
   # return. The scratch is invisible to git, so a leftover directory here is
   # harmless and must never become a refusal of its own.
   gitdir=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || gitdir=""
-  [ -z "$gitdir" ] || rm -f "$gitdir"/fm-env-local.* 2>/dev/null || true
+  # Keep the seed record: only mktemp's six-character suffix names staging
+  # scratch, while fm-env-local-seed-record is the retire phase's ownership
+  # evidence and must survive until that phase has read it.
+  [ -z "$gitdir" ] || rm -f "$gitdir"/fm-env-local.?????? 2>/dev/null || true
   # Every seed-phase path that returns below leaves no copy of this library's own
   # in the worktree except the one published at the very end, so the record is
   # dropped once here and written once there. That keeps it describing the current
