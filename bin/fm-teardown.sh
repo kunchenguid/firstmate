@@ -3042,6 +3042,30 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+# Release the isolated copy here: after the endpoint is confirmed retired and
+# after every FALLIBLE task-state retirement above has succeeded, but BEFORE the
+# record removal below. Nothing fallible may be placed between this release and
+# that removal, and that invariant is the whole point of this position.
+#
+# Releasing earlier lets another home acquire the worktree while a retry still
+# trusts stale metadata and reaps that home's live processes. Releasing later -
+# after the record is gone - is just as bad in the other direction: teardown
+# refuses immediately on a missing meta (see the "no meta for task" guard near
+# the top), so a transient provider failure would strand a reserved worktree
+# with NO supported retry at all. Between the two, the record must outlive the
+# release attempt, so a failure here leaves both the record and the reservation
+# intact and a plain rerun can retry.
+case "$TASK_WORKTREE_RELEASE" in
+  orca)
+    fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+    ;;
+  treehouse)
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted with the task record and provider reservation intact for retry" >&2
+      exit 1
+    }
+    ;;
+esac
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
@@ -3053,22 +3077,6 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
-# Release the isolated copy only after the endpoint is confirmed retired and
-# every fallible task-state retirement, including meta removal, has succeeded.
-# A provider release failure here can leak a reserved worktree, which is
-# recoverable; releasing earlier can let another home acquire it while a retry
-# still trusts stale metadata and reaps that home's live processes.
-case "$TASK_WORKTREE_RELEASE" in
-  orca)
-    fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-    ;;
-  treehouse)
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-      exit 1
-    }
-    ;;
-esac
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

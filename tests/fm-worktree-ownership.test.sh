@@ -129,6 +129,17 @@ SH
   cat > "$dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 printf 'treehouse <%s>\n' "$*" >> "${FM_RUNTIME_LOG:?}"
+# A provider release can fail transiently - a git index lock left by a killed
+# process, a busy pool. FM_FAKE_TREEHOUSE_RETURN_FAIL models that so the failure
+# path is reachable in a test.
+case "${1:-}" in
+  return)
+    if [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" = 1 ]; then
+      printf 'treehouse: return failed\n' >&2
+      exit 1
+    fi
+    ;;
+esac
 exit 0
 SH
   chmod +x "$dir/fakebin/tmux" "$dir/fakebin/treehouse"
@@ -338,8 +349,35 @@ SH
 
 test_spawn_refuses_a_worktree_another_live_task_claims
 test_spawn_accepts_the_worktree_its_own_record_names
+# The failure path, and the counterpart to the ordering case above. That one
+# keeps the release from happening too EARLY; this one keeps the task record
+# from being erased too early. Teardown refuses outright on a missing meta (the
+# "no meta for task" guard near the top of bin/fm-teardown.sh), so a record
+# removed before a failed release would strand a reserved worktree with no
+# supported retry at all - the provider still holds it and every rerun exits.
+test_failed_release_preserves_the_record_for_retry() {
+  local dir id=retryable rc=0
+  dir=$(make_teardown_case teardown-release-fail)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=sess:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "mode=no-mistakes"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force \
+    > "$dir/out" 2> "$dir/err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "teardown reported success despite a failed provider release"
+  grep -q 'treehouse <return' "$dir/runtime.log" \
+    || fail "the release was never attempted, so this case proves nothing:"$'\n'"$(cat "$dir/runtime.log")"
+  [ -f "$dir/home/state/$id.meta" ] \
+    || fail "a failed provider release erased the task record; teardown refuses on a missing meta, so the reserved worktree can never be retried"
+  pass "teardown: a failed provider release keeps the task record, so a rerun can retry"
+}
+
 test_teardown_retires_the_endpoint_before_releasing_the_worktree
 test_teardown_failure_preserves_the_record_and_provider_reservation
+test_failed_release_preserves_the_record_for_retry
 test_tmux_unconfirmed_close_preserves_the_record_and_provider_reservation
 test_tmux_renamed_window_uses_stable_identity_for_retirement
 test_zellij_unconfirmed_close_preserves_the_record_and_provider_reservation
