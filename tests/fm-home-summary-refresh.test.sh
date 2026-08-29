@@ -703,6 +703,75 @@ run_bootstrap_detect() {
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
+
+# A timed-out attempt can finish recording after a newer ledger is published.
+# Its record must retain the attempt's ordering rather than look like a failure
+# of the newer publication and keep the session-start diagnostic active.
+ORDER_HOME="$TMP_ROOT/order-home"
+ORDER_DATE_BIN="$TMP_ROOT/order-date-bin"
+mkdir -p "$ORDER_HOME/state" "$ORDER_HOME/data" "$ORDER_HOME/config" \
+  "$ORDER_HOME/projects" "$ORDER_DATE_BIN"
+printf '# Seeded Firstmate home\n' > "$ORDER_HOME/AGENTS.md"
+printf 'order\n' > "$ORDER_HOME/.fm-secondmate-home"
+cat > "$ORDER_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+REAL_DATE=$(command -v date)
+cat > "$ORDER_DATE_BIN/date" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = -u ] && [ "$2" = +%Y-%m-%dT%H:%M:%SZ ]; then
+  python3 - "$FM_TEST_ORDER_START" "$FM_TEST_ORDER_EARLY" "$FM_TEST_ORDER_LATE" <<'PY'
+import sys
+import time
+
+started = float(sys.argv[1])
+print(sys.argv[2] if time.time() - started < 1 else sys.argv[3])
+PY
+  exit 0
+fi
+exec "$FM_TEST_REAL_DATE" "$@"
+SH
+chmod +x "$ORDER_DATE_BIN/date"
+ORDER_LOCK_MARKER="$TMP_ROOT/order-lock-held"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ORDER_HOME" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
+  : > "$3"
+  sleep 30
+' _ "$ROOT" "$ORDER_HOME" "$ORDER_LOCK_MARKER" &
+LOCK_HOLDER_PID=$!
+i=0
+while [ ! -e "$ORDER_LOCK_MARKER" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$LOCK_HOLDER_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$ORDER_LOCK_MARKER" ] || fail "could not hold the publication lock for ordering coverage"
+order_started=$(python3 -c 'import time; print(time.time())')
+PATH="$ORDER_DATE_BIN:$FAKEBIN:$PATH" FM_TEST_REAL_DATE="$REAL_DATE" \
+  FM_TEST_ORDER_START="$order_started" FM_TEST_ORDER_EARLY="$NOW_ONE" \
+  FM_TEST_ORDER_LATE="$NOW_THREE" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$ORDER_HOME" FM_HOME_SUMMARY_TIMEOUT=2 \
+  "$WRITER" --best-effort \
+  || fail "ordered timeout changed the best-effort caller result"
+kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+LOCK_HOLDER_PID=
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ORDER_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
+  "$WRITER" || fail "could not publish after the ordered timeout"
+order_out=$(run_bootstrap_detect "$ORDER_HOME")
+case "$order_out" in
+  *HOME_SUMMARY:*)
+    fail "a pre-publication attempt was reported after the newer ledger: $order_out"
+    ;;
+esac
+pass "failure records preserve refresh attempt ordering"
+
 report_out=$(run_bootstrap_detect "$REPORT_HOME")
 printf '%s\n' "$report_out" \
   | grep -F 'HOME_SUMMARY: this home has never published state/home-summary.json' \
