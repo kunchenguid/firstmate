@@ -1528,7 +1528,14 @@ fm_wake_signal_sig() {  # <file> -> "size:mtime"
 }
 
 fm_wake_signal_seen_path() {  # <state> <file>
-  printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
+  local task
+  case "$2" in
+    *.status)
+      task=$(basename "$2"); task=${task%.status}
+      status_signal_seen_marker_path "$1" "$task"
+      ;;
+    *) printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')" ;;
+  esac
 }
 
 # The byte size recorded in <file>'s seen marker, or 0 when no marker exists, it

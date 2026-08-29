@@ -554,7 +554,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
 }
 
 _seen_status_path() {  # <state> <task>
-  printf '%s/.subsuper-seen-status-%s' "$1" "$(_stale_key "$2")"
+  status_daemon_seen_marker_path "$1" "$2"
 }
 
 # The byte offset in <task>'s status log up to which this daemon has already

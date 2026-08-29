@@ -861,11 +861,27 @@ EOF
   printf '%s' "$offset"
 }
 
+status_signal_seen_marker_path() {  # <state> <task-id>
+  printf '%s/.seen-%s' "$1" "$(printf '%s.status' "$2" | tr '.' '_')"
+}
+
+status_heartbeat_seen_marker_path() {  # <state> <task-id>
+  printf '%s/.hb-surfaced-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
+}
+
+status_daemon_seen_marker_path() {  # <state> <task-id>
+  printf '%s/.subsuper-seen-status-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
+}
+
 status_retire_presentation_task() {  # <state> <task-id>
   local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0 found=0
+  local signal_marker heartbeat_marker daemon_marker
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
+  signal_marker=$(status_signal_seen_marker_path "$state" "$task")
+  heartbeat_marker=$(status_heartbeat_seen_marker_path "$state" "$task")
+  daemon_marker=$(status_daemon_seen_marker_path "$state" "$task")
 
   # A remote-home teardown can legitimately retire an endpoint ID that has no
   # status log in that home. Do not contend with that home's unrelated status
@@ -874,7 +890,10 @@ status_retire_presentation_task() {  # <state> <task-id>
   # durable proof that there is nothing to retire.
   if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ] \
     && [ ! -e "$state/.$task.open-decisions-cursor" ] \
-    && [ ! -L "$state/.$task.open-decisions-cursor" ]; then
+    && [ ! -L "$state/.$task.open-decisions-cursor" ] \
+    && [ ! -e "$signal_marker" ] && [ ! -L "$signal_marker" ] \
+    && [ ! -e "$heartbeat_marker" ] && [ ! -L "$heartbeat_marker" ] \
+    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ]; then
     if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       return 0
     fi
@@ -918,7 +937,8 @@ EOF
     fi
   fi
   if [ "$rc" -eq 0 ]; then
-    rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" || rc=1
+    rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
+      "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
   fi
   fm_lock_release "$lock" || rc=1
   return "$rc"

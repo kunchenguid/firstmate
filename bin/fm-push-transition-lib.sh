@@ -109,7 +109,7 @@ wake() {
 }
 
 _hb_surfaced_path() {
-  printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
+  status_heartbeat_seen_marker_path "$STATE" "$1"
 }
 
 # The byte offset in <task>'s status log that the heartbeat backstop has already
