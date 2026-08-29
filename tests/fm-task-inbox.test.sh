@@ -49,8 +49,9 @@ inbox_lib() {  # <state> <function> [args...]
 }
 
 # A fake tmux for the watcher cases: capture-pane replays FM_FAKE_TMUX_CAPTURE,
-# display-message yields a numeric cursor row, and every literal send-keys is
-# logged to FM_SEND_LOG so a doorbell ring is observable.
+# display-message yields a numeric cursor row, list-windows reports the modelled
+# window so the endpoint reads as present, and every literal send-keys is logged
+# to FM_SEND_LOG so a doorbell ring is observable.
 make_watch_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -85,7 +86,12 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # These cases model a pane that EXISTS and is idle. The doorbell's
+    # live-agent gate reads this inventory, so an empty answer here would
+    # describe a retired endpoint and correctly suppress the ring.
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-fm-t1}"
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -497,6 +503,134 @@ test_watcher_escalates_once_after_budget() {
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
 
+# --- doorbell live-agent gate ------------------------------------------------
+#
+# These two run REAL processes in a REAL tmux server on a private socket, need
+# no harness and no credentials, and self-skip where tmux is absent, so CI
+# enforces them everywhere it runs tmux.
+#
+# The defect they exist for: the doorbell is submitted as keystrokes to whatever
+# owns the endpoint. When the agent has exited, that owner is the worker's shell
+# at a prompt, and the doorbell line is executed as a command - observed live as
+# "bash: Firstmate: command not found", three times on one pane, once per
+# delivery attempt. The refusal case pins that a proven-agent-free endpoint is
+# never typed into; the delivery case pins that the gate did not simply mute the
+# doorbell, so neither can go quietly vacuous.
+
+DOORBELL_SOCKET="fm-doorbell-$$"
+DOORBELL_LAB=
+
+doorbell_cleanup() {
+  [ -z "${DOORBELL_LAB:-}" ] && return 0
+  tmux -L "$DOORBELL_SOCKET" kill-server >/dev/null 2>&1 || true
+  rm -rf "$DOORBELL_LAB"
+  DOORBELL_LAB=
+}
+
+# Sets DOORBELL_LAB and DOORBELL_SHIM, or returns nonzero so the caller skips.
+# Deliberately NOT called through a command substitution: the globals must land
+# in the calling shell, not in a subshell that is discarded.
+DOORBELL_SHIM=
+doorbell_lab() {
+  local real sleep_bin
+  real=$(command -v tmux) || return 1
+  sleep_bin=$(command -v sleep) || return 1
+  DOORBELL_LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-doorbell.XXXXXX") || return 1
+  DOORBELL_SHIM="$DOORBELL_LAB/shim"
+  mkdir -p "$DOORBELL_LAB/shim" "$DOORBELL_LAB/bin"
+  cat > "$DOORBELL_LAB/shim/tmux" <<SH
+#!/usr/bin/env bash
+exec "$real" -L "$DOORBELL_SOCKET" "\$@"
+SH
+  chmod +x "$DOORBELL_LAB/shim/tmux"
+  # A stand-in agent binary: a SYMLINK to a real long-running system binary, so
+  # the kernel records the agent-shaped executable identity the classifier reads
+  # (a copied platform binary would fail code-signing validation on macOS).
+  ln -s "$sleep_bin" "$DOORBELL_LAB/bin/claude" || return 1
+}
+
+# Runs fm_task_inbox_ring against the private socket and echoes its exit status.
+doorbell_ring() {  # <shim> <state> <target> <record>
+  local shim=$1 state=$2 target=$3 rec=$4 rc=0
+  PATH="$shim:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_task_inbox_ring tmux "$2" "$3"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$target" "$rec" >/dev/null 2>&1 || rc=$?
+  printf '%s' "$rc"
+}
+
+doorbell_agent_state() {  # <shim> <target>
+  PATH="$1:$PATH" bash -c '
+    . "$1"
+    fm_backend_agent_state tmux "$2"
+  ' _ "$ROOT/bin/fm-backend.sh" "$2" 2>/dev/null
+}
+
+test_doorbell_refuses_an_endpoint_with_no_agent() {
+  local shim state rec rc pane
+  command -v tmux >/dev/null 2>&1 || { echo "# skip: tmux not found"; return 0; }
+  doorbell_lab || { echo "# skip: could not build the doorbell lab"; return 0; }
+  shim=$DOORBELL_SHIM
+  trap doorbell_cleanup EXIT
+  state="$DOORBELL_LAB/state"
+  mkdir -p "$state"
+  # A pane whose foreground group is nothing but a shell: the exact shape a
+  # crewmate's pane takes the moment its agent exits.
+  PATH="$shim:$PATH" tmux new-session -d -s doorbell -n dead bash --norc --noprofile \
+    || { doorbell_cleanup; echo "# skip: could not start a private tmux server"; return 0; }
+  sleep 0.5
+  [ "$(doorbell_agent_state "$shim" doorbell:dead)" = dead ] || {
+    doorbell_cleanup
+    echo "# skip: a bare shell pane did not classify as agent-free on this platform"
+    return 0
+  }
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 'steer body')
+  rc=$(doorbell_ring "$shim" "$state" doorbell:dead "$rec")
+  [ "$rc" = 3 ] \
+    || { doorbell_cleanup; fail "ringing an agent-free endpoint must refuse with 3 (got $rc)"; }
+  pane=$(PATH="$shim:$PATH" tmux capture-pane -p -t doorbell:dead 2>/dev/null || true)
+  case "$pane" in
+    *"Firstmate instruction waiting"*)
+      doorbell_cleanup
+      fail "the doorbell was typed into a shell prompt: $pane"
+      ;;
+  esac
+  # The record itself is untouched, so nothing is lost by refusing.
+  [ -f "$rec" ] || { doorbell_cleanup; fail "the refused steer must stay durably recorded"; }
+  doorbell_cleanup
+  pass "doorbell: a proven agent-free endpoint refuses instead of typing into its shell"
+}
+
+test_doorbell_still_rings_a_live_agent_endpoint() {
+  local shim state rec rc i pane
+  command -v tmux >/dev/null 2>&1 || { echo "# skip: tmux not found"; return 0; }
+  doorbell_lab || { echo "# skip: could not build the doorbell lab"; return 0; }
+  shim=$DOORBELL_SHIM
+  trap doorbell_cleanup EXIT
+  state="$DOORBELL_LAB/state"
+  mkdir -p "$state"
+  PATH="$shim:$PATH" tmux new-session -d -s doorbell -n live \
+    "PATH=$DOORBELL_LAB/bin:\$PATH claude 600" \
+    || { doorbell_cleanup; echo "# skip: could not start a private tmux server"; return 0; }
+  i=0
+  while [ "$i" -lt 20 ] && [ "$(doorbell_agent_state "$shim" doorbell:live)" != alive ]; do
+    sleep 0.2
+    i=$((i + 1))
+  done
+  [ "$(doorbell_agent_state "$shim" doorbell:live)" = alive ] || {
+    pane=$(doorbell_agent_state "$shim" doorbell:live)
+    doorbell_cleanup
+    echo "# skip: the stand-in agent pane did not classify as alive (got $pane)"
+    return 0
+  }
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 'steer body')
+  rc=$(doorbell_ring "$shim" "$state" doorbell:live "$rec")
+  [ "$rc" = 0 ] \
+    || { doorbell_cleanup; fail "a live agent endpoint must still be rung (got $rc)"; }
+  doorbell_cleanup
+  pass "doorbell: a live agent endpoint still rings, so the gate is not vacuous"
+}
+
 test_write_is_durable_and_exact
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
@@ -511,3 +645,5 @@ test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
+test_doorbell_refuses_an_endpoint_with_no_agent
+test_doorbell_still_rings_a_live_agent_endpoint

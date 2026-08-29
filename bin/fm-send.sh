@@ -961,6 +961,7 @@ else
     case "$ring_rc" in
       1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      3) echo "fm-send: doorbell refused, $T holds no agent (the pane is a shell); the steer is durably recorded at $INBOX_RECORD - recover the worker before it can act on it" >&2 ;;
     esac
     exit 0
   fi
