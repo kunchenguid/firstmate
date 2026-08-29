@@ -2530,6 +2530,98 @@ if (!data || typeof data !== "object" || Array.isArray(data) || data.ok !== true
   return 1
 }
 
+teardown_tmux_endpoint_state() {  # <meta> <target>
+  local meta=$1 target=$2 count window_id windows inventory_status
+  count=$(grep -c '^tmux_window_id=' "$meta" 2>/dev/null || true)
+  if [ "$count" -eq 0 ]; then
+    fm_backend_agent_state tmux "$target"
+    return 0
+  fi
+  [ "$count" -eq 1 ] || { printf 'unreadable'; return 0; }
+  window_id=$(meta_value "$meta" tmux_window_id)
+  case "$window_id" in
+    @|@*[!0-9]*) printf 'unreadable'; return 0 ;;
+    @*) ;;
+    *) printf 'unreadable'; return 0 ;;
+  esac
+  fm_backend_source tmux || { printf 'unreadable'; return 0; }
+  if windows=$(LC_ALL=C tmux list-windows -a -F '#{window_id}' 2>&1); then
+    inventory_status=0
+  else
+    inventory_status=$?
+  fi
+  if [ "$inventory_status" -ne 0 ]; then
+    case "$windows" in
+      *"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+        printf 'missing'
+        ;;
+      *) printf 'unreadable' ;;
+    esac
+    return 0
+  fi
+  if printf '%s\n' "$windows" | grep -Fqx "$window_id"; then
+    printf 'present'
+  else
+    printf 'missing'
+  fi
+}
+
+teardown_endpoint_retirement_confirmed() {  # <meta> <task-id> <backend> <target> <scope>
+  local meta=$1 task_id=$2 backend=$3 target=$4 scope=$5 state retention
+  retention="retaining every durable task record and the provider reservation"
+  if [ "$scope" = child ]; then
+    retention="retaining that child's durable identity records and the provider reservation"
+  fi
+  case "$backend" in
+    herdr)
+      fm_backend_source herdr || true
+      if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
+        echo "error: herdr endpoint confirmation is unavailable for $task_id; $retention" >&2
+        return 1
+      fi
+      if ! fm_backend_herdr_endpoint_confirmed_gone "$target"; then
+        echo "error: herdr pane $target for $task_id is not confirmed gone after its close attempt; $retention" >&2
+        return 1
+      fi
+      ;;
+    tmux)
+      state=$(teardown_tmux_endpoint_state "$meta" "$target")
+      if [ "$state" != missing ]; then
+        echo "error: tmux window $target for $task_id is not confirmed gone after its close attempt (state=$state); $retention" >&2
+        return 1
+      fi
+      ;;
+    zellij)
+      state=$(teardown_zellij_endpoint_state "$target" "$(meta_value "$meta" zellij_tab_id)")
+      if [ "$state" != missing ]; then
+        echo "error: Zellij tab for $target and task $task_id is not confirmed gone after its close attempt (state=$state); $retention" >&2
+        return 1
+      fi
+      ;;
+    cmux)
+      state=$(teardown_cmux_endpoint_state "$(meta_value "$meta" cmux_workspace_id)")
+      if [ "$state" != missing ]; then
+        echo "error: cmux workspace for $target and task $task_id is not confirmed gone after its close attempt (state=$state); $retention" >&2
+        return 1
+      fi
+      ;;
+    orca)
+      if [ -z "$target" ]; then
+        echo "error: Orca terminal for $task_id is not recorded, so retirement cannot be confirmed; $retention" >&2
+        return 1
+      fi
+      if ! teardown_orca_close_confirmed "$target"; then
+        echo "error: Orca terminal $target for $task_id is not confirmed retired because $TEARDOWN_ORCA_CLOSE_REASON; $retention" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "error: $backend endpoint $target for $task_id cannot be confirmed gone; $retention" >&2
+      return 1
+      ;;
+  esac
+}
+
 preflight_firstmate_home_herdr_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
   sub_state="$home/state"
@@ -2555,7 +2647,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_worktree_release
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2566,6 +2658,7 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_worktree_release=none
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -2585,18 +2678,15 @@ cleanup_firstmate_home_children() {
           return 1
         fi
         fm_backend_herdr_kill_serialized "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true
-        if ! fm_backend_herdr_endpoint_confirmed_gone "$child_t"; then
-          echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
-          return 1
-        fi
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
         ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
-      else
+      elif [ "$child_backend" != orca ]; then
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    teardown_endpoint_retirement_confirmed "$child_meta" "$child_id" "$child_backend" "$child_t" child || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2610,24 +2700,16 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
-      fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+      child_worktree_release=orca
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-          :
-        else
-          child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
-            return "$child_return_rc"
-          fi
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
-        fi
+        child_worktree_release=treehouse
       else
-        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        child_worktree_release=remove
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
@@ -2645,6 +2727,25 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/$child_id.launch-pointer"
+    case "$child_worktree_release" in
+      orca)
+        fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+        ;;
+      treehouse)
+        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+          :
+        else
+          child_return_rc=$?
+          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            return "$child_return_rc"
+          fi
+          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        fi
+        ;;
+      remove)
+        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        ;;
+    esac
   done
 }
 
@@ -2878,51 +2979,13 @@ fi
 # it has no independent terminal inventory. Unknown presence, unavailable
 # confirmation machinery, and backends that cannot confirm retain every record
 # so a later rerun can retry the close.
-if [ "$BACKEND" = herdr ]; then
-  fm_backend_source herdr || true
-  if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
-    echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
-    exit 1
-  fi
-  if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
-    echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
-    exit 1
-  fi
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" = tmux ]; then
-  endpoint_state=$(fm_backend_agent_state tmux "$T")
-  if [ "$endpoint_state" != missing ]; then
-    echo "error: tmux window $T for $ID is not confirmed gone after its close attempt (state=$endpoint_state); retaining every durable task record and the provider reservation" >&2
-    exit 1
-  fi
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" = zellij ]; then
-  endpoint_state=$(teardown_zellij_endpoint_state "$T" "$(meta_value "$META" zellij_tab_id)")
-  if [ "$endpoint_state" != missing ]; then
-    echo "error: Zellij tab for $T and task $ID is not confirmed gone after its close attempt (state=$endpoint_state); retaining every durable task record and the provider reservation" >&2
-    exit 1
-  fi
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" = cmux ]; then
-  endpoint_state=$(teardown_cmux_endpoint_state "$(meta_value "$META" cmux_workspace_id)")
-  if [ "$endpoint_state" != missing ]; then
-    echo "error: cmux workspace for $T and task $ID is not confirmed gone after its close attempt (state=$endpoint_state); retaining every durable task record and the provider reservation" >&2
-    exit 1
-  fi
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" = orca ]; then
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
-  if [ -z "$T_ORCA" ]; then
-    echo "error: Orca terminal for $ID is not recorded, so retirement cannot be confirmed; retaining every durable task record and the Orca worktree reservation" >&2
-    exit 1
-  fi
-  if ! teardown_orca_close_confirmed "$T_ORCA"; then
-    echo "error: Orca terminal $T_ORCA for $ID is not confirmed retired because $TEARDOWN_ORCA_CLOSE_REASON; retaining every durable task record and the Orca worktree reservation" >&2
-    exit 1
-  fi
-elif [ "$KIND" != secondmate ]; then
-  echo "error: $BACKEND endpoint $T for $ID cannot be confirmed gone; retaining every durable task record and the provider reservation" >&2
-  exit 1
 fi
+teardown_endpoint_retirement_confirmed "$META" "$ID" "$BACKEND" "$T" direct || exit 1
 
 TASK_WORKTREE_RELEASE=none
 post_lock_cleanup_check=

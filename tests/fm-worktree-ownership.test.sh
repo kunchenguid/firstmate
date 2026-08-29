@@ -208,6 +208,37 @@ SH
   pass "teardown: an unconfirmed tmux close preserves the claim and reservation"
 }
 
+test_tmux_renamed_window_uses_stable_identity_for_retirement() {
+  local dir id=tmux-renamed out rc=0
+  dir=$(make_teardown_case teardown-tmux-renamed)
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux <%s>\n' "$*" >> "${FM_RUNTIME_LOG:?}"
+case "$*" in
+  "list-windows -a -F #{window_id}") printf '%s\n' '@42' ;;
+  *"#{window_name}"*) printf '%s\n' 'renamed-live-window' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=sess:fm-$id" "tmux_window_id=@42" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "mode=no-mistakes"
+
+  out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "tmux teardown accepted a renamed live window as retired"
+  case "$out" in *"state=present"*) ;; *) fail "tmux refusal did not report the stable window as present: $out" ;; esac
+  grep -Fq 'tmux <list-windows -a -F #{window_id}>' "$dir/runtime.log" \
+    || fail "tmux teardown did not consult the stable window-id inventory"
+  if grep -Fq 'treehouse <return' "$dir/runtime.log"; then
+    fail "tmux teardown returned the worktree while its renamed endpoint survived"
+  fi
+  [ -f "$dir/home/state/$id.meta" ] \
+    || fail "tmux teardown erased metadata for the surviving renamed endpoint"
+  pass "teardown: renamed tmux windows remain owned until their stable id disappears"
+}
+
 test_zellij_unconfirmed_close_preserves_the_record_and_provider_reservation() {
   local dir id=zellij-retained out rc=0
   dir=$(make_teardown_case teardown-zellij-retained)
@@ -310,6 +341,7 @@ test_spawn_accepts_the_worktree_its_own_record_names
 test_teardown_retires_the_endpoint_before_releasing_the_worktree
 test_teardown_failure_preserves_the_record_and_provider_reservation
 test_tmux_unconfirmed_close_preserves_the_record_and_provider_reservation
+test_tmux_renamed_window_uses_stable_identity_for_retirement
 test_zellij_unconfirmed_close_preserves_the_record_and_provider_reservation
 test_cmux_unconfirmed_close_preserves_the_record_and_provider_reservation
 test_orca_unconfirmed_close_preserves_the_record_and_provider_reservation

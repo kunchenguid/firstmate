@@ -214,9 +214,15 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
+  new-window) printf '%s\n' "@42"; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|send-keys|set-window-option) exit 0 ;;
+  set-window-option)
+    case "$*" in
+      *"allow-rename off"*) [ "${FM_TMUX_PIN_FAILURE:-0}" != 1 ] || exit 1 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  has-session|new-session|send-keys|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -255,18 +261,45 @@ test_spawn_tmux_window_construction() {
     "new-window must not target the bare session name (collides under base-index 1)"
 
   # Bug 2 fix (a): pin the window name against automatic-rename / allow-rename.
-  assert_grep "set-window-option -t @spawnwid automatic-rename off" "$rec" \
+  assert_grep "set-window-option -t @42 automatic-rename off" "$rec" \
     "must disable automatic-rename on the spawned window"
-  assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
+  assert_grep "set-window-option -t @42 allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
+  assert_grep "send-keys -t @42 treehouse get Enter" "$rec" \
     "treehouse get must be sent to the stable window id"
-  assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
+  assert_grep "display-message -p -t @42 #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
+  grep -Fqx 'tmux_window_id=@42' "$home/state/rec-win-gg7.meta" \
+    || fail "spawn metadata must retain the stable window id used for retirement"
 
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
+}
+
+test_spawn_refuses_an_unpinned_tmux_window() {
+  local home proj fakebin rec wt out status
+  home="$TMP_ROOT/spawn-unpinned-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-unpinned-proj")
+  fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/spawn-unpinned-fake")
+  rec="$TMP_ROOT/spawn-unpinned.log"
+  : > "$rec"
+  wt="$TMP_ROOT/spawn-unpinned-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+
+  out=$(FM_TMUX_PIN_FAILURE=1 run_spawn_record \
+    "$home" unpinned-gg8 "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a tmux window whose name could not be pinned"
+  [ ! -e "$home/state/unpinned-gg8.meta" ] \
+    || fail "failed name pinning published task metadata"
+  assert_grep 'kill-window -t @42' "$rec" \
+    "failed name pinning did not retire the newly created window"
+  assert_not_contains "$out" "spawned unpinned-gg8" \
+    "failed name pinning reported a successful spawn"
+  assert_contains "$out" "could not pin tmux window @42" \
+    "failed name pinning did not explain the spawn refusal"
+  pass "fm-spawn: a window whose stable name cannot be pinned is retired and refused"
 }
 
 test_lib_classification
@@ -275,3 +308,4 @@ test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction
+test_spawn_refuses_an_unpinned_tmux_window

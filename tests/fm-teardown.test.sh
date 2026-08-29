@@ -1691,6 +1691,77 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
   done
 }
 
+test_secondmate_tmux_noop_close_retains_home_and_record() {
+  local case_dir home rc=0
+  case_dir=$(make_case secondmate-tmux-noop-close)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{window_name}"*) printf '%s\n' 'fm-task-x1' ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate-tmux-noop-close: teardown accepted a no-op close"
+  [ -d "$home" ] || fail "secondmate-tmux-noop-close: teardown removed the live secondmate home"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "secondmate-tmux-noop-close: teardown erased the live secondmate record"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "secondmate-tmux-noop-close: teardown released a provider reservation"
+  assert_grep "tmux window" "$case_dir/stderr" \
+    "secondmate-tmux-noop-close: refusal did not identify the surviving endpoint"
+  pass "secondmate teardown retains its home and record after a no-op tmux close"
+}
+
+test_forced_secondmate_tmux_child_noop_close_retains_child_and_parent() {
+  local case_dir home rc=0 child
+  case_dir=$(make_case secondmate-child-tmux-noop-close)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{window_name}"*) printf '%s\n' 'fm-child-a' 'fm-child-b' ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate-child-tmux-noop-close: forced teardown accepted a no-op child close"
+  [ -d "$home" ] && [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "secondmate-child-tmux-noop-close: forced teardown removed the parent home or record"
+  for child in child-a child-b; do
+    [ -e "$home/state/$child.meta" ] && [ -d "$case_dir/$child-wt" ] \
+      || fail "secondmate-child-tmux-noop-close: forced teardown removed $child state or worktree"
+  done
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "secondmate-child-tmux-noop-close: forced teardown released child work"
+  assert_grep "retaining that child's durable identity records" "$case_dir/stderr" \
+    "secondmate-child-tmux-noop-close: refusal did not preserve child ownership"
+  pass "forced secondmate teardown retains child and parent state after a no-op close"
+}
+
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
   local case_dir home lock ready release holder_pid rc waited=0 child
   case_dir=$(make_case descendant-locks)
@@ -2610,6 +2681,8 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
+test_secondmate_tmux_noop_close_retains_home_and_record
+test_forced_secondmate_tmux_child_noop_close_retains_child_and_parent
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
