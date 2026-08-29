@@ -1068,6 +1068,16 @@ case "$*" in
   *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
   *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;
+  *list-windows*)
+    # This fake models every endpoint recorded in its own home as present.
+    # Returning an empty inventory would instead describe a retired endpoint,
+    # so the doorbell's live-agent gate would correctly refuse pointer delivery.
+    for meta in "${FM_HOME:-}"/state/*.meta; do
+      [ -f "$meta" ] || continue
+      sed -n 's/^window=[^:]*://p' "$meta"
+    done
+    exit 0
+    ;;
   *capture-pane*) printf '❯\n'; exit 0 ;;
   *'send-keys'*' -l '*)
     [ "${FM_FAKE_TMUX_FAIL_LITERAL:-0}" = 1 ] && exit 1

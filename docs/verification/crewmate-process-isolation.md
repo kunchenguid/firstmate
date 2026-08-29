@@ -11,13 +11,7 @@ They pin the logic with real processes and no credentials; the facts below are w
 
 ## Worktree ownership has two independent boundaries
 
-Teardown retains the provider reservation unless the backend can confirm that the task endpoint retired.
-Tmux, Zellij, and cmux use structural endpoint inventories, Herdr uses its structured exact-pane absence check, and Orca requires a successful structured close acknowledgment because its CLI exposes no independent terminal inventory.
-An unreadable inventory, a surviving endpoint, or an unacknowledged Orca close refuses before task metadata is retired or the provider reservation is released.
-
-The spawn-side ownership guard is an independent backend-agnostic second protection.
-It refuses a worktree that another live task record in the same home still names even if teardown confirmation was unavailable or a stale record was restored by hand.
-Treehouse's retained owner reservation covers allocation across homes, while the spawn guard covers stale same-home claims, so neither boundary is redundant with the other.
+The [worktree architecture](../architecture.md#worktrees-not-branches-in-your-checkout) owns the current spawn-side claim and teardown-side retirement contract.
 `tests/fm-worktree-ownership.test.sh` executes both boundaries and verifies that every unconfirmed backend close preserves the task record and provider reservation.
 
 ## A prompt passed as an argument is matchable process text
@@ -84,7 +78,7 @@ bash commands it started: ['cat <lab>/briefA.md', 'sleep 240; echo done', ...]
 
 ## Per-harness pointer delivery
 
-The launch templates in `bin/fm-spawn.sh` all place the prompt in the same argv slot, so the mechanism is harness-independent; what each harness contributes is whether its agent acts on a pointer rather than an inlined brief.
+Every positional-prompt launch template in `bin/fm-spawn.sh` places the pointer in the prompt's argv slot; what each harness contributes is whether its agent acts on that pointer rather than an inlined brief.
 Verified 2026-08-29 by launching each installed harness with only the pointer sentence in argv and a brief on disk whose whole task was to create one named file.
 
 | harness | version | outcome |

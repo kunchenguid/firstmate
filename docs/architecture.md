@@ -130,6 +130,7 @@ Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
+Before submitting that line as keystrokes, the shared inbox path refuses only when the recovery-grade liveness probe proves the endpoint holds no agent; ambiguous or unverified endpoints still ring, and an unacknowledged durable record retains the ordinary re-ring and stale-worker escalation path.
 Its local-only typed plane - harness-native invocations and explicit backend targets - selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful typed sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 Text for a worker to read and commands that drive a worker's process are separate planes.
@@ -186,7 +187,12 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
-Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
+One worktree belongs to one live task: spawn refuses a worktree named by another live task record in the same home, while Treehouse's retained owner reservation or Orca's retained worktree id prevents provider reuse across homes.
+Teardown independently closes the recorded endpoint and requires exact structural absence for tmux, Herdr, Zellij, and cmux, or a typed successful native close acknowledgment for Orca, before it retires task metadata and releases the provider reservation.
+An unreadable or surviving endpoint, an unacknowledged Orca close, or a backend without a retirement proof refuses with the durable task record and provider reservation intact for retry.
+Keeping both the spawn-side claim check and teardown-side retirement ordering prevents a half-retired task from sharing its worktree even when either boundary encounters stale state.
+The brief remains on disk, while positional-prompt harnesses receive only a short pointer to its resolved path in process argv; Kimi receives the same pointer after its readiness gate, and a raw launch command that expands the brief as prompt text is refused.
+The `fm-spawn.sh` and `fm-teardown.sh` headers own the exact refusal and cleanup mechanics, `tests/fm-spawn-pool-base-freshen.test.sh`, `tests/fm-spawn-brief-argv.test.sh`, and `tests/fm-worktree-ownership.test.sh` own portable regression coverage, and [crewmate process isolation verification](verification/crewmate-process-isolation.md) records the active harness evidence.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
