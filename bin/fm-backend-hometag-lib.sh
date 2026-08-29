@@ -18,13 +18,19 @@
 # path, so distinct installations - including multiple primaries on one
 # machine - never collide even though they share one backend-global
 # namespace. Callers source this file AFTER resolving their own
-# FM_HOME/FM_ROOT fallbacks (both adapters already do this for their own
-# purposes before any other function runs).
+# FM_HOME/FM_ROOT fallbacks (both adapters, and bin/fm-task-tmp-lib.sh's
+# callers, already do this before any other function runs).
+#
+# bin/fm-task-tmp-lib.sh reuses the same tag for a namespace with the same
+# shape: /tmp is machine-global, so it discriminates one home's per-task temp
+# root from another home's task carrying the same id.
 #
 # Moving/relocating a firstmate installation changes its FM_ROOT path and
-# therefore its tag; titles created under the old tag simply stop matching -
-# an accepted limitation, no worse than the existing fact that a task's
-# recorded absolute worktree path does not survive a move either.
+# therefore its tag; titles created under the old tag simply stop matching,
+# and a per-task temp root recorded under it stops matching too, so teardown
+# reports that refusal instead of removing a path it can no longer prove is
+# this task's - an accepted limitation, no worse than the existing fact that a
+# task's recorded absolute worktree path does not survive a move either.
 
 FM_BACKEND_HOMETAG_SECONDMATE_MARKER=".fm-secondmate-home"
 
