@@ -289,6 +289,15 @@ wait_for_healthy_successor() {
 # as applied to each half. Comparing a singly-truncated probe against a doubly
 # truncated row silently stops matching once an identity is long enough, which is
 # reachable with a deep watcher path.
+#
+# The reason column decides whether a row describes the WATCHER's own end at all.
+# A row is written under the watcher's pid whenever a cycle closes, including the
+# ones where the ARM was the thing that ended - an interrupted arm TERMs its child
+# and then records its OWN signal against that pid. Reading such a row back as the
+# watcher's fate names a signal the watcher never received. Only the two
+# classifications owned_child_finished draws from the child's own wait status are
+# eligible; this is an allow-list on purpose, so a reason added later is ignored
+# here by default instead of silently becoming a watcher exit.
 owner_recorded_exit() {
   local pid=$1 identity=$2 want
   [ -f "$CYCLE_LOG" ] || return 1
@@ -296,7 +305,8 @@ owner_recorded_exit() {
     "$(cycle_clean_field "${pid:-none}")" "$(cycle_clean_field "${identity:-none}")")")
   awk -F'\t' -v pid="watcher_pid=$pid" -v want="lock_before=$want" \
     -v since="$cycle_started_at" '
-    $2 == pid && $3 == "origin=started" && $10 == want {
+    $2 == pid && $3 == "origin=started" && $10 == want \
+      && ($8 == "reason=nonzero-exit" || $8 == "reason=signal-exit") {
       ended = $5; sub(/^ended_at=/, "", ended)
       if (ended + 0 < since + 0) next
       code = $6; sub(/^exit_code=/, "", code)
@@ -314,12 +324,21 @@ owner_recorded_exit() {
 # only remaining evidence in exactly that case. Re-prove the identity the cycle
 # recorded, the way every other holder check in this codebase does, and compare
 # it through the same cleaning the ledger uses so length cannot decide the answer.
+#
+# Three answers, not two. 0: the recorded identity is re-proven on a live pid.
+# 1: the watcher is provably gone - its pid is free, or that pid now belongs to a
+# different process. 2: nothing is proven either way, because this cycle recorded
+# no identity for the watcher or the live pid's identity cannot be read right now.
+# Collapsing 2 into either neighbour invents a fact: "still live" names a process
+# that may not be the watcher, and "exited" asserts an end that was never
+# observed. An unknown has to stay unknown all the way to the operator.
 cycle_watcher_still_live() {
   local pid=$1 identity=$2 current
   fm_pid_alive "$pid" || return 1
-  [ -n "$identity" ] || return 0
+  [ -n "$identity" ] || return 2
   current=$(cycle_clean_field "$(fm_pid_identity "$pid" 2>/dev/null || true)")
-  [ -n "$current" ] && [ "$current" = "$identity" ]
+  [ -n "$current" ] || return 2
+  [ "$current" = "$identity" ]
 }
 
 # Name what actually ended a cycle that produced no reason line. "Cycle ended
@@ -330,18 +349,25 @@ cycle_watcher_still_live() {
 # and the verdict and exit status are untouched - only the operator's evidence
 # improves.
 unexplained_cycle_evidence() {
-  local pid=$cycle_watcher_pid holder age owner_exit clean_identity
+  local pid=$cycle_watcher_pid holder age owner_exit clean_identity live=0
   age=$(fm_path_age "$BEAT")
   case "$pid" in ''|*[!0-9]*) printf 'watcher identity was never established'; return 0 ;; esac
   holder=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   clean_identity=$(cycle_clean_field "$cycle_watcher_identity")
-  if ! cycle_watcher_still_live "$pid" "$clean_identity" \
-    && owner_exit=$(owner_recorded_exit "$pid" "$clean_identity"); then
+  # One probe, read once: two calls could disagree about a single fact if the
+  # process changes state between them, and each one forks ps off this host.
+  cycle_watcher_still_live "$pid" "$clean_identity" || live=$?
+  if [ "$live" -eq 2 ]; then
+    printf 'watcher pid=%s could not be identified - that pid is in use but the identity recorded for this cycle could not be re-proven against it, so neither a live watcher nor an exit is established (last beacon %ss ago, lock now: %s)' \
+      "$pid" "$age" "${holder:-unheld}"
+    return 0
+  fi
+  if [ "$live" -ne 0 ] && owner_exit=$(owner_recorded_exit "$pid" "$clean_identity"); then
     printf 'watcher pid=%s %s without delivering a wake (last beacon %ss ago, lock now: %s)' \
       "$pid" "$owner_exit" "$age" "${holder:-unheld}"
     return 0
   fi
-  if cycle_watcher_still_live "$pid" "$clean_identity"; then
+  if [ "$live" -eq 0 ]; then
     if [ "$holder" = "$pid" ]; then
       printf 'watcher pid=%s is still live and holds this home lock, but its beacon has not advanced for %ss' "$pid" "$age"
     else

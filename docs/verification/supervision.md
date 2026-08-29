@@ -539,6 +539,32 @@ mutant  -> not ok - a long identity lost the owner-recorded exit:
 The mutant does not lose the verdict, only the exit code - it falls back to the generic disposition text in exactly the case where the recorded exit is the only evidence left.
 The fixture asserts its own identity length before relying on it, so it cannot pass vacuously on a short path.
 
+The ledger reason filter, mutant = the allow-list removed so any row under the watcher's PID is eligible:
+
+```text
+control -> ok - an arm-interrupted row is not reported as the watcher's own exit
+mutant  -> not ok - attached arm reported its own arm's signal as the watcher's exit:
+               watcher: attached pid=25977 (beacon 1s)
+               watcher: FAILED - cycle ended without an actionable reason:
+               watcher pid=25977 was killed by HUP without delivering a wake
+```
+
+The watcher in that fixture was never sent SIGHUP; its own arm was, and the arm terminated it.
+The mutant names a signal source that does not exist, which is the same unactionable evidence in a more confident voice.
+
+The three-answer liveness probe, mutant = an unreadable identity collapsed back into "not live":
+
+```text
+control -> ok - an unreadable identity reads as unknown, and a real death still reads as a death
+mutant  -> not ok - an unreadable identity was reported as a death:
+               watcher: attached pid=27845 (beacon 1s)
+               watcher: FAILED - cycle ended without an actionable reason:
+               watcher pid=27845 died leaving its own lock behind
+```
+
+The fixture asserts the watcher is still alive at that moment, so the mutant's sentence is provably false rather than merely unproven.
+Its second leg kills that same watcher and requires the death wording to still fire, so the fix cannot pass by simply never saying it.
+
 ### Beacon freshness under host suspend - attempted and deferred
 
 The second half of the reported problem, that `state/.last-watcher-beat` can read fresh while supervision is already dead and stale while a watcher is merely suspended, was attempted on this branch and deliberately deferred rather than shipped.
