@@ -222,6 +222,7 @@ test_raw_launch_uses_pointer_and_refuses_brief_expansion() {
   rec=$(make_case raw-pointer raw-harness)
   read_case "$rec"
   fm_fake_exit0 "$FAKEBIN_DIR" raw-harness
+  # shellcheck disable=SC2016  # single quotes are deliberate: the placeholders must reach fm-spawn as literal template text, unexpanded by this shell
   raw_launch='raw-harness "$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"'
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" "$raw_launch") || fail "raw pointer spawn failed: $out"
@@ -239,6 +240,7 @@ test_raw_launch_uses_pointer_and_refuses_brief_expansion() {
 
   rec=$(make_case raw-brief raw-harness)
   read_case "$rec"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the placeholders must reach fm-spawn as literal template text, unexpanded by this shell
   raw_launch='raw-harness "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" "$raw_launch") \
