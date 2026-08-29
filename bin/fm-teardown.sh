@@ -93,10 +93,24 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
-# Pre-teardown cleanup sequence (runs once every landed/discard-work safety
-# refusal above has already passed, and BEFORE any worktree return, branch
-# delete, or backend kill below - a still-active run or a leaked process may
-# own live work in that worktree):
+# Task-scoped external cleanup runs immediately after endpoint authorization:
+# the named chrome-devtools-axi bridge may live on a browser host outside the
+# worktree process tree, so teardown reads state/<id>.chrome-devtools-session and
+# confirms the exact task-derived name. Only a task whose own launcher recorded
+# opening a bridge is asked about at all - an unused task costs no browser call -
+# and a stop is issued only for a session the tool reports as something other
+# than gone, and only once that same tool has answered "gone" for a freshly
+# minted name nothing ever started, so a wrapper or inherited port that redirects
+# every invocation onto one shared bridge is reported instead of obeyed. Each
+# browser call is bounded, so an unresponsive bridge cannot stall teardown. This
+# best-effort cleanup precedes landed-work checks so a refusal cannot strand the
+# bridge. Teardown checks again after worker exit to close the last-start race,
+# while the captain's browser is never closed.
+#
+# The remaining pre-teardown cleanup sequence runs once every landed/discard-work
+# safety refusal above has already passed, and BEFORE any worktree return, branch
+# delete, or backend kill below - a still-active run or a leaked process may own
+# live work in that worktree:
 #   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
 #     be torn down while its no-mistakes pipeline run is still PARKED at a gate
 #     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
@@ -154,6 +168,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-chrome-devtools-lib.sh
+. "$SCRIPT_DIR/fm-chrome-devtools-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -695,6 +711,9 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+# A Windows-host bridge is outside worktree process reaping. Stop its exact
+# task-scoped session before any landed-work refusal can leave it orphaned.
+[ "$KIND" = secondmate ] || fm_chrome_bridge_cleanup "$STATE" "$ID"
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -2489,6 +2508,7 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
+    [ "$child_kind" = secondmate ] || fm_chrome_bridge_cleanup "$sub_state" "$child_id"
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
@@ -2502,7 +2522,11 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
-      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged"
+      "$sub_state/$child_id.cursor-session" \
+      "$sub_state/$child_id.chrome-devtools-session" "$sub_state/$child_id.reconcile-nudged"
+    # The bridge binding's mutex and in-flight set are directories beside it.
+    rm -rf "$sub_state/$child_id.chrome-devtools-session.lock" \
+      "$sub_state/$child_id.chrome-devtools-session.inflight"
   done
 }
 
@@ -2789,6 +2813,10 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+# Recheck after the worker endpoint is gone. This closes the race where a live
+# worker starts its bridge after the pre-refusal cleanup but before process exit;
+# a session this teardown already stopped reads inactive and makes no stop call.
+[ "$KIND" = secondmate ] || fm_chrome_bridge_cleanup "$STATE" "$ID"
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
@@ -2818,9 +2846,13 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.chrome-devtools-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged"
+# The bridge binding's mutex and in-flight set are directories beside it.
+rm -rf "$STATE/$ID.chrome-devtools-session.lock" \
+  "$STATE/$ID.chrome-devtools-session.inflight"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

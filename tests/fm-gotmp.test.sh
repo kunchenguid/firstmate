@@ -71,6 +71,9 @@ make_fake_root() {
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.
   ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
+  # fm-chrome-devtools-lib.sh: teardown sources it unconditionally for task-scoped
+  # browser bridge cleanup, and it sources fm-timeout-lib.sh above in turn.
+  ln -s "$ROOT/bin/fm-chrome-devtools-lib.sh" "$fake/bin/fm-chrome-devtools-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
@@ -160,6 +163,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.
   ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
+  # fm-chrome-devtools-lib.sh: teardown sources it unconditionally for task-scoped
+  # browser bridge cleanup, and it sources fm-timeout-lib.sh above in turn.
+  ln -s "$ROOT/bin/fm-chrome-devtools-lib.sh" "$fake/bin/fm-chrome-devtools-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"

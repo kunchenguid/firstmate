@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-chrome-devtools-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -843,6 +845,27 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   pass "fm-spawn --relaunch: switching away from cursor retires its session binding"
 }
 
+# The bridge session is derived from (state dir, task id), so a replacement
+# incarnation inherits the exact session the retired one may still be running.
+# Resetting the startup marker would make teardown skip that live bridge.
+test_relaunch_keeps_a_live_chrome_bridge_owned() {
+  local dir record session
+  dir=$(new_case chromebridge rl36)
+  add_ship_task "$dir" rl36 claude
+  fm_chrome_binding_write "$dir/home/state" rl36 \
+    || fail "could not seed the task's Chrome bridge binding"
+  session=$FM_CHROME_TASK_SESSION
+  record="$dir/home/state/rl36.chrome-devtools-session"
+  printf 'session=%s\nstarted=1\n' "$session" > "$record"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl36 --relaunch >/dev/null
+  [ "$(sed -n 's/^session=//p' "$record")" = "$session" ] \
+    || fail "a relaunch must keep the task's exact bridge session"
+  grep -q '^started=1$' "$record" \
+    || fail "a relaunch disowned the retired incarnation's live Chrome bridge"
+  pass "fm-spawn --relaunch: a live task Chrome bridge stays owned by the task"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1337,6 +1360,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
+test_relaunch_keeps_a_live_chrome_bridge_owned
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

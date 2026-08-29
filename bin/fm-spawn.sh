@@ -181,7 +181,10 @@
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
-# already existed for that workspace). It is launched through the verified binary
+# already existed for that workspace). Every crewmate and scout also receives one
+# lazy task-scoped chrome-devtools-axi session recorded in
+# state/<id>.chrome-devtools-session; no bridge starts until the worker uses it.
+# It is launched through the verified binary
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
@@ -257,6 +260,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-chrome-devtools-lib.sh
+. "$SCRIPT_DIR/fm-chrome-devtools-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -2339,8 +2344,13 @@ fi
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# The root is created private (700) because it also carries the task-private
+# launcher directory that goes first on the worker's PATH, and /tmp/fm-<id> is a
+# name any local user could have created first. The launcher directory itself is
+# minted with an unpredictable name inside it, so its exact path is never
+# derivable from the task id.
 TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
+(umask 077; mkdir -p "$TASK_TMP" && mkdir -p "$TASK_TMP/gotmp")
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -2859,6 +2869,55 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Bind browser automation lazily to one non-default bridge session for this task.
+# The task-private launcher marks the binding before a browser action can start
+# the bridge, and that mark is what teardown reclaims against: a task with no
+# recorded start is never asked about, so the launcher is not an optimisation but
+# the thing that makes reclamation happen at all.
+# chrome-devtools-axi is an optional universal tool, so like every other missing
+# universal tool this degrades to a diagnostic instead of blocking the launch -
+# but the degraded state is honest about what it costs: the session still isolates
+# this task's bridge from the captain's, and nothing will reclaim it.
+if [ "$KIND" != secondmate ]; then
+  if ! fm_chrome_binding_write "$STATE_REAL" "$ID"; then
+    echo "warning: could not create the task-scoped chrome-devtools bridge binding for $ID; this task will not isolate a browser bridge" >&2
+  else
+    CHROME_DEVTOOLS_AXI_BIN=$(command -v chrome-devtools-axi 2>/dev/null || true)
+    CHROME_DEVTOOLS_AXI_EXPORTS="unset CHROME_DEVTOOLS_AXI_PORT; export CHROME_DEVTOOLS_AXI_SESSION=$FM_CHROME_TASK_SESSION"
+    case "$CHROME_DEVTOOLS_AXI_BIN" in
+      /*)
+        # The launcher dir is minted fresh under the task temp root rather than
+        # named from the task id: it goes first on the worker's PATH, and
+        # /tmp/fm-<id>/bin would be a name any local user could reach for.
+        CHROME_DEVTOOLS_AXI_BINDIR=$(fm_chrome_launcher_dir_create "$TASK_TMP" || true)
+        if [ -n "$CHROME_DEVTOOLS_AXI_BINDIR" ] \
+          && fm_chrome_wrapper_write "$STATE_REAL" "$ID" "$CHROME_DEVTOOLS_AXI_BINDIR/chrome-devtools-axi" "$CHROME_DEVTOOLS_AXI_BIN"; then
+          CHROME_DEVTOOLS_AXI_EXPORTS="$CHROME_DEVTOOLS_AXI_EXPORTS; export PATH=$CHROME_DEVTOOLS_AXI_BINDIR:\$PATH"
+        else
+          echo "warning: could not create the task-scoped chrome-devtools bridge launcher for $ID; the session still keeps this task's bridge off the captain's, but nothing will record that a bridge was opened, so teardown will not reclaim one and any bridge this task leaves must be stopped by hand" >&2
+        fi
+        ;;
+      *)
+        echo "warning: chrome-devtools-axi is unavailable; $ID keeps its task-scoped bridge session but gets no task-private launcher, so teardown will not reclaim a bridge opened through some other copy of the tool" >&2
+        ;;
+    esac
+    # Same composer window as the TRACEPARENT send below, so the same rule and the
+    # same shape: a status of 2 left this line typed but unsubmitted, and
+    # appending the launch command would run the two concatenated. The status has
+    # to be read from the else branch - `if ! cmd` reports the negation, which is
+    # 0 for every failure and would make the refusal below unreachable.
+    if spawn_send_text_line "$T" "$CHROME_DEVTOOLS_AXI_EXPORTS"; then
+      :
+    else
+      CHROME_SEND_STATUS=$?
+      if [ "$CHROME_SEND_STATUS" -eq 2 ]; then
+        echo "error: chrome-devtools bridge scoping input could not be cleared for $W; refusing to append the launch command" >&2
+        exit 1
+      fi
+      echo "warning: the task-scoped chrome-devtools bridge session could not be delivered to $ID; this task will not isolate a browser bridge, and teardown will not reclaim any bridge it opens" >&2
+    fi
+  fi
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.

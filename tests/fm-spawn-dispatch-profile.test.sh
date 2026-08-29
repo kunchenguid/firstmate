@@ -12,6 +12,9 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+# shellcheck source=bin/fm-chrome-devtools-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-chrome-devtools-lib.sh"
 
 make_spawn_pi_probe() {
   local fakebin=$1 tool=$2
@@ -53,13 +56,27 @@ case "${1:-}" in
         prev=$a
       done
     fi
+    if [ -n "${FM_FAKE_TEXT_LOG:-}" ]; then
+      for a in "$@"; do
+        case "$a" in
+          *CHROME_DEVTOOLS_AXI_SESSION=*) printf '%s\n' "$a" >> "$FM_FAKE_TEXT_LOG" ;;
+        esac
+      done
+    fi
+    if [ -n "${FM_FAKE_CHROME_SEND_STATUS:-}" ]; then
+      for a in "$@"; do
+        case "$a" in
+          *CHROME_DEVTOOLS_AXI_SESSION=*) exit "$FM_FAKE_CHROME_SEND_STATUS" ;;
+        esac
+      done
+    fi
     exit 0
     ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" treehouse chrome-devtools-axi
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -126,11 +143,36 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_TEXT_LOG="${FM_TEST_TEXT_LOG:-}" \
+    FM_FAKE_CHROME_SEND_STATUS="${FM_TEST_CHROME_SEND_STATUS:-}" \
+    FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
-    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:${FM_TEST_SPAWN_PATH:-$PATH}" \
     "$SPAWN" "$@" 2>&1
+}
+
+# mirror_path_without <dir> <tool> [<bindir> ...]: the whole search path
+# re-exposed by symlink except one tool, so a host that happens to install that
+# tool cannot make an absent-tool test pass vacuously.
+mirror_path_without() {
+  local dir=$1 omit=$2 search bindir entry name
+  shift 2
+  mkdir -p "$dir"
+  search=$(printf '%s\n' "$@"; printf '%s\n' "$PATH" | tr ':' '\n')
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=${entry##*/}
+      [ "$name" = "$omit" ] && continue
+      [ -e "$dir/$name" ] || ln -s "$entry" "$dir/$name" 2>/dev/null
+    done
+  done <<EOF
+$search
+EOF
+  ! PATH="$dir" command -v "$omit" >/dev/null 2>&1 \
+    || fail "the $omit-free search path still resolved $omit"
 }
 
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
@@ -826,6 +868,472 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_task_scoped_chrome_bridge_binding_is_exported_before_launch() {
+  local rec id out status record session textlog tasktmp wrapper launcher_dir mode
+  id=profile-chrome-session-z20
+  rm -rf "/tmp/fm-$id"
+  rec=$(make_spawn_case profile-chrome-session claude "$id")
+  read_case_record "$rec"
+  textlog="$CASE_DIR/text.log"
+
+  out=$(FM_TEST_TEXT_LOG="$textlog" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with a task-scoped Chrome binding should succeed"
+  record="$HOME_DIR/state/$id.chrome-devtools-session"
+  assert_present "$record" "spawn did not record the task-scoped Chrome binding"
+  session=$(sed -n 's/^session=//p' "$record")
+  case "$session" in
+    fm-*) ;;
+    *) fail "spawn recorded an invalid or default Chrome session: ${session:-empty}" ;;
+  esac
+  assert_grep 'started=0' "$record" "a fresh Chrome binding was not marked unused"
+  assert_grep "unset CHROME_DEVTOOLS_AXI_PORT; export CHROME_DEVTOOLS_AXI_SESSION=$session; export PATH=" "$textlog" \
+    "spawn did not export the recorded Chrome session and task-private launcher before launching the worker"
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$HOME_DIR/state/$id.meta")
+  launcher_dir=$(sed -n 's/.*export PATH=\([^:]*\):.*/\1/p' "$textlog" | tail -n 1)
+  case "$launcher_dir" in
+    "$tasktmp"/?*) ;;
+    *) fail "spawn put an unexpected directory first on the worker's PATH: ${launcher_dir:-empty}" ;;
+  esac
+  [ "$launcher_dir" != "$tasktmp/bin" ] \
+    || fail "the task-private Chrome launcher lives at a path derivable from the task id"
+  assert_absent "$tasktmp/bin" \
+    "spawn created the task-private Chrome launcher at a name derivable from the task id"
+  wrapper="$launcher_dir/chrome-devtools-axi"
+  assert_present "$wrapper" "spawn did not create the task-private Chrome launcher"
+  chmod 600 "$record"
+  ( umask 022; CHROME_DEVTOOLS_AXI_SESSION="$session" "$wrapper" pages ) \
+    || fail "the task-private Chrome launcher did not delegate to the real tool"
+  assert_grep 'started=1' "$record" \
+    "the task-private Chrome launcher did not mark a bridge-starting action"
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$record" 2>/dev/null)
+  else
+    mode=$(stat -c %a "$record" 2>/dev/null)
+  fi
+  [ "$mode" = 600 ] \
+    || fail "the launcher's startup marking widened the task binding record from 0600 to 0$mode"
+  pass "spawn records and exports one non-default chrome-devtools bridge session per task"
+}
+
+test_missing_chrome_devtools_tool_does_not_block_the_launch() {
+  local rec id out status record session textlog chromeless tasktmp
+  id=profile-chrome-missing-z21
+  rm -rf "/tmp/fm-$id"
+  rec=$(make_spawn_case profile-chrome-missing claude "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/chrome-devtools-axi"
+  chromeless="$CASE_DIR/path-without-chrome"
+  mirror_path_without "$chromeless" chrome-devtools-axi "$FAKEBIN_DIR"
+  textlog="$CASE_DIR/text.log"
+
+  out=$(FM_TEST_SPAWN_PATH="$chromeless" FM_TEST_TEXT_LOG="$textlog" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a missing chrome-devtools-axi must not block a ship launch"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=claude" "the launch did not complete without chrome-devtools-axi"
+  assert_contains "$out" "chrome-devtools-axi is unavailable" "the absent browser tool was not reported"
+  assert_contains "$out" "teardown will not reclaim" \
+    "spawn implied teardown would still reclaim a bridge nothing can record the start of"
+  assert_contains "$(cat "$LAUNCH_LOG")" "claude --dangerously-skip-permissions" \
+    "no agent launch command was sent without chrome-devtools-axi"
+  record="$HOME_DIR/state/$id.chrome-devtools-session"
+  assert_present "$record" "spawn dropped the task-scoped Chrome binding when the tool was absent"
+  session=$(sed -n 's/^session=//p' "$record")
+  assert_grep "export CHROME_DEVTOOLS_AXI_SESSION=$session" "$textlog" \
+    "spawn stopped scoping the task's Chrome session when the tool was absent"
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$HOME_DIR/state/$id.meta")
+  [ -z "$(find "$tasktmp" -name chrome-devtools-axi -print -quit 2>/dev/null)" ] \
+    || fail "spawn wrote a task-private Chrome launcher with no real tool behind it"
+  ! grep -q 'export PATH=' "$textlog" \
+    || fail "spawn prepended a launcher directory to the worker PATH with no real tool behind it"
+  pass "an absent chrome-devtools-axi degrades to a warning and still scopes the task's bridge session"
+}
+
+test_world_writable_task_temp_root_never_reaches_the_worker_path() {
+  local rec id out status record session textlog tasktmp
+  id=profile-chrome-untrusted-z22
+  tasktmp="/tmp/fm-$id"
+  rm -rf "$tasktmp"
+  mkdir -p "$tasktmp"
+  chmod 777 "$tasktmp"
+  rec=$(make_spawn_case profile-chrome-untrusted claude "$id")
+  read_case_record "$rec"
+  textlog="$CASE_DIR/text.log"
+
+  out=$(FM_TEST_TEXT_LOG="$textlog" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a pre-created task temp root must not block a ship launch"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=claude" "the launch did not complete"
+  record="$HOME_DIR/state/$id.chrome-devtools-session"
+  assert_present "$record" "spawn dropped the task-scoped Chrome binding"
+  session=$(sed -n 's/^session=//p' "$record")
+  assert_grep "export CHROME_DEVTOOLS_AXI_SESSION=$session" "$textlog" \
+    "spawn stopped scoping the task's Chrome session"
+  ! grep -q "export PATH=$tasktmp" "$textlog" \
+    || fail "spawn put a world-writable task temp directory first on the worker's PATH"
+  [ -z "$(find "$tasktmp" -name chrome-devtools-axi -print -quit 2>/dev/null)" ] \
+    || fail "spawn wrote its task-private launcher into a world-writable directory"
+  rm -rf "$tasktmp"
+  pass "a pre-created world-writable task temp root never becomes the worker's first PATH entry"
+}
+
+# The launcher directory goes first on the worker's PATH, so its name must not be
+# reconstructible from anything an onlooker knows - the task id and its /tmp root
+# are both visible in fleet output. Minting it twice under one root must not
+# produce the same path.
+test_task_private_launcher_directory_is_unpredictable() {
+  local parent first second
+  parent="$TMP_ROOT/launcher-unpredictable"
+  rm -rf "$parent"
+  mkdir -p "$parent"
+  chmod 700 "$parent"
+
+  first=$(fm_chrome_launcher_dir_create "$parent") \
+    || fail "could not create a task-private Chrome launcher directory"
+  second=$(fm_chrome_launcher_dir_create "$parent") \
+    || fail "could not create a second task-private Chrome launcher directory"
+  [ "$first" != "$second" ] \
+    || fail "two launcher directories under one task temp root reused a single derivable name"
+  case "$first" in
+    "$parent"/?*) ;;
+    *) fail "the launcher directory escaped its verified task temp root: $first" ;;
+  esac
+  fm_chrome_dir_is_task_private "$first" \
+    || fail "the launcher directory was not created private to this user"
+
+  chmod 777 "$parent"
+  ! fm_chrome_launcher_dir_create "$parent" >/dev/null 2>&1 \
+    || fail "a launcher directory was minted under a world-writable parent"
+  chmod 700 "$parent"
+  rm -rf "$parent"
+  pass "the task-private Chrome launcher directory is minted unpredictably inside a verified private root"
+}
+
+# The pane-shell exports that scope a worker's browser calls are sent once, at
+# spawn. Anything the worker runs whose environment did not survive - a nested
+# shell, an rc file that re-exports CHROME_DEVTOOLS_AXI_PORT, a subprocess
+# launched with a scrubbed env - would otherwise mark this task's binding started
+# and then open the bridge on the captain's default session, orphaning it exactly
+# as the incident did. The launcher is on that execution path whatever the
+# environment, so it must carry the binding itself rather than merely record it.
+test_task_private_launcher_forces_the_recorded_session() {
+  local dir id state tool envlog bindir wrapper session record
+  id=launcher-binding-z23
+  dir="$TMP_ROOT/launcher-binding"
+  rm -rf "$dir"
+  mkdir -p "$dir/state" "$dir/tool"
+  chmod 700 "$dir"
+  state="$dir/state"
+  envlog="$dir/tool-env.log"
+  tool="$dir/tool/chrome-devtools-axi"
+  cat > "$tool" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'session=%s port=%s args=%s\n' \
+  "${CHROME_DEVTOOLS_AXI_SESSION:-unset}" "${CHROME_DEVTOOLS_AXI_PORT:-unset}" "$*" \
+  >> "$FM_FAKE_TOOL_ENV_LOG"
+SH
+  chmod +x "$tool"
+
+  fm_chrome_binding_write "$state" "$id" \
+    || fail "could not write the task binding for the launcher test"
+  session=$FM_CHROME_TASK_SESSION
+  record="$state/$id.chrome-devtools-session"
+  bindir=$(fm_chrome_launcher_dir_create "$dir") \
+    || fail "could not mint a task-private Chrome launcher directory"
+  wrapper="$bindir/chrome-devtools-axi"
+  fm_chrome_wrapper_write "$state" "$id" "$wrapper" "$tool" \
+    || fail "could not write the task-private Chrome launcher"
+
+  env -i "PATH=$PATH" "FM_FAKE_TOOL_ENV_LOG=$envlog" \
+    CHROME_DEVTOOLS_AXI_SESSION=default CHROME_DEVTOOLS_AXI_PORT=9333 \
+    "$wrapper" pages \
+    || fail "the task-private Chrome launcher did not delegate to the real tool"
+  assert_grep "session=$session port=unset args=pages" "$envlog" \
+    "a bridge-starting call escaped the recorded task session or kept an inherited bridge port"
+  assert_grep 'started=1' "$record" \
+    "the launcher did not mark the binding for a bridge-starting call"
+
+  env -i "PATH=$PATH" "FM_FAKE_TOOL_ENV_LOG=$envlog" \
+    CHROME_DEVTOOLS_AXI_SESSION=default CHROME_DEVTOOLS_AXI_PORT=9333 \
+    "$wrapper" stop \
+    || fail "the task-private Chrome launcher did not delegate a stop to the real tool"
+  assert_grep "session=$session port=unset args=stop" "$envlog" \
+    "a worker stop escaped the recorded task session and could close the captain's bridge"
+
+  sed 's/^session=.*/session=captain-shared/' "$record" > "$record.forged"
+  mv "$record.forged" "$record"
+  ! fm_chrome_wrapper_write "$state" "$id" "$wrapper" "$tool" >/dev/null 2>&1 \
+    || fail "the launcher was written to force a session the task binding does not record"
+  rm -rf "$dir"
+  pass "the task-private Chrome launcher forces the recorded session and drops an inherited bridge port"
+}
+
+# A worker that opens a bridge and then shuts it down itself has left nothing to
+# reclaim. Teardown's conditional disclosure - "this task recorded a start and the
+# tool now says the session is gone, which a session-blind dispatcher would also
+# say" - exists to flag a host that cannot scope bridges, so it must not fire for
+# every browser-using task that cleaned up after itself. The marker is only
+# cleared by a stop the tool reported succeeded; a failed stop stays eligible.
+test_launcher_stop_retires_the_marker_only_when_the_tool_agrees() {
+  local dir id state tool bindir wrapper record mode
+  id=launcher-selfstop-z24
+  dir="$TMP_ROOT/launcher-selfstop"
+  rm -rf "$dir"
+  mkdir -p "$dir/state" "$dir/tool"
+  chmod 700 "$dir"
+  state="$dir/state"
+  tool="$dir/tool/chrome-devtools-axi"
+  cat > "$tool" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" != stop ] || exit "${FM_FAKE_TOOL_STOP_STATUS:-0}"
+exit 0
+SH
+  chmod +x "$tool"
+
+  fm_chrome_binding_write "$state" "$id" \
+    || fail "could not write the task binding for the launcher self-stop test"
+  record="$state/$id.chrome-devtools-session"
+  bindir=$(fm_chrome_launcher_dir_create "$dir") \
+    || fail "could not mint a task-private Chrome launcher directory"
+  wrapper="$bindir/chrome-devtools-axi"
+  fm_chrome_wrapper_write "$state" "$id" "$wrapper" "$tool" \
+    || fail "could not write the task-private Chrome launcher"
+
+  "$wrapper" open https://example.invalid \
+    || fail "the task-private Chrome launcher did not delegate a bridge-starting call"
+  assert_grep 'started=1' "$record" \
+    "the launcher did not mark the binding for a bridge-starting call"
+
+  FM_FAKE_TOOL_STOP_STATUS=7 "$wrapper" stop \
+    && fail "the launcher hid a failed stop from the worker"
+  assert_grep 'started=1' "$record" \
+    "a stop the tool reported failed retired the marker and made the task ineligible for cleanup"
+
+  ( umask 022; "$wrapper" stop ) || fail "the launcher did not delegate a successful stop"
+  assert_grep 'started=0' "$record" \
+    "a bridge the worker stopped itself still reads as a recorded start teardown must explain"
+
+  "$wrapper" || fail "the launcher did not delegate a bare invocation"
+  assert_grep 'started=0' "$record" \
+    "a bare status invocation - what an agent harness runs at session start - marked the task as having opened a bridge"
+  "$wrapper" --version || fail "the launcher did not delegate a version query"
+  assert_grep 'started=0' "$record" \
+    "a version query marked the task as having opened a bridge"
+  "$wrapper" navigate https://example.invalid \
+    || fail "the launcher did not delegate a bridge-capable command"
+  assert_grep 'started=1' "$record" \
+    "a bridge-capable command was exempted from marking the task binding"
+
+  ( umask 022; "$wrapper" stop ) \
+    || fail "the launcher did not delegate the stop that clears the marker for the flag-prefix check"
+  assert_grep 'started=0' "$record" \
+    "the launcher left the marker set before the flag-prefix check could start from a clean binding"
+  "$wrapper" -h || fail "the launcher did not delegate a lone help query"
+  assert_grep 'started=0' "$record" \
+    "a lone help query marked the task as having opened a bridge"
+  "$wrapper" -v open https://example.invalid \
+    || fail "the launcher did not delegate a bridge-capable command behind a leading flag"
+  assert_grep 'started=1' "$record" \
+    "a bridge-capable command behind a leading -v escaped marking, so teardown would make no stop call and orphan that bridge"
+
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$record" 2>/dev/null)
+  else
+    mode=$(stat -c %a "$record" 2>/dev/null)
+  fi
+  [ "$mode" = 600 ] \
+    || fail "retiring the marker after a self-stop widened the task binding record to 0$mode"
+  rm -rf "$dir"
+  pass "a worker's own successful stop retires the startup marker and a failed one does not"
+}
+
+# A worker can have a bridge-capable command in flight while it issues its own
+# stop - the tool call that opens a second bridge lands between the stop being
+# handed over and the launcher retiring the marker. Clearing the marker then
+# describes a bridge the stop never covered: that fresh bridge stays live while
+# both teardown passes see started=0 and skip it, which is exactly the orphan
+# this binding exists to prevent. Cleanup's reset already declines on a record
+# somebody else replaced, and the launcher's must decline the same way.
+test_launcher_stop_keeps_a_marker_written_during_the_stop() {
+  local dir id state tool bindir wrapper record
+  id=launcher-stoprace-z25
+  dir="$TMP_ROOT/launcher-stoprace"
+  rm -rf "$dir"
+  mkdir -p "$dir/state" "$dir/tool"
+  chmod 700 "$dir"
+  state="$dir/state"
+  tool="$dir/tool/chrome-devtools-axi"
+  # Stopping takes real time, and this tool spends it the way the incident did:
+  # the worker opens another bridge through its own launcher while the stop is
+  # still in flight. Driving that second bridge through the real launcher marks
+  # the binding through the real marking path, so the interleaving is the
+  # product's own and the ordering is fixed rather than raced.
+  cat > "$tool" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = stop ]; then
+  if [ -n "${FM_FAKE_TOOL_CONCURRENT_LAUNCHER:-}" ]; then
+    concurrent=$FM_FAKE_TOOL_CONCURRENT_LAUNCHER
+    FM_FAKE_TOOL_CONCURRENT_LAUNCHER= "$concurrent" navigate https://example.invalid || exit 1
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$tool"
+
+  fm_chrome_binding_write "$state" "$id" \
+    || fail "could not write the task binding for the launcher stop-race test"
+  record="$state/$id.chrome-devtools-session"
+  bindir=$(fm_chrome_launcher_dir_create "$dir") \
+    || fail "could not mint a task-private Chrome launcher directory"
+  wrapper="$bindir/chrome-devtools-axi"
+  fm_chrome_wrapper_write "$state" "$id" "$wrapper" "$tool" \
+    || fail "could not write the task-private Chrome launcher"
+
+  "$wrapper" open https://example.invalid \
+    || fail "the task-private Chrome launcher did not delegate a bridge-starting call"
+  assert_grep 'started=1' "$record" \
+    "the launcher did not mark the binding for a bridge-starting call"
+
+  FM_FAKE_TOOL_CONCURRENT_LAUNCHER="$wrapper" "$wrapper" stop \
+    || fail "the launcher did not delegate a successful stop"
+  assert_grep 'started=1' "$record" \
+    "a stop retired a startup marker written by another invocation while it ran, so the bridge that mark describes would be skipped by teardown and orphaned"
+
+  # The declined reset is the worker's only warning that its own stop did not
+  # settle the binding, and teardown must still find a record it can read.
+  ( umask 022; "$wrapper" stop ) \
+    || fail "the launcher did not delegate a stop once no other invocation was writing the binding"
+  assert_grep 'started=0' "$record" \
+    "an uncontended self-stop failed to retire the startup marker"
+  rm -rf "$dir"
+  pass "a startup marker written during a self-stop survives that stop's reset"
+}
+
+# A worker's browser command marks the binding before the tool has opened
+# anything: the mark says a bridge exists, but the bridge is still coming up
+# while the command runs. A stop issued in that window - the incident's shape,
+# with one call still connecting while another shuts a session down - covers
+# nothing that call opened, so retiring the marker on it leaves that bridge live
+# while both teardown passes read started=0 and skip it. The launcher must
+# decline the reset for as long as any of its own calls is still in flight, and
+# must resume retiring it once none is.
+# Mutation proof: dropping the launcher's in-flight registration, or letting its
+# record_stamp answer for a record that has one, makes the mid-call assertion
+# red; never retiring the registration when the call returns makes the final
+# assertion red.
+test_launcher_stop_keeps_a_marker_whose_browser_call_is_still_running() {
+  local dir id state tool bindir wrapper record waited bg
+  id=launcher-inflight-z26
+  dir="$TMP_ROOT/launcher-inflight"
+  rm -rf "$dir"
+  mkdir -p "$dir/state" "$dir/tool"
+  chmod 700 "$dir"
+  state="$dir/state"
+  tool="$dir/tool/chrome-devtools-axi"
+  # Opening a bridge takes real time. This tool spends it: navigate announces
+  # that it is connecting and stays there until the test releases it, so the
+  # stop below provably runs while that call is still in flight rather than
+  # racing it.
+  cat > "$tool" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = navigate ]; then
+  : > "$FM_FAKE_TOOL_CONNECTING"
+  waited=0
+  while [ ! -e "$FM_FAKE_TOOL_GATE" ] && [ "$waited" -lt 400 ]; do
+    sleep 0.05
+    waited=$(( waited + 1 ))
+  done
+fi
+exit 0
+SH
+  chmod +x "$tool"
+
+  fm_chrome_binding_write "$state" "$id" \
+    || fail "could not write the task binding for the launcher in-flight test"
+  record="$state/$id.chrome-devtools-session"
+  bindir=$(fm_chrome_launcher_dir_create "$dir") \
+    || fail "could not mint a task-private Chrome launcher directory"
+  wrapper="$bindir/chrome-devtools-axi"
+  fm_chrome_wrapper_write "$state" "$id" "$wrapper" "$tool" \
+    || fail "could not write the task-private Chrome launcher"
+
+  FM_FAKE_TOOL_CONNECTING="$dir/connecting" FM_FAKE_TOOL_GATE="$dir/gate" \
+    "$wrapper" open https://example.invalid \
+    || fail "the task-private Chrome launcher did not delegate a bridge-starting call"
+  assert_grep 'started=1' "$record" \
+    "the launcher did not mark the binding for a bridge-starting call"
+
+  FM_FAKE_TOOL_CONNECTING="$dir/connecting" FM_FAKE_TOOL_GATE="$dir/gate" \
+    "$wrapper" navigate https://example.invalid &
+  bg=$!
+  waited=0
+  while [ ! -e "$dir/connecting" ] && [ "$waited" -lt 400 ]; do
+    sleep 0.05
+    waited=$(( waited + 1 ))
+  done
+  [ -e "$dir/connecting" ] \
+    || fail "the launcher never handed the second browser call to the tool"
+
+  ( umask 022; "$wrapper" stop ) \
+    || fail "the launcher did not delegate a successful stop"
+  assert_grep 'started=1' "$record" \
+    "a stop retired the startup marker of a browser call whose bridge was still coming up, so teardown would make no stop call and orphan that bridge"
+
+  : > "$dir/gate"
+  wait "$bg" || fail "the in-flight browser call did not complete"
+
+  # The registration is the launcher's own, so it must be retired when that call
+  # returns; otherwise no self-stop would ever settle the binding again.
+  ( umask 022; "$wrapper" stop ) \
+    || fail "the launcher did not delegate a stop once no browser call was in flight"
+  assert_grep 'started=0' "$record" \
+    "a self-stop with no browser call in flight failed to retire the startup marker"
+  rm -rf "$dir"
+  pass "a startup marker whose browser call is still running survives that task's own stop"
+}
+
+# A send that comes back 2 means the backend typed the line into the composer and
+# could neither submit it nor clear it (bin/backends/zellij.sh, bin/backends/cmux.sh),
+# so whatever is left there gets prefixed onto the next send. Appending the launch
+# command would then submit the two concatenated: the agent never starts and the
+# task is left unscoped. The TRACEPARENT send eight lines later already refuses on
+# exactly this status, and the bridge-scoping send must refuse identically.
+test_unsubmitted_bridge_scoping_input_refuses_the_launch() {
+  local rec id out status
+  id=profile-chrome-stuck-z25
+  rm -rf "/tmp/fm-$id"
+  rec=$(make_spawn_case profile-chrome-stuck claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CHROME_SEND_STATUS=2 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn continued after the bridge-scoping line was left unsubmitted in the composer"
+  assert_contains "$out" "refusing to append the launch command" \
+    "spawn did not report why it refused to launch onto an uncleared composer"
+  ! grep -q 'claude --dangerously-skip-permissions' "$LAUNCH_LOG" \
+    || fail "spawn appended the launch command onto an unsubmitted bridge-scoping line"
+  pass "a bridge-scoping line left unsubmitted in the composer refuses the launch"
+}
+
+test_task_scoped_chrome_bridge_binding_is_exported_before_launch
+test_task_private_launcher_forces_the_recorded_session
+test_unsubmitted_bridge_scoping_input_refuses_the_launch
+test_launcher_stop_retires_the_marker_only_when_the_tool_agrees
+test_launcher_stop_keeps_a_marker_written_during_the_stop
+test_launcher_stop_keeps_a_marker_whose_browser_call_is_still_running
+test_missing_chrome_devtools_tool_does_not_block_the_launch
+test_world_writable_task_temp_root_never_reaches_the_worker_path
+test_task_private_launcher_directory_is_unpredictable
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

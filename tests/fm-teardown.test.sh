@@ -57,6 +57,8 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+# shellcheck source=bin/fm-chrome-devtools-lib.sh
+. "$ROOT/bin/fm-chrome-devtools-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
@@ -545,8 +547,289 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_FAKE_CHROME_ACTIVE_DIR="${FM_FAKE_CHROME_ACTIVE_DIR:-}" \
+  FM_FAKE_CHROME_STOP_LOG="${FM_FAKE_CHROME_STOP_LOG:-}" \
+  FM_FAKE_CHROME_STOP_FAIL="${FM_FAKE_CHROME_STOP_FAIL:-0}" \
+  CHROME_DEVTOOLS_AXI_PORT="${CHROME_DEVTOOLS_AXI_PORT:-}" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+install_fake_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=${CHROME_DEVTOOLS_AXI_SESSION:-default}
+[ -z "${FM_FAKE_CHROME_CALL_LOG:-}" ] || printf '%s|%s\n' "$session" "${1:-status}" >> "$FM_FAKE_CHROME_CALL_LOG"
+case "${1:-}" in
+  '')
+    if [ -n "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] && [ -f "$FM_FAKE_CHROME_ACTIVE_DIR/$session" ]; then
+      printf '%s\n' 'page:' '  title: active bridge'
+    else
+      printf '%s\n' 'browser: no active session'
+    fi
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    [ "${FM_FAKE_CHROME_STOP_FAIL:-0}" = 0 ] || exit 9
+    [ -z "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] || rm -f -- "$FM_FAKE_CHROME_ACTIVE_DIR/$session"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# A PATH shim that routes every browser call onto one shared bridge, discarding
+# the session it was handed - the shape the operator's own WSL-to-Windows
+# dispatcher has, and the one that makes a task teardown able to close the
+# captain's Chrome.
+install_session_blind_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=captain-shared
+case "${1:-}" in
+  '')
+    if [ -n "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] && [ -f "$FM_FAKE_CHROME_ACTIVE_DIR/$session" ]; then
+      printf '%s\n' 'page:' '  title: the captain browsing'
+    else
+      printf '%s\n' 'browser: no active session'
+    fi
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    [ -z "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] || rm -f -- "$FM_FAKE_CHROME_ACTIVE_DIR/$session"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# The documented CHROME_DEVTOOLS_AXI_PORT override: an inherited port pins every
+# call to that one bridge whatever session name it is given.
+install_port_pinned_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=${CHROME_DEVTOOLS_AXI_SESSION:-default}
+[ -z "${CHROME_DEVTOOLS_AXI_PORT:-}" ] || session="port-${CHROME_DEVTOOLS_AXI_PORT}"
+case "${1:-}" in
+  '')
+    if [ -n "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] && [ -f "$FM_FAKE_CHROME_ACTIVE_DIR/$session" ]; then
+      printf '%s\n' 'page:' '  title: active bridge'
+    else
+      printf '%s\n' 'browser: no active session'
+    fi
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    [ -z "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] || rm -f -- "$FM_FAKE_CHROME_ACTIVE_DIR/$session"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# The tool's status wording for a live bridge is not a contract this repo owns.
+# This one reports a live bridge in a shape no allowlist would have guessed.
+install_unworded_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=${CHROME_DEVTOOLS_AXI_SESSION:-default}
+case "${1:-}" in
+  '')
+    if [ -n "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] && [ -f "$FM_FAKE_CHROME_ACTIVE_DIR/$session" ]; then
+      printf '%s\n' 'Connected: https://example.invalid (2 tabs)'
+    else
+      printf '%s\n' 'browser: no active session'
+    fi
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    [ -z "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] || rm -f -- "$FM_FAKE_CHROME_ACTIVE_DIR/$session"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# Same answers, delivered the other legitimate way a CLI reports state: on stderr
+# with a nonzero exit. The one line this repo does have evidence for must still be
+# read as the tool saying the session is gone.
+install_stderr_status_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=${CHROME_DEVTOOLS_AXI_SESSION:-default}
+case "${1:-}" in
+  '')
+    if [ -n "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] && [ -f "$FM_FAKE_CHROME_ACTIVE_DIR/$session" ]; then
+      printf '%s\n' 'Connected: https://example.invalid (2 tabs)' >&2
+    else
+      printf '%s\n' 'browser: no active session' >&2
+    fi
+    exit 3
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    [ -z "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] || rm -f -- "$FM_FAKE_CHROME_ACTIVE_DIR/$session"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# A tool that answers plainly about every session name except one, which it fails
+# on with no output at all. The probe stays readable, so the ownership proof still
+# passes - the task's own session is the only name there is no evidence about.
+install_selectively_mute_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=${CHROME_DEVTOOLS_AXI_SESSION:-default}
+case "${1:-}" in
+  '')
+    [ "$session" != "${FM_FAKE_CHROME_MUTE_SESSION:-}" ] || exit 1
+    printf '%s\n' 'browser: no active session'
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# A tool that reports plainly about the task's own session but says nothing at
+# all about the never-started probe name. The ownership proof cannot be settled
+# either way: this is not evidence the tool pins every call to one shared bridge.
+install_probe_mute_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=${CHROME_DEVTOOLS_AXI_SESSION:-default}
+case "${1:-}" in
+  '')
+    case "$session" in
+      fmprobe-*) exit 1 ;;
+    esac
+    printf '%s\n' 'page:' '  title: active bridge'
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# A browser whose bridge stopped answering: every call blocks well past any
+# teardown the operator would wait for.
+install_hanging_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_CHROME_CALL_LOG:-}" ] || printf '%s|%s\n' "${CHROME_DEVTOOLS_AXI_SESSION:-default}" "${1:-status}" >> "$FM_FAKE_CHROME_CALL_LOG"
+exec sleep 90
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# The resolved chrome-devtools-axi on the incident host is a WSL dispatcher onto
+# a Windows shim, and both ends enforce the same session-name contract before
+# they will act: ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$, refused with exit 64 and a
+# message that is not the gone answer. A name firstmate mints that this rejects
+# is never asked about at all, and the refusal reads like an ordinary answer.
+# A stopped bridge is retired into FM_FAKE_CHROME_STOPPED_DIR so the test can see
+# which exact session was acted on.
+install_name_bounded_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=${CHROME_DEVTOOLS_AXI_SESSION:-default}
+[ -z "${FM_FAKE_CHROME_CALL_LOG:-}" ] || printf '%s|%s\n' "$session" "${1:-status}" >> "$FM_FAKE_CHROME_CALL_LOG"
+if ! printf '%s' "$session" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'; then
+  printf "Refusing session name '%s': empty or malformed. Provide 1-64 characters of [A-Za-z0-9._-] starting alphanumeric.\n" "$session" >&2
+  exit 64
+fi
+case "${1:-}" in
+  '')
+    if [ -n "${FM_FAKE_CHROME_ACTIVE_DIR:-}" ] && [ -f "$FM_FAKE_CHROME_ACTIVE_DIR/$session" ]; then
+      printf '%s\n' 'page:' '  title: active bridge'
+    else
+      printf '%s\n' 'browser: no active session'
+    fi
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    if [ -n "${FM_FAKE_CHROME_STOPPED_DIR:-}" ] && [ -f "$FM_FAKE_CHROME_ACTIVE_DIR/$session" ]; then
+      mv -f -- "$FM_FAKE_CHROME_ACTIVE_DIR/$session" "$FM_FAKE_CHROME_STOPPED_DIR/$session"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+# A tool that opens a new bridge for this task while it is answering the status
+# question - the worker is still live during the pre-refusal cleanup pass, and
+# its launcher rewrites the binding record exactly this way.
+install_racing_chrome_devtools() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=${CHROME_DEVTOOLS_AXI_SESSION:-default}
+case "${1:-}" in
+  '')
+    if [ -n "${FM_FAKE_CHROME_RACE_RECORD:-}" ] && [ -f "$FM_FAKE_CHROME_RACE_RECORD" ]; then
+      tmp="$FM_FAKE_CHROME_RACE_RECORD.launcher.$$"
+      sed 's/^started=.*/started=1/' "$FM_FAKE_CHROME_RACE_RECORD" > "$tmp"
+      chmod 600 "$tmp"
+      mv -f -- "$tmp" "$FM_FAKE_CHROME_RACE_RECORD"
+      FM_FAKE_CHROME_RACE_RECORD=
+    fi
+    printf '%s\n' 'browser: no active session'
+    ;;
+  stop)
+    [ -z "${FM_FAKE_CHROME_STOP_LOG:-}" ] || printf '%s|stop\n' "$session" >> "$FM_FAKE_CHROME_STOP_LOG"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+chrome_record_mode() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+write_chrome_binding() {  # <case-dir> [task-id]
+  local case_dir=$1 id=${2:-task-x1}
+  fm_chrome_binding_write "$case_dir/state" "$id" \
+    || fail "could not write the Chrome binding fixture for $id"
+}
+
+mark_chrome_binding_started() {  # <case-dir> [task-id]
+  local case_dir=$1 id=${2:-task-x1} record tmp
+  record="$case_dir/state/$id.chrome-devtools-session"
+  tmp="$record.tmp"
+  if ! sed 's/^started=0$/started=1/' "$record" > "$tmp" || ! mv "$tmp" "$record"; then
+    fail "could not mark the Chrome binding fixture started for $id"
+  fi
 }
 
 # Build the teardown test's executable search path without lsof, regardless of
@@ -2596,6 +2879,761 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_active_chrome_bridge_is_stopped_without_touching_second_task() {
+  local case_dir rc session foreign_session active_dir stop_log
+  case_dir=$(make_case chrome-active-scope)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  install_fake_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  session=$FM_CHROME_TASK_SESSION
+  foreign_session=$(fm_chrome_task_session_name "$case_dir/state" task-y2)
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  mkdir -p "$active_dir"
+  touch "$active_dir/$session" "$active_dir/$foreign_session"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "active Chrome bridge cleanup should not break teardown"
+  assert_grep "$session|stop" "$stop_log" \
+    "teardown did not stop the task's exact named Chrome bridge"
+  [ "$(grep -cF "$session|stop" "$stop_log")" -eq 1 ] \
+    || fail "teardown stopped the same already-stopped Chrome bridge twice"
+  ! grep -q 'chrome-devtools bridge stop failed' "$case_dir/stderr" \
+    || fail "a successful teardown reported a Chrome bridge stop failure"
+  assert_absent "$active_dir/$session" "the task's active Chrome bridge survived teardown"
+  assert_present "$active_dir/$foreign_session" \
+    "teardown stopped a second task's Chrome bridge"
+  assert_absent "$case_dir/state/task-x1.chrome-devtools-session" \
+    "successful teardown retained the Chrome binding"
+  pass "teardown stops only the task's active named Chrome bridge and preserves a second task's bridge"
+}
+
+test_unused_chrome_binding_makes_no_stop_call() {
+  local case_dir rc active_dir stop_log
+  case_dir=$(make_case chrome-unused)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  install_fake_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  mkdir -p "$active_dir"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "unused Chrome bridge binding should not break teardown"
+  [ ! -s "$stop_log" ] || fail "an unused task produced a chrome-devtools stop call"
+  pass "a task that never started a Chrome bridge produces no stop call"
+}
+
+test_forged_chrome_binding_never_stops_foreign_session() {
+  local case_dir rc foreign_session active_dir stop_log record
+  case_dir=$(make_case chrome-forged-binding)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  install_fake_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  foreign_session=$(fm_chrome_task_session_name "$case_dir/state" task-y2)
+  record="$case_dir/state/task-x1.chrome-devtools-session"
+  printf 'session=%s\nstarted=1\n' "$foreign_session" > "$record"
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  mkdir -p "$active_dir"
+  touch "$active_dir/$foreign_session"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a foreign Chrome binding should be skipped without breaking teardown"
+  [ ! -s "$stop_log" ] || fail "a forged binding produced a chrome-devtools stop call"
+  assert_present "$active_dir/$foreign_session" "a forged binding stopped a foreign Chrome bridge"
+  assert_grep 'does not match its task-scoped session' "$case_dir/stderr" \
+    "a forged Chrome binding was not reported"
+  pass "a forged binding cannot make teardown stop another task's Chrome bridge"
+}
+
+test_chrome_stop_failure_is_reported_and_nonfatal() {
+  local case_dir rc session active_dir stop_log
+  case_dir=$(make_case chrome-stop-failure)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  install_fake_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  session=$FM_CHROME_TASK_SESSION
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  mkdir -p "$active_dir"
+  touch "$active_dir/$session"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  FM_FAKE_CHROME_STOP_FAIL=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a Chrome bridge stop failure must not fail teardown"
+  assert_grep "chrome-devtools bridge stop failed for task task-x1 session $session" "$case_dir/stderr" \
+    "a Chrome stop failure was not reported"
+  assert_grep "$session|stop" "$stop_log" "the failing stop was not scoped to the task session"
+  assert_absent "$case_dir/state/task-x1.chrome-devtools-session" \
+    "completed teardown retained the Chrome binding after a reported stop failure"
+  pass "a task-scoped Chrome stop failure is reported without breaking teardown"
+}
+
+test_unlanded_refusal_still_stops_chrome_bridge() {
+  local case_dir rc session active_dir stop_log
+  case_dir=$(make_case chrome-unlanded-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  install_fake_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  session=$FM_CHROME_TASK_SESSION
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  mkdir -p "$active_dir"
+  touch "$active_dir/$session"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "unlanded work should still refuse teardown"
+  assert_grep 'REFUSED:' "$case_dir/stderr" "unlanded-work refusal disappeared"
+  assert_grep "$session|stop" "$stop_log" \
+    "the unlanded-work refusal stranded the task's Chrome bridge"
+  assert_absent "$active_dir/$session" "the Chrome bridge survived an unlanded-work refusal"
+  assert_present "$case_dir/state/task-x1.chrome-devtools-session" \
+    "a refused teardown discarded the binding needed for a safe retry"
+  pass "an unlanded-work refusal still stops the task's Chrome bridge and retains its binding"
+}
+
+# The minimum design spends a bounded browser call only on a task whose own
+# launcher witnessed a bridge-capable command. A task that never opened one is
+# not merely spared the stop - it is spared every call, so an unused task cannot
+# be taxed by a browser tool that is slow, hung, or absent. The deliberate trade
+# is that a bridge opened around the launcher is left to the captain rather than
+# reclaimed on a guess about whose it is.
+test_an_unstarted_task_makes_no_browser_call_at_all() {
+  local case_dir rc session active_dir stop_log call_log
+  case_dir=$(make_case chrome-unstarted-silent)
+  install_fake_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  session=$FM_CHROME_TASK_SESSION
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  call_log="$case_dir/chrome-call.log"
+  mkdir -p "$active_dir"
+  touch "$active_dir/$session"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" \
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  FM_FAKE_CHROME_CALL_LOG="$call_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a task with no recorded bridge start must not fail cleanup"
+  assert_absent "$call_log" \
+    "cleanup spent a browser call on a task whose launcher recorded no bridge start"
+  [ ! -s "$stop_log" ] \
+    || fail "a task with no recorded bridge start produced a stop call"
+  [ ! -s "$case_dir/stderr" ] \
+    || fail "a task that never opened a bridge produced teardown output"
+  pass "a task whose launcher recorded no bridge start makes no browser call at all"
+}
+
+test_session_blind_tool_never_stops_a_shared_bridge() {
+  local case_dir rc active_dir stop_log
+  case_dir=$(make_case chrome-session-blind)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  install_session_blind_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  mkdir -p "$active_dir"
+  touch "$active_dir/captain-shared"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a session-blind browser tool must not break teardown"
+  [ ! -s "$stop_log" ] \
+    || fail "teardown issued a stop through a tool that discards the task session"
+  assert_present "$active_dir/captain-shared" \
+    "a task teardown closed the captain's shared Chrome bridge"
+  assert_grep 'not established that it acts on the session it is handed' "$case_dir/stderr" \
+    "teardown did not report that ownership of the task session went unproved"
+  pass "a browser tool that ignores the task session is reported, not obeyed"
+}
+
+test_ambient_bridge_port_cannot_retarget_cleanup() {
+  local case_dir rc active_dir stop_log
+  case_dir=$(make_case chrome-ambient-port)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  install_port_pinned_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  mkdir -p "$active_dir"
+  touch "$active_dir/port-9224"
+
+  rc=0
+  CHROME_DEVTOOLS_AXI_PORT=9224 \
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "an inherited bridge port must not break teardown"
+  [ ! -s "$stop_log" ] \
+    || fail "an inherited bridge port made teardown stop a bridge this task never started"
+  assert_present "$active_dir/port-9224" \
+    "an inherited bridge port let teardown close the bridge listening on it"
+  ! grep -q 'not established that it acts on the session' "$case_dir/stderr" \
+    || fail "the captain's ambient bridge port still reached the browser tool"
+  pass "an inherited CHROME_DEVTOOLS_AXI_PORT never reaches the task's bridge calls"
+}
+
+test_hung_bridge_tool_cannot_stall_cleanup() {
+  local case_dir rc started elapsed call_log
+  case_dir=$(make_case chrome-hung-tool)
+  install_hanging_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  call_log="$case_dir/chrome-call.log"
+
+  started=$(date +%s)
+  rc=0
+  FM_CHROME_BRIDGE_TIMEOUT=2 \
+  FM_FAKE_CHROME_CALL_LOG="$call_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+
+  expect_code 0 "$rc" "a browser tool that never answers must not fail cleanup"
+  [ "$elapsed" -lt 30 ] \
+    || fail "cleanup waited ${elapsed}s on an unresponsive browser tool instead of bounding it"
+  assert_present "$call_log" "cleanup never reached the browser tool"
+  assert_grep 'no readable status' "$case_dir/stderr" \
+    "an unresponsive browser tool did not degrade to a reported skip"
+  ! grep -q 'not established that it acts on the session' "$case_dir/stderr" \
+    || fail "a tool that never answered about the task's own session was still put through the ownership proof"
+  [ "$(wc -l < "$call_log" | tr -d ' ')" = 1 ] \
+    || fail "cleanup kept calling a browser tool that had already refused to answer about this task's session"
+  pass "an unresponsive browser bridge is bounded instead of stalling teardown"
+}
+
+# chrome-devtools-axi is an optional universal tool, so a host without one is an
+# ordinary host - and the fix for an orphaned bridge must not become a new way
+# for teardown to fail or to strand a worktree. The task did record a bridge
+# start, which is the only case where an absent tool has anything to say.
+test_missing_browser_tool_is_reported_and_never_fails_teardown() {
+  local case_dir rc path_dir tool resolved
+  case_dir=$(make_case chrome-tool-missing)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  # The allowlisted standard-command path carries no browser tool, so a host that
+  # installs chrome-devtools-axi can neither make this case pass vacuously nor
+  # have its own live browser reached by a test.
+  path_dir=$(make_path_without_lsof "$case_dir")
+  # The task session is derived from a digest, so the digest tool has to be on
+  # that reduced path or the binding fails its identity check before the absent
+  # browser tool is ever reached.
+  for tool in shasum sha256sum; do
+    resolved=$(command -v "$tool" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$tool" ;; esac
+  done
+  rm -f "$case_dir/fakebin/chrome-devtools-axi"
+  ! PATH="$path_dir" command -v chrome-devtools-axi >/dev/null 2>&1 \
+    || fail "the browser-tool-free search path still resolved chrome-devtools-axi"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_dir" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "an absent chrome-devtools-axi must not fail teardown"
+  assert_grep "chrome-devtools-axi is unavailable; task task-x1 bridge cleanup was skipped" \
+    "$case_dir/stderr" "an absent browser tool was not reported at teardown"
+  assert_grep "teardown task-x1 complete" "$case_dir/stdout" \
+    "an absent browser tool stopped teardown from completing"
+  assert_absent "$case_dir/state/task-x1.chrome-devtools-session" \
+    "completed teardown retained the Chrome binding on a host with no browser tool"
+  pass "an absent chrome-devtools-axi is reported at teardown and never fails it"
+}
+
+# The knob exists to bound teardown-time work, so it must not become a way to
+# un-bound it: docs/configuration.md states the 1..120 range this enforces.
+test_bridge_call_bound_is_clamped_to_its_documented_range() {
+  local pair input expected actual
+  for pair in '|20' 'abc|20' '2s|20' '-5|20' '0|20' '00|20' '1|1' '5|5' '007|7' \
+    '120|120' '121|120' '99999|120' '99999999999999999999999|120'; do
+    input=${pair%%|*}
+    expected=${pair##*|}
+    actual=$(FM_CHROME_BRIDGE_TIMEOUT="$input" fm_chrome_bridge_bound)
+    [ "$actual" = "$expected" ] \
+      || fail "FM_CHROME_BRIDGE_TIMEOUT=${input:-<empty>} resolved to a ${actual}s browser-call bound, not ${expected}s"
+  done
+  actual=$(unset FM_CHROME_BRIDGE_TIMEOUT; fm_chrome_bridge_bound)
+  [ "$actual" = 20 ] \
+    || fail "an unset FM_CHROME_BRIDGE_TIMEOUT resolved to a ${actual}s browser-call bound, not the 20s default"
+  pass "the browser-call bound honors FM_CHROME_BRIDGE_TIMEOUT only inside its documented 1..120 range"
+}
+
+# A probe the tool will not answer about establishes nothing, exactly as a probe
+# it answers about a name nothing started establishes nothing good. Both leave
+# ownership unproved, so both decline the stop and both say only that - cleanup
+# does not diagnose which kind of host it is looking at from an answer that
+# cannot tell them apart.
+test_an_unanswered_ownership_probe_declines_the_stop() {
+  local case_dir rc stop_log
+  case_dir=$(make_case chrome-probe-mute)
+  install_probe_mute_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  stop_log="$case_dir/chrome-stop.log"
+
+  rc=0
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "an unanswered ownership probe must not fail cleanup"
+  [ ! -s "$stop_log" ] \
+    || fail "cleanup stopped a bridge without settling whether the tool scopes by session"
+  assert_grep 'not established that it acts on the session it is handed' "$case_dir/stderr" \
+    "cleanup skipped an unproved ownership check without saying so"
+  pass "an ownership probe the tool will not answer declines the stop"
+}
+
+# The status wording for a live bridge is unverified, so an unrecognized answer
+# must mean "possibly live", not "nothing to do". The ownership proof, which needs
+# the tool to answer "gone" for a name nothing ever started, is what makes the
+# stop safe - not a guess about how a live bridge is described.
+test_unrecognized_live_status_is_still_reclaimed() {
+  local case_dir rc session active_dir stop_log
+  case_dir=$(make_case chrome-unworded-status)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  install_unworded_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  session=$FM_CHROME_TASK_SESSION
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  mkdir -p "$active_dir"
+  touch "$active_dir/$session"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "an unrecognized bridge status must not break teardown"
+  assert_grep "$session|stop" "$stop_log" \
+    "a live task bridge whose status wording was unrecognized was left orphaned"
+  assert_absent "$active_dir/$session" \
+    "a live task bridge whose status wording was unrecognized survived teardown"
+  pass "a live task bridge is reclaimed without guessing how the tool words a live status"
+}
+
+# The one line this repo has evidence for is the negative one. A tool that emits
+# it on stderr with a nonzero exit is still saying the bridge is gone: that must
+# read as a completed reclamation, not as an unreadable answer to warn about.
+test_status_reported_on_stderr_is_understood_as_gone() {
+  local case_dir rc active_dir stop_log record
+  case_dir=$(make_case chrome-stderr-status)
+  install_stderr_status_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  record="$case_dir/state/task-x1.chrome-devtools-session"
+  mkdir -p "$active_dir"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" \
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a status reported on stderr must not fail cleanup"
+  [ ! -s "$stop_log" ] \
+    || fail "cleanup stopped a bridge the tool had already reported gone"
+  ! grep -q 'skipping the bridge stop' "$case_dir/stderr" \
+    || fail "cleanup treated a plainly reported gone bridge as an unreadable answer"
+  grep -q '^started=0$' "$record" \
+    || fail "cleanup did not retire the marker for a bridge the tool reported gone"
+  pass "a bridge status delivered on stderr with a nonzero exit is read as an already-gone bridge"
+}
+
+# The incident host's dispatcher answers for one shared bridge whatever session
+# it is handed, so while the captain's browser is idle it reports the task's
+# session gone too. That is the same answer an honest tool with nothing running
+# gives, and no probe can separate them in that moment - so cleanup treats it as
+# what it says: nothing of this task's is running, retire the marker, make no
+# stop call, and do not narrate a host diagnosis the answer cannot support.
+test_idle_shared_bridge_retires_the_marker_without_a_stop() {
+  local case_dir rc active_dir stop_log record
+  case_dir=$(make_case chrome-session-blind-idle)
+  install_session_blind_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  active_dir="$case_dir/chrome-active"
+  stop_log="$case_dir/chrome-stop.log"
+  record="$case_dir/state/task-x1.chrome-devtools-session"
+  mkdir -p "$active_dir"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" \
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "an idle shared bridge must not fail cleanup"
+  [ ! -s "$stop_log" ] \
+    || fail "cleanup issued a stop through a tool that discards the task session"
+  assert_present "$active_dir" "the captain's browser state was disturbed"
+  grep -q '^started=0$' "$record" \
+    || fail "cleanup did not retire the marker for a session the tool reported gone"
+  pass "a session the tool reports gone retires the task marker and makes no stop call"
+}
+
+# An answer that cannot be read is no evidence a bridge exists under this name,
+# and a recorded start is evidence a bridge was once opened, not that one is
+# running now. A session-blind dispatcher that bounds out on the task's session
+# while answering "gone" for the probe would otherwise let a marked task's stop
+# land on the captain's shared bridge, so no stop may be issued. The operator is
+# told, because only a marked task can have left a bridge behind.
+test_an_unreadable_status_never_stops_a_session() {
+  local case_dir rc session stop_log
+  case_dir=$(make_case chrome-unreadable-marker)
+  install_selectively_mute_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  session=$FM_CHROME_TASK_SESSION
+  stop_log="$case_dir/chrome-stop.log"
+
+  rc=0
+  FM_FAKE_CHROME_MUTE_SESSION="$session" \
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a recorded start with an unreadable status must not fail cleanup"
+  [ ! -s "$stop_log" ] \
+    || fail "a recorded bridge start let cleanup stop a session the tool said nothing about"
+  assert_grep 'needs reclaiming by hand' "$case_dir/stderr" \
+    "a marked task whose session the tool would not report on was not flagged as possibly unreclaimed"
+  pass "a session the tool will not report on is never stopped even with a recorded start"
+}
+
+# The binding record is a 0600 task-private file. Cleanup's marker reset rewrites
+# it from the operator's shell, whose umask is not the record's business.
+test_marker_reset_keeps_the_binding_record_private() {
+  local case_dir rc record mode
+  case_dir=$(make_case chrome-record-mode)
+  install_fake_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  record="$case_dir/state/task-x1.chrome-devtools-session"
+  chmod 600 "$record"
+  mkdir -p "$case_dir/chrome-active"
+
+  rc=0
+  (
+    umask 022
+    FM_FAKE_CHROME_ACTIVE_DIR="$case_dir/chrome-active" \
+    PATH="$case_dir/fakebin:$PATH" \
+      fm_chrome_bridge_cleanup "$case_dir/state" task-x1
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "resetting the startup marker must not fail cleanup"
+  grep -q '^started=0$' "$record" || fail "cleanup did not reset the startup marker"
+  mode=$(chrome_record_mode "$record")
+  [ "$mode" = 600 ] \
+    || fail "cleanup widened the task binding record from 0600 to 0$mode"
+  pass "resetting the startup marker preserves the binding record's private mode"
+}
+
+# The probe is the whole warrant for believing the tool scopes by session, so its
+# name must be one nothing has ever started: minted fresh per call, carrying this
+# task's own binding, and never able to name or fall back to a shared or default
+# session. It must also be a name the tool will accept - a dispatcher that
+# refuses it answers something that is not the gone answer, which would read as a
+# tool that failed the proof rather than one that was never asked. The task
+# session and the probe therefore both stay inside the 64-character contract for
+# every task id, including the long one from the incident this change fixes.
+test_ownership_probe_is_a_fresh_task_scoped_nonce() {
+  local case_dir session first second id
+  case_dir=$(make_case chrome-probe-nonce)
+  write_chrome_binding "$case_dir"
+  session=$FM_CHROME_TASK_SESSION
+
+  first=$(fm_chrome_probe_session_name "$session") \
+    || fail "no ownership probe name could be minted for a valid task session"
+  second=$(fm_chrome_probe_session_name "$session") \
+    || fail "a second ownership probe name could not be minted"
+  [ "$first" != "$second" ] \
+    || fail "the ownership probe reused one derivable name instead of minting a fresh one"
+  case "$first" in
+    fmprobe-?*-?*) ;;
+    *) fail "the ownership probe name left this task's binding: $first" ;;
+  esac
+  case "$first" in
+    *"$session"*) fail "the ownership probe extended the task session instead of deriving from it" ;;
+  esac
+  [ "$first" != default ] && [ "$first" != "$session" ] \
+    || fail "the ownership probe named the default or the task's own session"
+  ! fm_chrome_probe_session_name default >/dev/null 2>&1 \
+    || fail "the ownership probe minted a name derived from the default session"
+  ! fm_chrome_probe_session_name '' >/dev/null 2>&1 \
+    || fail "the ownership probe minted a name with no task session behind it"
+  ! fm_chrome_probe_session_name shared-browser >/dev/null 2>&1 \
+    || fail "the ownership probe minted a name from something that is not a task session"
+
+  for id in x abcd mcf-web-service-dependency-verify-v9 \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+    session=$(fm_chrome_task_session_name "$case_dir/state" "$id") \
+      || fail "no task session name could be minted for task id $id"
+    [ "${#session}" -le 64 ] \
+      || fail "the task session for id $id is ${#session} characters, past the 64 a dispatcher accepts"
+    printf '%s' "$session" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' \
+      || fail "the task session for id $id is not a name a dispatcher accepts: $session"
+    first=$(fm_chrome_probe_session_name "$session") \
+      || fail "no ownership probe could be minted for task id $id"
+    [ "${#first}" -le 64 ] \
+      || fail "the ownership probe for id $id is ${#first} characters, past the 64 a dispatcher accepts"
+    printf '%s' "$first" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' \
+      || fail "the ownership probe for id $id is not a name a dispatcher accepts: $first"
+  done
+  pass "the ownership probe is a fresh task-scoped nonce that fits the session-name contract"
+}
+
+# Reproduces the incident host exactly: a dispatcher that honors
+# CHROME_DEVTOOLS_AXI_SESSION but refuses any name past 64 characters, and the
+# worker id from the orphaned-bridge report. A probe built by extending the task
+# session is refused, that refusal is not the gone answer, the proof fails, and
+# the task's live bridge is left running while the operator is told the shim does
+# not pass the session through - which this shim does.
+test_long_task_id_still_reclaims_its_bridge_on_a_name_bounded_host() {
+  local case_dir rc id session active_dir stopped_dir stop_log call_log
+  id=mcf-web-service-dependency-verify-v9
+  case_dir=$(make_case chrome-name-bounded)
+  install_name_bounded_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir" "$id"
+  mark_chrome_binding_started "$case_dir" "$id"
+  session=$FM_CHROME_TASK_SESSION
+  active_dir="$case_dir/chrome-active"
+  stopped_dir="$case_dir/chrome-stopped"
+  stop_log="$case_dir/chrome-stop.log"
+  call_log="$case_dir/chrome-call.log"
+  mkdir -p "$active_dir" "$stopped_dir"
+  touch "$active_dir/$session"
+
+  rc=0
+  FM_FAKE_CHROME_ACTIVE_DIR="$active_dir" \
+  FM_FAKE_CHROME_STOPPED_DIR="$stopped_dir" \
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  FM_FAKE_CHROME_CALL_LOG="$call_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" "$id" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a name-bounded browser tool must not fail cleanup"
+  ! grep -q 'Refusing session name' "$case_dir/stderr" \
+    || fail "cleanup handed the browser tool a session name it refuses"
+  assert_grep "$session|stop" "$stop_log" \
+    "the orphaned bridge from the incident's own worker id was left running"
+  assert_present "$stopped_dir/$session" \
+    "a live task bridge survived teardown on a host that bounds session names"
+  assert_absent "$active_dir/$session" \
+    "the task's bridge was still listed active after teardown stopped it"
+  ! grep -q 'stays inert' "$case_dir/stderr" \
+    || fail "a shim that does pass the task session through was reported as one that does not"
+  pass "a long task id still reclaims its bridge on a host that bounds session names"
+}
+
+# The pre-refusal cleanup pass runs while the worker is still live, and its
+# bounded status read takes real time. A bridge opened inside that window leaves
+# the marker at the same 1 it already held, so the answer in hand says nothing
+# about it. Retiring the marker there would make the post-exit recheck return
+# without a single browser call and orphan that bridge silently.
+test_a_bridge_opened_during_the_status_read_keeps_its_marker() {
+  local case_dir rc record stop_log
+  case_dir=$(make_case chrome-marker-race)
+  install_racing_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  mark_chrome_binding_started "$case_dir"
+  record="$case_dir/state/task-x1.chrome-devtools-session"
+  stop_log="$case_dir/chrome-stop.log"
+
+  rc=0
+  FM_FAKE_CHROME_RACE_RECORD="$record" \
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a binding rewritten mid-call must not fail cleanup"
+  [ ! -s "$stop_log" ] \
+    || fail "cleanup stopped a session the tool had just reported gone"
+  grep -q '^started=1$' "$record" \
+    || fail "cleanup retired the marker for a bridge opened while it was asking about the old one"
+  [ "$(chrome_record_mode "$record")" = 600 ] \
+    || fail "the concurrently rewritten binding record did not stay private"
+  pass "a bridge opened during the status read keeps its marker for the post-exit pass"
+}
+
+# The worker's own launcher marks the binding before the browser tool has opened
+# anything, so during the pre-refusal pass a marked task can have a bridge that is
+# still coming up. The status read for that session answers "gone" - it is not up
+# yet - and retiring the marker on that answer makes the post-exit recheck return
+# without a single browser call, orphaning the bridge that appears a moment later.
+# Cleanup must decline while any of the task's own browser calls is in flight.
+test_a_bridge_call_still_running_keeps_its_marker() {
+  local case_dir rc record stop_log tooldir bindir wrapper waited bg
+  case_dir=$(make_case chrome-inflight-race)
+  install_fake_chrome_devtools "$case_dir"
+  write_chrome_binding "$case_dir"
+  record="$case_dir/state/task-x1.chrome-devtools-session"
+  stop_log="$case_dir/chrome-stop.log"
+
+  # A real task-private launcher over a tool that stays connecting, so the
+  # in-flight call below is the product's own and its timing is fixed by the
+  # test rather than raced.
+  tooldir="$case_dir/chrome-tool"
+  mkdir -p "$tooldir"
+  chmod 700 "$tooldir"
+  cat > "$tooldir/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = navigate ]; then
+  : > "$FM_FAKE_TOOL_CONNECTING"
+  waited=0
+  while [ ! -e "$FM_FAKE_TOOL_GATE" ] && [ "$waited" -lt 400 ]; do
+    sleep 0.05
+    waited=$(( waited + 1 ))
+  done
+fi
+exit 0
+SH
+  chmod +x "$tooldir/chrome-devtools-axi"
+  bindir=$(fm_chrome_launcher_dir_create "$tooldir") \
+    || fail "could not mint a task-private Chrome launcher directory"
+  wrapper="$bindir/chrome-devtools-axi"
+  fm_chrome_wrapper_write "$case_dir/state" task-x1 "$wrapper" \
+    "$tooldir/chrome-devtools-axi" \
+    || fail "could not write the task-private Chrome launcher"
+
+  FM_FAKE_TOOL_CONNECTING="$case_dir/connecting" FM_FAKE_TOOL_GATE="$case_dir/gate" \
+    "$wrapper" navigate https://example.invalid &
+  bg=$!
+  waited=0
+  while [ ! -e "$case_dir/connecting" ] && [ "$waited" -lt 400 ]; do
+    sleep 0.05
+    waited=$(( waited + 1 ))
+  done
+  [ -e "$case_dir/connecting" ] \
+    || fail "the launcher never handed the worker's browser call to the tool"
+  grep -q '^started=1$' "$record" \
+    || fail "the launcher did not mark the binding for the worker's browser call"
+
+  rc=0
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a binding with a browser call in flight must not fail cleanup"
+  [ ! -s "$stop_log" ] \
+    || fail "cleanup stopped a session the tool had just reported gone"
+  grep -q '^started=1$' "$record" \
+    || fail "cleanup retired the marker of a browser call whose bridge was still coming up, so the post-exit pass would make no browser call and orphan it"
+
+  : > "$case_dir/gate"
+  wait "$bg" || fail "the in-flight browser call did not complete"
+
+  # Once no call is in flight the same answer settles the binding, so declining
+  # is a wait rather than a permanent refusal.
+  rc=0
+  FM_FAKE_CHROME_STOP_LOG="$stop_log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    fm_chrome_bridge_cleanup "$case_dir/state" task-x1 \
+    > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+  expect_code 0 "$rc" "cleanup must not fail once the browser call has returned"
+  grep -q '^started=0$' "$record" \
+    || fail "cleanup never retired the marker for a session the tool reports gone once no call was in flight"
+  [ "$(chrome_record_mode "$record")" = 600 ] \
+    || fail "the binding record did not stay private across the in-flight passes"
+  pass "a bridge call still running keeps its marker for the post-exit pass"
+}
+
+# Mutation proof for this regression suite:
+# - deleting the cleanup call leaves the active-session test red;
+# - spending any browser call on a task whose launcher recorded no start makes
+#   the unstarted-task test red, and stopping unconditionally makes the
+#   unused-task test red;
+# - re-stopping a session the tool already reports inactive makes the
+#   active-session test's single-stop assertion red;
+# - dropping the exact session export makes the cross-task survival test red;
+# - trusting the recorded name without deriving ownership makes the forged-binding test red;
+# - propagating `stop` failure makes the nonfatal-failure test red;
+# - moving cleanup below landed-work validation makes the refusal test red;
+# - stopping without first proving the tool acts on the session it is handed
+#   makes the session-blind test red;
+# - reusing a fixed probe name instead of minting a fresh one, or letting the
+#   probe fall back to a shared or default name, makes the probe-nonce test red;
+# - building the probe by extending the task session instead of from its digest,
+#   or dropping the 64-character bound on either minted name, makes the
+#   probe-nonce and name-bounded-host tests red;
+# - retiring the startup marker without checking the binding record is still the
+#   file the liveness answer was about makes the marker-race test red;
+# - retiring the startup marker while one of the task's own browser calls is
+#   still in flight - dropping the in-flight registration the launcher writes, or
+#   letting fm_chrome_binding_stamp answer for a record that has one - makes the
+#   in-flight test red, and never retiring it again once that call returns makes
+#   that test's second pass red;
+# - letting an inherited CHROME_DEVTOOLS_AXI_PORT through to the tool makes the
+#   ambient-port test red;
+# - classifying a live bridge from a guessed list of status words makes the
+#   unrecognized-status test red;
+# - reading the tool's status from stdout alone, or discarding it on a nonzero
+#   exit, makes the stderr-status test red;
+# - leaving the marker set when the tool reports the session gone makes the
+#   idle-shared-bridge test red;
+# - running the browser tool unbounded makes the hung-tool test red;
+# - accepting FM_CHROME_BRIDGE_TIMEOUT outside 1..120 makes the clamp test red;
+# - letting a recorded start warrant a stop for an unreadable status, or reading
+#   an unreadable status as evidence of a live bridge, makes the unreadable-status
+#   test red;
+# - stopping when the ownership probe cannot be answered makes the probe-mute
+#   test red;
+# - rewriting the binding record under the ambient umask makes the record-mode
+#   test red;
+# - dropping the missing-tool check, so cleanup runs a chrome-devtools-axi that
+#   is not installed, makes the absent-tool test red.
+test_an_unreadable_status_never_stops_a_session
+test_an_unanswered_ownership_probe_declines_the_stop
+test_ownership_probe_is_a_fresh_task_scoped_nonce
+test_long_task_id_still_reclaims_its_bridge_on_a_name_bounded_host
+test_a_bridge_opened_during_the_status_read_keeps_its_marker
+test_a_bridge_call_still_running_keeps_its_marker
+test_marker_reset_keeps_the_binding_record_private
+test_unrecognized_live_status_is_still_reclaimed
+test_status_reported_on_stderr_is_understood_as_gone
+test_idle_shared_bridge_retires_the_marker_without_a_stop
+test_active_chrome_bridge_is_stopped_without_touching_second_task
+test_unused_chrome_binding_makes_no_stop_call
+test_an_unstarted_task_makes_no_browser_call_at_all
+test_forged_chrome_binding_never_stops_foreign_session
+test_chrome_stop_failure_is_reported_and_nonfatal
+test_unlanded_refusal_still_stops_chrome_bridge
+test_session_blind_tool_never_stops_a_shared_bridge
+test_ambient_bridge_port_cannot_retarget_cleanup
+test_hung_bridge_tool_cannot_stall_cleanup
+test_bridge_call_bound_is_clamped_to_its_documented_range
+test_missing_browser_tool_is_reported_and_never_fails_teardown
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
