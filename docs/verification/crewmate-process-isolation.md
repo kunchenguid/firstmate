@@ -70,4 +70,18 @@ read the brief file: True
 bash commands it started: ['cat <lab>/briefA.md', 'sleep 240; echo done', ...]
 ```
 
-Re-establish all three sections after a Claude Code upgrade, and extend them to any harness whose launch template changes, using the same lab shape: one worker launched from a brief containing a unique sentinel, one pattern match against that sentinel, then a kill by explicit verified PID.
+## Per-harness pointer delivery
+
+The launch templates in `bin/fm-spawn.sh` all place the prompt in the same argv slot, so the mechanism is harness-independent; what each harness contributes is whether its agent acts on a pointer rather than an inlined brief.
+Verified 2026-08-29 by launching each installed harness with only the pointer sentence in argv and a brief on disk whose whole task was to create one named file.
+
+| harness | version | outcome |
+| --- | --- | --- |
+| claude | 2.1.251 | read the brief and began its first instruction |
+| codex | codex-cli 0.149.0 | read the brief and created the named file |
+| pi | 0.84.2 | read the brief and created the named file |
+
+`kimi` is unverified here only because it is not installed on this host; it has always been launched from a pointer, and `kimi_delivery_is_confirmed` in `bin/fm-spawn.sh` greps the sentence's leading `Read the brief at` verbatim, so the shared sentence must keep that prefix.
+`opencode`, `grok`, `cursor`, and `muse` are likewise unverified for pointer delivery and should be exercised with the lab shape below when next installed.
+
+Re-establish all sections after a harness upgrade, and extend them to any harness whose launch template changes, using the same lab shape: one worker launched from a brief containing a unique sentinel, one pattern match against that sentinel, then a kill by explicit verified PID.
