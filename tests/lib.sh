@@ -38,6 +38,7 @@ export FM_GATE_REFUSE_BYPASS=1
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export FM_FAKE_SPAWN_ACK_LIB="$ROOT/tests/fm-spawn-fake-ack.sh"
 
 # --- reporters --------------------------------------------------------------
 

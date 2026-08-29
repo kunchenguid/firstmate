@@ -33,6 +33,7 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+. "${FM_FAKE_SPAWN_ACK_LIB:?FM_FAKE_SPAWN_ACK_LIB unset}"
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
 fake_screen() {
@@ -67,6 +68,7 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    fm_fake_spawn_ack_send "$@"
     prev=
     literal=
     for arg in "$@"; do
@@ -112,6 +114,7 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    fm_fake_spawn_ack_capture
     start= end= prev=
     for arg in "$@"; do
       case "$prev" in

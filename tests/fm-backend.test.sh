@@ -775,11 +775,14 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+. "$FM_FAKE_SPAWN_ACK_LIB"
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
+  capture-pane) fm_fake_spawn_ack_capture; exit 0 ;;
+  send-keys) fm_fake_spawn_ack_send "\$@"; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -837,6 +840,7 @@ make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+. "$FM_FAKE_SPAWN_ACK_LIB"
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
   display-message)
@@ -850,6 +854,8 @@ case "\${1:-}" in
       exit 0
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
+  capture-pane) fm_fake_spawn_ack_capture; exit 0 ;;
+  send-keys) fm_fake_spawn_ack_send "\$@"; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0

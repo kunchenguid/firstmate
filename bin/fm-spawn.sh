@@ -134,6 +134,9 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Treehouse-backed spawns then pin the endpoint shell in that acquired path
+#   before publishing metadata; worktree= and the launch placeholder both use
+#   that verified endpoint cwd, never the primary project path.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2334,6 +2337,34 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  TASK_WORKTREE=$WT
+  pin_ack_left="fm-pin-$ID-"
+  pin_ack_right="${BASHPID:-$$}-$RANDOM"
+  pin_ack="$pin_ack_left$pin_ack_right"
+  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$TASK_WORKTREE") && printf '%s%s\n' $(shell_quote "$pin_ack_left") $(shell_quote "$pin_ack_right")"
+  pinned=
+  pin_seen=0
+  for _ in $(seq 1 10); do
+    if fm_backend_capture "$BACKEND" "$WT_TARGET" 20 "$W" 2>/dev/null | grep -Fxq "$pin_ack"; then
+      pin_seen=1
+    fi
+    pinned=$(spawn_current_path "$WT_TARGET" || true)
+    if [ "$pin_seen" -eq 1 ] && [ -n "$pinned" ] \
+      && [ "$(real_path_or_raw "$pinned")" = "$(real_path_or_raw "$TASK_WORKTREE")" ]; then
+      break
+    fi
+    sleep 0.5
+  done
+  if [ "$pin_seen" -ne 1 ] || [ -z "$pinned" ] \
+    || [ "$(real_path_or_raw "$pinned")" != "$(real_path_or_raw "$TASK_WORKTREE")" ]; then
+    echo "error: task $ID's endpoint did not stay in acquired worktree '$TASK_WORKTREE' (resolved '${pinned:-unknown}'); refusing to publish metadata or launch in the primary checkout" >&2
+    exit 1
+  fi
+else
+  TASK_WORKTREE=$WT
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2711,7 +2742,7 @@ preserve_relaunch_meta() {
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
-  echo "worktree=$WT"
+  echo "worktree=$TASK_WORKTREE"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
@@ -2782,7 +2813,7 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
-sq_worktree=$(shell_quote "$WT")
+sq_worktree=$(shell_quote "$TASK_WORKTREE")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -2920,4 +2951,4 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$TASK_WORKTREE"

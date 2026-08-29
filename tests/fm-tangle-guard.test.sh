@@ -125,16 +125,21 @@ test_bootstrap_line() {
 # The generated ship brief must carry the isolation assertion AHEAD of the
 # `git checkout -b` step, so the crewmate verifies its worktree before branching.
 test_brief_assertion_precedes_branch() {
-  local home brief iso br
+  local home brief iso br primary_real
   home="$TMP_ROOT/brief-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/projects/alpha"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-cc3 alpha --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/tangle-brief-cc3/brief.md"
+  primary_real=$(cd "$home/projects/alpha" && pwd -P)
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
     "brief is missing the isolation blocked-status contract"
-  assert_grep "The path check is authoritative" "$brief" \
-    "brief must make the path check authoritative"
+  assert_grep "primary_clone='$primary_real'" "$brief" \
+    "brief must emit the resolved primary clone path"
+  assert_grep "cd -- \"\$primary_clone\" && pwd -P" "$brief" \
+    "brief must make the primary-clone comparison executable"
+  assert_grep "A linked worktree normally has" "$brief" \
+    "brief must explain that a linked worktree git-dir under the primary clone is normal"
   assert_no_grep "A reliable test that you are in a linked worktree" "$brief" \
     "brief must not present git-dir/common-dir as decisive"
   assert_no_grep "they are identical in the primary checkout" "$brief" \
@@ -159,13 +164,16 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+. "${FM_FAKE_SPAWN_ACK_LIB:?FM_FAKE_SPAWN_ACK_LIB unset}"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) fm_fake_spawn_ack_capture; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
+  send-keys) fm_fake_spawn_ack_send "$@"; exit 0 ;;
+  has-session|new-session|new-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -236,15 +244,18 @@ make_spawn_record_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+. "${FM_FAKE_SPAWN_ACK_LIB:?FM_FAKE_SPAWN_ACK_LIB unset}"
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) fm_fake_spawn_ack_capture; exit 0 ;;
   new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|send-keys|set-window-option) exit 0 ;;
+  send-keys) fm_fake_spawn_ack_send "$@"; exit 0 ;;
+  has-session|new-session|set-window-option) exit 0 ;;
 esac
 exit 0
 SH
@@ -298,6 +309,8 @@ test_spawn_tmux_window_construction() {
     "treehouse get must be sent to the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
+  assert_grep "capture-pane -p -t @spawnwid -S -20" "$rec" \
+    "the pin acknowledgement must be captured from the stable window id"
 
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
