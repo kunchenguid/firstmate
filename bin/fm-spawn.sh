@@ -39,7 +39,8 @@
 #   it, an observed dialog is left untouched and recorded as a blocker. The grant
 #   is recorded in task metadata so a relaunch of the same task retains it; it is
 #   scoped to crewmate and scout tasks, refused for every other harness or task
-#   kind, and never edits Claude's trust store.
+#   kind, and never edits Claude's trust store. Batch dispatch refuses the flag
+#   because one shared invocation cannot grant repository trust per project.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -948,6 +949,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  if [ "$CLAUDE_TRUST_ACCEPT" -eq 1 ]; then
+    echo "error: --accept-claude-trust is single-task only; spawn each Claude task explicitly so trust authority remains scoped to one project" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -958,7 +963,6 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
-  [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ] || shared_args+=(--accept-claude-trust)
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.

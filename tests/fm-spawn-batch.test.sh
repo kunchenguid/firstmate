@@ -141,8 +141,26 @@ test_scout_batch_refuses_delivery_flags() {
   pass "scout batch refuses ship delivery flags instead of ignoring them"
 }
 
+# Repository trust is a per-project grant, so the shared batch argument surface
+# must refuse it before dispatching any child task.
+test_batch_refuses_shared_claude_trust_authority() {
+  local out status
+  out=$(run_ship_spawn \
+    nope-batch-trust-a-z13=projects/none-a \
+    nope-batch-trust-b-z14=projects/none-b \
+    --harness claude --accept-claude-trust)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a batch carrying shared Claude trust authority should exit non-zero"
+  printf '%s\n' "$out" | grep -F -- '--accept-claude-trust is single-task only' >/dev/null \
+    || fail "batch refusal did not name the project-scoping requirement"
+  printf '%s\n' "$out" | grep -F 'batch:' >/dev/null \
+    && fail "batch dispatched a child despite shared Claude trust authority"
+  pass "batch dispatch refuses to widen Claude trust authority across projects"
+}
+
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
+test_batch_refuses_shared_claude_trust_authority
 test_projects_path_scoping
