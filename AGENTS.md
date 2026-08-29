@@ -188,7 +188,9 @@ When that section reports its checks still in progress it names exactly what is 
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
-Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
+Use `gh-axi` for GitHub and `glab-axi` only for the bounded GitLab operations exposed by its current help; use `chrome-devtools-axi` for browser work and `lavish-axi` for structured decisions or reports, and consult current help rather than memorizing flags.
+Only `bin/fm-pr-merge.sh` may invoke the guarded `glab-axi mr merge` primitive after resolving explicit merge authority and exact task, MR, and source-head identity; workers never merge their own MRs or call that primitive directly.
+If a required GitLab operation is unsupported or `glab-axi` is unavailable, stop and escalate instead of substituting plain `glab`, generic API access, or another write path.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
@@ -336,7 +338,7 @@ Delivery mode and `yolo` are orthogonal.
 Never merge a red PR under either setting; destructive, irreversible, and security-sensitive merges still escalate.
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
-Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+Use `bin/fm-pr-merge.sh` for every task PR or MR merge, passing the exact `captain-explicit` or `standing-yolo-green` authority class so merge metadata and the expected provider head are recorded and an unproved result is refused instead of reported as landed; use `bin/fm-merge-local.sh` for approved local-only landing, and never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate

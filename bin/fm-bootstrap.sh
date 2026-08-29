@@ -54,10 +54,12 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
-#          The AXI-family floor policy is owned beside GH_AXI_MIN and
-#          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
-#          build below its floor reports MISSING like no-mistakes, so the operator
-#          is asked to upgrade rather than silently running an older tool.
+#          The AXI-family floor policy is owned beside GH_AXI_MIN,
+#          GLAB_AXI_MIN, and LAVISH_AXI_MIN below; the per-tool owners point
+#          there. An installed build below its floor reports MISSING like
+#          no-mistakes, so the operator is asked to upgrade rather than silently
+#          running an older tool. glab-axi stays task-scoped rather than
+#          universally required, but 0.2.0 introduced the guarded merge contract.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). A compatible tasks-axi default backend is silent.
@@ -839,6 +841,7 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    glab-axi) echo "glab-axi update" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
@@ -883,6 +886,9 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
+# glab-axi remains optional, but any installed copy must include guarded
+# immediate squash merge and the current strict normalized MR JSON fields.
+GLAB_AXI_MIN=0.2.0
 LAVISH_AXI_MIN=0.1.46
 
 treehouse_supports_lease() {
@@ -1230,6 +1236,9 @@ detect_local_tools() {
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
+  fi
+  if command -v glab-axi >/dev/null 2>&1 && ! tool_version_at_least glab-axi "$GLAB_AXI_MIN"; then
+    echo "MISSING: glab-axi (install: $(install_cmd glab-axi))"
   fi
   if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
     echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"

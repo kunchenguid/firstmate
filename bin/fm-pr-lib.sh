@@ -24,6 +24,11 @@ FM_PR_PATH=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_RESOLVED_STATE=
+FM_PR_RESOLVED_HEAD=
+FM_PR_RESOLVED_SOURCE_BRANCH=
+FM_PR_RESOLVED_TARGET_BRANCH=
+FM_PR_RESOLVED_HAS_CONFLICTS=
 FM_PR_DATA_PROVIDER=
 FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
@@ -213,6 +218,86 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Resolve one current glab-axi/ux-v1 MR view as a single strict JSON document.
+# The provider wrapper owns response bounds; this consumer additionally binds
+# its normalized result to the URL-derived host, complete nested project, IID,
+# canonical URL, source head, source/target branches, and conflict flag before
+# exposing any field to a lifecycle caller. Missing, duplicate, malformed,
+# truncated, or identity-mismatched output is inconclusive and returns nonzero.
+fm_pr_gitlab_mr_resolve() { # <canonical-mr-url>
+  local url=$1 output fields resolved_state resolved_head resolved_source
+  local resolved_target resolved_conflicts extra host path number
+  FM_PR_RESOLVED_STATE=
+  FM_PR_RESOLVED_HEAD=
+  FM_PR_RESOLVED_SOURCE_BRANCH=
+  FM_PR_RESOLVED_TARGET_BRANCH=
+  FM_PR_RESOLVED_HAS_CONFLICTS=
+  fm_pr_url_parse "$url" || return 1
+  [ "$FM_PR_PROVIDER" = gitlab ] || return 1
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
+  command -v glab-axi >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  output=$(glab-axi mr view "$number" --hostname "$host" --repo "$path" --format json 2>/dev/null) \
+    || return 1
+  fields=$(printf '%s\n' "$output" | jq -ers \
+    --arg host "$host" \
+    --arg repo "$path" \
+    --arg url "$url" \
+    --argjson iid "$number" '
+      if length == 1
+        and (.[0] | type) == "object"
+        and .[0].schema == "glab-axi/ux-v1"
+        and .[0].ok == true
+        and .[0].meta.backend == "official-glab"
+        and .[0].meta.host == $host
+        and .[0].meta.repo == $repo
+        and .[0].meta.complete == true
+        and .[0].meta.truncated == false
+        and (.[0].data.mr | type) == "object"
+        and (.[0].data.mr.iid | type) == "number"
+        and .[0].data.mr.iid == (.[0].data.mr.iid | floor)
+        and .[0].data.mr.iid == $iid
+        and (.[0].data.mr.web_url | type) == "string"
+        and .[0].data.mr.web_url == $url
+        and (.[0].data.mr.state | type) == "string"
+        and (.[0].data.mr.head_sha | type) == "string"
+        and (.[0].data.mr.source_branch | type) == "string"
+        and (.[0].data.mr.target_branch | type) == "string"
+        and (.[0].data.mr.has_conflicts | type) == "boolean"
+      then [
+        .[0].data.mr.state,
+        .[0].data.mr.head_sha,
+        .[0].data.mr.source_branch,
+        .[0].data.mr.target_branch,
+        (.[0].data.mr.has_conflicts | tostring)
+      ] | @tsv
+      else error("invalid merge-request identity")
+      end
+    ' 2>/dev/null) || return 1
+  IFS=$'\t' read -r resolved_state resolved_head resolved_source resolved_target resolved_conflicts extra <<EOF
+$fields
+EOF
+  [ -z "$extra" ] || return 1
+  case "$resolved_state" in opened|closed|merged) ;; *) return 1 ;; esac
+  case "$resolved_conflicts" in true|false) ;; *) return 1 ;; esac
+  case "$resolved_source$resolved_target" in *'|'*) return 1 ;; esac
+  fm_pr_head_valid "$resolved_head" || return 1
+  git check-ref-format --branch "$resolved_source" >/dev/null 2>&1 || return 1
+  git check-ref-format --branch "$resolved_target" >/dev/null 2>&1 || return 1
+  # shellcheck disable=SC2034 # Output consumed by callers after this resolver returns.
+  FM_PR_RESOLVED_STATE=$resolved_state
+  # shellcheck disable=SC2034 # Output consumed by callers after this resolver returns.
+  FM_PR_RESOLVED_HEAD=$resolved_head
+  # shellcheck disable=SC2034 # Output consumed by callers after this resolver returns.
+  FM_PR_RESOLVED_SOURCE_BRANCH=$resolved_source
+  # shellcheck disable=SC2034 # Output consumed by callers after this resolver returns.
+  FM_PR_RESOLVED_TARGET_BRANCH=$resolved_target
+  # shellcheck disable=SC2034 # Output consumed by callers after this resolver returns.
+  FM_PR_RESOLVED_HAS_CONFLICTS=$resolved_conflicts
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
@@ -285,6 +370,39 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# One guarded GitLab squash receipt binds the task, canonical MR URL (and thus
+# host/project/IID), accepted authority class, exact source head and branches,
+# and the provider-verified squash and target result commits.
+fm_pr_gitlab_guarded_squash_receipt_valid() (
+  local receipt=$1 version id url authority head source target squash result field_count
+  case "$receipt" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  field_count=$(printf '%s\n' "$receipt" | awk -F'|' 'NR == 1 { print NF }') || return 1
+  [ "$field_count" = 9 ] || return 1
+  IFS='|' read -r version id url authority head source target squash result <<EOF
+$receipt
+EOF
+  [ "$version" = v1 ] || return 1
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ "$FM_PR_PROVIDER" = gitlab ] || return 1
+  case "$authority" in captain-explicit|standing-yolo-green) ;; *) return 1 ;; esac
+  fm_pr_head_valid "$head" && fm_pr_head_valid "$squash" \
+    && fm_pr_head_valid "$result" || return 1
+  git check-ref-format --branch "$source" >/dev/null 2>&1 || return 1
+  git check-ref-format --branch "$target" >/dev/null 2>&1 || return 1
+)
+
+fm_pr_gitlab_guarded_squash_receipt_matches() (
+  local receipt=$1 expected_id=$2 expected_url=$3 expected_head=$4
+  local version id url authority head source target squash result
+  fm_pr_gitlab_guarded_squash_receipt_valid "$receipt" || return 1
+  IFS='|' read -r version id url authority head source target squash result <<EOF
+$receipt
+EOF
+  [ "$id" = "$expected_id" ] && [ "$url" = "$expected_url" ] \
+    && [ "$head" = "$expected_head" ]
+)
+
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
@@ -313,6 +431,14 @@ fm_pr_metadata_identity_parse() {
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
           fm_pr_head_valid "$value" || post_pr_invalid=1
+        fi
+        ;;
+      gitlab_guarded_squash_receipt=*)
+        if [ "$seen_pr" -eq 1 ]; then
+          value=${line#gitlab_guarded_squash_receipt=}
+          fm_pr_gitlab_guarded_squash_receipt_valid "$value" || post_pr_invalid=1
+        else
+          post_pr_invalid=1
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)

@@ -1,8 +1,8 @@
-# GitLab merge request watch and merge verification
+# GitLab merge request watch and guarded squash verification
 
-Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
-Every command through "Upgrade path from an existing armed watch" was run on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
-Every output is reproduced exactly.
+This record covers GitLab merge watching alongside guarded squash routing and safe cleanup.
+The live watch evidence through "Upgrade path from an existing armed watch" was collected on 2026-07-21.
+The guarded routing, cleanup, and integration evidence was refreshed on 2026-08-28 through executable public interfaces with synthetic normalized provider responses and local Git repositories; no live merge was issued.
 
 ## Versions
 
@@ -14,20 +14,18 @@ $ bash --version | head -1
 GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu)
 ```
 
-The merge evidence dated 2026-08-22 was collected on a different host, on:
+The guarded routing and cleanup refresh used:
 
 ```
-$ glab --version
-glab 1.82.0-<local build tag> (<local build commit>)
+$ glab-axi --version
+glab-axi 0.2.0 (contract glab-axi/v1)
 
 $ jq --version
-jq-1.8.1
+jq-1.6
 
 $ bash --version | head -1
-GNU bash, version 5.2.15(1)-release (x86_64-amazon-linux-gnu)
+GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
 ```
-
-That `glab` is a locally built 1.82.0; only its build tag and commit are elided, because they name a private build rather than a released version.
 
 ## The evidence project
 
@@ -52,8 +50,9 @@ Two things about plain `glab` were established by running it, because assuming e
 
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+The byte-static poll therefore continues to read state from plain glab's field output rather than adding JSON parsing to every silent poll.
+Current lifecycle prerequisites are owned by [`configuration.md`](configuration.md#toolchain).
+Only an exact `merged` wakes firstmate, so a changed poll output format produces no wake rather than a false merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
@@ -178,6 +177,8 @@ $ PATH="$noglab" fm-pr-check.sh e6 https://github.com/kunchenguid/firstmate/pull
 armed: state/e6.check.sh
 ```
 
+Current GitLab arming prerequisites and refusal behavior are documented in [`configuration.md`](configuration.md#toolchain).
+
 ## Upgrade path from an existing armed watch
 
 The stored record gained the provider tag, so its version moved to `fm-pr-poll-registration-v2` and a record written by the previous release no longer parses.
@@ -206,92 +207,32 @@ merged
 
 No armed watch is lost by upgrading.
 
-## Merging a merge request
+## Guarded merge routing and squash cleanup
 
-`bin/fm-pr-merge.sh` now merges a GitLab merge request through the shared recording helper and GitLab's own live pre-merge guards.
-Every run below used a throwaway `FM_HOME`, so no live task record was touched, and a `glab` wrapper that refused any `merge` subcommand outright, so no merge could reach the forge even if a check were wrong.
-That wrapper is why the open fixture merge request could be used as evidence at all: it is `mergeable` with discussions resolved, so the pipeline conditions are the only thing between it and a real merge.
+[`architecture.md`](architecture.md#delivery-modes-are-explicit-per-task) owns the guarded GitLab routing, result-consumption, receipt, and cleanup invariants.
+The exact invocation and receipt mechanics are owned by the header and `--help` output of [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh), with teardown proof mechanics owned by [`bin/fm-teardown.sh`](../bin/fm-teardown.sh).
 
-Merging needs `glab` for the read and `jq` to parse it, and either one absent refuses before anything is recorded:
+## Executable verification
 
-```
-$ PATH="$noglab" fm-pr-merge.sh e5 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
-error: merging a GitLab merge request requires glab on PATH
-$ echo $?
-1
-$ PATH="$nojq" fm-pr-merge.sh e6 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
-error: merging a GitLab merge request requires jq on PATH
-$ echo $?
-1
-```
+The focused public-interface regressions use fake bounded provider responses, count exact provider invocations, cover accepted and rejected lifecycle evidence, and exercise cleanup through the real entrypoint against local Git repositories.
+They issue no live merge.
 
-Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
-
-`jq` is not one of firstmate's common tools, which is why the watch poll reads glab's field output instead.
-The merge path cannot do the same: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline appear only in glab's JSON.
-The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
-
-The merged half of the fixture is refused, and every failing condition is listed rather than just the first:
+Selected exact lines from the focused run were:
 
 ```
-$ fm-pr-merge.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
-armed: state/e1.check.sh
-error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
-  - state is "merged", not open
-  - detailed_merge_status is "not_open", not mergeable
-  - the head pipeline status is "none", not success
-  - the head pipeline ran at "none", not at the current head 33762fcf6777c8d993220d25fb541e56c48081b9
-$ echo $?
-1
+$ bin/fm-test-run.sh tests/fm-pr-merge.test.sh
+ok - fm-pr-merge requires exactly one validated merge-authority class
+ok - fm-pr-merge routes exact nested GitLab MRs and accepts only verified guarded success actions
+ok - fm-pr-merge refuses every non-squash GitLab behavior and override before provider access
+ok - fm-pr-merge records one expected head and rejects stale or ambiguous MR views
+ok - fm-pr-merge propagates provider refusals and accepts no ambiguous success result
+ok - fm-pr-merge refuses before recording when a GitLab lifecycle dependency is missing
+FM_TEST_END 2026-08-28T01:41:28Z tests/fm-pr-merge.test.sh exit=0 duration_ms=351678
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=351822
+
+$ bash tests/fm-teardown.test.sh --gitlab-only
+ok - GitLab teardown accepts exact guarded-squash evidence plus target content proof
+ok - GitLab teardown refuses dirty, unmerged, stale, malformed, mismatched, or content-unproven evidence
 ```
 
-The open half is `mergeable`, conflict-free, and has its discussions resolved, so only the pipeline conditions refuse it.
-The fixture runs no CI, so its `head_pipeline` is `null`, which is reported as `none` rather than treated as nothing to check:
-
-```
-$ fm-pr-merge.sh e2 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
-armed: state/e2.check.sh
-error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
-  - the head pipeline status is "none", not success
-  - the head pipeline ran at "none", not at the current head 66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
-$ echo $?
-1
-```
-
-A project that runs no pipeline at all therefore cannot merge through this path.
-That is the intended reading of the requirement rather than an oversight: a successful pipeline at the head is a condition, and "there is no pipeline" does not satisfy it.
-
-Both refusals came after `pr=` was recorded and the merge poll was armed, exactly as a failing `gh-axi pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
-
-A recorded `pr_head=` that no longer matches the live head is reported, and the live head is what gets verified.
-The stale value below was written into the task record by hand, because a GitLab task never records one on its own:
-
-```
-$ fm-pr-merge.sh e4 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
-armed: state/e4.check.sh
-notice: recorded head 1111111111111111111111111111111111111111 disagrees with the live head 66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8; verifying the live head
-error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
-  - the head pipeline status is "none", not success
-  - the head pipeline ran at "none", not at the current head 66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
-```
-
-The remaining refusal conditions, and the merge itself, are covered by `tests/fm-pr-merge.test.sh` against fixtures.
-The conflict, unresolved-discussion, and running-pipeline conditions were additionally exercised against real merge requests on a private instance; those runs cannot be reproduced here, so their identifiers stay out of this record.
-The merge itself is not exercised against any live merge request, in either direction: `glab mr merge` has no dry run, so a live success path would mean merging someone's work to produce evidence.
-
-## Why the head is read live and bound to the merge
-
-The verified head is passed to `glab mr merge --sha`, so GitLab refuses the merge if the source branch moved between the read and the merge.
-Without it, a push landing in that window would merge commits nothing verified.
-
-`--yes` is passed for the same reason the watch poll needs no terminal: an unattended run cannot answer a confirmation prompt, and a wedged prompt is worse than a refusal.
-It skips only that prompt; the conditions above are what authorize the merge.
-
-## Why a recorded head is not the authority
-
-`bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
-It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
-
-The merge path does not record one either, and deliberately does not depend on one.
-A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
-Reading the head live at merge time, reporting a recorded value that disagrees, and binding the merge to what was actually verified is what closes that gap.
+The generated-brief regression separately proves that ship and scout workers across every supported runtime receive the bounded GitLab route and cannot invoke the guarded primitive.

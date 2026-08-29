@@ -26,8 +26,8 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
-# The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
-# deliberately restricted, so a case that needs jq exposes this one rather than
+# The GitLab lifecycle path reads normalized MR JSON with the real jq, and
+# BASE_PATH is deliberately restricted, so a case that needs jq exposes this one rather than
 # depending on the host keeping jq in one of those four directories.
 REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
@@ -119,10 +119,21 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  cat > "$fakebin/glab-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GLAB_AXI_LOG"
+printf '%s\n' "{\"schema\":\"glab-axi/ux-v1\",\"ok\":true,\"data\":{\"mr\":{\"iid\":7,\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"web_url\":\"${FM_TEST_GLAB_URL:-https://gitlab.example/group/subgroup/project/-/merge_requests/7}\",\"head_sha\":\"${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"source_branch\":\"fm/task-a\",\"target_branch\":\"main\",\"has_conflicts\":false}},\"meta\":{\"backend\":\"official-glab\",\"host\":\"gitlab.example\",\"repo\":\"group/subgroup/project\",\"complete\":true,\"truncated\":false,\"limit\":30}}"
+SH
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+exec '$REAL_JQ' "\$@"
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" \
+    "$fakebin/glab-axi" "$fakebin/jq"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/glab-axi.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -270,16 +281,24 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
 
 run_merge_entry() {
-  local dir=$1
+  local dir=$1 id url
   shift
+  if [ "$#" -ge 2 ]; then
+    id=$1
+    url=$2
+    shift 2
+    set -- "$id" "$url" --authority captain-explicit "$@"
+  fi
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -495,7 +514,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
     rc=$?
     set -e
     [ "$rc" -ne 0 ] || fail "merge entrypoint accepted invalid URL"
-    [ "$(cat "$dir/stderr")" = 'error: invalid PR merge request' ] || fail "merge invalid URL diagnostic was not fixed"
+    [ "$(cat "$dir/stderr")" = 'error: invalid PR/MR merge request' ] || fail "merge invalid URL diagnostic was not fixed"
     after=$(state_snapshot "$dir/home/state")
     [ "$after" = "$before" ] || fail "merge invalid URL changed prior state"
   done
@@ -2831,7 +2850,7 @@ SH
 # https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
 # docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab entry bindir name
+  local dir state out rc url value noglab entry bindir name head_dir
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
@@ -2917,29 +2936,21 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
-  # The merge path addresses the forge the URL names, and never the other one.
-  # This fixture's glab answers with the field output the poll reads, so the
-  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
-  # state it could not read.
-  write_task_meta "$dir" task-c
-  : > "$dir/glab.log"
-  # The merge path needs jq before it reads anything, so this case supplies it
-  # and the refusal below is the unreadable state rather than a missing tool.
-  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
-  set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
-  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
-    || fail "merge wrapper refused for some reason other than the state it could not read"
-  [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
-  grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
-    || fail "merge wrapper did not read the merge request through glab at its own instance"
-  ! grep -qF ' mr merge ' "$dir/glab.log" \
-    || fail "merge wrapper merged despite an unreadable merge request state"
+  # Arming also records one exact source head through the bounded normalized
+  # interface. The merge wrapper's mutation contract has its own focused suite.
+  head_dir=$(make_case gitlab-head-record)
+  write_task_meta "$head_dir" task-d
+  run_check_entry "$head_dir" task-d "$url" >/dev/null \
+    || fail "GitLab arming could not record a strict normalized MR head"
+  grep -qxF 'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    "$head_dir/home/state/task-d.meta" \
+    || fail "GitLab arming did not record the glab-axi MR head"
+  grep -qxF 'mr view 7 --hostname gitlab.example --repo group/subgroup/project --format json' \
+    "$head_dir/glab-axi.log" \
+    || fail "GitLab arming did not use the exact bounded JSON identity path"
+  [ ! -s "$head_dir/gh-axi.log" ] || fail "GitLab arming reached the GitHub CLI"
 
-  pass "GitLab merge requests are followed on any instance and never wake falsely"
+  pass "GitLab merge requests are followed and identity-bound on any instance"
 }
 
 seed_canonical_poll() {

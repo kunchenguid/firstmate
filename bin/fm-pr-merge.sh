@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Merge a task's PR or MR after recording pr= and any available pr_head= through
-# bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
-# The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
-# addressed through gh-axi by the derived owner and repository; a GitLab merge
-# request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded.
+# Merge one task's canonical PR or MR through its guarded provider owner after
+# bin/fm-pr-check.sh records pr= and the exact available pr_head=. The wrapper
+# requires the caller to name the already-resolved captain-explicit or standing
+# routine merge authority; destination identity never substitutes for authority.
+# The full canonical URL is parsed by bin/fm-pr-lib.sh. GitHub is addressed by
+# derived owner/repository, while GitLab is addressed by URL-derived host,
+# complete nested project path, and MR IID.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -37,33 +38,29 @@
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
 # a merge command that failed keeps its original error surfaced raw and first.
-# GitLab adds no method flag at all: its merge method is the project's own
-# setting, which the merge API applies, and imposing squash there would override
-# that convention rather than mirror the GitHub default.
+# GitLab accepts no caller merge behavior except one optional explicit
+# --squash, which is consumed as confirmation of the sole supported strategy.
+# Before provider access the wrapper rejects repository, hostname, head,
+# authority, output, auto-merge, source-deletion, alternate-method, unknown,
+# duplicate, and positional overrides rather than forwarding any of them.
 #
-# A GitLab merge is refused unless every pre-merge condition holds, each read
-# live at merge time rather than taken from recorded metadata: the merge request
-# is open, detailed_merge_status is mergeable, has_conflicts is false,
-# blocking_discussions_resolved is true, and the head pipeline succeeded at the
-# exact current head commit. Every failing condition is reported, not just the
-# first. The verified head is then passed to glab as --sha, so a push that lands
-# between that read and the merge fails the merge instead of landing commits
-# nothing verified. A recorded pr_head that disagrees with the live head is
-# reported rather than trusted, because a rebase moves the head and leaves the
-# recorded value stale. Reading that state needs glab and jq, and either one
-# absent stops the merge before any state is recorded.
+# The wrapper records the exact source head from one bounded glab-axi MR view,
+# re-resolves that URL/head/source/target immediately before mutation, and calls
+# exactly one guarded glab-axi mr merge with URL-derived identity, durable head,
+# exact branches, explicit authority, immediate squash, and JSON output. It never invokes plain
+# glab, retries a merge, or falls back to another mutation path. A zero-exit
+# result is accepted only as one strict glab-axi/ux-v1 JSON document whose
+# action, identity, head, branches, successful pipeline, authority, and result
+# commits all match. One task-bound guarded-squash receipt is then persisted for
+# safe cleanup; an unprovable response leaves the poll armed and cleanup refused.
 #
-# Extra args must not include --repo or -R in any form, including a bundled
-# short-option cluster such as -yR, because the repository comes only from the
-# URL, nor --sha on GitLab because the head comes only from the live read.
-#
-# On GitLab, this script confirms the MR is actually merged before reporting it;
-# an auto-merge-queued or unconfirmed request leaves the poll armed and records
-# no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's
-# destination, normal-case deduplication, and at-least-once recovery.
-# A landed merge whose outcome cannot be written is reported loudly rather than
-# misreported as a failed merge.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+# bin/fm-merge-outcome-lib.sh owns a confirmed merge's destination, normal-case
+# deduplication, and at-least-once recovery. A landed merge whose outcome cannot
+# be written is reported loudly rather than misreported as a failed merge.
+# Usage:
+#   fm-pr-merge.sh <task-id> <pr-or-mr-url> \
+#     --authority <captain-explicit|standing-yolo-green> \
+#     [-- <provider merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,6 +70,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # Role partition: merging is MAIN-owned; the Pi supervision branch reports the
@@ -82,26 +81,53 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "PR merge (fm-pr-merge)"
 
-if [ "$#" -lt 2 ]; then
-  echo "error: invalid PR merge request" >&2
+usage() {
+  cat <<'USAGE'
+Usage:
+  fm-pr-merge.sh <task-id> <pr-or-mr-url> \
+    --authority <captain-explicit|standing-yolo-green> \
+    [-- <provider merge args>]
+
+Merge one task's canonical pull request or merge request through its guarded
+provider owner. GitLab permits only immediate squash and accepts no provider
+argument except an optional explicit --squash. GitHub keeps the existing
+merge-method default and extra-argument behavior. A validated GitLab result
+also records one task-bound guarded-squash receipt for later cleanup.
+USAGE
+}
+
+invalid_request() {
+  echo "error: invalid PR/MR merge request" >&2
   exit 2
+}
+
+if [ "$#" -eq 1 ] && { [ "$1" = -h ] || [ "$1" = --help ]; }; then
+  usage
+  exit 0
 fi
+[ "$#" -ge 4 ] || invalid_request
+
 ID=$1
 RAW_URL=$2
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
-  echo "error: invalid PR merge request" >&2
-  exit 2
+  invalid_request
 fi
 URL=$FM_PR_URL
 PROVIDER=$FM_PR_PROVIDER
+HOST=$FM_PR_HOST
+PROJECT_PATH=$FM_PR_PATH
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
-# glab resolves the instance from the project URL passed to -R, so the host is
-# rebuilt from the parsed identity rather than read from any ambient default.
-PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
-[ "${1:-}" = "--" ] && shift
+[ "${1:-}" = --authority ] && [ "$#" -ge 2 ] || invalid_request
+AUTHORITY=$2
+case "$AUTHORITY" in
+  captain-explicit|standing-yolo-green) ;;
+  *) invalid_request ;;
+esac
+shift 2
+[ "${1:-}" = -- ] && shift
 
 caller_has_merge_method() {
   local arg
@@ -173,150 +199,60 @@ reject_repo_overrides() {
   done
 }
 
-reject_head_overrides() {
+reject_authority_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --sha|--sha=*)
-        echo "error: extra merge arguments must not override the head commit" >&2
+      --authority|--authority=*)
+        echo "error: merge authority must be declared exactly once at the Firstmate boundary" >&2
         return 1
         ;;
     esac
   done
 }
 
-reject_repo_overrides "$@" || exit 1
-[ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
+validate_gitlab_args() {
+  local arg squash_count=0
+  for arg in "$@"; do
+    case "$arg" in
+      --squash) squash_count=$((squash_count + 1)) ;;
+      *)
+        echo "error: GitLab merge arguments allow only one optional --squash" >&2
+        return 1
+        ;;
+    esac
+  done
+  if [ "$squash_count" -gt 1 ]; then
+    echo "error: GitLab merge arguments allow only one optional --squash" >&2
+    return 1
+  fi
+}
 
-# Task-derived paths are constructed only after the canonical ID validation.
+gitlab_branch_guards_available() {
+  local merge_help option
+  merge_help=$(glab-axi mr merge --help 2>&1) || return 1
+  for option in --expected-source --expected-target; do
+    printf '%s\n' "$merge_help" \
+      | grep -Eq -- "(^|[[:space:],])$option([=[:space:],]|$)" || return 1
+  done
+}
+
+reject_repo_overrides "$@" || exit 1
+reject_authority_overrides "$@" || exit 1
+[ "$PROVIDER" != gitlab ] || validate_gitlab_args "$@" || exit 1
+
+# Task-derived paths are constructed only after canonical task-ID validation.
 META="$STATE/$ID.meta"
-if [ ! -f "$META" ] || [ -L "$META" ]; then
+if [ ! -f "$META" ] || [ -L "$META" ] \
+  || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
-
-# Reading the merge request state needs both tools. Report them together and
-# before anything is recorded, so a missing tool is a named prerequisite rather
-# than a merge that is armed and then refused for an unexplained reason.
-GITLAB_MISSING=
-if [ "$PROVIDER" = gitlab ]; then
-  command -v glab >/dev/null 2>&1 || GITLAB_MISSING="glab"
-  if ! command -v jq >/dev/null 2>&1; then
-    GITLAB_MISSING="${GITLAB_MISSING:+$GITLAB_MISSING and }jq"
-  fi
-  if [ -n "$GITLAB_MISSING" ]; then
-    echo "error: merging a GitLab merge request requires $GITLAB_MISSING on PATH" >&2
-    exit 1
-  fi
+if [ "$PROVIDER" = gitlab ] && command -v glab-axi >/dev/null 2>&1 \
+  && ! gitlab_branch_guards_available; then
+  echo "error: guarded GitLab merge requires glab-axi support for --expected-source and --expected-target" >&2
+  exit 1
 fi
-
-# The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
-# because that script re-records pr= and drops a pr_head= it cannot resolve.
-RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
-  RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
-fi
-
-# Pre-merge conditions for a GitLab merge request, read from one live view of
-# the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
-# returns non-zero after reporting every condition that failed.
-FM_PR_MERGE_HEAD=
-gitlab_verify_mergeable() {
-  local json fields line
-  local total=0 named=0 refusals=''
-  local state='' detail='' conflicts='' discussions=''
-  local live_head='' pipeline_sha='' pipeline_status=''
-
-  # GITLAB_HOST is set to the same host the project URL already carries, so the
-  # instance is taken from the parsed URL by both signals and never from the
-  # operator's configured default.
-  if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
-    || [ -z "$json" ]; then
-    echo "error: could not read the GitLab merge request state before merging" >&2
-    return 1
-  fi
-  # One named field per line. The names keep a trailing empty value readable
-  # after command substitution strips blank lines, and an absent or null field
-  # becomes an empty string or the literal "null", neither of which satisfies any
-  # check below, so an unreadable field refuses the merge instead of passing it.
-  if ! fields=$(printf '%s' "$json" | jq -r '
-      if type == "object" then
-        "state=" + ((.state // "") | tostring),
-        "detail=" + ((.detailed_merge_status // "") | tostring),
-        "conflicts=" + (.has_conflicts | tostring),
-        "discussions=" + (.blocking_discussions_resolved | tostring),
-        "head=" + ((.sha // "") | tostring),
-        "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
-        "pipeline_status=" + ((.head_pipeline.status // "") | tostring)
-      else
-        error("merge request payload is not an object")
-      end' 2>/dev/null); then
-    echo "error: could not read the GitLab merge request state before merging" >&2
-    return 1
-  fi
-  while IFS= read -r line; do
-    total=$((total + 1))
-    case "$line" in
-      state=*) state=${line#state=} ;;
-      detail=*) detail=${line#detail=} ;;
-      conflicts=*) conflicts=${line#conflicts=} ;;
-      discussions=*) discussions=${line#discussions=} ;;
-      head=*) live_head=${line#head=} ;;
-      pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
-      pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
-      *) continue ;;
-    esac
-    named=$((named + 1))
-  done <<FIELDS
-$fields
-FIELDS
-  # Every field named exactly once and no unnamed line: a value carrying a
-  # newline would split into a line no name matches, so it is refused here
-  # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 7 ] || [ "$total" -ne 7 ]; then
-    echo "error: could not read the GitLab merge request state before merging" >&2
-    return 1
-  fi
-
-  if ! fm_pr_head_valid "$live_head"; then
-    echo "error: could not read the GitLab merge request head commit before merging" >&2
-    return 1
-  fi
-  # A rebase moves the head and leaves the recorded value behind, so the
-  # disagreement is reported and the live head is what gets verified and merged.
-  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
-    printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
-      "$RECORDED_HEAD" "$live_head" >&2
-  fi
-
-  [ "$state" = opened ] \
-    || refusals="$refusals  - state is \"${state:-unreadable}\", not open
-"
-  [ "$detail" = mergeable ] \
-    || refusals="$refusals  - detailed_merge_status is \"${detail:-unreadable}\", not mergeable
-"
-  [ "$conflicts" = false ] \
-    || refusals="$refusals  - has_conflicts is \"${conflicts:-unreadable}\", not false
-"
-  [ "$discussions" = true ] \
-    || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
-"
-  [ "$pipeline_status" = success ] \
-    || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
-"
-  [ "$pipeline_sha" = "$live_head" ] \
-    || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
-"
-
-  if [ -n "$refusals" ]; then
-    printf 'error: refusing to merge %s\n' "$URL" >&2
-    printf '%s' "$refusals" >&2
-    return 1
-  fi
-  printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
-    "$URL" "$live_head" >&2
-  FM_PR_MERGE_HEAD=$live_head
-}
 
 # Read one live GitHub pull request view after gh-axi returns. The selected
 # fields distinguish a landed pull request from a merge-queue entry and retain
@@ -497,9 +433,138 @@ record_pr_metadata() {
     return 1
   fi
   grep -qxF "pr=$URL" "$META" || {
-    echo "error: PR metadata recording failed" >&2
+    echo "error: PR/MR metadata recording failed" >&2
     return 1
   }
+}
+
+validate_gitlab_merge_result() { # <json> <source> <target> <head>
+  local output=$1 source=$2 target=$3 head=$4
+  printf '%s\n' "$output" | jq -es \
+    --arg host "$HOST" \
+    --arg repo "$PROJECT_PATH" \
+    --arg url "$URL" \
+    --arg source "$source" \
+    --arg target "$target" \
+    --arg head "$head" \
+    --arg authority "$AUTHORITY" \
+    --argjson iid "$PR_NUMBER" '
+      def sha:
+        type == "string"
+        and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+      .[0] as $result
+      | length == 1
+      and ($result | type) == "object"
+      and $result.schema == "glab-axi/ux-v1"
+      and $result.ok == true
+      and $result.meta.backend == "official-glab"
+      and $result.meta.host == $host
+      and $result.meta.repo == $repo
+      and $result.meta.complete == true
+      and $result.meta.truncated == false
+      and ($result.data.merge | type) == "object"
+      and (["merged", "already_merged", "reconciled_merged"]
+        | index($result.data.merge.action)) != null
+      and ($result.data.merge.iid | type) == "number"
+      and $result.data.merge.iid == ($result.data.merge.iid | floor)
+      and $result.data.merge.iid == $iid
+      and $result.data.merge.web_url == $url
+      and $result.data.merge.source_branch == $source
+      and $result.data.merge.target_branch == $target
+      and $result.data.merge.source_head_sha == $head
+      and $result.data.merge.authority == $authority
+      and ($result.data.merge.pipeline | type) == "object"
+      and ($result.data.merge.pipeline.id | type) == "number"
+      and $result.data.merge.pipeline.id > 0
+      and $result.data.merge.pipeline.id == ($result.data.merge.pipeline.id | floor)
+      and $result.data.merge.pipeline.sha == $head
+      and $result.data.merge.pipeline.status == "success"
+      and ($result.data.merge.squash_commit_sha | sha)
+      and (($result.data.merge.merge_commit_sha == null)
+        or ($result.data.merge.merge_commit_sha | sha))
+      and ($result.data.merge.result_commit_sha | sha)
+      and $result.data.merge.result_commit_sha == (
+        if $result.data.merge.merge_commit_sha == null
+        then $result.data.merge.squash_commit_sha
+        else $result.data.merge.merge_commit_sha
+        end
+      )
+    ' >/dev/null 2>&1
+}
+
+record_gitlab_guarded_squash_receipt() { # <validated-json> <source> <target> <head>
+  local output=$1 source=$2 target=$3 head=$4 receipt
+  receipt=$(printf '%s\n' "$output" | jq -er \
+    --arg id "$ID" \
+    --arg url "$URL" \
+    --arg authority "$AUTHORITY" \
+    --arg head "$head" \
+    --arg source "$source" \
+    --arg target "$target" \
+    '["v1", $id, $url, $authority, $head, $source, $target,
+      .data.merge.squash_commit_sha, .data.merge.result_commit_sha] | join("|")') \
+    || return 1
+  fm_pr_gitlab_guarded_squash_receipt_valid "$receipt" || return 1
+  (
+    local meta_lock meta_tmp receipt_count head_count pr_count
+    local meta_device state_device lock_held=0
+    meta_lock=
+    meta_tmp=
+    cleanup_receipt_record() {
+      [ -z "$meta_tmp" ] || rm -f -- "$meta_tmp"
+      if [ "$lock_held" -eq 1 ]; then
+        fm_lock_release "$meta_lock" || true
+        lock_held=0
+      fi
+    }
+    trap cleanup_receipt_record EXIT
+    trap 'exit 1' HUP INT TERM
+    meta_lock=$(fm_meta_lock_path "$META") || exit 1
+    fm_lock_acquire_wait "$meta_lock" || exit 1
+    lock_held=1
+    [ -f "$META" ] && [ ! -L "$META" ] \
+      && [ "$(fm_pr_file_link_count "$META")" = 1 ] || exit 1
+    meta_device=$(fm_pr_file_device "$META") || exit 1
+    state_device=$(fm_pr_file_device "$STATE") || exit 1
+    [ "$meta_device" = "$state_device" ] || exit 1
+    pr_count=$(grep -c '^pr=' "$META" || true)
+    head_count=$(grep -c '^pr_head=' "$META" || true)
+    receipt_count=$(grep -c '^gitlab_guarded_squash_receipt=' "$META" || true)
+    [ "$pr_count" -eq 1 ] && [ "$head_count" -eq 1 ] \
+      && [ "$receipt_count" -le 1 ] || exit 1
+    grep -qxF "pr=$URL" "$META" || exit 1
+    grep -qxF "pr_head=$head" "$META" || exit 1
+    fm_pr_metadata_identity_parse "$META" || exit 1
+    [ "$FM_PR_META_PROVIDER" = gitlab ] && [ "$FM_PR_META_URL" = "$URL" ] \
+      && [ "$FM_PR_META_HOST" = "$HOST" ] \
+      && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
+      && [ "$FM_PR_META_NUMBER" = "$PR_NUMBER" ] || exit 1
+    meta_tmp=$(mktemp "$STATE/.fm-pr-merge-meta.XXXXXX") || exit 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        gitlab_guarded_squash_receipt=*) ;;
+        *) printf '%s\n' "$line" >> "$meta_tmp" || exit 1 ;;
+      esac
+    done < "$META"
+    printf 'gitlab_guarded_squash_receipt=%s\n' "$receipt" >> "$meta_tmp" || exit 1
+    chmod 0600 "$meta_tmp" || exit 1
+    fm_pr_private_file_valid "$meta_tmp" 600 "$state_device" || exit 1
+    fm_pr_metadata_identity_parse "$meta_tmp" || exit 1
+    [ "$FM_PR_META_PROVIDER" = gitlab ] && [ "$FM_PR_META_URL" = "$URL" ] \
+      && [ "$FM_PR_META_HOST" = "$HOST" ] \
+      && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
+      && [ "$FM_PR_META_NUMBER" = "$PR_NUMBER" ] || exit 1
+    fm_pr_regular_destination_on_device_or_absent "$META" "$state_device" || exit 1
+    mv -f -- "$meta_tmp" "$META" || exit 1
+    meta_tmp=
+    fm_pr_private_file_valid "$META" 600 "$state_device" || exit 1
+    fm_pr_metadata_identity_parse "$META" || exit 1
+    grep -qxF "gitlab_guarded_squash_receipt=$receipt" "$META" || exit 1
+    [ "$(grep -c '^gitlab_guarded_squash_receipt=' "$META" || true)" -eq 1 ] \
+      || exit 1
+    trap - EXIT HUP INT TERM
+    cleanup_receipt_record
+  )
 }
 
 FM_PR_GITHUB_AUTO_REQUESTED=false
@@ -560,8 +625,8 @@ github_report_queue_rules() {
         printf 'error: this run refuses even though the request for %s was accepted with the exact flags base branch %s requires (--auto --%s): the pull request has still not entered the merge queue, so no landed or queued outcome is proven; re-check the pull request'"'"'s merge queue state before retrying\n' \
           "$URL" "$FM_PR_GITHUB_BASE" "$queue_method" >&2
       else
-        printf 'error: base branch %s requires the merge queue; retry with: %s %s %s -- --auto --%s\n' \
-          "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$queue_method" >&2
+        printf 'error: base branch %s requires the merge queue; retry with: %s %s %s --authority %s -- --auto --%s\n' \
+          "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$AUTHORITY" "$queue_method" >&2
       fi
       ;;
     conflicting)
@@ -603,24 +668,6 @@ github_report_unmerged_outcome() {
     return 0
   fi
   github_report_queue_rules
-}
-
-gitlab_confirm_merged() {
-  local json state
-  if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
-    -R "$PROJECT_URL" -F json 2>/dev/null) || [ -z "$json" ]; then
-    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
-    return 2
-  fi
-  if ! state=$(printf '%s' "$json" | jq -r \
-    'if type == "object" and (.state | type == "string") then .state else error("invalid state") end' \
-    2>/dev/null); then
-    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
-    return 2
-  fi
-  [ "$state" = merged ]
 }
 
 # Record before either forge call. This arms the merge poll without claiming a
@@ -673,26 +720,59 @@ case "$PROVIDER" in
     fi
     ;;
   gitlab)
-    gitlab_verify_mergeable || exit 1
-    # --sha binds the merge to the head this run verified, so a push that lands
-    # in between is refused by GitLab instead of merged unverified. --yes only
-    # skips the interactive confirmation, which no supervised run can answer;
-    # the conditions above are what authorize the merge.
-    GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
-      --sha "$FM_PR_MERGE_HEAD" --yes "$@"
-    gitlab_confirm_rc=0
-    gitlab_confirm_merged || gitlab_confirm_rc=$?
-    [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    PR_HEAD_COUNT=$(grep -c '^pr_head=' "$META" || true)
+    if [ "$PR_HEAD_COUNT" -ne 1 ]; then
+      echo "error: GitLab merge metadata has no single exact expected head" >&2
+      exit 1
+    fi
+    EXPECTED_HEAD=$(grep '^pr_head=' "$META" | cut -d= -f2-)
+    if ! fm_pr_head_valid "$EXPECTED_HEAD"; then
+      echo "error: GitLab merge metadata has no single exact expected head" >&2
+      exit 1
+    fi
+    if ! fm_pr_gitlab_mr_resolve "$URL"; then
+      echo "error: glab-axi JSON could not revalidate the GitLab merge request before merging" >&2
+      exit 1
+    fi
+    if [ "$FM_PR_RESOLVED_HEAD" != "$EXPECTED_HEAD" ]; then
+      echo "error: GitLab merge request head changed after recording; refusing stale expected head" >&2
+      exit 1
+    fi
+    EXPECTED_SOURCE=$FM_PR_RESOLVED_SOURCE_BRANCH
+    EXPECTED_TARGET=$FM_PR_RESOLVED_TARGET_BRANCH
+
+    MERGE_RC=0
+    MERGE_OUTPUT=$(glab-axi mr merge "$PR_NUMBER" \
+      --repo "$PROJECT_PATH" \
+      --hostname "$HOST" \
+      --expected-url "$URL" \
+      --expected-head "$EXPECTED_HEAD" \
+      --expected-source "$EXPECTED_SOURCE" \
+      --expected-target "$EXPECTED_TARGET" \
+      --authority "$AUTHORITY" \
+      --squash \
+      --format json) || MERGE_RC=$?
+    if [ "$MERGE_RC" -ne 0 ]; then
+      [ -z "$MERGE_OUTPUT" ] || printf '%s\n' "$MERGE_OUTPUT"
+      exit "$MERGE_RC"
+    fi
+    if ! validate_gitlab_merge_result "$MERGE_OUTPUT" \
+      "$EXPECTED_SOURCE" "$EXPECTED_TARGET" "$EXPECTED_HEAD"; then
+      echo "error: glab-axi returned an unprovable GitLab merge result; merge state is ambiguous" >&2
+      exit 1
+    fi
+    if ! record_gitlab_guarded_squash_receipt "$MERGE_OUTPUT" \
+      "$EXPECTED_SOURCE" "$EXPECTED_TARGET" "$EXPECTED_HEAD"; then
+      echo "error: could not persist the validated GitLab guarded-squash receipt" >&2
+      exit 1
+    fi
+    printf '%s\n' "$MERGE_OUTPUT"
     ;;
-  *)
-    echo "error: invalid PR merge request" >&2
-    exit 2
-    ;;
+  *) invalid_request ;;
 esac
 
 # Reached only after the forge confirmed the merge landed: set -e exits on a
-# refused or failed merge above, and a queued forge merge exits without an
-# outcome while its existing poll remains armed.
+# refused, failed, or ambiguous merge above, while its poll remains armed.
 outcome_rc=0
 fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self || outcome_rc=$?
 case "$outcome_rc" in

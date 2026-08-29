@@ -287,6 +287,15 @@ fi
 
 REPO=${POS[1]}
 
+# One worker-facing GitLab capability rule is interpolated into both ordinary
+# scout and ship briefs so their tool boundary cannot drift by task kind.
+IFS= read -r -d '' PROVIDER_TOOL_RULE <<'EOF' || true
+3. Use `gh-axi` for GitHub operations and `glab-axi` only for bounded GitLab operations exposed by its current help; use `chrome-devtools-axi` for browser operations, and inspect current top-level and leaf help before use.
+   The guarded `glab-axi mr merge` primitive is reserved to firstmate through `bin/fm-pr-merge.sh`; never invoke it or merge your own MR.
+   Never substitute plain `glab`, generic API access, browser login, or another unsupported write path; append `blocked: {what is missing}` and stop for firstmate when the bounded surface cannot perform the required operation.
+EOF
+PROVIDER_TOOL_RULE=${PROVIDER_TOOL_RULE%$'\n'}
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -337,7 +346,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$PROVIDER_TOOL_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -453,7 +462,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$PROVIDER_TOOL_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

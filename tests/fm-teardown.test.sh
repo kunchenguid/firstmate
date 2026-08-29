@@ -5,7 +5,9 @@
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
 # and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# is already in the up-to-date default branch. A recorded GitLab MR instead needs
+# exact current host/project/IID/head/source/target evidence, one task-bound
+# guarded-squash receipt, and independently matching target content together.
 #
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -38,6 +40,10 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (gl-a) GitLab + exact guarded squash and target content      -> ALLOW
+#   (gl-b) GitLab + incomplete or mismatched lifecycle evidence  -> REFUSE
+#
+# Pass --gitlab-only to run those two focused public-interface cases.
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -64,6 +70,8 @@ REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+REAL_JQ_FOR_TEST=$(command -v jq) || fail "GitLab teardown tests require jq"
+export REAL_JQ_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -738,6 +746,191 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   expect_code 0 "$rc" "squash-ancestor: teardown should succeed when local HEAD is in the merged PR head"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-ancestor: teardown printed a REFUSED line"
   pass "squash-merged PR accepts a local HEAD that is an ancestor of the final PR head"
+}
+
+# Build an unpushed task whose exact GitLab MR head is available only through
+# the canonical URL-derived project. The ambient origin remains on an unrelated
+# baseline, while the canonical target optionally receives equivalent squash
+# content and a task-bound guarded receipt.
+make_gitlab_lifecycle_case() { # <name> [land-content=yes|no]
+  local name=$1 land_content=${2:-yes} case_dir local_head result_head
+  case_dir=$(make_case "$name")
+  git clone -q --bare "$case_dir/origin.git" "$case_dir/ambient.git"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q "$case_dir/origin.git" \
+    "HEAD:refs/merge-requests/9/head"
+  [ "$land_content" != yes ] || land_on_origin_main "$case_dir" feature.txt hello
+  result_head=$(git -C "$case_dir/origin.git" rev-parse refs/heads/main)
+  git -C "$case_dir/wt" config \
+    url."$case_dir/origin.git".insteadOf https://gitlab.example/group/project.git
+  git -C "$case_dir/project" remote set-url origin "$case_dir/ambient.git"
+  printf '%s\n' \
+    'pr=https://gitlab.example/group/project/-/merge_requests/9' \
+    "pr_head=$local_head" \
+    "gitlab_guarded_squash_receipt=v1|task-x1|https://gitlab.example/group/project/-/merge_requests/9|captain-explicit|$local_head|fm/task-x1|main|$result_head|$result_head" \
+    >> "$case_dir/state/task-x1.meta"
+  jq -cn --arg head "$local_head" '{
+    schema:"glab-axi/ux-v1",
+    ok:true,
+    data:{mr:{
+      iid:9,
+      state:"merged",
+      web_url:"https://gitlab.example/group/project/-/merge_requests/9",
+      head_sha:$head,
+      source_branch:"fm/task-x1",
+      target_branch:"main",
+      has_conflicts:false
+    }},
+    meta:{
+      backend:"official-glab",
+      host:"gitlab.example",
+      repo:"group/project",
+      complete:true,
+      truncated:false,
+      limit:30
+    }
+  }' > "$case_dir/mr.json"
+  cat > "$case_dir/fakebin/glab-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$case_dir/glab-axi.log'
+cat '$case_dir/mr.json'
+SH
+  ln -sf "$REAL_JQ_FOR_TEST" "$case_dir/fakebin/jq"
+  chmod +x "$case_dir/fakebin/glab-axi"
+  : > "$case_dir/glab-axi.log"
+  printf '%s\n' "$case_dir"
+}
+
+test_gitlab_merged_squash_uses_exact_provider_and_content() {
+  local case_dir rc
+  case_dir=$(make_gitlab_lifecycle_case gitlab-merged-squash)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-merged-squash: exact merged evidence and content should allow"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "gitlab-merged-squash: teardown printed a REFUSED line"
+  ! git -C "$case_dir/project" show-ref --verify --quiet \
+    refs/fm-teardown/task-x1/gitlab/9/head \
+    || fail "gitlab-merged-squash: temporary canonical MR ref was not retired"
+  ! git -C "$case_dir/project" show-ref --verify --quiet \
+    refs/fm-teardown/task-x1/gitlab/9/target \
+    || fail "gitlab-merged-squash: temporary canonical target ref was not retired"
+  grep -qxF 'mr view 9 --hostname gitlab.example --repo group/project --format json' \
+    "$case_dir/glab-axi.log" \
+    || fail "gitlab-merged-squash: cleanup did not use the bounded canonical MR read"
+  pass "GitLab teardown accepts exact guarded-squash evidence plus target content proof"
+}
+
+test_gitlab_unmerged_mismatched_and_dirty_refuse() {
+  local case_dir rc variant line meta
+  for variant in duplicate-pr missing-head missing-receipt duplicate-head \
+    duplicate-receipt squash-not-in-target result-not-in-target unmerged conflicts malformed-url \
+    url-mismatch source-mismatch target-mismatch head-mismatch receipt-source-mismatch \
+    malformed-view duplicate-view content-absent dirty mr-ref-mismatch; do
+    if [ "$variant" = content-absent ]; then
+      case_dir=$(make_gitlab_lifecycle_case "gitlab-refuse-$variant" no)
+    else
+      case_dir=$(make_gitlab_lifecycle_case "gitlab-refuse-$variant")
+    fi
+    meta="$case_dir/state/task-x1.meta"
+    case "$variant" in
+      duplicate-pr)
+        line=$(grep '^pr=' "$meta")
+        printf '%s\n' "$line" >> "$meta"
+        ;;
+      missing-head)
+        grep -v '^pr_head=' "$meta" > "$meta.tmp"
+        mv "$meta.tmp" "$meta"
+        ;;
+      missing-receipt)
+        grep -v '^gitlab_guarded_squash_receipt=' "$meta" > "$meta.tmp"
+        mv "$meta.tmp" "$meta"
+        ;;
+      duplicate-head)
+        line=$(grep '^pr_head=' "$meta")
+        printf '%s\n' "$line" >> "$meta"
+        ;;
+      duplicate-receipt)
+        line=$(grep '^gitlab_guarded_squash_receipt=' "$meta")
+        printf '%s\n' "$line" >> "$meta"
+        ;;
+      squash-not-in-target)
+        sed -E 's/\|[0-9a-f]{40}\|([0-9a-f]{40})$/|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|\1/' \
+          "$meta" > "$meta.tmp"
+        mv "$meta.tmp" "$meta"
+        ;;
+      result-not-in-target)
+        sed 's/|[0-9a-f]\{40\}$/|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
+          "$meta" > "$meta.tmp"
+        mv "$meta.tmp" "$meta"
+        ;;
+      unmerged)
+        jq '.data.mr.state = "opened"' "$case_dir/mr.json" > "$case_dir/mr.tmp"
+        mv "$case_dir/mr.tmp" "$case_dir/mr.json"
+        ;;
+      conflicts)
+        jq '.data.mr.has_conflicts = true' "$case_dir/mr.json" > "$case_dir/mr.tmp"
+        mv "$case_dir/mr.tmp" "$case_dir/mr.json"
+        ;;
+      malformed-url)
+        sed 's#^pr=https://gitlab\.example/#pr=https://GitLab.example/#' \
+          "$meta" > "$meta.tmp"
+        mv "$meta.tmp" "$meta"
+        ;;
+      url-mismatch)
+        jq '.data.mr.web_url = "https://gitlab.example/other/project/-/merge_requests/9"' \
+          "$case_dir/mr.json" > "$case_dir/mr.tmp"
+        mv "$case_dir/mr.tmp" "$case_dir/mr.json"
+        ;;
+      source-mismatch)
+        jq '.data.mr.source_branch = "fm/other-task"' \
+          "$case_dir/mr.json" > "$case_dir/mr.tmp"
+        mv "$case_dir/mr.tmp" "$case_dir/mr.json"
+        ;;
+      target-mismatch)
+        jq '.data.mr.target_branch = "release"' \
+          "$case_dir/mr.json" > "$case_dir/mr.tmp"
+        mv "$case_dir/mr.tmp" "$case_dir/mr.json"
+        ;;
+      head-mismatch)
+        sed 's/^pr_head=.*/pr_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
+          "$meta" > "$meta.tmp"
+        mv "$meta.tmp" "$meta"
+        ;;
+      receipt-source-mismatch)
+        sed 's/|fm\/task-x1|main|/|fm\/other-task|main|/' "$meta" > "$meta.tmp"
+        mv "$meta.tmp" "$meta"
+        ;;
+      malformed-view) printf '{not-json\n' > "$case_dir/mr.json" ;;
+      duplicate-view) cat "$case_dir/mr.json" >> "$case_dir/mr.json.copy"; cat "$case_dir/mr.json.copy" >> "$case_dir/mr.json" ;;
+      content-absent) : ;;
+      dirty) printf '%s\n' uncommitted >> "$case_dir/wt/feature.txt" ;;
+      mr-ref-mismatch)
+        git -C "$case_dir/origin.git" update-ref refs/merge-requests/9/head refs/heads/main
+        ;;
+    esac
+    chmod 0600 "$meta"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "gitlab-refuse-$variant: cleanup should preserve the task"
+    grep -q REFUSED "$case_dir/stderr" \
+      || fail "gitlab-refuse-$variant: refusal did not surface"
+    assert_present "$case_dir/wt/.git" \
+      "gitlab-refuse-$variant: worktree was removed"
+    assert_present "$meta" \
+      "gitlab-refuse-$variant: task metadata was removed"
+  done
+  pass "GitLab teardown refuses dirty, unmerged, stale, malformed, mismatched, or content-unproven evidence"
 }
 
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
@@ -2596,6 +2789,12 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+if [ "${1:-}" = --gitlab-only ]; then
+  test_gitlab_merged_squash_uses_exact_provider_and_content
+  test_gitlab_unmerged_mismatched_and_dirty_refuse
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2618,6 +2817,8 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+test_gitlab_merged_squash_uses_exact_provider_and_content
+test_gitlab_unmerged_mismatched_and_dirty_refuse
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses

@@ -217,6 +217,30 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_worker_gitlab_tool_boundary_is_shared() {
+  local home id brief
+  home="$TMP_ROOT/gitlab-tool-boundary-home"
+  mkdir -p "$home/data"
+  for id in ship scout; do
+    if [ "$id" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-gitlab-ship some-proj \
+        --mode no-mistakes >/dev/null 2>&1
+      brief="$home/data/brief-gitlab-ship/brief.md"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-gitlab-scout some-proj \
+        --scout >/dev/null 2>&1
+      brief="$home/data/brief-gitlab-scout/brief.md"
+    fi
+    assert_grep "glab-axi\` only for bounded GitLab operations exposed by its current help" \
+      "$brief" "$id brief lost the bounded GitLab tool route"
+    assert_grep "guarded \`glab-axi mr merge\` primitive is reserved to firstmate" \
+      "$brief" "$id brief exposed merge authority to the worker"
+    assert_grep "Never substitute plain \`glab\`, generic API access" \
+      "$brief" "$id brief lost the unsupported-write refusal"
+  done
+  pass "fm-brief.sh: ship and scout workers share the bounded GitLab tool boundary"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -755,6 +779,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_worker_gitlab_tool_boundary_is_shared
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

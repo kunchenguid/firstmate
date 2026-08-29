@@ -5,15 +5,17 @@
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)', and
-# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
+# 'MISSING: gh-axi (install: ...)', optional installed-tool
+# 'MISSING: glab-axi (install: glab-axi update)',
+# 'MISSING: lavish-axi (install: ...)', and 'BOOTSTRAP_INFO: ...' lines, so
+# those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
 # multi-ID moves, whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations,
-# which no-mistakes version is on PATH, which gh-axi version is on PATH, and
-# which lavish-axi version is on PATH.
+# which no-mistakes version is on PATH, which gh-axi version is on PATH, which
+# optional glab-axi version is installed, and which lavish-axi version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -370,6 +372,44 @@ much older gh-axi minor reports an upgrade^0.0.9^missing
 unparseable gh-axi version reports an upgrade^gh-axi development build^missing
 ROWS
   pass "bootstrap enforces gh-axi minimum version"
+}
+
+test_glab_axi_min_version() {
+  local label version mode case_dir fakebin out missing n
+  missing='MISSING: glab-axi (install: glab-axi update)'
+  n=0
+  while IFS='^' read -r label version mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/glab-axi-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    if [ "$version" != absent ]; then
+      cat > "$fakebin/glab-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf '%s\n' '$version'
+fi
+SH
+      chmod +x "$fakebin/glab-axi"
+    fi
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+      FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty) [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing) [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+    esac
+  done <<'ROWS'
+absent task-scoped glab-axi is not universally required^absent^empty
+minimum guarded-merge glab-axi is accepted^0.2.0^empty
+newer glab-axi patch is accepted^0.2.1^empty
+newer glab-axi minor is accepted^0.3.0^empty
+older glab-axi reports an upgrade^0.1.99^missing
+unparseable glab-axi reports an upgrade^glab-axi development build^missing
+ROWS
+  pass "bootstrap enforces the guarded-merge floor on installed task-scoped glab-axi"
 }
 
 test_lavish_axi_min_version() {
@@ -1151,6 +1191,7 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
+test_glab_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version

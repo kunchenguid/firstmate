@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# GitLab head recording is required and comes only from one bounded, strict
+# glab-axi mr view JSON document bound to the URL-derived host/project/IID.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -49,13 +51,23 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   exit 1
 }
 
-# Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
-# every error by design, so a missing CLI would be indistinguishable from a
-# merge request that is never merged. Arming is the one point where that can be
-# reported, so the absent tool stops the watch here instead of watching nothing.
-if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
-  echo "error: watching a GitLab merge request requires glab on PATH" >&2
-  exit 1
+# The byte-static poll retains its read-only plain-glab transport and is silent
+# on every error, so arming reports a missing poll dependency synchronously.
+# Lifecycle consumers separately require bounded glab-axi JSON plus jq so they
+# can bind the exact MR head and refuse malformed or ambiguous provider output.
+if [ "$PROVIDER" = gitlab ]; then
+  if ! command -v glab >/dev/null 2>&1; then
+    echo "error: watching a GitLab merge request requires glab on PATH" >&2
+    exit 1
+  fi
+  if ! command -v glab-axi >/dev/null 2>&1; then
+    echo "error: recording a GitLab merge request requires glab-axi on PATH" >&2
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: recording a GitLab merge request requires jq on PATH" >&2
+    exit 1
+  fi
 fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
@@ -64,15 +76,10 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
+# Record the exact provider head when its bounded interface can prove it.
+# GitHub keeps its existing optional gh lookup; GitLab requires one complete
+# normalized glab-axi result because guarded merge and cleanup need one durable
+# expected source revision rather than a later best-effort reconstruction.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
@@ -80,11 +87,18 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
+elif [ "$PROVIDER" = gitlab ]; then
+  if ! fm_pr_gitlab_mr_resolve "$URL"; then
+    echo "error: glab-axi JSON could not prove the GitLab merge request identity and head; refusing to arm its watch" >&2
+    exit 1
+  fi
+  PR_HEAD=$FM_PR_RESOLVED_HEAD
 fi
 
 META_TMP=
 META_LOCK=
 META_LOCK_HELD=0
+PRESERVED_GITLAB_RECEIPT=
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
@@ -106,15 +120,26 @@ META_LOCK_HELD=1
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+RECEIPT_COUNT=$(grep -c '^gitlab_guarded_squash_receipt=' "$META" || true)
+if [ "$RECEIPT_COUNT" -eq 1 ]; then
+  EXISTING_RECEIPT=$(grep '^gitlab_guarded_squash_receipt=' "$META" | cut -d= -f2-)
+  if fm_pr_gitlab_guarded_squash_receipt_matches \
+    "$EXISTING_RECEIPT" "$ID" "$URL" "$PR_HEAD"; then
+    PRESERVED_GITLAB_RECEIPT=$EXISTING_RECEIPT
+  fi
+fi
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*) ;;
+    pr=*|pr_head=*|gitlab_guarded_squash_receipt=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+[ -z "$PRESERVED_GITLAB_RECEIPT" ] \
+  || printf 'gitlab_guarded_squash_receipt=%s\n' "$PRESERVED_GITLAB_RECEIPT" >> "$META_TMP" \
+  || exit 1
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1

@@ -13,14 +13,20 @@
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# A recorded GitLab MR uses stricter conjunctive evidence: one complete current
+# glab-axi JSON result must bind the canonical host/project/IID/URL, local source
+# branch, exact recorded source head, target branch, merged nonconflicting state,
+# and one task-bound guarded-squash receipt. The exact MR head and target are
+# freshly fetched only from that URL-derived project, the receipt squash and
+# result commits must be reachable from the target, and the provider-agnostic
+# content check must prove
+# the local work is already present there. Missing, malformed, stale, ambiguous,
+# unmerged, mismatched, or content-unproven GitLab evidence refuses cleanup.
+# GitHub resolves the task's recorded pr= when present, or - when no pr= was ever
+# recorded - looks up a merged PR whose head branch matches the worktree's branch
+# and fetches refs/pull/<n>/head when needed. A GitHub lookup error falls back to
+# the content check; if that is also inconclusive, teardown refuses rather than
+# risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -207,6 +213,9 @@ DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
 teardown_release_locks() {
   local status=$? i
+  if declare -F gitlab_lifecycle_refs_cleanup >/dev/null 2>&1; then
+    gitlab_lifecycle_refs_cleanup || true
+  fi
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
@@ -851,6 +860,86 @@ default_branch() {
   return 1
 }
 
+GITLAB_LIFECYCLE_STATUS=unresolved
+GITLAB_LIFECYCLE_STATE=
+GITLAB_LIFECYCLE_HEAD=
+GITLAB_LIFECYCLE_SOURCE=
+GITLAB_LIFECYCLE_TARGET=
+GITLAB_LIFECYCLE_HAS_CONFLICTS=
+GITLAB_LIFECYCLE_SQUASH=
+GITLAB_LIFECYCLE_RESULT=
+GITLAB_LIFECYCLE_REMOTE=
+GITLAB_LIFECYCLE_NUMBER=
+GITLAB_LIFECYCLE_HEAD_REF=
+GITLAB_LIFECYCLE_TARGET_REF=
+
+gitlab_lifecycle_refs_cleanup() {
+  local ref failed=0
+  [ -n "${PROJ:-}" ] || return 0
+  for ref in "$GITLAB_LIFECYCLE_HEAD_REF" "$GITLAB_LIFECYCLE_TARGET_REF"; do
+    [ -n "$ref" ] || continue
+    git -C "$PROJ" update-ref -d "$ref" >/dev/null 2>&1 || failed=1
+  done
+  return "$failed"
+}
+
+# Resolve one recorded GitLab lifecycle exactly once for this cleanup attempt.
+# A failed resolution stays failed so later checks cannot combine observations
+# from different provider responses into one cleanup authorization.
+resolve_gitlab_lifecycle() {
+  local pr_count head_count receipt_count recorded_head receipt
+  local receipt_version receipt_id receipt_url receipt_authority receipt_head
+  local receipt_source receipt_target receipt_squash receipt_result
+  local host path number
+  case "$GITLAB_LIFECYCLE_STATUS" in
+    resolved) return 0 ;;
+    failed) return 1 ;;
+  esac
+  GITLAB_LIFECYCLE_STATUS=failed
+  pr_count=$(grep -c '^pr=' "$META" || true)
+  head_count=$(grep -c '^pr_head=' "$META" || true)
+  receipt_count=$(grep -c '^gitlab_guarded_squash_receipt=' "$META" || true)
+  [ "$pr_count" -eq 1 ] && [ "$head_count" -eq 1 ] \
+    && [ "$receipt_count" -eq 1 ] || return 1
+  fm_pr_metadata_identity_parse "$META" || return 1
+  [ "$FM_PR_META_PROVIDER" = gitlab ] && [ "$FM_PR_META_URL" = "$PR_URL" ] \
+    || return 1
+  fm_pr_url_parse "$PR_URL" || return 1
+  [ "$FM_PR_PROVIDER" = gitlab ] || return 1
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
+  recorded_head=$(grep '^pr_head=' "$META" | cut -d= -f2-)
+  fm_pr_head_valid "$recorded_head" || return 1
+  receipt=$(grep '^gitlab_guarded_squash_receipt=' "$META" | cut -d= -f2-)
+  fm_pr_gitlab_guarded_squash_receipt_valid "$receipt" || return 1
+  IFS='|' read -r receipt_version receipt_id receipt_url receipt_authority \
+    receipt_head receipt_source receipt_target receipt_squash receipt_result <<EOF
+$receipt
+EOF
+  [ "$receipt_version" = v1 ] && [ "$receipt_id" = "$ID" ] \
+    && [ "$receipt_url" = "$PR_URL" ] || return 1
+  case "$receipt_authority" in captain-explicit|standing-yolo-green) ;; *) return 1 ;; esac
+  [ "$receipt_head" = "$recorded_head" ] || return 1
+  fm_pr_head_valid "$receipt_squash" && fm_pr_head_valid "$receipt_result" || return 1
+  fm_pr_gitlab_mr_resolve "$PR_URL" || return 1
+  GITLAB_LIFECYCLE_STATE=$FM_PR_RESOLVED_STATE
+  GITLAB_LIFECYCLE_HEAD=$FM_PR_RESOLVED_HEAD
+  GITLAB_LIFECYCLE_SOURCE=$FM_PR_RESOLVED_SOURCE_BRANCH
+  GITLAB_LIFECYCLE_TARGET=$FM_PR_RESOLVED_TARGET_BRANCH
+  GITLAB_LIFECYCLE_HAS_CONFLICTS=$FM_PR_RESOLVED_HAS_CONFLICTS
+  [ "$recorded_head" = "$GITLAB_LIFECYCLE_HEAD" ] \
+    && [ "$receipt_source" = "$GITLAB_LIFECYCLE_SOURCE" ] \
+    && [ "$receipt_target" = "$GITLAB_LIFECYCLE_TARGET" ] || return 1
+  GITLAB_LIFECYCLE_SQUASH=$receipt_squash
+  GITLAB_LIFECYCLE_RESULT=$receipt_result
+  GITLAB_LIFECYCLE_REMOTE="https://$host/$path.git"
+  GITLAB_LIFECYCLE_NUMBER=$number
+  GITLAB_LIFECYCLE_HEAD_REF="refs/fm-teardown/$ID/gitlab/$number/head"
+  GITLAB_LIFECYCLE_TARGET_REF="refs/fm-teardown/$ID/gitlab/$number/target"
+  GITLAB_LIFECYCLE_STATUS=resolved
+}
+
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
@@ -1028,7 +1117,20 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n fetched
+  # A GitLab object already present in the shared Git database is not provider
+  # identity evidence. Always fetch the exact MR ref from the canonical project
+  # and require that ref itself to resolve to the recorded source revision.
+  if [ "$GITLAB_LIFECYCLE_STATUS" = resolved ]; then
+    git -C "$WT" fetch --quiet "$GITLAB_LIFECYCLE_REMOTE" \
+      "+refs/merge-requests/$GITLAB_LIFECYCLE_NUMBER/head:$GITLAB_LIFECYCLE_HEAD_REF" \
+      >/dev/null 2>&1 || return 1
+    fetched=$(git -C "$WT" rev-parse --verify "$GITLAB_LIFECYCLE_HEAD_REF^{commit}" 2>/dev/null) \
+      || return 1
+    [ "$fetched" = "$commit" ] || return 1
+    git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+    return
+  fi
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
@@ -1075,6 +1177,27 @@ EOF
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state head current
+  if [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL" \
+    && [ "$FM_PR_PROVIDER" = gitlab ]; then
+    resolve_gitlab_lifecycle || return 1
+    [ "$GITLAB_LIFECYCLE_STATE" = merged ] \
+      && [ "$GITLAB_LIFECYCLE_HAS_CONFLICTS" = false ] \
+      && [ "$branch" = "$GITLAB_LIFECYCLE_SOURCE" ] || return 1
+    head=$GITLAB_LIFECYCLE_HEAD
+    ensure_commit_object "$PR_URL" "$head" || return 1
+    current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+    if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
+      :
+    elif unpushed_patches_are_in_pr_head "$head"; then
+      :
+    else
+      return 1
+    fi
+    # Provider state and source containment are necessary but not sufficient.
+    # Independently prove the local content is in the exact target branch.
+    content_in_default
+    return
+  fi
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
@@ -1105,14 +1228,25 @@ pr_is_merged() {
 # so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
+  if [ "$GITLAB_LIFECYCLE_STATUS" = resolved ]; then
+    name=$GITLAB_LIFECYCLE_TARGET
+    ref=$GITLAB_LIFECYCLE_TARGET_REF
+    git -C "$WT" fetch --quiet "$GITLAB_LIFECYCLE_REMOTE" \
+      "+refs/heads/$name:$ref" >/dev/null 2>&1 || return 1
+    git -C "$WT" merge-base --is-ancestor "$GITLAB_LIFECYCLE_SQUASH" "$ref" \
+      2>/dev/null || return 1
+    git -C "$WT" merge-base --is-ancestor "$GITLAB_LIFECYCLE_RESULT" "$ref" \
+      2>/dev/null || return 1
   else
-    return 1
+    name=$(default_branch) || return 1
+    if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+      git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+      ref="refs/remotes/origin/$name"
+    elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+      ref="refs/heads/$name"
+    else
+      return 1
+    fi
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
@@ -1128,6 +1262,19 @@ content_in_default() {
 # only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
+  # A recorded GitLab MR must satisfy its complete provider-bound proof.
+  # Content alone cannot turn open, stale, mismatched, unreadable, or malformed
+  # MR evidence into cleanup authority even if a similar patch reached the
+  # target elsewhere.
+  if [ -n "$PR_URL" ]; then
+    if fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+      pr_is_merged "$branch"
+      return
+    fi
+    case "$PR_URL" in
+      https://*'/-/merge_requests/'*) return 1 ;;
+    esac
+  fi
   pr_is_merged "$branch" && return 0
   content_in_default
 }
