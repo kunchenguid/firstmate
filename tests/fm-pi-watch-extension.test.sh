@@ -520,6 +520,88 @@ EOF
   pass "Pi delivery retries leave successor close handling supervised"
 }
 
+test_pi_persistent_delivery_retry_surfaces_bounded_failure() {
+  local repo home plugin arm_log delivery_log stop blocked out status
+  repo="$TMP_ROOT/pi-delivery-retry-bound-root"
+  home="$TMP_ROOT/pi-delivery-retry-bound-home"
+  arm_log="$TMP_ROOT/pi-delivery-retry-bound-arm.log"
+  delivery_log="$TMP_ROOT/pi-delivery-retry-bound-delivery.log"
+  stop="$TMP_ROOT/pi-delivery-retry-bound.stop"
+  blocked="$TMP_ROOT/pi-delivery-retry-bound.blocked"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+if [ "$(grep -c '^arm=' "$FM_ARM_LOG")" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: task-bound committed\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_DELIVERY_LOG="$delivery_log" FM_DELIVERY_BLOCK_FILE="$blocked" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_DELIVERY_CONTINUATION_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let mainPrompt = "";
+let branchOffers = 0;
+const pi = {
+  on() {},
+  events: {
+    emit(channel) {
+      if (channel === "fm-branch-supervision:dispatch") branchOffers += 1;
+    },
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    mainPrompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task-bound.meta`, "project=/projects/approved\n");
+const wake = "1\t1\tsignal\ttask-bound.status\tsignal: task-bound committed\n";
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, wake);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-delivery-retry-bound", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && !mainPrompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!mainPrompt.includes("watcher: FAILED - delivery continuation preflight remained transient after 2 retries")) {
+  throw new Error(`bounded retry failure did not reach main: ${mainPrompt}`);
+}
+if (!mainPrompt.includes("result=retry task=task-bound reason=validation-attribution-unavailable")) {
+  throw new Error(`bounded retry failure lost its typed result: ${mainPrompt}`);
+}
+if (branchOffers !== 0) throw new Error(`bounded retry failure reached branch ${branchOffers} times`);
+const attempts = readFileSync(process.env.FM_DELIVERY_LOG, "utf8").trim().split("\n");
+if (attempts.length !== 3) throw new Error(`expected initial preflight plus two retries, got ${attempts.length}`);
+if (!existsSync(`${process.env.FM_HOME}/state/.wake-queue`)) throw new Error("bounded retry failure removed the wake queue");
+if (readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8") !== wake) {
+  throw new Error("bounded retry failure acknowledged or changed the queued wake");
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi persistent delivery retry must surface a bounded typed failure: $out"
+  [ -z "$out" ] || fail "Pi persistent delivery-retry bound test printed output: $out"
+  pass "Pi persistent delivery retries stop at a typed recoverable failure"
+}
+
 test_pi_branch_offer_owns_actionable_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-offer-root"
@@ -2924,6 +3006,7 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_transient_delivery_retry_keeps_successor_supervised
+test_pi_persistent_delivery_retry_surfaces_bounded_failure
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check

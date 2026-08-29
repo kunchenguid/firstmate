@@ -285,6 +285,16 @@ test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak() {
   FM_DATA_OVERRIDE="$data" assert_fold "$dir/malformed.status" \
     "$(printf 'default\tblocked\tprose mentions [key=other] before the final detail [key=main-custody]\n')" \
     "malformed legacy resolution cannot close the default blocker"
+  mkdir -p "$data/invalid-tail"
+  cp "$data/t/brief.md" "$data/invalid-tail/brief.md"
+  printf 'blocked: custody stop [key=bad key]\n' > "$dir/invalid-tail.status"
+  FM_DATA_OVERRIDE="$data" assert_fold "$dir/invalid-tail.status" \
+    "$(printf 'default\tblocked\tcustody stop [key=bad key]\n')" \
+    "invalid legacy trailing slug retains the default blocker"
+  printf 'resolved: custody clear [key=bad key]\n' >> "$dir/invalid-tail.status"
+  FM_DATA_OVERRIDE="$data" assert_fold "$dir/invalid-tail.status" \
+    "$(printf 'default\tblocked\tcustody stop [key=bad key]\n')" \
+    "invalid legacy trailing resolution cannot close the default blocker"
   printf 'blocked: waiting while docs mention [key=route] in prose\n' > "$dir/mid-note.status"
   assert_fold "$dir/mid-note.status" \
     "$(printf 'default\tblocked\twaiting while docs mention [key=route] in prose\n')" \

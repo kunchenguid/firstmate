@@ -58,6 +58,7 @@ type SessionGeneration = {
   retryTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
+  deliveryInFlight: boolean;
   seq: number;
 };
 
@@ -94,6 +95,7 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+const deliveryRetryLimit = positiveInteger("FM_DELIVERY_CONTINUATION_RETRY_LIMIT", 5);
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
@@ -199,6 +201,7 @@ function createGeneration(): SessionGeneration {
     retryTimer: null,
     retryFailures: 0,
     restoring: false,
+    deliveryInFlight: false,
     seq: 0,
   };
 }
@@ -386,6 +389,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (!continuationResults.some((line) => line.startsWith("result=retry "))) break;
+      if (continuationAttempt >= deliveryRetryLimit) {
+        await sendWake(
+          owner,
+          `${message}\n\nwatcher: FAILED - delivery continuation preflight remained transient after ${deliveryRetryLimit} retries\n${continuationResults.join("\n")}`,
+        );
+        return;
+      }
       continuationAttempt += 1;
       await waitForRetry(continuationAttempt);
     }
@@ -594,7 +604,13 @@ export default function (pi: ExtensionAPI) {
             owner.restoring = false;
             ownsRestoration = false;
             const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-            await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
+            if (owner.deliveryInFlight) return;
+            owner.deliveryInFlight = true;
+            try {
+              await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
+            } finally {
+              owner.deliveryInFlight = false;
+            }
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
