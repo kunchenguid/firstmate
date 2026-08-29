@@ -173,6 +173,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/resource-aware-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -259,6 +263,10 @@
     {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/examples/compute-hosts.json",
+      "audience": "operator-example"
     },
     {
       "path": "docs/examples/crew-dispatch.json",

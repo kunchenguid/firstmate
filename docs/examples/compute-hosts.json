@@ -1,0 +1,10 @@
+{
+  "preferred": {
+    "ssh": "Valentino",
+    "kind": "gpu"
+  },
+  "fallback": {
+    "ssh": "Valentino-Arbeit",
+    "kind": "cpu"
+  }
+}

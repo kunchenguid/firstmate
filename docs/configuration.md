@@ -353,6 +353,42 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Compute hosts and worker slots (config/compute-hosts.json)
+
+`config/compute-hosts.json` is an optional local, gitignored file naming a preferred SSH compute host and a fallback SSH compute host for recompute-heavy or host-bound work.
+It is not inherited by secondmate homes, and it is not a harness or model profile: leave `config/crew-dispatch.json` alone when editing this file.
+An absent file still protects the local supervisor host through measured worker slots; only host-bound routing needs the inventory.
+This section is the single owner of the canonical schema.
+`bin/fm-capacity-lib.sh` owns the slot formula, the fresh-probe contract, host-scoped live-worker counting, and the refuse-rather-than-kill spawn gate.
+`resource-aware-dispatch` owns the firstmate procedure that consults that command.
+
+```json
+{
+  "preferred": { "ssh": "<ssh-config-alias>", "kind": "gpu" },
+  "fallback": { "ssh": "<ssh-config-alias>", "kind": "cpu" }
+}
+```
+
+`ssh` is a safe SSH config alias (`A-Za-z0-9._-`).
+`kind` is `gpu` or `cpu`; any other value is an error in this file and in the `--preferred-kind`/`--fallback-kind` session pins alike.
+A session pin overrides only its own field, so `bin/fm-capacity.sh route --preferred <alias>` still uses the fallback configured here.
+A `cpu` host is suitable when load1 is below nproc and at least 2048 MiB is available.
+A `gpu` host must clear those same host gates and additionally report GPU utilization at most 90 with at least 1024 MiB VRAM free, so free VRAM on a machine whose CPU is pinned or whose RAM is exhausted still falls through to the fallback.
+A host with no run-queue load average - a Windows host, where the probe reads a busy percentage instead - is sampled several times across a short window, and the mean is gated as a percentage (below 90% busy) rather than rescaled into a load1, so a one-second burst does not demote the preferred host while a machine sitting at 99% busy is still refused.
+A sample the host could not take is omitted rather than reported as 0% busy, so a broken CPU counter leaves no headroom measurement and the host is unsuitable rather than apparently idle.
+`bin/fm-capacity.sh route` prints `preferred_cpu` and `fallback_cpu`, the reading each probe actually produced (`load1=...`, `busy_pct=.../samples=...`, or `unmeasured`), so a passed-over preferred host can be explained.
+Those host gates are also what rejects an unmeasurable host, on each axis independently: the POSIX probe omits `load1` entirely when it cannot read `/proc/loadavg` - never a fabricated zero - so a host with readable RAM but no usable CPU sample still has no headroom measurement to pass, and an unreadable `/proc/meminfo` reports `mem_avail_mb=0`, which fails the RAM gate on its own.
+Routing prefers the preferred host when it is freshly reachable and suitable, then the fallback, and otherwise returns `route=none` rather than piling that class of work onto the protected local supervisor.
+Worker panes still launch on the supervisor host; the route is where the host-bound compute runs.
+The worker-slot budget is scoped to this physical host rather than to one home: occupancy counts live workers across this home, the local primary home it was seeded from, and every locally routed secondmate home registered under that primary, and `bin/fm-capacity.sh slots` prints `homes_scanned` alongside `occupied`.
+Those home paths are canonicalized before they are deduplicated, so a home reached through a trailing slash or a symlink is counted once rather than twice.
+That local budget fails closed on the same principle as the remote host gates: a run-queue load this host cannot read is not idle headroom, so the budget is 0 slots and a fresh independent ship or scout worker is refused rather than launched onto an unmeasured supervisor.
+The failed reading stays visible instead of being rewritten as a measured `0` - `bin/fm-capacity.sh slots` and the refusal message report the load as `unknown` when nothing came back at all - so a zero budget from a broken reading is distinguishable from a genuinely busy host.
+A slot is released when the recorded endpoint is confidently gone (`dead` or `missing`), and always kept when it is confidently `alive`.
+For every other endpoint verdict - `unverified` on a backend with no recovery classifier, and equally `ambiguous` or `unreadable` on one that has it - the task's own last declaration decides: the declared waits `paused` and `captain-held` release the slot through the shared pause/hold predicate, and so does any other line the shared wake classifier reads as captain-relevant (`done`, `failed`, `blocked`, `needs-decision`, and legacy bare lines such as `PR ready ...` or `merged`), while actively working or not-yet-declared work keeps it.
+See [`docs/examples/compute-hosts.json`](examples/compute-hosts.json) for a copyable starting point.
+When the file exists, `bin/fm-capacity.sh` requires `jq` to parse it; a present but malformed file is a concrete error for routing, while local slot calculation still runs.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -369,6 +405,7 @@ An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead 
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
+When `config/compute-hosts.json` exists, `bin/fm-capacity.sh` also requires `jq` to parse that host inventory.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
