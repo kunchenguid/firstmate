@@ -82,6 +82,24 @@ run_shim() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
+# The archive read stages its parser-legible copy under TMPDIR. Nothing may
+# survive the process that staged it, so a test points TMPDIR at a fixture
+# directory of its own and asserts that directory is empty of views afterwards.
+assert_no_staged_archive_view() {  # <tmpdir> <message>
+  local tmpdir=$1 message=$2 leftover
+  leftover=$(find "$tmpdir" -maxdepth 1 -name 'fm-archive-view.*' 2>/dev/null |
+    LC_ALL=C sort | paste -sd' ' -)
+  [ -z "$leftover" ] || fail "$message: $leftover"
+}
+
+sha256_of() {  # <text>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  fi
+}
+
 write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_write_meta "$home/state/$id.meta" \
@@ -1168,6 +1186,990 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# Backlog retention MOVES a closed row rather than deleting it, so an answered
+# captain call lives in the archive once enough work has closed behind it. The
+# completion gate has to treat that as the recorded answer it is, or a finished
+# investigation whose calls were all properly answered can never be cleaned up.
+# Nothing here rescues a lost answer, because nothing was lost: this asserts the
+# captain's exact words survive the move and that the gate reads where they went.
+test_archived_captain_answer_still_completes_the_investigation() {
+  local home id out
+  home=$(make_home retention-archive)
+  id=sample-retention-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample retention" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the retention-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample retention review\n\nOne captain choice was needed and has been answered.\n' \
+    > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-retention-call \
+    --title "Choose the retention window" --reason "captain retention choice pending" \
+    --repo sample >/dev/null || fail "could not register the captain-held task"
+  printf 'Keep the sample retention window at thirty days.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-retention-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  run_captain "$home" complete "$id" sample-retention-call >/dev/null \
+    || fail "completion failed on the answered inventory"
+  out=$(run_captain "$home" verify "$id") || fail "verification failed before retention ran"
+  case "$out" in
+    *archived*) fail "nothing was archived yet, so the pass must not claim it was: $out" ;;
+  esac
+
+  # Retention, exactly as the backlog contract runs it: the answered row moves
+  # out of the active backlog and into the archive, answer text and all.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_no_grep "sample-retention-call" "$home/data/backlog.md" \
+    "setup error: retention should have moved the answered call out of the active backlog"
+  assert_grep "sample-retention-call" "$home/data/done-archive.md" \
+    "retention lost the answered captain call instead of archiving it"
+  assert_grep "Keep the sample retention window at thirty days." "$home/data/done-archive.md" \
+    "the captain's exact words did not survive the move into the archive"
+
+  out=$(run_captain "$home" verify "$id" 2> "$home/verify.err") \
+    || fail "the completion gate refused an answered captain call the archive still holds: $(cat "$home/verify.err")"
+  assert_contains "$out" "1 answered and archived" \
+    "a pass on an archived answer must say so, not read like a looser check"
+
+  # The retired command spelling delegates to the same gate, so pre-collapse
+  # briefs reach the fix without being rewritten.
+  run_shim "$home" verify "$id" >/dev/null 2> "$home/shim-verify.err" \
+    || fail "the shim's verify still refused the archived answer: $(cat "$home/shim-verify.err")"
+
+  # The gate's real consumer: cleanup of the finished investigation.
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "cleanup refused a finished investigation whose only captain call was answered: $(cat "$home/teardown.err")"
+  assert_present "$home/data/$id/report.md" "cleanup must keep the investigation deliverable"
+  pass "an answered captain call retention moved to the archive still completes and cleans up"
+}
+
+# The gate must not get looser in exchange. Reading the archive adds one place a
+# record can legitimately live; it changes nothing about what counts as answered.
+# Every failing shape must still fail, and each must say which one it is: the
+# wording that said only "absent" is what sent a reader hunting for a lost
+# captain answer instead of at the record right in front of them. That includes
+# the two ways the archive read itself can fail, because reporting either as "no
+# record" would restore exactly the false absent this change removes.
+test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
+  local home id absent_err closed_err archived_err unheld_err unstaged_err unreadable_err out
+  home=$(make_home retention-gate-guard)
+  id=sample-guarded-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Guard the retention gate" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the guarded-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Guarded review\n\nThe captain calls below are deliberately unfinished.\n' \
+    > "$home/data/$id/report.md"
+
+  # (1) An inventory entry with no record in either file. Written straight into
+  # the durable attestation, because `complete` refuses to attest one - which is
+  # the point: an entry can only get here by outliving the task it named.
+  printf 'decisions_reviewed=1\ndecision_keys=sample-vanished-call\n' >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/absent.out" 2> "$home/absent.err"; then
+    fail "verification passed an inventory entry with no record in either file"
+  fi
+  absent_err=$(cat "$home/absent.err")
+  assert_contains "$absent_err" "has no record" \
+    "a never-recorded call must be named as having no record at all"
+  assert_contains "$absent_err" "$home/data/backlog.md" \
+    "the no-record message must name the active backlog it searched"
+  assert_contains "$absent_err" "$home/data/done-archive.md" \
+    "the no-record message must name the archive it searched, so a reader stops hunting"
+
+  # (2) A recorded call closed outside `answer`: the captain's word was never
+  # written down, and the gate must still refuse it.
+  tasks_in "$home" add sample-unanswered-call "Choose the guarded option" --repo sample >/dev/null \
+    || fail "could not create the unanswered call"
+  run_captain "$home" hold sample-unanswered-call --reason "captain guarded choice pending" >/dev/null \
+    || fail "could not hold the unanswered call"
+  printf 'decision_keys=sample-unanswered-call\n' >> "$home/state/$id.meta"
+  tasks_in "$home" "done" sample-unanswered-call >/dev/null \
+    || fail "could not close the call outside the answer path"
+  if run_captain "$home" verify "$id" > "$home/closed.out" 2> "$home/closed.err"; then
+    fail "verification passed a call closed with no recorded captain answer"
+  fi
+  closed_err=$(cat "$home/closed.err")
+  assert_contains "$closed_err" "closed with no recorded captain answer" \
+    "a recorded-but-unanswered call must be named as recorded and unanswered"
+  assert_contains "$closed_err" "$home/data/backlog.md" \
+    "the unanswered message must name the file the record was found in"
+
+  # (3) The same unanswered call after retention archives it. Being in the
+  # archive is not evidence of an answer, so this must fail exactly as (2) did
+  # while naming the archive as where the record now is.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_grep "sample-unanswered-call" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the unanswered call into the archive"
+  if run_captain "$home" verify "$id" > "$home/archived.out" 2> "$home/archived.err"; then
+    fail "verification passed an archived call that carries no captain answer"
+  fi
+  archived_err=$(cat "$home/archived.err")
+  assert_contains "$archived_err" "closed with no recorded captain answer" \
+    "an archived call with no answer must still be refused for the same reason"
+  assert_contains "$archived_err" "$home/data/done-archive.md" \
+    "the archived-and-unanswered message must name the archive as where the record is"
+
+  # Cleanup is still refused while that call is unanswered, in either file, and
+  # refused by the gate itself rather than incidentally.
+  if run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"; then
+    fail "cleanup erased an investigation whose captain call was never answered"
+  fi
+  assert_grep "has not passed the captain-call completion gate" "$home/teardown.err" \
+    "cleanup was refused for some other reason, so this proves nothing about the gate"
+  assert_present "$home/state/$id.meta" "a refused cleanup must preserve the investigation record"
+
+  # (4) A recorded entry that is open but was never held for the captain. It is
+  # not the captain's item at all, and dropping it from the inventory is the
+  # repair rather than answering it, so it must say that in its own words.
+  tasks_in "$home" add sample-unheld-call "Choose the unheld option" --repo sample >/dev/null \
+    || fail "could not create the unheld call"
+  printf 'decision_keys=sample-unheld-call\n' >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/unheld.out" 2> "$home/unheld.err"; then
+    fail "verification passed an inventory entry that is not held for the captain"
+  fi
+  unheld_err=$(cat "$home/unheld.err")
+  assert_contains "$unheld_err" "is not held for the captain" \
+    "a recorded but unheld entry must be named as not the captain's item"
+  assert_contains "$unheld_err" "$home/data/backlog.md" \
+    "the unheld message must name the file the record was found in"
+
+  # Every pair of the three refusals must be tellable apart, which is the whole
+  # repair here.
+  [ "$absent_err" != "$closed_err" ] || fail "no record and unanswered read identically: $absent_err"
+  [ "$closed_err" != "$archived_err" ] \
+    || fail "the unanswered message does not distinguish which file holds the record"
+  [ "$absent_err" != "$archived_err" ] \
+    || fail "no record and an archived record with no answer read identically: $absent_err"
+  [ "$unheld_err" != "$absent_err" ] && [ "$unheld_err" != "$closed_err" ] \
+    && [ "$unheld_err" != "$archived_err" ] \
+    || fail "the unheld refusal does not read differently from the other two: $unheld_err"
+
+  # Recording the answer, once, is what actually clears the gate - and it clears
+  # it for the backlog copy, so the pass is earned rather than assumed.
+  tasks_in "$home" add sample-answered-call "Choose the guarded option" --repo sample >/dev/null \
+    || fail "could not create the answerable call"
+  run_captain "$home" hold sample-answered-call --reason "captain guarded choice pending" >/dev/null \
+    || fail "could not hold the answerable call"
+  printf 'decision_keys=sample-answered-call\n' >> "$home/state/$id.meta"
+  printf 'Take the guarded option.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-answered-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  out=$(run_captain "$home" verify "$id") \
+    || fail "verification refused a properly answered call"
+  case "$out" in
+    *archived*) fail "the answered call is in the active backlog; the pass must not claim otherwise: $out" ;;
+  esac
+
+  # (5) Retention moves that answered record into the archive, and then the copy
+  # the read needs cannot be staged at all. Nothing was read, so the archive is
+  # unexamined: this must blame the staging rather than the layout, and above all
+  # must not read as an absent record.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_grep "sample-answered-call" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the answered call into the archive"
+  assert_no_grep "sample-answered-call" "$home/data/backlog.md" \
+    "setup error: the archive read is only reached once retention has emptied the active backlog of that row"
+  if (TMPDIR="$home/no-such-tmp"; export TMPDIR; run_captain "$home" verify "$id") \
+    > "$home/unstaged.out" 2> "$home/unstaged.err"; then
+    fail "verification passed a record it never managed to read"
+  fi
+  unstaged_err=$(cat "$home/unstaged.err")
+  assert_contains "$unstaged_err" "$home/data/done-archive.md" \
+    "the staging-failure refusal must name the archive it was trying to copy"
+  assert_contains "$unstaged_err" "could be staged" \
+    "the staging-failure refusal must say the copy could not be staged"
+  assert_not_contains "$unstaged_err" "has no record" \
+    "a record that could not be copied must never be reported as no record at all"
+  assert_not_contains "$unstaged_err" "layout changed" \
+    "nothing was read, so the staging failure must not be blamed on the archive layout"
+
+  # (6) The archive still carries the entry, but its own section heading is no
+  # longer one tasks-axi accepts, so the record cannot be read back. Only this
+  # throwaway fixture is damaged, and only its heading: the entry line is left
+  # intact so the read reaches the parse instead of stopping at "no entry".
+  assert_grep "## Archived " "$home/data/done-archive.md" \
+    "setup error: retention should have written a dated archive heading to damage"
+  sed 's/^## Archived /## Retired /' "$home/data/done-archive.md" > "$home/damaged-archive.md" \
+    || fail "could not write the damaged archive fixture"
+  mv "$home/damaged-archive.md" "$home/data/done-archive.md"
+  assert_no_grep "## Archived " "$home/data/done-archive.md" \
+    "setup error: the damaged archive must carry no heading the read can still rewrite"
+  grep -Eq "^- \[[ x]\] sample-answered-call - " "$home/data/done-archive.md" \
+    || fail "setup error: the damaged archive must still carry the task entry, or nothing is proven about the parse"
+  if run_captain "$home" verify "$id" > "$home/unreadable.out" 2> "$home/unreadable.err"; then
+    fail "verification passed a record it could not read back out of the archive"
+  fi
+  unreadable_err=$(cat "$home/unreadable.err")
+  assert_contains "$unreadable_err" "$home/data/done-archive.md" \
+    "the unreadable-archive refusal must name the archive it could not read"
+  assert_contains "$unreadable_err" "could not read that record" \
+    "the unreadable-archive refusal must say the record could not be read back"
+  assert_not_contains "$unreadable_err" "has no record" \
+    "an archive that still holds the entry must never be reported as no record at all"
+
+  # Both archive-read failures must also be tellable apart from each other and
+  # from the three gate refusals, for the same reason those three are.
+  [ "$unstaged_err" != "$absent_err" ] \
+    || fail "a record that could not be copied reads as no record: $unstaged_err"
+  [ "$unstaged_err" != "$closed_err" ] && [ "$unstaged_err" != "$archived_err" ] \
+    || fail "a record that could not be copied reads as a recorded-but-unanswered call: $unstaged_err"
+  [ "$unreadable_err" != "$absent_err" ] \
+    || fail "an unreadable archive reads as no record: $unreadable_err"
+  [ "$unreadable_err" != "$unstaged_err" ] \
+    || fail "a layout the parser rejects and a copy that could not be staged read identically: $unreadable_err"
+  [ "$unreadable_err" != "$closed_err" ] && [ "$unreadable_err" != "$archived_err" ] \
+    || fail "an unreadable archive reads as a recorded-but-unanswered call: $unreadable_err"
+  pass "no-record, recorded-but-unanswered, archived-but-unanswered, unheld, unstageable, and unreadable captain-call records all still fail, distinguishably"
+}
+
+# The siblings that share the same lookup. Reading the archive is not permission
+# to write it: tasks-axi writes the active backlog and nothing else, so an
+# archived record can be reported on and replayed, never changed or duplicated.
+test_archived_records_are_readable_but_never_written() {
+  local home out err
+  home=$(make_home retention-archive-writes)
+  tasks_in "$home" add sample-archived-call "Choose the archived option" --repo sample >/dev/null \
+    || fail "could not create the call"
+  run_captain "$home" hold sample-archived-call --reason "captain archived choice pending" >/dev/null \
+    || fail "could not hold the call"
+  printf 'Take the archived option.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-archived-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not run backlog retention"
+  cp "$home/data/done-archive.md" "$home/archive-before.md"
+  cp "$home/data/backlog.md" "$home/backlog-before.md"
+
+  # An exact replay is the same idempotent no-op it was before retention ran.
+  out=$(run_captain "$home" answer sample-archived-call --decision-file "$home/answer.txt") \
+    || fail "an exact answer replay failed once the record was archived"
+  assert_contains "$out" "answered: sample-archived-call" \
+    "the replay must report the same recorded answer it did before retention"
+  cmp -s "$home/data/done-archive.md" "$home/archive-before.md" \
+    || fail "the replay wrote to the archive"
+  cmp -s "$home/data/backlog.md" "$home/backlog-before.md" \
+    || fail "the replay resurrected the archived row in the active backlog"
+
+  # A different answer, or a release, has nowhere to go and must say so.
+  printf 'Take a different option after all.\n' > "$home/other.txt"
+  if run_captain "$home" answer sample-archived-call --decision-file "$home/other.txt" \
+    > "$home/drift.out" 2> "$home/drift.err"; then
+    fail "a drifted answer was accepted against an archived record"
+  fi
+  err=$(cat "$home/drift.err")
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the refusal must name the archive as where the record is"
+  assert_contains "$err" "not writable" \
+    "the refusal must say the archive cannot take the change, not that the task is absent"
+  cmp -s "$home/data/done-archive.md" "$home/archive-before.md" \
+    || fail "a refused answer still wrote to the archive"
+
+  # The release is the same answer the archive already records, so only its close
+  # mode differs: lifting a hold is a write, and the archive takes no writes.
+  if run_captain "$home" answer sample-archived-call --decision-file "$home/answer.txt" --release \
+    > "$home/release.out" 2> "$home/release.err"; then
+    fail "--release was accepted against an archived record that was never reopened"
+  fi
+  err=$(cat "$home/release.err")
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the release refusal must name the archive as where the record is"
+  assert_not_contains "$err" "has no record" \
+    "a release against an archived record must not be refused as if the task were absent"
+  cmp -s "$home/data/done-archive.md" "$home/archive-before.md" \
+    || fail "a refused release still wrote to the archive"
+  cmp -s "$home/data/backlog.md" "$home/backlog-before.md" \
+    || fail "a refused release resurrected the archived row in the active backlog"
+
+  # Holding the same id again would mint a second row for a call the captain has
+  # already answered, splitting one identity across the two files.
+  if run_captain "$home" hold sample-archived-call --title "Choose again" \
+    --reason "captain archived choice pending" > "$home/hold.out" 2> "$home/hold.err"; then
+    fail "hold created a duplicate row for a call the archive already closed"
+  fi
+  assert_grep "already closed and archived" "$home/hold.err" \
+    "the refusal must name retention as the reason, not a missing task"
+  assert_no_grep "sample-archived-call" "$home/data/backlog.md" \
+    "the refused hold left a duplicate row in the active backlog"
+
+  # The keyed intake reaches the same record. A delivery whose answer it recorded
+  # itself replays as closed after retention moves the row, so a channel that
+  # redelivers an old answer does not read it as a new unrecorded one.
+  tasks_in "$home" add sample-keyed-call "Choose the keyed option" --repo sample >/dev/null \
+    || fail "could not create the keyed call"
+  run_captain "$home" hold sample-keyed-call --reason "captain keyed choice pending" >/dev/null \
+    || fail "could not hold the keyed call"
+  out=$(printf 'sample-keyed-call\tTake the keyed option.\tcaptain reply\n' \
+    | run_captain "$home" answers --source "test channel") \
+    || fail "the keyed intake could not record the answer: $out"
+  assert_contains "$out" "closed: sample-keyed-call" "the keyed intake did not record the answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not run backlog retention"
+  assert_grep "sample-keyed-call" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the keyed answer into the archive"
+  cp "$home/data/done-archive.md" "$home/archive-before-keyed.md"
+  cp "$home/data/backlog.md" "$home/backlog-before-keyed.md"
+  out=$(printf 'sample-keyed-call\tTake the keyed option.\tcaptain reply\n' \
+    | run_captain "$home" answers --source "test channel") \
+    || fail "the keyed intake failed on a replayed archived answer: $out"
+  assert_contains "$out" "closed: sample-keyed-call" \
+    "a replayed delivery for an archived answer must report it closed, not absent"
+  cmp -s "$home/data/done-archive.md" "$home/archive-before-keyed.md" \
+    || fail "the replayed keyed delivery wrote to the archive"
+  cmp -s "$home/data/backlog.md" "$home/backlog-before-keyed.md" \
+    || fail "the replayed keyed delivery resurrected the archived row in the active backlog"
+
+  # A key that names nothing is skipped, naming both files it searched so it is
+  # not mistaken for a captain answer that went missing.
+  out=$(printf 'sample-nowhere-call\tSome answer.\tcaptain reply\n' \
+    | run_captain "$home" answers --source "test channel" 2>&1) || true
+  assert_contains "$out" "skipped: sample-nowhere-call" \
+    "a key naming no task must be skipped"
+  assert_contains "$out" "$home/data/done-archive.md" \
+    "the skip must name the archive it searched so the key is not mistaken for a lost answer"
+  pass "archived captain-call records are readable, replayable, and never written or duplicated"
+}
+
+# The last sibling that shared the backlog-only lookup: the ownership check
+# `complete` runs over the ORIGIN. A row retention has archived is still this
+# home's own record of it, so a long-finished investigation can attest a later
+# review pass instead of being disowned by the home that ran it. An archive that
+# cannot be opened leaves ownership unknown, which is not the same answer as not
+# owned, so that refuses in its own words rather than naming another home.
+test_archived_origin_still_owns_a_later_review_pass() {
+  local home id call out err
+  home=$(make_home retention-archived-origin)
+  id=sample-archived-origin
+  call=sample-later-review-call
+  tasks_in "$home" add "$id" "Investigate the archived origin" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin"
+  tasks_in "$home" add "$call" "Choose the later option" --repo sample >/dev/null \
+    || fail "could not create the captain call"
+  run_captain "$home" hold "$call" --reason "captain later choice pending" >/dev/null \
+    || fail "could not hold the captain call"
+  printf 'Take the later option.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  tasks_in "$home" "done" "$id" >/dev/null || fail "could not close the origin"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not run backlog retention"
+
+  # Ownership rests on the archived row alone here: no attestation metadata was
+  # ever written and there is no report deliverable to answer it first, so a
+  # backlog-only lookup has nothing left to find.
+  assert_absent "$home/state/$id.meta" \
+    "setup error: attestation metadata would answer ownership before the archive read"
+  assert_absent "$home/data/$id" \
+    "setup error: a report deliverable would answer ownership before the archive read"
+  assert_no_grep "$id" "$home/data/backlog.md" \
+    "setup error: retention should have moved the origin row out of the active backlog"
+  assert_grep "$id" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the origin row into the archive"
+
+  out=$(run_captain "$home" complete "$id" "$call" 2>&1) \
+    || fail "completion disowned an origin whose own row retention archived: $out"
+  assert_contains "$out" "captain-call inventory reviewed" \
+    "the later review pass over an archived origin was not recorded"
+
+  # And the fail-closed half: an archive path that cannot be opened must not be
+  # read as evidence that some other home owns this origin.
+  mv "$home/data/done-archive.md" "$home/archive-elsewhere.md"
+  ln -s "$home/archive-elsewhere.md" "$home/data/done-archive.md"
+  if run_captain "$home" complete "$id" "$call" > "$home/origin.out" 2> "$home/origin.err"; then
+    fail "completion attested an origin while the archive could not be searched"
+  fi
+  err=$(cat "$home/origin.err")
+  assert_contains "$err" "not a readable regular file" \
+    "the refusal must name the archive it could not search"
+  assert_not_contains "$err" "is not owned by the active home" \
+    "an archive that was never searched must not read as a disowned origin"
+  assert_contains "$err" "investigation origin $id" \
+    "the refusal must name the origin as an origin, because that is the record to look at"
+  assert_not_contains "$err" "captain call $id" \
+    "the refusal must not send the operator hunting a captain call by the origin's id"
+  pass "an origin whose own row retention archived still owns a later review pass"
+}
+
+# Reading the archive and being able to open it are different questions. A path
+# that exists and is not a readable regular file leaves it unknown whether the
+# record is in there, so it has to stop the gate in its own words instead of
+# reading as "no record", and it has to stop `hold` from minting a second row for
+# a call the archive may already hold. No archive file at all is the opposite
+# case and stays quiet, because a home that has never had a row trimmed is
+# healthy rather than broken.
+test_unopenable_archive_refuses_instead_of_reading_as_absent() {
+  local home id out err
+  home=$(make_home retention-archive-unopenable)
+  id=sample-unopenable-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Guard the archive read" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the guarded-read origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Guard the archive read\n\nOne captain choice was needed and has been answered.\n' \
+    > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-unopenable-call --title "Choose the guarded option" \
+    --reason "captain guarded choice pending" --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+  printf 'Take the guarded option.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-unopenable-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  run_captain "$home" complete "$id" sample-unopenable-call >/dev/null \
+    || fail "completion failed on the answered inventory"
+
+  # Nothing has been trimmed yet, so the record is still in the live backlog and
+  # there is no archive file at all. A young home like that must not be refused.
+  # On its own this does not reach the archive read, because the backlog answers
+  # first; the genuine no-archive-file case is driven a few lines below.
+  assert_absent "$home/data/done-archive.md" \
+    "setup error: retention has not run, so no archive file should exist yet"
+  run_captain "$home" verify "$id" >/dev/null 2> "$home/no-archive.err" \
+    || fail "a home with no archive file at all was refused: $(cat "$home/no-archive.err")"
+
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  out=$(run_captain "$home" verify "$id") || fail "verification failed on the archived answer"
+  assert_contains "$out" "1 answered and archived" \
+    "setup error: the record should now be read out of the archive"
+
+  # The record now lives ONLY in the archive, so the archive read is genuinely on
+  # the path. Take the archive file away and an archive that does not exist has
+  # to stay QUIET: "no record", never "the archive could not be read", because a
+  # home that has simply never had a row trimmed has no archive file either. This
+  # is the boundary the symlink case below contrasts with, and it is the
+  # assertion a change making an absent archive loud has to fail.
+  mv "$home/data/done-archive.md" "$home/archive-taken-away.md"
+  if run_captain "$home" verify "$id" > "$home/absent.out" 2> "$home/absent.err"; then
+    fail "verification passed while the answered record was in neither file"
+  fi
+  err=$(cat "$home/absent.err")
+  assert_contains "$err" "has no record" \
+    "an archive file that does not exist must read as no record at all"
+  assert_not_contains "$err" "not a readable regular file" \
+    "a missing archive file must stay quiet rather than being called unreadable"
+  mv "$home/archive-taken-away.md" "$home/data/done-archive.md"
+
+  # The archive path becomes a symlink, which this read deliberately refuses to
+  # follow. The record is still in there, which is exactly why the refusal must
+  # not read as an absent record.
+  mv "$home/data/done-archive.md" "$home/archive-elsewhere.md"
+  ln -s "$home/archive-elsewhere.md" "$home/data/done-archive.md"
+  if run_captain "$home" verify "$id" > "$home/unopenable.out" 2> "$home/unopenable.err"; then
+    fail "verification passed while the archive could not be opened at all"
+  fi
+  err=$(cat "$home/unopenable.err")
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the refusal must name the archive path it could not open"
+  assert_contains "$err" "not a readable regular file" \
+    "the refusal must say the archive could not be read, not that the record is gone"
+  assert_not_contains "$err" "has no record" \
+    "an archive that was never searched must not be reported as holding no record"
+
+  # The mirror of the origin-ownership subject: here the record really is a
+  # captain call, so the refusal has to say so. Wiring the two subjects backwards
+  # has to fail on this line as well as on the ownership one.
+  assert_contains "$err" "captain call sample-unopenable-call" \
+    "an inventory entry's refusal must name the captain call it could not settle"
+  assert_not_contains "$err" "investigation origin" \
+    "a captain call's refusal must not be reported as an origin-ownership failure"
+
+  # And `hold` must not mint a second row for a call the archive may already
+  # hold, which is the split identity that guard exists to prevent.
+  if run_captain "$home" hold sample-unopenable-call --title "Choose the guarded option" \
+    --reason "captain guarded choice pending" > "$home/hold.out" 2> "$home/hold.err"; then
+    fail "hold created a row for an archived call while the archive could not be read"
+  fi
+  assert_grep "not a readable regular file" "$home/hold.err" \
+    "the refused hold must name the unreadable archive rather than a missing task"
+  assert_no_grep "sample-unopenable-call" "$home/data/backlog.md" \
+    "the refused hold minted a second row for a call the archive may already hold"
+
+  # Non-vacuity: the same gate passes again the moment the archive is readable.
+  rm -f "$home/data/done-archive.md"
+  mv "$home/archive-elsewhere.md" "$home/data/done-archive.md"
+  out=$(run_captain "$home" verify "$id") \
+    || fail "the gate stayed refused once the archive was readable again"
+  assert_contains "$out" "1 answered and archived" \
+    "the restored archive must be read exactly as it was before"
+  pass "an archive path that cannot be opened refuses loudly and blocks a duplicate hold"
+}
+
+# The archive read stages one copy of the archive per process and reuses it
+# across lookups, and the archive GROWS underneath that copy: `tasks-axi done`
+# trims by default, so closing one call inside a batch moves an older closed row
+# into the archive between two lookups of the same process. A copy staged before
+# that move must not answer for the row the move added. If it does, a record that
+# is right there in the archive reads as an archive the parser cannot read, which
+# is a false alarm about the file's layout raised over a perfectly healthy file.
+test_a_row_archived_mid_batch_is_still_read_out_of_the_archive() {
+  local home out
+  home=$(make_home retention-archive-midbatch)
+  # A one-row window, so closing one call trims the previously closed one. Under
+  # the tracked ten-row window nothing moves mid-batch and this proves nothing.
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 1\n' \
+    > "$home/.tasks.toml"
+
+  # An answered call the archive already holds, so the batch's FIRST row is an
+  # archive read and the copy it stages is the one the later rows inherit.
+  tasks_in "$home" add sample-early-call "Choose the early option" --repo sample >/dev/null \
+    || fail "could not create the early call"
+  run_captain "$home" hold sample-early-call --reason "captain early choice pending" >/dev/null \
+    || fail "could not hold the early call"
+  printf 'Take the early option.\n' > "$home/early.txt"
+  run_captain "$home" answer sample-early-call --decision-file "$home/early.txt" >/dev/null \
+    || fail "could not record the early answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention over the early call"
+  assert_grep "sample-early-call" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the early call into the archive"
+
+  # An answered call still sitting in the backlog's Done section. This is the row
+  # the batch itself archives, and the row a later lookup in that same batch asks
+  # for once it has moved.
+  tasks_in "$home" add sample-mid-call "Choose the middle option" --repo sample >/dev/null \
+    || fail "could not create the middle call"
+  run_captain "$home" hold sample-mid-call --reason "captain middle choice pending" >/dev/null \
+    || fail "could not hold the middle call"
+  printf 'Take the middle option.\n' > "$home/mid.txt"
+  run_captain "$home" answer sample-mid-call --decision-file "$home/mid.txt" >/dev/null \
+    || fail "could not record the middle answer"
+  assert_grep "sample-mid-call" "$home/data/backlog.md" \
+    "setup error: the middle call must still be in the backlog, or nothing moves mid-batch"
+
+  # And a live call for the batch to close, which is what triggers the trim.
+  tasks_in "$home" add sample-late-call "Choose the late option" --repo sample >/dev/null \
+    || fail "could not create the late call"
+  run_captain "$home" hold sample-late-call --reason "captain late choice pending" >/dev/null \
+    || fail "could not hold the late call"
+
+  out=$(printf 'sample-early-call\tTake the early option.\tcaptain reply\nsample-late-call\tTake the late option.\tcaptain reply\nsample-mid-call\tTake the middle option.\tcaptain reply\n' \
+    | run_captain "$home" answers --source "test channel" 2>&1) || true
+  assert_contains "$out" "skipped: sample-early-call (already closed and archived" \
+    "setup error: the first row must read the archive, or no copy is staged before the trim"
+  assert_contains "$out" "closed: sample-late-call" \
+    "setup error: the live call must close, because closing it is what trims the middle one"
+  assert_grep "sample-mid-call" "$home/data/done-archive.md" \
+    "setup error: closing the late call should have trimmed the middle one into the archive"
+  assert_no_grep "sample-mid-call" "$home/data/backlog.md" \
+    "setup error: the middle call must be out of the backlog, or its lookup never reaches the archive"
+
+  # The row the batch archived a moment ago is still read out of the archive, as
+  # the closed-and-archived record it is.
+  assert_contains "$out" "skipped: sample-mid-call (already closed and archived" \
+    "a row the batch itself archived must still be read out of the archive"
+  assert_not_contains "$out" "could not be read" \
+    "a healthy archive that grew mid-batch must not be reported as an unreadable layout"
+  assert_contains "$out" "answers: closed=1 skipped=2" \
+    "only the two already-answered deliveries may be skipped"
+  pass "a row archived mid-batch is still read out of the archive"
+}
+
+# An archive read that FAILED is not an archive that answered no. The path guards
+# settle whether the file can be opened, but the read can still break after it
+# opens, and the ownership check treats "no entry" as "another home owns this
+# origin", so a read error arriving as an answer disowns a home from its own
+# investigation. That is the same wrong-confident lookup the whole two-file read
+# exists to remove, so it has to refuse in the words it uses for an archive it
+# could not read.
+test_an_archive_read_error_never_disowns_the_origin() {
+  local home id call real_grep err out
+  home=$(make_home retention-archive-read-error)
+  id=sample-read-error-origin
+  call=sample-read-error-call
+  tasks_in "$home" add "$id" "Investigate the read error" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin"
+  tasks_in "$home" add "$call" "Choose the read-error option" --repo sample >/dev/null \
+    || fail "could not create the captain call"
+  run_captain "$home" hold "$call" --reason "captain read-error choice pending" >/dev/null \
+    || fail "could not hold the captain call"
+  printf 'Take the read-error option.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  tasks_in "$home" "done" "$id" >/dev/null || fail "could not close the origin"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not run backlog retention"
+
+  # Ownership rests on the archived row alone, so the archive read is the only
+  # thing that can answer it and a failed read is the only thing under test.
+  assert_absent "$home/state/$id.meta" \
+    "setup error: attestation metadata would answer ownership before the archive read"
+  assert_absent "$home/data/$id" \
+    "setup error: a report deliverable would answer ownership before the archive read"
+  assert_grep "$id" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the origin row into the archive"
+
+  # The archive stays a perfectly ordinary readable file; the READ is what fails.
+  # A grep that reports a read error for that file and only that file reproduces
+  # an EIO, a stale network handle, or a file unlinked under the open, and leaves
+  # every other grep in the script alone so the refusal cannot come from anywhere
+  # else.
+  real_grep=$(command -v grep) || fail "could not resolve the real grep"
+  mkdir -p "$home/grepfail"
+  cat > "$home/grepfail/grep" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    */done-archive.md) exit 2 ;;
+  esac
+done
+exec $real_grep "\$@"
+SH
+  chmod +x "$home/grepfail/grep"
+
+  if (PATH="$home/grepfail:$PATH"; export PATH; run_captain "$home" complete "$id" "$call") \
+    > "$home/read-error.out" 2> "$home/read-error.err"; then
+    fail "completion attested an origin whose archive read never completed"
+  fi
+  err=$(cat "$home/read-error.err")
+  assert_not_contains "$err" "is not owned by the active home" \
+    "an archive read that failed must never read as a disowned origin"
+  assert_contains "$err" "the archive could not be searched" \
+    "the refusal must say the archive could not be read"
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the refusal must name the archive whose read failed"
+
+  # Two different things reach this refusal and the archive's mode is fine in this
+  # one, so it must not assert a cause it cannot know. Naming a mode or a symlink
+  # to repair sends the operator at a file that is not broken, which is the same
+  # confidently-wrong direction the old "absent" wording sent them in.
+  assert_contains "$err" "or the read of it did not complete" \
+    "the refusal must allow for a read that broke, not assert an unreadable path"
+  assert_not_contains "$err" "symlink" \
+    "a read that failed must not tell the operator to repair a symlink"
+  assert_not_contains "$err" "unreadable mode" \
+    "a read that failed must not tell the operator to repair a file mode"
+
+  # And it must name the right KIND of record. The subject here is an
+  # investigation origin, so calling it a captain call would send the operator
+  # looking for a captain-held task by an id no captain call ever had.
+  assert_contains "$err" "investigation origin $id" \
+    "an ownership failure must name the origin as an origin"
+  assert_not_contains "$err" "captain call $id" \
+    "an ownership failure must not send the operator hunting a captain call by the origin's id"
+
+  # Non-vacuity: the same gate passes the moment the read works again, so the
+  # refusal above is the failed read and not the fixture.
+  out=$(run_captain "$home" complete "$id" "$call" 2>&1) \
+    || fail "completion stayed refused once the archive read worked again: $out"
+  assert_contains "$out" "captain-call inventory reviewed" \
+    "the later review pass over an archived origin was not recorded"
+  pass "an archive read that fails refuses in its own words instead of disowning the origin"
+}
+
+# The legacy fallback runs only when the first probe genuinely MISSED, never when
+# it could not be settled, and this pair pins that because the reasoning beside it
+# does not survive a refactor. The two probes name different records, so ruling on
+# the legacy one while the keyed one is unreadable can pass a captain call that was
+# never answered. The fixture is one where the legacy record is real, live, and
+# answered, so falling through would look right and be wrong; only the archive's
+# readability differs between the halves, which is what makes the refusal
+# attributable to the archive read and to nothing else.
+test_an_unsettled_archive_read_outranks_the_legacy_identity() {
+  local home id key legacy out err
+  home=$(make_home retention-archive-legacy-fallback)
+  id=sample-fallback-origin
+  key=laterpick
+  legacy="$id-decision-$key"
+
+  # An unrelated closed row, trimmed by real retention, so this home HAS an
+  # archive file whose readability can be flipped without touching the record
+  # under test.
+  tasks_in "$home" add sample-fallback-filler "Trim this row" --repo sample >/dev/null \
+    || fail "could not create the filler row"
+  tasks_in "$home" "done" sample-fallback-filler >/dev/null \
+    || fail "could not close the filler row"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_grep "sample-fallback-filler" "$home/data/done-archive.md" \
+    "setup error: retention should have built the archive out of the filler row"
+
+  # The record the gate would rule on if it fell through: the LEGACY derived
+  # identity, alive in the backlog and carrying a real recorded captain answer.
+  tasks_in "$home" add "$legacy" "Choose the fallback option" --repo sample >/dev/null \
+    || fail "could not create the legacy call"
+  run_captain "$home" hold "$legacy" --reason "captain fallback choice pending" >/dev/null \
+    || fail "could not hold the legacy call"
+  printf 'Take the fallback option.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$legacy" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  assert_grep "$legacy" "$home/data/backlog.md" \
+    "setup error: the answered legacy record must stay in the live backlog"
+  assert_no_grep "$legacy" "$home/data/done-archive.md" \
+    "setup error: the legacy record must not be archived, or the fallback is not what reaches it"
+
+  # Pre-collapse metadata names the bare key, and nothing anywhere is that key, so
+  # the fallback is the only thing that can resolve the entry.
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$key" >> "$home/state/$id.meta"
+  if tasks_in "$home" show "$key" --full >/dev/null 2>&1; then
+    fail "setup error: the bare key must name no task, or the fallback is never reached"
+  fi
+
+  # Half one, the quiet no-entry boundary: no archive file at all, so the read
+  # settles as a miss, the fallback runs, and the answered legacy record passes.
+  # This half is what proves the record really is reachable and answered, which is
+  # what makes the refusal in half two mean something.
+  mv "$home/data/done-archive.md" "$home/archive-parked.md" \
+    || fail "could not park the archive fixture"
+  out=$(run_captain "$home" verify "$id" 2>&1) \
+    || fail "the gate refused an answered legacy record while no archive existed: $out"
+  assert_contains "$out" "verified: $id captain-call inventory" \
+    "the fallback did not rule on the answered legacy record it reached"
+
+  # Half two, the same fixture with only the archive's readability changed: the
+  # first probe cannot be settled, so the gate must refuse rather than rule on a
+  # record other than the one it was asked about.
+  ln -s "$home/archive-parked.md" "$home/data/done-archive.md" \
+    || fail "could not make the archive unreadable"
+  if run_captain "$home" verify "$id" > "$home/fallback.out" 2> "$home/fallback.err"; then
+    fail "the gate ruled on the legacy identity while the keyed record's archive read was unsettled"
+  fi
+  err=$(cat "$home/fallback.err")
+  assert_contains "$err" "the archive could not be searched" \
+    "the refusal must name the archive read rather than a missing decision"
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the refusal must name the archive it could not search"
+  assert_not_contains "$err" "has no record" \
+    "an unsettled archive read must never read as a decision that is simply absent"
+
+  # And the flip back: readable again, and the same fixture passes again, so the
+  # refusal was the archive read and not something the symlink step disturbed.
+  rm -f "$home/data/done-archive.md"
+  mv "$home/archive-parked.md" "$home/data/done-archive.md" \
+    || fail "could not restore the archive fixture"
+  out=$(run_captain "$home" verify "$id" 2>&1) \
+    || fail "the gate stayed refused once the archive was readable again: $out"
+  assert_contains "$out" "verified: $id captain-call inventory" \
+    "the restored archive must leave the fallback ruling exactly as it did before"
+  pass "an archive read that cannot be settled outranks an answered legacy identity"
+}
+
+# A legacy key resolves through the composed `<origin>-decision-<key>` identity,
+# and that identity is what reaches the archive. An archive-read skip therefore
+# has to name the id that was probed: naming the bare key sends a reader hunting a
+# row nothing ever archived, which is the same misdirection the old "absent"
+# wording cost real time on.
+test_an_archive_skip_names_the_probed_legacy_identity() {
+  local home id key legacy out
+  home=$(make_home retention-archive-legacy-skip)
+  id=sample-legacy-skip-origin
+  key=laterpick
+  legacy="$id-decision-$key"
+  tasks_in "$home" add "$legacy" "Choose the legacy option" --repo sample >/dev/null \
+    || fail "could not create the legacy call"
+  run_captain "$home" hold "$legacy" --reason "captain legacy choice pending" >/dev/null \
+    || fail "could not hold the legacy call"
+  printf 'Take the legacy option.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$legacy" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+
+  # The archive still carries the legacy row, but its own section heading is no
+  # longer one tasks-axi accepts, so the record cannot be read back and the read
+  # reaches the archive-failure skip rather than resolving.
+  sed 's/^## Archived /## Retired /' "$home/data/done-archive.md" > "$home/damaged-archive.md" \
+    || fail "could not write the damaged archive fixture"
+  mv "$home/damaged-archive.md" "$home/data/done-archive.md"
+  assert_grep "$legacy" "$home/data/done-archive.md" \
+    "setup error: the damaged archive must still carry the legacy entry"
+  assert_no_grep "## Archived " "$home/data/done-archive.md" \
+    "setup error: the damaged archive must carry no heading the read can still rewrite"
+
+  # The delivered key names no task in either file; the composed identity is the
+  # one that actually hit the archive.
+  out=$(printf '%s\tTake the legacy option.\tcaptain reply\n' "$key" \
+    | run_captain "$home" answers "$id" --source "test channel" 2>&1) || true
+  assert_contains "$out" "skipped: $legacy (archived in" \
+    "the skip must name the identity that actually reached the archive"
+  assert_not_contains "$out" "skipped: $key (archived in" \
+    "the skip must not name a key nothing ever archived"
+  pass "an archive-read skip names the probed legacy identity, not the delivered key"
+}
+
+# The staged copy of the archive outlives the call that made it, so something has
+# to remove it before the process ends or every archived lookup leaves a file in
+# TMPDIR. Both reader entry points are covered because they are opposite shapes:
+# bin/fm-captain-hold.sh already owns an EXIT trap of its own that the removal
+# must not displace, and bin/fm-decision-hold.sh owns none.
+test_no_staged_archive_view_survives_a_reader() {
+  local home id call viewtmp out hold digest body
+  home=$(make_home retention-archive-view-leak)
+  id=sample-view-leak-review
+  call=sample-view-leak-call
+  viewtmp="$home/viewtmp"
+  mkdir -p "$viewtmp" "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the staged view" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Staged view review\n\nOne captain choice was needed and has been answered.\n' \
+    > "$home/data/$id/report.md"
+  run_captain "$home" hold "$call" --title "Choose the staged option" \
+    --reason "captain staged choice pending" --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+  printf 'Take the staged option.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "completion failed on the answered inventory"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_no_grep "$call" "$home/data/backlog.md" \
+    "setup error: the archive read is only reached once the backlog no longer holds that row"
+
+  # The gate, whose only copy of the record is the archived one. Reporting the
+  # archived count proves the archive read genuinely ran, so the emptiness below
+  # is about the removal and not about a view that was never staged.
+  out=$( (TMPDIR="$viewtmp"; export TMPDIR; run_captain "$home" verify "$id") 2>&1 ) \
+    || fail "the gate refused an answered captain call the archive holds: $out"
+  assert_contains "$out" "1 answered and archived" \
+    "setup error: the record must be read out of the archive, or nothing was staged"
+  assert_no_staged_archive_view "$viewtmp" \
+    "the gate left its staged copy of the archive behind"
+
+  # And the same for the shim's `resolve`, the one command there that reads a
+  # record in its own process rather than handing off. A pre-collapse routed
+  # record, archived, replays exactly, which only happens if the archive answered.
+  hold=$(run_shim "$home" hold "$id" routedpick --title "Routed pick" \
+    --reason "captain routed pick pending" --repo sample) \
+    || fail "could not register the legacy routed call"
+  tasks_in "$home" add sample-view-leak-work "Apply the routed pick" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create the routed work"
+  printf 'Use the routed answer.\n' > "$home/route.txt"
+  digest=$(sha256_of "$(cat "$home/route.txt")")
+  body="$home/route-body.txt"
+  printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: sample-view-leak-work\nResolution mode: routed\n\nCaptain decision:\n%s\n\nRouted work:\n- sample-view-leak-work\n' \
+    "$digest" "$(cat "$home/route.txt")" > "$body"
+  tasks_in "$home" update "$hold" --body-file "$body" --archive-body >/dev/null \
+    || fail "could not record the pre-collapse routed body"
+  tasks_in "$home" "done" "$hold" >/dev/null || fail "could not close the legacy routed call"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention over the legacy routed call"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "setup error: the shim's archive read is only reached once the live backlog stops answering for that row"
+  fi
+  assert_grep "$hold" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the legacy routed call into the archive"
+
+  out=$( (TMPDIR="$viewtmp"; export TMPDIR; run_shim "$home" resolve "$id" routedpick \
+    --decision-file "$home/route.txt" --routed-to sample-view-leak-work) 2>&1 ) \
+    || fail "the shim did not replay a routed record the archive holds: $out"
+  assert_contains "$out" "resolved: $hold" \
+    "setup error: the replay must reach the archived record, or nothing was staged"
+  assert_no_staged_archive_view "$viewtmp" \
+    "the shim left its staged copy of the archive behind"
+  pass "no staged copy of the archive survives either reader entry point"
+}
+
+# The archive is only found through this home's own `[markdown]` table, so every
+# spelling of that table tasks-axi itself honors has to be recognized. Each home
+# here configures a NON-default archive, so a form this read failed to match would
+# fall back to the tracked default, find no archive there, and report the answered
+# record as absent all over again.
+# tasks-axi is the file's real reader, so it decides which spellings are in scope,
+# and it honors a single-quoted TOML literal string for the value as readily as a
+# double-quoted one, so both value forms belong here too. The spellings tasks-axi
+# ignores get the opposite guarantee, in
+# test_config_forms_tasks_axi_ignores_fall_back_the_same_way below.
+test_markdown_config_forms_all_locate_the_archive() {
+  local home form archive=data/retired-rows.md out index=0
+  while IFS= read -r form; do
+    [ -n "$form" ] || continue
+    index=$((index + 1))
+    home=$(make_home "markdown-config-$index")
+    case "$form" in
+      CRLF)
+        form='[markdown]'
+        printf 'backend = "markdown"\r\n\r\n%s\r\npath = "data/backlog.md"\r\narchive = "%s"\r\ndone_keep = 10\r\n' \
+          "$form" "$archive" > "$home/.tasks.toml"
+        form='[markdown] with carriage returns'
+        ;;
+      SINGLE_QUOTED_VALUES)
+        printf "backend = \"markdown\"\n\n[markdown]\npath = 'data/backlog.md'\narchive = '%s'\ndone_keep = 10\n" \
+          "$archive" > "$home/.tasks.toml"
+        form="[markdown] with single-quoted literal values"
+        ;;
+      *)
+        printf 'backend = "markdown"\n\n%s\npath = "data/backlog.md"\narchive = "%s"\ndone_keep = 10\n' \
+          "$form" "$archive" > "$home/.tasks.toml"
+        ;;
+    esac
+    tasks_in "$home" add sample-header-call "Choose the header option" --repo sample >/dev/null \
+      || fail "could not create the call under header form <$form>"
+    run_captain "$home" hold sample-header-call --reason "captain header choice pending" >/dev/null \
+      || fail "could not hold the call under header form <$form>"
+    printf 'Take the header option.\n' > "$home/answer.txt"
+    run_captain "$home" answer sample-header-call --decision-file "$home/answer.txt" >/dev/null \
+      || fail "could not record the answer under header form <$form>"
+    tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+      || fail "could not run backlog retention under header form <$form>"
+    assert_grep "sample-header-call" "$home/$archive" \
+      "setup error: retention should have used the configured archive under header form <$form>"
+    assert_absent "$home/data/done-archive.md" \
+      "setup error: the tracked default archive must stay unused, or this proves nothing"
+
+    # The exact replay only reaches its record if the configured archive was the
+    # file that got searched.
+    out=$(run_captain "$home" answer sample-header-call --decision-file "$home/answer.txt" 2>&1) \
+      || fail "the configured [markdown] archive was not found under header form <$form>: $out"
+    assert_contains "$out" "answered: sample-header-call" \
+      "the archived answer must replay under header form <$form>"
+  done <<'EOF'
+[markdown]
+[markdown] # the markdown backend
+[ markdown ]
+CRLF
+SINGLE_QUOTED_VALUES
+EOF
+  [ "$index" = 5 ] || fail "not every config form was exercised: $index"
+  pass "every [markdown] config form tasks-axi honors still locates the configured archive"
+}
+
+# The mirror of the test above, and the guarantee that keeps this read from
+# resolving a path retention never writes. tasks-axi does NOT honor a quoted
+# `["markdown"]` table key: it ignores that table entirely and falls back to its
+# own defaults. This read has to fall back too. If it honored the quoted key it
+# would resolve the CONFIGURED archive while retention wrote somewhere else, so
+# the lookup would search a file that is never written and an answered record
+# would read as absent again - the exact failure this whole change removes,
+# restored for one config spelling.
+test_config_forms_tasks_axi_ignores_fall_back_the_same_way() {
+  local home out
+  home=$(make_home markdown-config-quoted-key)
+  printf 'backend = "markdown"\n\n["markdown"]\npath = "data/live-rows.md"\narchive = "data/retired-rows.md"\ndone_keep = 0\n' \
+    > "$home/.tasks.toml"
+
+  tasks_in "$home" add sample-quoted-call "Choose the quoted option" --repo sample >/dev/null \
+    || fail "could not create the call under a quoted table key"
+  run_captain "$home" hold sample-quoted-call --reason "captain quoted choice pending" >/dev/null \
+    || fail "could not hold the call under a quoted table key"
+  printf 'Take the quoted option.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-quoted-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the answer under a quoted table key"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention under a quoted table key"
+
+  # tasks-axi ignored the quoted table, so neither configured file was ever
+  # written; it fell back and archived into this home's default archive instead.
+  assert_absent "$home/data/live-rows.md" \
+    "setup error: tasks-axi is expected to ignore a quoted table key, so the configured backlog must stay unwritten"
+  assert_absent "$home/data/retired-rows.md" \
+    "setup error: tasks-axi is expected to ignore a quoted table key, so the configured archive must stay unwritten"
+  assert_grep "sample-quoted-call" "$home/data/done-archive.md" \
+    "setup error: retention should have fallen back to this home's default archive"
+
+  # So this read has to fall back to that same file. Honoring the quoted key would
+  # point it at the configured archive instead, which retention never wrote, and
+  # the exact replay below would then find no record at all.
+  out=$(run_captain "$home" answer sample-quoted-call --decision-file "$home/answer.txt" 2>&1) \
+    || fail "the fallback archive tasks-axi actually wrote was not the file this read searched: $out"
+  assert_contains "$out" "answered: sample-quoted-call" \
+    "an archived answer must replay out of the same fallback archive tasks-axi wrote"
+  pass "a config form tasks-axi ignores falls back here exactly as it does there"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1185,3 +2187,15 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_archived_captain_answer_still_completes_the_investigation
+test_unanswered_and_absent_captain_calls_still_fail_distinguishably
+test_archived_records_are_readable_but_never_written
+test_a_row_archived_mid_batch_is_still_read_out_of_the_archive
+test_archived_origin_still_owns_a_later_review_pass
+test_unopenable_archive_refuses_instead_of_reading_as_absent
+test_an_archive_read_error_never_disowns_the_origin
+test_an_unsettled_archive_read_outranks_the_legacy_identity
+test_an_archive_skip_names_the_probed_legacy_identity
+test_no_staged_archive_view_survives_a_reader
+test_markdown_config_forms_all_locate_the_archive
+test_config_forms_tasks_axi_ignores_fall_back_the_same_way

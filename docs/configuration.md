@@ -89,6 +89,8 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Retention moves a closed row into that archive rather than deleting it, so firstmate's own checks for whether a durable task record still exists read the archive as well as the backlog, strictly read-only, and resolve both paths from this same `[markdown]` table.
+Keep `path` and `archive` declared here rather than only in a user-level tasks-axi config, so retention and those reads cannot resolve different files; [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) owns that resolution and its measured limits, and [`docs/captain-hold-lifecycle.md`](captain-hold-lifecycle.md) owns the two-file read.
 When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations.
 Secondmate handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own fleet-level validation, delegates the item move to `tasks-axi mv`, and requires a verified receiver wake after a new move becomes durable.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.

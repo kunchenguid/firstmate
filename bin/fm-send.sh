@@ -530,6 +530,11 @@ RESOLVE_HOLD_KEYS=
 # derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
 # means not closed and still carrying the captain-hold annotations tasks-axi
 # preserves even past a hold-until date.
+# The active backlog is deliberately the only file read here, for the same reason
+# `diverged` stays backlog-only in bin/fm-captain-hold.sh: a candidate qualifies
+# only while it is not done and still held for the captain, and backlog retention
+# moves nothing but a CLOSED row into the archive, so no row the archive holds
+# could ever qualify and reading the second file would add only cost.
 fm_send_hold_resolved_id() {  # <task-id> <decision-key>
   local show id state hold_kind
   command -v tasks-axi >/dev/null 2>&1 || return 1
