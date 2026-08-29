@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "Firstmate will then instruct you to drive validation through the no-mistakes CLI" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -352,6 +352,32 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+# Promoted learning (data/learnings.md, recorded 2026-08-22): spawned Claude
+# workers inherit firstmate's CLAUDE_CONFIG_DIR, which has no user-level skills
+# directory, so a worker told to invoke a skill by name gets "Unknown skill" and
+# stalls at the delivery handoff. No ship brief, in any mode, may instruct a
+# worker to invoke the no-mistakes skill; the CLI (`no-mistakes axi run`) is the
+# only worker-facing form. This is the check that promotion demands: a rule that
+# cannot regress silently back into prose.
+test_ship_briefs_never_instruct_skill_invocation() {
+  local home mode id brief
+  home="$TMP_ROOT/no-skill-invocation-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-no-skill-invocation-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: brief did not scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode: brief was not scaffolded"
+    assert_no_grep "/no-mistakes" "$brief" \
+      "$mode: brief instructs a worker to invoke a skill that cannot resolve in a spawned worker's environment"
+  done
+  brief="$home/data/brief-no-skill-invocation-no-mistakes/brief.md"
+  assert_grep "drive it with \`no-mistakes axi run\`" "$brief" \
+    "no-mistakes brief must route the worker through the CLI instead of a skill name"
+  pass "fm-brief.sh: no ship brief instructs a worker to invoke the no-mistakes skill"
 }
 
 test_ship_project_memory_wording() {
@@ -760,6 +786,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_ship_briefs_never_instruct_skill_invocation
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

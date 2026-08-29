@@ -377,3 +377,11 @@ Use `/stow` before an intentional reset when the conversation may hold durable k
 
 The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, generation-bound post-handling acknowledgement, deterministic re-arm recovery after watcher downtime, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying tracked-child arm wrapper.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.
+
+## Promoted learnings and recurrence measurement
+
+A fleet-local learning (`data/learnings.md`, private and not read by any tracked script) only binds once it is a check, refusal, or brief clause rather than prose someone has to remember.
+Promoting one means two tracked artifacts land together: a binding regression test in the matching `tests/<subject>.test.sh` that fails when the guarded defect is present, proven by mutation before it ships, plus a case arm in [`bin/fm-learning-recurrence.sh`](../bin/fm-learning-recurrence.sh) naming the rule's guarded path(s), its banned pattern, and the date it was recorded.
+`bin/fm-learning-recurrence.sh <rule-id>` measures recurrence from git history itself rather than a hand-kept tally: it counts commits whose diff adds a line matching the pattern to a guarded path, split into introductions before the rule existed and recurrences on or after its recorded date.
+A nonzero recurrence count is a signal to escalate the check's design, not to re-record the rule.
+The counting logic lives in `bin/fm-learning-recurrence-lib.sh` so `tests/fm-learning-recurrence.test.sh` can drive it directly against a fixture repository, independent of this repo's own history.

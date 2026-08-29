@@ -161,10 +161,11 @@ When a requested effort value is outside the harness-specific accepted set, `fm-
 This preserves launch success instead of passing a known-bad value.
 For Cursor, select the intended reasoning class through a model id the account's own `--list-models` actually returns, and leave the separate effort axis unset.
 
-## no-mistakes skill invocation
+## Skill invocation
 
-Send the validation skill using the target harness's skill invocation form.
+Send a skill by name using the target harness's skill invocation form below.
 Natural language is acceptable if uncertain.
+Never use this mechanism to trigger no-mistakes validation on a spawned worker: per `AGENTS.md`'s Validate section, instruct the worker in plain text to drive `no-mistakes axi run` directly, because a spawned worker's restricted skills directory does not resolve a skill-name invocation and the attempt silently stalls (binding check: `tests/fm-brief.test.sh:test_ship_briefs_never_instruct_skill_invocation`). The per-harness forms and verified mechanics below remain the reference for other skills.
 
 - claude: `/<skill>`, for example `/no-mistakes`.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
