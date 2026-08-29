@@ -296,6 +296,9 @@ family_for_basename() {
     fm-backend-orca.test.sh)
       printf '%s\n' orca
       ;;
+    fm-backend-superset.test.sh)
+      printf '%s\n' superset
+      ;;
     *)
       printf '%s\n' unclassified
       ;;
@@ -306,7 +309,7 @@ expected_gate_skip_for_family() {
   case "$1" in
     real-herdr-gated) printf '%s\n' herdr ;;
     live-harness-optin) printf '%s\n' optin-env ;;
-    cmux|zellij|orca) printf '%s\n' optional-binary ;;
+    cmux|zellij|orca|superset) printf '%s\n' optional-binary ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
@@ -327,6 +330,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+superset
 unclassified
 EOF
 }
@@ -1099,6 +1103,10 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
       ;;
+    bin/backends/superset*)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' superset
+      ;;
     bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
@@ -1248,7 +1256,7 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore)
+    README.md|VISION.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
     *)
       families_for_test_reference "$path" \

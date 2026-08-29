@@ -47,14 +47,16 @@
 #   docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
-#   auto-detected herdr or cmux spawn prints a loud stderr notice;
-#   auto-detected tmux stays silent; zellij and orca are never auto-detected.
+#   herdr, zellij, orca, cmux, and superset. Orca and superset each own both
+#   the task worktree and terminal, so ship/scout spawns on either do not run
+#   treehouse get; cmux is a session provider only, exactly like herdr/zellij,
+#   so it does. An auto-detected herdr or cmux spawn prints a loud stderr
+#   notice; auto-detected tmux stays silent; zellij, orca, and superset are
+#   never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. cmux and superset do not support --secondmate
+#   spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -658,6 +660,9 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+SUPERSET_ABORT_CLEANUP=0
+SUPERSET_WORKSPACE_ID=
+SUPERSET_TERMINAL_ID=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -698,6 +703,21 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# parse_superset_worktree_result: unlike Orca's 2-or-3-field result, Superset
+# never returns an implicit terminal (bin/backends/superset.sh finding #2),
+# so this is a plain 2-field "<workspace-id>\t<worktree-path>" split. An
+# empty raw string (nothing printed - full self-cleanup already succeeded)
+# sets both fields empty and returns 1.
+parse_superset_worktree_result() {  # <raw> -> sets SUPERSET_WORKSPACE_ID, WT
+  local raw=$1
+  SUPERSET_WORKSPACE_ID=${raw%%$'\t'*}
+  if [ "$raw" = "$SUPERSET_WORKSPACE_ID" ]; then
+    WT=
+    return 1
+  fi
+  WT=${raw#*$'\t'}
 }
 
 spawn_abort_cleanup() {
@@ -767,6 +787,34 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+          } > "$STATE/$ID.meta" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+  if [ "$SUPERSET_ABORT_CLEANUP" = 1 ]; then
+    SUPERSET_ABORT_CLEANUP=0
+    if [ -n "${SUPERSET_TERMINAL_ID:-}" ] && [ -n "${SUPERSET_WORKSPACE_ID:-}" ]; then
+      fm_backend_kill superset "$SUPERSET_WORKSPACE_ID:$SUPERSET_TERMINAL_ID" 2>/dev/null || true
+    fi
+    if [ -n "${SUPERSET_WORKSPACE_ID:-}" ]; then
+      if ! fm_backend_remove_worktree superset "$SUPERSET_WORKSPACE_ID" 2>/dev/null; then
+        mkdir -p "$STATE" 2>/dev/null || true
+        if [ -d "$STATE" ]; then
+          {
+            echo "window=$W"
+            echo "worktree=${WT:-}"
+            echo "project=$PROJ_ABS"
+            echo "harness=$HARNESS"
+            echo "kind=$KIND"
+            [ -z "${MODE:-}" ] || echo "mode=$MODE"
+            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
+            echo "tasktmp=${TASK_TMP:-}"
+            echo "model=${MODEL:-default}"
+            echo "effort=${EFFORT:-default}"
+            echo "backend=superset"
+            echo "superset_workspace_id=$SUPERSET_WORKSPACE_ID"
+            [ -z "${SUPERSET_TERMINAL_ID:-}" ] || echo "superset_terminal_id=$SUPERSET_TERMINAL_ID"
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
@@ -985,8 +1033,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = superset ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=superset does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
+  fi
+  if [ "$BACKEND" = superset ]; then
+    fm_backend_superset_runtime_check || exit 1
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -2157,6 +2212,29 @@ EOF
     fi
     T="$ORCA_TERMINAL"
     ;;
+  superset)
+    set +e
+    SUPERSET_WT_RAW=$(fm_backend_superset_worktree_create "$PROJ_ABS" "$W")
+    SUPERSET_WT_STATUS=$?
+    set -e
+    if [ "$SUPERSET_WT_STATUS" -ne 0 ]; then
+      if [ "$SUPERSET_WT_STATUS" -eq 2 ] && [ -n "$SUPERSET_WT_RAW" ]; then
+        if parse_superset_worktree_result "$SUPERSET_WT_RAW" && [ -n "$SUPERSET_WORKSPACE_ID" ]; then
+          SUPERSET_ABORT_CLEANUP=1
+        fi
+      fi
+      exit 1
+    fi
+    parse_superset_worktree_result "$SUPERSET_WT_RAW" || true
+    SUPERSET_ABORT_CLEANUP=1
+    if [ -z "$SUPERSET_WORKSPACE_ID" ] || [ -z "$WT" ]; then
+      echo "error: superset did not return a workspace id/path for $W" >&2
+      exit 1
+    fi
+    validate_spawn_worktree "superset ws create" "$W"
+    SUPERSET_TERMINAL_ID=$(fm_backend_superset_terminal_create "$SUPERSET_WORKSPACE_ID" "$W") || exit 1
+    T="$SUPERSET_WORKSPACE_ID:$SUPERSET_TERMINAL_ID"
+    ;;
 esac
 fi
 if [ "$KIND" = secondmate ]; then
@@ -2177,6 +2255,7 @@ spawn_send_text_line() {  # <target> <text>
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+    superset) fm_backend_superset_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() {  # <target>
@@ -2194,6 +2273,7 @@ spawn_send_literal() {  # <target> <text>
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
     cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+    superset) fm_backend_superset_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
@@ -2203,6 +2283,7 @@ spawn_send_key() {  # <target> <key>
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+    superset) fm_backend_superset_send_key "$1" "$2" ;;
   esac
 }
 
@@ -2281,7 +2362,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$BACKEND" != superset ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2690,6 +2771,7 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+[ "$BACKEND" = superset ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -2702,7 +2784,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id superset_workspace_id superset_terminal_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2746,6 +2828,10 @@ preserve_relaunch_meta() {
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
+  if [ "$BACKEND" = superset ]; then
+    echo "superset_workspace_id=$SUPERSET_WORKSPACE_ID"
+    echo "superset_terminal_id=$SUPERSET_TERMINAL_ID"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -2775,6 +2861,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+[ "$BACKEND" = superset ] && SUPERSET_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

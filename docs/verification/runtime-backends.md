@@ -762,6 +762,48 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## Superset
+
+Real readiness and response-shape evidence was gathered on 2026-08-20 against `superset` CLI v1.23.0 on macOS, driving a real local host service (`superset status --json` reporting `running=true`, `healthy=true`).
+
+```sh
+superset status --json
+```
+
+Observed fields:
+
+```text
+running=true
+healthy=true
+```
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Scratch session create | `ws create --local --name <name> --json` | Returned `{workspace:{id,...,type:"session"},terminals:[],agents:[]}`; no `worktreePath` field. |
+| Project-backed create | `ws create --local --project <id> --name <name> --branch <name> --skip-branch-prefix --json` | Returned `{workspace:{id,...,type:"worktree"},terminals:[{terminalId,label:"Workspace Setup"}],agents:[],alreadyExists,txid}`; still no `worktreePath`. |
+| Path resolution | `ws get <id> --json` | Returned the flat shape with `worktreePath` and `worktreeExists`, required as a follow-up after every project-backed create. |
+| Terminal create | `terminals create --workspace <id> --json` | Returned `{terminalId,status:"active"}`; no `--title` flag exists. |
+| Terminal read | `terminals read --workspace <id> --terminal <id> [--max-lines N] --json` | Returned `{terminalId,cols,rows,text}`, plain unstyled text; correct on the very first read of a brand-new terminal. |
+| Terminal send (default) | `terminals send --workspace <id> --terminal <id> --text <text> --json` | Typed the text and pressed Enter (`submitted:true`); executed the command. |
+| Terminal send (staged) | `terminals send ... --text <text> --no-submit --json` | Left text unsubmitted (`submitted:false`). |
+| Empty text | `terminals send ... --text "" --json` | Rejected: `Error: text: Too small: expected string to have >=1 characters`. |
+| Embedded newline/CR | `terminals send ... --text "\n"` or `"\r"` with `--no-submit` | Inserted as literal text; did not submit the already-staged command. |
+| Ctrl-C | `terminals send ... --text "\x03" --json` | Delivered a real interrupt: the running `sleep 60` exited with `^C` and a `[130]` prompt. |
+| Ctrl-U | `terminals send ... --text "\x15" --no-submit --json` | Inserted as literal text (rendered as caret-notation `^U`); did NOT clear the line. |
+| Terminal close | `terminals close --workspace <id> --terminal <id> --json` | Returned `{terminalId,status:"disposed"}`. |
+| Workspace delete | `ws delete <id> --local --json` | Returned `{deleted:[id],warnings:[]}`; performed no dirty-worktree check - a workspace with an uncommitted tracked file was deleted silently. |
+| CLI errors | any failing command with `--json` | Plain-text `Error: ...` on stderr, exit 1, empty stdout; `--json` does not change error formatting. |
+
+`superset projects create`'s exact JSON response shape was NOT live-verified: there is no `projects delete` command to clean up a throwaway registration, so `bin/backends/superset.sh` requires the project pre-registered instead of guessing at that shape.
+
+```sh
+tests/fm-backend-superset.test.sh
+tests/fm-backend.test.sh
+tests/fm-bootstrap.test.sh
+```
+
+The fake-Superset suite covers the adapter primitives (capture, send, keys, composer state) and the `fm-spawn.sh` integration paths (metadata write and harness launch, secondmate refusal, runtime-not-ready refusal, and abort cleanup on a failed terminal create or a failed cleanup attempt).
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

@@ -36,7 +36,12 @@
 # quarantine entries with the rest of the volatile state.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
-# an Orca target from ambient CLI state.
+# an Orca target from ambient CLI state. Superset tasks follow the identical
+# shape - close the recorded terminal, then remove the recorded workspace
+# through `superset ws delete` - because that command performs no dirty-check
+# of its own (bin/backends/superset.sh finding #3), so this teardown's own
+# require_superset_worktree_path_match gate is the only thing that can refuse
+# a mismatched or unlanded removal.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -676,6 +681,8 @@ WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
+T_SUPERSET=
+[ "$BACKEND" != superset ] || T_SUPERSET=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
@@ -690,6 +697,8 @@ if [ -z "$BUSY_GEN" ]; then
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
+SUPERSET_WORKSPACE_ID=$(fm_meta_get "$META" superset_workspace_id)
+SUPERSET_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -876,10 +885,24 @@ require_orca_terminal() {
   printf '%s\n' "$terminal"
 }
 
+require_superset_workspace_id() {
+  local meta=$1 id
+  id=$(meta_value "$meta" superset_workspace_id)
+  if [ -z "$id" ]; then
+    echo "error: missing superset_workspace_id in $meta; cannot remove Superset worktree" >&2
+    return 1
+  fi
+  printf '%s\n' "$id"
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
+fi
+
+if [ "$BACKEND" = superset ] && [ "$KIND" != secondmate ]; then
+  SUPERSET_WORKSPACE_ID=$(require_superset_workspace_id "$META") || exit 1
 fi
 
 # Where a harness's firstmate-owned global turn-end registry entry lives is
@@ -1781,6 +1804,39 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
+# require_superset_worktree_path_match: the same identity-before-removal proof
+# as require_orca_worktree_path_match, for the same reason - `superset ws
+# delete` performs NO dirty-worktree check of its own
+# (bin/backends/superset.sh finding #3), so this REFUSED-and-preserve gate is
+# the only thing standing between a mismatched workspace id and a silently
+# discarded worktree.
+require_superset_worktree_path_match() {
+  local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
+  resolved=$(fm_backend_worktree_path superset "$worktree_id") || {
+    echo "REFUSED: cannot resolve Superset workspace id $worktree_id to a path; preserving metadata." >&2
+    return 1
+  }
+  inspected_abs=$(canonical_existing_dir "$inspected") || {
+    echo "REFUSED: cannot canonicalize inspected worktree ${inspected:-<missing>}; preserving metadata." >&2
+    return 1
+  }
+  resolved_abs=$(canonical_existing_dir "$resolved") || {
+    echo "REFUSED: Superset workspace id $worktree_id resolved to uninspectable path ${resolved:-<missing>}; preserving metadata." >&2
+    return 1
+  }
+  if [ "$resolved_abs" != "$inspected_abs" ]; then
+    echo "REFUSED: Superset workspace id $worktree_id resolves to $resolved_abs, not inspected worktree $inspected_abs." >&2
+    echo "Cannot verify dirty or unlanded work for the worktree Superset would remove; preserving metadata." >&2
+    return 1
+  fi
+}
+
+require_superset_worktree_path_match_if_present() {
+  local worktree_id=$1 inspected=$2
+  [ -n "$inspected" ] && [ -e "$inspected" ] || return 0
+  require_superset_worktree_path_match "$worktree_id" "$inspected"
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -2247,7 +2303,7 @@ preflight_descendant_task_locks() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_superset_workspace_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2270,6 +2326,13 @@ validate_firstmate_home_children_removal() {
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
+      fi
+    elif [ "$child_backend" = superset ]; then
+      child_superset_workspace_id=$(require_superset_workspace_id "$child_meta") || return 1
+      if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+        child_proj=$(meta_value "$child_meta" project)
+        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        require_superset_worktree_path_match "$child_superset_workspace_id" "$child_wt" || return 1
       fi
     elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
@@ -2414,7 +2477,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_superset_workspace_id child_return_rc child_busy_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2432,6 +2495,12 @@ cleanup_firstmate_home_children() {
     fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+      if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      fi
+    fi
+    if [ "$child_backend" = superset ] && [ "$child_kind" != secondmate ]; then
+      child_superset_workspace_id=$(require_superset_workspace_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
@@ -2470,6 +2539,13 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+    elif [ "$child_backend" = superset ]; then
+      if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+          "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      fi
+      fm_backend_remove_worktree "$child_backend" "$child_superset_workspace_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -2626,6 +2702,16 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+if [ "$BACKEND" = superset ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+  if ! inspectable_git_worktree "$WT"; then
+    echo "REFUSED: Superset ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
+    echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
+    exit 1
+  fi
+  require_superset_worktree_path_match "$SUPERSET_WORKSPACE_ID" "$WT" || exit 1
+  SUPERSET_PATH_MATCH_VERIFIED=1
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -2691,6 +2777,24 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ "$BACKEND" = superset ] && [ "$KIND" != secondmate ]; then
+  if [ "$SUPERSET_PATH_MATCH_VERIFIED" != 1 ]; then
+    require_superset_worktree_path_match_if_present "$SUPERSET_WORKSPACE_ID" "$WT" || exit 1
+    SUPERSET_PATH_MATCH_VERIFIED=1
+  fi
+  if [ -d "$WT" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.opencode/plugins/fm-busy-state.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  fi
+  [ -z "$T_SUPERSET" ] || fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+  fm_backend_remove_worktree "$BACKEND" "$SUPERSET_WORKSPACE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -2759,7 +2863,7 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
-elif [ "$BACKEND" != orca ]; then
+elif [ "$BACKEND" != orca ] && [ "$BACKEND" != superset ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then

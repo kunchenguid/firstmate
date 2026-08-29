@@ -466,9 +466,10 @@ test_backend_name_explicit_beats_detection() {
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
+  fm_backend_validate superset 2>/dev/null || fail "fm_backend_validate should accept superset"
   local out
   # bogus names a backend with no adapter at all; tmux, herdr, zellij, orca,
-  # and cmux are all known adapters and spawn-supported.
+  # cmux, and superset are all known adapters and spawn-supported.
   out=$(fm_backend_validate bogus 2>&1) && fail "fm_backend_validate should refuse bogus (no such adapter)"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate did not name the rejected backend"
   out=$(fm_backend_validate codex-app 2>&1) && fail "fm_backend_validate should refuse codex-app"
@@ -510,6 +511,7 @@ test_backend_validate_spawn_accepts_orca() {
   fm_backend_validate_spawn zellij 2>/dev/null || fail "fm_backend_validate_spawn should accept zellij"
   fm_backend_validate_spawn orca 2>/dev/null || fail "fm_backend_validate_spawn should accept orca"
   fm_backend_validate_spawn cmux 2>/dev/null || fail "fm_backend_validate_spawn should accept cmux"
+  fm_backend_validate_spawn superset 2>/dev/null || fail "fm_backend_validate_spawn should accept superset"
   out=$(fm_backend_validate_spawn bogus 2>&1) && fail "fm_backend_validate_spawn should still refuse unknown backends"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate_spawn did not preserve unknown-backend validation"
   out=$(fm_backend_validate_spawn codex-app 2>&1) && fail "fm_backend_validate_spawn should refuse codex-app"
@@ -595,6 +597,7 @@ test_backend_of_selector_matches_explicit_target_meta() {
   fm_write_meta "$state/tmux-task.meta" "window=firstmate:fm-tmux-task"
   fm_write_meta "$state/custom-window-task.meta" "window=custom-window"
   fm_write_meta "$state/orca-task.meta" "window=fm-orca-task" "terminal=term-orca-task" "backend=orca"
+  fm_write_meta "$state/superset-task.meta" "window=fm-superset-task" "superset_workspace_id=ws-superset-task" "superset_terminal_id=term-superset-task" "backend=superset"
 
   [ "$(fm_backend_of_selector 'dotfiles-d6' 'default:wA:p2' "$state")" = herdr ] \
     || fail "bare non-fm task id selector should use its recorded backend"
@@ -610,6 +613,10 @@ test_backend_of_selector_matches_explicit_target_meta() {
     || fail "raw window selector matching metadata should not require tmux fallback"
   [ "$(fm_backend_of_selector 'term-orca-task' 'term-orca-task' "$state")" = orca ] \
     || fail "matching an explicit Orca terminal handle should inherit metadata backend"
+  [ "$(fm_backend_resolve_selector 'fm-superset-task' "$state")" = "ws-superset-task:term-superset-task" ] \
+    || fail "Superset fm-<id> selector should resolve to the reconstructed workspace:terminal target, not window="
+  [ "$(fm_backend_of_selector 'ws-superset-task:term-superset-task' 'ws-superset-task:term-superset-task' "$state")" = superset ] \
+    || fail "matching an explicit Superset composite target should inherit metadata backend"
   [ "$(fm_backend_of_selector 'default:w1:p2' 'default:w1:p2' "$state")" = herdr ] \
     || fail "explicit backend target matching metadata should use that task's backend"
   [ "$(fm_backend_of_selector 'firstmate:fm-tmux-task' 'firstmate:fm-tmux-task' "$state")" = tmux ] \

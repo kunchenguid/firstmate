@@ -31,6 +31,7 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
+    "docs/superset-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -99,6 +100,10 @@
       "target": "docs/verification/runtime-backends.md"
     },
     {
+      "source": "docs/superset-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
@@ -150,6 +155,10 @@
     },
     {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/firstmate-superset/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -311,6 +320,10 @@
     {
       "path": "docs/subagent-guard.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/superset-backend.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/supervision-protocols/claude.md",

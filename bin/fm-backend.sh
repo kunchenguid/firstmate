@@ -25,7 +25,13 @@
 # the documented macOS fallback signals when cmux's claude wrapper strips that
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
-# docs/cmux-backend.md for its empirical basis.
+# docs/cmux-backend.md for its empirical basis. P6 adds bin/backends/superset.sh,
+# also EXPERIMENTAL and spawn-capable, behind `--backend superset`/
+# `FM_BACKEND=superset`/`config/backend` and never auto-detected - like Orca it
+# also owns the task worktree, but unlike Orca's single terminal handle it
+# addresses a terminal by a composite "<workspace_id>:<terminal_id>" target,
+# mirroring cmux's target-string convention; see docs/superset-backend.md for
+# its empirical basis.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -33,8 +39,8 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
-# carries an explicit `backend=` line.
+# spawn-capable backend, currently experimental herdr, zellij, orca, cmux, or
+# superset, carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -65,9 +71,13 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# superset is EXPERIMENTAL and spawn-capable; like orca it is also the
+# worktree provider, but it addresses its terminal by a composite
+# workspace:terminal target like cmux - verified against the real 1.23.0 CLI
+# (docs/superset-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux superset"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux superset"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -304,17 +314,20 @@ fm_backend_validate_spawn() {  # <name>
 #     spawn/liveness paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
-#     so it drops both treehouse and any other backend's session CLI.
+#     (tmux, herdr, zellij, cmux); orca and superset each own their own task
+#     worktree and terminal, so both drop treehouse and any other backend's
+#     session CLI. superset's adapter parses JSON with node (already a
+#     universal COMMON_TOOLS requirement), not jq.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
   case "$1" in
-    tmux)   printf '%s' 'tmux treehouse' ;;
-    herdr)  printf '%s' 'herdr jq treehouse' ;;
-    zellij) printf '%s' 'zellij jq treehouse' ;;
-    cmux)   printf '%s' 'cmux jq treehouse' ;;
-    orca)   printf '%s' 'orca' ;;
+    tmux)     printf '%s' 'tmux treehouse' ;;
+    herdr)    printf '%s' 'herdr jq treehouse' ;;
+    zellij)   printf '%s' 'zellij jq treehouse' ;;
+    cmux)     printf '%s' 'cmux jq treehouse' ;;
+    orca)     printf '%s' 'orca' ;;
+    superset) printf '%s' 'superset' ;;
     *) return 1 ;;
   esac
 }
@@ -350,11 +363,16 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend terminal window
+  local meta=$1 backend terminal window workspace
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+  fi
+  if [ "$backend" = superset ]; then
+    workspace=$(fm_meta_get "$meta" superset_workspace_id)
+    terminal=$(fm_meta_get "$meta" superset_terminal_id)
+    [ -n "$workspace" ] && [ -n "$terminal" ] && { printf '%s:%s' "$workspace" "$terminal"; return 0; }
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
@@ -523,6 +541,21 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
+    superset)
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: legacy Superset endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      workspace=$(fm_backend_meta_exact_value "$meta" superset_workspace_id) || workspace=
+      surface=$(fm_backend_meta_exact_value "$meta" superset_terminal_id) || surface=
+      if [ "$window" != "fm-$id" ] \
+        || ! fm_backend_endpoint_atom_valid "$workspace" \
+        || ! fm_backend_endpoint_atom_valid "$surface"; then
+        echo "REFUSED: Superset endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      window="$workspace:$surface"
+      ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_BACKEND=$backend
@@ -532,12 +565,17 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
 }
 
 fm_backend_meta_for_window() {  # <target> <state-dir>
-  local target=$1 state=$2 meta window terminal
+  local target=$1 state=$2 meta window terminal superset_ws superset_term
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     window=$(fm_meta_get "$meta" window)
     terminal=$(fm_meta_get "$meta" terminal)
-    { [ -n "$window" ] && [ "$window" = "$target" ]; } || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } || continue
+    superset_ws=$(fm_meta_get "$meta" superset_workspace_id)
+    superset_term=$(fm_meta_get "$meta" superset_terminal_id)
+    { [ -n "$window" ] && [ "$window" = "$target" ]; } \
+      || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } \
+      || { [ -n "$superset_ws" ] && [ -n "$superset_term" ] && [ "$superset_ws:$superset_term" = "$target" ]; } \
+      || continue
     printf '%s' "$meta"
     return 0
   done
@@ -631,6 +669,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    superset)
+      if [ -z "${_FM_BACKEND_SUPERSET_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$FM_BACKEND_LIB_DIR/backends/superset.sh" || return 1
+        _FM_BACKEND_SUPERSET_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -702,6 +747,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    superset) fm_backend_superset_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -717,6 +763,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    superset) fm_backend_superset_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -734,6 +781,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    superset) fm_backend_superset_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -752,6 +800,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    superset) fm_backend_superset_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -762,6 +811,7 @@ fm_backend_remove_worktree() {  # <backend> <worktree-id>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     orca) fm_backend_orca_remove_worktree "$@" ;;
+    superset) fm_backend_superset_remove_worktree "$@" ;;
     *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
   esac
 }
@@ -772,6 +822,7 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     orca) fm_backend_orca_worktree_path "$@" ;;
+    superset) fm_backend_superset_worktree_path "$@" ;;
     *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
   esac
 }
@@ -815,6 +866,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
+    superset) fm_backend_superset_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -863,6 +915,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
     cmux)
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
+      ;;
+    superset)
+      fm_backend_source superset || return 1
+      fm_backend_superset_target_ready "$target" "$expected_label"
       ;;
     *)
       return 1

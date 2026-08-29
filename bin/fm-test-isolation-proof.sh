@@ -150,6 +150,9 @@ exclusion_reason() {
     fm-backend-orca.test.sh)
       printf '%s\n' 'orca backend surface; keep serial until dedicated isolation proof'
       ;;
+    fm-backend-superset.test.sh)
+      printf '%s\n' 'superset backend surface; keep serial until dedicated isolation proof'
+      ;;
     *)
       return 1
       ;;
