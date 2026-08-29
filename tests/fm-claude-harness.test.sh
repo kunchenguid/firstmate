@@ -15,6 +15,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-claude-harness)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+NODE_BIN=$(command -v node) || fail "node is required for the Orca Claude spawn fixture"
+NODE_BIN_DIR=${NODE_BIN%/*}
 
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -160,6 +162,60 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_FAKE_ORCA_LOG"
+state=$(cat "$FM_FAKE_CLAUDE_STATE" 2>/dev/null || true)
+case "${1:-}:${2:-}" in
+  status:*)
+    printf '%s\n' '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}'
+    ;;
+  repo:show)
+    printf '%s\n' '{"ok":true,"result":{"repo":{"id":"repo-1"}}}'
+    ;;
+  worktree:create)
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"},"terminal":{"handle":"term-1"}}}\n' "$FM_FAKE_ORCA_WT"
+    ;;
+  terminal:send)
+    text_arg=
+    enter=0
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --text)
+          shift
+          text_arg=${1:-}
+          ;;
+        --enter) enter=1 ;;
+      esac
+      shift
+    done
+    case "$text_arg" in
+      *'claude --dangerously-skip-permissions'*)
+        printf 'command-typed\n' > "$FM_FAKE_CLAUDE_STATE"
+        state=command-typed
+        ;;
+    esac
+    if [ "$enter" = 1 ] && [ -z "$text_arg" ] && [ "$state" = command-typed ]; then
+      printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE"
+    fi
+    printf '%s\n' '{"ok":true,"result":{}}'
+    ;;
+  terminal:read)
+    case "$state" in
+      trust-no)
+        printf '{"ok":true,"result":{"terminal":{"tail":[" Accessing workspace:",""," %s",""," Quick safety check: is this yours?",""," ❯ No, exit","   Yes, I trust this folder",""," Enter to confirm . Esc to cancel"]}}}\n' "$FM_FAKE_ORCA_WT"
+        ;;
+      *)
+        printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":["shell starting","$ "]}}}'
+        ;;
+    esac
+    ;;
+  *) printf '%s\n' '{"ok":true,"result":{}}' ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   printf '%s\n' "$fakebin"
 }
@@ -178,8 +234,25 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
   : > "$case_dir/keys.log"
+  : > "$case_dir/orca.log"
   : > "$case_dir/claude.state"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+run_orca_spawn() {
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  shift 6
+  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_ORCA_WT="$wt" TMUX= \
+    FM_FAKE_ORCA_LOG="$case_dir/orca.log" \
+    FM_FAKE_CLAUDE_STATE="$case_dir/claude.state" \
+    FM_CLAUDE_TRUST_POLLS=2 FM_CLAUDE_TRUST_CLEAR_POLLS=2 \
+    FM_CLAUDE_TRUST_POLL_INTERVAL=0 \
+    PATH="$fakebin:$NODE_BIN_DIR:$BASE_PATH" \
+    "$SPAWN" "$id" "$proj" --backend orca --harness claude \
+      --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 read_spawn_record() {
@@ -401,6 +474,31 @@ test_claude_final_detection_poll_gets_a_full_clear_budget() {
   pass "fm-spawn: final-poll detection retains a full dialog-clearance budget"
 }
 
+test_claude_orca_capability_gap_stays_alive_and_loud() {
+  local id rec out rc expected count
+  id="claude-orca-gap-z13-$$"
+  rec=$(make_spawn_case orca-gap "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(run_orca_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "an Orca trust dialog should leave the worker alive for manual clearance"
+  expected="blocked: backend=orca task=$id requires a human keystroke to clear Claude's workspace-trust dialog; select \"Yes, I trust this folder\" with Down, then press Enter; worker left alive on term-1"
+  count=$(printf '%s\n' "$out" | grep -Fxc "$expected" || true)
+  [ "$count" = 1 ] || fail "the Orca capability gap should emit exactly one actionable diagnostic, got $count"
+  assert_grep "$expected" "$HOME_DIR/state/$id.status" \
+    "the Orca capability gap did not leave a supervisor-visible blocker"
+  assert_not_contains "$(cat "$CASE_DIR/orca.log")" "Down" \
+    "the spawn attempted a key Orca is guaranteed to reject"
+  assert_not_contains "$out" "unsupported Orca key" \
+    "the capability gap was detected only after Orca rejected the key"
+  [ "$(cat "$CASE_DIR/claude.state")" = trust-no ] \
+    || fail "the Orca worker did not remain alive on the workspace-trust dialog"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "the non-fatal Orca capability gap incorrectly failed the spawn"
+  pass "fm-spawn: Orca leaves Claude alive and loudly requests manual trust clearance"
+}
+
 test_claude_already_trusted_spawn_never_touches_the_dialog
 test_claude_trust_dialog_is_navigated_never_a_blind_enter
 test_claude_stuck_dialog_fails_loudly
@@ -413,3 +511,4 @@ test_claude_stale_dialog_scrollback_never_receives_keys
 test_claude_unreadable_settle_window_fails_with_uncertainty
 test_claude_blank_capture_remains_inconclusive
 test_claude_final_detection_poll_gets_a_full_clear_budget
+test_claude_orca_capability_gap_stays_alive_and_loud

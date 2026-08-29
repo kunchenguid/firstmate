@@ -14,10 +14,10 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 
 Fresh-worktree or first-machine launch may show a workspace-trust dialog: `--dangerously-skip-permissions` bypasses PERMISSION checks only, never that separate gate.
-`../../../bin/fm-spawn.sh` now clears it automatically on every launch and relaunch, so firstmate no longer peeks or sends a key for it.
+`../../../bin/fm-spawn.sh` now clears it automatically on every launch and relaunch whose backend can deliver Down; a backend without that capability leaves Claude alive on the dialog and emits and records one blocked human-keystroke diagnostic instead of attempting a rejected key.
 The dialog is cancel-first and cancel-focused by default (verified live, Claude Code 2.1.251): a bare Enter selects "No, exit" and quits claude immediately, so never accept it with a plain `--key Enter` - the detector and the required Down-then-Enter sequence live in `../../../bin/fm-composer-lib.sh` (`fm_composer_claude_trust_dialog_state`) and `fm-spawn.sh`'s claude launch path, the one owner for both.
 Accepting the dialog for a git worktree persists under the repository's own checkout path in `~/.claude.json`, never the worktree's own path, so every other worktree of an already-trusted repository launches with no dialog at all; firstmate never edits that file itself.
-A spawn that observes the dialog but cannot clear it or confirm that the launch brief resumed processing fails loudly in `state/<id>.status` rather than leaving a silently idle pane.
+On a capable backend, a spawn that observes the dialog but cannot clear it or confirm that the launch brief resumed processing fails loudly in `state/<id>.status` rather than leaving a silently idle pane.
 An unreadable detection window fails separately because a dialog may still be pending, while a definitely already-trusted launch retains the existing spawn path without a new processing requirement.
 Treat either failure like any other failed spawn by inspecting the pane and using `stuck-crewmate-recovery` if it recurs.
 

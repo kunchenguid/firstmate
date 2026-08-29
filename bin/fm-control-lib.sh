@@ -166,14 +166,14 @@ fm_control_exit_command() {  # <harness>
 }
 
 # Which named keys a backend adapter can deliver. Every session provider
-# normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
-# exposes only an interrupt and an Enter, so it can deliver neither Escape nor
-# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
+# normalizes Enter, Ctrl+C, Down, and the Ctrl+U composer clear; Orca's terminal
+# API exposes only an interrupt and an Enter, so it can deliver none of Escape,
+# Down, or Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
     tmux|herdr|zellij|cmux)
-      case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
+      case "$key" in Escape|Enter|C-c|C-u|Down) return 0 ;; esac
       ;;
     orca)
       case "$key" in Enter|C-c) return 0 ;; esac

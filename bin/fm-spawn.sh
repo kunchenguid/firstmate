@@ -2462,6 +2462,10 @@ claude_trust_dialog_clear() {
           ;;
         trust-unfocused)
           [ "$clear_i" -lt "$clear_max" ] || return 1
+          if ! fm_control_backend_supports_key "$BACKEND" Down; then
+            claude_spawn_human_trust_required
+            return 0
+          fi
           spawn_send_key "$T" Down || return 1
           verification_due=1
           ;;
@@ -2486,6 +2490,13 @@ claude_trust_dialog_clear() {
 claude_spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
+}
+
+claude_spawn_human_trust_required() {
+  local line
+  line="blocked: backend=$BACKEND task=$ID requires a human keystroke to clear Claude's workspace-trust dialog; select \"Yes, I trust this folder\" with Down, then press Enter; worker left alive on $T"
+  printf '%s\n' "$line" >> "$STATE/$ID.status"
+  printf '%s\n' "$line" >&2
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then

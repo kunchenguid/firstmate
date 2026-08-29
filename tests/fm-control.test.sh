@@ -346,7 +346,7 @@ test_backend_key_capability_matrix() {
   for backend in tmux herdr zellij cmux; do
     # C-u is the composer clear muse's interrupt needs; every session provider
     # but Orca normalizes it (bin/backends/*.sh).
-    for key in Escape Enter C-c C-u; do
+    for key in Escape Enter C-c C-u Down; do
       fm_control_backend_supports_key "$backend" "$key" \
         || fail "$backend should be able to deliver $key"
     done
@@ -355,6 +355,8 @@ test_backend_key_capability_matrix() {
     && fail "orca's terminal API has no Escape and must not claim it"
   fm_control_backend_supports_key orca C-u \
     && fail "orca's terminal API has no composer clear and must not claim one"
+  fm_control_backend_supports_key orca Down \
+    && fail "orca's terminal API has no Down key and must not claim one"
   fm_control_backend_supports_key orca C-c || fail "orca should deliver C-c"
   fm_control_backend_supports_key orca Enter || fail "orca should deliver Enter"
   pass "fm-control-lib: the backend key matrix matches each adapter's real send-key surface"
