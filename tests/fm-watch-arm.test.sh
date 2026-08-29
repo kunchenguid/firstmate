@@ -95,14 +95,13 @@ write_remote_delta() {  # <result-path> <status-line>
 }
 
 status_signature() {  # <status-path>
-  local size ident epoch birth=''
-  size=$(LC_ALL=C wc -c < "$1" | tr -d '[:space:]')
-  if [ "$(uname)" = Darwin ]; then
-    ident=$(stat -f '%d:%i' "$1"); epoch=$(stat -f '%B' "$1"); [ "$epoch" = 0 ] || birth=$(stat -f '%FB' "$1")
-  else
-    ident=$(stat -c '%d:%i' "$1"); epoch=$(stat -c '%W' "$1"); [ "$epoch" = 0 ] || birth=$(stat -c '%w' "$1")
-  fi
-  if [ -n "$birth" ]; then printf '%s@strong:%s:%s' "$size" "$ident" "$birth"; else printf '%s@weak:%s' "$size" "$ident"; fi
+  bash -c '
+    . "$1"
+    reported=$(status_observed_signature "$2") || exit 1
+    size=$(_fm_status_file_size "$2") || exit 1
+    ident=$(_fm_open_decisions_file_ident "$2") || exit 1
+    printf "v2\t%s\t%s@%s" "$reported" "$size" "$ident"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$1"
 }
 
 wait_for_file_text() {  # <file> <fixed-text>

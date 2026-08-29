@@ -446,6 +446,42 @@ EOF
   pass "transient unreadable signals recover without advancing their position"
 }
 
+test_permission_recovery_reclassifies_catchall_status() {
+  local dir state status before_ident after_ident out
+  dir=$(make_supercase catchall-permission-recovery); state="$dir/state"
+  status="$state/permission-r8.status"
+  printf 'blocked: release approval required\nworking: preserving context\n' > "$status"
+  before_ident=$(_fm_open_decisions_file_ident "$status")
+  chmod 000 "$status"
+  if [ -r "$status" ]; then
+    chmod 600 "$status"
+    pass "daemon permission recovery skipped because permissions cannot deny reads"
+    return
+  fi
+
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ "$(status_seen_offset "$state" permission-r8)" = 0 ] \
+    || { chmod 600 "$status"; fail "an unreadable catch-all status advanced its classification position"; }
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ "$(grep -c 'unreadable status span' "$state/.subsuper-escalations")" = 1 ] \
+    || { chmod 600 "$status"; fail "an unchanged unreadable catch-all status reported repeatedly"; }
+
+  chmod 600 "$status"
+  after_ident=$(_fm_open_decisions_file_ident "$status")
+  [ "$after_ident" = "$before_ident" ] || fail "permission recovery changed the catch-all file identity"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: release approval required"*) ;;
+    *) fail "the catch-all did not surface preserved content after readability recovery: $out" ;;
+  esac
+  [ "$(status_seen_offset "$state" permission-r8)" = "$(log_size "$status")" ] \
+    || fail "the catch-all did not classify from the unadvanced position"
+  pass "daemon catch-all reclassifies permission-recovered status content"
+}
+
 # A permanently unclassifiable status must not wedge supervision. The accepted
 # contract is deliberately simple: report it, acknowledge the wake so an unchanged
 # permanent failure cannot re-alarm on every pass, and never advance the
@@ -2617,6 +2653,7 @@ test_catchall_buffer_failure_preserves_position
 test_durable_wake_failure_retains_entire_batch
 test_missing_status_stale_is_acknowledged_without_diagnostic
 test_transient_unreadable_signal_recovers_without_advancing
+test_permission_recovery_reclassifies_catchall_status
 test_permanent_classification_failure_is_reported_and_acknowledged
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal

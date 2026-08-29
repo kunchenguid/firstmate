@@ -18,8 +18,8 @@
 # that cannot be read or identified is a classification failure.
 # A presentation marker stores both the last reported file signature and the last
 # successfully classified position.
-# Failed reads advance only the reported signature, bounding diagnostics to one per
-# distinct file state while preserving every unclassified byte for recovery.
+# The reported signature includes path type, mode, symlink target, and observable
+# failure kind, while failed reads leave every unclassified byte for recovery.
 #
 # There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
@@ -892,8 +892,15 @@ status_daemon_seen_marker_path() {  # <state> <task-id>
 }
 
 _status_presentation_signature_valid() {
-  local value=$1 size ident
+  local value=$1 size ident encoded
   [ "$value" = unverifiable ] && return 0
+  case "$value" in
+    r1:*)
+      encoded=${value#r1:}
+      case "$encoded" in ''|*[!0-9a-f]*) return 1 ;; esac
+      return 0
+      ;;
+  esac
   case "$value" in *@*) size=${value%%@*}; ident=${value#*@} ;; *) return 1 ;; esac
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
   case "$ident" in ''|*$'\t'*|*$'\n'*) return 1 ;; esac
@@ -913,12 +920,12 @@ status_presentation_marker_parse() {
       _status_presentation_signature_valid "$reported" || return 1
       if [ "$classified" != - ]; then
         _status_presentation_signature_valid "$classified" || return 1
-        [ "$classified" != unverifiable ] || return 1
+        case "$classified" in unverifiable|r1:*) return 1 ;; esac
       fi
       ;;
     *)
       _status_presentation_signature_valid "$raw" || return 1
-      [ "$raw" != unverifiable ] || return 1
+      case "$raw" in unverifiable|r1:*) return 1 ;; esac
       reported=$raw
       classified=$raw
       ;;
@@ -927,14 +934,43 @@ status_presentation_marker_parse() {
   STATUS_PRESENTATION_CLASSIFIED=$classified
 }
 
+_status_observed_path_state() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%HT:%p' "$1" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%F:%f' "$1" 2>/dev/null
+  fi
+}
+
 status_observed_signature() {
-  local size ident
-  size=$(_fm_status_file_size "$1") || { printf 'unverifiable'; return 0; }
-  size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) printf 'unverifiable'; return 0 ;; esac
-  ident=$(_fm_open_decisions_file_ident "$1") || { printf 'unverifiable'; return 0; }
-  [ -n "$ident" ] || { printf 'unverifiable'; return 0; }
-  printf '%s@%s' "$size" "$ident"
+  local f=$1 size=${2-} ident=${3-} path_state link_target=- access kind encoded
+  path_state=$(_status_observed_path_state "$f") || path_state=stat-error
+  if [ -L "$f" ]; then
+    link_target=$(readlink "$f" 2>/dev/null) || link_target=readlink-error
+    kind=symlink
+  elif [ ! -e "$f" ]; then
+    kind=absent
+  elif [ ! -f "$f" ]; then
+    kind=nonregular
+  elif [ -r "$f" ]; then
+    kind=readable
+  else
+    kind=unreadable
+  fi
+  if [ -z "$size" ]; then
+    size=$(_fm_status_file_size "$f") || size='size-error'
+    size=${size//[[:space:]]/}
+    case "$size" in ''|*[!0-9]*) size='size-error' ;; esac
+  fi
+  if [ -z "$ident" ]; then
+    ident=$(_fm_open_decisions_file_ident "$f") || ident=identity-error
+    [ -n "$ident" ] || ident=identity-error
+  fi
+  if [ -r "$f" ]; then access=readable; else access=unreadable; fi
+  encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' \
+    "$size" "$ident" "$path_state" "$link_target" "$access" "$kind" \
+    | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+  printf 'r1:%s' "$encoded"
 }
 
 status_presentation_marker_reported_matches() {
@@ -966,12 +1002,13 @@ status_presentation_marker_report() {
 }
 
 status_presentation_marker_commit() {
-  local marker=$1 file=$2 endpoint=$3 ident=$4 current signature
+  local marker=$1 file=$2 endpoint=$3 ident=$4 current reported classified
   case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
   current=$(_fm_open_decisions_file_ident "$file") || return 1
   [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
-  signature="${endpoint}@${ident}"
-  printf 'v2\t%s\t%s' "$signature" "$signature" > "$marker"
+  reported=$(status_observed_signature "$file" "$endpoint" "$ident") || return 1
+  classified="${endpoint}@${ident}"
+  printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
 
 status_retire_presentation_task() {  # <state> <task-id>

@@ -140,18 +140,13 @@ set_mtime() {  # <epoch> <file>
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
-  local size ident epoch birth
+  local reported size ident
   case "$1" in
     *.status)
+      reported=$(status_observed_signature "$1")
       size=$(size_of "$1")
-      if [ "$(uname)" = Darwin ]; then
-        ident=$(stat -f '%d:%i' "$1" 2>/dev/null); epoch=$(stat -f '%B' "$1" 2>/dev/null)
-        [ "$epoch" = 0 ] || birth=$(stat -f '%FB' "$1" 2>/dev/null)
-      else
-        ident=$(stat -c '%d:%i' "$1" 2>/dev/null); epoch=$(stat -c '%W' "$1" 2>/dev/null)
-        [ "$epoch" = 0 ] || birth=$(stat -c '%w' "$1" 2>/dev/null)
-      fi
-      if [ -n "${birth:-}" ]; then printf '%s@strong:%s:%s' "$size" "$ident" "$birth"; else printf '%s@weak:%s' "$size" "$ident"; fi
+      ident=$(_fm_open_decisions_file_ident "$1")
+      printf 'v2\t%s\t%s@%s' "$reported" "$size" "$ident"
       ;;
     *)
       if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
@@ -954,6 +949,43 @@ test_unreadable_status_reports_once_per_file_state() {
   [ "$(status_presentation_marker_offset "$marker" "$status_file")" = "$(size_of "$status_file")" ] \
     || fail "readable recovery did not classify content written before the failure"
   pass "unreadable status reports are bounded without advancing classification"
+}
+
+test_permission_recovery_surfaces_preserved_status() {
+  local dir state fakebin out status_file marker before_ident after_ident pid
+  dir=$(make_case permission-recovery); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; status_file="$state/task.status"; marker="$state/.seen-task_status"
+  printf 'blocked: release approval required\nworking: preserving context\n' > "$status_file"
+  before_ident=$(_fm_open_decisions_file_ident "$status_file")
+  chmod 000 "$status_file"
+  if [ -r "$status_file" ]; then
+    chmod 600 "$status_file"
+    pass "permission recovery skipped because permissions cannot deny reads"
+    return
+  fi
+
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; chmod 600 "$status_file"; fail "an unreadable regular status was not reported"; }
+  [ "$(status_presentation_marker_offset "$marker" "$status_file")" = 0 ] \
+    || { chmod 600 "$status_file"; fail "an unreadable regular status advanced its classification position"; }
+  ack_stopped_cycle "$state" || { chmod 600 "$status_file"; fail "could not acknowledge the unreadable regular-status wake"; }
+  touch "$state/.last-check" "$state/.last-heartbeat"
+
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; chmod 600 "$status_file"; fail "an unchanged unreadable regular status reported again"; }
+
+  chmod 600 "$status_file"
+  after_ident=$(_fm_open_decisions_file_ident "$status_file")
+  [ "$after_ident" = "$before_ident" ] || { reap "$pid"; fail "the permission-only recovery changed file identity"; }
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "readability recovery did not surface preserved content"; }
+  grep -Fx "signal: $status_file" "$out" >/dev/null \
+    || fail "readability recovery did not use the actionable signal path: $(cat "$out")"
+  [ "$(status_presentation_marker_offset "$marker" "$status_file")" = "$(size_of "$status_file")" ] \
+    || fail "readability recovery did not classify from the unadvanced position"
+  pass "permission recovery surfaces content from the unadvanced position"
 }
 
 test_terminal_stale_surfaced() {
@@ -3095,6 +3127,7 @@ test_actionable_signal_survives_a_later_routine_append
 test_release_completion_survives_a_later_routine_append
 test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state
+test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

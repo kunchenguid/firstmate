@@ -117,9 +117,9 @@ SH
 prime_status_seen() {  # <state> <file>
   FM_STATE_OVERRIDE="$1" bash -c '
     . "$1"
-    sig=$(fm_wake_signal_sig "$3") || exit 1
-    [ -n "$sig" ] || exit 1
-    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+    size=$(_fm_status_file_size "$3") || exit 1
+    ident=$(_fm_open_decisions_file_ident "$3") || exit 1
+    fm_wake_status_seen_commit "$2" "$3" "$size" "$ident"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
 }
 

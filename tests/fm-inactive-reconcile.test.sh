@@ -113,15 +113,12 @@ outcome_count() { # <home> <suffix>
 }
 
 prime_seen() { # <state> <status>
-  local state=$1 status=$2 size ident epoch birth=''
-  size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
-  if [ "$(uname)" = Darwin ]; then
-    ident=$(stat -f '%d:%i' "$status"); epoch=$(stat -f '%B' "$status"); [ "$epoch" = 0 ] || birth=$(stat -f '%FB' "$status")
-  else
-    ident=$(stat -c '%d:%i' "$status"); epoch=$(stat -c '%W' "$status"); [ "$epoch" = 0 ] || birth=$(stat -c '%w' "$status")
-  fi
-  if [ -n "$birth" ]; then ident="strong:$ident:$birth"; else ident="weak:$ident"; fi
-  printf '%s@%s' "$size" "$ident" > "$state/.seen-$(basename "$status" | tr '.' '_')"
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    size=$(_fm_status_file_size "$3") || exit 1
+    ident=$(_fm_open_decisions_file_ident "$3") || exit 1
+    fm_wake_status_seen_commit "$2" "$3" "$size" "$ident"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
