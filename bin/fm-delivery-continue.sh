@@ -143,8 +143,8 @@ esac
 
 # Run attribution can block while the worker or another local actor advances
 # the worktree. Re-read its exact state after that query, then carry the same
-# head into fm-send's final locked target validation so no stale instruction is
-# enqueued from the earlier sample.
+# head into fm-send's Git-ref-locked validation and inbox publication so no
+# stale instruction is enqueued from the earlier sample or a concurrent commit.
 CURRENT=$(git -C "$WORKTREE" rev-parse --verify HEAD 2>/dev/null) || refuse unreadable-worktree-head
 WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null) || refuse unreadable-worktree-status
 [ -z "$WORKTREE_STATUS" ] || refuse uncommitted-worktree

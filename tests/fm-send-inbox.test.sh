@@ -22,6 +22,9 @@
 #      retryable send failure that could duplicate the durable instruction.
 #   9. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
+#  10. An expected-head enqueue holds Git's own HEAD transaction across final
+#      validation and record publication, so a concurrent commit cannot race
+#      a stale head-bound instruction into the durable inbox.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -358,6 +361,66 @@ test_expected_worktree_head_is_revalidated_before_enqueue() {
   pass "fm-send inbox: final target validation refuses a stale expected worktree head"
 }
 
+test_expected_head_enqueue_excludes_concurrent_commit() {
+  local dir err wt expected current sender i real_mktemp rc body
+  dir=$(setup_case expected-head-race); err="$dir/send.err"
+  wt="$dir/worktree"
+  fm_git_init_commit "$wt"
+  expected=$(git -C "$wt" rev-parse HEAD)
+  printf 'worktree=%s\n' "$wt" >> "$dir/home/state/t1.meta"
+  real_mktemp=$(command -v mktemp)
+  cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$*" in
+  *'/.dedup.'*)
+    : > "${FM_EXPECTED_HEAD_RACE_READY:?}"
+    while [ ! -e "${FM_EXPECTED_HEAD_RACE_RELEASE:?}" ]; do
+      /bin/sleep 0.01
+    done
+    ;;
+esac
+exec "${FM_REAL_MKTEMP:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mktemp"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_WORKTREE_HEAD="$expected" \
+    FM_REAL_MKTEMP="$real_mktemp" \
+    FM_EXPECTED_HEAD_RACE_READY="$dir/race-ready" \
+    FM_EXPECTED_HEAD_RACE_RELEASE="$dir/race-release" \
+    -- t1 "validate exact head $expected" &
+  sender=$!
+  i=0
+  while [ ! -e "$dir/race-ready" ] && kill -0 "$sender" 2>/dev/null && [ "$i" -lt 500 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/race-ready" ]; then
+    : > "$dir/race-release"
+    wait "$sender" 2>/dev/null || true
+    fail "the expected-head race fixture never reached durable publication: $(cat "$err")"
+  fi
+  git -C "$wt" -c user.name='Firstmate Test' -c user.email='firstmate-test@example.invalid' \
+    commit -q --allow-empty -m concurrent-head-advance 2> "$dir/commit.err"
+  rc=$?
+  [ "$rc" -ne 0 ] || {
+    : > "$dir/race-release"
+    wait "$sender" 2>/dev/null || true
+    fail "a concurrent commit advanced HEAD during expected-head publication"
+  }
+  : > "$dir/race-release"
+  wait "$sender" || fail "the head-guarded send failed: $(cat "$err")"
+  current=$(git -C "$wt" rev-parse HEAD)
+  [ "$current" = "$expected" ] || fail "HEAD changed while the bound instruction was published"
+  body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+  [ "$body" = "validate exact head $expected" ] || fail "the head-bound record was not published intact: $body"
+  git -C "$wt" -c user.name='Firstmate Test' -c user.email='firstmate-test@example.invalid' \
+    commit -q --allow-empty -m advance-after-publication \
+    || fail "the expected-head transaction remained locked after publication"
+  pass "fm-send inbox: expected-head publication and direct commits are mutually exclusive"
+}
+
 test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable); err="$dir/send.err"
@@ -386,4 +449,5 @@ test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_expected_worktree_head_is_revalidated_before_enqueue
+test_expected_head_enqueue_excludes_concurrent_commit
 test_unwritable_inbox_fails_loudly

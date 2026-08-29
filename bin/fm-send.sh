@@ -142,7 +142,10 @@
 # semantic callers may set FM_SEND_EXPECTED_SPAWN_GEN,
 # FM_SEND_EXPECTED_REMOTE_HOST, or FM_SEND_EXPECTED_WORKTREE_HEAD to require
 # sampled identity and local worktree state to still match during final locked
-# target validation; unset or empty guards do not change ordinary sends.
+# target validation; the worktree-head guard holds Git's own HEAD transaction
+# across the clean-state check and durable inbox publication, so a direct
+# concurrent commit cannot advance the ref in that interval. Unset or empty
+# guards do not change ordinary sends.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -234,6 +237,93 @@ fi
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+FM_SEND_HEAD_GUARD_DIR=
+FM_SEND_HEAD_GUARD_PID=
+FM_SEND_HEAD_GUARD_PREPARED=0
+FM_SEND_INBOX_META_LOCK_HELD=
+FM_SEND_INBOX_SEQ_LOCK_HELD=
+
+fm_send_head_guard_release() {
+  if [ -n "$FM_SEND_HEAD_GUARD_PID" ]; then
+    if [ "$FM_SEND_HEAD_GUARD_PREPARED" = 1 ]; then
+      if printf 'abort\n' >&9 2>/dev/null; then
+        IFS= read -r _ <&8 2>/dev/null || true
+      fi
+    fi
+    exec 9>&-
+    exec 8<&-
+    wait "$FM_SEND_HEAD_GUARD_PID" 2>/dev/null || true
+  fi
+  if [ -n "$FM_SEND_HEAD_GUARD_DIR" ]; then
+    rm -f -- "$FM_SEND_HEAD_GUARD_DIR/in" "$FM_SEND_HEAD_GUARD_DIR/out" "$FM_SEND_HEAD_GUARD_DIR/err" 2>/dev/null || true
+    rmdir "$FM_SEND_HEAD_GUARD_DIR" 2>/dev/null || true
+  fi
+  FM_SEND_HEAD_GUARD_DIR=
+  FM_SEND_HEAD_GUARD_PID=
+  FM_SEND_HEAD_GUARD_PREPARED=0
+}
+
+# Hold Git's own HEAD reference transaction without changing the ref. A commit
+# that wins first makes prepare fail; once prepare succeeds, another commit
+# cannot advance HEAD until the caller publishes or refuses the inbox record.
+fm_send_head_guard_acquire() {  # <worktree> <expected-head>
+  local worktree=$1 expected=$2 start_response prepare_response
+  FM_SEND_HEAD_GUARD_DIR=$(mktemp -d "$STATE/.fm-send-head-guard.XXXXXX") || return 1
+  mkfifo "$FM_SEND_HEAD_GUARD_DIR/in" "$FM_SEND_HEAD_GUARD_DIR/out" || {
+    fm_send_head_guard_release
+    return 1
+  }
+  : > "$FM_SEND_HEAD_GUARD_DIR/err" || {
+    fm_send_head_guard_release
+    return 1
+  }
+  git -C "$worktree" update-ref --stdin \
+    < "$FM_SEND_HEAD_GUARD_DIR/in" \
+    > "$FM_SEND_HEAD_GUARD_DIR/out" \
+    2> "$FM_SEND_HEAD_GUARD_DIR/err" &
+  FM_SEND_HEAD_GUARD_PID=$!
+  if ! exec 9> "$FM_SEND_HEAD_GUARD_DIR/in"; then
+    fm_send_head_guard_release
+    return 1
+  fi
+  if ! exec 8< "$FM_SEND_HEAD_GUARD_DIR/out"; then
+    fm_send_head_guard_release
+    return 1
+  fi
+  if ! printf 'start\nverify HEAD %s\nprepare\n' "$expected" >&9; then
+    fm_send_head_guard_release
+    return 1
+  fi
+  IFS= read -r start_response <&8 || {
+    fm_send_head_guard_release
+    return 1
+  }
+  IFS= read -r prepare_response <&8 || {
+    fm_send_head_guard_release
+    return 1
+  }
+  if [ "$start_response" != 'start: ok' ] || [ "$prepare_response" != 'prepare: ok' ]; then
+    fm_send_head_guard_release
+    return 1
+  fi
+  FM_SEND_HEAD_GUARD_PREPARED=1
+}
+
+fm_send_cleanup() {
+  fm_send_head_guard_release
+  if [ -n "$FM_SEND_INBOX_SEQ_LOCK_HELD" ]; then
+    fm_lock_release "$FM_SEND_INBOX_SEQ_LOCK_HELD"
+    FM_SEND_INBOX_SEQ_LOCK_HELD=
+  fi
+  if [ -n "$FM_SEND_INBOX_META_LOCK_HELD" ]; then
+    fm_lock_release "$FM_SEND_INBOX_META_LOCK_HELD"
+    FM_SEND_INBOX_META_LOCK_HELD=
+  fi
+  fm_lease_guard_release
+}
+
+trap fm_send_cleanup EXIT
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -431,7 +521,6 @@ if [ -n "$TARGET_META" ]; then
   LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
   if [ -n "$LEASE_GUARD_TASK" ]; then
     fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
-    trap 'fm_lease_guard_release' EXIT
   fi
 fi
 
@@ -889,6 +978,7 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: its task metadata could not be locked for final delivery validation" >&2
       exit 1
     fi
+    FM_SEND_INBOX_META_LOCK_HELD=$INBOX_META_LOCK
     CURRENT_INBOX_TARGET=
     CURRENT_INBOX_BACKEND=
     CURRENT_INBOX_SPAWN_GEN=
@@ -924,13 +1014,45 @@ else
           || [ -n "$CURRENT_INBOX_STATUS" ]; }; } \
       || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
       fm_lock_release "$INBOX_META_LOCK"
+      FM_SEND_INBOX_META_LOCK_HELD=
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired, changed endpoint, or changed its expected worktree state during target resolution" >&2
       exit 1
     fi
-    if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
+
+    if [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ]; then
+      INBOX_DIR=$(fm_task_inbox_dir "$STATE" "$INBOX_TASK_ID")
+      mkdir -p "$INBOX_DIR/handled" || inbox_write_rc=1
+      INBOX_SEQ_LOCK="$INBOX_DIR/.seq.lock"
+      if [ "${inbox_write_rc:-0}" -eq 0 ]; then
+        fm_task_inbox_lock_acquire "$INBOX_SEQ_LOCK" || inbox_write_rc=1
+      fi
+      if [ "${inbox_write_rc:-0}" -eq 0 ]; then
+        FM_SEND_INBOX_SEQ_LOCK_HELD=$INBOX_SEQ_LOCK
+        fm_send_head_guard_acquire "$CURRENT_INBOX_WORKTREE" "$FM_SEND_EXPECTED_WORKTREE_HEAD" \
+          || inbox_write_rc=1
+      fi
+      if [ "${inbox_write_rc:-0}" -eq 0 ]; then
+        CURRENT_INBOX_HEAD=$(git -C "$CURRENT_INBOX_WORKTREE" rev-parse --verify HEAD 2>/dev/null || true)
+        CURRENT_INBOX_STATUS=$(git -C "$CURRENT_INBOX_WORKTREE" status --porcelain 2>/dev/null || printf 'unreadable')
+        if [ "$CURRENT_INBOX_HEAD" != "$FM_SEND_EXPECTED_WORKTREE_HEAD" ] || [ -n "$CURRENT_INBOX_STATUS" ]; then
+          inbox_write_rc=1
+        elif [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
+          INBOX_RECORD=$(_fm_task_inbox_write_idempotent_locked "$INBOX_DIR" "$MESSAGE" \
+            "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
+        else
+          INBOX_RECORD=$(_fm_task_inbox_write_record_locked "$INBOX_DIR" "$MESSAGE" \
+            "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
+        fi
+      fi
+      fm_send_head_guard_release
+      if [ -n "$FM_SEND_INBOX_SEQ_LOCK_HELD" ]; then
+        fm_lock_release "$FM_SEND_INBOX_SEQ_LOCK_HELD"
+        FM_SEND_INBOX_SEQ_LOCK_HELD=
+      fi
+    elif [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
     else
@@ -939,6 +1061,7 @@ else
     fi
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"
+      FM_SEND_INBOX_META_LOCK_HELD=
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -946,6 +1069,7 @@ else
       exit 1
     fi
     fm_lock_release "$INBOX_META_LOCK"
+    FM_SEND_INBOX_META_LOCK_HELD=
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.
