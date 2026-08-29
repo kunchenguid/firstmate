@@ -161,18 +161,13 @@ When a requested effort value is outside the harness-specific accepted set, `fm-
 This preserves launch success instead of passing a known-bad value.
 For Cursor, select the intended reasoning class through a model id the account's own `--list-models` actually returns, and leave the separate effort axis unset.
 
-## no-mistakes skill invocation
+## Triggering no-mistakes validation
 
-Send the validation skill using the target harness's skill invocation form.
-Natural language is acceptable if uncertain.
+Do not trigger validation with a skill-invocation form (`/no-mistakes`, `$no-mistakes`, or equivalent) sent into a worker's pane: it resolves only when that harness's active config directory contains the installed skill, and firstmate cannot assume that at trigger time.
+For `claude` specifically, `bin/fm-spawn.sh` forwards firstmate's own `CLAUDE_CONFIG_DIR` onto the crewmate launch when set, to keep credential/config parity with firstmate's own store; a non-default store commonly has no `skills/` directory at all, so `/no-mistakes` reliably fails to resolve for a claude crewmate in that configuration.
 
-- claude: `/<skill>`, for example `/no-mistakes`.
-- codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
-- opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
-- pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
-- grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
-- kimi: `/<skill>`, for example `/no-mistakes`.
-- cursor: `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills. Its slash popup swallows the first Enter, so a genuine second Enter submits; the shared submit retry handles it.
+Instead, send a short natural-language instruction telling the worker to drive no-mistakes itself through its CLI (`no-mistakes axi run`, per `no-mistakes axi --help`); state that explicitly in the trigger message rather than assuming the crewmate's brief already spells out the CLI mechanics, since `bin/fm-brief.sh`'s generated `no-mistakes`-mode brief still tells the crewmate to "run /no-mistakes" and has not yet been updated to match.
+This works identically across every harness because it never depends on skill discovery.
 
 ## Submission acknowledgement hazards
 
@@ -223,7 +218,7 @@ A `$<skill>` invocation opens a `$`-autocomplete (skill) popup, the same hazard 
 `fm-send` handles it the same way it handles `/` - it gives the popup a longer settle (1.2s) between typing and the first Enter, with the target backend's submit retry as the safety net - but the `$` settle is scoped to `harness=codex`, read from the target metadata for exact task ids or legacy `fm-<id>` labels.
 That scope matters because, unlike `/`, a leading `$` commonly starts ordinary text (`$5/month`, `$HOME`), so a universal `$` rule would needlessly slow plain steers to claude/opencode/pi; only a codex target receiving a `$...` message gets the popup-settle.
 An explicit `session:window` target has no meta, so its harness is unknown and treated as non-codex (the safe fast-path default).
-This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on the first Enter instead of biting the popup.
+This is why a skill invocation like `$no-mistakes` sent to a codex crew now lands on the first Enter instead of biting the popup, the same as any other `$<skill>` invocation.
 
 Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
 Accept with Enter.
@@ -248,6 +243,7 @@ The checkpoint is deliberately foreground and bounded so Codex regains control r
 | Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
 | Exit command | `/exit` |
 | Interrupt | double Escape; known flaky while a long shell command runs, so use `bin/fm-control.sh <task-id> relaunch` for a wedged pane |
+| Skill invocation | No separate verified skill-invocation form beyond normal slash-command behavior; use natural language if the exact skill command is uncertain. |
 
 No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
@@ -275,6 +271,7 @@ The follow-up was verified in the interactive TUI; `opencode run` can exit befor
 | Busy state | The Firstmate-owned extension's `agent_start` (busy) and `agent_settled` confirmed by `ctx.isIdle()` (idle), which covers retries, compaction, tool loops, and queued continuations. |
 | Exit command | `/quit` |
 | Interrupt | single Escape |
+| Skill invocation | No separate verified skill-invocation form beyond normal command behavior; use natural language if the exact skill command is uncertain. |
 
 Pi has no permission system, so crewmates are always autonomous.
 Pi's `packages/coding-agent/docs/settings.md` UI and display section documents `regular` as the `tuiMode` default and `fullscreen` as experimental; fullscreen can bury steers by rewriting scrollback, so Firstmate avoids it when the installed CLI supports the override.
