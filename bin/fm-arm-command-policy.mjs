@@ -458,6 +458,15 @@ function isAssignment(value) {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(value);
 }
 
+// Shell reserved words. splitProgram cuts a program on its operators, so a
+// compound command's body arrives as a node introduced by one of these rather
+// than by the command it runs, and a caller that reads the node's first word as
+// the executed command must account for them.
+export const SHELL_RESERVED_WORDS = new Set([
+  "if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac",
+  "do", "done", "function", "time", "coproc",
+]);
+
 function wordsInNode(tokens) {
   const words = [];
   let skipRedirectionTarget = false;
@@ -752,7 +761,7 @@ function analyzeProgram(command, context, depth = 0) {
     const position = commandPosition(tokens);
     const nodeContext = contextWithAssignments(activeContext, position.words);
     const firstName = basename(position.words[0]?.value || "");
-    if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function", "time", "coproc"].includes(firstName)) {
+    if (SHELL_RESERVED_WORDS.has(firstName)) {
       unsupported = true;
     }
 

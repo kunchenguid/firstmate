@@ -6,7 +6,7 @@ Primary scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native ses
 Harness hook files adapt each enabled primary harness integration's turn-end mechanism to that shared predicate.
 
 Related PreToolUse guards deny unsafe commands before execution rather than detecting a blind turn end afterward.
-Their separate owners are [`arm-pretool-check.md`](arm-pretool-check.md), [`cd-guard.md`](cd-guard.md), and [`subagent-guard.md`](subagent-guard.md).
+Their separate owners are [`arm-pretool-check.md`](arm-pretool-check.md), [`cd-guard.md`](cd-guard.md), and [`subagent-guard.md`](subagent-guard.md) for the primary, and [`worker-command-guard.md`](worker-command-guard.md) for the crewmates and scouts firstmate launches.
 Do not infer this guard's scope, loop safety, or compatibility tradeoffs for those guards.
 
 ## Current invariant
