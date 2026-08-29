@@ -927,7 +927,7 @@ cmd_diagnose() {
   wt=$(fm_meta_get_local "$meta" worktree)
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
     diagnose_inconclusive "$id" "${checked:-none}" no-local-copy 'the pipeline logs need a readable local copy to read them from' \
-      "$endpoint_unread" "$endpoint_note"
+      "$endpoint_unread" '' "$endpoint_note"
     return 0
   fi
 
@@ -935,7 +935,7 @@ cmd_diagnose() {
   run=$(attributed_run "$wt") || run=
   if [ -z "$run" ]; then
     diagnose_inconclusive "$id" "${checked:-none}" no-attributed-run 'no pipeline run is attributed to this local copy' \
-      "$endpoint_unread" "$endpoint_note"
+      "$endpoint_unread" '' "$endpoint_note"
     return 0
   fi
   local run_id
@@ -944,7 +944,7 @@ cmd_diagnose() {
   [ -n "$steps" ] || steps=$(last_step "$run")
   if [ -z "$steps" ]; then
     diagnose_inconclusive "$id" "${checked:-none}" no-readable-steps "pipeline run $run_id lists no readable steps" \
-      "$endpoint_unread" "$endpoint_note"
+      "$endpoint_unread" '' "$endpoint_note"
     return 0
   fi
   # `unread` and `unscanned` are separate lists on purpose. A log that failed to
@@ -988,28 +988,36 @@ cmd_diagnose() {
     fi
     spent=$((spent + $(date +%s) - started))
   done
+  # One combined list, built once and printed the same way by both verdicts
+  # below. The endpoint and a step log that resisted are the same fact - evidence
+  # that was attempted and yielded nothing - so they belong in one `unread=`.
+  # Composing it per verdict is how the token came to name only the endpoint on
+  # the one verdict that means nothing was read at all, while the step logs sat
+  # in prose beside it: two `unread` statements on one line with different
+  # contents, and a reader who trusts the token re-reads the terminal and stops.
+  local unread_all=$unread
+  [ -z "$endpoint_unread" ] || unread_all="$endpoint_unread${unread:+,$unread}"
   # The first step is always attempted: SCAN_BUDGET and NM_TIMEOUT are both
   # validated positive and nothing is spent before it, so `readable -eq 0` means
   # every attempt failed and `unread` is never empty here. Budget truncation
   # after that shows up as `unscanned`, which is disclosed beside the failure
-  # rather than replacing it.
+  # rather than replacing it - a different fact from what was attempted and
+  # yielded nothing, and kept in its own list for that reason.
   if [ "$readable" -eq 0 ]; then
     diagnose_inconclusive "$id" "${checked:-none}" step-log-unreadable \
-      "no step log of pipeline run $run_id could be read (unread: ${unread:-none}${unscanned:+; unscanned: $unscanned})" \
-      "$endpoint_unread" "$endpoint_note"
+      "no step log of pipeline run $run_id could be read" \
+      "$unread_all" "$unscanned" "$endpoint_note"
     return 0
   fi
-  local unread_all=$unread
-  [ -z "$endpoint_unread" ] || unread_all="$endpoint_unread${unread:+,$unread}"
   printf 'USAGE_WALL: %s no-signature checked=%s run=%s%s%s%s\n' "$id" "$checked" "$run_id" \
     "${unread_all:+ unread=$unread_all}" "${unscanned:+ unscanned=$unscanned}" \
     "${endpoint_note:+ - $endpoint_note}"
   printf 'USAGE_WALL_NEXT: no usage-limit signature is present in what was readable; this is not proof the work crashed, so keep reading the evidence itself.\n'
 }
 
-diagnose_inconclusive() {  # <id> <checked> <reason-slug> <detail> [<endpoint-unread>] [<endpoint-note>]
-  printf 'USAGE_WALL: %s unknown reason=%s checked=%s%s - %s%s\n' "$1" "$3" "$2" \
-    "${5:+ unread=$5}" "$4" "${6:+; $6}"
+diagnose_inconclusive() {  # <id> <checked> <reason-slug> <detail> [<unread>] [<unscanned>] [<endpoint-note>]
+  printf 'USAGE_WALL: %s unknown reason=%s checked=%s%s%s - %s%s\n' "$1" "$3" "$2" \
+    "${5:+ unread=$5}" "${6:+ unscanned=$6}" "$4" "${7:+; $7}"
   printf 'USAGE_WALL_NEXT: the evidence that separates a usage wall from a crash could not be read; do not record a failure until it can.\n'
 }
 

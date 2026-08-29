@@ -1047,8 +1047,33 @@ assert_not_contains "$OUT" 'no-signature' \
   'an unreadable log must never be reported as read-and-nothing-matched'
 assert_not_contains "$OUT" 'step-log:review' \
   'a step that was never readable must not be listed as checked'
-assert_contains "$OUT" 'unread: review,test' 'the verdict names the logs it could not read'
+assert_contains "$OUT" 'unread=review,test' 'the verdict names the logs it could not read'
 pass 'diagnose reports an unreadable step log as unknown rather than a clean read'
+
+# `unread=` must name EVERYTHING that was attempted and yielded nothing, on the
+# one verdict that means nothing was read at all. The endpoint and the step logs
+# are the same fact, so a reader who learned from the recovery skill to trust
+# the token and re-read what it names must not be handed the terminal alone
+# while the step logs sit in prose beside it - the token would underreport
+# exactly where the scan read least, and the agent would stop after re-reading
+# the one source it was told about.
+CASE="$TMP_ROOT/dx-log-unreadable-wedged"; mkdir -p "$CASE"
+make_task "$CASE" darkwedgedcrew
+fake_tmux_wedged "$CASE_FB" fm-darkwedgedcrew
+fake_nm_perstep "$CASE_FB" "fm/darkwedgedcrew" RUNDARKW failed \
+  '    review,failed,0,120
+    test,failed,0,120'
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_CAPTURE_TIMEOUT=1 \
+  "$WALL" diagnose darkwedgedcrew 2>&1 )
+assert_contains "$OUT" 'unknown reason=step-log-unreadable' \
+  'nothing readable anywhere is still unknown, never no-signature'
+assert_contains "$OUT" 'unread=endpoint,review,test' \
+  'one unread= list names every source that was attempted and yielded nothing'
+assert_contains "$OUT" 'endpoint capture did not complete within 1s' \
+  'the verdict still names why the endpoint yielded nothing'
+assert_not_contains "$OUT" 'unread: ' \
+  'the same fact must not be stated twice in two vocabularies on one line'
+pass 'diagnose names the endpoint and the step logs in one unread= list'
 
 # A PARTIAL read is disclosed rather than folded into a clean result: one log
 # read cleanly does not license silence about the one that could not be read.
@@ -1216,9 +1241,9 @@ OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_SCAN_BUDGET=1 \
   "$WALL" diagnose budgetcrew 2>&1 )
 assert_contains "$OUT" 'unknown reason=step-log-unreadable' \
   'a log that resisted a read still reports step-log-unreadable'
-assert_contains "$OUT" 'unread: review' 'the log that failed to read is named as unread'
-assert_contains "$OUT" 'unscanned: test' 'the step the budget never reached is named as unscanned'
-assert_not_contains "$OUT" 'unread: review,test' \
+assert_contains "$OUT" 'unread=review' 'the log that failed to read is named as unread'
+assert_contains "$OUT" 'unscanned=test' 'the step the budget never reached is named as unscanned'
+assert_not_contains "$OUT" 'unread=review,test' \
   'a step nothing attempted must not be reported as one whose log failed to read'
 pass 'diagnose separates a step the budget never reached from a log that failed to read'
 
