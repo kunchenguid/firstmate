@@ -272,8 +272,9 @@ test_normalize_key() {
     [ "$(fm_backend_cmux_normalize_key Esc)" = escape ] || { echo "Esc failed" >&2; exit 1; }
     [ "$(fm_backend_cmux_normalize_key C-c)" = ctrl-c ] || { echo "C-c failed" >&2; exit 1; }
     [ "$(fm_backend_cmux_normalize_key ctrl+c)" = ctrl-c ] || { echo "ctrl+c failed" >&2; exit 1; }
+    [ "$(fm_backend_cmux_normalize_key Down)" = down ] || { echo "Down failed" >&2; exit 1; }
   ) || fail "fm_backend_cmux_normalize_key did not map firstmate's key vocabulary to cmux's verified names"
-  pass "fm_backend_cmux_normalize_key: Enter/Escape/C-c map to cmux's verified enter/escape/ctrl-c"
+  pass "fm_backend_cmux_normalize_key: Enter/Escape/C-c/Down map to cmux's verified key names"
 }
 
 test_scoped_title_uses_primary_home_label() {
@@ -603,6 +604,19 @@ test_send_key_normalizes_and_targets() {
   assert_contains "$(cat "$dir/log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000'$'\x1f''--surface'$'\x1f''bbbbbbbb-1111-1111-1111-111111111111'$'\x1f''escape' \
     "send_key did not normalize Escape to escape and target the explicit workspace/surface"
   pass "fm_backend_cmux_send_key: normalizes the key (Escape -> escape) and targets the explicit workspace/surface"
+}
+
+test_send_key_normalizes_down_and_targets() {
+  local dir fb
+  dir="$TMP_ROOT/sendkey-down"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Down' "$ROOT"
+  expect_code 0 $? "send_key Down should succeed"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000'$'\x1f''--surface'$'\x1f''bbbbbbbb-1111-1111-1111-111111111111'$'\x1f''down' \
+    "send_key did not normalize Down to cmux's lowercase down token"
+  pass "fm_backend_cmux_send_key: normalizes Down to cmux's lowercase down token"
 }
 
 test_send_key_recovers_stale_target_by_label() {
@@ -1137,6 +1151,7 @@ test_capture_trims_locally
 test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready
 test_send_key_normalizes_and_targets
+test_send_key_normalizes_down_and_targets
 test_send_key_recovers_stale_target_by_label
 test_send_literal_uses_separator_for_option_shaped_text
 test_send_text_line_clears_partial_input_when_enter_fails
