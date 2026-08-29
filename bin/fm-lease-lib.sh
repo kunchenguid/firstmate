@@ -12,15 +12,23 @@
 # actor while it exists.
 #
 # CONTRACT.
-#   - Lease file: $STATE/.lease-<task>, one line "<actor>\t<pid>\t<epoch>".
+#   - Lease file: $STATE/.lease-<task>, one line
+#     "<actor>\t<pid>\t<epoch>\t<owner>".
 #     Written atomically (temp + ln for claim, temp + mv for a same-actor
-#     refresh), with inspection and mutation serialized by the home-local
-#     lease-command lock; leases never coordinate across firstmate homes.
+#     same-owner refresh), with inspection and mutation serialized by the
+#     home-local lease-command lock; leases never coordinate across firstmate
+#     homes. The owner is the current operation's $FM_LEASE_OWNER; legacy and
+#     non-Pi callers default it to the actor name.
 #   - Actors: exactly "main" and "branch". The current actor is
 #     $FM_SUPERVISION_ACTOR when set, else "main". The branch's shell gets
 #     FM_SUPERVISION_ACTOR=branch injected deterministically by the Pi branch
 #     extension's bash tool, not by agent memory. Any other value is refused
 #     loudly - an unknown actor is a wiring bug, not a third role.
+#   - Ownership: actor separates MAIN from BRANCH, while owner separates
+#     concurrent operations by the same actor. A live claim from another
+#     actor or owner is refused, release removes only the exact actor and
+#     owner, and release-owner provides deterministic settled-operation
+#     cleanup. release-actor is reserved for generation activation recovery.
 #   - Staleness: the recorded pid is the long-lived supervising process (the
 #     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), and
 #     both actors live inside that one pi process, so a dead recorded pid
@@ -40,15 +48,15 @@
 # running as the same uid inside the same pi process can evade any in-process
 # discriminator (it can rewrite env, spawn fresh shells, and edit state
 # files), so adversarial-grade separation is explicitly out of scope here and
-# tracked as separate follow-up design work. The branch's shell prelude makes
-# the actor variables readonly (see the Pi branch extension), so an
+# tracked as separate follow-up design work. The Pi shell preludes make the
+# lease identity variables readonly, so an
 # ACCIDENTAL override fails loudly inside the branch's own shell as well.
-#   - Guard semantics (fm_lease_guard): no lease, a same-actor lease, or a
-#     provably stale lease passes; a live lease held by the OTHER actor
+#   - Guard semantics (fm_lease_guard): no lease, an exact-owner lease, or a
+#     provably stale lease passes; a live lease held by another actor or owner
 #     refuses with exit FM_LEASE_REFUSE_EXIT. In a Pi supervision context the
 #     guard retains the lease-command lock until fm_lease_guard_release, so the
-#     other actor cannot claim between the check and the guarded mutation. A
-#     home without the current Pi session lock cannot have a live lease, so
+#     other operation cannot claim between the check and the guarded mutation.
+#     A home without the current Pi session lock cannot have a live lease, so
 #     the guard is a no-op there - non-Pi behavior is unchanged by construction.
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
 #     merging a PR, landing local-only work, spawning workers - refuse the
@@ -93,6 +101,17 @@ fm_lease_actor() {
   esac
 }
 
+fm_lease_owner() {
+  local actor=$1 owner=${FM_LEASE_OWNER:-$1}
+  case "$owner" in
+    '' | *[!A-Za-z0-9._-]*)
+      echo "error: invalid FM_LEASE_OWNER '$owner'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$owner"
+}
+
 # fm_lease_valid_id <id>: 0 iff the task/resource id is safe to embed in a
 # state filename.
 fm_lease_valid_id() {
@@ -107,7 +126,7 @@ fm_lease_path() {
 }
 
 # fm_lease_read <task>: read the lease into FM_LEASE_ACTOR/FM_LEASE_PID/
-# FM_LEASE_EPOCH. Returns 1 when no lease file exists. A malformed lease
+# FM_LEASE_EPOCH/FM_LEASE_RECORD_OWNER. Returns 1 when no lease file exists. A malformed lease
 # (unreadable actor or pid) reads as actor "" so callers treat it as stale
 # rather than blocking forever on a torn record.
 fm_lease_read() {
@@ -116,18 +135,26 @@ fm_lease_read() {
   FM_LEASE_ACTOR=
   FM_LEASE_PID=
   FM_LEASE_EPOCH=
+  FM_LEASE_RECORD_OWNER=
   [ -e "$file" ] || return 1
   IFS= read -r line < "$file" 2>/dev/null || line=
   FM_LEASE_ACTOR=$(printf '%s' "$line" | cut -f1)
   FM_LEASE_PID=$(printf '%s' "$line" | cut -f2)
   # shellcheck disable=SC2034 # Consumed by sourcing callers (bin/fm-lease.sh check).
   FM_LEASE_EPOCH=$(printf '%s' "$line" | cut -f3)
+  FM_LEASE_RECORD_OWNER=$(printf '%s' "$line" | cut -f4)
   case "$FM_LEASE_ACTOR" in
     main|branch) ;;
     *) FM_LEASE_ACTOR= ;;
   esac
   case "$FM_LEASE_PID" in
     '' | *[!0-9]*) FM_LEASE_PID= ;;
+  esac
+  if [ -z "$FM_LEASE_RECORD_OWNER" ]; then
+    FM_LEASE_RECORD_OWNER=$FM_LEASE_ACTOR
+  fi
+  case "$FM_LEASE_RECORD_OWNER" in
+    '' | *[!A-Za-z0-9._-]*) FM_LEASE_RECORD_OWNER= ;;
   esac
   return 0
 }
@@ -167,9 +194,10 @@ fm_lease_clear_stale() {
 # This closes the check/use race with a concurrent claim. Outside Pi, stale
 # records are still cleaned but the lock is released before returning.
 fm_lease_guard() {
-  local task=$1 action=$2 actor lock lease_actor active=0
+  local task=$1 action=$2 actor owner lock lease_actor lease_owner active=0
   fm_lease_valid_id "$task" || return 0
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  owner=$(fm_lease_owner "$actor") || exit "$FM_LEASE_REFUSE_EXIT"
   case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
     true:*|*:main|*:branch) active=1 ;;
   esac
@@ -190,9 +218,10 @@ fm_lease_guard() {
     return 0
   fi
   lease_actor=$FM_LEASE_ACTOR
-  if [ "$lease_actor" != "$actor" ]; then
+  lease_owner=$FM_LEASE_RECORD_OWNER
+  if [ "$lease_actor" != "$actor" ] || [ "$lease_owner" != "$owner" ]; then
     fm_lease_guard_release
-    echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task); retry after that actor releases it" >&2
+    echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor by another operation (state/.lease-$task); retry after its owner releases it" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
   fi
 }

@@ -11,16 +11,16 @@
 # Usage:
 #   fm-lease.sh claim <task> [--actor main|branch]
 #       Take the lease for the calling actor. Idempotent for the holder (the
-#       claim refreshes its own lease). Refuses with exit 6 while the other
-#       actor holds a live lease. A stale lease (dead pid, or a torn record)
-#       is cleared and re-claimed.
+#       claim refreshes its own lease). Refuses with exit 6 while another
+#       actor or operation holds a live lease. A stale lease (dead pid, or a
+#       torn record) is cleared and re-claimed.
 #   fm-lease.sh claim-new <task> [--actor main|branch]
 #       Take the lease only when no actor currently holds it. Unlike claim,
-#       this refuses a same-actor live lease instead of refreshing it.
+#       this refuses an exact-owner live lease instead of refreshing it.
 #   fm-lease.sh release <task> [--actor main|branch]
-#       Drop the calling actor's lease. Releasing a lease the actor does not
-#       hold is a silent no-op, so a retry after a partial failure is safe.
-#       Naming the other actor is refused loudly.
+#       Drop the calling operation's exact lease. Releasing a lease the actor
+#       and owner do not hold is a silent no-op, so a retry after a partial
+#       failure is safe. Naming the other actor is refused loudly.
 #   fm-lease.sh check <task>
 #       Print "<actor> <pid> <epoch> <live|stale>" for a held lease, or
 #       nothing (exit 1) when the task is unleased.
@@ -28,6 +28,8 @@
 #       Drop every lease the named actor holds; the Pi branch extension runs
 #       this at generation activation so a replaced branch conversation's
 #       leases never outlive it.
+#   fm-lease.sh release-owner --actor main|branch --owner <owner>
+#       Drop every lease held by that exact operation owner.
 #   fm-lease.sh sweep
 #       Remove every provably stale lease in this home. Run at session start
 #       (a lease held by a dead actor is cleared at session start); safe to
@@ -53,7 +55,7 @@ fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
 trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
 
 usage() {
-  echo "usage: fm-lease.sh claim|claim-new|release <task> [--actor main|branch] | release-actor --actor main|branch | check <task> | sweep" >&2
+  echo "usage: fm-lease.sh claim|claim-new|release <task> [--actor main|branch] [--owner owner] | release-actor --actor main|branch | release-owner --actor main|branch --owner owner | check <task> | sweep" >&2
   exit 2
 }
 
@@ -66,10 +68,15 @@ case "$CMD" in
     shift 2>/dev/null || true
     fm_lease_valid_id "$TASK" || usage
     ACTOR=
+    OWNER=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --actor)
           ACTOR=${2:-}
+          shift 2 || usage
+          ;;
+        --owner)
+          OWNER=${2:-}
           shift 2 || usage
           ;;
         *) usage ;;
@@ -79,24 +86,36 @@ case "$CMD" in
       ACTOR=$(fm_lease_actor) || exit 2
     fi
     case "$ACTOR" in main|branch) ;; *) usage ;; esac
+    OWNER=${OWNER:-$(fm_lease_owner "$ACTOR")}
+    fm_lease_valid_id "$OWNER" || usage
     ;;
   check)
     TASK=${1:-}
     [ "$#" -le 1 ] || usage
     fm_lease_valid_id "$TASK" || usage
     ;;
-  release-actor)
+  release-actor|release-owner)
     ACTOR=
+    OWNER=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --actor)
           ACTOR=${2:-}
           shift 2 || usage
           ;;
+        --owner)
+          OWNER=${2:-}
+          shift 2 || usage
+          ;;
         *) usage ;;
       esac
     done
     case "$ACTOR" in main|branch) ;; *) usage ;; esac
+    if [ "$CMD" = release-owner ]; then
+      fm_lease_valid_id "$OWNER" || usage
+    else
+      [ -z "$OWNER" ] || usage
+    fi
     ;;
   sweep)
     [ "$#" -eq 0 ] || usage
@@ -116,8 +135,8 @@ case "$CMD" in
     fi
     LEASE=$(fm_lease_path "$TASK")
     if fm_lease_live "$TASK"; then
-      if [ "$CMD" = claim-new ] || [ "$FM_LEASE_ACTOR" != "$ACTOR" ]; then
-        echo "error: $CMD refused - task '$TASK' is leased to the $FM_LEASE_ACTOR supervision actor (state/.lease-$TASK)" >&2
+      if [ "$CMD" = claim-new ] || [ "$FM_LEASE_ACTOR" != "$ACTOR" ] || [ "$FM_LEASE_RECORD_OWNER" != "$OWNER" ]; then
+        echo "error: $CMD refused - task '$TASK' is leased to the $FM_LEASE_ACTOR supervision actor by another operation (state/.lease-$TASK)" >&2
         exit "$FM_LEASE_REFUSE_EXIT"
       fi
     fi
@@ -133,19 +152,19 @@ case "$CMD" in
     fi
     [ -n "$HOLDER_PID" ] || HOLDER_PID=$$
     TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")
-    printf '%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" > "$TMP"
+    printf '%s\t%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" "$OWNER" > "$TMP"
     if [ -e "$LEASE" ]; then
-      # Same-actor refresh, or a stale/torn record: replace atomically.
+      # Same-owner refresh, or a stale/torn record: replace atomically.
       mv -f -- "$TMP" "$LEASE"
     elif ! ln -- "$TMP" "$LEASE" 2>/dev/null; then
       # Lost the create race to the sibling actor; re-check who won.
       rm -f -- "$TMP"
-      if fm_lease_live "$TASK" && [ "$FM_LEASE_ACTOR" != "$ACTOR" ]; then
-        echo "error: claim refused - task '$TASK' was just leased to the $FM_LEASE_ACTOR supervision actor" >&2
+      if fm_lease_live "$TASK" && { [ "$FM_LEASE_ACTOR" != "$ACTOR" ] || [ "$FM_LEASE_RECORD_OWNER" != "$OWNER" ] || [ "$CMD" = claim-new ]; }; then
+        echo "error: claim refused - task '$TASK' was just leased to the $FM_LEASE_ACTOR supervision actor by another operation" >&2
         exit "$FM_LEASE_REFUSE_EXIT"
       fi
       TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")
-      printf '%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" > "$TMP"
+      printf '%s\t%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" "$OWNER" > "$TMP"
       mv -f -- "$TMP" "$LEASE"
     else
       rm -f -- "$TMP"
@@ -157,7 +176,7 @@ case "$CMD" in
       echo "error: release refused - the $CALLER supervision actor cannot release a lease as $ACTOR on '$TASK'" >&2
       exit "$FM_LEASE_REFUSE_EXIT"
     fi
-    if fm_lease_read "$TASK" && { [ "$FM_LEASE_ACTOR" = "$ACTOR" ] || [ -z "$FM_LEASE_ACTOR" ]; }; then
+    if fm_lease_read "$TASK" && { { [ "$FM_LEASE_ACTOR" = "$ACTOR" ] && [ "$FM_LEASE_RECORD_OWNER" = "$OWNER" ]; } || [ -z "$FM_LEASE_ACTOR" ]; }; then
       rm -f -- "$(fm_lease_path "$TASK")"
     fi
     ;;
@@ -178,6 +197,22 @@ case "$CMD" in
       TASK=${LEASE##*/.lease-}
       fm_lease_valid_id "$TASK" || continue
       if fm_lease_read "$TASK" && [ "$FM_LEASE_ACTOR" = "$ACTOR" ]; then
+        rm -f -- "$LEASE"
+      fi
+    done
+    ;;
+  release-owner)
+    CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+    if [ "$ACTOR" != "$CALLER" ]; then
+      echo "error: release-owner refused - the $CALLER supervision actor cannot release leases as $ACTOR" >&2
+      exit "$FM_LEASE_REFUSE_EXIT"
+    fi
+    for LEASE in "$STATE"/.lease-*; do
+      [ -e "$LEASE" ] || continue
+      case "$LEASE" in *.lock) continue ;; esac
+      TASK=${LEASE##*/.lease-}
+      fm_lease_valid_id "$TASK" || continue
+      if fm_lease_read "$TASK" && [ "$FM_LEASE_ACTOR" = "$ACTOR" ] && [ "$FM_LEASE_RECORD_OWNER" = "$OWNER" ]; then
         rm -f -- "$LEASE"
       fi
     done

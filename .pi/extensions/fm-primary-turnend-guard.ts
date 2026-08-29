@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+const leaseScript = `${root}/bin/fm-lease.sh`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
@@ -485,6 +486,25 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 export default function (pi: ExtensionAPI) {
   let sessionstartGeneration: SessionstartGeneration | null = null;
   let sessionstartExitListenerRegistered = false;
+  let mainLeaseOwner = "";
+  const releaseMainLeaseOwner = (): boolean => {
+    if (!mainLeaseOwner) return true;
+    const result = spawnSync("bash", [leaseScript, "release-owner", "--actor", "main", "--owner", mainLeaseOwner], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_STATE_OVERRIDE: state,
+        FM_ROOT_OVERRIDE: root,
+        FM_SUPERVISION_ACTOR: "main",
+        FM_LEASE_OWNER: mainLeaseOwner,
+      },
+    });
+    if (result.status !== 0) return false;
+    mainLeaseOwner = "";
+    return true;
+  };
   const cleanupSessionstartOnProcessExit = (): void => {
     const generation = sessionstartGeneration;
     if (!generation) return;
@@ -556,9 +576,14 @@ export default function (pi: ExtensionAPI) {
     try {
       if (generation) await stopSessionstartGeneration(generation);
     } finally {
+      releaseMainLeaseOwner();
       if (sessionstartGeneration === generation) sessionstartGeneration = null;
       removeSessionstartExitListener();
     }
+  });
+
+  pi.on?.("agent_start", () => {
+    if (!mainLeaseOwner) mainLeaseOwner = `pi-main-${randomUUID()}`;
   });
 
   pi.on("tool_call", async (event) => {
@@ -570,11 +595,33 @@ export default function (pi: ExtensionAPI) {
       return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
     }
     const result = await runPretoolCheck(command);
-    if (result.code !== 2) return {};
-    return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
+    if (result.code === 2) {
+      return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
+    }
+    if (mainLeaseOwner) {
+      event.input.command = `export FM_SUPERVISION_ACTOR=main FM_LEASE_OWNER=${mainLeaseOwner}
+readonly FM_SUPERVISION_ACTOR FM_LEASE_OWNER
+(
+${command}
+)`;
+    }
+    return {};
   });
 
   pi.on("agent_settled", async () => {
+    if (!releaseMainLeaseOwner()) {
+      guardFollowupActive = true;
+      try {
+        const content = encodeFirstmateOperationalInput(
+          "turn-end-guard",
+          "MAIN supervision lease cleanup failed. Retry the exact settled-operation cleanup before handling another fleet wake.",
+        );
+        await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      } catch {
+        guardFollowupActive = false;
+      }
+      return;
+    }
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;

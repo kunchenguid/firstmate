@@ -1084,6 +1084,87 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
+test_pi_main_turn_lease_owner_cleans_exactly_at_settle() {
+  local repo home ext out status
+  repo="$TMP_ROOT/pi-main-lease-root"
+  home="$TMP_ROOT/pi-main-lease-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-lease.sh" "$ROOT/bin/fm-lease-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 0
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$repo/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/"*.sh
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage(message) {
+    throw new Error(`unexpected cleanup follow-up: ${message}`);
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const runBash = (command) => spawnSync("bash", ["-lc", command], {
+  cwd: process.env.PLUGIN.split("/.pi/")[0],
+  encoding: "utf8",
+  env: { ...process.env, FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state` },
+});
+const mutate = async (command) => {
+  const event = { type: "tool_call", toolName: "bash", toolCallId: "lease-call", input: { command } };
+  const result = await handlers.get("tool_call")(event);
+  if (result?.block) throw new Error(`lease command was blocked: ${result.reason}`);
+  return event.input.command;
+};
+
+await handlers.get("agent_start")({ type: "agent_start" }, {});
+let result = runBash(await mutate("bin/fm-lease.sh claim task-main --actor main"));
+if (result.status !== 0) throw new Error(`main turn claim failed: ${result.stderr}`);
+const lease = readFileSync(`${process.env.FM_HOME}/state/.lease-task-main`, "utf8").trim().split("\t");
+if (!/^pi-main-[A-Za-z0-9._-]+$/.test(lease[3] ?? "")) throw new Error(`main turn owner was not persisted: ${lease}`);
+result = runBash("FM_SUPERVISION_ACTOR=main FM_LEASE_OWNER=other-main-turn bin/fm-lease.sh claim task-main --actor main");
+if (result.status !== 6) throw new Error(`competing main turn claim exited ${result.status}: ${result.stderr}`);
+await handlers.get("agent_settled")({ type: "agent_settled" }, {});
+if (existsSync(`${process.env.FM_HOME}/state/.lease-task-main`)) throw new Error("settled main turn retained its lease");
+
+result = runBash("FM_SUPERVISION_ACTOR=main FM_LEASE_OWNER=delivery-owner bin/fm-lease.sh claim task-race --actor main");
+if (result.status !== 0) throw new Error(`continuation fixture claim failed: ${result.stderr}`);
+await handlers.get("agent_start")({ type: "agent_start" }, {});
+result = runBash(await mutate("bin/fm-lease.sh claim task-race --actor main"));
+if (result.status !== 6) throw new Error(`main turn stole continuation custody: ${result.status}: ${result.stderr}`);
+await handlers.get("agent_settled")({ type: "agent_settled" }, {});
+if (!existsSync(`${process.env.FM_HOME}/state/.lease-task-race`)) throw new Error("main settled cleanup removed continuation custody");
+result = runBash("FM_SUPERVISION_ACTOR=main FM_LEASE_OWNER=delivery-owner bin/fm-lease.sh release task-race --actor main");
+if (result.status !== 0) throw new Error(`continuation fixture release failed: ${result.stderr}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi MAIN turn leases must use exact operation ownership: $out"
+  [ -z "$out" ] || fail "Pi MAIN lease-owner test printed output: $out"
+  pass ".pi primary extension cleans only the settled MAIN operation's leases"
+}
+
 # --- --claude cooperative mode -----------------------------------------------
 # In --claude mode the guard ignores stop_hook_active (Claude marks every stop
 # after ANY stop-hook continuation true, including asyncRewake rewake turns) and
@@ -1796,6 +1877,7 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_main_turn_lease_owner_cleans_exactly_at_settle
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

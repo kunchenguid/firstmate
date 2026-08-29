@@ -385,10 +385,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working" or (.delivery_continuation.state == "pending" or .delivery_continuation.state == "head-mismatch"))
        | {id, kind,
-        state: (if .delivery_continuation.state == "pending" then "validation_pending"
+        state: (if .delivery_continuation.state == "pending" and .delivery_continuation.worker_run_attributed != true then "validation_pending"
                 elif .delivery_continuation.state == "head-mismatch" then "validation_conflict"
                 else .current_state.state end),
-        doing: ((if .delivery_continuation.state == "pending" then
+        doing: ((if .delivery_continuation.state == "pending" and .delivery_continuation.worker_run_attributed == true then
+                   (((.current_state.detail // "") as $d
+                     | if $d != "" then $d else (.hints.last_event_text // "") end)
+                    + "; validation instruction remains unacknowledged")
+                 elif .delivery_continuation.state == "pending" then
                    ("Validation instruction awaiting acknowledgement"
                     + (if .delivery_continuation.worker_unverified_busy then "; activity source unverified" else "" end))
                  elif .delivery_continuation.state == "head-mismatch" then

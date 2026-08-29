@@ -504,6 +504,33 @@ test_release_actor_drops_only_that_actors_leases() {
   pass "release commands authorize the caller and bulk release drops only that actor's leases"
 }
 
+test_operation_owner_claim_and_cleanup_are_exact() {
+  local home out status
+  local -x PI_CODING_AGENT=true
+  home="$TMP_ROOT/operation-owner-home"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+
+  FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ FM_LEASE_OWNER=main-turn-one \
+    "$ROOT/bin/fm-lease.sh" claim task-owned --actor main || fail "first operation claim failed"
+  out=$(FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ FM_LEASE_OWNER=main-turn-two \
+    "$ROOT/bin/fm-lease.sh" claim task-owned --actor main 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "same-actor competing operation claim exited $status, not 6: $out"
+  assert_contains "$out" "another operation" "same-actor claim refusal lost operation ownership"
+
+  FM_HOME="$home" FM_LEASE_OWNER=main-turn-two "$ROOT/bin/fm-lease.sh" release task-owned --actor main \
+    || fail "non-owner release failed"
+  [ -e "$home/state/.lease-task-owned" ] || fail "non-owner release removed another operation's lease"
+  FM_HOME="$home" FM_LEASE_OWNER=main-turn-two \
+    "$ROOT/bin/fm-lease.sh" release-owner --actor main --owner main-turn-two || fail "non-owner cleanup failed"
+  [ -e "$home/state/.lease-task-owned" ] || fail "non-owner cleanup removed another operation's lease"
+  FM_HOME="$home" FM_LEASE_OWNER=main-turn-one \
+    "$ROOT/bin/fm-lease.sh" release-owner --actor main --owner main-turn-one || fail "exact-owner cleanup failed"
+  [ ! -e "$home/state/.lease-task-owned" ] || fail "exact-owner cleanup kept its operation lease"
+  pass "same-actor operations remain exclusive and cleanup is exact-owner only"
+}
+
 # --- role-partition refinements ----------------------------------------------
 
 test_branch_cannot_force_teardown_or_directly_relaunch() {
@@ -549,4 +576,5 @@ test_guard_stale_clear_cannot_delete_a_new_claim
 test_guard_holds_exclusivity_through_mutation
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
+test_operation_owner_claim_and_cleanup_are_exact
 test_branch_cannot_force_teardown_or_directly_relaunch

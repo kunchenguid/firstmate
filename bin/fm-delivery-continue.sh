@@ -29,6 +29,8 @@ TASK=${1:-}
 case "$TASK" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
 
 CLAIMED=0
+FM_LEASE_OWNER="delivery-$TASK-$$"
+export FM_LEASE_OWNER
 cleanup() {
   [ "$CLAIMED" = 1 ] || return 0
   "$LEASE_BIN" release "$TASK" >/dev/null 2>&1 || true

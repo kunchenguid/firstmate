@@ -575,6 +575,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
 
 // 1. An accepted wake reaches the branch session, never main.
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const bashTool = session.options.customTools.find((tool) => tool.name === "bash");
+  globalThis.__fmHookedBash = bashTool.__options.spawnHook({ command: "true", cwd: "/x", env: { PATH: "/bin" } });
+};
 const offer = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
 if (!offer.accepted) throw new Error("branch did not accept the wake offer");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
@@ -599,10 +603,10 @@ if (!loader.options.systemPrompt || !loader.options.systemPrompt.startsWith("You
   throw new Error("branch system prompt is not the generator's output");
 }
 if (loader.options.systemPrompt.length < 4096) throw new Error("branch prompt is below the provider caching minimum");
-const bashTool = session.options.customTools.find((tool) => tool.name === "bash");
-const hooked = bashTool.__options.spawnHook({ command: "true", cwd: "/x", env: { PATH: "/bin" } });
+const hooked = globalThis.__fmHookedBash;
 if (hooked.env.FM_SUPERVISION_ACTOR !== "branch") throw new Error("branch bash does not inject the branch actor");
 if (hooked.env.FM_LEASE_HOLDER_PID !== String(process.ppid)) throw new Error("branch bash does not pin the verified session-lock holder pid");
+if (!/^pi-branch-[A-Za-z0-9._-]+$/.test(hooked.env.FM_LEASE_OWNER)) throw new Error("branch bash does not inject its exact turn lease owner");
 
 // 3. Shared per-home prompt_cache_key: overrides only payloads that already
 // carry one, stable within the home.
@@ -2560,20 +2564,19 @@ const { dispatch, settle, home, realRoot } = globalThis.__t;
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
-globalThis.__fmOnBranchPrompt = async () => {
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
   if (globalThis.__fmTurnLeaseClaimed) return;
-  const claimed = spawnSync("bash", [`${realRoot}/bin/fm-lease.sh`, "claim", "task-turn", "--actor", "branch"], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      FM_HOME: home,
-      FM_STATE_OVERRIDE: `${home}/state`,
-      FM_ROOT_OVERRIDE: realRoot,
-      FM_SUPERVISION_ACTOR: "branch",
-      FM_LEASE_HOLDER_PID: String(process.pid),
-    },
-  });
-  if (claimed.status !== 0) throw new Error(`branch lease claim failed: ${claimed.stderr}`);
+  globalThis.__fmExecuteBranchBash = (context) => {
+    const claimed = spawnSync("bash", ["-lc", context.command], {
+      cwd: context.cwd,
+      encoding: "utf8",
+      env: context.env,
+    });
+    if (claimed.status !== 0) throw new Error(`branch lease claim failed: ${claimed.stderr}`);
+    return { content: [], details: { status: claimed.status } };
+  };
+  const bashTool = session.options.customTools.find((tool) => tool.name === "bash");
+  await bashTool.execute("claim-turn-lease", { command: `${realRoot}/bin/fm-lease.sh claim task-turn --actor branch` });
   if (!existsSync(`${home}/state/.lease-task-turn`)) throw new Error("branch turn did not hold its claimed lease");
   globalThis.__fmTurnLeaseClaimed = true;
 };

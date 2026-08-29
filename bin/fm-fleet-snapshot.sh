@@ -33,6 +33,10 @@
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
+#     delivery_continuation preserves the durable delivery record and projects
+#     whether current_state is attributable to a no-mistakes run, so renderers
+#     can keep unacknowledged delivery evidence secondary to active or terminal
+#     pipeline state.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
@@ -454,7 +458,7 @@ task_json_lines() {
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json continuation_tsv continuation_state continuation_head continuation_delivery continuation_json continuation_unverified_busy continuation_current_head continuation_record_state
+  local open_decisions_tsv open_decisions_json continuation_tsv continuation_state continuation_head continuation_delivery continuation_json continuation_unverified_busy continuation_current_head continuation_record_state continuation_run_attributed current_detail
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -498,12 +502,17 @@ task_json_lines() {
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    current_detail=$(printf '%s' "$current_json" | jq -r '.detail // ""')
     continuation_state=
     continuation_head=
     continuation_delivery=
     continuation_current_head=
     continuation_record_state=
     continuation_unverified_busy=false
+    continuation_run_attributed=false
+    if [ "$current_source" = run-step ] || { [ "$current_source" = status-log ] && printf '%s\n' "$current_detail" | grep -Fq 'run still monitoring PR'; }; then
+      continuation_run_attributed=true
+    fi
     if [ -n "$worktree" ] && [ -d "$worktree" ]; then
       continuation_current_head=$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null || true)
     fi
@@ -517,15 +526,16 @@ EOF
         continuation_head=$continuation_record_state
         continuation_record_state=$continuation_state
       fi
-      if [ "$continuation_state" = pending ] && [ "$current_source" != run-step ] \
+      if [ "$continuation_state" = pending ] && [ "$continuation_run_attributed" != true ] \
         && { [ "$current_state" = working ] || [ "$current_state" = unknown ]; }; then
         continuation_unverified_busy=true
       fi
       continuation_json=$(jq -n \
         --arg state "$continuation_state" --arg record_state "$continuation_record_state" --arg head "$continuation_head" --arg current_head "$continuation_current_head" --arg delivery "$continuation_delivery" \
         --arg worker_state "$current_state" --arg worker_source "$current_source" \
+        --argjson worker_run_attributed "$continuation_run_attributed" \
         --argjson worker_unverified_busy "$continuation_unverified_busy" \
-        '{state:$state,record_state:$record_state,head:$head,current_head:($current_head | if . == "" then null else . end),delivery:$delivery,worker_state:$worker_state,worker_source:$worker_source,worker_unverified_busy:$worker_unverified_busy}')
+        '{state:$state,record_state:$record_state,head:$head,current_head:($current_head | if . == "" then null else . end),delivery:$delivery,worker_state:$worker_state,worker_source:$worker_source,worker_run_attributed:$worker_run_attributed,worker_unverified_busy:$worker_unverified_busy}')
     else
       continuation_json=null
     fi

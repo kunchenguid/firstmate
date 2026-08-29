@@ -162,7 +162,7 @@ test_terminal_receipt_and_existing_lease_retry() {
 }
 
 test_fleet_and_bearings_project_pending_continuation() {
-  local dir home send state fakebin snapshot bearings
+  local dir home send state fakebin snapshot bearings head active_bearings monitoring_bearings terminal_bearings
   dir="$TMP_ROOT/fleet-projection"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
   send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
@@ -187,7 +187,71 @@ SH
   bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bearings-snapshot.sh" --json)
   printf '%s' "$bearings" | jq -e '.in_flight[] | select(.id == "ship") | .state == "validation_pending" and (.doing | contains("source unverified"))' >/dev/null \
     || fail "Bearings hid pending continuation or unverified busy source: $bearings"
-  pass "fleet and Bearings project the pending continuation and unverified worker activity"
+  head=$(git -C "$home/projects/ship" rev-parse HEAD)
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'axi status')
+    if [ "${FM_FAKE_RUN_MODE:-}" = active ]; then
+      cat <<EOF
+run:
+  id: "01RUN"
+  branch: fm/ship
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:?}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
+EOF
+    elif [ "${FM_FAKE_RUN_MODE:-}" = monitoring ]; then
+      cat <<EOF
+run:
+  id: "01RUN"
+  branch: fm/ship
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:?}"
+  pr: "https://example.invalid/pull/1"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+    ci,running,0,0
+EOF
+    else
+      cat <<EOF
+run:
+  id: "01RUN"
+  branch: fm/ship
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:?}"
+  pr: "https://example.invalid/pull/1"
+  findings: none
+outcome: checks-passed
+EOF
+    fi
+    ;;
+  'axi logs') exit 0 ;;
+  'runs --limit') exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/no-mistakes"
+  active_bearings=$(FM_FAKE_RUN_MODE=active FM_FAKE_RUN_HEAD="$head" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-bearings-snapshot.sh" --json)
+  printf '%s' "$active_bearings" | jq -e '.in_flight[] | select(.id == "ship") | .state == "working" and (.doing | contains("validating (running)")) and (.doing | contains("validation instr"))' >/dev/null \
+    || fail "Bearings let pending delivery hide an attributed active run: $active_bearings"
+  printf 'done: PR https://example.invalid/pull/1 checks green\n' > "$home/state/ship.status"
+  monitoring_bearings=$(FM_FAKE_RUN_MODE=monitoring FM_FAKE_RUN_HEAD="$head" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-bearings-snapshot.sh" --json)
+  printf '%s' "$monitoring_bearings" | jq -e '.in_flight[] | select(.id == "ship") | .state == "done" and (.doing | contains("checks green")) and (.doing | contains("validation instr"))' >/dev/null \
+    || fail "Bearings lost an attributed monitoring run reconciled through status: $monitoring_bearings"
+  terminal_bearings=$(FM_FAKE_RUN_MODE=terminal FM_FAKE_RUN_HEAD="$head" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-bearings-snapshot.sh" --json)
+  printf '%s' "$terminal_bearings" | jq -e '.in_flight[] | select(.id == "ship") | .state == "done" and (.doing | contains("checks green: PR ready for review")) and (.doing | contains("validation instr"))' >/dev/null \
+    || fail "Bearings let pending delivery hide an attributed terminal run: $terminal_bearings"
+  pass "fleet and Bearings preserve pending delivery behind authoritative run state"
 }
 
 test_advanced_head_surfaces_continuation_conflict() {

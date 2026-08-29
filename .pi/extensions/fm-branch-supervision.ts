@@ -409,6 +409,7 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 export default function (pi: ExtensionAPI) {
   let branch: AgentSession | null = null;
   let branchBroken = "";
+  let activeBranchLeaseOwner = "";
   let mainStreaming = false;
   let shuttingDown = false;
   // Bumps at every session replacement so a stale chain continuation from the
@@ -544,13 +545,16 @@ export default function (pi: ExtensionAPI) {
   // Branch leases are operation-scoped even though their liveness pid is the
   // Pi process: activation clears replacement residue, and every settled
   // branch turn clears anything its model did not release itself.
-  function releaseBranchLeases(expectedGeneration: number): boolean {
+  function releaseBranchLeases(expectedGeneration: number, owner = ""): boolean {
     if (!generationOwnsLock(expectedGeneration)) return false;
     try {
-      const result = spawnSync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
+      const args = owner
+        ? [leaseScript, "release-owner", "--actor", "branch", "--owner", owner]
+        : [leaseScript, "release-actor", "--actor", "branch"];
+      const result = spawnSync("bash", args, {
         cwd: fmRoot,
         encoding: "utf8",
-        env: { ...scriptEnv, FM_SUPERVISION_ACTOR: "branch" },
+        env: { ...scriptEnv, FM_SUPERVISION_ACTOR: "branch", ...(owner ? { FM_LEASE_OWNER: owner } : {}) },
       });
       return result.status === 0;
     } catch {
@@ -804,14 +808,17 @@ export default function (pi: ExtensionAPI) {
         if (!actingAsOwner(branchGeneration)) {
           throw new Error("bash refused: supervision session was replaced or lost lock ownership");
         }
+        if (!activeBranchLeaseOwner) {
+          throw new Error("bash refused: supervision branch has no active turn lease owner");
+        }
         return {
           ...context,
-          // Loud accidental-override guard (captain-decided): the actor
-          // variables are readonly inside the branch's own shell, so an
+          // Loud accidental-override guard (captain-decided): the lease
+          // identity variables are readonly inside the branch's own shell, so an
           // accidental in-shell reassignment fails loudly instead of silently
           // impersonating main. Confused-agent-grade by design; the threat
           // model lives in bin/fm-lease-lib.sh.
-          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID
+          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID FM_LEASE_OWNER
 (
 ${context.command}
 )`,
@@ -820,6 +827,7 @@ ${context.command}
             ...scriptEnv,
             FM_SUPERVISION_ACTOR: "branch",
             FM_LEASE_HOLDER_PID: leaseHolderPid,
+            FM_LEASE_OWNER: activeBranchLeaseOwner,
           },
         };
       },
@@ -946,12 +954,15 @@ ${context.command}
         );
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
+        const branchLeaseOwner = `pi-branch-${acceptedGeneration}-${randomUUID()}`;
+        activeBranchLeaseOwner = branchLeaseOwner;
         try {
           await session.prompt(
             `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
           );
         } finally {
-          if (generationOwnsLock(acceptedGeneration) && !releaseBranchLeases(acceptedGeneration)) {
+          activeBranchLeaseOwner = "";
+          if (generationOwnsLock(acceptedGeneration) && !releaseBranchLeases(acceptedGeneration, branchLeaseOwner)) {
             throw new Error("could not release the branch turn's supervision leases");
           }
         }
