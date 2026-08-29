@@ -514,7 +514,8 @@ ShellCheck 0.11.0 (pinned)
 base: origin/main f66be0f
 ```
 
-Both regression cases were checked against the code with their own fix removed, because a case that cannot fail proves nothing.
+Each regression case below was checked against the code with its own fix removed, because a case that cannot fail proves nothing.
+One behaviour in this change has no such case; it is named in full under "The uncovered leg" below rather than left for a reader to find by opening the test files.
 
 The cycle-end evidence, mutant = the evidence clause reverted to the bare upstream sentence:
 
@@ -564,6 +565,24 @@ mutant  -> not ok - an unreadable identity was reported as a death:
 
 The fixture asserts the watcher is still alive at that moment, so the mutant's sentence is provably false rather than merely unproven.
 Its second leg kills that same watcher and requires the death wording to still fire, so the fix cannot pass by simply never saying it.
+
+#### The uncovered leg: an empty recorded identity
+
+That liveness probe has a second leg, and no test in this repository fails without it.
+This is the one behaviour in this change that ships unproven, and it is stated here so the coverage of the rest is not read as covering it too.
+
+When the identity recorded for the cycle is empty rather than merely unreadable, `cycle_watcher_still_live` answers unknown instead of falling back to bare pid liveness.
+Reverting that leg alone - `[ -n "$identity" ] || return 2` back to `return 0` - leaves the entire `tests/fm-watcher-lock.test.sh` suite green at 35 ok, 0 not ok, exit 0.
+The mutant was confirmed to be valid bash first, so that green is a real pass rather than a broken script.
+
+It could not be staged because the fixed and unfixed code only diverge on a pid the kernel has already recycled.
+An empty recorded identity is captured in exactly one place: when an owning arm forks its watcher and `fm_pid_identity` cannot read the new child, at `cycle_begin "$child" started ...` in `bin/fm-watch-arm.sh`.
+Shadowing `ps` so that read fails does reproduce the empty identity - driven through the real scripts, that arm prints `watcher pid=N exited and released this home lock without recording a delivered wake` - but an owning arm reaches the evidence path only after `wait` has reaped that child, so `fm_pid_alive` is already false and both versions take the same branch above the leg.
+The attached-arm paths cannot reach it at all, because `fm_watcher_lock_matches_pid` rejects an empty recorded identity before a cycle can begin from one.
+Forcing the divergence therefore needs that freed pid to be reused by a live process inside that window, which is not deterministically stageable without test-only machinery that would make the fixture unlike a real run.
+
+The leg is kept exactly as written rather than deleted.
+Deleting it would restore the bare-liveness fallback this change's own rationale rules out, which trades an unproven behaviour for a known defect.
 
 ### Beacon freshness under host suspend - attempted and deferred
 
