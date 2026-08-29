@@ -160,7 +160,7 @@ export default function (pi: any): void {
           && prompt.indexOf("Before reading any retained content beyond metadata") < prompt.indexOf("Before accepting non-public context"),
         retainedEvidenceInventory: prompt.includes("current tracked files and working state")
           && prompt.includes("all local Git refs and history including preserved task branches")
-          && prompt.includes("all registered Treehouse worktrees and their retained uncommitted files")
+          && prompt.includes("all Treehouse worktrees and their retained uncommitted files, whether or not they are registered")
           && prompt.includes("private reports and briefs")
           && prompt.includes("durable Firstmate records"),
         missingEvidenceStopsHandoff: prompt.includes("stop the handoff, and report the missing local source instead of substituting a new owner"),

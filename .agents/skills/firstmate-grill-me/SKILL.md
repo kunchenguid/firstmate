@@ -41,7 +41,7 @@ Before reading any retained content beyond metadata, state the active provider a
 Start with a metadata-only inventory of paths, ref names, worktree identities, report and brief identifiers, record kinds, owners, timestamps, and dirty or clean state; do not read payloads or values during this inventory.
 After that disclosure, read only the minimum redacted content needed to reconcile ownership and provenance, keep secrets and raw private, customer, payment, or personal values outside the interview context, and use opaque identifiers for sensitive source pointers.
 If safe redaction is impossible, stop that reconciliation branch and route it to the existing protected owner.
-Inspect the current tracked files and working state, all local Git refs and history including preserved task branches, all registered Treehouse worktrees and their retained uncommitted files, private reports and briefs, and durable Firstmate records.
+Inspect the current tracked files and working state, all local Git refs and history including preserved task branches, all Treehouse worktrees and their retained uncommitted files, whether or not they are registered, private reports and briefs, and durable Firstmate records.
 Separate current evidence from superseded reports, reconcile contradictions through the record owner that governs the fact, and record a safe source pointer, capture date, and confidence for each material conclusion.
 Confirm from that evidence the exact owner, input boundary, output boundary, and authority boundary of the existing local `note-to-node` method before composing its handoff.
 Confirm the existing owners for project intake, diagnosis, captain-held choices, process events, credentials, delivery, and memory before routing any branch to them.
