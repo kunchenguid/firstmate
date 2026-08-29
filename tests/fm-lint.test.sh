@@ -169,7 +169,7 @@ test_list_files_reports_the_shell_inventory() {
   # working-tree diff a local test run happens to have, so this stays a pure
   # inventory check independent of fm-lint.sh's own changed-file mode below.
   listed=$(CI=true "$LINT" --list-files)
-  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  expected=$(find bin bin/backends tests scripts -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete shell inventory"
   pass "fm-lint.sh --list-files reports the complete shell inventory"
@@ -473,7 +473,7 @@ test_ci_forces_full_lint_even_with_empty_diff() {
   # No git stub: CI=true must short-circuit fm-lint.sh's mode selection before
   # it ever consults git, so this proves CI wins regardless of local diff state.
   listed=$(CI=true "$LINT" --list-files)
-  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  expected=$(find bin bin/backends tests scripts -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "CI=true did not force the full canonical file set"
   pass "fm-lint.sh forces a full lint in CI even when the local diff would be empty"
@@ -489,7 +489,7 @@ test_main_branch_forces_full_lint() {
   # not the ambient CI signal a real CI run would otherwise supply.
   listed=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
     FM_TEST_GIT_BRANCH=main "$LINT" --list-files)
-  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  expected=$(find bin bin/backends tests scripts -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh did not force a full lint when HEAD is on main"
   pass "fm-lint.sh forces a full lint when HEAD is on main"

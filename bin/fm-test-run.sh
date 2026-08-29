@@ -182,7 +182,7 @@ family_for_basename() {
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|fm-unadvanceable-work.test.sh|\
     fm-record-contradictions-lib.test.sh|fm-worktree-unique-content.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|test-changed.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-heavy-suite.test.sh|fm-pi-watch-extension.test.sh|\
@@ -936,6 +936,9 @@ families_for_changed_path() {
       ;;
     bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
       printf '%s\n' pure-contract-unit
+      ;;
+    scripts/test-changed.sh)
+      printf '%s\n' __script__:test-changed.test.sh
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
