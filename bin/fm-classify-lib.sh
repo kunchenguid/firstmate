@@ -1514,7 +1514,7 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
         }
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
           [ -n "$events" ] && events="${events} ; "
-          events="${events}${line}"
+          events="${events}reconciliation-required: ${line}"
           rc=0
           continue
         }

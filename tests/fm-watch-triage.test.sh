@@ -241,7 +241,7 @@ test_status_span_survives_a_later_routine_append() {
 # Closure is the one thing that may retire an event inside a span, and only
 # through status_open_decisions' own open/closed rule.
 test_status_span_respects_decision_closure() {
-  local dir state event
+  local dir state event open
   dir=$(make_case classify-closure); state="$dir/state"
   printf 'needs-decision [key=api]: pick A or B\nresolved [key=api]: took A\n' > "$state/closed.status"
   status_span_has_actionable "$state/closed.status" 0 \
@@ -265,7 +265,16 @@ test_status_span_respects_decision_closure() {
     || fail "a still-open decision was retired by a newer closure under another key"
   [ "$event" = "needs-decision [key=api]: pick A or B" ] \
     || fail "the span reported '$event' instead of the decision still open"
-  pass "span classification retires only decisions the whole-file fold proves closed"
+  printf 'needs-decision [key=pending-reply-x]: unrelated request\nworking: awaiting reconciliation\n' \
+    > "$state/rejected-reserved.status"
+  event=$(status_span_first_actionable "$state/rejected-reserved.status" 0) \
+    || fail "a rejected reserved-key request was silently dropped"
+  [ "$event" = "reconciliation-required: needs-decision [key=pending-reply-x]: unrelated request" ] \
+    || fail "a rejected reserved-key request was not labeled for reconciliation: $event"
+  open=$(status_open_decisions "$state/rejected-reserved.status")
+  [ -z "$open" ] \
+    || fail "span classification treated a rejected reserved-key request as an open decision: $open"
+  pass "span classification retires closed decisions and surfaces rejected transitions for reconciliation"
 }
 
 test_malformed_seen_signature_reads_the_whole_log() {
@@ -909,14 +918,15 @@ test_routine_appends_after_a_classified_event_stay_absorbed() {
 test_unreadable_status_reports_once_per_file_state() {
   local dir state fakebin out status_file target marker sig pid
   dir=$(make_case unreadable-status); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; status_file="$state/task.status"; target="$dir/status-target"
-  printf 'blocked: release host unavailable\n' > "$target"
+  out="$dir/watch.out"; status_file="$state/task.status"; target="$dir/missing-status-target"
   ln -s "$target" "$status_file"
   marker="$state/.seen-task_status"
 
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an unreadable status was not reported"; }
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a dangling status symlink was not reported"; }
+  grep -Fx "signal: $status_file" "$out" >/dev/null \
+    || fail "a dangling status symlink did not use the immediate signal path: $(cat "$out")"
   sig=$(status_observed_signature "$status_file")
   status_presentation_marker_reported_matches "$marker" "$sig" \
     || fail "the unreadable status report did not advance its wake signature"
