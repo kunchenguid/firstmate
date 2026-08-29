@@ -1168,6 +1168,10 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
+    bin/fm-codex-tier-lib.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' secondmate
+      ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch

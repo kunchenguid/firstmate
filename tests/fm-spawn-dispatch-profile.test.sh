@@ -42,7 +42,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
+  new-window)
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'created\n' > "$FM_FAKE_ENDPOINT_LOG"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -59,7 +63,22 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  get)
+    [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf 'get cwd=%s args=%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    ;;
+  return)
+    case " $* " in
+      *' --if-lease-holder '*) exit 64 ;;
+    esac
+    [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf 'return cwd=%s args=%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+    ;;
+esac
+SH
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -73,7 +92,28 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  'doctor --json')
+    effective_model=${FM_FAKE_CODEX_EFFECTIVE_MODEL:-gpt-5.4}
+    if [ -f .codex/fake-effective-model ]; then
+      IFS= read -r effective_model < .codex/fake-effective-model
+    fi
+    [ -z "${FM_FAKE_CODEX_CWD_LOG:-}" ] || printf 'doctor %s bin=%s home=%s\n' "$PWD" "$0" "${CODEX_HOME:-}" >> "$FM_FAKE_CODEX_CWD_LOG"
+    printf '{"checks":[{"id":"config.load","details":{"model":"%s"}}]}\n' \
+      "$effective_model"
+    exit "${FM_FAKE_CODEX_DOCTOR_STATUS:-0}"
+    ;;
+  'debug models')
+    [ -z "${FM_FAKE_CODEX_CWD_LOG:-}" ] || printf 'models %s bin=%s home=%s\n' "$PWD" "$0" "${CODEX_HOME:-}" >> "$FM_FAKE_CODEX_CWD_LOG"
+    [ "${FM_FAKE_CODEX_CATALOG_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CODEX_CATALOG_STATUS}"
+    printf '%s\n' '{"models":[{"slug":"gpt-5.4","service_tiers":[{"id":"priority"}]},{"slug":"gpt-5.4-mini","service_tiers":[]}]}'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/codex"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -88,7 +128,7 @@ make_spawn_case() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$home/codex-home"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -117,6 +157,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  rm -f "$launchlog.endpoint" "$launchlog.treehouse" "$launchlog.codex-cwd"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -125,10 +166,17 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    CODEX_HOME="$home/codex-home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_ENDPOINT_LOG="$launchlog.endpoint" \
+    FM_FAKE_TREEHOUSE_LOG="$launchlog.treehouse" \
+    FM_FAKE_CODEX_CWD_LOG="$launchlog.codex-cwd" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_CODEX_EFFECTIVE_MODEL="${FM_TEST_CODEX_EFFECTIVE_MODEL:-gpt-5.4}" \
+    FM_FAKE_CODEX_DOCTOR_STATUS="${FM_TEST_CODEX_DOCTOR_STATUS:-0}" \
+    FM_FAKE_CODEX_CATALOG_STATUS="${FM_TEST_CODEX_CATALOG_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -146,10 +194,11 @@ EOF
 }
 
 assert_meta_profile() {
-  local meta=$1 harness=$2 model=$3 effort=$4
+  local meta=$1 harness=$2 model=$3 effort=$4 tier=${5:-standard}
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+  assert_grep "tier=$tier" "$meta" "meta missing tier=$tier"
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
@@ -379,7 +428,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -418,6 +467,40 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_codex_fast_tier_refuses_before_mutation() {
+  local rec id out status launch
+  id=profile-raw-codex-standard-z15a
+  rec=$(make_spawn_case profile-raw-codex-standard claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --profile custom")
+  status=$?
+  expect_code 0 "$status" "raw standard Codex launch should remain supported"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default standard
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex --profile custom" ] \
+    || fail "raw standard Codex launch changed"$'\n'"actual: $launch"
+
+  id=profile-raw-codex-fast-z15b
+  rec=$(make_spawn_case profile-raw-codex-fast claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --profile custom" --tier fast)
+  status=$?
+  expect_code 1 "$status" "raw fast Codex launch should be refused"
+  assert_contains "$out" "--tier fast requires Firstmate's canonical Codex launch template" \
+    "raw fast Codex refusal did not require the canonical template"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw fast Codex refusal published metadata"
+  assert_absent "$LAUNCH_LOG.endpoint" "raw fast Codex refusal created an endpoint"
+  assert_absent "$LAUNCH_LOG.treehouse" "raw fast Codex refusal acquired a worktree"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw fast Codex refusal reached launch construction"
+  pass "raw Codex fast tier refuses before worktree or endpoint mutation"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -435,6 +518,35 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
+test_non_codex_tier_is_omitted_with_warning() {
+  local baseline_rec baseline_case baseline_launch rec id out status launch
+  baseline_rec=$(make_spawn_case profile-claude-tier-baseline claude profile-claude-tier-baseline-z2a)
+  read_case_record "$baseline_rec"
+  baseline_case=$CASE_DIR
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    profile-claude-tier-baseline-z2a "$PROJ_DIR" >/dev/null
+  baseline_launch=$(cat "$LAUNCH_LOG")
+
+  id=profile-claude-tier-z2a
+  rec=$(make_spawn_case profile-claude-tier claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --tier fast)
+  status=$?
+  expect_code 0 "$status" "claude spawn with an explicit tier should succeed"
+  assert_contains "$out" "no verified serving-tier flag" \
+    "unsupported tier warning did not explain the omitted launch axis"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default fast
+  launch=$(cat "$LAUNCH_LOG")
+  baseline_launch=${baseline_launch//"$baseline_case"/CASE_ROOT}
+  launch=${launch//"$CASE_DIR"/CASE_ROOT}
+  baseline_launch=${baseline_launch//profile-claude-tier-baseline-z2a/ID}
+  launch=${launch//profile-claude-tier-z2a/ID}
+  [ "$launch" = "$baseline_launch" ] || fail "non-Codex launch changed when tier was supplied"$'\n'"baseline: $baseline_launch"$'\n'"actual: $launch"
+  assert_not_contains "$launch" "service_tier" "non-Codex launch must omit the serving-tier override"
+  pass "non-Codex tier is recorded, warned, and omitted from the launch"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -446,9 +558,127 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
+}
+
+test_codex_fast_tier_opt_in() {
+  local rec id out status launch
+  id=profile-codex-fast-z3a
+  rec=$(make_spawn_case profile-codex-fast codex "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/jq" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+  chmod +x "$FAKEBIN_DIR/jq"
+
+  out=$(FM_TEST_CODEX_DOCTOR_STATUS=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --tier fast)
+  status=$?
+  expect_code 0 "$status" "codex spawn with fast tier should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default fast
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$HOME_DIR/codex-home' '$FAKEBIN_DIR/codex' -c 'service_tier=\"priority\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex fast tier was not threaded as the verified priority override"
+  assert_not_contains "$launch" "service_tier=\"default\"" "fast tier launch must not contain the standard override"
+  assert_grep "doctor $WT_DIR" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast preflight did not resolve configuration from the finalized worktree"
+  assert_grep "doctor $WT_DIR bin=$FAKEBIN_DIR/codex home=$HOME_DIR/codex-home" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast preflight did not use the pinned executable and config home"
+  assert_grep "models $WT_DIR bin=$FAKEBIN_DIR/codex home=$HOME_DIR/codex-home" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast catalog inspection did not use the pinned executable and config home"
+  assert_grep "get cwd=$PROJ_DIR args=get --lease --lease-holder $id" "$LAUNCH_LOG.treehouse" \
+    "Codex fast spawn did not lease its worktree before endpoint creation"
+  assert_no_grep "return " "$LAUNCH_LOG.treehouse" \
+    "successful Codex fast spawn returned its live worktree lease"
+  pass "codex fast tier is an explicit opt-in"
+}
+
+test_codex_fast_secondmate_pins_runtime() {
+  local rec id sm out status launch
+  id=profile-codex-fast-secondmate-z3aa
+  rec=$(make_spawn_case profile-codex-fast-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --secondmate --tier fast)
+  status=$?
+  expect_code 0 "$status" "Codex fast secondmate spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$HOME_DIR/codex-home' '$FAKEBIN_DIR/codex' -c 'service_tier=\"priority\"' --dangerously-bypass-approvals-and-sandbox" \
+    "Codex fast secondmate launch did not pin its preflight runtime"
+  assert_not_contains "$launch" "notify=" \
+    "Codex secondmate launch gained the task turn-end hook variant"
+  assert_grep "doctor $sm bin=$FAKEBIN_DIR/codex home=$HOME_DIR/codex-home" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast secondmate preflight did not use its pinned launch runtime"
+  assert_grep "models $sm bin=$FAKEBIN_DIR/codex home=$HOME_DIR/codex-home" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast secondmate catalog inspection did not use its pinned launch runtime"
+  pass "Codex fast secondmates pin the validated executable and config home"
+}
+
+test_codex_fast_tier_requires_model_support() {
+  local rec id out status launch
+  id=profile-codex-fast-unsupported-z3b
+  rec=$(make_spawn_case profile-codex-fast-unsupported codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gpt-5.4-mini --tier fast)
+  status=$?
+  expect_code 1 "$status" "Codex fast tier should refuse an unsupported explicit model"
+  assert_contains "$out" "model 'gpt-5.4-mini' does not advertise the priority service tier" \
+    "unsupported explicit model refusal did not name the missing tier capability"
+  assert_absent "$HOME_DIR/state/$id.meta" "unsupported fast model refusal published metadata"
+  assert_absent "$LAUNCH_LOG.endpoint" "unsupported fast model created an endpoint"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "service_tier" "unsupported fast model reached Codex launch"
+
+  id=profile-codex-fast-config-unsupported-z3c
+  rec=$(make_spawn_case profile-codex-fast-config-unsupported codex "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.codex"
+  printf '%s\n' gpt-5.4-mini > "$PROJ_DIR/.codex/fake-effective-model"
+  git -C "$PROJ_DIR" add .codex/fake-effective-model
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm unsupported-origin-model
+  git -C "$PROJ_DIR" push --quiet origin HEAD
+  printf '%s\n' gpt-5.4 > "$PROJ_DIR/.codex/fake-effective-model"
+  git -C "$PROJ_DIR" add .codex/fake-effective-model
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm supported-primary-model
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --tier fast)
+  status=$?
+  expect_code 1 "$status" "Codex fast tier should refuse an unsupported configured model"
+  assert_contains "$out" "model 'gpt-5.4-mini' does not advertise the priority service tier" \
+    "unsupported configured model refusal did not use Codex's effective model"
+  assert_absent "$HOME_DIR/state/$id.meta" "unsupported configured fast model published metadata"
+  assert_absent "$LAUNCH_LOG.endpoint" "unsupported configured fast model created an endpoint"
+  assert_grep "doctor $WT_DIR" "$LAUNCH_LOG.codex-cwd" \
+    "configured-model refusal did not inspect the refreshed launch worktree"
+  assert_grep "return cwd=$PROJ_DIR args=return --force $WT_DIR" "$LAUNCH_LOG.treehouse" \
+    "failed Codex fast preflight did not return its pre-acquired worktree"
+  pass "Codex fast tier requires priority support from the resolved model"
+}
+
+test_codex_fast_tier_fails_closed_without_catalog() {
+  local rec id out status
+  id=profile-codex-fast-no-catalog-z3d
+  rec=$(make_spawn_case profile-codex-fast-no-catalog codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CODEX_CATALOG_STATUS=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model gpt-5.4 --tier fast)
+  status=$?
+  expect_code 1 "$status" "Codex fast tier should refuse an unreadable model catalog"
+  assert_contains "$out" "could not inspect the installed Codex model catalog" \
+    "catalog failure refusal did not identify the unavailable capability evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "unverified fast model published metadata"
+  assert_absent "$LAUNCH_LOG.endpoint" "unverified fast model created an endpoint"
+  pass "Codex fast tier refuses when model capability cannot be verified"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -462,7 +692,7 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'service_tier=\"default\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
@@ -837,8 +1067,14 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_codex_fast_tier_refuses_before_mutation
 test_claude_threads_model_and_effort
+test_non_codex_tier_is_omitted_with_warning
 test_codex_threads_model_and_effort
+test_codex_fast_tier_opt_in
+test_codex_fast_secondmate_pins_runtime
+test_codex_fast_tier_requires_model_support
+test_codex_fast_tier_fails_closed_without_catalog
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

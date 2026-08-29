@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent] [tier]
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
@@ -12,6 +12,8 @@
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
+# Existing endpoint metadata must record tier=standard|fast; a missing legacy
+# tier refuses access instead of being guessed from current defaults.
 #
 # Remote placement ends here, but the second-mate agent always runs on the
 # Herdr backend in the dedicated fm-remote session, so launch refuses any other
@@ -85,6 +87,18 @@ remote_endpoint_load() {
     REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded in Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
     return 1
   fi
+  REMOTE_ENDPOINT_TIER=$(fm_meta_get "$REMOTE_ENDPOINT_META" tier)
+  case "$REMOTE_ENDPOINT_TIER" in
+    standard|fast) ;;
+    '')
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint has no recorded tier; refusing access until it is explicitly migrated or safely replaced"
+      return 1
+      ;;
+    *)
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint records invalid tier '$REMOTE_ENDPOINT_TIER'; refusing access until it is explicitly migrated"
+      return 1
+      ;;
+  esac
   case "$REMOTE_ENDPOINT_TARGET" in
     "$REMOTE_HERDR_SESSION":?*) ;;
     *)
@@ -120,6 +134,7 @@ print_route() { # <id>
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  printf 'tier=%s\n' "$REMOTE_ENDPOINT_TIER"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
@@ -135,7 +150,7 @@ cmd_route() {
 }
 
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-} tier=${7:-standard}
   local current meta out herdr_session
 
   validate_id "$id"
@@ -145,6 +160,7 @@ cmd_launch() {
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$tier" in standard|fast) ;; *) die "invalid remote secondmate tier: $tier" ;; esac
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
@@ -170,6 +186,7 @@ cmd_launch() {
   ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
+  [ "$tier" = standard ] || ARGS+=(--tier "$tier")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
@@ -325,7 +342,7 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 7 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;

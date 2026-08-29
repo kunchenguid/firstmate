@@ -154,10 +154,15 @@ Launch or recover the remote second mate with the same command used for a local 
 bin/fm-spawn.sh <id> --secondmate
 ```
 
-The primary resolves the verified secondmate harness and optional model and effort, runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to launch on Herdr in `fm-remote`.
+The primary resolves the verified secondmate harness, optional model and effort, and serving tier, then runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to launch on Herdr in `fm-remote`.
+The recorded tier defaults to standard, and an explicit `--tier fast` opts only a Codex spawn into fast service.
+Recovery preserves the recorded tier when the resolved harness family is unchanged; a harness-family change resets it to standard unless the caller explicitly supplies `--tier`.
+The primary never falls back to a pre-tier remote launch: an older remote code root refuses before mutation and must be updated before retrying.
 All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.
 An existing remote endpoint recorded in another Herdr session, including `default`, is classified as unverified and left untouched; launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it instead of attempting a live cutover.
+An existing remote endpoint with missing or invalid tier metadata receives the same fail-closed treatment and is never assigned a tier by guess.
+Before publishing the primary route, launch reads back the remote endpoint's recorded tier and preserves the route without rewriting either record when that value is missing, invalid, or different from the requested tier.
 A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.

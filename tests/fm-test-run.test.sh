@@ -89,7 +89,8 @@ test_changed_file_selection_is_conservative() {
 }
 
 init_changed_fixture_repo() {
-  local repo=$1 script
+  local repo=$1 script codex_tier_helper
+  codex_tier_helper="fm-codex-tier""-lib.sh"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
@@ -119,6 +120,7 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/$codex_tier_helper"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
@@ -193,7 +195,8 @@ test_changed_runner_surfaces_select_their_family() {
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
-  local tmp repo listed rc
+  local tmp repo listed rc codex_tier_helper
+  codex_tier_helper="fm-codex-tier""-lib.sh"
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
@@ -219,6 +222,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/$codex_tier_helper"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" "Codex tier helper selects backend dispatch coverage"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "Codex tier helper selects secondmate coverage"
+  git -C "$repo" add "bin/$codex_tier_helper"
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm codex-tier-helper-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

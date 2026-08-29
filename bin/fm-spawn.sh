@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tier <standard|fast>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tier <standard|fast>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tier <standard|fast>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -16,7 +16,7 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--tier <standard|fast>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -26,7 +26,7 @@
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
+#   model, effort, and tier may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
@@ -35,9 +35,16 @@
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   axes chosen by firstmate at intake. --tier <standard|fast> is an optional
+#   per-spawn axis that defaults to standard. Firstmate's canonical Codex template
+#   receives the verified service-tier override; an explicit tier on another harness
+#   is recorded and omitted with a warning. A raw Codex command remains unmodified in
+#   standard mode, so its actual service tier is outside Firstmate's verified contract.
+#   Fast service requires the canonical Codex template; a raw Codex launch command is
+#   refused before task worktree or endpoint creation because its executable,
+#   configuration home, and tier override cannot be verified or rewritten safely.
+#   The canonical fast launch also refuses when its resolved model cannot be verified
+#   to advertise the priority service tier in the installed Codex model catalog.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -150,7 +157,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--tier/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -170,6 +177,8 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#     __CODEXCOMMAND__ resolved Codex executable with its effective config home
+#     __TIERFLAG__  quoted Codex per-spawn service-tier override
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -257,6 +266,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-tier-lib.sh
+. "$SCRIPT_DIR/fm-codex-tier-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -280,6 +291,7 @@ KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
+TIER=standard
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -287,6 +299,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+TIER_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -303,6 +316,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      tier) TIER=$a; TIER_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -322,6 +336,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --tier) want_value=tier ;;
+    --tier=*) TIER=${a#--tier=}; TIER_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -337,6 +353,7 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$TIER_SET" -eq 0 ] || [ -n "$TIER" ] || { echo "error: --tier requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
@@ -358,6 +375,37 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+case "$TIER" in
+  standard|fast) ;;
+  *) echo "error: --tier must be one of standard, fast" >&2; exit 1 ;;
+esac
+
+resolve_secondmate_recovery_tier() {
+  local id=$1 harness=$2 meta recorded_tier recorded_harness recorded_family target_family
+  [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = secondmate ] && [ "$TIER_SET" -eq 0 ] || return 0
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] \
+    && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 0
+  recorded_tier=$(fm_meta_get "$meta" tier)
+  if [ -z "$recorded_tier" ] && [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    echo "error: remote secondmate $id has no recorded tier; refusing recovery until it is explicitly migrated or safely replaced" >&2
+    return 1
+  fi
+  [ -n "$recorded_tier" ] || recorded_tier=standard
+  case "$recorded_tier" in
+    standard|fast) ;;
+    *) echo "error: secondmate $id has invalid recorded tier '$recorded_tier'; refusing recovery" >&2; return 1 ;;
+  esac
+  recorded_harness=$(fm_meta_get "$meta" harness)
+  recorded_family=$(fm_control_harness_family "$recorded_harness" 2>/dev/null || printf '%s' "$recorded_harness")
+  target_family=$(fm_control_harness_family "$harness" 2>/dev/null || printf '%s' "$harness")
+  if [ "$target_family" = "$recorded_family" ]; then
+    TIER=$recorded_tier
+  else
+    TIER=standard
+  fi
+  TIER_SET=1
+}
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -406,8 +454,8 @@ else
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local id=$1 remote host root home harness positional model effort tier backend out rc meta tmp
+  local remote_backend remote_target remote_harness remote_herdr_session remote_tier registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -456,8 +504,14 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  if ! resolve_secondmate_recovery_tier "$id" "$harness"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
+  tier=$TIER
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
     if [ "$MODEL_SET" -eq 0 ]; then
       model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
@@ -490,6 +544,18 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  case "$tier" in
+    standard|fast) ;;
+    *)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: invalid remote secondmate tier: $tier" >&2
+      return 1
+      ;;
+  esac
+  if [ "$TIER_SET" -eq 1 ] && [ "$harness" != codex ]; then
+    echo "warning: harness '$harness' has no verified serving-tier flag; recording tier=$tier and omitting it from launch" >&2
+  fi
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
@@ -558,14 +624,14 @@ spawn_remote_secondmate() {
   # carrier is resolved against THIS task's own meta (reused verbatim on
   # relaunch, freshly rooted otherwise, never adopting this process's ambient
   # TRACEPARENT) under this home's frozen decision, then handed to the remote
-  # host to export into the agent's pane. Disabled resolves to empty and the
-  # remote launch call stays byte-identical to the untraced one.
+  # host to export into the agent's pane. Disabled resolves to an empty
+  # positional carrier in the fixed tier-aware launch shape.
   remote_traceparent=
   if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  launch_args+=("$remote_traceparent" "$tier")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -586,6 +652,7 @@ spawn_remote_secondmate() {
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_tier=$(printf '%s\n' "$out" | sed -n 's/^tier=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -605,6 +672,23 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  case "$remote_tier" in
+    standard|fast) ;;
+    *)
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote launch returned tier '${remote_tier:-missing}', expected standard or fast; preserving the remote route for reconciliation" >&2
+      return 1
+      ;;
+  esac
+  if [ "$remote_tier" != "$tier" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned tier '$remote_tier', expected '$tier'; preserving the remote route for reconciliation" >&2
     return 1
   fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
@@ -628,6 +712,7 @@ spawn_remote_secondmate() {
     echo "tasktmp="
     echo "model=${model#-}"
     echo "effort=${effort#-}"
+    echo "tier=$remote_tier"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -658,6 +743,11 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+PREACQUIRED_WORKTREE=0
+TREEHOUSE_ABORT_CLEANUP=0
+TREEHOUSE_ABORT_FORCE=0
+TREEHOUSE_ABORT_WORKTREE=
+WORKTREE_REFRESHED=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -764,12 +854,23 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            echo "tier=${TIER:-standard}"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
+    fi
+  fi
+  if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
+    TREEHOUSE_ABORT_CLEANUP=0
+    if [ "$TREEHOUSE_ABORT_FORCE" = 1 ]; then
+      (cd "$PROJ_ABS" && treehouse return --force "$TREEHOUSE_ABORT_WORKTREE" </dev/null) \
+        || echo "warning: could not return pre-acquired worktree '$TREEHOUSE_ABORT_WORKTREE' after aborted spawn of $ID" >&2
+    else
+      (cd "$PROJ_ABS" && treehouse return "$TREEHOUSE_ABORT_WORKTREE" </dev/null) \
+        || echo "warning: could not return pre-acquired worktree '$TREEHOUSE_ABORT_WORKTREE' after aborted spawn of $ID" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -872,6 +973,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ "$TIER_SET" -eq 0 ] || shared_args+=(--tier "$TIER")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1033,6 +1135,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  if [ "$TIER_SET" -eq 0 ]; then
+    TIER=$(fm_meta_get "$RELAUNCH_META" tier)
+    [ -n "$TIER" ] || TIER=standard
+  fi
+  case "$TIER" in
+    standard|fast) ;;
+    *) echo "error: task $ID has invalid recorded tier '$TIER'; refusing relaunch" >&2; exit 1 ;;
+  esac
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1139,9 +1249,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXCOMMAND__ __MODELFLAG____EFFORTFLAG____TIERFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXCOMMAND__ __MODELFLAG____EFFORTFLAG____TIERFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1205,6 +1315,7 @@ launch_template() {
   esac
 }
 
+CANONICAL_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -1234,12 +1345,21 @@ case "$ARG3" in
       harness_src='config/crew-harness'
     fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    CANONICAL_LAUNCH=1
     ;;
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    CANONICAL_LAUNCH=1
     ;;
 esac
+
+resolve_secondmate_recovery_tier "$ID" "$HARNESS" || exit 1
+
+if [ "$HARNESS" = codex ] && [ "$TIER" = fast ] && [ "$CANONICAL_LAUNCH" != 1 ]; then
+  echo "error: --tier fast requires Firstmate's canonical Codex launch template; raw Codex launch commands cannot be verified or rewritten safely" >&2
+  exit 1
+fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
@@ -1253,6 +1373,15 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
 fi
 
 case "$HARNESS" in
+  codex)
+    CODEX_COMMAND=codex
+    if [ "$TIER" = fast ]; then
+      fm_codex_fast_tier_runtime_resolve || exit 1
+      CODEX_BIN=$FM_CODEX_FAST_TIER_BIN
+      CODEX_HOME_EFFECTIVE=$FM_CODEX_FAST_TIER_HOME
+      CODEX_COMMAND="CODEX_HOME=$(shell_quote "$CODEX_HOME_EFFECTIVE") $(shell_quote "$CODEX_BIN")"
+    fi
+    ;;
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
@@ -1282,6 +1411,10 @@ case "$HARNESS" in
     fi
     ;;
 esac
+
+if [ "$TIER_SET" -eq 1 ] && [ "$HARNESS" != codex ]; then
+  echo "warning: harness '$HARNESS' has no verified serving-tier flag; recording tier=$TIER and omitting it from launch" >&2
+fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
@@ -1446,6 +1579,23 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
+  esac
+}
+
+tier_flag_for_harness() {
+  local harness=$1 tier=$2
+  [ -n "$tier" ] || return 0
+  case "$harness" in
+    codex)
+      # Codex 0.147.0 renders service_tier=default as the standard tier and
+      # service_tier=priority as Fast. Its model catalog advertises priority
+      # but no neutral tier, so default is the empirically verified override
+      # that defeats the operator's global priority setting without a warning.
+      case "$tier" in
+        standard) printf -- '-c %s ' "$(shell_quote "service_tier=\"default\"")" ;;
+        fast) printf -- '-c %s ' "$(shell_quote "service_tier=\"priority\"")" ;;
+      esac
+      ;;
   esac
 }
 
@@ -1915,6 +2065,46 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+if [ "$HARNESS" = codex ] && [ "$TIER" = fast ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    CODEX_PREFLIGHT_CWD=$WT
+    [ "$KIND" = secondmate ] || CODEX_PREFLIGHT_CWD=$RELAUNCH_WT
+    fm_codex_fast_tier_supported "$CODEX_PREFLIGHT_CWD" "$MODEL" "$CODEX_BIN" "$CODEX_HOME_EFFECTIVE" || exit 1
+  elif [ "$KIND" = secondmate ]; then
+    fm_codex_fast_tier_supported "$WT" "$MODEL" "$CODEX_BIN" "$CODEX_HOME_EFFECTIVE" || exit 1
+  elif [ "$BACKEND" != orca ]; then
+    TREEHOUSE_GET_STATUS=0
+    WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || TREEHOUSE_GET_STATUS=$?
+    if [ "$TREEHOUSE_GET_STATUS" -ne 0 ]; then
+      echo "error: treehouse get --lease failed to acquire a worktree for $ID" >&2
+      exit 1
+    fi
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get --lease did not report a worktree for $ID" >&2
+      exit 1
+    fi
+    TREEHOUSE_ABORT_CLEANUP=1
+    TREEHOUSE_ABORT_WORKTREE=$WT
+    validate_spawn_worktree "treehouse get --lease" "$ID"
+    TREEHOUSE_WORKTREE_STATUS=$(git -C "$WT" status --porcelain) || {
+      echo "error: could not inspect pre-acquired worktree '$WT'" >&2
+      exit 1
+    }
+    if [ -n "$TREEHOUSE_WORKTREE_STATUS" ]; then
+      echo "error: pre-acquired worktree '$WT' is not clean; refusing to discard uncommitted work" >&2
+      exit 1
+    fi
+    TREEHOUSE_ABORT_FORCE=1
+    freshen_spawn_worktree_base "$WT" || exit 1
+    WORKTREE_REFRESHED=1
+    fm_codex_fast_tier_supported "$WT" "$MODEL" "$CODEX_BIN" "$CODEX_HOME_EFFECTIVE" || exit 1
+    PREACQUIRED_WORKTREE=1
+  fi
+fi
+
+SPAWN_INITIAL_CWD=$PROJ_ABS
+[ "$PREACQUIRED_WORKTREE" != 1 ] || SPAWN_INITIAL_CWD=$WT
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
@@ -1938,7 +2128,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_INITIAL_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -1990,7 +2180,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$SPAWN_INITIAL_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2044,7 +2234,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$SPAWN_INITIAL_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2097,7 +2287,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_INITIAL_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2110,7 +2300,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_INITIAL_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2122,7 +2312,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_INITIAL_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2152,6 +2342,11 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    if [ "$HARNESS" = codex ] && [ "$TIER" = fast ]; then
+      freshen_spawn_worktree_base "$WT" || exit 1
+      WORKTREE_REFRESHED=1
+      fm_codex_fast_tier_supported "$WT" "$MODEL" "$CODEX_BIN" "$CODEX_HOME_EFFECTIVE" || exit 1
+    fi
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -2281,7 +2476,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$PREACQUIRED_WORKTREE" != 1 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2330,7 +2525,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$WORKTREE_REFRESHED" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -2702,7 +2897,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort tier busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2720,6 +2915,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "tier=${TIER:-standard}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -2775,6 +2971,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+[ "$PREACQUIRED_WORKTREE" != 1 ] || TREEHOUSE_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -2785,8 +2982,11 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+TIERFLAG=$(tier_flag_for_harness "$HARNESS" "$TIER")
+[ "$HARNESS" != codex ] || LAUNCH=${LAUNCH//__CODEXCOMMAND__/$CODEX_COMMAND}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__TIERFLAG__/$TIERFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

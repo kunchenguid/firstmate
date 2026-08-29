@@ -660,6 +660,18 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'doctor --json')
+    printf '%s\n' '{"checks":[{"id":"config.load","details":{"model":"gpt-5.4"}}]}'
+    ;;
+  'debug models')
+    printf '%s\n' '{"models":[{"slug":"gpt-5.4","service_tiers":[{"id":"priority"}]}]}'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/codex"
   fm_fake_exit0 "$fakebin" pi
   printf '%s\n' "$fakebin"
 }
@@ -670,15 +682,29 @@ SH
 spawn_secondmate_capture() {
   local world=$1 id=$2 home=$3 launchlog=$4 fakebin
   shift 4
-  mkdir -p "$world/home/state" "$world/home/data"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/codex-home"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" CODEX_HOME="$world/codex-home" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
+}
+
+respawn_secondmate_capture() {
+  local world=$1 id=$2 launchlog=$3 fakebin
+  shift 3
+  mkdir -p "$world/codex-home"
+  fakebin=$(make_launch_capturing_tmux "$world/tmux-$id-respawn")
+  : > "$launchlog"
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" CODEX_HOME="$world/codex-home" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$@" --secondmate
 }
 
 test_spawn_backend_precedence_over_inherited_config() {
@@ -854,7 +880,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex -c 'service_tier=\"default\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit-harness-no-tokens: launch did not use codex"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "model_reasoning_effort" \
@@ -887,6 +913,86 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   assert_not_contains "$launch" "model_reasoning_effort=\"high\"" \
     "explicit-harness-explicit-axes: launch leaked the file's effort token"
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
+}
+
+test_secondmate_recovery_preserves_recorded_tier() {
+  local w sm meta launchlog launch out status
+  w="$TMP_ROOT/spawn-recovery-tier"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --tier fast >/dev/null 2>&1
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" tier)" = fast ] || fail "recovery-tier: initial fast tier was not recorded"
+
+  out=$(respawn_secondmate_capture "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "secondmate recovery should preserve its recorded tier"$'\n'"$out"
+  [ "$(meta_field "$meta" tier)" = fast ] || fail "recovery-tier: respawn replaced fast with standard"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "-c 'service_tier=\"priority\"'" \
+    "recovery-tier: respawn did not launch Codex on the recorded fast tier"
+  pass "C9 spawn: secondmate recovery preserves its recorded serving tier"
+}
+
+test_secondmate_recovery_resets_tier_after_harness_change() {
+  local w sm meta launchlog launch out status
+  w="$TMP_ROOT/spawn-recovery-tier-harness-change"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --tier fast >/dev/null 2>&1
+  meta="$w/home/state/sm.meta"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  out=$(respawn_secondmate_capture "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "secondmate recovery should reset tier on a harness change"$'\n'"$out"
+  [ "$(meta_field "$meta" harness)" = claude ] \
+    || fail "recovery-tier-change: respawn did not select the configured Claude harness"
+  [ "$(meta_field "$meta" tier)" = standard ] \
+    || fail "recovery-tier-change: a Codex fast tier carried onto Claude"
+  launch=$(cat "$launchlog")
+  assert_not_contains "$launch" "service_tier" \
+    "recovery-tier-change: Claude launch retained a Codex serving-tier flag"
+
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  out=$(respawn_secondmate_capture "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "secondmate recovery should keep the reset tier when returning to Codex"$'\n'"$out"
+  [ "$(meta_field "$meta" tier)" = standard ] \
+    || fail "recovery-tier-change: returning to Codex silently reactivated fast tier"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "-c 'service_tier=\"default\"'" \
+    "recovery-tier-change: returning to Codex did not retain the reset standard tier"
+  assert_not_contains "$launch" "service_tier=\"priority\"" \
+    "recovery-tier-change: returning to Codex silently reactivated fast tier"
+  pass "C10 spawn: secondmate recovery resets tier when its harness changes"
+}
+
+test_secondmate_recovery_honors_explicit_tier_after_harness_change() {
+  local w sm meta launchlog out status
+  w="$TMP_ROOT/spawn-recovery-explicit-tier-harness-change"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --tier fast >/dev/null 2>&1
+  meta="$w/home/state/sm.meta"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  out=$(respawn_secondmate_capture "$w" sm "$launchlog" --tier fast 2>&1); status=$?
+  expect_code 0 "$status" "an explicit recovery tier should survive a harness change"$'\n'"$out"
+  [ "$(meta_field "$meta" harness)" = claude ] \
+    || fail "recovery-explicit-tier: respawn did not select the configured Claude harness"
+  [ "$(meta_field "$meta" tier)" = fast ] \
+    || fail "recovery-explicit-tier: the explicit fast tier was reset"
+  assert_contains "$out" "recording tier=fast and omitting it from launch" \
+    "recovery-explicit-tier: the unsupported explicit tier was not surfaced"
+  pass "C11 spawn: explicit recovery tier wins across a harness change"
 }
 
 test_spawned_secondmate_uses_its_harness_supervision_model() {
@@ -2568,6 +2674,9 @@ test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
+test_secondmate_recovery_preserves_recorded_tier
+test_secondmate_recovery_resets_tier_after_harness_change
+test_secondmate_recovery_honors_explicit_tier_after_harness_change
 test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges

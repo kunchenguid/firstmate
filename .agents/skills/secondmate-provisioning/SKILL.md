@@ -219,6 +219,7 @@ For a remote route, the same command probes and relaunches only on the configure
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.
 `stuck-crewmate-recovery`'s remote-secondmate note owns why the endpoint-dead and send-failed verdicts that seem to justify this are themselves unreliable.
 Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
+When the resolved harness family is unchanged, respawn preserves the recorded serving tier; a harness-family change resets it to standard unless the caller explicitly supplies `--tier`.
 If the secondmate is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
 To move a live LOCAL secondmate onto a newly pinned harness, model, or effort without a full recovery, set `config/secondmate-harness` and then relaunch it with `bin/fm-control.sh <id> relaunch`, which re-resolves that pin, stops the agent, and launches the replacement in the same home ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read; use the remote route's own relaunch path for those.

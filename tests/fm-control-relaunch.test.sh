@@ -120,12 +120,26 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/codex" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  'doctor --json')
+    printf '%s\n' '{"checks":[{"id":"config.load","details":{"model":"gpt-5.4"}}]}'
+    ;;
+  'debug models')
+    [ "${FM_FAKE_CODEX_CATALOG_STATUS:-0}" -eq 0 ] || exit "$FM_FAKE_CODEX_CATALOG_STATUS"
+    printf '%s\n' '{"models":[{"slug":"gpt-5.4","service_tiers":[{"id":"priority"}]}]}'
+    ;;
+esac
+SH
+  chmod +x "$fb/codex"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake" "$dir/codex-home"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   printf 'claude' > "$dir/fake/command"
@@ -154,6 +168,7 @@ add_ship_task() {
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
+    echo "tier=standard"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
@@ -164,6 +179,8 @@ run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    CODEX_HOME="$dir/codex-home" \
+    FM_FAKE_CODEX_CATALOG_STATUS="${FM_FAKE_CODEX_CATALOG_STATUS:-0}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
@@ -509,14 +526,75 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   local dir out rc
   dir=$(new_case keepprofile rl6)
   add_ship_task "$dir" rl6 claude
-  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=high/' \
+  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=high/; s/^tier=standard$/tier=fast/' \
     "$dir/home/state/rl6.meta" > "$dir/home/state/rl6.meta.tmp"
   mv "$dir/home/state/rl6.meta.tmp" "$dir/home/state/rl6.meta"
   out=$(run_control "$dir" rl6 relaunch --note "same runtime"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl6 model)" = opus ] || fail "the model should carry across a same-harness relaunch"
   [ "$(meta_field "$dir" rl6 effort)" = high ] || fail "the effort should carry across a same-harness relaunch"
+  [ "$(meta_field "$dir" rl6 tier)" = fast ] || fail "the serving tier should carry across a same-harness relaunch"
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
+}
+
+test_explicit_standard_tier_overrides_recorded_fast() {
+  local dir out rc
+  dir=$(new_case tier-override rl36)
+  add_ship_task "$dir" rl36 claude
+  sed 's/^tier=standard$/tier=fast/' "$dir/home/state/rl36.meta" > "$dir/home/state/rl36.meta.tmp"
+  mv "$dir/home/state/rl36.meta.tmp" "$dir/home/state/rl36.meta"
+  out=$(run_control "$dir" rl36 relaunch --tier standard --note "return to standard tier"); rc=$?
+  expect_code 0 "$rc" "an explicit standard tier should override the recorded fast tier"$'\n'"$out"
+  [ "$(meta_field "$dir" rl36 tier)" = standard ] \
+    || fail "the replacement metadata should record the explicit standard tier"
+  [ "$(journal_field "$dir" rl36 to_tier)" = standard ] \
+    || fail "the relaunch journal should agree with the replacement tier"
+  pass "fm-control relaunch: explicit standard tier overrides a recorded fast tier"
+}
+
+test_invalid_recorded_tier_refuses_before_stop() {
+  local dir out rc
+  dir=$(new_case invalid-tier rl37)
+  add_ship_task "$dir" rl37 claude
+  sed 's/^tier=standard$/tier=burst/' "$dir/home/state/rl37.meta" > "$dir/home/state/rl37.meta.tmp"
+  mv "$dir/home/state/rl37.meta.tmp" "$dir/home/state/rl37.meta"
+  cp "$dir/home/state/rl37.meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl37 relaunch --tier standard --note "keep running"); rc=$?
+  expect_code 1 "$rc" "an invalid recorded tier should refuse before lifecycle mutation"
+  assert_contains "$out" "invalid recorded tier 'burst'" \
+    "the refusal should name the invalid durable tier"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an invalid recorded tier must not stop the running agent"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an invalid recorded tier must send no lifecycle input"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl37.meta" \
+    || fail "an invalid recorded tier refusal must preserve metadata byte-identical"
+  pass "fm-control relaunch: invalid recorded tiers fail closed before stop"
+}
+
+test_fast_codex_preflight_refuses_before_stop() {
+  local dir out rc FM_FAKE_CODEX_CATALOG_STATUS=1
+  dir=$(new_case fast-preflight rl38)
+  add_ship_task "$dir" rl38 codex
+  sed 's/^model=default$/model=gpt-5.4/; s/^tier=standard$/tier=fast/' \
+    "$dir/home/state/rl38.meta" > "$dir/home/state/rl38.meta.tmp"
+  mv "$dir/home/state/rl38.meta.tmp" "$dir/home/state/rl38.meta"
+  cp "$dir/home/state/rl38.meta" "$dir/meta.before"
+  printf 'codex' > "$dir/fake/command"
+
+  out=$(run_control "$dir" rl38 relaunch --note "keep the current worker"); rc=$?
+  expect_code 1 "$rc" "an unreadable Codex catalog should refuse before lifecycle mutation"
+  assert_contains "$out" "could not inspect the installed Codex model catalog" \
+    "the refusal should identify the unavailable capability evidence"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "a failed fast-tier preflight must leave the running Codex agent alive"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a failed fast-tier preflight must send no lifecycle input"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl38.meta" \
+    || fail "a failed fast-tier preflight must preserve metadata byte-identical"
+  [ ! -e "$dir/home/state/rl38.control-relaunch" ] \
+    || fail "a failed fast-tier preflight must not create a relaunch journal"
+  pass "fm-control relaunch: Codex fast-tier eligibility is proven before stop"
 }
 
 test_explicit_model_wins_over_the_recorded_one() {
@@ -1323,6 +1401,9 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_explicit_standard_tier_overrides_recorded_fast
+test_invalid_recorded_tier_refuses_before_stop
+test_fast_codex_preflight_refuses_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

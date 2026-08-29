@@ -282,6 +282,13 @@ New harnesses get verified through a supervised trial task before joining the se
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
+`fm-spawn.sh` records `tier=` on every task and accepts the optional `--tier standard|fast` spawn axis.
+Firstmate's canonical Codex workers default to standard, and only an explicit `--tier fast` opts that spawn into fast service.
+Fast service is available only through the canonical Codex launch template, and the launch refuses before the agent starts or task metadata is published when the effective model cannot be resolved, the installed model catalog cannot be inspected, or that catalog does not advertise priority service for the model.
+Raw Codex launch commands remain unmodified in standard mode, so their actual service tier is outside Firstmate's verified contract, and they cannot request fast service because Firstmate cannot safely verify or rewrite their executable, configuration home, and tier override.
+The per-spawn override leaves the operator's effective Codex configuration, including `~/.codex/config.toml`, byte-identical.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact fast-tier preflight and refusal mechanics.
+An explicit tier on another harness remains recorded for relaunch but is omitted from the launch with a warning.
 Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabilities; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact version-safe launch mechanics.
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
@@ -314,7 +321,8 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+Serving tier is a separate optional per-task spawn axis, defaults to standard, and is deliberately not a `config/crew-dispatch.json` field.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.

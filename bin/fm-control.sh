@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--tier <standard|fast>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -33,7 +33,7 @@
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
+#              harness/model/effort/tier - so switching harness is one ordinary use
 #              of this verb. With no explicit axis, a secondmate re-resolves its
 #              durable config/secondmate-harness pin (harness plus its optional
 #              model and effort tokens) exactly as any other respawn does, while
@@ -130,6 +130,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-tier-lib.sh
+. "$SCRIPT_DIR/fm-codex-tier-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -190,9 +192,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+NEW_TIER=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+TIER_SET=0
 NOTE=
 NOTE_SET=0
 want_value=
@@ -205,6 +209,7 @@ for a in "$@"; do
       harness) NEW_HARNESS=$a; HARNESS_SET=1 ;;
       model) NEW_MODEL=$a; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$a; EFFORT_SET=1 ;;
+      tier) NEW_TIER=$a; TIER_SET=1 ;;
       note) NOTE=$a; NOTE_SET=1 ;;
       note-file)
         [ -f "$a" ] || die "--note-file '$a' is not a readable file"
@@ -222,6 +227,8 @@ for a in "$@"; do
     --model=*) NEW_MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) NEW_EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --tier) want_value=tier ;;
+    --tier=*) NEW_TIER=${a#--tier=}; TIER_SET=1 ;;
     --note) want_value=note ;;
     --note=*) NOTE=${a#--note=}; NOTE_SET=1 ;;
     --note-file) want_value=note-file ;;
@@ -236,15 +243,20 @@ done
 [ -z "$want_value" ] || die "--$want_value requires a value"
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$TIER_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --tier, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$TIER_SET" = 0 ] || [ -n "$NEW_TIER" ] || die "--tier requires a non-empty value"
 case "$NEW_EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) die "--effort must be one of low, medium, high, xhigh, max" ;;
+esac
+case "$NEW_TIER" in
+  ''|standard|fast) ;;
+  *) die "--tier must be one of standard, fast" ;;
 esac
 
 # --- exact task-id resolution ----------------------------------------------
@@ -515,9 +527,11 @@ CONFIG_MODEL=
 CONFIG_EFFORT=
 PRIOR_MODEL=
 PRIOR_EFFORT=
+PRIOR_TIER=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+TARGET_TIER=
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -534,9 +548,11 @@ journal_write() {  # <phase> [extra-line]...
     echo "from_harness=$PRIOR_RECORDED_HARNESS"
     echo "from_model=$PRIOR_MODEL"
     echo "from_effort=$PRIOR_EFFORT"
+    echo "from_tier=$PRIOR_TIER"
     echo "to_harness=$TARGET_HARNESS"
     echo "to_model=$TARGET_MODEL"
     echo "to_effort=$TARGET_EFFORT"
+    echo "to_tier=$TARGET_TIER"
     local line
     for line in "$@"; do
       echo "$line"
@@ -611,8 +627,14 @@ resolve_relaunch_profile() {
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
+  PRIOR_TIER=$(fm_meta_get "$META" tier)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
+  [ -n "$PRIOR_TIER" ] || PRIOR_TIER=standard
+  case "$PRIOR_TIER" in
+    standard|fast) ;;
+    *) die "task $ID has invalid recorded tier '$PRIOR_TIER'; refusing relaunch before stopping its agent" ;;
+  esac
   if [ "$HARNESS_SET" = 0 ] \
      && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
     die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
@@ -656,8 +678,8 @@ resolve_relaunch_profile() {
   # transaction, where nothing has changed yet.
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" \
     || die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
-  # A model or effort chosen for the previous harness does not transfer to a
-  # different one, so an explicit harness change resets both axes unless the
+  # A model, effort, or tier chosen for the previous harness does not transfer
+  # to a different one, so an explicit harness change resets all axes unless the
   # caller names them too.
   if [ "$MODEL_SET" = 1 ]; then
     TARGET_MODEL=$NEW_MODEL
@@ -677,6 +699,25 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
+  if [ "$TIER_SET" = 1 ]; then
+    TARGET_TIER=$NEW_TIER
+  elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
+    TARGET_TIER=$PRIOR_TIER
+  else
+    TARGET_TIER=standard
+  fi
+  case "$TARGET_TIER" in
+    standard|fast) ;;
+    *) die "task $ID resolved invalid target tier '$TARGET_TIER'; refusing relaunch before stopping its agent" ;;
+  esac
+}
+
+preflight_relaunch_profile() {
+  [ "$TARGET_HARNESS" = codex ] && [ "$TARGET_TIER" = fast ] || return 0
+  fm_codex_fast_tier_runtime_resolve || return 1
+  fm_codex_fast_tier_supported \
+    "$WT" "$TARGET_MODEL" \
+    "$FM_CODEX_FAST_TIER_BIN" "$FM_CODEX_FAST_TIER_HOME"
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
@@ -809,6 +850,8 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  preflight_relaunch_profile \
+    || die "Codex fast-tier capability could not be verified; refusing relaunch before stopping its agent"
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
@@ -827,6 +870,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  spawn_args+=(--tier "$TARGET_TIER")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
@@ -843,7 +887,7 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT tier=$TARGET_TIER backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
 # --- verbs ------------------------------------------------------------------

@@ -205,6 +205,18 @@ if [ "${FM_FAKE_SSH_MODE:-normal}" = doctor-fixable ] \
   printf 'unreadable\n'
   exit 0
 fi
+if [ "${FM_FAKE_SSH_MODE:-normal}" = legacy-tier-protocol ] \
+  && [ "$command_name" = fm-remote-secondmate-control.sh ] \
+  && [ "$_command_action" = launch ]; then
+  control_argc=$(perl -MMIME::Base64=decode_base64 -e '
+    my @args=split(/\0/, decode_base64($ARGV[0]));
+    print scalar(@args) - 2;
+  ' "$argv_b64")
+  case "$control_argc" in
+    5|6) touch "$FM_FAKE_LEGACY_LAUNCH"; exit 0 ;;
+    *) exit 2 ;;
+  esac
+fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
@@ -275,6 +287,7 @@ remote_env() {
   FM_FAKE_INHERIT_PAYLOAD="$TMP_ROOT/inherit.payload" \
   FM_FAKE_LAUNCH_ENTERED="$TMP_ROOT/launch.entered" \
   FM_FAKE_LAUNCH_RELEASE="$TMP_ROOT/launch.release" \
+  FM_FAKE_LEGACY_LAUNCH="$TMP_ROOT/legacy-launch.entered" \
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
   "$@"
 }
@@ -713,6 +726,17 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
+rm -f "$TMP_ROOT/legacy-launch.entered"
+if FM_FAKE_SSH_MODE=legacy-tier-protocol remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-legacy-tier-protocol.out" 2>&1; then
+  fail "remote spawn succeeded against a peer without tier protocol support"
+fi
+assert_absent "$TMP_ROOT/legacy-launch.entered" \
+  "legacy remote peer entered its launch handler without a tier override"
+assert_absent "$PARENT/state/ios.meta" \
+  "legacy remote protocol refusal published parent endpoint metadata"
+pass "legacy remote peers refuse tier-aware launches before mutation"
+
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
@@ -723,6 +747,10 @@ assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
+assert_grep 'tier=standard' "$PARENT/state/ios.meta" "parent metadata omitted the remote serving tier"
+assert_grep 'tier=standard' "$REMOTE_HOME/state/parent-route/ios.meta" "remote endpoint metadata omitted its serving tier"
+assert_grep 'tier=standard' <(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios) \
+  "remote route did not report its actual serving tier"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
@@ -732,6 +760,78 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-tier-mismatch.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-tier-mismatch.meta"
+sed 's/^tier=standard$/tier=fast/' "$TMP_ROOT/remote-ios-before-tier-mismatch.meta" > "$remote_route_meta"
+if tier_mismatch_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "parent accepted a live remote endpoint on a different serving tier"
+fi
+assert_contains "$tier_mismatch_out" "remote launch returned tier 'fast', expected 'standard'" \
+  "remote tier mismatch refusal did not name the actual and requested tiers"
+cmp -s "$TMP_ROOT/parent-ios-before-tier-mismatch.meta" "$PARENT/state/ios.meta" \
+  || fail "remote tier mismatch rewrote the parent endpoint metadata"
+assert_grep 'tier=fast' "$remote_route_meta" "remote tier mismatch rewrote the live endpoint tier"
+mv -f "$TMP_ROOT/remote-ios-before-tier-mismatch.meta" "$remote_route_meta"
+
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-invalid-tier.meta"
+sed 's/^tier=standard$/tier=burst/' "$TMP_ROOT/remote-ios-before-invalid-tier.meta" > "$remote_route_meta"
+if invalid_tier_out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1); then
+  fail "remote control accepted invalid endpoint tier metadata"
+fi
+assert_contains "$invalid_tier_out" "records invalid tier 'burst'" \
+  "remote invalid-tier refusal did not name the invalid value"
+mv -f "$TMP_ROOT/remote-ios-before-invalid-tier.meta" "$remote_route_meta"
+pass "remote endpoint serving tiers are returned, validated, and matched before parent publication"
+
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-missing-tier.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-missing-tier.meta"
+sed '/^tier=/d' "$TMP_ROOT/remote-ios-before-missing-tier.meta" > "$remote_route_meta"
+sed '/^tier=/d' "$TMP_ROOT/parent-ios-before-missing-tier.meta" > "$PARENT/state/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-missing-tier.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-missing-tier.meta"
+cp "$HERDR_LOG" "$TMP_ROOT/herdr-before-missing-tier.log"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>/dev/null)" = unverified ] \
+  || fail "live remote endpoint with missing tier metadata was not classified unverified"
+if missing_tier_route_out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1); then
+  fail "remote control synthesized a tier for an endpoint with missing tier metadata"
+fi
+assert_contains "$missing_tier_route_out" "endpoint has no recorded tier" \
+  "remote missing-tier refusal did not identify the absent endpoint tier"
+if missing_tier_launch_out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr 2>&1); then
+  fail "remote control reused a live endpoint with missing tier metadata"
+fi
+assert_contains "$missing_tier_launch_out" "endpoint has no recorded tier" \
+  "remote live-reuse refusal did not identify the absent endpoint tier"
+if missing_parent_tier_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "parent recovery synthesized a tier for a legacy remote endpoint"
+fi
+assert_contains "$missing_parent_tier_out" "remote secondmate ios has no recorded tier" \
+  "parent missing-tier refusal did not identify the absent remote tier"
+cmp -s "$TMP_ROOT/remote-ios-missing-tier.meta" "$remote_route_meta" \
+  || fail "remote missing-tier refusal changed endpoint metadata"
+cmp -s "$TMP_ROOT/parent-ios-missing-tier.meta" "$PARENT/state/ios.meta" \
+  || fail "parent missing-tier refusal changed route metadata"
+assert_no_grep '^tier=' "$remote_route_meta" "remote missing-tier refusal synthesized endpoint metadata"
+assert_no_grep '^tier=' "$PARENT/state/ios.meta" "parent missing-tier refusal synthesized route metadata"
+cmp -s "$TMP_ROOT/herdr-before-missing-tier.log" "$HERDR_LOG" \
+  || fail "remote missing-tier refusal touched the live endpoint"
+mv -f "$TMP_ROOT/remote-ios-before-missing-tier.meta" "$remote_route_meta"
+mv -f "$TMP_ROOT/parent-ios-before-missing-tier.meta" "$PARENT/state/ios.meta"
+pass "live legacy remote endpoints with missing tiers fail closed"
+
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-tier-warning.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-tier-warning.meta"
+sed 's/^harness=codex$/harness=claude/' "$TMP_ROOT/remote-ios-before-tier-warning.meta" > "$remote_route_meta"
+sed 's/^harness=codex$/harness=claude/' "$TMP_ROOT/parent-ios-before-tier-warning.meta" > "$PARENT/state/ios.meta"
+tier_warning_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness claude --tier standard 2>&1) \
+  || fail "remote non-Codex standard-tier reuse failed"$'\n'"$tier_warning_out"
+assert_contains "$tier_warning_out" "harness 'claude' has no verified serving-tier flag" \
+  "remote parent path suppressed the unsupported-tier warning"
+mv -f "$TMP_ROOT/remote-ios-before-tier-warning.meta" "$remote_route_meta"
+mv -f "$TMP_ROOT/parent-ios-before-tier-warning.meta" "$PARENT/state/ios.meta"
+pass "remote parent surfaces unsupported serving-tier warnings"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
