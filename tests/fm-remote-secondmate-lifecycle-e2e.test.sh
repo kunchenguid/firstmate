@@ -654,7 +654,8 @@ assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not p
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
-assert_grep "$REMOTE_HOME/data/captain-shared.md" "$REMOTE_HOME/data/charter.md" "remote charter did not point at inherited captain preferences"
+assert_grep "$REMOTE_HOME/data/captain.md" "$REMOTE_HOME/data/charter.md" "remote charter did not point at its private captain preferences"
+assert_no_grep "$REMOTE_HOME/data/captain-shared.md" "$REMOTE_HOME/data/charter.md" "remote charter pointed at shared captain preferences"
 assert_no_grep "$PARENT/data/captain.md" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local captain preferences path"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
