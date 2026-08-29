@@ -1258,6 +1258,14 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
+    bin/fm-task-tmp-lib.sh)
+      # The per-task temp root: created by fm-spawn (backend-dispatch), removed
+      # by fm-teardown (pr-forge), and covered directly by fm-gotmp.test.sh
+      # (session-bootstrap).
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
+      ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch

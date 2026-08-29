@@ -170,6 +170,10 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+# Every task gets its own temp root (bin/fm-task-tmp-lib.sh owns the path),
+# recorded as tasktmp= in the meta and handed to the launched agent as TMPDIR
+# (with GOTMPDIR at gotmp/), so the agent's harness scratch is confined to one
+# directory fm-teardown removes with the task instead of leaking under /tmp.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -303,6 +307,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-task-tmp-lib.sh
+. "$SCRIPT_DIR/fm-task-tmp-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1300,9 +1306,11 @@ launch_template() {
   esac
 }
 
+LAUNCH_RAW=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    LAUNCH_RAW=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -2473,12 +2481,14 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
+# Per-task temp root (path shape owned by bin/fm-task-tmp-lib.sh), with Go's
+# build temp nested at gotmp/. Go won't create GOTMPDIR, so mkdir before it is
+# used; fm-teardown removes the whole root. Nested (not a bare root/gotmp) so
+# other per-task temp lives alongside it and teardown cleans one deterministic
+# path. The agent's own harness scratch is the other occupant: it follows the
+# process TMPDIR, which the launch command below pins to this root, so it is
+# torn down with the task instead of accumulating under /tmp until reboot.
+TASK_TMP=$(fm_task_tmp_root "$ID") || { echo "error: cannot derive a temp root for task '$ID'" >&2; exit 1; }
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
@@ -2984,6 +2994,14 @@ esac
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# Pin the agent's temp root to this task's own, so harness scratch (tool
+# results, scratchpad files, and anything else it derives from TMPDIR) lands
+# where teardown removes it. The pane shell keeps its ambient TMPDIR; only the
+# agent process tree is scoped. A raw launch command is the unverified-adapter
+# escape hatch and is passed through exactly as given, so it is left alone.
+if [ "$LAUNCH_RAW" -eq 0 ]; then
+  LAUNCH="TMPDIR=$(shell_quote "$TASK_TMP") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

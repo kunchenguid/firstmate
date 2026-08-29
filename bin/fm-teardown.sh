@@ -19,6 +19,12 @@
 # home with a backlog but no compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
+# Cleanup also removes this task's own per-task temp root - the agent's harness
+# scratch plus gotmp/ - recorded as tasktmp= by fm-spawn, and only when it is
+# exactly the path bin/fm-task-tmp-lib.sh derives for this task id. Nothing is
+# removed by worktree slot, by age, or by scanning for siblings, so a live task
+# sharing a reused slot is never touched. A refusal or failure there is reported
+# on stderr and never fails an otherwise-complete teardown.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -189,6 +195,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-task-tmp-lib.sh
+. "$SCRIPT_DIR/fm-task-tmp-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -733,7 +741,8 @@ fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
+# (bin/fm-task-tmp-lib.sh owns its shape); absent for tasks spawned before that
+# change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
@@ -2866,9 +2875,14 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Remove the per-task temp root recorded by spawn: this task's own gotmp/ and its
+# agent's harness scratch, which the launch pinned there via TMPDIR. Read before
+# the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
+# Only the one path this task's own record names is ever removed, and only when it
+# is exactly the path fm_task_tmp_root derives for this id, so a live sibling
+# session in a reused worktree slot cannot be caught by it. A refusal or failure
+# there is reported by the library and never fails an otherwise-complete teardown.
+fm_task_tmp_remove "$ID" "$TASK_TMP" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1

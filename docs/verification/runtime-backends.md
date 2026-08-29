@@ -1116,3 +1116,29 @@ The live probe loads the tracked watcher extension through Pi's real resource lo
 It proved that a follow-up the extension sends while main is streaming raises no `before_agent_start` at queue time or when the run reaches it, joins the run as a user `message_start` carrying the exact wake text in its own model turn, and is followed by a verified successor and delivery of the next close; a follow-up sent to the idle main raises `before_agent_start` with the exact text before its user `message_start`.
 The portable regression drives the same shape with a fake main that never raises `before_agent_start` while streaming, then proves a replacement replays only the follow-up Pi had not consumed and that an exhausted restoration delivers its typed failure without launching a further arm.
 A second regression holds a branch settlement open while the verified successor exits with a failure, and proves that failure takes the ordinary bounded retry once the delivery settles rather than leaving the generation with no watcher and no retry.
+
+## Per-task temp root and harness scratch
+
+`bin/fm-spawn.sh` pins each launched agent's `TMPDIR` to that task's own temp root so its harness scratch is torn down with the task (`bin/fm-task-tmp-lib.sh`).
+That confinement depends on one vendor-observable fact: a harness derives its scratch tree from the process `TMPDIR` rather than a fixed `/tmp`.
+
+Verified on 2026-08-28 with Claude Code 2.1.251 on Linux 6.19.12 x86_64, in a tmux pane whose shell exported `TMPDIR` before launch:
+
+```sh
+export TMPDIR=/tmp/fm-scratch-probe/tmp; mkdir -p "$TMPDIR"
+claude --dangerously-skip-permissions
+# prompt: Print only the absolute path of your scratchpad directory.
+```
+
+The agent answered with, and the filesystem carried, a path under the pinned root:
+
+```text
+/tmp/fm-scratch-probe/tmp/claude-1000/-tmp-fm-scratch-probe-wt/aa9a9886-e9a4-4f65-9381-46c935f6fb82/scratchpad
+```
+
+The same root also received that run's `node-compile-cache`, so an unpinned run's whole scratch tree is what accumulates under `/tmp` between reboots.
+Only Claude Code is verified here; it is the harness whose scratch was observed leaking (up to 2.7 GB of search-index databases from a single session).
+
+No live guard is registered for this fact, because nothing in Firstmate reads harness output to reach a verdict from it.
+A harness that stopped honoring `TMPDIR` would simply keep its scratch outside the task root: teardown still removes exactly the one recorded temp root, still refuses anything else, and still succeeds.
+The portable regressions for the removal itself are in `tests/fm-gotmp.test.sh`, including a live sibling task in a reused worktree slot that must survive; the launch pin is asserted in `tests/fm-kimi-harness.test.sh` and `tests/fm-spawn-dispatch-profile.test.sh`.
