@@ -12,6 +12,10 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+# Derive every per-task temp root inside this suite's own sandbox instead of the
+# machine's /tmp, so a spawned case creates and leaves nothing outside it. The
+# spawn subprocess and fm_test_task_tmp_root read the same override.
+export FM_TASK_TMP_BASE="$TMP_ROOT"
 
 make_spawn_pi_probe() {
   local fakebin=$1 tool=$2
@@ -131,7 +135,8 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="TMPDIR='/tmp/fm-$id' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  # Home-scoped temp root: derived through its owning library, not spelled out.
+  expected="TMPDIR='$(fm_test_task_tmp_root "$HOME_DIR" "$id")' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }

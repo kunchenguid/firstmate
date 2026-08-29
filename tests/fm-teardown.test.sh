@@ -58,6 +58,10 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+# Derive every per-task temp root inside this suite's own sandbox instead of the
+# machine's /tmp, so the tasktmp case creates and leaves nothing outside it. The
+# teardown subprocess and fm_test_task_tmp_root read the same override.
+export FM_TASK_TMP_BASE="$TMP_ROOT"
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
@@ -2247,14 +2251,19 @@ test_leaked_worktree_process_is_reaped() {
 }
 
 test_leaked_tasktmp_process_is_reaped() {
-  local case_dir rc pid
+  local case_dir rc pid task_tmp
   case_dir=$(make_case leaked-tasktmp-reap)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
-  mkdir -p "$case_dir/tasktmp"
+  # Teardown scans - and removes - only the root bin/fm-task-tmp-lib.sh derives
+  # for this task under this home, so the fixture records exactly that path
+  # instead of an arbitrary one. run_teardown resolves FM_HOME the same way.
+  # shellcheck disable=SC2031 # reading the ambient FM_HOME, not the one fm_test_task_tmp_root sets in its own subshell
+  task_tmp=$(fm_test_task_tmp_root "${FM_HOME:-$ROOT}" task-x1)
+  printf '%s\n' "tasktmp=$task_tmp" >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$task_tmp"
   land_shippable_commit "$case_dir"
 
-  ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
+  ( cd "$task_tmp" && exec sleep 300 ) &
   pid=$!
   disown
   sleep 0.3

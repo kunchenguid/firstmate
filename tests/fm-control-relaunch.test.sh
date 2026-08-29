@@ -35,13 +35,12 @@ X_LINK="$ROOT/bin/fm-x-link.sh"
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
-TASK_TMPS=()
+# Derive every per-task temp root a relaunch spawn creates inside this suite's own
+# sandbox instead of the machine's /tmp, so nothing is left outside it. The spawn
+# subprocess and fm_test_task_tmp_root read the same override.
+export FM_TASK_TMP_BASE="$TMP_ROOT"
 
 relaunch_cleanup() {
-  local d
-  for d in "${TASK_TMPS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
-  done
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
@@ -152,13 +151,12 @@ add_ship_task() {
     echo "kind=ship"
     echo "mode=no-mistakes"
     echo "yolo=off"
-    echo "tasktmp=/tmp/fm-$id"
+    echo "tasktmp=$(fm_test_task_tmp_root "$home" "$id")"
     echo "model=default"
     echo "effort=default"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
-  TASK_TMPS+=("/tmp/fm-$id")
 }
 
 run_control() {  # <case-dir> <args...>

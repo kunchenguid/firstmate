@@ -110,6 +110,24 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# fm_test_task_tmp_root <fm-home> <task-id>: the canonical per-task temp root a
+# spawn/teardown subprocess derives for that task. The root is home-scoped via
+# bin/fm-backend-hometag-lib.sh, so a suite asserting the launch's TMPDIR pin
+# derives it through the owning library - with the same FM_HOME/FM_ROOT the
+# subprocess resolves - instead of spelling the shape out a second time. The
+# suites that need it launch spawn with FM_ROOT_OVERRIDE='', so the subprocess
+# resolves FM_ROOT to this same installation root.
+fm_test_task_tmp_root() {
+  local home=$1 id=$2
+  (
+    FM_HOME=$home
+    FM_ROOT=$ROOT
+    # shellcheck source=bin/fm-task-tmp-lib.sh
+    . "$ROOT/bin/fm-task-tmp-lib.sh"
+    fm_task_tmp_root "$id"
+  )
+}
+
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM

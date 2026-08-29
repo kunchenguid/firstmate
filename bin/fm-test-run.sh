@@ -1163,9 +1163,18 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
       ;;
-    bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
+    bin/fm-backend.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-backend-hometag-lib.sh)
+      # The shared home tag: cmux/zellij titles (backend-dispatch,
+      # real-herdr-gated) and, since it also discriminates the per-task temp
+      # root, everything bin/fm-task-tmp-lib.sh covers below.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' real-herdr-gated
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)

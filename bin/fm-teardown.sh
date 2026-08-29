@@ -145,9 +145,12 @@
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     roots are unique per task and never shared, so this can never reach
+#     another task's or the primary's processes - the temp root because it is
+#     passed only after fm_task_tmp_owned (bin/fm-task-tmp-lib.sh) confirms the
+#     recorded path is exactly this task's own, the same validation the removal
+#     further below applies, so a foreign or hand-edited tasktmp= is neither
+#     scanned nor removed. Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -744,6 +747,12 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # (bin/fm-task-tmp-lib.sh owns its shape); absent for tasks spawned before that
 # change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+# The one validated unit both the process reaper and the removal act on: the
+# recorded root, and only when it is exactly the root fm_task_tmp_root derives
+# for this id. Empty for a task with no tasktmp= and for a recorded path that is
+# not this task's own, so neither is scanned for processes nor removed; the
+# removal below reports the refusal once.
+TASK_TMP_OWN=$(fm_task_tmp_owned "$ID" "$TASK_TMP") || TASK_TMP_OWN=
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -2732,7 +2741,7 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP_OWN"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already

@@ -8,9 +8,12 @@
 #
 # The removal is task-scoped on purpose: the worktree pool reuses slot numbers, so
 # one slot's scratch path accumulates sessions from many tasks, live ones included.
-# These tests pin that teardown removes only the path this task's own record names,
-# that it refuses anything else, and that a refusal or failure never fails an
-# otherwise-complete teardown.
+# The root is also home-scoped, because /tmp is shared by every firstmate home on
+# the machine and task ids are per-home slugs. These tests pin that teardown
+# removes only the path this task's own record names, that it refuses anything
+# else - including the older undiscriminated <base>/fm-<id> shape, which is
+# ambiguous between homes and so is deliberately left to leak - and that a refusal
+# or failure never fails an otherwise-complete teardown.
 #
 # These tests exercise fm-teardown directly as a subprocess against a fake FM_HOME/FM_ROOT
 # built so the real script resolves into it, with stub helper scripts.
@@ -51,6 +54,22 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 # (fm-teardown) read the same override, exactly as they read the same default.
 export FM_TASK_TMP_BASE="$TMP_ROOT"
 
+# The canonical temp root for a task under a given fake home. Home-scoped via
+# bin/fm-backend-hometag-lib.sh, so it is derived here exactly the way the
+# teardown subprocess derives it - same FM_HOME/FM_ROOT, same library - instead of
+# being spelled out, which would only pin a copy of the shape.
+canonical_task_tmp() {  # <fake-home> <task-id>
+  local fake=$1 id=$2
+  mkdir -p "$fake"
+  (
+    FM_HOME=$fake
+    FM_ROOT=$fake
+    # shellcheck source=bin/fm-task-tmp-lib.sh
+    . "$ROOT/bin/fm-task-tmp-lib.sh"
+    fm_task_tmp_root "$id"
+  )
+}
+
 # Build a fake FM_HOME/FM_ROOT so the real fm-teardown.sh (symlinked in) resolves
 # state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
 # live tmux/treehouse/fleet state is touched. A nonexistent worktree path makes both
@@ -71,8 +90,10 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
-  # fm-task-tmp-lib.sh: the per-task temp root shape and its guarded removal.
+  # fm-task-tmp-lib.sh: the per-task temp root shape and its guarded removal,
+  # plus the home-tag library it sources for the per-home discriminator.
   ln -s "$ROOT/bin/fm-task-tmp-lib.sh" "$fake/bin/fm-task-tmp-lib.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
@@ -141,7 +162,8 @@ META
 
 test_teardown_removes_tasktmp_dir() {
   local id=td-rm-z2
-  local task_tmp="$TMP_ROOT/fm-$id"
+  local task_tmp
+  task_tmp=$(canonical_task_tmp "$TMP_ROOT/$id" "$id")
   mkdir -p "$task_tmp/gotmp"
   printf 'leftover\n' > "$task_tmp/gotmp/build-artifact"
   local fake
@@ -170,6 +192,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   ln -s "$ROOT/bin/fm-task-tmp-lib.sh" "$fake/bin/fm-task-tmp-lib.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
@@ -228,7 +251,8 @@ META
 test_teardown_skips_gracefully_when_dir_missing() {
   # tasktmp= points to a path that does not exist. Teardown must not error.
   local id=td-missing-z4
-  local task_tmp="$TMP_ROOT/fm-$id"
+  local task_tmp
+  task_tmp=$(canonical_task_tmp "$TMP_ROOT/$id" "$id")
   # Intentionally do NOT create $task_tmp.
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
@@ -257,8 +281,12 @@ test_teardown_leaves_live_sibling_session_untouched() {
   # with its own scratch. Tearing this task down must remove this task's root and
   # nothing of the sibling's.
   local id=td-sibling-z5
-  local mine="$TMP_ROOT/fm-$id"
-  local sibling="$TMP_ROOT/fm-td-sibling-live-z5"
+  local mine sibling
+  mine=$(canonical_task_tmp "$TMP_ROOT/$id" "$id")
+  # The live sibling belongs to the SAME home - a second task of this
+  # installation reusing the worktree slot - so only the task component of the
+  # root distinguishes the two.
+  sibling=$(canonical_task_tmp "$TMP_ROOT/$id" td-sibling-live-z5)
   seed_task_scratch "$mine" 11111111-1111-1111-1111-111111111111 mine
   seed_task_scratch "$sibling" 22222222-2222-2222-2222-222222222222 live-sibling
   local fake
@@ -290,20 +318,46 @@ test_teardown_refuses_a_foreign_tasktmp() {
   pass "fm-teardown refuses a recorded temp root that is not this task's own, and still completes"
 }
 
+test_teardown_refuses_a_legacy_undiscriminated_tasktmp() {
+  # A task in flight when the home scoping landed recorded the old
+  # <base>/fm-<id> shape: the right task id, but no home tag. Two homes with
+  # colliding ids both recorded exactly that, and nothing at teardown time says
+  # which one this is, so it is refused rather than guessed at - a bounded leak
+  # (those roots hold only Go build temp) instead of one chance of deleting a
+  # live sibling home's directory.
+  local id=td-legacy-z9
+  local legacy="$TMP_ROOT/fm-$id"
+  seed_task_scratch "$legacy" 44444444-4444-4444-4444-444444444444 legacy-shape
+  local fake
+  fake=$(make_fake_root "$id" "$legacy")
+  [ "$legacy" != "$(canonical_task_tmp "$TMP_ROOT/$id" "$id")" ] \
+    || fail "precondition: the legacy shape must differ from the home-scoped root"
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" > "$TMP_ROOT/$id.out" 2> "$TMP_ROOT/$id.err" \
+    || fail "teardown exited non-zero on a legacy undiscriminated temp root"
+  [ -d "$legacy" ] || fail "teardown removed a legacy undiscriminated temp root"
+  grep -q "is not $id's own" "$TMP_ROOT/$id.err" \
+    || fail "teardown did not report the refused legacy temp root"
+  grep -q "teardown $id complete" "$TMP_ROOT/$id.out" \
+    || fail "teardown did not complete after refusing the legacy temp root"
+  pass "fm-teardown refuses a legacy undiscriminated temp root, reports it, and still completes"
+}
+
 test_teardown_refuses_a_symlinked_tasktmp() {
   # The canonical path exists but is a symlink: removing it would delete the link
   # and, for a careless implementation, could reach its target. Refuse instead.
   local id=td-symlink-z7
   local target="$TMP_ROOT/symlink-target-z7"
+  local task_tmp
+  task_tmp=$(canonical_task_tmp "$TMP_ROOT/$id" "$id")
   mkdir -p "$target"
   printf 'keep\n' > "$target/keep"
-  ln -s "$target" "$TMP_ROOT/fm-$id"
+  ln -s "$target" "$task_tmp"
   local fake
-  fake=$(make_fake_root "$id" "$TMP_ROOT/fm-$id")
+  fake=$(make_fake_root "$id" "$task_tmp")
   FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" > "$TMP_ROOT/$id.out" 2> "$TMP_ROOT/$id.err" \
     || fail "teardown exited non-zero when the recorded temp root was a symlink"
   [ -f "$target/keep" ] || fail "teardown followed a symlinked temp root and removed its target"
-  [ -L "$TMP_ROOT/fm-$id" ] || fail "teardown removed the symlink itself"
+  [ -L "$task_tmp" ] || fail "teardown removed the symlink itself"
   grep -q "is a symlink" "$TMP_ROOT/$id.err" || fail "teardown did not report the symlinked temp root"
   grep -q "teardown $id complete" "$TMP_ROOT/$id.out" \
     || fail "teardown did not complete after refusing a symlinked temp root"
@@ -319,11 +373,14 @@ test_teardown_survives_an_unremovable_tasktmp() {
   fi
   local id=td-stuck-z8
   local base="$TMP_ROOT/readonly-base-z8"
-  mkdir -p "$base/fm-$id"
-  printf 'stuck\n' > "$base/fm-$id/leftover"
+  local task_tmp
+  mkdir -p "$base"
+  task_tmp=$(FM_TASK_TMP_BASE="$base" canonical_task_tmp "$TMP_ROOT/$id" "$id")
+  mkdir -p "$task_tmp"
+  printf 'stuck\n' > "$task_tmp/leftover"
   chmod 555 "$base"
   local fake rc
-  fake=$(make_fake_root "$id" "$base/fm-$id")
+  fake=$(make_fake_root "$id" "$task_tmp")
   set +e
   FM_TASK_TMP_BASE="$base" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" \
     > "$TMP_ROOT/$id.out" 2> "$TMP_ROOT/$id.err"
@@ -343,5 +400,6 @@ test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing
 test_teardown_leaves_live_sibling_session_untouched
 test_teardown_refuses_a_foreign_tasktmp
+test_teardown_refuses_a_legacy_undiscriminated_tasktmp
 test_teardown_refuses_a_symlinked_tasktmp
 test_teardown_survives_an_unremovable_tasktmp
