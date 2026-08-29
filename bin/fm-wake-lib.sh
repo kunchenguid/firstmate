@@ -126,6 +126,24 @@ fm_watcher_lock_matches_pid() {
 
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
+# fm_watcher_live_holder_pid <state> <watch-path> [home]
+# Echo the pid of a LIVE, identity-matched holder of this home's watcher lock, or
+# fail when there is none. This answers "is a watcher process still there", NOT
+# "is it still cycling" - a holder whose beacon is stale still qualifies, which is
+# exactly the distinction the callers below need.
+#
+# Deliberately wait-free: it reads the lock and re-proves the recorded identity,
+# and never sleeps or watches the beacon. It is used only to make an operator
+# message name the right fault, so it must not add latency to a guard whose job
+# is to block a turn, and it never changes a verdict.
+fm_watcher_live_holder_pid() {
+  local state=$1 watch_path=$2 home=${3:-$FM_HOME} pid
+  pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  printf '%s' "$pid"
+}
+
 fm_watcher_healthy() {
   local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=

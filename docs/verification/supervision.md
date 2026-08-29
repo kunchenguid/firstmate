@@ -505,6 +505,48 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### Cycle-end evidence and holder-naming banners, 2026-08-29
+
+```text
+macOS 27.0 (26A5421a) arm64
+GNU bash 5.3.9(1)-release
+ShellCheck 0.11.0 (pinned)
+base: origin/main f66be0f
+```
+
+Both regression cases were checked against the code with their own fix removed, because a case that cannot fail proves nothing.
+
+The cycle-end evidence, mutant = the evidence clause reverted to the bare upstream sentence:
+
+```text
+control -> ok - an attached arm reports the exit status its owning arm recorded
+mutant  -> not ok - attached arm did not report the owner-recorded exit:
+               watcher: attached pid=96760 (beacon 0s)
+               watcher: FAILED - cycle ended without an actionable reason
+```
+
+That mutant output is the reported symptom itself: a fresh beacon, a failed cycle, and nothing to act on.
+
+The ledger probe at a long identity, mutant = the singly-truncated probe restored:
+
+```text
+control -> ok - the owner-recorded exit is still found when the identity is long
+mutant  -> not ok - a long identity lost the owner-recorded exit:
+               watcher: FAILED - cycle ended without an actionable reason:
+               watcher pid=15635 exited and released this home lock without recording a delivered wake
+```
+
+The mutant does not lose the verdict, only the exit code - it falls back to the generic disposition text in exactly the case where the recorded exit is the only evidence left.
+The fixture asserts its own identity length before relying on it, so it cannot pass vacuously on a short path.
+
+### Beacon freshness under host suspend - attempted and deferred
+
+The second half of the reported problem, that `state/.last-watcher-beat` can read fresh while supervision is already dead and stale while a watcher is merely suspended, was attempted on this branch and deliberately deferred rather than shipped.
+The approach - separating a suspended watcher from a wedged one by watching the beacon for a bounded window instead of inferring from its age - is sound and reproduces the fault, but bounding those windows introduced five regressions of its own across four review rounds, each fix bounding one window and opening another.
+Two of them broke guarantees the change itself had stated: callers that declared no budget stopped keeping their previous timing, and a receipt could claim a full observation that was never spent, which let a caller skip the one observation the design promised.
+The pattern is the finding, and it is recorded here rather than lost: adding timed windows to a supervision path that had none, measured on a clock that can move underneath them in both directions, is the same class of fault the work set out to fix.
+No part of that machinery is present in this change; the evidence above covers only what ships.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

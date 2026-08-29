@@ -199,7 +199,7 @@ if [ "$FM_SUP_WATCHER_FRESH" = true ] && fm_afk_daemon_owns_supervision "$STATE"
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode reason rule live_holder holder_phrase
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -207,15 +207,23 @@ block_stop() {
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  # The block itself is unchanged: this only names WHICH fault is blocking, so a
+  # host that merely resumed is not reported as a watcher that died. The read is
+  # wait-free, because a guard that blocks a turn must not wait to do it.
+  if live_holder=$(fm_watcher_live_holder_pid "$STATE" "$WATCH" "$FM_HOME"); then
+    holder_phrase="watcher pid $live_holder holds this home lock but has not beaten"
+  else
+    holder_phrase='no live watcher holds this home lock'
+  fi
   {
     printf '●%s\n' "$rule"
     printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
     if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-      printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+      printf '●  %s task(s) in flight, but %s (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$holder_phrase" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-      printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
+      printf '●  %s process-event source(s) registered, but %s (last beat: %s).\n' "$FM_SUP_SOURCES" "$holder_phrase" "$FM_SUP_BEACON_DESC"
     else
-      printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
+      printf '●  X-mode relay polling needs supervision, but %s (last beat: %s).\n' "$holder_phrase" "$FM_SUP_BEACON_DESC"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'

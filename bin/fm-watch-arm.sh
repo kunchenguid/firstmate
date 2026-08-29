@@ -29,9 +29,11 @@
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
-#   watcher: FAILED - cycle ended without an actionable reason
+#   watcher: FAILED - cycle ended without an actionable reason: <evidence>
 #                                                        - a clean cycle ended with no wake and no
-#                                                          verified healthy successor
+#                                                          verified healthy successor; the evidence
+#                                                          clause names what ended it (see
+#                                                          unexplained_cycle_evidence below)
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
@@ -269,8 +271,95 @@ wait_for_healthy_successor() {
   done
 }
 
+# An arm that only ATTACHED to a watcher holds no handle on that watcher's exit
+# status, so a cycle that ends without a delivered wake is silent from here even
+# though the arm that OWNED the child classified it in the lifecycle ledger. Read
+# that classification back rather than reporting nothing: this is the difference
+# between "the cycle ended" and "the watcher exited 1".
+#
+# The row is bound to this exact cycle - same watcher pid AND the same recorded
+# process identity in its lock snapshot, closed no earlier than this arm attached
+# - so neither a recycled pid nor an older cycle of the same watcher can be read
+# as this one. The ledger stays diagnostic: a missing or unreadable row degrades
+# to the disposition text below and never changes the verdict.
+#
+# The wanted field is rebuilt through the SAME transforms the ledger applied on
+# the way in - lock_snapshot cleans each part, then cycle_log_append cleans the
+# whole composite again - because cut(1) applied once to a pair is not the same
+# as applied to each half. Comparing a singly-truncated probe against a doubly
+# truncated row silently stops matching once an identity is long enough, which is
+# reachable with a deep watcher path.
+owner_recorded_exit() {
+  local pid=$1 identity=$2 want
+  [ -f "$CYCLE_LOG" ] || return 1
+  want=$(cycle_clean_field "$(printf 'pid:%s|identity:%s' \
+    "$(cycle_clean_field "${pid:-none}")" "$(cycle_clean_field "${identity:-none}")")")
+  awk -F'\t' -v pid="watcher_pid=$pid" -v want="lock_before=$want" \
+    -v since="$cycle_started_at" '
+    $2 == pid && $3 == "origin=started" && $10 == want {
+      ended = $5; sub(/^ended_at=/, "", ended)
+      if (ended + 0 < since + 0) next
+      code = $6; sub(/^exit_code=/, "", code)
+      sig = $7; sub(/^signal=/, "", sig)
+      if (code == "unknown") next
+      found = (sig == "none") ? "exited " code : "was killed by " sig
+    }
+    END { if (found != "") print found }
+  ' "$CYCLE_LOG" 2>/dev/null | grep . || return 1
+}
+
+# A recycled pid is a live pid, so bare liveness cannot stand in for "the watcher
+# is still running": it would name an unrelated process to the operator and, by
+# claiming the watcher never exited, suppress the recorded exit code that is the
+# only remaining evidence in exactly that case. Re-prove the identity the cycle
+# recorded, the way every other holder check in this codebase does, and compare
+# it through the same cleaning the ledger uses so length cannot decide the answer.
+cycle_watcher_still_live() {
+  local pid=$1 identity=$2 current
+  fm_pid_alive "$pid" || return 1
+  [ -n "$identity" ] || return 0
+  current=$(cycle_clean_field "$(fm_pid_identity "$pid" 2>/dev/null || true)")
+  [ -n "$current" ] && [ "$current" = "$identity" ]
+}
+
+# Name what actually ended a cycle that produced no reason line. "Cycle ended
+# without an actionable reason" alone is unactionable: a watcher that exited
+# cleanly, one that died leaving its lock, one another watcher replaced, and one
+# that is still live but no longer beating all reach here and need different
+# responses. The typed prefix is unchanged so existing consumers still match it,
+# and the verdict and exit status are untouched - only the operator's evidence
+# improves.
+unexplained_cycle_evidence() {
+  local pid=$cycle_watcher_pid holder age owner_exit clean_identity
+  age=$(fm_path_age "$BEAT")
+  case "$pid" in ''|*[!0-9]*) printf 'watcher identity was never established'; return 0 ;; esac
+  holder=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  clean_identity=$(cycle_clean_field "$cycle_watcher_identity")
+  if ! cycle_watcher_still_live "$pid" "$clean_identity" \
+    && owner_exit=$(owner_recorded_exit "$pid" "$clean_identity"); then
+    printf 'watcher pid=%s %s without delivering a wake (last beacon %ss ago, lock now: %s)' \
+      "$pid" "$owner_exit" "$age" "${holder:-unheld}"
+    return 0
+  fi
+  if cycle_watcher_still_live "$pid" "$clean_identity"; then
+    if [ "$holder" = "$pid" ]; then
+      printf 'watcher pid=%s is still live and holds this home lock, but its beacon has not advanced for %ss' "$pid" "$age"
+    else
+      printf 'watcher pid=%s is still live but no longer holds this home lock (lock now: %s)' "$pid" "${holder:-unheld}"
+    fi
+    return 0
+  fi
+  if [ -z "$holder" ]; then
+    printf 'watcher pid=%s exited and released this home lock without recording a delivered wake (last beacon %ss ago)' "$pid" "$age"
+  elif [ "$holder" = "$pid" ]; then
+    printf 'watcher pid=%s died leaving its own lock behind (last beacon %ss ago)' "$pid" "$age"
+  else
+    printf 'watcher pid=%s exited and this home lock moved to pid %s (last beacon %ss ago)' "$pid" "$holder" "$age"
+  fi
+}
+
 fail_unexplained_cycle() {
-  echo "watcher: FAILED - cycle ended without an actionable reason"
+  echo "watcher: FAILED - cycle ended without an actionable reason: $(unexplained_cycle_evidence)"
   return 1
 }
 
@@ -530,7 +619,7 @@ owned_child_finished() {
   cycle_log_append "$rc" "$signal" "$reason_type" none
   print_watch_output "$child_out"
   if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
-    echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason"
+    echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason: $(unexplained_cycle_evidence)"
   fi
   rm -f "$child_out" 2>/dev/null || true
   child=

@@ -836,6 +836,125 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+
+# An attached arm holds no handle on its watcher's exit status, so a watcher that
+# ends nonzero - killed, or bailing out of its own startup - used to reach the
+# operator as a bare "cycle ended without an actionable reason" with a perfectly
+# fresh beacon and nothing to act on. The owning arm classified that exit in the
+# lifecycle ledger, and the attached arm must report it.
+test_attached_arm_reports_the_owner_recorded_exit() {
+  local dir state fakebin ownerout attachout ownerpid attachpid wpid status i
+  dir=$(make_case attached-owner-exit)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ownerout="$dir/owner-arm.out"
+  attachout="$dir/attached-arm.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$ownerout" &
+  ownerpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: started pid=' "$ownerout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wpid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$wpid" "$ownerout" || fail "owning arm did not start a watcher"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$WATCH_ARM" > "$attachout" &
+  attachpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$attachout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$attachout" || fail "second arm did not attach to the running watcher"
+
+  # A watcher that ends without delivering, while its beacon is still well inside
+  # grace: the shape the suspend fix deliberately does not cover.
+  kill -TERM "$wpid" 2>/dev/null || fail "could not terminate the watcher"
+  wait_for_exit "$ownerpid" 200 >/dev/null 2>&1 || true
+  wait_for_exit "$attachpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after a nonzero watcher exit (status $status)"
+  grep -qF "cycle ended without an actionable reason: watcher pid=$wpid exited 1 without delivering a wake" "$attachout" \
+    || fail "attached arm did not report the owner-recorded exit: $(cat "$attachout")"
+  pass "an attached arm reports the exit status its owning arm recorded"
+}
+
+# The same ledger lookup at a LONG identity. The ledger writes its lock snapshot
+# through cycle_clean_field TWICE - once per part in lock_snapshot, then once
+# over the whole "pid:<x>|identity:<y>" composite in cycle_log_append - and
+# cut(1) applied to a pair is not cut(1) applied to each half. A probe truncated
+# only once therefore stops matching its own row past roughly a 497-character
+# identity, and the operator silently drops from the recorded exit code back to
+# the generic disposition text in exactly the case where the exit code is the
+# only evidence left.
+#
+# A deep watcher path is how that length is reached in practice: this home runs
+# out of pooled worktrees whose paths are already long, and the identity carries
+# the full command. This case runs the SAME two-arm fixture as the one above from
+# a deliberately deep copy, so it differs from it by path length alone.
+test_owner_recorded_exit_survives_a_long_identity() {
+  local dir state fakebin deep bin ownerout attachout ownerpid attachpid wpid status i identity
+  dir=$(make_case long-identity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+
+  # ~470 characters of path, so lstart plus the command clears the 497-character
+  # point where the two truncations start to disagree.
+  deep="$dir"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    deep="$deep/nested-worktree-path-segment-$i-padding"
+  done
+  bin="$deep/bin"
+  mkdir -p "$bin" || fail "could not build the deep fixture path"
+  cp "$ROOT"/bin/*.sh "$bin/" 2>/dev/null || fail "could not stage the deep bin"
+  [ -x "$bin/fm-watch-arm.sh" ] || fail "deep bin is missing the arm"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$bin/fm-watch-arm.sh" > "$dir/owner.out" 2>&1 &
+  ownerpid=$!
+  ownerout="$dir/owner.out"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF 'watcher: started pid=' "$ownerout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wpid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$wpid" "$ownerout" || fail "deep-path owning arm did not start a watcher: $(cat "$ownerout")"
+
+  # The fixture is only meaningful if it actually produced a long identity.
+  identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  [ "${#identity}" -gt 497 ] \
+    || fail "fixture did not reach a long identity (${#identity} chars); the truncation case would pass vacuously"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$bin/fm-watch-arm.sh" > "$dir/attached.out" 2>&1 &
+  attachpid=$!
+  attachout="$dir/attached.out"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$attachout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$attachout" || fail "deep-path second arm did not attach: $(cat "$attachout")"
+
+  kill -TERM "$wpid" 2>/dev/null || fail "could not terminate the deep-path watcher"
+  wait_for_exit "$ownerpid" 200 >/dev/null 2>&1 || true
+  wait_for_exit "$attachpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "deep-path attached arm did not fail after a nonzero exit (status $status)"
+  grep -qF "watcher pid=$wpid exited 1 without delivering a wake" "$attachout" \
+    || fail "a long identity lost the owner-recorded exit: $(cat "$attachout")"
+  pass "the owner-recorded exit is still found when the identity is long"
+}
+
 test_cycle_exit_ledger_links_successor_and_stays_bounded() {
   local dir state fakebin armout check_file first_arm successor_arm successor_pid i size iteration
   dir=$(make_case cycle-ledger)
@@ -1130,4 +1249,6 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
+test_attached_arm_reports_the_owner_recorded_exit
+test_owner_recorded_exit_survives_a_long_identity
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
