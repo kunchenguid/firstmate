@@ -1531,6 +1531,23 @@ fm_wake_signal_seen_path() {  # <state> <file>
   printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
 }
 
+# The byte size recorded in <file>'s seen marker, or 0 when no marker exists, it
+# cannot be read, or it does not hold this "size:mtime" format. That size is the
+# position the watcher has already classified, so it is also the start offset of
+# the bytes it has not: fm-classify-lib.sh's status_span_has_actionable reads the
+# span from here to the current size rather than only the log's last line. A 0
+# means "classify the whole file", which surfaces events rather than losing them.
+fm_wake_signal_seen_size() {  # <state> <file>
+  local marker sig size
+  marker=$(fm_wake_signal_seen_path "$1" "$2")
+  sig=$(cat "$marker" 2>/dev/null) || { printf '0'; return 0; }
+  size=${sig%%:*}
+  case "$size" in
+    ''|*[!0-9]*) printf '0' ;;
+    *) printf '%s' "$size" ;;
+  esac
+}
+
 # 0 when <file>'s current signature exactly matches its recorded seen marker,
 # meaning every byte in it was already surfaced or deliberately absorbed.
 # A missing marker or unreadable signature is NOT a match, so uncertainty reads

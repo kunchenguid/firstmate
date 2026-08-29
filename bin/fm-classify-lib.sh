@@ -634,6 +634,14 @@ _fm_status_file_size() {  # <status-file>
   LC_ALL=C wc -c < "$f" 2>/dev/null
 }
 
+# Private scratch path for a one-shot span read, alongside the status file the
+# same way the cursor above is, and PID-scoped so concurrent readers of one log
+# (the watcher and the away-mode daemon both classify the same stream) never
+# truncate each other's chunk.
+_fm_status_span_scratch() {  # <status-file>
+  printf '%s.span.%s' "$(_fm_open_decisions_cursor_path "$1")" "$$"
+}
+
 _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   local f=$1 start=$2 length=$3
   if [ -n "${FM_STATUS_SPAN_READER:-}" ]; then
@@ -1243,22 +1251,91 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
-# 0 (actionable) if ANY status file listed in a "signal:" wake carries a
-# captain-relevant last line; 1 otherwise. Pass the space-separated file list that
-# follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,
-# which never carry a verb) are skipped. A 1 here is NOT "benign" on its own: a
-# no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
-# also provably working (signal_crew_provably_working below); otherwise it surfaces.
-signal_reason_is_actionable() {  # <file> ...
-  local f last
-  for f in "$@"; do
-    [ -e "$f" ] || continue
-    case "$f" in *.status) ;; *) continue ;; esac
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
-    status_is_captain_relevant "$last" && return 0
-  done
-  return 1
+# Print the FIRST still-live captain-relevant event in the bytes of an append-only
+# status log at or after <start-offset>, and return 0; return 1 when the span
+# carries none.
+#
+# This is the read model every supervisor's per-wake classification must use.
+# Asking "is the LAST line captain-relevant?" cannot answer "did an actionable
+# event arrive?" over an append-only EVENT log: one later routine append - a
+# `working:` progress note landing while a supervisor lingers its signal grace
+# window - moves the last line past a `needs-decision`, `blocked`, `failed`, or
+# `done` event that nothing else will ever re-read, and the event is classified
+# routine and absorbed. status_open_decisions above already fixed exactly that
+# masking for the durable decision fold; this is the same correction for the
+# classification path, so a decision, blocker, or finish cannot go silent.
+#
+# <start-offset> is the position the CALLER has already classified. Each
+# supervisor owns its own position record (bin/fm-watch.sh reads the size in its
+# .seen-* signature, bin/fm-supervise-daemon.sh its .subsuper-seen-status-<task>
+# marker) because the always-on watcher and the away-mode daemon classify the
+# same stream independently and must not consume one shared cursor. An offset of
+# 0, a malformed offset, or an offset past the current size reads the whole file,
+# so a truncated, replaced, or never-classified log surfaces its events rather
+# than losing them.
+#
+# A `needs-decision`/`blocked` event in the span is skipped only when the fold
+# over the WHOLE file proves its key is no longer open - the worker self-closed
+# it, or the answering firstmate closed it at answer time. status_open_decisions
+# is the single owner of that open/closed rule, including its same-key reopening
+# behavior, so this never re-derives it. Every other captain-relevant event
+# (`done`, `failed`, a legacy bare line) is terminal and always actionable.
+status_span_first_actionable() {  # <status-file> <start-offset>
+  local f=$1 start=${2:-0} size chunk_file line verb key open='' folded=0 rc=1
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  case "$start" in ''|*[!0-9]*) start=0 ;; esac
+  [ "$start" -le "$size" ] || start=0
+  [ "$start" -lt "$size" ] || return 1
+  chunk_file=$(_fm_status_span_scratch "$f") || return 1
+  _fm_status_read_span "$f" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
+    || { rm -f "$chunk_file"; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    status_is_captain_relevant "$line" || continue
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      needs-decision|blocked)
+        # Only a line the fold would actually have opened can be closed by it;
+        # a rejected key or a reserved-namespace violation stays actionable.
+        key=$(_fm_decision_key "$line") || { rc=0; break; }
+        _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
+          || { rc=0; break; }
+        if [ "$folded" -eq 0 ]; then
+          open=$(status_open_decisions "$f")
+          folded=1
+        fi
+        _fm_open_set_has "$open" "$key" || continue
+        rc=0
+        break
+        ;;
+      *) rc=0; break ;;
+    esac
+  done < "$chunk_file"
+  rm -f "$chunk_file"
+  [ "$rc" -eq 0 ] && printf '%s' "$line"
+  return "$rc"
+}
+
+# Print the byte offset that means "classified through the end of this log", for
+# a supervisor recording its own position after acting on a span. Fails without
+# printing when the size cannot be read or is not a count, so a caller records a
+# stale position rather than a wrong one.
+status_log_end_offset() {  # <status-file>
+  local size
+  size=$(_fm_status_file_size "$1") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$size"
+}
+
+# 0 when that same span carries such an event, printing nothing. The predicate
+# every per-wake classification uses; callers that must also NAME the event they
+# found (an away-mode escalation digest) use status_span_first_actionable above.
+status_span_has_actionable() {  # <status-file> <start-offset>
+  status_span_first_actionable "$1" "${2:-0}" > /dev/null
 }
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
@@ -1400,8 +1477,9 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
-# same space-separated file list as signal_reason_is_actionable. Files are mapped to
-# task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
+# same space-separated file list the caller classified with the span read above.
+# Files are mapped to task ids by stripping the .status / .turn-ended suffix;
+# a no-verb wake with nothing
 # provably working must surface, so an empty/unresolvable list returns 1.
 # A kind=secondmate task's .status signal is never absorbable here regardless of
 # busy evidence: that stream is the mate's routed-reply channel, so every append
@@ -1444,21 +1522,4 @@ stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
   last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
   [ -n "$last" ] && status_is_captain_relevant "$last"
-}
-
-# Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is
-# captain-relevant. This is the cheap fleet-scan both supervisors run as a
-# catch-all backstop for a captain-relevant status the per-wake path might miss.
-# No dedup is applied here: each consumer dedupes against its own seen-state (the
-# daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
-scan_captain_relevant_statuses() {  # <state>
-  local state=$1 f last task
-  for f in "$state"/*.status; do
-    [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    status_is_captain_relevant "$last" || continue
-    task=$(basename "$f"); task="${task%.status}"
-    printf '%s\t%s\t%s\n' "$f" "$task" "$last"
-  done
-  return 0
 }

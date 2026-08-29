@@ -93,6 +93,87 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+# Byte size of a status log: the daemon records escalation progress as a
+# position in the append-only stream, so a fixture that means "already escalated
+# through here" writes that position.
+log_size() { LC_ALL=C wc -c < "$1" | tr -d '[:space:]'; }
+
+seen_through() {  # <state> <task>
+  local state=$1 task=$2 key
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  log_size "$state/$task.status" > "$state/.subsuper-seen-status-$key"
+}
+
+# The reported bug in away mode: the captain is away, a worker reports something
+# the captain must hear, then keeps appending routine progress. Classifying only
+# the last line self-handles the wake and the work stalls silently until the
+# captain returns.
+test_classify_signal_survives_a_later_routine_append() {
+  local dir state out
+  dir=$(make_supercase classify-masked)
+  state="$dir/state"
+
+  printf 'working: setup\nblocked: cannot reach the release host\nworking: retrying the upload\n' \
+    > "$state/mask-b1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/mask-b1.status" "$state")
+  case "$out" in
+    escalate\|*) ;;
+    *) fail "a blocker hidden behind a later working: line was self-handled: $out" ;;
+  esac
+  case "$out" in
+    *"blocked: cannot reach the release host"*) ;;
+    *) fail "the escalation named the routine line instead of the blocker: $out" ;;
+  esac
+
+  # The captain-reported shape: a finished release/install followed by routine
+  # cleanup chatter must still reach an away captain.
+  printf 'working: publishing\ndone: release 1.4.0 published and installed\nworking: cleaning the build dir\n' \
+    > "$state/mask-r1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/mask-r1.status" "$state")
+  case "$out" in
+    escalate\|*) ;;
+    *) fail "a release/install completion hidden behind later routine appends was self-handled: $out" ;;
+  esac
+  case "$out" in
+    *"done: release 1.4.0 published and installed"*) ;;
+    *) fail "the escalation named the routine line instead of the completion: $out" ;;
+  esac
+
+  # Once escalated through the end of the log, a further routine append is
+  # routine again: the fix must not turn every later signal into a re-escalation.
+  seen_through "$state" "mask-b1"
+  printf 'working: still retrying\n' >> "$state/mask-b1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/mask-b1.status" "$state")
+  case "$out" in
+    self\|*) ;;
+    *) fail "a routine append after the blocker was escalated re-escalated it: $out" ;;
+  esac
+  pass "an actionable event is escalated to an away captain despite later routine appends"
+}
+
+# The away-mode backstop must reach the same event when the per-wake path never
+# ran, which is exactly what it exists for.
+test_catchall_scan_surfaces_a_masked_event() {
+  local dir state
+  dir=$(make_supercase catchall-masked)
+  state="$dir/state"
+  printf 'working: setup\nneeds-decision: pick A or B\nworking: tidying the branch\n' \
+    > "$state/catch-m1.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "the catch-all scan missed a decision hidden behind a later working: line"
+  grep -F "needs-decision: pick A or B" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the catch-all scan escalated something other than the decision it found"
+  # And it records progress, so the next scan does not re-fire the same event.
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the catch-all scan re-fired an event it had already escalated"
+  pass "the away-mode catch-all scan surfaces a masked event once"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -162,7 +243,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     key=$(printf '%s' "$task" | tr ':/.' '___')
     echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
     [ "$case_name" = prior-terminal ] \
-      && printf '%s' "$status_line" > "$state/.subsuper-seen-status-$key"
+      && seen_through "$state" "$task"
     [ "$case_name" = paused ] \
       && echo $(( $(date +%s) - 500 )) > "$state/.subsuper-paused-$key"
 
@@ -969,8 +1050,8 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/sig-t8.status" "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not escalated"
   key=$(printf '%s' "sig-t8" | tr ':/.' '___')
-  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "done: PR https://x/y/pull/8" ] \
-    || fail "captain signal escalate did not write the seen-status marker"
+  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$(log_size "$state/sig-t8.status")" ] \
+    || fail "captain signal escalate did not record the escalated-through offset"
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
@@ -1239,7 +1320,7 @@ test_classify_signal_dedup_against_scan() {
   printf 'done: PR https://x/y/pull/9\n' > "$state/dup-s9.status"
   # Simulate the catch-all scan having already escalated this status.
   key=$(printf '%s' "dup-s9" | tr ':/.' '___')
-  printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
+  seen_through "$state" "dup-s9"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
   # Without the seen marker, it should escalate.
@@ -1257,7 +1338,7 @@ test_classify_stale_dedup_against_signal() {
   state="$dir/state"
   printf 'done: PR https://x/y/pull/10\n' > "$state/dup-s10.status"
   key=$(printf '%s' "dup-s10" | tr ':/.' '___')
-  printf 'done: PR https://x/y/pull/10' > "$state/.subsuper-seen-status-$key"
+  seen_through "$state" "dup-s10"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
   # Without the seen marker, it should escalate.
@@ -1283,7 +1364,7 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "wishlist-w1" | tr ':/.' '___')
   # Simulate an earlier false-positive escalate that wrote the seen marker.
-  printf '%s' "$incident" > "$state/.subsuper-seen-status-$key"
+  seen_through "$state" "wishlist-w1"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
   case "$out" in
     self\|*transient*) ;;
@@ -2162,6 +2243,8 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
+test_classify_signal_survives_a_later_routine_append
+test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale

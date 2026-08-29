@@ -112,14 +112,34 @@ _hb_surfaced_path() {
   printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
 }
 
-# Record a captain-relevant status after its durable wake has been enqueued.
+# The byte offset in <task>'s status log that the heartbeat backstop has already
+# surfaced to firstmate, or 0 when it never has. A POSITION rather than the
+# surfaced line: the backstop exists to catch an event the per-wake path missed,
+# and comparing the last line cannot see an event a later routine append moved
+# past - exactly the masking fm-classify-lib.sh's span read exists to stop. An
+# absent or malformed marker (including one an older watcher wrote as a status
+# line) reads 0, so the log is re-classified and the backstop errs toward
+# surfacing rather than swallowing.
+hb_surfaced_offset() {  # <task>
+  local raw
+  raw=$(cat "$(_hb_surfaced_path "$1")" 2>/dev/null) || { printf '0'; return 0; }
+  case "$raw" in
+    ''|*[!0-9]*) printf '0' ;;
+    *) printf '%s' "$raw" ;;
+  esac
+}
+
+# Record a status log as surfaced through its current end, after its durable wake
+# has been enqueued. Unconditional: the wake names this task, so firstmate reads
+# the whole log, including a routine line trailing the event that woke it.
 mark_surfaced() {  # <status-file>
-  local f=$1 task last
+  local f=$1 task size
+  # The signal batch this is called for coalesces status writes with the same
+  # turn's .turn-ended marker; only a status log has a position to record.
+  case "$f" in *.status) ;; *) return 0 ;; esac
   task=$(basename "$f"); task="${task%.status}"
-  last=$(last_status_line "$f")
-  [ -n "$last" ] || return 0
-  status_is_captain_relevant "$last" || return 0
-  printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+  size=$(status_log_end_offset "$f") || return 0
+  printf '%s' "$size" > "$(_hb_surfaced_path "$task")"
 }
 
 # Act on a fresh actionable transition from a push-capable backend.

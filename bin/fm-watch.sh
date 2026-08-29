@@ -945,35 +945,57 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+# 0 when any signaled status file carries a captain-relevant event in the bytes
+# appended since this watcher last classified it. The start offset is the size in
+# that file's own .seen-* signature (bin/fm-wake-lib.sh owns that format), and
+# fm-classify-lib.sh's status_span_has_actionable owns what counts as actionable
+# in the span. Reading the SPAN rather than the last line is what stops a later
+# routine append - a `working:` note landing inside SIGNAL_GRACE below - from
+# hiding the `needs-decision`, `blocked`, `failed`, or `done` event that arrived
+# just before it: the .seen-* marker advances either way, so an event absorbed
+# here is never re-read. Non-.status arguments (.turn-ended markers, which carry
+# no verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal is
+# only benign when the crew is also provably working (signal_crew_provably_working).
+signal_files_actionable() {  # <status-file> ...
+  local f
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || continue
+    status_span_has_actionable "$f" "$(fm_wake_signal_seen_size "$STATE" "$f")" && return 0
+  done
+  return 1
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
-# Mark every current captain-relevant status as surfaced. Called after the
-# heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
-# by the next heartbeat.
+# Mark every status log as surfaced through its current end. Called after the
+# heartbeat backstop enqueues its wake, so the same events are not re-surfaced by
+# the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f task last
-  while IFS=$(printf '\t') read -r f task last; do
-    [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
-  done < <(scan_captain_relevant_statuses "$STATE")
+  local f
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    mark_surfaced "$f"
+  done
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
-# any captain-relevant status has NOT already been surfaced to firstmate (its
-# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
-# effects: the caller enqueues first, then marks surfaced. Because every
-# captain-relevant signal/stale already marks itself surfaced when it wakes
-# firstmate, this normally finds nothing and the heartbeat is absorbed; it
-# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
+# any status log carries a captain-relevant event past the position already
+# surfaced to firstmate (.hb-surfaced-<task>). It walks every log rather than only
+# those whose LAST line looks captain-relevant, because the event this backstop
+# most needs to catch is precisely one a later routine append has already moved
+# past. Pure detect, no side effects: the caller enqueues first, then marks
+# surfaced. Because every captain-relevant signal/stale already marks itself
+# surfaced when it wakes firstmate, this normally finds nothing and the heartbeat
+# is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
-  while IFS=$(printf '\t') read -r f task last; do
-    [ -n "$f" ] || continue
-    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-    [ "$surfaced" = "$last" ] && continue
-    return 0
-  done < <(scan_captain_relevant_statuses "$STATE")
+  local f task
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    status_span_has_actionable "$f" "$(hb_surfaced_offset "$task")" && return 0
+  done
   return 1
 }
 
@@ -1341,7 +1363,8 @@ EOF
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
-    #   - any status file carries a captain-relevant verb;
+    #   - any status file gained a captain-relevant event since it was last
+    #     classified (its whole new span, not merely its last line);
     #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
     #     NOT provably working - the crew stopped its turn with no actively-running
     #     pipeline and no busy pane, so it may be done (even via an interactive menu
@@ -1353,7 +1376,7 @@ EOF
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present || signal_files_actionable $files || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -1587,9 +1610,10 @@ EOF
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+      # Backstop: a captain-relevant event the per-wake path absorbed by mistake.
+      # Enqueue first, then record every status log surfaced through its end so the
+      # next heartbeat does not re-fire it (enqueue-before-suppress preserved);
+      # this wake sends firstmate to the whole fleet, so every log is read.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced

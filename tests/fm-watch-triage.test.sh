@@ -167,23 +167,92 @@ reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
-test_signal_reason_is_actionable_classifier() {
-  local dir state
+size_of() { LC_ALL=C wc -c < "$1" | tr -d '[:space:]'; }
+
+test_status_span_actionable_classifier() {
+  local dir state offset
   dir=$(make_case classify-signal); state="$dir/state"
   printf 'working: step 1\nworking: step 2\n' > "$state/a.status"
-  signal_reason_is_actionable "$state/a.status" && fail "benign working: signal classified actionable"
+  status_span_has_actionable "$state/a.status" 0 && fail "benign working: span classified actionable"
   printf 'working: x\nneeds-decision: pick A or B\n' > "$state/b.status"
-  signal_reason_is_actionable "$state/b.status" || fail "captain-relevant signal classified benign"
-  : > "$state/c.turn-ended"
-  signal_reason_is_actionable "$state/c.turn-ended" && fail "a bare turn-ended marker classified actionable"
-  # Coalesced batch: one benign + one captain-relevant -> actionable.
-  signal_reason_is_actionable "$state/a.status" "$state/b.status" || fail "coalesced benign+actionable not actionable"
+  status_span_has_actionable "$state/b.status" 0 || fail "captain-relevant span classified benign"
   # A failure and a merge result are captain-relevant and must always wake.
   printf 'failed: build broke on main\n' > "$state/d.status"
-  signal_reason_is_actionable "$state/d.status" || fail "a failed: line was not actionable"
+  status_span_has_actionable "$state/d.status" 0 || fail "a failed: line was not actionable"
   printf 'merged\n' > "$state/e.status"
-  signal_reason_is_actionable "$state/e.status" || fail "a legacy merged line was not actionable"
-  pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
+  status_span_has_actionable "$state/e.status" 0 || fail "a legacy merged line was not actionable"
+  # An offset past the whole log has nothing left to classify: an event already
+  # classified must not re-fire on the next append.
+  offset=$(size_of "$state/b.status")
+  status_span_has_actionable "$state/b.status" "$offset" \
+    && fail "an already-classified needs-decision re-fired from its own end offset"
+  printf 'working: tidying up\n' >> "$state/b.status"
+  status_span_has_actionable "$state/b.status" "$offset" \
+    && fail "a routine append after a classified decision was classified actionable"
+  # An unusable offset (absent, malformed, or past a truncated log) reads the
+  # whole file rather than losing the events it cannot account for.
+  status_span_has_actionable "$state/b.status" "" || fail "an empty offset did not read the whole log"
+  status_span_has_actionable "$state/b.status" "not-a-number" || fail "a malformed offset did not read the whole log"
+  status_span_has_actionable "$state/b.status" 99999 || fail "an offset past the log did not read the whole log"
+  pass "status_span_has_actionable: benign absorbed, captain events surfaced, classified events not re-fired"
+}
+
+# The reported bug, at the classifier: an actionable event followed by a ROUTINE
+# append must stay actionable, and must be reported as ITSELF rather than as the
+# routine line that happens to sit last.
+test_status_span_survives_a_later_routine_append() {
+  local dir state event
+  dir=$(make_case classify-masked); state="$dir/state"
+  printf 'working: setup\nneeds-decision: pick A or B\nworking: still tidying the branch\n' \
+    > "$state/mask.status"
+  status_span_has_actionable "$state/mask.status" 0 \
+    || fail "a needs-decision hidden behind a later working: line was classified routine"
+  event=$(status_span_first_actionable "$state/mask.status" 0)
+  [ "$event" = "needs-decision: pick A or B" ] \
+    || fail "the span reported '$event' instead of the decision it found"
+  # The captain-reported shape: a finished release/install reported as done and
+  # then followed by routine cleanup chatter must still reach the captain.
+  printf 'working: publishing\ndone: release 1.4.0 published and installed\nworking: cleaning the build dir\nnote: cache pruned\n' \
+    > "$state/release.status"
+  status_span_has_actionable "$state/release.status" 0 \
+    || fail "a done: completion hidden behind later routine appends was classified routine"
+  event=$(status_span_first_actionable "$state/release.status" 0)
+  [ "$event" = "done: release 1.4.0 published and installed" ] \
+    || fail "the span reported '$event' instead of the completion it found"
+  # A blocker is the away-mode shape of the same masking.
+  printf 'blocked: cannot reach the release host\nworking: retrying the upload\n' \
+    > "$state/blocked.status"
+  status_span_has_actionable "$state/blocked.status" 0 \
+    || fail "a blocked: event hidden behind a later working: line was classified routine"
+  pass "an actionable event is not hidden by later routine appends, and is named as itself"
+}
+
+# Closure is the one thing that may retire an event inside a span, and only
+# through status_open_decisions' own open/closed rule.
+test_status_span_respects_decision_closure() {
+  local dir state event
+  dir=$(make_case classify-closure); state="$dir/state"
+  printf 'needs-decision [key=api]: pick A or B\nresolved [key=api]: took A\n' > "$state/closed.status"
+  status_span_has_actionable "$state/closed.status" 0 \
+    && fail "a decision the same span already closed was still classified actionable"
+  # Reopening the SAME key after a close must survive: the close belongs to the
+  # earlier opening, not to the one that came after it.
+  printf 'needs-decision [key=api]: pick A or B\nresolved [key=api]: took A\nneeds-decision [key=api]: A broke, pick again\n' \
+    > "$state/reopened.status"
+  status_span_has_actionable "$state/reopened.status" 0 \
+    || fail "a decision reopened under a key that was closed earlier was classified routine"
+  # A terminal event is never retired by a later closure line.
+  printf 'failed: build broke on main\nresolved [key=api]: unrelated\n' > "$state/term.status"
+  status_span_has_actionable "$state/term.status" 0 \
+    || fail "a failed: event was retired by an unrelated closure"
+  # A live decision must survive a NEWER closure that belongs to another key.
+  printf 'needs-decision [key=api]: pick A or B\nneeds-decision [key=db]: pick a store\nresolved [key=db]: took sqlite\n' \
+    > "$state/two.status"
+  event=$(status_span_first_actionable "$state/two.status" 0) \
+    || fail "a still-open decision was retired by a newer closure under another key"
+  [ "$event" = "needs-decision [key=api]: pick A or B" ] \
+    || fail "the span reported '$event' instead of the decision still open"
+  pass "span classification retires only decisions the whole-file fold proves closed"
 }
 
 test_stale_is_terminal_classifier() {
@@ -198,19 +267,6 @@ test_stale_is_terminal_classifier() {
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
   pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
-}
-
-test_scan_captain_relevant_statuses_classifier() {
-  local dir state out
-  dir=$(make_case classify-scan); state="$dir/state"
-  printf 'working: a\n' > "$state/one.status"
-  printf 'blocked: no perms\n' > "$state/two.status"
-  printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
-  out=$(scan_captain_relevant_statuses "$state")
-  printf '%s' "$out" | grep -F "two.status" >/dev/null || fail "scan missed a blocked: status"
-  printf '%s' "$out" | grep -F "three.status" >/dev/null || fail "scan missed a done: status"
-  printf '%s' "$out" | grep -F "one.status" >/dev/null && fail "scan surfaced a benign working: status"
-  pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
 }
 
 test_classifier_primitives() {
@@ -744,6 +800,82 @@ test_actionable_signal_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+}
+
+# The reported bug, end to end through a real watcher: a crew reports something
+# the captain must act on and then keeps appending routine progress, which is
+# ordinary while the watcher lingers its signal grace window to coalesce a status
+# write with the same turn's turn-end. Classifying only the last line reads the
+# batch as routine, and because the crew IS provably working the no-verb fallback
+# absorbs it too - the .seen-* suppressor then advances and nothing ever re-reads
+# the event, so the work stalls with the captain never told.
+test_actionable_signal_survives_a_later_routine_append() {
+  local dir state fakebin out drain_out status_file sig pid
+  dir=$(make_case actionable-masked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  # Everything through "working: setup" was already classified, so this asserts
+  # the newly appended span, not merely a whole-file re-read.
+  printf 'working: setup\n' > "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
+  printf 'needs-decision: pick A or B\nworking: still tidying the branch\n' >> "$status_file"
+  # Positive evidence the crew is still working, so the no-verb fallback cannot
+  # rescue the wake: only reading the event itself can surface it.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "watcher absorbed a needs-decision hidden behind a later working: line"; }
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the masked signal failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
+    || fail "the masked actionable signal was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a captain event hidden behind a later routine append is still surfaced (queue + exit)"
+}
+
+# The captain-reported completion shape of the same masking, end to end.
+test_release_completion_survives_a_later_routine_append() {
+  local dir state fakebin out drain_out status_file sig pid
+  dir=$(make_case release-masked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'working: publishing\n' > "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
+  printf 'done: release 1.4.0 published and installed\nworking: cleaning the build dir\n' >> "$status_file"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "watcher absorbed a release/install completion hidden behind later cleanup chatter"; }
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the masked completion failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
+    || fail "the masked completion was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a finished release reported before routine cleanup chatter is still surfaced"
+}
+
+# The other direction: the fix must not turn ordinary progress into wakes.
+test_routine_appends_after_a_classified_event_stay_absorbed() {
+  local dir state fakebin out status_file sig pid
+  dir=$(make_case actionable-classified); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  # The decision is BEHIND the classified position, so only the new routine line
+  # is in the span. A supervisor that re-read the whole log would wake again here.
+  printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
+  printf 'working: still tidying the branch\n' >> "$status_file"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher re-surfaced a decision it had already classified: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "a routine append after a classified decision enqueued a wake"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a routine append after an already-classified event is absorbed (no re-wake)"
 }
 
 test_terminal_stale_surfaced() {
@@ -2701,6 +2833,26 @@ test_heartbeat_no_change_absorbed() {
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
 }
 
+test_heartbeat_backstop_surfaces_a_masked_status() {
+  local dir state fakebin out sig pid
+  dir=$(make_case heartbeat-masked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # Same miss as below, but the captain-relevant event is followed by a routine
+  # append, so its last line reads benign. The backstop must still catch it.
+  printf 'working: setup\nneeds-decision: pick A or B\nworking: tidying the branch\n' \
+    > "$state/miss.status"
+  sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "heartbeat backstop missed a decision hidden behind a later working: line"
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
+  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "$(size_of "$state/miss.status")" ] \
+    || fail "backstop did not record the masked status as surfaced through its end"
+  pass "the heartbeat backstop surfaces a captain event hidden behind a later routine append"
+}
+
 test_heartbeat_backstop_surfaces_unsurfaced_status() {
   local dir state fakebin out drain_out sig pid
   dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2716,8 +2868,8 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pid=$!
   wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
-  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "done: PR https://example.test/pr/5" ] \
-    || fail "backstop did not record the status as surfaced (would re-fire next heartbeat)"
+  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "$(size_of "$state/miss.status")" ] \
+    || fail "backstop did not record the status as surfaced through its end (would re-fire next heartbeat)"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
@@ -2815,9 +2967,10 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
-test_signal_reason_is_actionable_classifier
+test_status_span_actionable_classifier
+test_status_span_survives_a_later_routine_append
+test_status_span_respects_decision_closure
 test_stale_is_terminal_classifier
-test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
@@ -2835,6 +2988,9 @@ test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
+test_actionable_signal_survives_a_later_routine_append
+test_release_completion_survives_a_later_routine_append
+test_routine_appends_after_a_classified_event_stay_absorbed
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
@@ -2874,6 +3030,7 @@ test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
