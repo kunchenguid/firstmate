@@ -41,10 +41,10 @@ start_session_standin() {  # <outfile> [seconds] -> "child_pid session_pid"
   # positively contains a real descendant for the binding test. It stays
   # running (waiting on its child) until the test kills it; the caller reads
   # both pids from the line printed as soon as the child exists.
-  local out_file=$1 secs=${2:-300} i
+  local out_file=$1 secs=${2:-300}
   : > "$out_file"
   "$STANDIN_BIN" -c "sleep $secs >/dev/null 2>&1 & echo \"\$! \$$\"; wait" >"$out_file" 2>/dev/null &
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     { [ -s "$out_file" ]; } && break
     sleep 0.05
   done
@@ -148,7 +148,7 @@ assert_pending() {  # <state> <expect-pending: 1=yes 0=no> <msg>
 }
 
 test_delivery_state() {
-  local state top epoch seq
+  local state top epoch
   state="$TMP_ROOT/delivery"
   mkdir -p "$state"
 
@@ -241,6 +241,7 @@ test_arm_gates() {
   }
 
   touch "$state/state/.afk"
+  # shellcheck disable=SC2016 # the quoted script must not expand in the test shell
   out=$(arm_gate_env env FM_STATE_OVERRIDE="$state/state" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$state/state" \
     FM_BRIDGE_HARNESS=codex bash -c '
       # shellcheck source=/dev/null
@@ -252,6 +253,7 @@ test_arm_gates() {
   pass "arm refuses when away mode is active and creates nothing"
 
   rm -f "$state/state/.afk"
+  # shellcheck disable=SC2016 # the quoted script must not expand in the test shell
   out=$(arm_gate_env env FM_STATE_OVERRIDE="$state/state" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$state/state" \
     FM_BRIDGE_HARNESS=claude bash -c '
       # shellcheck source=/dev/null
@@ -262,6 +264,7 @@ test_arm_gates() {
   [ ! -e "$state/state/.watch-codex-bridge-terminal" ] || fail "arm wrote a terminal record for a non-Codex harness"
   pass "arm refuses a non-Codex harness"
 
+  # shellcheck disable=SC2016 # the quoted script must not expand in the test shell
   out=$(arm_gate_env env FM_STATE_OVERRIDE="$state/state" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$state/state" \
     FM_BRIDGE_HARNESS=codex bash -c '
       # shellcheck source=/dev/null
@@ -394,7 +397,7 @@ test_inject_decision_matrix() {
   stub="$state/stubs-idle"
   make_inject_stubs "$stub" idle empty empty "idle footer"
   out=$(FM_STUB_SHELL_PID="$session_pid" FM_INJECT_LOG="$state/inject.log" bridge_inject_run "$state" "$stub" "$session_pid")
-  case "$out" in rc=4\ delivered=$top) ;;
+  case "$out" in rc=4\ delivered="$top") ;;
     *) fail "an already-doorbelled queue must be skipped, not resubmitted (got: $out)" ;;
   esac
   [ ! -s "$state/inject.log" ] || fail "an already-doorbelled queue must not reach the submit path"
@@ -406,7 +409,7 @@ test_inject_decision_matrix() {
   make_inject_stubs "$stub" busy empty empty ""
   : > "$state/inject.log"
   out=$(FM_STUB_SHELL_PID="$session_pid" FM_INJECT_LOG="$state/inject.log" bridge_inject_run "$state" "$stub" "$session_pid")
-  case "$out" in rc=2\ delivered=$top) ;;
+  case "$out" in rc=2\ delivered="$top") ;;
     *) fail "a busy pane must defer without delivering (got: $out)" ;;
   esac
   [ ! -s "$state/inject.log" ] || fail "a busy pane must never be typed into"
@@ -417,7 +420,7 @@ test_inject_decision_matrix() {
   make_inject_stubs "$stub" unknown empty empty "Working... esc to interrupt"
   : > "$state/inject.log"
   out=$(FM_STUB_SHELL_PID="$session_pid" FM_INJECT_LOG="$state/inject.log" bridge_inject_run "$state" "$stub" "$session_pid")
-  case "$out" in rc=2\ delivered=$top) ;;
+  case "$out" in rc=2\ delivered="$top") ;;
     *) fail "a rendered-busy footer must defer (got: $out)" ;;
   esac
   [ ! -s "$state/inject.log" ] || fail "a rendered-busy pane must never be typed into"
@@ -428,7 +431,7 @@ test_inject_decision_matrix() {
   make_inject_stubs "$stub" idle pending empty ""
   : > "$state/inject.log"
   out=$(FM_STUB_SHELL_PID="$session_pid" FM_INJECT_LOG="$state/inject.log" bridge_inject_run "$state" "$stub" "$session_pid")
-  case "$out" in rc=3\ delivered=$top) ;;
+  case "$out" in rc=3\ delivered="$top") ;;
     *) fail "a pending composer must defer (got: $out)" ;;
   esac
   [ ! -s "$state/inject.log" ] || fail "a non-empty composer must never be typed into"
@@ -525,13 +528,14 @@ SH
 
   # reconcile closes a recorded dead terminal and drops the record...
   printf 'tmux\tfm-codex-bridge-leak\t\n' > "$state/state/.watch-codex-bridge-terminal"
-  out=$(FM_STATE_OVERRIDE="$state/state" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$state/state" \
+  if ! out=$(FM_STATE_OVERRIDE="$state/state" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$state/state" \
     PATH="$state/fakebin:$PATH" FM_FAKE_TMUX_LOG="$state/state/tmux.log" bash -c '
       # shellcheck source=/dev/null
       . "$1"
       bridge_reconcile_cmd
-    ' _ "$BRIDGE" 2>&1)
-  [ "$?" -eq 0 ] || fail "reconcile of a recorded dead terminal failed: $out"
+    ' _ "$BRIDGE" 2>&1); then
+    fail "reconcile of a recorded dead terminal failed: $out"
+  fi
   [ ! -e "$state/state/.watch-codex-bridge-terminal" ] || fail "reconcile did not drop the dead terminal record"
   # ...and stands down while a live bridge owns the lock.
   printf 'tmux\tfm-codex-bridge-live\t\n' > "$state/state/.watch-codex-bridge-terminal"
