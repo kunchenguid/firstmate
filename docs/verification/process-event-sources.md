@@ -10,6 +10,7 @@ Generic keyed-answer feed verified on 2026-08-16 on the same platform, against t
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 The optional Signal adapter was verified on 2026-08-20 on the same platform with a fake `signal-cli` and isolated home.
+Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 
 ## The published Lavish poll interface the adapter wraps
 
