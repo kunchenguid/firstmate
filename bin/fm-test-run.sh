@@ -254,6 +254,7 @@ family_for_basename() {
       printf '%s\n' session-bootstrap
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-claude-trust-dialog-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
@@ -522,6 +523,7 @@ tests/fm-classify-decision-key.test.sh 928
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 30
 tests/fm-claude-stop-autoarm.test.sh 60633
 tests/fm-cmux-claude-composer-live-e2e.test.sh 20
+tests/fm-claude-trust-dialog-live-e2e.test.sh 21
 tests/fm-codex-continuity-live-e2e.test.sh 19
 tests/fm-composer-matrix-live-e2e.test.sh 21
 tests/fm-control-relaunch.test.sh 31881

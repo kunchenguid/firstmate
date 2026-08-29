@@ -2410,47 +2410,39 @@ claude_capture() {
 # Claude's own workspace-trust dialog (bin/fm-composer-lib.sh owns detection
 # and the "bare Enter declines and exits" hazard) can appear before any
 # composer exists, once, the first time ANY worktree of a never-trusted
-# repository is spawned into. The common already-trusted case costs one cheap
-# capture read and returns immediately; CLAUDE_TRUST_DIALOG_SEEN is set only
-# when the dialog was actually observed, so an ordinary spawn's behavior is
-# unchanged.
+# repository is spawned into. CLAUDE_TRUST_DIALOG_SEEN is set only when the
+# dialog was actually observed.
 CLAUDE_TRUST_DIALOG_SEEN=0
+CLAUDE_LAUNCH_IDLE_SEEN=0
 claude_trust_dialog_clear() {
-  local pane state i=0 max=${FM_CLAUDE_TRUST_POLLS:-30} interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
-  pane=$(claude_capture)
-  state=$(fm_composer_claude_trust_dialog_state "$pane")
-  [ "$state" = absent ] && return 0
-  CLAUDE_TRUST_DIALOG_SEEN=1
+  local pane state busy i=0 max=${FM_CLAUDE_TRUST_POLLS:-40} interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
+    pane=$(claude_capture)
+    state=$(fm_composer_claude_trust_dialog_state "$pane")
     case "$state" in
-      absent) return 0 ;;
+      absent)
+        busy=$(fm_rendered_busy_state "$pane" claude)
+        case "$busy" in
+          idle) CLAUDE_LAUNCH_IDLE_SEEN=1 ;;
+          busy)
+            [ "$CLAUDE_LAUNCH_IDLE_SEEN" = 1 ] && return 0
+            ;;
+        esac
+        ;;
       trust-focused) spawn_send_key "$T" Enter ;;
       trust-unfocused) spawn_send_key "$T" Down ;;
     esac
+    case "$state" in
+      trust-focused|trust-unfocused) CLAUDE_TRUST_DIALOG_SEEN=1 ;;
+    esac
     sleep "$interval"
-    pane=$(claude_capture)
-    state=$(fm_composer_claude_trust_dialog_state "$pane")
     i=$((i + 1))
   done
-  [ "$state" = absent ]
-}
-
-# Postcondition for the trust-dialog accept above: the dialog being gone is
-# not proof the launch brief is being processed (a delivered key is not proof
-# of submission - harness-adapters' control-and-recovery reference). This
-# reads the same delivery-only rendered busy footer bin/fm-composer-lib.sh
-# already uses fleet-wide to confirm a submitted turn actually started, so a
-# claude that quietly re-showed a second gate (or never resumed) fails loudly
-# instead of reporting a false "spawned".
-claude_wait_for_processing() {
-  local pane i=0 max=${FM_CLAUDE_PROCESSING_POLLS:-40} interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
-  while [ "$i" -lt "$max" ]; do
-    pane=$(claude_capture)
-    printf '%s' "$pane" | fm_busy_lines_match claude && return 0
-    i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "$interval"
-  done
-  return 1
+  case "$state" in
+    trust-focused|trust-unfocused) return 1 ;;
+  esac
+  [ "$CLAUDE_TRUST_DIALOG_SEEN" = 1 ] && return 2
+  return 3
 }
 
 claude_spawn_fail() {  # <detail>
@@ -3111,6 +3103,12 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+case "$HARNESS" in
+  claude*)
+    CLAUDE_LAUNCH_BASELINE=$(fm_rendered_busy_state "$(claude_capture)" claude)
+    [ "$CLAUDE_LAUNCH_BASELINE" = idle ] && CLAUDE_LAUNCH_IDLE_SEEN=1
+    ;;
+esac
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -3144,14 +3142,14 @@ if [ "$HARNESS" = kimi ]; then
 fi
 case "$HARNESS" in
   claude*)
-    if ! claude_trust_dialog_clear; then
-      claude_spawn_fail "claude's workspace-trust dialog could not be cleared"
+    claude_trust_dialog_clear || {
+      case $? in
+        1) claude_spawn_fail "claude's workspace-trust dialog could not be cleared" ;;
+        2) claude_spawn_fail "claude accepted the workspace-trust dialog but never confirmed it started processing the launch brief" ;;
+        *) claude_spawn_fail "claude launch never confirmed it started processing the launch brief" ;;
+      esac
       exit 1
-    fi
-    if [ "$CLAUDE_TRUST_DIALOG_SEEN" = 1 ] && ! claude_wait_for_processing; then
-      claude_spawn_fail "claude accepted the workspace-trust dialog but never confirmed it started processing the launch brief"
-      exit 1
-    fi
+    }
     ;;
 esac
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then

@@ -198,16 +198,10 @@ fm_pane_input_pending() {  # <target>
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_busy_state() {  # <target> [harness] -> busy|idle|unknown
-  local win=$1 harness=${2:-} tail40 visible
+  local win=$1 harness=${2:-} tail40
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
     || { printf 'unknown'; return 0; }
-  visible=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
-  [ -n "$visible" ] || { printf 'unknown'; return 0; }
-  if printf '%s' "$visible" | fm_busy_lines_match "$harness"; then
-    printf 'busy'
-  else
-    printf 'idle'
-  fi
+  fm_rendered_busy_state "$tail40" "$harness"
 }
 
 fm_pane_is_busy() {  # <target> [harness]

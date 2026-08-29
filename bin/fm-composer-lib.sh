@@ -352,6 +352,17 @@ fm_busy_lines_match() {  # [harness]
   [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
 }
 
+fm_rendered_busy_state() {  # <screen> [harness] -> busy|idle|unknown
+  local screen=$1 harness=${2:-} visible
+  visible=$(printf '%s' "$screen" | grep -v '^[[:space:]]*$' | tail -12)
+  [ -n "$visible" ] || { printf 'unknown'; return 0; }
+  if printf '%s' "$visible" | fm_busy_lines_match "$harness"; then
+    printf 'busy'
+  else
+    printf 'idle'
+  fi
+}
+
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
 # AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
 # SHELL glyphs are one only INSIDE a composer container; on a bare row they are

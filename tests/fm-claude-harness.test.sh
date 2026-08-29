@@ -33,6 +33,8 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 #   no-processing accepting the dialog clears it, but claude never shows a
 #                 busy signal afterward (simulates a worker that quietly
 #                 re-parked on a second gate instead of resuming).
+#   delayed-dialog the shell remains visible for two reads before the dialog.
+#   stale-no-processing an old busy footer remains in scrollback after trust.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -57,8 +59,14 @@ fake_screen() {
     gone-stuck)
       printf '\xe2\x9d\xaf \n'
       ;;
+    gone-stale)
+      printf 'Thinking... (esc to interrupt)\ncurrent row 01\ncurrent row 02\ncurrent row 03\ncurrent row 04\ncurrent row 05\ncurrent row 06\ncurrent row 07\ncurrent row 08\ncurrent row 09\ncurrent row 10\ncurrent row 11\ncurrent row 12\n$ \n'
+      ;;
     *)
-      printf 'shell starting\n$ \n'
+      case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
+        stale-no-processing) printf 'Thinking... (esc to interrupt)\nshell starting\n$ \n' ;;
+        *) printf 'shell starting\n$ \n' ;;
+      esac
       ;;
   esac
 }
@@ -94,12 +102,14 @@ case "${1:-}" in
           command-typed)
             case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
               trusted) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              delayed-dialog) printf 'delayed-1\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               *) printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE" ;;
             esac
             ;;
           trust-yes)
             case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
               no-processing) printf 'gone-stuck\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              stale-no-processing) printf 'gone-stale\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               *) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
             esac
             ;;
@@ -109,6 +119,10 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    case "$state" in
+      delayed-1) state=delayed-2; printf 'delayed-2\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+      delayed-2) state=trust-no; printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+    esac
     fake_screen
     exit 0
     ;;
@@ -155,7 +169,7 @@ run_spawn() {
     FM_FAKE_KEY_LOG="$case_dir/keys.log" \
     FM_FAKE_CLAUDE_STATE="$case_dir/claude.state" \
     FM_FAKE_CLAUDE_MODE="${FM_FAKE_CLAUDE_MODE:-trusted}" \
-    FM_CLAUDE_TRUST_POLLS=10 FM_CLAUDE_TRUST_POLL_INTERVAL=0 FM_CLAUDE_PROCESSING_POLLS=10 \
+    FM_CLAUDE_TRUST_POLLS=10 FM_CLAUDE_TRUST_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness claude --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -234,7 +248,39 @@ test_claude_accept_without_processing_fails_loudly() {
   pass "fm-spawn: accepting the dialog is not proof of delivery - an unconfirmed resume still fails loudly"
 }
 
+test_claude_delayed_trust_dialog_is_not_missed() {
+  local id rec out rc
+  id="claude-delayed-z5-$$"
+  rec=$(make_spawn_case delayed "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=delayed-dialog run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a delayed trust dialog should still be cleared"
+  assert_contains "$(cat "$CASE_DIR/keys.log")" "Down" \
+    "a delayed trust dialog was mistaken for an already-trusted launch"
+  [ "$(cat "$CASE_DIR/claude.state")" = processing ] \
+    || fail "the delayed dialog spawn did not reach brief processing"
+  pass "fm-spawn: a delayed Claude trust dialog remains inside the launch observation window"
+}
+
+test_claude_stale_busy_scrollback_cannot_confirm_processing() {
+  local id rec out rc
+  id="claude-stale-z6-$$"
+  rec=$(make_spawn_case stale "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=stale-no-processing run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "stale busy scrollback must not confirm the new launch"
+  assert_contains "$out" "never confirmed it started processing the launch brief" \
+    "stale busy scrollback did not produce the processing failure"
+  pass "fm-spawn: stale busy scrollback cannot prove a replacement Claude launch started"
+}
+
 test_claude_already_trusted_spawn_never_touches_the_dialog
 test_claude_trust_dialog_is_navigated_never_a_blind_enter
 test_claude_stuck_dialog_fails_loudly
 test_claude_accept_without_processing_fails_loudly
+test_claude_delayed_trust_dialog_is_not_missed
+test_claude_stale_busy_scrollback_cannot_confirm_processing

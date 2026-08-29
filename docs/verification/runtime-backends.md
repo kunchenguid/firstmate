@@ -176,6 +176,28 @@ The current classifier matrix and its refresh guard are recorded in [Composer cl
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
 Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
 
+### Claude workspace trust
+
+Claude Code 2.1.251 was verified on 2026-08-29 through real `fm-spawn.sh` launches in isolated tmux windows and scratch git worktrees.
+The first worktree of a never-trusted repository rendered `Accessing workspace:` with `No, exit` focused, and a bare Enter returned the pane to its shell.
+Moving Down before Enter accepted the dialog, removed it, and let Claude process the launch brief.
+A before-and-after diff of Claude's managed trust store recorded `hasTrustDialogAccepted` under the repository checkout path and no entry under the worktree path.
+A second worktree of the same repository then launched without a dialog or another trust-store entry, so acceptance is a one-time repository cost rather than a per-worktree cost.
+Firstmate never writes or pre-seeds Claude's trust store; the opt-in guard redirects Claude to an isolated config directory and drives the real launch path.
+
+Refresh the live proof with:
+
+```sh
+FM_CLAUDE_TRUST_DIALOG_LIVE=1 bin/fm-test-run.sh tests/fm-claude-trust-dialog-live-e2e.test.sh
+```
+
+Bounded output from the verified behavior:
+
+```text
+ok - Claude 2.1.251 (Claude Code): fresh trust was accepted and both worktree briefs were processed without human input
+ok - Claude 2.1.251 (Claude Code): trust acceptance persisted once for the repository, not once per worktree
+```
+
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
