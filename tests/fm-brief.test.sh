@@ -260,6 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
     || fail "explicit no-mistakes brief omitted the committed-head receipt contract"
   assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
+  # shellcheck disable=SC2016 # Command substitutions are literal generated brief text.
   assert_grep 'done: committed $(git rev-parse HEAD) [spawn-gen=$(sed -n '\''s/^spawn_gen=//p'\''' "$brief" \
     "explicit no-mistakes brief did not require the incarnation-bound committed-head receipt"
 

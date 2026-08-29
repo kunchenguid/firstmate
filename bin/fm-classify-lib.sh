@@ -363,6 +363,7 @@ _fm_status_legacy_tail_key_compat_enabled() {  # <status-file>
   fi
   brief="$data/$task/brief.md"
   [ -f "$brief" ] && [ ! -L "$brief" ] || return 1
+  # shellcheck disable=SC2016 # Backticks are literal historical brief text.
   grep -Fqx 'The main firstmate'"'"'s answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append `resolved: {how it cleared}` yourself (keyed with `[key=<slug>]` if you opened it with one) as your domain resumes.' "$brief" \
     || grep -Fqx '   Firstmate'"'"'s reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append `resolved: {how it cleared}` yourself (same `[key=<slug>]` if you opened it with one) as you resume.' "$brief"
 }

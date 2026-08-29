@@ -267,6 +267,7 @@ test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak() {
   dir=$(case_dir legacy-trailing-key)
   data="$dir/data"
   mkdir -p "$data/t"
+  # shellcheck disable=SC2016 # Backticks are literal historical brief text.
   printf '%s\n' '   Firstmate'"'"'s reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append `resolved: {how it cleared}` yourself (same `[key=<slug>]` if you opened it with one) as you resume.' > "$data/t/brief.md"
   printf 'blocked: invalid custody receipt remains inadmissible [key=main-custody]\n' > "$dir/t.status"
   expected=$(printf 'main-custody\tblocked\tinvalid custody receipt remains inadmissible\n')

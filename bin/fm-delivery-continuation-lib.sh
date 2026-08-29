@@ -8,6 +8,7 @@ fm_delivery_committed_receipt_contract() {
 }
 
 fm_delivery_historical_receipt_contract() {
+  # shellcheck disable=SC2016 # Backticks are literal historical brief text.
   printf '%s\n' 'When you believe it is complete, append `done: {summary}` to the status file and stop.'
 }
 
@@ -23,7 +24,7 @@ fm_delivery_receipt_contract_kind() {  # <brief>
 }
 
 fm_delivery_receipt_state() {  # <status> <canonical|historical> [spawn-gen]
-  local status=$1 kind=$2 spawn_gen=${3:-} line parsed parsed_head parsed_gen state= head=
+  local status=$1 kind=$2 spawn_gen=${3:-} line parsed parsed_head parsed_gen state='' head=''
   case "$kind" in canonical|historical) ;; *) return 1 ;; esac
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
