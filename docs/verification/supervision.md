@@ -140,7 +140,7 @@ The large-digest cases emitted 250,000 characters, while the control emitted 50,
 The automatic case reported one compaction episode and made no non-summary provider request until the test supplied the next prompt.
 The manual case submitted `/compact` once, observed `Compacted from`, made no refresh-only provider request, and completed the next prompt below the hard limit.
 Both large-digest next prompts carried `AGENTS_MARKER=current` plus the model-readable truncation marker, while the bounded control carried the current marker without truncation.
-The adversarial case selected a model that reports and enforces one token per UTF-8 byte rather than the representative chars/4 approximation the other cases use; its first post-compaction prompt takes the unknown-usage estimate branch, and a second post-compaction prompt repeats the same clean-message byte estimate against authoritative provider-reported usage becoming available, both succeeding below the hard limit.
+The adversarial case selected a model that reports and enforces one token per UTF-8 byte rather than the representative chars/4 approximation the other cases use; its first post-compaction prompt succeeds below the hard limit against the single UTF-8 byte estimate that base context and the refresh budget always use, and a second post-compaction prompt proves the first request's ephemeral refresh never accumulates into the second request's base context, since that base context is rebuilt from persisted session entries and the refresh itself is never persisted, so it too succeeds below the hard limit while still receiving a bounded refresh. This is the deliberate conservative over-reservation described in `docs/sessionstart-nudge.md`, not an authoritative token measurement, since Pi 0.84.3 exposes no per-entry token count.
 The 300,000-character control received the provider's `maximum context length is 65536 tokens` rejection, proving the successful cases did not use a permissive endpoint.
 The fixture guard returned healthy and the watcher extension was absent throughout, so neither supervision path is a precondition for the result.
 
@@ -150,7 +150,7 @@ tests/fm-pi-compaction-context.test.sh
 # ok - real Pi manual /compact submits once, leaves headroom, refreshes instructions, and permits the next prompt
 # ok - real Pi bounded refresh control remains complete and below the provider limit
 # ok - real Pi next prompt survives a selected model enforcing one token per UTF-8 byte
-# ok - real Pi second post-compaction prompt stays bounded under authoritative usage with a UTF-8 byte enforcing model
+# ok - real Pi second post-compaction prompt keeps a bounded refresh without accumulating the prior one
 # ok - local provider hard-limit control rejects an oversized real Pi request
 # ok - Pi and pi-signed share this extension path; other primary harnesses and runtime backends do not execute its compaction hook
 # fm-pi-compaction-context.test.sh: all assertions passed
