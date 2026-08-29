@@ -6,10 +6,11 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared wait, either a paused:
-# external wait or a verified captain-held transfer, is the separate idle absorb
-# case and re-surfaces only on its long bounded cadence, although its initial
-# no-verb status signal still surfaces in normal mode.
+# working signal is never silently swallowed. A declared paused: external wait is
+# the separate idle absorb case and re-surfaces only on its long bounded cadence,
+# although its initial no-verb status signal still surfaces in normal mode. A
+# leftover held window is inspected once, then stays quiet on the wake channel
+# while remaining on the open-work list.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -26,14 +27,42 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
+#                          both surfaced once. Leftover idle comes off wedge
+#                          markers. After that inspect, a live leftover-idle pane
+#                          uses exponential backoff capped at once per hour, never
+#                          every poll or every STALE_ESCALATE_SECS. Dead or unknown
+#                          leftover stays silent with zero repeats after that
+#                          inspect. A dead+done or dead+paused
+#                          pane stays silent after that classification: this path
+#                          never tears down, never deletes unlanded copies, and at
+#                          most unbinds the window mapping. A leftover held window
+#                          stays on the open-work list and off the wake channel.
+#                          Once per day one leftover list of long-inactive panes
+#                          is emitted for firstmate (task, age, last movement,
+#                          where work sits), not a per-pane scream. Firstmate
+#                          brings the captain one decide-or-discard from that
+#                          list, then cleans only discarded panes. Agents return
+#                          and rebuilding context costs more, so this is not an
+#                          aggressive sweep: leftover notes younger than
+#                          LEFTOVER_LIST_SECS stay off the digest. A mixed-age
+#                          digest leaves the daily marker expired so a younger
+#                          note enters when it ages in; already-listed notes stay
+#                          quiet the same day. This path
+#                          never auto-teardowns unlanded work. A secondmate idle
+#                          stays skipped as healthy. A live declared paused: wait
+#                          keeps its bounded
+#                          recheck. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane whose own task
+#                          resume. A frozen run that was classified working still
+#                          uses that ladder, via a marker written in the working
+#                          arm; leftover idle does not, even if old wedge-timer
+#                          files remain. Unless afk
+#                          is active. A pane whose own task
 #                          worktree was written during the quiet window is
 #                          deferred rather than escalated (wedge_defer_writing),
 #                          because files appearing there are liveness the pane and
@@ -78,6 +107,16 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
+#   check: leftover list: <rows>
+#                          once per day, one firstmate-facing digest of long-inactive
+#                          leftover tasks (name, age, last movement, where work sits).
+#                          The payload starts with decide-or-discard. Firstmate
+#                          brings the captain that one call, then cleans only
+#                          discarded panes. This path never auto-teardowns
+#                          unlanded work. Leftover notes younger than
+#                          LEFTOVER_LIST_SECS stay off the digest. A mixed-age
+#                          digest leaves the daily marker expired so a younger
+#                          note enters when it ages in.
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
@@ -214,13 +253,24 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once; a
-# secondmate earns the cadence on its declaration alone, because its endpoint
-# liveness is deliberately never read (pause_state_class owns that split).
-# These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
-# longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
+# A paused crew whose agent has confidently exited uses the same bounded cadence,
+# while a live or ambiguously read agent still surfaces once; a secondmate earns
+# the cadence on its declaration alone, because its endpoint liveness is
+# deliberately never read (pause_state_class owns that split).
+# A declared paused: wait re-surfaces once every PAUSE_RESURFACE_SECS so a
+# forgotten pause cannot rot invisibly. Live declared waits keep that cadence.
+# After one inspect, leftover held stays quiet on the wake channel even when
+# that cadence is due. Dead+paused stays silent after classification.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# Live leftover idle after the first inspect: exponential backoff from this base,
+# capped at once per hour. Dead or unknown leftover stays silent. Not the wedge
+# timer and not the pause cadence.
+IDLE_BACKOFF_SECS=${FM_IDLE_BACKOFF_SECS:-60}
+IDLE_BACKOFF_CAP_SECS=${FM_IDLE_BACKOFF_CAP_SECS:-3600}
+# One leftover list per day of long-inactive leftover notes for firstmate.
+# Notes younger than this stay off the digest so returning agents keep context.
+# The digest is one decide-or-discard; this path never auto-teardowns.
+LEFTOVER_LIST_SECS=${FM_LEFTOVER_LIST_SECS:-86400}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -307,7 +357,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
+# .wedge-escalations-, .working-, .paused-*, .writing-*, .idle-last-, .idle-n-), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -616,7 +666,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.working-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -673,7 +723,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # pause tracking stays unwritten here, exactly as the idle away-mode handoff
       # leaves it, because the daemon owns that bookkeeping.
       key=$(window_key "$win")
-      rm -f "$since_file" "$escalation_file"
+      rm -f "$since_file" "$escalation_file" "$STATE/.working-$key"
       clear_write_tracking "$key"
       declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
       if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
@@ -695,11 +745,147 @@ clear_pause_state() {  # <window-key>
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
 }
 
+clear_idle_tracking() {  # <window-key>
+  local key=$1
+  rm -f "$STATE/.idle-last-$key" "$STATE/.idle-n-$key"
+}
+
+clear_leftover_note() {  # <task>
+  local task=$1
+  [ -n "$task" ] || return 0
+  rm -f "$STATE/.leftover-task-$task"
+}
+
 clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_idle_tracking "$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.working-$key"
+}
+
+pane_is_dead() {  # <window>
+  local w=$1 v
+  v=$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null) || v=unknown
+  [ "$v" = dead ]
+}
+
+# Ordinary dead+paused leftover: not a secondmate, not a captain hold.
+leftover_dead_paused() {  # <window> <task>
+  local win=$1 task=$2 last
+  [ "$(window_kind "$win")" != secondmate ] || return 1
+  last=$(last_status_line "$STATE/$task.status")
+  status_is_paused "$last" || return 1
+  pane_is_dead "$win"
+}
+
+work_sits_of() {  # <task>
+  local task=$1 meta wt
+  meta="$STATE/$task.meta"
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && { printf '%s' "$wt"; return 0; }
+  wt=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && { printf 'window:%s' "$wt"; return 0; }
+  printf 'unbound'
+}
+
+note_leftover() {  # <task> <last-movement>
+  local task=$1 last=$2 sits
+  [ -n "$task" ] || return 0
+  sits=$(work_sits_of "$task")
+  printf 'task=%s\nlast-movement=%s\nwork-sits=%s\n' "$task" "${last:-none}" "${sits:-unknown}" > "$STATE/.leftover-task-$task"
+}
+
+# Drop window=/terminal= after dead+done or dead+paused classification.
+# Never deletes the meta, the worktree, or unlanded copies.
+unbind_window_mapping() {  # <task>
+  local task=$1 meta tmp line
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 0
+  tmp="$meta.unbind.$$"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      window=*|terminal=*) ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$meta" > "$tmp"
+  mv "$tmp" "$meta"
+}
+
+leftover_idle_backoff_check() {  # <window>
+  local win=$1 key n delay alive
+  key=$(window_key "$win")
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || alive=unknown
+  [ "$alive" = alive ] || return 0
+  [ -e "$STATE/.idle-last-$key" ] || date +%s > "$STATE/.idle-last-$key"
+  n=$(cat "$STATE/.idle-n-$key" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  [ "$n" -gt 6 ] && n=6
+  delay=$((IDLE_BACKOFF_SECS * (1 << n)))
+  [ "$delay" -gt "$IDLE_BACKOFF_CAP_SECS" ] && delay=$IDLE_BACKOFF_CAP_SECS
+  [ "$(age_of "$STATE/.idle-last-$key")" -ge "$delay" ] || return 0
+  fm_wake_append stale "$win" "stale: $win" || exit 1
+  date +%s > "$STATE/.idle-last-$key"
+  echo $((n + 1)) > "$STATE/.idle-n-$key"
+  wake "stale: $win"
+}
+
+# One leftover list per day of long-inactive leftover notes.
+# Missing marker starts the clock without waking.
+# Notes younger than LEFTOVER_LIST_SECS stay off the digest so agents can return.
+# Young leftover notes leave the marker expired so they enter the digest as soon as they age in.
+# A mixed-age digest also leaves the marker expired; listed notes stay quiet the same day.
+# A digest is queued before the clock advances.
+# The digest is one decide-or-discard for firstmate; this path never teardowns.
+leftover_list_tick() {
+  local marker="$STATE/.leftover-list" rows='' f task last sits age reason young=0 tmp listed now
+  local -a to_mark=()
+  afk_present && return 0
+  if [ ! -e "$marker" ]; then
+    touch "$marker"
+    return 0
+  fi
+  [ "$(age_of "$marker")" -ge "$LEFTOVER_LIST_SECS" ] || return 0
+  now=$(date +%s)
+  for f in "$STATE"/.leftover-task-*; do
+    [ -e "$f" ] || continue
+    task=$(grep '^task=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    last=$(grep '^last-movement=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    sits=$(grep '^work-sits=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    age=$(age_of "$f")
+    [ -n "$task" ] || continue
+    if [ ! -f "$STATE/$task.meta" ]; then
+      rm -f "$f"
+      continue
+    fi
+    listed=$(grep '^listed=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    case "$listed" in
+      ''|*[!0-9]*) ;;
+      *) [ $((now - listed)) -lt "$LEFTOVER_LIST_SECS" ] && continue ;;
+    esac
+    if [ "$age" -lt "$LEFTOVER_LIST_SECS" ]; then
+      young=1
+      continue
+    fi
+    to_mark+=("$f")
+    rows="${rows}${task} age=${age}s last-movement=${last:-none} work-sits=${sits:-unknown}"$'\n'
+  done
+  if [ -z "$rows" ]; then
+    [ "$young" -eq 0 ] && touch "$marker"
+    return 0
+  fi
+  reason="check: leftover list:"$'\n'"decide-or-discard"$'\n'"$rows"
+  fm_wake_append check leftover-list "$reason" || exit 1
+  for f in "${to_mark[@]}"; do
+    tmp="$f.listed.$$"
+    grep -v '^listed=' "$f" > "$tmp" || true
+    printf 'listed=%s\n' "$now" >> "$tmp"
+    touch -r "$f" "$tmp"
+    mv "$tmp" "$f"
+  done
+  [ "$young" -eq 0 ] && touch "$marker"
+  wake "$reason"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -767,16 +953,22 @@ surface_nonterminal_stale() {  # <window> <hash>
   key=$(window_key "$win")
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.working-$key"
   clear_write_tracking "$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
+  note_leftover "$task" "$last"
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
+    if leftover_dead_paused "$win" "$task"; then
+      unbind_window_mapping "$task"
+    fi
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+    date +%s > "$STATE/.idle-last-$key"
+    echo 0 > "$STATE/.idle-n-$key"
   fi
   wake "stale: $win"
 }
@@ -1383,7 +1575,11 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
-  # crossed turn bound already handed to the away-mode daemon).
+  # crossed turn bound already handed to the away-mode daemon). A leftover idle
+  # that has already been inspected: live leftover uses exponential backoff
+  # capped at once per hour; dead or unknown leftover stays silent. Dead+done
+  # and dead+paused stay silent after classification. Only a hash classified
+  # working via the working-arm marker keeps the frozen-run wedge re-arm.
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -1412,6 +1608,7 @@ EOF
     sf="$STATE/.stale-$key"
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
+    wf="$STATE/.working-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     # Busy match: a backend's native semantic state when available (herdr), else
@@ -1457,22 +1654,34 @@ EOF
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
+              : > "$wf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
+              rm -f "$ssf" "$ewf" "$wf"
               clear_write_tracking "$key"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              note_leftover "$task" "$last"
+              if [ "$kind" != secondmate ] && pane_is_dead "$w"; then
+                unbind_window_mapping "$task"
+              fi
               wake "stale: $w"
             fi
-          elif [ -e "$ssf" ]; then
+          elif [ -e "$wf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+          elif [ -e "$ssf" ] || [ -s "$ewf" ]; then
+            if crew_is_provably_working "$task"; then
+              : > "$wf"
+              wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            else
+              rm -f "$ssf" "$ewf"
+            fi
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -1499,10 +1708,15 @@ EOF
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
+                : > "$wf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
-                handle_paused_stale "$w" "$task" "$h"
+                if leftover_dead_paused "$w" "$task" || status_is_captain_held "$last"; then
+                  surface_nonterminal_stale "$w" "$h"
+                else
+                  handle_paused_stale "$w" "$task" "$h"
+                fi
                 ;;
               *)
                 surface_nonterminal_stale "$w" "$h"
@@ -1510,17 +1724,44 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+            last=$(last_status_line "$STATE/$task.status")
+            if [ -e "$pf" ] || status_is_paused_or_captain_held "$last"; then
               case "$(pause_state_class "$w" "$task")" in
-                paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                paused)
+                  if leftover_dead_paused "$w" "$task"; then
+                    printf '%s' "$h" > "$sf"
+                    : > "$pf"
+                    rm -f "$ssf" "$ewf" "$wf"
+                    clear_write_tracking "$key"
+                    triage_log "classified leftover dead+paused (silent): $w"
+                  elif status_is_captain_held "$last"; then
+                    :
+                  else
+                    handle_paused_stale "$w" "$task" "$h"
+                  fi
+                  ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
+                         : > "$wf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)
+                  if status_is_paused "$last"; then
+                    handle_paused_stale "$w" "$task" "$h"
+                  fi
+                  ;;
               esac
-            else
+            elif [ -e "$wf" ]; then
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+            elif [ -e "$ssf" ] || [ -s "$ewf" ]; then
+              if crew_is_provably_working "$task"; then
+                : > "$wf"
+                wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+              else
+                leftover_idle_backoff_check "$w"
+              fi
+            else
+              leftover_idle_backoff_check "$w"
             fi
           fi
         fi
@@ -1535,6 +1776,8 @@ EOF
         else
           rm -f "$ssf" "$ewf"
           clear_write_tracking "$key"
+          clear_idle_tracking "$key"
+          clear_leftover_note "$task"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
         # is cleared - but not in the same poll the declared-pause cadence just
@@ -1551,8 +1794,10 @@ EOF
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
       else
-        rm -f "$ssf" "$ewf"
+        rm -f "$ssf" "$ewf" "$wf"
         clear_write_tracking "$key"
+        clear_idle_tracking "$key"
+        clear_leftover_note "$task"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
@@ -1567,6 +1812,8 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+
+  leftover_list_tick
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
