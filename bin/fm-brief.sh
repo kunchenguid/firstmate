@@ -202,11 +202,11 @@ INBOX_SECTION=${INBOX_SECTION%$'\n'}
 # hand-offs only when it travels with the worker's instructions.
 IFS= read -r -d '' OFF_LIMITS_MODULE_SECTION <<EOF || true
 # Off-limits module prohibition - permanent safety boundary
-1. The rule. Honour every off-limits module prohibition recorded by this brief's operator. Never edit, and never make a read that leads to a write, anywhere in a fenced module. This is permanent until the operator personally lifts it.
+1. The rule. Honour every off-limits module prohibition recorded by this brief's operator as an absolute boundary. Never edit, and never make a read that leads to a write, anywhere in a fenced module. This boundary remains absolute until the operator personally lifts it.
 2. The operator's concrete prohibition. Read the operator's own private preferences file at $DATA/captain.md for the concrete fenced-module list before inspecting or changing code that might be fenced. Do not copy that private list into this shared template.
 3. The check that actually works. Ask whether the fenced module RENDERS this file, not whether the path looks like it belongs to that module.
 Fenced modules can render shared components that live outside their own directories, so every "is this under the module directory/" test can pass while a change alters what a fenced module displays.
-4. The escape. If a task appears to REQUIRE touching a fenced module, that is NOT a green light - append \`blocked: {why}\` and return it to the operator.
+4. The escape. If a task appears to REQUIRE touching a fenced module, that is NOT a green light - append \`blocked: {why}\`, stop, and return it to the operator without proceeding.
 Never resolve it by editing, and never by inventing a fork on your own judgement.
 
 QA boundary. Fenced modules are off limits to QA-style work. Do not exercise them, click through them, file tickets against them, or continue a journey that routes into them; stop at the boundary and say so.
