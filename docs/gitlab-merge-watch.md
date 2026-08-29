@@ -1,7 +1,7 @@
 # GitLab merge request watch and merge verification
 
 Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
-Every command through "Upgrade path from an existing armed watch" was run on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
+The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
 Every output is reproduced exactly.
 
 ## Versions
@@ -178,33 +178,11 @@ $ PATH="$noglab" fm-pr-check.sh e6 https://github.com/kunchenguid/firstmate/pull
 armed: state/e6.check.sh
 ```
 
-## Upgrade path from an existing armed watch
+## Registration version
 
-The stored record gained the provider tag, so its version moved to `fm-pr-poll-registration-v2` and a record written by the previous release no longer parses.
-The existing non-executing migration handles that: it never runs the old artifact, and rebuilds the poll from the task's recorded pull request URL.
-Starting from a poll armed exactly as the previous release wrote it:
-
-```
-$ head -1 state/t1.pr-poll-registration
-fm-pr-poll-registration-v1
-$ fm-pr-check-migrate.sh --checks-safe
-PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home
-$ head -2 state/t1.pr-poll-registration
-fm-pr-poll-registration-v2
-t1
-$ cat state/.pr-check-migration.log
-task t1: migration outcome tracking started before legacy poll handling
-task t1: canonical legacy poll rebuilt and armed
-```
-
-The rebuilt poll works, verified against a pull request that is genuinely merged:
-
-```
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/t1.pr-poll)
-merged
-```
-
-No armed watch is lost by upgrading.
+The live registration tag is `fm-pr-poll-registration-v2`, which includes the provider tag.
+A `fm-pr-poll-registration-v1` record no longer parses.
+The one-time non-executing rebuild that converted those older watches has been retired; arm a current watch with `bin/fm-pr-check.sh`.
 
 ## Merging a merge request
 

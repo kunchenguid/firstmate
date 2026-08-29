@@ -780,7 +780,7 @@ test_bootstrap_does_not_announce_when_arm_fails() {
 test_bootstrap_does_not_follow_x_artifact_symlinks() {
   local home shim_target cadence_target out
   home="$TMP_ROOT/boot-linked-artifacts"
-  mkdir -p "$home/state" "$home/config" "$home/external-quarantine"
+  mkdir -p "$home/state" "$home/config"
   printf 'FMX_PAIRING_TOKEN=tok-linked\n' > "$home/.env"
   shim_target="$home/external-shim"
   cadence_target="$home/external-cadence"
@@ -789,7 +789,6 @@ test_bootstrap_does_not_follow_x_artifact_symlinks() {
   chmod 0640 "$shim_target" "$cadence_target"
   ln -s "$shim_target" "$home/state/x-watch.check.sh"
   ln -s "$cadence_target" "$home/config/x-mode.env"
-  ln -s "$home/external-quarantine" "$home/state/.pr-check-quarantine"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>"$home/bootstrap.err")
 
