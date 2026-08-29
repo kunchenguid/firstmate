@@ -157,7 +157,11 @@
 #   FM_USAGE_WALL_CAPTURE_TIMEOUT   bound on diagnose's endpoint capture (default
 #                                   15s), because a tmux server whose socket
 #                                   still exists but is wedged never answers and
-#                                   this command runs on the recovery path
+#                                   this command runs on the recovery path. That
+#                                   default is for a direct invocation, which has
+#                                   no outer bound; a caller that bounds this
+#                                   command defaults it below its own bound
+#                                   through fm_inner_bound in bin/fm-timeout-lib.sh
 #   FM_USAGE_WALL_TIGHT_PCT         percent at or below which a reading is
 #                                   labelled tight (default 20)
 #   FM_USAGE_WALL_TIGHT_RUNWAY_SECS runway at or below which a reading is
@@ -230,6 +234,7 @@ positive_int FM_USAGE_WALL_NM_TIMEOUT "$NM_TIMEOUT"
 positive_int FM_USAGE_WALL_SCAN_BUDGET "$SCAN_BUDGET"
 positive_int FM_USAGE_WALL_SNAPSHOT_TIMEOUT "$SNAPSHOT_TIMEOUT"
 positive_int FM_USAGE_WALL_CAPTURE_LINES "$CAPTURE_LINES"
+positive_int FM_USAGE_WALL_CAPTURE_TIMEOUT "$CAPTURE_TIMEOUT"
 non_negative_int FM_USAGE_WALL_TIGHT_PCT "$TIGHT_PCT"
 non_negative_int FM_USAGE_WALL_TIGHT_RUNWAY_SECS "$TIGHT_RUNWAY"
 

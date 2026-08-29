@@ -1340,3 +1340,22 @@ fi
 "$WALL" diagnose >/dev/null 2>&1; expect_code 2 $? 'diagnose without a task id is a usage error'
 "$WALL" --help >/dev/null 2>&1; expect_code 0 $? '--help succeeds'
 pass 'usage errors are refused with a usage exit status'
+
+# Every bound this command hands to fm_run_timed must be refused when it is not
+# a bound. bin/fm-timeout-lib.sh states the caller's obligation: `timeout 0` and
+# the perl fallback's `alarm 0` both DISABLE the deadline, so a zero that slips
+# through does not shorten a read, it restores an unbounded one - on the manual
+# recovery path, which has no outer bound to save it. Asserted over the whole
+# set rather than one knob at a time, because the defect this reproduces was a
+# newly added bound being the only one left out of the validation block.
+for KNOB in FM_USAGE_WALL_QUOTA_TIMEOUT FM_USAGE_WALL_NM_TIMEOUT \
+  FM_USAGE_WALL_SCAN_BUDGET FM_USAGE_WALL_SNAPSHOT_TIMEOUT \
+  FM_USAGE_WALL_CAPTURE_LINES FM_USAGE_WALL_CAPTURE_TIMEOUT; do
+  OUT=$(env "$KNOB=0" "$WALL" --help 2>&1); RC=$?
+  expect_code 2 "$RC" "$KNOB=0 must be refused, not accepted as a disabled bound"
+  assert_contains "$OUT" "$KNOB must be a positive integer" \
+    "$KNOB=0 must name the knob and its constraint"
+  OUT=$(env "$KNOB=abc" "$WALL" --help 2>&1); RC=$?
+  expect_code 2 "$RC" "$KNOB must refuse a non-numeric value rather than degrade"
+done
+pass 'every bound tunable is refused when it is not a bound'

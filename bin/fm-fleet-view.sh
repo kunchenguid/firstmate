@@ -18,11 +18,9 @@
 # same unknown line as any other unreadable gauge - never a healthy one, and
 # never a silently omitted section.
 #
-# The inner reading budget is defaulted strictly BELOW this outer bound. An
-# inner bound at or above the outer one is a false-unmeasurable generator: the
-# outer kill lands first, so a gauge that was about to answer is reported as one
-# that could not be read, in the surface built to prevent exactly that. An
-# operator who sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
+# The inner reading budget is defaulted strictly BELOW this outer bound, by the
+# rule bin/fm-timeout-lib.sh owns alongside the bound itself. An operator who
+# sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,8 +49,7 @@ esac
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
 SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
-HEADROOM_INNER=$((HEADROOM_TIMEOUT * 3 / 4))
-[ "$HEADROOM_INNER" -ge 1 ] || HEADROOM_INNER=1
+HEADROOM_INNER=$(fm_inner_bound "$HEADROOM_TIMEOUT")
 # Every non-zero exit used to be reported as a timeout, but only 124 is one.
 # `headroom` exits 2 on a usage error - reachable from here because
 # FM_USAGE_WALL_QUOTA_TIMEOUT is passed through from the operator's environment

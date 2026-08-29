@@ -161,3 +161,27 @@ fm_run_timed_reason() {  # <rc> <bound-secs> <what>
     *) printf 'the %s exited %s\n' "$what" "$rc" ;;
   esac
 }
+
+# fm_inner_bound <outer-secs>
+#   The bound a caller should default a NESTED bounded read to, given the bound
+#   it is itself imposing on that read.
+#
+# An inner bound at or above the outer one is a false-unmeasurable generator.
+# The outer timer starts first and its kill therefore lands first, so a read
+# that was about to answer is reported as one that could not be read - in the
+# surfaces built to prevent exactly that. Three callers now nest a bounded read
+# inside a bound of their own (the session-start digest's headroom read and its
+# per-task wall scan, and the fleet view's headroom read), and the derivation
+# lives here rather than in each of them so the numbers cannot drift apart.
+#
+# Three quarters, floored at one second: enough headroom for the inner bound to
+# fire and its reason to be printed before the outer kill, and never zero, which
+# fm_run_timed's own contract above forbids. A caller that sets the inner
+# tunable explicitly still wins; this is only the default.
+fm_inner_bound() {  # <outer-secs>
+  local outer=${1:-0} inner
+  case "$outer" in ''|*[!0-9]*) outer=0 ;; esac
+  inner=$((outer * 3 / 4))
+  [ "$inner" -ge 1 ] || inner=1
+  printf '%s\n' "$inner"
+}

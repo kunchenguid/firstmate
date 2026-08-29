@@ -1422,7 +1422,10 @@ EOF
   # visible without a clock: a per-task bound would have spent its full second
   # on each of the six wedged captures and scanned all six, while one 2s budget
   # spent at 1s a scan can only afford a couple before it is gone.
-  exhausted=$(printf '%s\n' "$out" | grep -c 'scan-budget-exhausted' || true)
+  # Anchored to the per-task verdict lines: the section's closing disclosure
+  # names the same reason in prose, and counting that as a seventh task made
+  # every count here one too high.
+  exhausted=$(printf '%s\n' "$out" | grep -c '^USAGE_WALL: task-.* reason=scan-budget-exhausted' || true)
   [ "$exhausted" -ge 1 ] || fail "the budget never stopped any scan: $out"
   scanned=$(( 6 - exhausted ))
   [ "$scanned" -ge 1 ] || fail "the budget must still scan the first task: $out"
@@ -1439,6 +1442,49 @@ EOF
   assert_not_contains "$unbudgeted_out" "scan-budget-exhausted" \
     "a budget large enough for every task must not report one exhausted"
   pass "session start: the per-task wall scan shares one budget and discloses what it did not check"
+}
+
+# The digest bounds `diagnose --endpoint-only`, and that command bounds its own
+# endpoint capture inside it. The inner bound must sit strictly below the outer
+# one: whichever timer fires first decides what the reader is told, and only the
+# inner one can name the wedged capture. Left at its standalone default the
+# capture bound is 15s, at or above every per-scan bound the digest imposes, so
+# the outer kill would always land first and the concrete reason would be
+# unreachable on the one path that runs automatically. This fails if either
+# bound is edited without the other, or if the derivation is dropped.
+test_wall_scan_bounds_the_capture_below_its_own_bound() {
+  local rec root home fakebin out
+  rec=$(new_world wall-inner-bound)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux_slow_capture "$fakebin" "fm-sess:live-window"
+  printf 'window=fm-sess:dead-window\nkind=ship\nbackend=tmux\n' > "$home/state/task-wedged.meta"
+
+  out=$(FM_SESSION_START_WALL_TIMEOUT=4 FM_SESSION_START_WALL_BUDGET=30 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "endpoint capture did not complete within 3s" \
+    "the scan must name the wedged capture, which only the inner bound can do"
+  assert_not_contains "$out" "reason=scan-did-not-complete" \
+    "an inner bound at or above the outer one reports the scan as unfinished instead of naming the wedged capture"
+
+  # The relationship holds as the outer bound moves, so the two cannot be edited
+  # apart: halve it and the reason halves with it rather than staying put.
+  out=$(FM_SESSION_START_WALL_TIMEOUT=8 FM_SESSION_START_WALL_BUDGET=30 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint capture did not complete within 6s" \
+    "the capture bound must be derived from the bound the digest imposes, not fixed"
+
+  # An operator who sets the inner knob explicitly still wins.
+  out=$(FM_SESSION_START_WALL_TIMEOUT=8 FM_SESSION_START_WALL_BUDGET=30 \
+    FM_USAGE_WALL_CAPTURE_TIMEOUT=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint capture did not complete within 2s" \
+    "an explicit FM_USAGE_WALL_CAPTURE_TIMEOUT must override the derived default"
+  pass "session start: the wall scan bounds its endpoint capture below its own bound"
 }
 
 # An endpoint with NO recorded window is not alive either, and it is itself a
@@ -2724,6 +2770,7 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_wall_scan_budget_is_shared_across_tasks
+test_wall_scan_bounds_the_capture_below_its_own_bound
 test_wall_scan_covers_an_endpoint_with_no_window
 test_wall_scan_budget_covers_no_window_endpoints
 test_wall_scan_budget_leaves_a_healthy_fleet_alone
