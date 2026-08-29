@@ -213,7 +213,12 @@ status_is_paused_or_captain_held() {  # <status-line>
 # note-head token is key metadata, stripped from the note); when both positions
 # carry a token, the documented before-colon one wins and the note-head token
 # stays note text. A token deeper inside the note is prose, never a stated key,
-# so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
+# except for one bounded legacy form emitted by older generated worker briefs:
+# a SINGLE complete token at the end of a `blocked:` or `resolved:` note. That
+# compatibility reader prevents an old `blocked: reason [key=x]` and its later
+# matching resolution from leaving a false `default` blocker. New producers use
+# the documented position. A mid-note mention, multiple tokens, or any other
+# verb remains prose and never becomes authority.
 # A line with no token in either position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
@@ -325,6 +330,23 @@ _fm_key_at_note_head() {  # <status-line> -> raw slug
     *) return 1 ;;
   esac
 }
+# Raw slug of the one bounded legacy compatibility form. It accepts only one
+# complete key token after nonempty prose at the END of a blocked/resolved note.
+_fm_key_at_note_tail_compat() {  # <status-line> -> raw slug
+  local line=$1 rest verb k prefix
+  verb=$(status_line_verb "$line")
+  case "$verb" in blocked|resolved) ;; *) return 1 ;; esac
+  case "$line" in *:*) rest=${line#*:} ;; *) return 1 ;; esac
+  rest=${rest%"${rest##*[![:space:]]}"}
+  case "$rest" in *' [key='*']') ;; *) return 1 ;; esac
+  k=${rest##*'[key='}
+  k=${k%]}
+  prefix=${rest%"[key=$k]"}
+  prefix=${prefix%"${prefix##*[![:space:]]}"}
+  [ -n "$prefix" ] || return 1
+  case "$prefix" in *'[key='*) return 1 ;; esac
+  printf '%s' "$k"
+}
 # 0 when a stated key slug is well-formed: nonempty, A-Za-z0-9._- only.
 _fm_decision_slug_ok() {  # <slug>
   case "$1" in
@@ -345,6 +367,10 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
+  elif ! _fm_key_before_colon "$1" && k=$(_fm_key_at_note_tail_compat "$1") \
+    && _fm_decision_slug_ok "$k"; then
+    n=${n%"[key=$k]"}
+    n=${n%"${n##*[![:space:]]}"}
   fi
   printf '%s' "$n"
 }
@@ -355,7 +381,15 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    k=$(_fm_key_at_note_head "$1") || { printf 'default'; return 0; }
+    if k=$(_fm_key_at_note_head "$1"); then
+      :
+    elif k=$(_fm_key_at_note_tail_compat "$1"); then
+      :
+    else
+      # A malformed or multiply-keyed legacy tail is a stated-but-invalid
+      # transition, not a reason to fall back into the shared default bucket.
+      case "$1" in *' [key='*']') return 1 ;; *) printf 'default'; return 0 ;; esac
+    fi
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"

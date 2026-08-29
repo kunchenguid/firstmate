@@ -72,6 +72,7 @@ Also report verdict captain for:
 - a needed credential or login;
 - anything destructive, irreversible, or security-sensitive.
 Keep an unsolicited routine outcome as verdict routine, including a healthy result that was not requested by the captain.
+For a committed-ready ship/no-mistakes receipt, the runtime has already run `bin/fm-delivery-continue.sh` before this turn. Its typed result is in the wake. Do not resend or call it around that same receipt. A `sent`, `already-delivered`, or `already-active` result may remain routine; every `refused` result is captain-facing unless a current authoritative re-read proves it superseded. This deterministic owner, not prompt compliance, owns the validation instruction.
 Keep an unchanged fleet review silent as instructed above.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.

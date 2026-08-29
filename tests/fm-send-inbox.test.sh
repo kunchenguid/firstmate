@@ -164,6 +164,21 @@ test_resend_enqueues_new_sequence() {
   pass "fm-send inbox: a re-send is a new durable record, never a retyped payload"
 }
 
+test_fire_and_forget_crewmate_delivery_is_idempotent() {
+  local dir err records first second
+  dir=$(setup_case fire-and-forget-crewmate); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 --fire-and-forget 0123456789abcdef "delivery=0123456789abcdef validate this commit" \
+    || fail "first fire-and-forget crewmate delivery failed"
+  first=$(find "$dir/home/state/t1.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  run_send "$dir" "$err" -- t1 --fire-and-forget 0123456789abcdef "delivery=0123456789abcdef validate this commit" \
+    || fail "replayed fire-and-forget crewmate delivery failed"
+  second=$(find "$dir/home/state/t1.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$first" = 1 ] && [ "$second" = 1 ] || fail "same delivery id made duplicate crewmate inbox records: $first -> $second"
+  records=$(find "$dir/home/state/t1.inbox" -name '*.msg' | head -1)
+  grep -Fx 'delivery=fire-and-forget' "$records" >/dev/null || fail "crewmate record lost fire-and-forget metadata"
+  pass "fm-send inbox: a stable fire-and-forget crewmate delivery deduplicates exactly once"
+}
+
 test_pending_composer_skips_ring_advisorily() {
   local dir err rc
   dir=$(setup_case pendingskip); err="$dir/send.err"
@@ -341,6 +356,7 @@ test_unwritable_inbox_fails_loudly() {
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
+test_fire_and_forget_crewmate_delivery_is_idempotent
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed

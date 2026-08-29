@@ -262,6 +262,21 @@ test_incremental_agrees_with_full_fold_across_appends() {
   pass "the incremental fold matches the full fold across appends in both key positions"
 }
 
+test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak() {
+  local dir expected
+  dir=$(case_dir legacy-trailing-key)
+  printf 'blocked: invalid custody receipt remains inadmissible [key=main-custody]\n' > "$dir/t.status"
+  expected=$(printf 'main-custody\tblocked\tinvalid custody receipt remains inadmissible\n')
+  assert_fold "$dir/t.status" "$expected" "legacy trailing blocker key"
+
+  printf 'resolved: custody receipt is valid and validation is active [key=main-custody]\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" "" "legacy trailing resolution"
+
+  printf 'blocked: prose mentions [key=other] before the final detail [key=main-custody]\n' > "$dir/malformed.status"
+  assert_fold "$dir/malformed.status" "" "multiple legacy tokens stay non-authoritative"
+  pass "the bounded legacy trailing-key form clears its real key without creating a false default blocker"
+}
+
 test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
@@ -275,6 +290,7 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak
 
 # status_key_closing_verb reports HOW the status side currently reads one key,
 # which is what lets a consumer tell a settled key from a key handed to a
