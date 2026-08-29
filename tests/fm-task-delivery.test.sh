@@ -299,6 +299,12 @@ STUB
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
     assert_grep "# Definition of done" "$payload" \
       "$mode: promoted worker did not receive a Definition of done"
+    assert_grep "pwd -P" "$payload" \
+      "$mode: promoted worker was not told to verify its physical worktree"
+    assert_grep "git rev-parse --show-toplevel" "$payload" \
+      "$mode: promoted worker was not told to verify its repository root"
+    assert_grep "If either resolves to the primary checkout, stop and escalate to firstmate" "$payload" \
+      "$mode: promoted worker was not told to stop when isolation fails"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
   done
@@ -314,7 +320,7 @@ STUB
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"
   assert_grep "supersede the scout delivery rules and report-based Definition of done" "$payload" \
     "promoted worker retained the scout delivery contract"
-  assert_grep "status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; the worktree isolation assertion; and every safety rule" "$payload" \
+  assert_grep "status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule" "$payload" \
     "promoted worker lost the scout protocols and safety rules that still apply"
 
   # The faster paths keep their own contracts rather than inheriting the pipeline's.
