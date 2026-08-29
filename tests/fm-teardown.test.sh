@@ -576,7 +576,12 @@ test_local_only_fork_remote_allows() {
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
-  pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
+  jq -e --arg id task-x1 '
+    .schema == "fm-secondmate-home-summary.v1"
+    and all(.endpoints[]; .id != $id)
+  ' "$case_dir/state/home-summary.json" >/dev/null \
+    || fail "successful task teardown did not publish the task's removal from the home summary ledger"
+  pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
 test_teardown_prompts_tasks_axi_done_when_compatible() {

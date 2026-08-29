@@ -982,48 +982,79 @@ fm_failure_episode_reset() {
   return 0
 }
 
-# --- Claude Stop auto-arm claim abandonment ----------------------------------
+# --- Claude Stop auto-arm generation claims -----------------------------------
 # Both Stop-event participants (bin/fm-claude-stop-autoarm.sh and
-# bin/fm-turnend-guard.sh --claude) stand down for whoever holds the auto-arm's
-# single-flight owner lock, on the premise that a live holder is still deciding
-# supervision. A holder that has already FINISHED that decision but never
-# released the lock turns the courtesy into indefinite silence: every later
-# async firing exits at the lock, the epoch ledger freezes at its last outcome,
-# and each following turn end allows a blind stop while nothing re-arms the
-# watcher. Observed 2026-08-14: one delivered rewake, then a beacon that went
-# 40 minutes without a beat, no watcher lock at all, two workers in flight, and
-# both of their reports unread until an operator drained the queue by hand.
+# bin/fm-turnend-guard.sh --claude) coordinate through the epoch ledger
+# state/.claude-autoarm-epoch, whose monotonic epoch sequence IS the claim
+# generation. This is an optimistic, generation-based single-flight design:
 #
-# One abandonment proof is the ledger, not pid liveness, because both ways a
-# finished claim keeps a live pid - reuse of the recorded pid, and a hook still
-# blocked writing its rewake banner - look alive:
+#   - The CURRENT claim is the ledger's latest entry: line 1 is the classic
+#     "epoch=N owner_pid=P outcome=O updated_at=T" record, and line 2 is the
+#     claiming process's pid-identity, the same identity every other
+#     supervision lock in this repo records (fm_pid_identity above). The
+#     identity is MANDATORY: a claimant that cannot record it does not claim
+#     (continuity falls to the synchronous guard), and the identity is read
+#     from the ledger entry alone - never substituted from any lock - so a
+#     reused pid can never authenticate someone else's stale entry.
+#   - A claim is OPEN (fm_autoarm_claim_open) while its outcome is "arming",
+#     its owner pid is alive, its recorded identity successfully recomputes
+#     and matches that pid, and it is not STUCK - stuck meaning both the
+#     ledger entry and the watcher beacon (state/.last-watcher-beat) are older
+#     than the guard grace, which proves the owner hung mid-arm with nothing
+#     supervising (every legitimate arming phase with no watcher is bounded in
+#     seconds, while a healthy hours-long cycle keeps the beacon beating).
+#   - Every firing DEFERS (exits 0) to an open claim; anything else - a
+#     terminal outcome, a dead or identity-mismatched owner, a stuck owner, an
+#     identityless entry, or no claim at all - lets the next firing take
+#     generation N+1 (fm_autoarm_claim_next). Taking a newer generation IS the
+#     reclaim: a steady-state predecessor is never signalled or revoked.
+#   - NO mutex is ever held across a blocking step. The owner lock
+#     state/.claude-autoarm.lock survives only as a micro-mutex serializing
+#     individual ledger reads-then-writes (a few non-blocking file
+#     operations); a holder that dies inside the hold is reclaimed by
+#     fm_lock_try_acquire's ordinary dead-owner steal.
+#   - A superseded owner goes COMPLETELY silent - cleanup only. Ownership is
+#     re-verified before every side effect: each arm invocation, each
+#     episode-state mutation, each ledger write, and each continuation.
+#   - The irrevocable commit point of a translation is the EXIT STATUS: the
+#     harness delivers the collected stderr banner only on exit 2 and discards
+#     it on exit 0. Markerless outcomes commit with the owned terminal ledger
+#     write. The once-per-episode failure notice commits only when its marker is
+#     created after the winning "failed" write in the same owned critical
+#     section. A superseded generation or failed required-marker creation is
+#     refused and exits 0 silently even after printing; a later generation
+#     supersedes the terminal entry and retries the notice.
 #
-#   1. the owner lock exists and carries the auto-arm role,
-#   2. its recorded pid is numeric,
-#   3. the ledger's owner_pid is exactly that pid, and
-#   4. the ledger's outcome is present and is not "arming".
+# This structurally removes the failure classes the lock-held-across-arm
+# design produced: a hung owner deferring every later firing forever (observed
+# 2026-08-26: a hook hung mid-arm with its ledger frozen at "arming" kept the
+# watcher from ever being auto-re-armed again; and 2026-08-14: a finished
+# claim whose leftover lock silenced both participants for 40 beacon-less
+# minutes), a reclaim mutex held across a blocking banner write recreating the
+# same unreclaimable-live-owner shape, and a reclaimed-but-alive owner racing
+# its replacement to translate one close twice.
 #
-# Condition 3 is what makes reclaiming race-free. A fresh claimant creates the
-# lock BEFORE it writes "arming", so until it does the ledger still names the
-# PREVIOUS owner and the two pids cannot match; a just-started claim is never
-# mistaken for an abandoned one. Condition 4 treats "arming" as in progress no
-# matter how old, because the owner foregrounds fm-watch-arm.sh for the whole
-# watcher cycle, which legitimately runs for hours.
+# Two bounded residuals are ACCEPTED INTENT, because closing them absolutely
+# would require a mutex held across output or steady-state revocation, both
+# deliberately rejected: (1) an owner that dies between its owned terminal
+# write and its own process exit leaves a committed outcome whose banner was
+# never delivered (process-death territory; the durable wake queue retains the
+# underlying event), and (2) a hung old-build owner that resumes during the
+# one legacy upgrade window may add one duplicate continuation. Each residual
+# costs at most one extra exit-2 continuation turn absorbed by the durable
+# idempotent wake queue. A claim misread as stuck in a pathological race
+# (e.g. a beacon read right at system wake) likewise yields at most one extra
+# arm that the watcher singleton dedupes, while the superseded owner still
+# goes silent.
 #
-# The ledger alone cannot prove every abandonment, though: an entry still reading
-# "arming", or no entry at all, says nothing about a recorded pid the operating
-# system has since handed to an unrelated live process - the same lapse, reached
-# when a session teardown kills a claim's whole process group before it can record
-# any outcome or run its release trap. So the claim also records the pid-identity
-# every other supervision lock in this repo records (fm_pid_identity above, used by
-# state/.watch.lock, the supervise-daemon lock, and the AFK launch lock), and a
-# recorded identity that no longer matches the live pid is abandonment on its own,
-# whatever the ledger says. That identity is written BEFORE the auto-arm role is
-# published, and every participant requires that role first, so a claim that is
-# genuinely mid-flight is never read as identity-less. A claim carrying no recorded
-# identity at all (an older build, a hand-edited lock) keeps exactly the
-# ledger-only reasoning above, and an identity that cannot be recomputed for the
-# live pid proves nothing either way, so it falls through to the ledger too.
+# fm_autoarm_claim_abandoned / fm_autoarm_release_abandoned below survive as
+# the LEGACY shim for a lock-holding claim from a pre-generation build (the
+# lock carries a role file only in that legacy shape, and in the guard's own
+# short terminal-check hold): a live legacy owner still defers per the legacy
+# proof, and a proven-abandoned one is reclaimed once through the steal mutex
+# - with an identity-verified live owner retired via TERM first, because old
+# code cannot re-check generations - so an upgrade mid-session can neither
+# double-arm nor deadlock behind a hung legacy hook.
 _fm_autoarm_epoch_field() {  # <epoch-file> <field>
   local file=$1 field=$2 tok
   local -a toks=()
@@ -1039,42 +1070,188 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
   return 1
 }
 
-# Record the claiming process's pid-identity inside the auto-arm owner lock, the
-# way every other supervision lock in this repo records it. Best effort by design:
-# a platform where fm_pid_identity cannot answer keeps the ledger-only reasoning
-# rather than losing the claim, and a record that cannot be completed leaves NO
-# identity file behind, so a partial write can never read as a mismatch against
-# its own live owner. Call it before publishing the auto-arm role.
-fm_autoarm_claim_record_identity() {  # <state-dir>
-  local state=$1 lock pid held identity back
-  lock="$state/.claude-autoarm.lock"
-  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside the
-  # command substitution below would resolve it in that subshell, recording the
-  # identity of a process that exits immediately and leaving every later reader
-  # with a permanent mismatch against the real owner.
-  pid=${BASHPID:-$$}
-  # The identity must describe the pid the lock publishes, so record it only for a
-  # lock this process actually holds (the same ownership test as fm_lock_set_role).
-  held=$(cat "$lock/pid" 2>/dev/null || true)
-  [ "$held" = "$pid" ] || return 1
-  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$identity" ] || return 1
-  if ! printf '%s\n' "$identity" > "$lock/pid-identity" 2>/dev/null; then
-    rm -f "$lock/pid-identity" 2>/dev/null || true
-    return 1
-  fi
-  back=$(cat "$lock/pid-identity" 2>/dev/null || true)
-  if [ "$back" != "$identity" ]; then
-    rm -f "$lock/pid-identity" 2>/dev/null || true
+# Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
+# FM_AUTOARM_OUTCOME, and FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
+# line 2 - identity is never substituted from a lock, so a transient
+# micro-mutex hold or a reused pid can never authenticate a stale entry).
+fm_autoarm_ledger_read() {  # <state-dir>
+  local state=$1 epoch
+  epoch="$state/.claude-autoarm-epoch"
+  FM_AUTOARM_GEN=
+  FM_AUTOARM_OWNER=
+  FM_AUTOARM_OUTCOME=
+  FM_AUTOARM_IDENTITY=
+  FM_AUTOARM_GEN=$(_fm_autoarm_epoch_field "$epoch" epoch) || return 1
+  FM_AUTOARM_OWNER=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
+  FM_AUTOARM_OUTCOME=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
+  case "$FM_AUTOARM_GEN" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  FM_AUTOARM_IDENTITY=$(sed -n '2p' "$epoch" 2>/dev/null || true)
+  return 0
+}
+
+# True while the CURRENT ledger claim is open and healthy - the defer predicate
+# both Stop participants use. Open means: outcome "arming", a live owner whose
+# mandatory recorded identity recomputes and matches its pid, and not stuck
+# (the contract comment above owns the stuck proof). fm_path_age reports an
+# absent beacon as ancient, which is exactly right: arming for a full grace
+# window without producing a first beat is the same hang. An identityless
+# entry is never open: real generation claims always record identity, a legacy
+# build's entry gets its deference from its held role-carrying lock through
+# the legacy shim, and anything else must not defer.
+fm_autoarm_claim_open() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current
+  epoch="$state/.claude-autoarm-epoch"
+  case "$grace" in
+    ''|*[!0-9]*|0) grace=300 ;;
+  esac
+  fm_autoarm_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_OUTCOME" = arming ] || return 1
+  fm_pid_alive "$FM_AUTOARM_OWNER" || return 1
+  [ -n "$FM_AUTOARM_IDENTITY" ] || return 1
+  current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
+  [ -n "$current" ] || return 1
+  [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
+  if [ "$(fm_path_age "$epoch")" -ge "$grace" ] \
+    && [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ]; then
     return 1
   fi
   return 0
 }
 
-fm_autoarm_claim_abandoned() {  # <state-dir>
-  local state=$1 epoch lock role pid owner outcome recorded current
+# Atomically publish this process as the owner of generation N+1, under one
+# short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
+# when a competing claimant won the race (the ledger holds an open claim), and
+# 1 when the micro-mutex is contended, the mandatory identity cannot be
+# computed, or the write failed.
+fm_autoarm_claim_next() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity tmp
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
+  FM_AUTOARM_MY_GEN=
+  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside a
+  # command substitution would resolve it in that subshell, recording the
+  # identity of a process that exits immediately.
+  pid=${BASHPID:-$$}
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  fm_lock_try_acquire "$lock" || return 1
+  if fm_autoarm_claim_open "$state" "$grace"; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  gen=$(_fm_autoarm_epoch_field "$epoch" epoch 2>/dev/null || true)
+  case "$gen" in
+    ''|*[!0-9]*) gen=0 ;;
+  esac
+  gen=$((gen + 1))
+  tmp="$epoch.tmp.$pid"
+  if ! printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
+      "$gen" "$pid" "$(date +%s)" "$identity" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  # shellcheck disable=SC2034 # Read by callers after the claim succeeds.
+  FM_AUTOARM_MY_GEN=$gen
+  return 0
+}
+
+# Write a new outcome for a generation this process still owns, re-verified
+# under the micro-mutex so a superseded owner can never clobber a newer claim.
+# With a fourth argument, create that marker after the ledger rename in the same
+# owned critical section (the once-per-episode failure notice). A marker failure
+# refuses the commit even though its terminal ledger entry remains; marker-first
+# ordering could permanently suppress a notice whose ledger write never won.
+# Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
+# unable (bounded contention or ledger-write failure).
+fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i
+  lock="$state/.claude-autoarm.lock"
+  epoch="$state/.claude-autoarm-epoch"
+  pid=${BASHPID:-$$}
+  i=0
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$i" -lt 20 ] || return 1
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if ! fm_autoarm_ledger_read "$state" \
+    || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  identity=$FM_AUTOARM_IDENTITY
+  tmp="$epoch.tmp.$pid"
+  if ! {
+      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+        "$gen" "$pid" "$outcome" "$(date +%s)"
+      [ -z "$identity" ] || printf '%s\n' "$identity"
+    } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
+# Lockless pre-side-effect ownership check: true while the ledger still names
+# <gen> owned by this process. A superseded owner must go silent instead of
+# arming, mutating shared state, or emitting.
+fm_autoarm_still_owner() {  # <state-dir> <gen>
+  local state=$1 gen=$2 pid
+  pid=${BASHPID:-$$}
+  fm_autoarm_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_GEN" = "$gen" ] && [ "$FM_AUTOARM_OWNER" = "$pid" ]
+}
+
+fm_autoarm_reset_owned() {  # <state-dir> <gen>
+  local state=$1 gen=$2 lock pid
+  lock="$state/.claude-autoarm.lock"
+  pid=${BASHPID:-$$}
+  fm_lock_try_acquire "$lock" || return 2
+  if ! fm_autoarm_ledger_read "$state" \
+    || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  if ! fm_failure_episode_reset "$state"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
+# LEGACY shim (see the contract comment above): the abandonment proof for a
+# lock-holding claim from a pre-generation build, recognizable by the role
+# file only such claims and the guard's short terminal-check hold publish.
+# A live legacy owner defers per this proof; a finished, identity-mismatched,
+# or stuck one is abandoned:
+#
+#   1. the owner lock exists and carries the auto-arm role,
+#   2. its recorded pid is numeric,
+#   3. a recorded pid-identity that no longer matches the live pid is
+#      abandonment on its own (pid reuse after a group kill), and otherwise
+#   4. the ledger's owner_pid is exactly that pid and its outcome is present
+#      and either is not "arming", or is "arming" while both the ledger entry
+#      and the watcher beacon are older than the guard grace (the same stuck
+#      proof as fm_autoarm_claim_open).
+fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current
+  lock="$state/.claude-autoarm.lock"
+  epoch="$state/.claude-autoarm-epoch"
+  case "$grace" in
+    ''|*[!0-9]*|0) grace=300 ;;
+  esac
   [ -e "$lock" ] || [ -L "$lock" ] || return 1
   role=$(fm_lock_role "$lock")
   [ "$role" = autoarm ] || return 1
@@ -1091,25 +1268,83 @@ fm_autoarm_claim_abandoned() {  # <state-dir>
   [ "$owner" = "$pid" ] || return 1
   outcome=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
   case "$outcome" in
-    ''|arming) return 1 ;;
+    '') return 1 ;;
+    arming)
+      [ "$(fm_path_age "$epoch")" -ge "$grace" ] || return 1
+      [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ] || return 1
+      return 0
+      ;;
   esac
   return 0
 }
 
-# Remove a proven-abandoned auto-arm claim so the next claimant can arm.
-# The proof is re-verified while holding the lock's steal mutex, which is the
-# same serialization fm_lock_try_acquire uses for stale-owner reclaim: while it
-# is held no other process can publish the primary lock, so the window between
-# proving abandonment and removing the lock cannot swallow a genuine new claim.
-fm_autoarm_release_abandoned() {  # <state-dir>
-  local state=$1 lock steal
+# Remove a proven-abandoned legacy claim so the next claimant can arm. The
+# proof is re-verified while holding the lock's steal mutex, the same
+# serialization fm_lock_try_acquire uses for stale-owner reclaim: while it is
+# held no other process can publish the primary lock, so the window between
+# proving abandonment and removing the lock cannot swallow a genuine new
+# claim.
+#
+# Old-build code cannot re-check generations, so a LIVE proven-abandoned
+# legacy owner whose recorded identity is verified to match its pid is retired
+# with TERM before the lock is removed: once the TERM is successfully queued
+# the process can never resume normal execution (delivery precedes any further
+# user code when it continues), so a short bounded wait for observed exit is a
+# courtesy, not a requirement. A pid is never signalled without a verified
+# matching identity; when the kill itself fails or the identity stops matching
+# mid-procedure (pid reuse), the reclaim refuses. Missing identity evidence
+# never blocks the reclaim of a proven-abandoned claim - it only disables the
+# TERM and the ledger graft below, keeping the documented bounded
+# upgrade-window residual instead of the deadlock.
+fm_autoarm_release_abandoned() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i
   lock="$state/.claude-autoarm.lock"
   steal="$lock.steal"
-  fm_autoarm_claim_abandoned "$state" || return 1
+  epoch="$state/.claude-autoarm-epoch"
+  fm_autoarm_claim_abandoned "$state" "$grace" || return 1
   fm_lock_try_acquire "$steal" || return 1
-  if ! fm_autoarm_claim_abandoned "$state"; then
+  if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
     return 1
+  fi
+  lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
+  recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ -n "$recorded" ] && fm_pid_alive "$lock_pid" \
+    && current=$(fm_pid_identity "$lock_pid" 2>/dev/null) \
+    && [ -n "$current" ] && [ "$current" = "$recorded" ]; then
+    # A live pid still answering to the recorded identity IS the genuine
+    # legacy owner (proven stuck or blocked after a terminal write): retire it
+    # before removing its lock, because old-build code cannot re-check
+    # generations. A pid the recorded identity does NOT verify - reused,
+    # unverifiable, or never recorded - is NEVER signalled; those shapes are
+    # reclaimed as-is, which is safe exactly because the recorded owner is
+    # gone or was never provably this process.
+    if ! kill -TERM "$lock_pid" 2>/dev/null; then
+      fm_lock_release "$steal"
+      return 1
+    fi
+    i=0
+    while [ "$i" -lt 20 ] && fm_pid_alive "$lock_pid"; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+  fi
+  # Preserve the legacy lock's identity evidence in the ledger before the lock
+  # disappears, keeping the ledger's original mtime so the stuck proof's age
+  # window is not silently reopened. Best effort.
+  if [ -n "$recorded" ] && [ -n "$lock_pid" ] \
+    && owner=$(_fm_autoarm_epoch_field "$epoch" owner_pid 2>/dev/null) \
+    && [ "$owner" = "$lock_pid" ] \
+    && [ -z "$(sed -n '2p' "$epoch" 2>/dev/null)" ]; then
+    line1=$(sed -n '1p' "$epoch" 2>/dev/null || true)
+    tmp="$epoch.tmp.${BASHPID:-$$}"
+    if [ -n "$line1" ] \
+      && printf '%s\n%s\n' "$line1" "$recorded" > "$tmp" 2>/dev/null \
+      && touch -r "$epoch" "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$epoch" 2>/dev/null; then
+      :
+    fi
+    rm -f "$tmp" 2>/dev/null || true
   fi
   fm_lock_remove_path "$lock" || true
   fm_lock_release "$steal"

@@ -105,6 +105,12 @@ count=$(cat "$FM_SSH_COUNT" 2>/dev/null || echo 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$FM_SSH_COUNT"
 printf '%s\n' "$*" >> "$FM_SSH_LOG"
+if [ -n "${FM_FAKE_SSH_HANG:-}" ]; then
+  # A busy remote lane: the transport attempt never returns on its own. The
+  # real sleep, because the stubbed one on PATH returns immediately.
+  /bin/sleep "$FM_FAKE_SSH_HANG"
+  exit 255
+fi
 if [ "${FM_FAKE_SSH_AFTER_AMBIGUOUS_RC:-0}" -ne 0 ] && [ "$count" -gt 1 ]; then
   exit "$FM_FAKE_SSH_AFTER_AMBIGUOUS_RC"
 fi
@@ -603,6 +609,95 @@ test_remote_transport_loss_preserves_expectation() {
   pass "fm-send remote: ssh 255 fails with resend-safe guidance and preserves the expectation"
 }
 
+test_remote_send_budget_bounds_busy_lane() {
+  local dir fb ssh_log home rhome rc err began elapsed count pend delivery corr ssh_before
+  dir="$TMP_ROOT/remote-budget"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-budget)
+  home=$(setup_remote_parent_home remote-budget "$rhome")
+  delivery=aaaabbbbccccdddd
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_SEND_REMOTE_BUDGET=invalid \
+    "$SEND" rsm --key Enter >"$dir/key-invalid.out" 2>"$dir/key-invalid.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an invalid remote key budget must fail"
+  assert_contains "$(cat "$dir/key-invalid.err")" "must be a positive integer" \
+    "an invalid remote key budget must explain its validation failure"
+  [ ! -f "$ssh_log.count" ] || fail "an invalid remote key budget reached the transport"
+
+  began=$(date +%s)
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_HANG=60 FM_SEND_REMOTE_BUDGET=2 \
+    "$SEND" rsm --key Enter >"$dir/key.out" 2>"$dir/key.err" || rc=$?
+  elapsed=$(( $(date +%s) - began ))
+  expect_code 1 "$rc" "a bounded remote key must preserve the existing failure contract"
+  [ "$elapsed" -le 15 ] || fail "the bounded remote key waited ${elapsed}s behind the busy lane"
+  assert_contains "$(cat "$dir/key.err")" "completion may be unknown" \
+    "a bounded remote key failure must preserve its existing diagnostic"
+  [ "$(cat "$ssh_log.count")" = 1 ] \
+    || fail "a bounded remote key must make exactly one transport attempt"
+  printf '0\n' > "$ssh_log.count"
+
+  # T5: a fire-and-forget send to a mate behind a busy lane returns its
+  # unconfirmed result within its own budget instead of waiting the lane out.
+  began=$(date +%s)
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_HANG=60 FM_SEND_REMOTE_BUDGET=2 \
+    "$SEND" rsm --fire-and-forget "$delivery" "reconcile your own books" \
+    >"$dir/out" 2>"$dir/err" || rc=$?
+  elapsed=$(( $(date +%s) - began ))
+  err=$(cat "$dir/err")
+  expect_code 3 "$rc" "a budget-bounded fire-and-forget send must report unconfirmed: $err"
+  [ "$elapsed" -le 15 ] || fail "the bounded send waited ${elapsed}s behind the busy lane"
+  assert_contains "$err" "delivery-id=$delivery" \
+    "the bounded unconfirmed result must name the reusable delivery id"
+  [ "$(cat "$ssh_log.count")" = 1 ] \
+    || fail "a budget hit must not retry into the same busy lane, got $(cat "$ssh_log.count") attempts"
+
+  # A retry with the same delivery id against the recovered lane dedups onto
+  # the same remote record.
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm --fire-and-forget "$delivery" "reconcile your own books" \
+    >"$dir/retry.out" 2>"$dir/retry.err" \
+    || fail "the same-delivery-id retry after the budget hit failed"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 1 ] || fail "the same-delivery-id retry did not dedup onto one record, found $count"
+
+  # A reply-bearing send names the budget and prints the correlation-reusing
+  # resend command, with the expectation preserved as delivery-unknown.
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_HANG=60 FM_SEND_REMOTE_BUDGET=2 \
+    "$SEND" rsm "please rename the metric" >"$dir/reply.out" 2>"$dir/reply.err" || rc=$?
+  err=$(cat "$dir/reply.err")
+  [ "$rc" -ne 0 ] || fail "a budget-bounded reply-bearing send must not claim confirmed delivery"
+  assert_contains "$err" "within its 2s budget" \
+    "the budget-bounded failure must name the budget that bounded it"
+  assert_contains "$err" "Only the correlation-reusing resend below is idempotent" \
+    "the budget-bounded failure must print the supported safe resend boundary"
+  pend=$(pending_record "$home")
+  [ -n "$pend" ] || fail "a budget-bounded reply-bearing send must preserve its expectation"
+  [ "$(grep '^phase=' "$pend" | tail -1 | cut -d= -f2-)" = delivery_unknown ] \
+    || fail "the preserved expectation must record unknown delivery: $(cat "$pend")"
+
+  # Invalid transport configuration fails before a correlation-reusing resend
+  # mutates the preserved expectation or reaches the transport.
+  corr=$(fm_pending_reply_get "$pend" corr_id)
+  cp "$pend" "$dir/pending-before-invalid-budget"
+  ssh_before=$(cat "$ssh_log.count")
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_SEND_REMOTE_BUDGET=invalid \
+    FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+    "$SEND" rsm "please rename the metric" >"$dir/invalid.out" 2>"$dir/invalid.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an invalid remote budget must fail the resend"
+  assert_contains "$(cat "$dir/invalid.err")" "must be a positive integer" \
+    "an invalid remote budget must explain its validation failure"
+  [ "$(cat "$ssh_log.count")" = "$ssh_before" ] \
+    || fail "an invalid remote budget reached the remote transport"
+  cmp -s "$dir/pending-before-invalid-budget" "$pend" \
+    || fail "an invalid remote budget mutated the reusable pending expectation: $(cat "$pend")"
+  pass "fm-send remote: the remote leg is budget-bounded and stays idempotent across the bound"
+}
+
 test_local_secondmate_pending_keeps_expectation_armed() {
   local dir fb log home rc rec corr
   dir="$TMP_ROOT/local-pending-expectation"; mkdir -p "$dir"
@@ -693,6 +788,7 @@ test_remote_slash_rides_inbox
 test_remote_real_failure_still_fails
 test_remote_exit3_no_longer_delivered
 test_remote_transport_loss_preserves_expectation
+test_remote_send_budget_bounds_busy_lane
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key
 test_local_secondmate_pending_keeps_expectation_armed

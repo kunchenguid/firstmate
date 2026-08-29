@@ -165,6 +165,10 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
+case "$HOME_SUMMARY_INTERVAL" in
+  ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
+esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -781,9 +785,11 @@ surface_nonterminal_stale() {  # <window> <hash>
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
 age_of() {  # seconds since file mtime; "due immediately" if missing
-  local f=$1 m
+  local f=$1 m now
   m=$(stat_mtime "$f") || { echo 999999; return; }
-  echo $(( $(date +%s) - m ))
+  now=$(date +%s)
+  [ "$m" -le "$now" ] || { echo 999999; return; }
+  echo $(( now - m ))
 }
 
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
@@ -1189,6 +1195,10 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+  fi
+
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
@@ -1316,6 +1326,11 @@ while :; do
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # The final coalesced signal set is the watcher-carried status-change
+    # trigger for this home's published summary. Refresh before either
+    # surfacing or absorbing the signal so an actionable exit cannot leave the
+    # ledger behind the event it reports. Publication failure stays side-band.
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue

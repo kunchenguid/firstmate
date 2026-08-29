@@ -242,7 +242,7 @@ if [ "$PREFLIGHT_RC" -ne 0 ]; then
 fi
 
 set +e
-PROVISION_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-home-provision.sh < "$TMP/manifest" 2>&1)
+PROVISION_OUT=$("$SCRIPT_DIR/fm-on.sh" --stdin "$ID" fm-remote-home-provision.sh < "$TMP/manifest" 2>&1)
 PROVISION_RC=$?
 set -e
 if [ "$PROVISION_RC" -ne 0 ]; then

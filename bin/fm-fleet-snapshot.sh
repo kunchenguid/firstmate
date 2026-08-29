@@ -171,7 +171,8 @@ JSON is the stable machine-readable output contract.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
-aggregation, and marks inventory contradictions or unavailable child state invalid.
+aggregation, includes generated_epoch for freshness arithmetic, and marks
+inventory contradictions or unavailable child state invalid.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until, deferred_marker, and plural
@@ -670,6 +671,7 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
+    --argjson generated_epoch "$SNAPSHOT_EPOCH" \
     --arg home "$FM_HOME" \
     --argjson child_n "$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
@@ -780,6 +782,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | {
         schema:"fm-secondmate-home-summary.v1",
         generated:$generated,
+        generated_epoch:$generated_epoch,
         home:$home,
         valid:$valid,
         reason:$reason,

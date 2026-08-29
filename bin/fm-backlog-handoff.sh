@@ -549,7 +549,7 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
   mv -f -- "$counter_tmp" "$counter" \
     || { rm -f -- "$snapshot" "$counter_tmp"; return 1; }
   remote_rel="state/handoff/$id.outbox.md"
-  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh put "$remote_rel" 1048576 \
+  if ! "$SCRIPT_DIR/fm-on.sh" --stdin "$id" fm-remote-file.sh put "$remote_rel" 1048576 \
     "$bytes" "$hash" "$generation" < "$snapshot"; then
     rm -f -- "$snapshot"
     echo "error: handoff transfer to $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2

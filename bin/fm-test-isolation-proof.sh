@@ -1,25 +1,32 @@
 #!/usr/bin/env bash
-# fm-test-isolation-proof.sh - bounded concurrent isolation proof for portable
-# behavior-test candidates (Phase 2 pre-shard gate).
+# fm-test-isolation-proof.sh - bounded concurrent isolation proofs for portable
+# behavior-test candidates and selected runner families.
 #
-# This is the single owner of the proven parallel candidate set, the concurrent
-# proof run, and the isolation checks that admitted that set. Production
-# portable CI shards and bounded local fm-test-run.sh --jobs for this exact set
-# are owned by bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
+# This is the single owner of the proven portable candidate set, the reusable
+# concurrent proof run, and its isolation checks. Production portable CI shards,
+# bounded local fm-test-run.sh --jobs admission, and family worker caps are owned
+# by bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
 #
-# It does NOT:
-#   - compose production CI shard membership (fm-test-run.sh owns that partition)
-#   - run real Herdr, real default-server tmux, watcher lock races, AFK, live
-#     harnesses, or GUI backends
+# It does NOT compose production CI shard membership; fm-test-run.sh owns that
+# partition. The default portable pool excludes real Herdr, real default-server
+# tmux, watcher lock races, AFK, live harnesses, and GUI backends. A named family
+# pool instead runs that family's exact membership and inherits its prerequisites.
 #
 # Usage:
-#   fm-test-isolation-proof.sh [--jobs N] [--json path] [--list]
+#   fm-test-isolation-proof.sh [--pool <name>] [--jobs N] [--json path] [--list]
 #   fm-test-isolation-proof.sh --list-exclusions
 #   fm-test-isolation-proof.sh -h | --help
 #
 # Options:
+#   --pool NAME  candidate pool: "portable" (default, this harness's own curated
+#                set) or a bin/fm-test-run.sh family name, to prove a stateful
+#                family that stays serial on CI but may earn bounded local
+#                concurrency. bin/fm-test-run.sh's list_concurrent_safe_families
+#                records which families passed.
 #   --jobs N     max concurrent workers (default: 4; min 1)
-#   --json path  write a machine-readable proof artifact after the run
+#   --json path  write a pool-scoped machine-readable proof artifact after the
+#                run; fm_test_run_jobs_enabled is true only for a successful
+#                concurrent run within that pool's recorded admission cap
 #   --list       print the proven candidate paths (one per line) and exit 0
 #   --list-exclusions
 #                print basename + reason for scripts deliberately kept serial
@@ -40,9 +47,11 @@
 #   FM_ISOLATION_SUMMARY total=<n> failed=<n> concurrency=<n> duration_ms=<n>
 #
 # Exit status is the aggregate of candidate exits: non-zero if any candidate
-# fails, if isolation checks fail, or if the candidate set is empty. A script
-# that fails only under concurrency must be removed from the candidate set and
-# investigated; this harness never retries a failure into green.
+# fails, gate-skips (first meaningful line matching ^skip:), if isolation checks
+# fail, or if the candidate set is empty. A gate skip names the pool, candidate,
+# and missing prerequisite and cannot admit concurrency. A script that fails
+# only under concurrency must be removed from the candidate set and investigated;
+# this harness never retries a failure into green.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,6 +61,7 @@ JOBS=4
 JSON_PATH=
 LIST_ONLY=0
 LIST_EXCLUSIONS=0
+POOL=portable
 
 usage() {
   awk '
@@ -218,11 +228,20 @@ global_git_snapshot() {
   git config --global --list 2>/dev/null | LC_ALL=C sort || true
 }
 
+detect_gate_skip() {
+  local file=$1 first
+  first=$(awk 'NF { print; exit }' "$file" 2>/dev/null || true)
+  case "$first" in
+    skip:*) printf '%s\n' "$first" ;;
+    *) return 1 ;;
+  esac
+}
+
 write_json_artifact() {
-  local out=$1 started=$2 finished=$3 run_id=$4 total=$5 failed=$6 concurrency=$7 duration=$8 records=$9
-  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$concurrency" "$duration" "$records" <<'PY'
+  local out=$1 started=$2 finished=$3 run_id=$4 total=$5 failed=$6 concurrency=$7 duration=$8 records=$9 pool=${10} jobs_enabled=${11}
+  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$concurrency" "$duration" "$records" "$pool" "$jobs_enabled" <<'PY'
 import json, sys
-out, started, finished, run_id, total, failed, concurrency, duration, records_path = sys.argv[1:10]
+out, started, finished, run_id, total, failed, concurrency, duration, records_path, pool, jobs_enabled = sys.argv[1:12]
 scripts = []
 with open(records_path, encoding="utf-8") as fh:
     for line in fh:
@@ -242,6 +261,7 @@ doc = {
     "started_at": started,
     "finished_at": finished,
     "kind": "isolation-proof",
+    "pool": pool,
     "concurrency": int(concurrency),
     "summary": {
         "total": int(total),
@@ -250,7 +270,7 @@ doc = {
     },
     "scripts": scripts,
     "production_sharding_enabled": False,
-    "fm_test_run_jobs_enabled": False,
+    "fm_test_run_jobs_enabled": jobs_enabled == "1",
 }
 with open(out, "w", encoding="utf-8") as fh:
     json.dump(doc, fh, indent=2, sort_keys=True)
@@ -276,6 +296,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --json=*)
       JSON_PATH=${1#--json=}
+      shift
+      ;;
+    --pool)
+      [ "$#" -gt 1 ] || die "--pool requires a name (portable, or a family name)"
+      POOL=$2
+      shift 2
+      ;;
+    --pool=*)
+      POOL=${1#--pool=}
       shift
       ;;
     --list)
@@ -309,11 +338,41 @@ if [ "$LIST_EXCLUSIONS" -eq 1 ]; then
   exit 0
 fi
 
+# The portable pool is this harness's own curated set. A family pool proves a
+# stateful family that stays serial on CI but may earn bounded local
+# concurrency; bin/fm-test-run.sh's list_concurrent_safe_families records which
+# families passed. Membership stays empirical: a family that fails here is not
+# admitted, and this harness never retries a failure into green.
+pool_candidates() {
+  case "$POOL:$LIST_ONLY" in
+    portable:1)
+      list_parallel_candidates
+      ;;
+    portable:0)
+      "$ROOT/bin/fm-test-run.sh" --list-scheduled --proven-isolated
+      ;;
+    *:1)
+      "$ROOT/bin/fm-test-run.sh" --list --family "$POOL" \
+        || die "--pool $POOL is not a known family (see bin/fm-test-run.sh --list-families)"
+      ;;
+    *)
+      "$ROOT/bin/fm-test-run.sh" --list-scheduled --family "$POOL" \
+        || die "--pool $POOL is not a known family (see bin/fm-test-run.sh --list-families)"
+      ;;
+  esac
+}
+
+set +e
+candidate_output=$(pool_candidates)
+pool_rc=$?
+set -e
+[ "$pool_rc" -eq 0 ] || exit "$pool_rc"
+
 CANDIDATES=()
 while IFS= read -r s; do
   [ -n "$s" ] || continue
   CANDIDATES+=("$s")
-done < <(list_parallel_candidates | LC_ALL=C sort -u)
+done < <(printf '%s\n' "$candidate_output" | awk '!seen[$0]++')
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   for s in "${CANDIDATES[@]+"${CANDIDATES[@]}"}"; do
@@ -348,14 +407,15 @@ printf 'FM_ISOLATION_BEGIN %s concurrency=%s candidates=%s\n' \
 # Worker state arrays parallel to CANDIDATES indices (1-based worker labels).
 declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
+ACTIVE_WORKERS=0
 
 wait_one_slot() {
-  local pid idx work rc duration script mode
-  # Wait for the oldest launched worker still recorded.
-  pid=${WORKER_PIDS[0]}
-  idx=${WORKER_IDX[0]}
-  WORKER_PIDS=("${WORKER_PIDS[@]:1}")
-  WORKER_IDX=("${WORKER_IDX[@]:1}")
+  local slot=$1 pid idx work rc duration script mode gate_skip
+  pid=${WORKER_PIDS[$slot]}
+  idx=${WORKER_IDX[$slot]}
+  unset 'WORKER_PIDS[slot]'
+  unset 'WORKER_IDX[slot]'
+  ACTIVE_WORKERS=$((ACTIVE_WORKERS - 1))
   set +e
   wait "$pid"
   set -e
@@ -363,6 +423,10 @@ wait_one_slot() {
   script=${CANDIDATES[$((idx - 1))]}
   rc=$(cat "$work/out/exit" 2>/dev/null || echo 1)
   duration=$(cat "$work/out/duration_ms" 2>/dev/null || echo 0)
+  if [ "$rc" -eq 0 ] && gate_skip=$(detect_gate_skip "$work/out/output"); then
+    rc=1
+    log "pool $POOL candidate gate-skipped without proving concurrency: $script: $gate_skip"
+  fi
   printf 'FM_ISOLATION_CANDIDATE_END %s %s exit=%s duration_ms=%s worker=%s\n' \
     "$(now_iso)" "$script" "$rc" "$duration" "$idx"
   printf '%s\t%s\t%s\t%s\n' "$script" "$rc" "$duration" "$idx" >>"$RECORDS"
@@ -370,13 +434,9 @@ wait_one_slot() {
     FAILED=$((FAILED + 1))
     AGG_RC=1
     log "candidate failed: $script exit=$rc"
-    if [ -s "$work/out/stdout" ]; then
-      log "--- stdout ($script) ---"
-      tail -n 40 "$work/out/stdout" >&2 || true
-    fi
-    if [ -s "$work/out/stderr" ]; then
-      log "--- stderr ($script) ---"
-      tail -n 40 "$work/out/stderr" >&2 || true
+    if [ -s "$work/out/output" ]; then
+      log "--- output ($script) ---"
+      tail -n 40 "$work/out/output" >&2 || true
     fi
   fi
   # Isolation: worker root must remain mode 0700 and under the proof parent.
@@ -396,6 +456,29 @@ wait_one_slot() {
       AGG_RC=1
       ;;
   esac
+}
+
+worker_pid_is_running() {
+  local want=$1 running inventory="$PROOF_ROOT/running-pids"
+  jobs -r -p >"$inventory"
+  while IFS= read -r running; do
+    [ "$running" = "$want" ] && return 0
+  done <"$inventory"
+  return 1
+}
+
+wait_one_completed_slot() {
+  local slot work
+  while :; do
+    for slot in "${!WORKER_PIDS[@]}"; do
+      work="$PROOF_ROOT/w${WORKER_IDX[$slot]}"
+      if [ -f "$work/out/exit" ] || ! worker_pid_is_running "${WORKER_PIDS[$slot]}"; then
+        wait_one_slot "$slot"
+        return
+      fi
+    done
+    sleep 0.01
+  done
 }
 
 idx=0
@@ -429,7 +512,7 @@ for script in "${CANDIDATES[@]}"; do
       FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
     cd "$ROOT" || exit 1
     begin_ms=$(now_ms)
-    bash "$script" >"$work/out/stdout" 2>"$work/out/stderr"
+    bash "$script" >"$work/out/output" 2>&1
     rc=$?
     end_ms=$(now_ms)
     duration=$((end_ms - begin_ms))
@@ -440,17 +523,18 @@ for script in "${CANDIDATES[@]}"; do
     printf '%s\n' "$duration" >"$work/out/duration_ms"
     exit 0
   ) &
-  WORKER_PIDS+=("$!")
-  WORKER_IDX+=("$idx")
+  WORKER_PIDS[idx]=$!
+  WORKER_IDX[idx]=$idx
+  ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
 
   # Bound concurrency.
-  while [ "${#WORKER_PIDS[@]}" -ge "$JOBS" ]; do
-    wait_one_slot
+  while [ "$ACTIVE_WORKERS" -ge "$JOBS" ]; do
+    wait_one_completed_slot
   done
 done
 
-while [ "${#WORKER_PIDS[@]}" -gt 0 ]; do
-  wait_one_slot
+while [ "$ACTIVE_WORKERS" -gt 0 ]; do
+  wait_one_completed_slot
 done
 
 GIT_AFTER=$(global_git_snapshot)
@@ -487,9 +571,17 @@ if [ -n "$JSON_PATH" ]; then
   mkdir -p "$(dirname "$JSON_PATH")"
   # Stable record order for the artifact.
   sort -t$'\t' -k1,1 "$RECORDS" -o "$RECORDS"
+  jobs_enabled=0
+  jobs_max=0
+  if "$ROOT/bin/fm-test-run.sh" --list-concurrent-safe-families | grep -Fxq "$POOL"; then
+    jobs_max=$("$ROOT/bin/fm-test-run.sh" --concurrent-safe-family-jobs-max "$POOL")
+  fi
+  if [ "$AGG_RC" -eq 0 ] && [ "$JOBS" -gt 1 ] && [ "$JOBS" -le "$jobs_max" ]; then
+    jobs_enabled=1
+  fi
   write_json_artifact "$JSON_PATH" \
     "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
-    "$TOTAL" "$FAILED" "$JOBS" "$RUN_DURATION" "$RECORDS"
+    "$TOTAL" "$FAILED" "$JOBS" "$RUN_DURATION" "$RECORDS" "$POOL" "$jobs_enabled"
   log "wrote isolation proof artifact: $JSON_PATH"
 fi
 
