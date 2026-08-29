@@ -890,48 +890,15 @@ status_daemon_seen_marker_path() {  # <state> <task-id>
   printf '%s/.subsuper-seen-status-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
 }
 
-status_classification_failure_receipt_path() {  # <state> <task-id>
-  printf '%s/.status-classify-failure-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
-}
-
-status_classification_failure_fingerprint() {  # <status-file> <failure-kind>
-  local f=$1 kind=$2 metadata target=''
-  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
-    metadata=absent
-  elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    metadata=$(LC_ALL=C stat -f '%HT:%d:%i:%z:%m:%c:%Sp' "$f" 2>/dev/null) || metadata=unstatable
-  else
-    metadata=$(LC_ALL=C stat -c '%F:%d:%i:%s:%Y:%Z:%A' "$f" 2>/dev/null) || metadata=unstatable
-  fi
-  [ -L "$f" ] && target=$(readlink "$f" 2>/dev/null || true)
-  printf '%s\t%s\t%s\n' "$kind" "$metadata" "$target" | cksum | awk '{print $1 ":" $2}'
-}
-
-status_classification_failure_record() {  # <state> <task-id> <status-file> <failure-kind>
-  local state=$1 task=$2 f=$3 kind=$4 receipt fingerprint current tmp
-  receipt=$(status_classification_failure_receipt_path "$state" "$task")
-  fingerprint=$(status_classification_failure_fingerprint "$f" "$kind") || return 2
-  current=$(cat "$receipt" 2>/dev/null || true)
-  [ "$current" != "$fingerprint" ] || return 1
-  tmp="$receipt.tmp.$$"
-  printf '%s' "$fingerprint" > "$tmp" && mv -f "$tmp" "$receipt" || { rm -f "$tmp"; return 2; }
-  return 0
-}
-
-status_classification_failure_clear() {  # <state> <task-id>
-  rm -f "$(status_classification_failure_receipt_path "$1" "$2")"
-}
-
 status_retire_presentation_task() {  # <state> <task-id>
   local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0 found=0
-  local signal_marker heartbeat_marker daemon_marker failure_receipt
+  local signal_marker heartbeat_marker daemon_marker
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
   signal_marker=$(status_signal_seen_marker_path "$state" "$task")
   heartbeat_marker=$(status_heartbeat_seen_marker_path "$state" "$task")
   daemon_marker=$(status_daemon_seen_marker_path "$state" "$task")
-  failure_receipt=$(status_classification_failure_receipt_path "$state" "$task")
 
   # A remote-home teardown can legitimately retire an endpoint ID that has no
   # status log in that home. Do not contend with that home's unrelated status
@@ -988,7 +955,7 @@ EOF
   fi
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
-      "$signal_marker" "$heartbeat_marker" "$daemon_marker" "$failure_receipt" || rc=1
+      "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
   fi
   fm_lock_release "$lock" || rc=1
   return "$rc"
@@ -1398,7 +1365,7 @@ _fm_status_open_decision_origins() {  # <status-file>
 
 status_span_first_actionable_record() {  # <status-file> <start-offset>
   local f=$1 start=${2:-0} size ident cur_ident scratch chunk_file full_file prefix_file
-  local line verb key origins='' folded=0 rc=1 prefix_lines=0 line_number=0 live_line='' events='' _line _key
+  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -1437,15 +1404,13 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
         }
         if [ "$folded" -eq 0 ]; then
           _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
-            || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
+            || { failed=1; break; }
           if [ "$start" -gt 0 ]; then
             _fm_status_read_span "$full_file" 0 "$start" > "$prefix_file" 2>/dev/null \
-              || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
+              || { failed=1; break; }
             while IFS= read -r _line || [ -n "$_line" ]; do prefix_lines=$((prefix_lines + 1)); done < "$prefix_file"
           fi
-          origins=$(_fm_status_open_decision_origins "$full_file") || {
-            rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2;
-          }
+          origins=$(_fm_status_open_decision_origins "$full_file") || { failed=1; break; }
           folded=1
         fi
         live_line=$(while IFS=$(printf '\t') read -r _key _line; do
@@ -1467,6 +1432,7 @@ EOF
     esac
   done < "$chunk_file"
   rm -f "$chunk_file" "$full_file" "$prefix_file"
+  [ "$failed" -eq 0 ] || return 2
   if [ "$rc" -eq 0 ]; then printf '%s\t%s\t%s' "$size" "$ident" "$events"; else printf '%s\t%s' "$size" "$ident"; fi
   return "$rc"
 }

@@ -86,7 +86,7 @@ test_signal_catchup_without_running_watcher() {
 }
 
 test_stale_enqueue_before_suppressor() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  local dir state fakebin out drain_out capture_file window key pane_hash
   dir=$(make_case stale)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -120,7 +120,7 @@ test_stale_enqueue_before_suppressor() {
 # the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
 # suppressor - so a watcher killed between the two never swallows the surfaced finish.
 test_not_working_stale_enqueue_before_suppressor() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  local dir state fakebin out drain_out capture_file window key pane_hash
   dir=$(make_case stale-stopped)
   state="$dir/state"
   fakebin="$dir/fakebin"

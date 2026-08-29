@@ -219,6 +219,7 @@ test_stale_read_failure_surfaces_without_advancing_seen() {
   key=$(printf '%s' stale-r3 | tr ':/.' '___')
   printf '3' > "$state/.subsuper-seen-status-$key"
   (
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
     _fm_status_read_span() { return 1; }
     FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: sess:fm-stale-r3" "$state"
   )
@@ -282,7 +283,9 @@ test_status_read_failure_surfaces_without_advancing_seen() {
   key=$(printf '%s' read-r1 | tr ':/.' '___')
   printf '3' > "$state/.subsuper-seen-status-$key"
   (
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
     last_status_line() { return 0; }
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
     _fm_status_read_span() { return 1; }
     FM_ESCALATE_BATCH_SECS=999 handle_wake "signal: $state/read-r1.status" "$state"
   )
@@ -371,9 +374,10 @@ EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
   (
     FM_DAEMON_DIR="$fakebin"
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
     _fm_status_read_span() { return 1; }
     handle_durable_wakes fallback "$state"
-  ) || fail "an unreadable signal could not publish its bounded failure receipt"
+  ) || fail "an unreadable signal did not acknowledge its wake after reporting"
   out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
   case "$out" in *"unreadable status span"*) ;;
     *) fail "an unreadable durable signal did not surface its diagnostic: $out" ;;
@@ -387,16 +391,19 @@ EOF
   case "$out" in *"blocked: status cannot be classified"*) ;;
     *) fail "the recovered status was not classified from its original position: $out" ;;
   esac
-  [ ! -e "$(status_classification_failure_receipt_path "$state" unreadable-r7)" ] \
-    || fail "successful classification left its failure receipt behind"
   pass "transient unreadable signals recover without advancing their position"
 }
 
-test_permanent_failure_receipt_bounds_repeats_and_tracks_changes() {
-  local dir state fakebin out count key
+# A permanently unclassifiable status must not wedge supervision. The accepted
+# contract is deliberately simple: report it, acknowledge the wake so an unchanged
+# permanent failure cannot re-alarm on every pass, and never advance the
+# classification position, so the log is classified from where it stopped once it
+# becomes readable. The residual risk - no guaranteed automatic retry inside a
+# crash-mid-read window - is accepted and covered by the locked startup replay.
+test_permanent_classification_failure_is_reported_and_acknowledged() {
+  local dir state fakebin out key
   dir=$(make_supercase durable-symlink); state="$dir/state"; fakebin="$dir/daemon-bin"
   printf 'blocked: first target\n' > "$dir/target-one"
-  printf 'failed: second target\n' > "$dir/target-two"
   ln -s "$dir/target-one" "$state/symlink-r9.status"
   mkdir -p "$fakebin"
   cat > "$fakebin/fm-wake-drain.sh" <<EOF
@@ -406,35 +413,42 @@ printf '1\t1\tsignal\tsymlink-r9.status\tsignal: $state/symlink-r9.status\n'
 printf 'WAKE_ACK_REQUIRED: bounded --ack-through 1 --recovery-generation gen\n' >&2
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
+
   FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
     || fail "a permanent classification failure left its wake unacknowledged"
-  rm -f "$state/.subsuper-last-scan"
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;;
+    *) fail "a permanent classification failure did not surface its diagnostic: $out" ;;
+  esac
+  key=$(printf '%s' symlink-r9 | tr ':/.' '___')
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "a classification failure advanced its position"
+
+  # Repeated handling must keep acknowledging rather than retaining the wake, so
+  # supervision cannot be wedged by a condition that will never change.
   FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
     || fail "a repeated permanent failure retained its wake"
-  count=$(grep -c 'unreadable status span' "$state/.subsuper-escalations" 2>/dev/null || true)
-  [ "$count" = 1 ] || fail "one failure condition surfaced $count diagnostics"
-  ln -sf "$dir/target-two" "$state/symlink-r9.status"
-  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
-    || fail "a changed failure condition retained its wake"
-  count=$(grep -c 'unreadable status span' "$state/.subsuper-escalations" 2>/dev/null || true)
-  [ "$count" = 2 ] || fail "a changed failure condition did not surface exactly once"
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "a repeated classification failure advanced its position"
+
+  # Once the log is readable, its content is classified from the position that
+  # was never advanced, so nothing written before the failure is lost.
   rm -f "$state/symlink-r9.status"
   printf 'blocked: readable replacement\nworking: cleanup\n' > "$state/symlink-r9.status"
+  : > "$state/.subsuper-escalations"
   FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
     || fail "a readable replacement did not classify normally"
   out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
   case "$out" in *"blocked: readable replacement"*) ;;
     *) fail "the readable replacement was not classified from the unadvanced position: $out" ;;
   esac
-  key=$(printf '%s' symlink-r9 | tr ':/.' '___')
   case "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" in
     "$(log_size "$state/symlink-r9.status")"@*) ;;
     *) fail "successful recovery did not advance through the readable replacement" ;;
   esac
-  [ "$(wc -l < "$dir/acked" | tr -d ' ')" = 4 ] \
-    || fail "bounded failure handling did not acknowledge every durable wake"
-  pass "failure receipts bound repeats and reset when conditions change"
+  [ "$(wc -l < "$dir/acked" | tr -d ' ')" = 3 ] \
+    || fail "every durable wake should be acknowledged, including the failures"
+  pass "a permanent classification failure is reported, acknowledged, and never advances its position"
 }
 
 test_catchall_scan_surfaces_a_masked_event() {
@@ -2543,7 +2557,7 @@ test_catchall_advances_routine_then_surfaces_append
 test_durable_wake_failure_retains_entire_batch
 test_missing_status_stale_is_acknowledged_without_diagnostic
 test_transient_unreadable_signal_recovers_without_advancing
-test_permanent_failure_receipt_bounds_repeats_and_tracks_changes
+test_permanent_classification_failure_is_reported_and_acknowledged
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging

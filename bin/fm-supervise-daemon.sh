@@ -342,7 +342,7 @@ _collapse_newlines() {  # <text>
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last event record rest endpoint ident rc receipt_rc distilled="" rel="" seen_rel="" task
+  local reason=$1 state=$2 f last event record rest endpoint ident rc distilled="" rel="" seen_rel="" task
   for f in $reason; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
@@ -352,18 +352,13 @@ classify_signal() {  # <reason-after-colon> <state>
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      status_classification_failure_record "$state" "$task" "$f" span-read
-      receipt_rc=$?
-      if [ "$receipt_rc" -ne 1 ]; then
-        distilled="${distilled}$(basename "$f"): unreadable status span | "
-        rel=1
-      fi
-      if [ "$receipt_rc" -eq 2 ] && [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ]; then
-        printf 'ERROR\t%s\n' "$f" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
-      fi
+      # Could not classify this log: escalate rather than self-handling, and
+      # record no classified endpoint for it, so its content is classified again
+      # once it is readable.
+      distilled="${distilled}$(basename "$f"): unreadable status span | "
+      rel=1
       continue
     fi
-    status_classification_failure_clear "$state" "$task"
     endpoint=${record%%$'\t'*}
     rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
     [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
@@ -602,12 +597,19 @@ mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
 
 # Advance the offset for every task a per-wake classification escalated, so the
 # catch-all scan does not re-escalate the same events within HEARTBEAT_SCAN_SECS.
+# An ERROR row names a task whose log could not be classified: its position is
+# deliberately left where it was, so the content is classified again once the log
+# is readable, while the wake itself is still acknowledged. Retaining the wake
+# instead would re-report an unchanged permanent failure on every pass, and a
+# repeating alarm buries the events this supervision exists to deliver. That
+# residual risk is accepted and bounded: the failure is reported again whenever
+# the log next changes, and a locked session start replays the durable queue.
 mark_escalated_seen() {  # <state> <captured-endpoint-file>
   local state=$1 capture=$2 task endpoint ident rc=0
   [ -f "$capture" ] || return 1
-  grep -q '^ERROR' "$capture" 2>/dev/null && return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
+    [ "$task" = ERROR ] && continue
     mark_status_seen "$state" "$task" "$endpoint" "$ident" || rc=1
   done < "$capture"
   return "$rc"
@@ -1147,7 +1149,7 @@ housekeeping() {  # <state>
   #     read decides relevance, and the escalated-through offset is the dedup.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local event record rest endpoint ident rc receipt_rc
+    local event record rest endpoint ident rc
     for f in "$state"/*.status; do
       [ -e "$f" ] || [ -L "$f" ] || continue
       task=$(basename "$f"); task="${task%.status}"
@@ -1155,15 +1157,11 @@ housekeeping() {  # <state>
         "$(status_seen_offset "$state" "$task")")
       rc=$?
       if [ "$rc" -eq 2 ]; then
-        status_classification_failure_record "$state" "$task" "$f" span-read
-        receipt_rc=$?
-        [ "$receipt_rc" -eq 0 ] \
-          && escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
-        [ "$receipt_rc" -eq 2 ] \
-          && escalate_add "$state" "$(basename "$f"): unreadable status span; failure receipt unavailable (catch-all scan)"
+        # Could not classify: report it and commit no position, so the log is
+        # classified again once it is readable.
+        escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
         continue
       fi
-      status_classification_failure_clear "$state" "$task"
       [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
       endpoint=${record%%$'\t'*}
       rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
@@ -1305,7 +1303,7 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
-  local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest receipt_rc
+  local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest
   local kind="" arg="" classification_failed=0
   : > "$capture" || return 1
   if should_force_self "$reason"; then
@@ -1325,14 +1323,12 @@ handle_wake() {  # <reason> <state>
                 span_rc=$?
                 case "$span_rc" in
                   0|1)
-                    status_classification_failure_clear "$state" "$task"
                     if [ -n "$span_record" ]; then endpoint=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; ident=${rest%%$'\t'*}; printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" > "$capture"; fi
                     ;;
                   *)
-                    status_classification_failure_record "$state" "$task" "$state/$task.status" span-read
-                    receipt_rc=$?
-                    if [ "$receipt_rc" -eq 1 ]; then span_rc=1; span_record=''; fi
-                    [ "$receipt_rc" -eq 2 ] && printf 'ERROR\t%s\n' "$task" > "$capture"
+                    # Could not classify: classify_stale surfaces it, and no
+                    # position is committed for this task.
+                    printf 'ERROR\t%s\n' "$task" > "$capture"
                     ;;
                 esac
               else

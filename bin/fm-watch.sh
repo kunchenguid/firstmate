@@ -957,9 +957,8 @@ run_check_capture() {
 # no verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal is
 # only benign when the crew is also provably working (signal_crew_provably_working).
 signal_files_actionable() {  # <status-file> ...
-  local f task record rest endpoint ident rc receipt_rc found=1
+  local f task record rest endpoint ident rc found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
-  FM_SIGNAL_CLASSIFY_ERROR=0
   for f in "$@"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
@@ -969,17 +968,13 @@ signal_files_actionable() {  # <status-file> ...
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      if afk_present; then
-        FM_SIGNAL_CLASSIFY_ERROR=1
-        found=0
-      else
-        status_classification_failure_record "$STATE" "$task" "$f" span-read
-        receipt_rc=$?
-        if [ "$receipt_rc" -ne 1 ]; then FM_SIGNAL_CLASSIFY_ERROR=1; found=0; fi
-      fi
+      # Could not classify this log. Surface it rather than absorbing it, and
+      # record NO classified endpoint for it below, so its content is classified
+      # again once it is readable. The wake signature still advances, which is
+      # what bounds this to one report per distinct file state.
+      found=0
       continue
     fi
-    status_classification_failure_clear "$STATE" "$task"
     endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
     FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
     [ "$rc" -eq 0 ] && found=0
@@ -994,7 +989,6 @@ signal_files_actionable() {  # <status-file> ...
 # re-surfaced by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
   local f endpoint ident rc=0
-  [ "${FM_HEARTBEAT_SCAN_ERROR:-0}" -eq 0 ] || return 0
   while IFS=$(printf '\t') read -r f endpoint ident; do
     [ -n "$f" ] || continue
     mark_surfaced "$f" "$endpoint" "$ident" || rc=1
@@ -1015,9 +1009,8 @@ EOF
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task record rest endpoint ident rc receipt_rc found=1
+  local f task record rest endpoint ident rc found=1
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
-  FM_HEARTBEAT_SCAN_ERROR=0
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
@@ -1025,12 +1018,10 @@ heartbeat_scan_finds_actionable() {
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      status_classification_failure_record "$STATE" "$task" "$f" span-read
-      receipt_rc=$?
-      if [ "$receipt_rc" -ne 1 ]; then FM_HEARTBEAT_SCAN_ERROR=1; found=0; fi
+      # Could not classify: surface, and record no endpoint for this log.
+      found=0
       continue
     fi
-    status_classification_failure_clear "$STATE" "$task"
     endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
     FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
     [ "$rc" -eq 0 ] && found=0
@@ -1415,10 +1406,10 @@ EOF
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
-    FM_SIGNAL_CLASSIFY_ERROR=0
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
+    # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
@@ -1426,21 +1417,24 @@ EOF
       done <<EOF
 $pending
 EOF
-      if [ "$FM_SIGNAL_CLASSIFY_ERROR" -eq 0 ]; then
-        while IFS=$(printf '\t') read -r sf sig f; do
-          [ -n "$sf" ] || continue
-          case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
-        done <<EOF
+      # The wake signature advances for every file in this batch, including one
+      # whose span could not be classified: it has now been reported, and this is
+      # what bounds an unreadable log to one report per distinct file state. Only
+      # a SUCCESSFULLY classified log commits a classification position below, so
+      # an unreadable log's content is still classified once it becomes readable.
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
+      done <<EOF
 $pending
 EOF
-        while IFS=$(printf '\t') read -r f surface_end surface_ident; do
-          [ -n "$f" ] || continue
-          fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
-          mark_surfaced "$f" "$surface_end" "$surface_ident"
-        done <<EOF
+      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+        [ -n "$f" ] || continue
+        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
+        mark_surfaced "$f" "$surface_end" "$surface_ident"
+      done <<EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
-      fi
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do

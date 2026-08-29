@@ -14,6 +14,7 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 if ! command -v _fm_open_decisions_file_ident >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-classify-lib.sh
   . "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
 fi
 mkdir -p "$STATE"
