@@ -9,6 +9,17 @@ Incident chronology and transcript excerpts stay in the private task report and 
 The portable regressions are `tests/fm-spawn-brief-argv.test.sh`, `tests/fm-worktree-ownership.test.sh`, and the doorbell pair in `tests/fm-task-inbox.test.sh`.
 They pin the logic with real processes and no credentials; the facts below are what a real harness contributes and no fixture can prove.
 
+## Worktree ownership has two independent boundaries
+
+Teardown retains the provider reservation unless the backend can confirm that the task endpoint retired.
+Tmux, Zellij, and cmux use structural endpoint inventories, Herdr uses its structured exact-pane absence check, and Orca requires a successful structured close acknowledgment because its CLI exposes no independent terminal inventory.
+An unreadable inventory, a surviving endpoint, or an unacknowledged Orca close refuses before task metadata is retired or the provider reservation is released.
+
+The spawn-side ownership guard is an independent backend-agnostic second protection.
+It refuses a worktree that another live task record in the same home still names even if teardown confirmation was unavailable or a stale record was restored by hand.
+Treehouse's retained owner reservation covers allocation across homes, while the spawn guard covers stale same-home claims, so neither boundary is redundant with the other.
+`tests/fm-worktree-ownership.test.sh` executes both boundaries and verifies that every unconfirmed backend close preserves the task record and provider reservation.
+
 ## A prompt passed as an argument is matchable process text
 
 Verified 2026-08-29 against Claude Code 2.1.251, tmux 3.5a, treehouse v2.2.1 on Linux.

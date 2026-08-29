@@ -127,11 +127,12 @@
 #     grace period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
-#     processes. That uniqueness is an enforced invariant, not an assumption:
-#     bin/fm-spawn.sh refuses a worktree another live task's meta still names,
-#     and the release below is ordered after endpoint retirement so a refused
-#     close cannot hand this worktree to the next spawn while this task still
-#     claims it. Idempotent: nothing left to find is a silent no-op.
+#     processes. That uniqueness is an enforced invariant, not an assumption.
+#     Teardown confirms endpoint retirement before releasing the provider
+#     reservation. Independently, bin/fm-spawn.sh refuses a worktree another
+#     live task's meta in this home still names, regardless of backend, so a
+#     stale claim remains a second protection rather than relying on close
+#     confirmation alone. Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -2394,6 +2395,141 @@ $session	$lock_path"
   return 1
 }
 
+# Structural Zellij retirement signal: the recorded tab is absent from a
+# successful session tab inventory. A missing session is gone; an unreadable
+# inventory or unknown tab identity is not proof the endpoint retired.
+teardown_zellij_endpoint_state() {  # <target> <tab-id>
+  local target=$1 tab_id=$2 sessions tabs
+  fm_backend_source zellij || { printf 'unreadable'; return 0; }
+  fm_backend_zellij_parse_target "$target" || { printf 'unreadable'; return 0; }
+  if ! sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null); then
+    printf 'unreadable'
+    return 0
+  fi
+  if ! printf '%s\n' "$sessions" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
+    printf 'missing'
+    return 0
+  fi
+  case "$tab_id" in
+    ''|*[!0-9]*)
+      printf 'unreadable'
+      return 0
+      ;;
+  esac
+  if ! tabs=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-tabs --json 2>/dev/null); then
+    printf 'unreadable'
+    return 0
+  fi
+  if ! printf '%s' "$tabs" | jq -e '
+      type == "array"
+      and all(.[]; type == "object" and (.tab_id | type == "number"))
+    ' >/dev/null 2>&1; then
+    printf 'unreadable'
+    return 0
+  fi
+  if printf '%s' "$tabs" | jq -e --arg tab "$tab_id" '
+      any(.[]; (.tab_id | tostring) == $tab)
+    ' >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'missing'
+  fi
+}
+
+# Structural cmux retirement signal: the recorded workspace id is absent from
+# every window's workspace inventory. An unreadable inventory or missing
+# workspace identity is not proof the endpoint retired.
+teardown_cmux_endpoint_state() {  # <workspace-id>
+  local workspace_id=$1 wins window_ids window_id workspaces
+  fm_backend_source cmux || { printf 'unreadable'; return 0; }
+  if [ -z "$workspace_id" ]; then
+    printf 'unreadable'
+    return 0
+  fi
+  if ! wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null); then
+    printf 'unreadable'
+    return 0
+  fi
+  if ! printf '%s' "$wins" | jq -e '
+      type == "array"
+      and all(.[]; type == "object" and (.id | type == "string") and (.id | length > 0))
+    ' >/dev/null 2>&1; then
+    printf 'unreadable'
+    return 0
+  fi
+  window_ids=$(printf '%s' "$wins" | jq -r '.[].id')
+  while IFS= read -r window_id; do
+    [ -n "$window_id" ] || continue
+    if ! workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$window_id" 2>/dev/null); then
+      printf 'unreadable'
+      return 0
+    fi
+    if ! printf '%s' "$workspaces" | jq -e '
+        type == "object"
+        and (.workspaces | type == "array")
+        and all(.workspaces[]; type == "object" and (.id | type == "string"))
+      ' >/dev/null 2>&1; then
+      printf 'unreadable'
+      return 0
+    fi
+    if printf '%s' "$workspaces" | jq -e --arg id "$workspace_id" '
+        any(.workspaces[]; .id == $id)
+      ' >/dev/null 2>&1; then
+      printf 'present'
+      return 0
+    fi
+  done <<EOF
+$window_ids
+EOF
+  printf 'missing'
+}
+
+# Orca exposes no independent terminal inventory, so retirement is confirmed
+# only by a typed native close acknowledgment with ok:true. Adapter kill
+# swallows native failures; this teardown-boundary read does not.
+teardown_orca_close_confirmed() {  # <terminal-id>
+  local terminal=$1 out parse_status
+  TEARDOWN_ORCA_CLOSE_REASON=
+  fm_backend_source orca || {
+    TEARDOWN_ORCA_CLOSE_REASON="the Orca adapter is unavailable"
+    return 1
+  }
+  fm_backend_orca_tool_check || {
+    TEARDOWN_ORCA_CLOSE_REASON="the Orca CLI is unavailable"
+    return 1
+  }
+  out=$(orca terminal close --terminal "$terminal" --json 2>/dev/null) || {
+    TEARDOWN_ORCA_CLOSE_REASON="the native close command failed"
+    return 1
+  }
+  if [ -z "$out" ]; then
+    TEARDOWN_ORCA_CLOSE_REASON="the native close returned no acknowledgment"
+    return 1
+  fi
+  if printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (_) {
+  process.exit(2);
+}
+if (data && typeof data === "object" && !Array.isArray(data) && data.ok === false) process.exit(3);
+if (!data || typeof data !== "object" || Array.isArray(data) || data.ok !== true) process.exit(4);
+' >/dev/null 2>&1
+  then
+    return 0
+  else
+    parse_status=$?
+  fi
+  case "$parse_status" in
+    2) TEARDOWN_ORCA_CLOSE_REASON="the native close returned malformed JSON" ;;
+    3) TEARDOWN_ORCA_CLOSE_REASON="the native close reported failure" ;;
+    *) TEARDOWN_ORCA_CLOSE_REASON="the native close returned no successful typed acknowledgment" ;;
+  esac
+  return 1
+}
+
 preflight_firstmate_home_herdr_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
   sub_state="$home/state"
@@ -2736,12 +2872,12 @@ elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
-# A refused, skipped, or failed Herdr close must never erase a live task's
-# durable endpoint identity: unless the exact pane is confirmed gone, retain
-# every record and stop before any removal below so a later rerun can retry
-# the locked close. Only a structured not-found proves the pane gone; unknown
-# presence, missing or malformed endpoint identity, and missing confirmation
-# machinery all refuse.
+# A refused, skipped, failed, or unconfirmable endpoint close must never erase
+# a live task's durable identity. Herdr, tmux, Zellij, and cmux require exact
+# structural absence; Orca requires a typed native close acknowledgment because
+# it has no independent terminal inventory. Unknown presence, unavailable
+# confirmation machinery, and backends that cannot confirm retain every record
+# so a later rerun can retry the close.
 if [ "$BACKEND" = herdr ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
@@ -2752,15 +2888,45 @@ if [ "$BACKEND" = herdr ]; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
   fi
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" = tmux ]; then
+  endpoint_state=$(fm_backend_agent_state tmux "$T")
+  if [ "$endpoint_state" != missing ]; then
+    echo "error: tmux window $T for $ID is not confirmed gone after its close attempt (state=$endpoint_state); retaining every durable task record and the provider reservation" >&2
+    exit 1
+  fi
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" = zellij ]; then
+  endpoint_state=$(teardown_zellij_endpoint_state "$T" "$(meta_value "$META" zellij_tab_id)")
+  if [ "$endpoint_state" != missing ]; then
+    echo "error: Zellij tab for $T and task $ID is not confirmed gone after its close attempt (state=$endpoint_state); retaining every durable task record and the provider reservation" >&2
+    exit 1
+  fi
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" = cmux ]; then
+  endpoint_state=$(teardown_cmux_endpoint_state "$(meta_value "$META" cmux_workspace_id)")
+  if [ "$endpoint_state" != missing ]; then
+    echo "error: cmux workspace for $T and task $ID is not confirmed gone after its close attempt (state=$endpoint_state); retaining every durable task record and the provider reservation" >&2
+    exit 1
+  fi
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" = orca ]; then
+  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
+    ORCA_PATH_MATCH_VERIFIED=1
+  fi
+  if [ -z "$T_ORCA" ]; then
+    echo "error: Orca terminal for $ID is not recorded, so retirement cannot be confirmed; retaining every durable task record and the Orca worktree reservation" >&2
+    exit 1
+  fi
+  if ! teardown_orca_close_confirmed "$T_ORCA"; then
+    echo "error: Orca terminal $T_ORCA for $ID is not confirmed retired because $TEARDOWN_ORCA_CLOSE_REASON; retaining every durable task record and the Orca worktree reservation" >&2
+    exit 1
+  fi
+elif [ "$KIND" != secondmate ]; then
+  echo "error: $BACKEND endpoint $T for $ID cannot be confirmed gone; retaining every durable task record and the provider reservation" >&2
+  exit 1
 fi
 
 TASK_WORKTREE_RELEASE=none
 post_lock_cleanup_check=
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
-  fi
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -2772,7 +2938,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   TASK_WORKTREE_RELEASE=orca
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)

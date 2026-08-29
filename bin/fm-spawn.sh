@@ -1755,10 +1755,11 @@ real_path_or_raw() {  # <path>
 # That double-assignment is reachable whenever a worktree returns to the pool
 # while a record in this home still claims it (a half-retired teardown, or a
 # hand-edited or restored record), so the invariant is checked here rather than
-# assumed. Cross-home allocation is owned by treehouse's owner reservation, and
-# teardown keeps that reservation until the endpoint retires. The task's OWN
-# record is skipped: a relaunch legitimately re-enters the worktree its meta
-# already names.
+# assumed. This backend-independent check is separate from teardown's endpoint
+# retirement confirmation. Cross-home allocation is owned by treehouse's owner
+# reservation, which teardown retains until its endpoint is confirmed retired.
+# The task's OWN record is skipped: a relaunch legitimately re-enters the
+# worktree its meta already names.
 #
 # This is a pre-publication check, so it cannot by itself serialize two spawns
 # racing for one slot; the task-set lock held across meta publication owns that.

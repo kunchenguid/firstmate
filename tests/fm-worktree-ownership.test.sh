@@ -180,9 +180,138 @@ test_teardown_failure_preserves_the_record_and_provider_reservation() {
   pass "teardown: failed state retirement preserves the claim and reservation"
 }
 
+test_tmux_unconfirmed_close_preserves_the_record_and_provider_reservation() {
+  local dir id=tmux-retained out rc=0
+  dir=$(make_teardown_case teardown-tmux-retained)
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux <%s>\n' "$*" >> "${FM_RUNTIME_LOG:?}"
+case "${1:-}" in
+  list-windows) printf 'fm-%s\n' "${FM_TASK_ID:?}" ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=sess:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "mode=no-mistakes"
+
+  out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    FM_TASK_ID="$id" PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "tmux teardown accepted a no-op close"
+  case "$out" in *"tmux window"*"not confirmed gone"*) ;; *) fail "tmux refusal did not name the unconfirmed endpoint: $out" ;; esac
+  if grep -Fq 'treehouse <return' "$dir/runtime.log"; then
+    fail "tmux teardown returned the worktree after an unconfirmed close"
+  fi
+  [ -f "$dir/home/state/$id.meta" ] \
+    || fail "tmux teardown removed metadata after an unconfirmed close"
+  pass "teardown: an unconfirmed tmux close preserves the claim and reservation"
+}
+
+test_zellij_unconfirmed_close_preserves_the_record_and_provider_reservation() {
+  local dir id=zellij-retained out rc=0
+  dir=$(make_teardown_case teardown-zellij-retained)
+  cat > "$dir/fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+printf 'zellij <%s>\n' "$*" >> "${FM_RUNTIME_LOG:?}"
+case "$*" in
+  "list-sessions --short --no-formatting") printf 'firstmate\n' ;;
+  *"action list-panes --json"*) printf '[{"id":7,"tab_id":3,"is_plugin":false}]\n' ;;
+  *"action list-tabs --json"*) printf '[{"tab_id":3,"name":"fm-%s"}]\n' "${FM_TASK_ID:?}" ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/zellij"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:7" "endpoint_task_id=$id" "backend=zellij" \
+    "zellij_session=firstmate" "zellij_tab_id=3" "zellij_pane_id=7" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "mode=no-mistakes"
+
+  out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    FM_TASK_ID="$id" PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Zellij teardown accepted a no-op close"
+  case "$out" in *"Zellij tab"*"not confirmed gone"*) ;; *) fail "Zellij refusal did not name the unconfirmed endpoint: $out" ;; esac
+  if grep -Fq 'treehouse <return' "$dir/runtime.log"; then
+    fail "Zellij teardown returned the worktree after an unconfirmed close"
+  fi
+  [ -f "$dir/home/state/$id.meta" ] \
+    || fail "Zellij teardown removed metadata after an unconfirmed close"
+  pass "teardown: an unconfirmed Zellij close preserves the claim and reservation"
+}
+
+test_cmux_unconfirmed_close_preserves_the_record_and_provider_reservation() {
+  local dir id=cmux-retained out rc=0
+  dir=$(make_teardown_case teardown-cmux-retained)
+  cat > "$dir/fakebin/cmux" <<'SH'
+#!/usr/bin/env bash
+printf 'cmux <%s>\n' "$*" >> "${FM_RUNTIME_LOG:?}"
+case "${1:-}" in
+  workspace) printf '{"workspaces":[{"id":"ws-retained","title":"fm-retained"}]}\n' ;;
+  list-panes) printf '{"panes":[{"selected_surface_id":"sf-retained","surface_ids":["sf-retained"]}]}\n' ;;
+  list-windows) printf '[{"id":"window-retained","workspace_count":1}]\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/cmux"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=ws-retained:sf-retained" "endpoint_task_id=$id" "backend=cmux" \
+    "cmux_workspace_id=ws-retained" "cmux_surface_id=sf-retained" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "mode=no-mistakes"
+
+  out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "cmux teardown accepted a no-op close"
+  case "$out" in *"cmux workspace"*"not confirmed gone"*) ;; *) fail "cmux refusal did not name the unconfirmed endpoint: $out" ;; esac
+  if grep -Fq 'treehouse <return' "$dir/runtime.log"; then
+    fail "cmux teardown returned the worktree after an unconfirmed close"
+  fi
+  [ -f "$dir/home/state/$id.meta" ] \
+    || fail "cmux teardown removed metadata after an unconfirmed close"
+  pass "teardown: an unconfirmed cmux close preserves the claim and reservation"
+}
+
+test_orca_unconfirmed_close_preserves_the_record_and_provider_reservation() {
+  local dir id=orca-retained out rc=0
+  dir=$(make_teardown_case teardown-orca-retained)
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf 'orca <%s>\n' "$*" >> "${FM_RUNTIME_LOG:?}"
+case "$*" in
+  "worktree show --worktree id:wt-retained --json")
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-retained","path":"%s"}}}\n' "${FM_ORCA_WORKTREE_PATH:?}"
+    ;;
+  "terminal close --terminal term-retained --json")
+    printf '{"ok":false,"error":{"code":"close_failed","message":"close failed"}}\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/orca"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "backend=orca" \
+    "terminal=term-retained" "orca_worktree_id=wt-retained" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "mode=no-mistakes"
+
+  out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    FM_ORCA_WORKTREE_PATH="$dir/worktree" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Orca teardown accepted a failed close acknowledgment"
+  case "$out" in *"Orca terminal"*"native close reported failure"*) ;; *) fail "Orca refusal did not name the unconfirmed endpoint: $out" ;; esac
+  if grep -Fq 'orca <worktree rm' "$dir/runtime.log"; then
+    fail "Orca teardown removed the worktree after an unconfirmed close"
+  fi
+  [ -f "$dir/home/state/$id.meta" ] \
+    || fail "Orca teardown removed metadata after an unconfirmed close"
+  pass "teardown: an unconfirmed Orca close preserves the claim and reservation"
+}
+
 test_spawn_refuses_a_worktree_another_live_task_claims
 test_spawn_accepts_the_worktree_its_own_record_names
 test_teardown_retires_the_endpoint_before_releasing_the_worktree
 test_teardown_failure_preserves_the_record_and_provider_reservation
+test_tmux_unconfirmed_close_preserves_the_record_and_provider_reservation
+test_zellij_unconfirmed_close_preserves_the_record_and_provider_reservation
+test_cmux_unconfirmed_close_preserves_the_record_and_provider_reservation
+test_orca_unconfirmed_close_preserves_the_record_and_provider_reservation
 
 echo "# all fm-worktree-ownership tests passed"
