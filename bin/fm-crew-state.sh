@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <allowance|run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -27,7 +27,10 @@
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
-#   2. Matching no-mistakes run for this crew's branch AND current code identity,
+#   2. Parked on the ACCOUNT allowance (bin/fm-allowance-lib.sh)? That outranks
+#      every source below, which would otherwise describe a worker waiting at its
+#      limit prompt as still working. Reported as parked with the cause.
+#   3. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
@@ -42,15 +45,15 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
+#   4. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
+#   5. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#   6. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
@@ -71,6 +74,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-allowance-lib.sh
+. "$SCRIPT_DIR/fm-allowance-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
@@ -216,6 +221,33 @@ crew_busy_verdict() {  # <target>
   esac
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
+
+# --- allowance park (outranks every source below) ---------------------------
+# A worker whose harness refused the turn on the ACCOUNT allowance is sitting at
+# an idle prompt waiting for a keystroke: its process is alive, its pane renders
+# normally, and nothing it was nominally in the middle of is advancing. Every
+# source below would describe that worker as though it were still working - a
+# no-mistakes run reports the step it stalled on, and the busy record can still
+# read busy from a turn that never closed - which is exactly what made the
+# 2026-08-17 outage expensive to diagnose. So the park is read first and reported
+# as the cause, because recovery is a single Enter once the reset has passed and
+# the only hard part was ever knowing that.
+#
+# bin/fm-allowance-lib.sh owns the verdict and gates it per harness, so an adapter
+# with no verified signature falls straight through to the sources below and this
+# section changes nothing for it. Remote mates never reach here (they were
+# answered by their own host above). The pane arm is given the same bounded
+# capture the busy read uses; a worker whose endpoint has already gone reads from
+# its transcript alone.
+if [ -n "$WT" ]; then
+  ALLOWANCE_TAIL=''
+  if [ -n "$BACKEND_TARGET" ]; then
+    ALLOWANCE_TAIL=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || ALLOWANCE_TAIL=''
+  fi
+  if ALLOWANCE_DETAIL=$(fm_allowance_park_detail "$HARNESS" "$WT" "$ALLOWANCE_TAIL"); then
+    emit parked allowance "${ALLOWANCE_DETAIL#* } (${ALLOWANCE_DETAIL%% *} signal; resumes on a single Enter once the reset has passed)"
+  fi
+fi
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the

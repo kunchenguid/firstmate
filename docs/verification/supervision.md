@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, semantic busy state, allowance-park, turn-end, watcher-continuity, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -204,6 +204,71 @@ tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
+
+## Allowance-park detection
+
+A worker whose provider refused the turn on the account allowance keeps a live process, a live endpoint, and a normally rendered pane, so every liveness probe above reads it as healthy.
+[`bin/fm-allowance-lib.sh`](../../bin/fm-allowance-lib.sh) is the single owner of that verdict, and [`bin/fm-watch.sh`](../../bin/fm-watch.sh) and [`bin/fm-crew-state.sh`](../../bin/fm-crew-state.sh) both consult it ahead of their busy gate, because the semantic busy state above stays busy across a refused turn whose closing hook never fires.
+The verdict reads two independent signals and either alone carries it, so no single vendor string is load-bearing.
+
+Per-harness support is a gate: an adapter with no entry below reports "not parked" and behaves exactly as it did before the library existed.
+
+| Harness | Version verified | Signal | Observed result |
+| --- | --- | --- | --- |
+| Claude | 2.1.241 (Claude Code) | Session record (structural, preferred) | 128 refusal records across the local transcript store, every one an assistant record carrying `"isApiErrorMessage":true` with `"apiErrorStatus":429` and `"error":"rate_limit"`. |
+| Claude | 2.1.241 (Claude Code) | Rendered pane (fallback) | The pane carries the same limit notice plus a `Press Enter to continue after reset` affordance, captured from the 2026-08-17 incident panes. That affordance never reaches the transcript, so the two signals stay genuinely independent. |
+| Codex, OpenCode, Pi, Grok, Kimi, Cursor, Muse | n/a | None | No refusal has been observed from these adapters, so no signature is claimed and none of them ever parks. |
+
+The 429 conjunction, rather than `isApiErrorMessage` alone, is what separates an allowance park from the other refusals the same field marks, measured on 2026-08-23:
+
+```sh
+grep -raho '"apiErrorStatus":[0-9]*' ~/.claude/projects/ | sort | uniq -c
+#     128 "apiErrorStatus":429
+
+grep -rah '"isApiErrorMessage":true' ~/.claude/projects/ | grep -v '"apiErrorStatus"' \
+  | grep -o '"text":"[^"]*"' | sort | uniq -c
+#       1 "text":"Not logged in · Please run /login"
+#       2 "text":"Request timed out"
+```
+
+429 is the only status the field ever takes, and the two non-allowance refusals carry no status at all.
+The notice itself takes three shapes, which is why the signature matches the limit word as a class with an optional trailing clause rather than as a literal:
+
+```sh
+grep -rah '"apiErrorStatus":429' ~/.claude/projects/ | grep -o '"text":"[^"]*"' \
+  | sed 's/[0-9]\{1,2\}:\?[0-9]\{0,2\}[ap]m/HH:MMxm/' | sort | uniq -c | sort -rn
+#      84 "text":"You've hit your session limit · resets HH:MMxm (UTC)"
+#      40 "text":"You've hit your session limit · resets HH:MMxm (UTC) · progress saved"
+#       4 "text":"You've hit your weekly limit · resets HH:MMxm (UTC)"
+```
+
+Taking the last conversational record - user and assistant records only - is what makes the structural signal current state rather than history, and it discriminates on the same store:
+
+```text
+transcripts with a 429 record: 68
+last conversational record IS the refusal (parked): 29
+something later (resumed): 39
+```
+
+Transcripts live at `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<worktree with / and . replaced by ->/<session>.jsonl`, and `bin/fm-spawn.sh` forwards firstmate's own resolved store onto the crewmate launch, so the watcher resolves the same store the crewmate writes.
+At session start only `<project-dir>/<session>/tool-results/` exists; the transcript appears once the session has content, which is why the live guard below asserts on the directory rather than on a transcript.
+
+Deterministic entry point:
+
+```sh
+tests/fm-allowance-park.test.sh
+```
+
+Refresh command for the per-harness evidence above, which launches every installed harness bare and spends no model tokens:
+
+```sh
+FM_ALLOWANCE_PARK_DRIFT=1 tests/fm-allowance-park-live-e2e.test.sh
+# ok - claude (2.1.241 (Claude Code)): store resolves at /home/<user>/.claude/projects/<mangled> and a healthy worker is not read as parked
+# ok - every installed harness with a verified allowance signature was exercised
+```
+
+That guard proves the store derivation still lands where the harness writes and that a healthy worker is not classified as parked.
+It deliberately does not prove that a real refusal still writes the matched fields, because forcing one means exhausting the account allowance, which is the outage this detection exists to shorten; that half is refreshed by capturing the next real refusal against the counts above.
 
 ## Turn-end guard
 
