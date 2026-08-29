@@ -444,6 +444,54 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
+# Every reported pull request carries the landing verdict recorded at arming
+# time, and a URL scraped out of a status log never inherits one.
+write_landing_child() { # <home> <id> <status> [extra-meta...]
+  local home=$1 id=$2 status=$3
+  shift 3
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    "spawn_gen=s${BASHPID:-$$}.$RANDOM" "$@"
+  printf '%s\n' "$status" > "$home/state/$id.status"
+  : > "$home/state/$id.turn-ended"
+  age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
+}
+
+test_reported_pr_carries_its_landing_verdict() {
+  local pr=https://example.test/owner/repo/pull/1
+
+  make_world landing-confirmed
+  write_landing_child "$MAIN" child "done: PR $pr checks green" \
+    'pr_landing=confirmed' "pr=$pr"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  grep -Fq "pr=$pr pr_landing=confirmed" "$MAIN/state/.wake-queue" \
+    || fail "a confirmed landing target was not reported as one: $(cat "$MAIN/state/.wake-queue")"
+
+  make_world landing-legacy
+  write_landing_child "$MAIN" child "done: PR $pr checks green" "pr=$pr"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  grep -Fq "pr=$pr pr_landing=unverified" "$MAIN/state/.wake-queue" \
+    || fail "a pull request recorded without a verdict was not reported as unverified: $(cat "$MAIN/state/.wake-queue")"
+
+  # The verdict belongs to the recorded pr= line; a scraped URL is a different
+  # pull request that nothing ever checked.
+  make_world landing-scraped
+  write_landing_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/6 checks green' \
+    'pr_landing=confirmed'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  grep -Fq 'pr=https://example.test/owner/repo/pull/6 pr_landing=unverified' "$MAIN/state/.wake-queue" \
+    || fail "a scraped pull request inherited an unrelated landing verdict: $(cat "$MAIN/state/.wake-queue")"
+
+  make_world landing-parent; bind_secondmate local
+  write_landing_child "$MATE" child "done: PR $pr checks green" 'pr_landing=confirmed' "pr=$pr"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  grep -Fq "pr=$pr pr_landing=confirmed" "$MAIN/state/mate.status" \
+    || fail "the parent report dropped the landing verdict: $(cat "$MAIN/state/mate.status")"
+
+  pass "reported pull requests carry their recorded landing verdict"
+}
+
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
@@ -460,5 +508,6 @@ test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
 test_reconciliation_never_calls_forge
+test_reported_pr_carries_its_landing_verdict
 
 echo "all inactive reconciliation tests passed"

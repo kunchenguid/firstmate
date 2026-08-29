@@ -582,6 +582,62 @@ EOF
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
+# The reporting path is the other half of the landing guard: bin/fm-pr-check.sh
+# refuses to ARM an upstream pull request, and this is what stops one that never
+# went through arming - a URL scraped out of a worker's status line - from being
+# read as a pull request awaiting a merge decision.
+test_pr_landing_verdict_is_reported() {
+  local home fakebin out view
+  home=$(make_home pr-landing)
+  fakebin=$(make_fakebin "$home")
+  fm_write_meta "$home/state/confirmed-task.meta" \
+    "window=firstmate:fm-confirmed-task" \
+    "worktree=$home/projects/confirmed-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "pr_landing=confirmed" \
+    "pr=https://github.com/x45dev/firstmate/pull/4"
+  # No recorded verdict at all: what a metadata record written before the guard
+  # existed looks like. Unverified, never assumed good.
+  fm_write_meta "$home/state/legacy-task.meta" \
+    "window=firstmate:fm-legacy-task" \
+    "worktree=$home/projects/legacy-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/5"
+  # Never armed, so never checked: the exact route an upstream pull request took
+  # to reach the captain worded as a merge decision.
+  fm_write_meta "$home/state/scraped-task.meta" \
+    "window=firstmate:fm-scraped-task" \
+    "worktree=$home/projects/scraped-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship"
+  printf 'done: PR https://github.com/kunchenguid/firstmate/pull/6 checks green\n' \
+    > "$home/state/scraped-task.status"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "confirmed-task") | .pr.landing) == "confirmed"
+      and (.tasks[] | select(.id == "legacy-task") | .pr.landing) == "unverified"
+      and (.tasks[] | select(.id == "scraped-task") | .pr.source) == "status_event"
+      and (.tasks[] | select(.id == "scraped-task") | .pr.landing) == "unverified"
+  ' >/dev/null || fail "recorded landing verdicts were not reported: $out"
+
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "| https://github.com/x45dev/firstmate/pull/4 |" \
+    "a confirmed landing target should render as a bare PR URL"
+  assert_contains "$view" \
+    "https://github.com/kunchenguid/firstmate/pull/5 (landing unverified; not a confirmed landing path)" \
+    "a PR with no recorded verdict must not render as a bare merge-ready URL"
+  assert_contains "$view" \
+    "https://github.com/kunchenguid/firstmate/pull/6 (landing unverified; not a confirmed landing path)" \
+    "a PR scraped from the status log must not render as a bare merge-ready URL"
+  pass "reported pull requests carry their landing verdict, and only a confirmed one renders bare"
+}
+
 test_view_renders_snapshot() {
   local home fakebin view
   home=$(make_home view)
@@ -812,5 +868,6 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+test_pr_landing_verdict_is_reported
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status

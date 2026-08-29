@@ -94,11 +94,16 @@ SH
   # number fails. This keeps the landed-work check hermetic (never reaching the real
   # gh-axi) and represents the common "no GitHub PR" baseline. Tests that need a
   # merged PR or a lookup error override this file with the helpers below.
+  # The "api /repos/" case answers fm-pr-check.sh's landing guard, which asks
+  # the forge whether this machine can merge into the repository hosting the
+  # pull request; PR_CHECK calls used by these tests are all against a
+  # repository this machine can merge into, so it always answers true.
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
   "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
+  "api /repos/"*) printf '%s\n' true ; exit 0 ;;
 esac
 exit 0
 SH
@@ -265,6 +270,7 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
   "pr view")
     printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' ; exit 0 ;;
+  "api /repos/"*) printf '%s\n' true ; exit 0 ;;
 esac
 exit 0
 SH

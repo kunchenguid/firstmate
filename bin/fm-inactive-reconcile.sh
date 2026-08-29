@@ -45,6 +45,13 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
+# Every reported pull request carries the landing verdict bin/fm-pr-check.sh
+# recorded at arming time, so an outcome cannot reach the captain worded as a
+# merge decision without one. This scan never asks the forge, so it reports the
+# recorded answer or says there is none: a URL scraped out of a status log, or
+# recorded before that verdict existed, is pr_landing=unverified rather than
+# silently indistinguishable from a confirmed landing path.
+#
 # The scan reads only durable local state and fm-crew-state.sh; it never invokes
 # gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
@@ -291,6 +298,21 @@ pr_for_task() { # <meta> <status>
   clean_field "$value"
 }
 
+# The verdict belongs to the recorded pr= line, so a URL that did not come from
+# metadata never inherits one.
+pr_landing_for_task() { # <meta> <pr>
+  local meta=$1 pr=$2 value=
+  [ -n "$pr" ] || return 0
+  if [ "$(clean_field "$(meta_field "$meta" pr)")" = "$pr" ]; then
+    value=$(clean_field "$(meta_field "$meta" pr_landing)")
+  fi
+  case "$value" in
+    confirmed|unchecked) ;;
+    *) value=unverified ;;
+  esac
+  printf '%s\n' "$value"
+}
+
 home_secondmate_id() {
   local marker="$FM_HOME/.fm-secondmate-home" id
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
@@ -313,8 +335,8 @@ append_once() { # <path> <line>
   printf '%s\n' "$line" >> "$path"
 }
 
-report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
-  local self=$1 task=$2 state=$3 outcome_key=$4 fingerprint=$5 pr=$6 parent_record destination line
+report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr> <pr-landing>
+  local self=$1 task=$2 state=$3 outcome_key=$4 fingerprint=$5 pr=$6 pr_landing=$7 parent_record destination line
   parent_record="$FM_HOME/.fm-secondmate-parent"
   fm_secondmate_parent_record_parse "$parent_record" || return 1
   case "$FM_SECONDMATE_PARENT_ROUTE" in
@@ -328,12 +350,12 @@ report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
     *) return 1 ;;
   esac
   line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
-  [ -z "$pr" ] || line="$line pr=$pr"
+  [ -z "$pr" ] || line="$line pr=$pr pr_landing=$pr_landing"
   append_once "$destination" "$line"
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr pr_landing incarnation fingerprint outcome_key payload kind state_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -352,6 +374,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta" "$status")
+  pr_landing=$(pr_landing_for_task "$meta" "$pr")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
   if [ -n "$self" ]; then
@@ -362,7 +385,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   if [ -n "$self" ]; then
-    if report_to_parent "$self" "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
+    if report_to_parent "$self" "$id" "$state" "$outcome_key" "$fingerprint" "$pr" "$pr_landing"; then
       mark_reported "$RECORD_PENDING" || return 1
     else
       payload="inactive terminal outcome needs parent report: child=$id state=$state"
@@ -372,7 +395,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   fi
   record_phase_set "$RECORD_PENDING" presentation || return 1
   payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
-  [ -z "$pr" ] || payload="$payload pr=$pr"
+  [ -z "$pr" ] || payload="$payload pr=$pr pr_landing=$pr_landing"
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
 

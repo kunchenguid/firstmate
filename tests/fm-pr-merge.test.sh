@@ -64,13 +64,17 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
-# gh-axi mock recording every invocation to a log file, and gh mock answering
+# gh-axi mock recording every invocation to a log file, answering the repository
+# permission read fm-pr-check.sh's landing guard makes, and gh mock answering
 # headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case " $* " in
+  *" api "*"/repos/"*) printf '%s\n' "${FM_TEST_GH_AXI_PERM-true}"; exit 0 ;;
+esac
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
@@ -94,6 +98,9 @@ add_gh_mocks_merge_fails() {
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case " $* " in
+  *" api "*"/repos/"*) printf '%s\n' "${FM_TEST_GH_AXI_PERM-true}"; exit 0 ;;
+esac
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
 esac
@@ -250,6 +257,31 @@ test_records_pr_and_head_before_merging() {
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+}
+
+# A pull request the forge says this machine cannot merge into is not a landing
+# path, so recording refuses it and the merge never reaches the forge.
+test_unmergeable_repository_refuses_before_merge() {
+  local case_dir rc
+  case_dir=$(make_case unmergeable-repo)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_GH_AXI_PERM=false run_pr_merge "$case_dir" task-x1 https://github.com/upstream/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "unmergeable-repo: fm-pr-merge merged a repository this machine cannot merge into"
+  assert_grep 'cannot be merged from this machine' "$case_dir/stderr" \
+    "unmergeable-repo: the refusal did not name the landing problem"
+  grep -q '^pr=' "$case_dir/state/task-x1.meta" \
+    && fail "unmergeable-repo: an unmergeable pull request was recorded anyway"
+  grep -q 'pr merge' "$case_dir/gh-axi.log" \
+    && fail "unmergeable-repo: gh-axi pr merge was invoked despite the refusal"
+  pass "fm-pr-merge refuses a repository the forge says this machine cannot merge into"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -812,6 +844,7 @@ test_github_still_forwards_sha_arg() {
 
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_unmergeable_repository_refuses_before_merge
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge

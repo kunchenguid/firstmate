@@ -89,9 +89,20 @@ case " $* " in
     ;;
 esac
 SH
+  # gh-axi reproducing the two contracts these tests depend on: the repository
+  # permission read the landing guard makes, which prints one bare boolean and
+  # exits 0, and the plain logged call every other path makes.
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case " $* " in
+  *" api "*"/repos/"*)
+    [ "${FM_TEST_GH_AXI_PERM_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GH_AXI_PERM_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_AXI_PERM_SLEEP"
+    printf '%s\n' "${FM_TEST_GH_AXI_PERM-true}"
+    exit 0
+    ;;
+esac
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
@@ -3354,6 +3365,133 @@ test_retirement_queue_failure_and_receipt_tampering() {
   pass "queue failure and untrusted receipts preserve canonical poll evidence"
 }
 
+# The landing-target guard proves itself only if the repository name is held
+# constant. Every case below arms the SAME upstream pull request and moves only
+# the forge's answer, so a guard that matched "kunchenguid/firstmate" could not
+# produce both outcomes and could not pass.
+UPSTREAM_PR=https://github.com/kunchenguid/firstmate/pull/1
+
+seed_fork_origin() {  # <dir> <origin-url>
+  local dir=$1 origin=$2
+  git -C "$dir/wt" init -q >/dev/null 2>&1 || return 1
+  git -C "$dir/wt" remote add origin "$origin" || return 1
+}
+
+assert_arming_refused() {  # <dir> <expected-stderr-substring> <what>
+  local dir=$1 expected=$2 what=$3 state before rc
+  state="$dir/home/state"
+  before=$(state_snapshot "$state")
+  set +e
+  run_check_entry "$dir" task-a "$UPSTREAM_PR" > "$dir/arm.out" 2> "$dir/arm.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$what did not refuse to arm"
+  grep -qF "$expected" "$dir/arm.err" || fail "$what refusal was not reported: $(cat "$dir/arm.err")"
+  [ ! -s "$dir/arm.out" ] || fail "$what refusal still announced an armed poll"
+  [ "$(state_snapshot "$state")" = "$before" ] || fail "$what refusal changed task state"
+  assert_no_grep '^pr=' "$state/task-a.meta" "$what refusal recorded a PR"
+}
+
+test_landing_target_guard() {
+  local dir state count landing_line pr_line rc
+
+  # 1. The forge reports no write access: refused, naming the fork the task's
+  # worktree actually pushes to as where the work has to land instead.
+  dir=$(make_case landing-refused)
+  write_task_meta "$dir"
+  seed_fork_origin "$dir" git@github.com:x45dev/firstmate.git \
+    || fail "could not seed the fork origin fixture"
+  FM_TEST_GH_AXI_PERM=false assert_arming_refused "$dir" \
+    'error: kunchenguid/firstmate cannot be merged from this machine; land this work on x45dev/firstmate instead' \
+    'an upstream pull request'
+  grep -qF 'api /repos/kunchenguid/firstmate' "$dir/gh-axi.log" \
+    || fail "the guard did not consult the forge for the viewer permission"
+
+  # 2. The same repository, the same worktree, the opposite forge answer: armed.
+  # This pair is the whole contract - the verdict decides, not the name.
+  dir=$(make_case landing-confirmed)
+  write_task_meta "$dir"
+  seed_fork_origin "$dir" git@github.com:x45dev/firstmate.git \
+    || fail "could not seed the fork origin fixture"
+  state="$dir/home/state"
+  FM_TEST_GH_AXI_PERM=true run_check_entry "$dir" task-a "$UPSTREAM_PR" \
+    > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "a confirmed landing target was refused: $(cat "$dir/arm.err")"
+  grep -qxF "pr=$UPSTREAM_PR" "$state/task-a.meta" || fail "confirmed arming did not record the PR"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "confirmed arming did not publish an authenticated poll"
+
+  # 3. The recorded verdict is what the reporting path reads, and it is written
+  # before pr= so fm_pr_metadata_identity_parse stays unchanged and a forged
+  # trailing pr_landing= line still fails closed.
+  grep -qxF 'pr_landing=confirmed' "$state/task-a.meta" || fail "the landing verdict was not recorded"
+  landing_line=$(grep -n '^pr_landing=' "$state/task-a.meta" | cut -d: -f1)
+  pr_line=$(grep -n '^pr=' "$state/task-a.meta" | cut -d: -f1)
+  [ "$landing_line" -lt "$pr_line" ] || fail "the landing verdict was recorded after pr="
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "the recorded landing verdict broke canonical metadata identity"
+  cp "$state/task-a.meta" "$dir/forged.meta"
+  printf 'pr_landing=confirmed\n' >> "$dir/forged.meta"
+  fm_pr_metadata_identity_parse "$dir/forged.meta" \
+    && fail "a landing verdict appended after pr= was accepted"
+
+  FM_TEST_GH_AXI_PERM=true run_check_entry "$dir" task-a "$UPSTREAM_PR" >/dev/null 2>/dev/null \
+    || fail "re-arming a confirmed landing target failed"
+  count=$(grep -c '^pr_landing=' "$state/task-a.meta")
+  [ "$count" -eq 1 ] || fail "re-arming appended a duplicate landing verdict"
+
+  # 4. An unreachable forge is an answer we did not get, not a permission we
+  # have, so each way of not getting one refuses rather than arming.
+  dir=$(make_case landing-forge-failed)
+  write_task_meta "$dir"
+  FM_TEST_GH_AXI_PERM_FAIL=1 assert_arming_refused "$dir" \
+    'error: could not confirm kunchenguid/firstmate is a landing path (the forge could not be queried)' \
+    'a forge call that failed'
+
+  dir=$(make_case landing-forge-timeout)
+  write_task_meta "$dir"
+  FM_PR_LANDING_TIMEOUT=1 FM_TEST_GH_AXI_PERM_SLEEP=5 assert_arming_refused "$dir" \
+    'error: could not confirm kunchenguid/firstmate is a landing path (the forge did not answer within the time limit)' \
+    'a forge call that timed out'
+
+  dir=$(make_case landing-forge-garbage)
+  write_task_meta "$dir"
+  FM_TEST_GH_AXI_PERM='<html>rate limited</html>' assert_arming_refused "$dir" \
+    'error: could not confirm kunchenguid/firstmate is a landing path (the forge did not report a permission)' \
+    'a forge reply that was not a permission'
+
+  dir=$(make_case landing-forge-absent)
+  write_task_meta "$dir"
+  rm -f "$dir/fakebin/gh-axi"
+  FM_TEST_GH_AXI_PERM=false assert_arming_refused "$dir" \
+    'error: could not confirm kunchenguid/firstmate is a landing path (gh-axi is not on PATH)' \
+    'an absent forge CLI'
+
+  # 5. With no origin to name, the refusal still stands and still says where the
+  # work has to go; only the fork's name is missing.
+  dir=$(make_case landing-no-origin)
+  write_task_meta "$dir"
+  FM_TEST_GH_AXI_PERM=false assert_arming_refused "$dir" \
+    'error: kunchenguid/firstmate cannot be merged from this machine; land this work on the fork this project pushes to instead' \
+    'an upstream pull request with no recorded origin'
+
+  # 6. A forge with no verified viewer-permission source is left exactly as it
+  # was: armed, recorded as unchecked, and never asked of gh-axi.
+  dir=$(make_case landing-gitlab-unchecked)
+  write_task_meta "$dir"
+  state="$dir/home/state"
+  run_check_entry "$dir" task-a https://gitlab.example/group/project/-/merge_requests/4 \
+    > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "a GitLab merge request was refused by the landing guard: $(cat "$dir/arm.err")"
+  grep -qxF 'pr_landing=unchecked' "$state/task-a.meta" \
+    || fail "the GitLab landing verdict was not recorded as unchecked"
+  assert_no_grep '/repos/' "$dir/gh-axi.log" "the GitLab path consulted GitHub for a permission"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the GitLab merge watch was not armed"
+
+  pass "arming a merge poll follows the forge's viewer permission, never a repository name"
+}
+
 test_gitlab_merged_poll_retires() {
   local dir state url rc
   dir=$(make_case gitlab-merged-retirement)
@@ -3381,6 +3519,7 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_landing_target_guard
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

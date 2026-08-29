@@ -1455,8 +1455,11 @@ test_rechain_delivers_second_post_on_same_thread() {
   FAKE_CURL_LOG="$log" run_pf "$parent" deliver public-final-a >/dev/null || fail "deliver failed"
   [ "$(followup_posts "$log")" = 1 ] || fail "expected the investigation post"
 
-  out=$(FAKE_CURL_LOG="$log" run_pf "$parent" rechain public-final-b --from public-final-a \
-    --work-home main --work-id ship-b --expected pr-merged) \
+  # Pinned inside the fixture's followup_expires_at window (2026-08-21T01:12:00Z
+  # to 2026-08-28T01:12:00Z) so this rechain never goes stale against the real
+  # wall clock once that window is in the past.
+  out=$(FAKE_CURL_LOG="$log" FMX_NOW_OVERRIDE=1787400000 run_pf "$parent" rechain public-final-b \
+    --from public-final-a --work-home main --work-id ship-b --expected pr-merged) \
     || fail "rechain failed: $out"
   assert_contains "$out" "retired public-final-a reason=handed on to public-final-b" \
     "rechain must retire the source loop"
@@ -1529,7 +1532,10 @@ exec "$REAL_TASKS_AXI" "$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
 
-  REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" \
+  # Pinned inside the fixture's followup_expires_at window (2026-08-21T01:12:00Z
+  # to 2026-08-28T01:12:00Z) so this rechain never goes stale against the real
+  # wall clock once that window is in the past.
+  REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" FMX_NOW_OVERRIDE=1787400000 \
     expect_failure "rechain must expose a resumable partial add" \
     run_pf "$home" rechain public-final-resume-b --from public-final-resume-a \
       --work-home main --work-id ship-resume --expected pr-merged
@@ -1543,7 +1549,7 @@ SH
   assert_absent "$home/state/public-followup/registry/public-final-resume-b" \
     "a failed bind must not publish a registration"
 
-  out=$(REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" \
+  out=$(REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" FMX_NOW_OVERRIDE=1787400000 \
     run_pf "$home" rechain public-final-resume-b --from public-final-resume-a \
       --work-home main --work-id ship-resume --expected pr-merged) \
     || fail "retrying the same rechain command must resume: $out"
@@ -1617,13 +1623,18 @@ done
 exec /bin/rm "\$@"
 EOF
   chmod +x "$home/fakebin/rm"
-  expect_failure "rechain must surface a failed source retirement" \
+  # Pinned inside the fixture's followup_expires_at window (2026-08-21T01:12:00Z
+  # to 2026-08-28T01:12:00Z) so these rechains never go stale against the real
+  # wall clock once that window is in the past.
+  FMX_NOW_OVERRIDE=1787400000 \
+    expect_failure "rechain must surface a failed source retirement" \
     run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
       --work-home main --work-id ship-retire-b --expected pr-merged
   assert_contains "$EXPECT_OUT" "public loop remains open" \
     "failed retirement must report that the source remains open"
 
-  expect_failure "a failed retirement must not leave the source claimable by another destination" \
+  FMX_NOW_OVERRIDE=1787400000 \
+    expect_failure "a failed retirement must not leave the source claimable by another destination" \
     run_pf "$home" rechain public-final-retire-c --from public-final-retire-a \
       --work-home main --work-id ship-retire-c --expected pr-merged
   assert_contains "$EXPECT_OUT" "already claimed by rechain destination 'public-final-retire-b'" \
@@ -1632,7 +1643,7 @@ EOF
     "a refused competing destination must not be registered"
 
   /bin/rm "$home/fakebin/rm"
-  out=$(run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
+  out=$(FMX_NOW_OVERRIDE=1787400000 run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
     --work-home main --work-id ship-retire-b --expected pr-merged) \
     || fail "the claimed destination must remain resumable: $out"
   assert_contains "$out" "retired public-final-retire-a" \
@@ -1842,7 +1853,11 @@ test_rechain_refuses_unclaimed_existing_destination() {
     --expected-final-file "$home/collision-expected.json" \
     --expires-at 2026-08-28T01:12:00Z >/dev/null || fail "could not seed destination collision"
 
-  expect_failure "a first rechain must not adopt an unrelated existing obligation" \
+  # Pinned inside the fixture's followup_expires_at window (2026-08-21T01:12:00Z
+  # to 2026-08-28T01:12:00Z) so this rechain never goes stale against the real
+  # wall clock once that window is in the past.
+  FMX_NOW_OVERRIDE=1787400000 \
+    expect_failure "a first rechain must not adopt an unrelated existing obligation" \
     run_pf "$home" rechain public-final-existing-b --from public-final-existing-a \
       --work-home main --work-id ship-existing --expected pr-merged
   assert_contains "$EXPECT_OUT" "was not created by this rechain" \
