@@ -587,7 +587,7 @@ Deleting it would restore the bare-liveness fallback this change's own rationale
 ### Beacon freshness under host suspend - attempted and deferred
 
 The second half of the reported problem, that `state/.last-watcher-beat` can read fresh while supervision is already dead and stale while a watcher is merely suspended, was attempted on this branch and deliberately deferred rather than shipped.
-The approach - separating a suspended watcher from a wedged one by watching the beacon for a bounded window instead of inferring from its age - is sound and reproduces the fault, but bounding those windows introduced five regressions of its own across four review rounds, each fix bounding one window and opening another.
+The approach - separating a suspended watcher from a wedged one by watching the beacon for a bounded window instead of inferring from its age - is sound and reproduces the fault, but bounding those windows introduced five regressions of its own, each fix bounding one window and opening another.
 Two of them broke guarantees the change itself had stated: callers that declared no budget stopped keeping their previous timing, and a receipt could claim a full observation that was never spent, which let a caller skip the one observation the design promised.
 The pattern is the finding, and it is recorded here rather than lost: adding timed windows to a supervision path that had none, measured on a clock that can move underneath them in both directions, is the same class of fault the work set out to fix.
 No part of that machinery is present in this change; the evidence above covers only what ships.

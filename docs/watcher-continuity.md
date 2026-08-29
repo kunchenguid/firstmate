@@ -136,5 +136,7 @@ The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+The beacon in `state/.last-watcher-beat` remains an age reading rather than a liveness proof, so it can read fresh while supervision is already dead and stale while a watcher is merely suspended.
+[`verification/supervision.md`](verification/supervision.md#beacon-freshness-under-host-suspend---attempted-and-deferred) records why that half is deferred rather than fixed here.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.
