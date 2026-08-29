@@ -150,8 +150,15 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # appended to that garbage. Arithmetic under `set -u` then aborts on the stray
 # token (e.g. the word "File" read as an unset variable), which silently kills the
 # watcher mid-cycle. Detect the platform once and pick the right form.
+#
+# Detecting the platform is necessary but NOT sufficient: `uname` tells you the OS,
+# not which `stat` wins on PATH. A Mac with Homebrew coreutils puts GNU stat ahead
+# of /usr/bin, so `uname` says Darwin while `stat` is GNU 9.x - and the exact
+# stdout-garbage failure described above fires on macOS too. Resolve BSD stat by
+# path rather than trusting PATH. FM_BSD_STAT overrides it for hosts that keep BSD
+# stat elsewhere.
 if [ "$(uname)" = Darwin ]; then
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
+  stat_mtime() { "${FM_BSD_STAT:-/usr/bin/stat}" -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi

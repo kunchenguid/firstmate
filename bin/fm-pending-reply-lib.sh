@@ -536,7 +536,7 @@ fm_pending_reply_file_signature() {  # <path>
   local path=$1
   [ -f "$path" ] || { printf 'missing'; return 0; }
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%d:%i:%z:%m:%c' "$path" 2>/dev/null || printf 'unreadable'
+    LC_ALL=C "${FM_BSD_STAT:-/usr/bin/stat}" -f '%d:%i:%z:%m:%c' "$path" 2>/dev/null || printf 'unreadable'
   else
     LC_ALL=C stat -c '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null || printf 'unreadable'
   fi

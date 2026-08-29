@@ -91,7 +91,7 @@ if [ "$FM_INACTIVE_RECONCILE_BUDGET_SECS" -gt 30 ]; then
 fi
 
 if [ "$(uname)" = Darwin ]; then
-  file_mtime() { stat -f %m "$1" 2>/dev/null; }
+  file_mtime() { "${FM_BSD_STAT:-/usr/bin/stat}" -f %m "$1" 2>/dev/null; }
 else
   file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi

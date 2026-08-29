@@ -619,7 +619,7 @@ FM_OPEN_DECISIONS_FOLD_VERSION=5
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   local f=$1
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%d:%i' "$f" 2>/dev/null
+    LC_ALL=C "${FM_BSD_STAT:-/usr/bin/stat}" -f '%d:%i' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null
   fi
