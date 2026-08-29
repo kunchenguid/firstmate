@@ -186,6 +186,8 @@ A second worktree of the same repository then launched without a dialog or anoth
 An unrelated scratch repository still required trust, ruling out global trust as the explanation.
 These observations are dated, version-pinned manual evidence rather than an automated proof.
 Portable regressions in `tests/fm-composer-lib.test.sh` and `tests/fm-claude-harness.test.sh` pin the classifier and spawn-path behavior without depending on Claude credentials.
+Automatic acceptance is gated by the task-scoped `fm-spawn.sh --accept-claude-trust` grant, which is persisted only in that task's Firstmate metadata for relaunches.
+Without the grant, an observed dialog remains untouched and becomes a supervisor-visible blocker.
 Firstmate never writes or pre-seeds Claude's trust store.
 
 The opt-in guard creates a fresh isolated config directory and proceeds to the real launch path only when Claude reports that profile authenticated:

@@ -117,6 +117,7 @@ case "${1:-}" in
             case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
               trusted) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               trusted-idle) printf 'trusted-idle\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              focused-dialog) printf 'trust-yes\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               delayed-dialog) printf 'delayed-1\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               blank-delayed-dialog) printf 'blank-1\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               last-poll-dialog) printf 'last-1\n' > "$FM_FAKE_CLAUDE_STATE" ;;
@@ -252,7 +253,7 @@ run_orca_spawn() {
     FM_CLAUDE_TRUST_POLL_INTERVAL=0 \
     PATH="$fakebin:$NODE_BIN_DIR:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --backend orca --harness claude \
-      --mode no-mistakes --yolo off "$@" 2>&1
+      --mode no-mistakes --yolo off --accept-claude-trust "$@" 2>&1
 }
 
 read_spawn_record() {
@@ -263,7 +264,10 @@ EOF
 
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  local trust_args=()
   shift 6
+  [ "${FM_TEST_CLAUDE_TRUST_AUTHORITY:-accept}" != accept ] \
+    || trust_args+=(--accept-claude-trust)
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -276,7 +280,72 @@ run_spawn() {
     FM_CLAUDE_TRUST_CLEAR_POLLS="${FM_TEST_CLAUDE_TRUST_CLEAR_POLLS:-10}" \
     FM_CLAUDE_TRUST_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness claude --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness claude --mode no-mistakes --yolo off \
+      "${trust_args[@]+"${trust_args[@]}"}" "$@" 2>&1
+}
+
+test_claude_trust_dialog_requires_explicit_project_authority() {
+  local id rec out rc expected bare_keys
+  id="claude-no-trust-authority-z0-$$"
+  rec=$(make_spawn_case no-trust-authority "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=dialog FM_TEST_CLAUDE_TRUST_AUTHORITY=absent run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "an unauthorized trust dialog should leave the worker alive as a blocker"
+  expected="blocked: backend=tmux task=$id requires explicit project-scoped --accept-claude-trust authority before Firstmate may accept Claude's persistent workspace-trust dialog; worker left alive on firstmate:fm-$id"
+  assert_contains "$out" "$expected" \
+    "the missing trust authority did not produce its project-scoped blocker"
+  assert_grep "$expected" "$HOME_DIR/state/$id.status" \
+    "the missing trust authority did not leave a supervisor-visible blocker"
+  assert_no_grep 'claude_trust=' "$HOME_DIR/state/$id.meta" \
+    "an unauthorized spawn persisted a Claude trust grant"
+  bare_keys=$(awk 'NF == 4 {print $4}' "$CASE_DIR/keys.log")
+  [ "$bare_keys" = Enter ] \
+    || fail "an unauthorized spawn delivered trust-navigation keys: $bare_keys"
+  [ "$(cat "$CASE_DIR/claude.state")" = trust-no ] \
+    || fail "the unauthorized trust dialog was not left untouched"
+  pass "fm-spawn: Claude trust acceptance requires explicit project-scoped authority"
+}
+
+test_claude_trust_authority_is_refused_for_other_harnesses() {
+  local id rec out rc
+  id="claude-trust-wrong-harness-z00-$$"
+  rec=$(make_spawn_case wrong-harness "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --harness codex --mode no-mistakes --yolo off \
+      --accept-claude-trust 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Claude trust grant must be refused for another harness"
+  assert_contains "$out" "--accept-claude-trust applies only to a Claude harness" \
+    "the cross-harness trust grant refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "the cross-harness trust grant refusal happened after task publication"
+  pass "fm-spawn: Claude trust authority cannot broaden to another harness"
+}
+
+test_claude_focused_trust_choice_still_requires_authority() {
+  local id rec out rc bare_keys
+  id="claude-focused-no-authority-z000-$$"
+  rec=$(make_spawn_case focused-no-authority "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=focused-dialog FM_TEST_CLAUDE_TRUST_AUTHORITY=absent run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a focused but unauthorized trust choice should remain blocked"
+  assert_contains "$out" "requires explicit project-scoped --accept-claude-trust authority" \
+    "the focused trust choice bypassed the project-scoped authority blocker"
+  bare_keys=$(awk 'NF == 4 {print $4}' "$CASE_DIR/keys.log")
+  [ "$bare_keys" = Enter ] \
+    || fail "an unauthorized focused trust choice received a confirming Enter: $bare_keys"
+  [ "$(cat "$CASE_DIR/claude.state")" = trust-yes ] \
+    || fail "the unauthorized focused trust choice was not left untouched"
+  pass "fm-spawn: a pre-focused Claude trust choice cannot bypass authority"
 }
 
 test_claude_already_trusted_spawn_never_touches_the_dialog() {
@@ -317,6 +386,8 @@ test_claude_trust_dialog_is_navigated_never_a_blind_enter() {
   [ "$bare_keys" = "$(printf 'Enter\nDown\nEnter')" ] \
     || fail "the dialog navigation sequence was not exactly Enter, Down, Enter - got: $bare_keys"
   [ "$(cat "$CASE_DIR/claude.state")" = processing ] || fail "the dialog must end with claude actually processing the brief"
+  assert_grep 'claude_trust=accept' "$HOME_DIR/state/$id.meta" \
+    "the project-scoped Claude trust grant was not persisted for task relaunches"
   pass "fm-spawn: claude's trust dialog is navigated to \"Yes\" before Enter, never a blind Enter"
 }
 
@@ -499,6 +570,9 @@ test_claude_orca_capability_gap_stays_alive_and_loud() {
   pass "fm-spawn: Orca leaves Claude alive and loudly requests manual trust clearance"
 }
 
+test_claude_trust_dialog_requires_explicit_project_authority
+test_claude_trust_authority_is_refused_for_other_harnesses
+test_claude_focused_trust_choice_still_requires_authority
 test_claude_already_trusted_spawn_never_touches_the_dialog
 test_claude_trust_dialog_is_navigated_never_a_blind_enter
 test_claude_stuck_dialog_fails_loudly

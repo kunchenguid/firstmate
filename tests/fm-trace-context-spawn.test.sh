@@ -31,6 +31,7 @@ case "${1:-}" in
     exit 0
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
+  capture-pane) printf 'Thinking... (esc to interrupt)\n'; exit 0 ;;
   send-keys)
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do

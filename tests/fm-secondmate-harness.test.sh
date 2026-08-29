@@ -416,13 +416,16 @@ test_propagate_lib() {
 # propagates the crew harness into the home's config.
 # ===========================================================================
 
-# A tmux stub that accepts every subcommand and prints nothing, so no window
-# pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
+# A tmux stub that accepts every subcommand and exposes a successful Claude
+# processing footer after launch. Echoes the fakebin dir.
 make_noop_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in
+  capture-pane) printf 'Thinking... (esc to interrupt)\n' ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -643,6 +646,7 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  capture-pane) printf 'Thinking... (esc to interrupt)\n'; exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then

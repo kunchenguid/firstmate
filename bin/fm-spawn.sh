@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--accept-claude-trust]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--accept-claude-trust]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -34,6 +34,12 @@
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
+#   --accept-claude-trust is the explicit project-scoped authority for this task
+#   to accept Claude's persistent workspace-trust dialog if one appears. Without
+#   it, an observed dialog is left untouched and recorded as a blocker. The grant
+#   is recorded in task metadata so a relaunch of the same task retains it; it is
+#   scoped to crewmate and scout tasks, refused for every other harness or task
+#   kind, and never edits Claude's trust store.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -318,6 +324,9 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+CLAUDE_TRUST_ACCEPT=0
+CLAUDE_TRUST_ACCEPT_SET=0
+CLAUDE_TRUST_RECORDED=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -364,6 +373,7 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --accept-claude-trust) CLAUDE_TRUST_ACCEPT=1; CLAUDE_TRUST_ACCEPT_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -387,6 +397,10 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
     echo "error: --traceparent is not a valid W3C traceparent" >&2
     exit 1
   }
+fi
+if [ "$CLAUDE_TRUST_ACCEPT" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --accept-claude-trust applies only to Claude crewmate and scout tasks" >&2
+  exit 1
 fi
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
@@ -944,6 +958,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ] || shared_args+=(--accept-claude-trust)
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -1128,6 +1143,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  if [ "$(fm_meta_get "$RELAUNCH_META" claude_trust)" = accept ]; then
+    CLAUDE_TRUST_RECORDED=1
+  fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1335,6 +1353,26 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$CLAUDE_TRUST_ACCEPT_SET" -ne 1 ] \
+  && [ "$CLAUDE_TRUST_RECORDED" -eq 1 ]; then
+  case "$HARNESS" in
+    claude*) CLAUDE_TRUST_ACCEPT=1 ;;
+  esac
+fi
+if [ "$CLAUDE_TRUST_ACCEPT" -eq 1 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --accept-claude-trust applies only to Claude crewmate and scout tasks" >&2
+    exit 1
+  fi
+  case "$HARNESS" in
+    claude*) ;;
+    *)
+      echo "error: --accept-claude-trust applies only to a Claude harness" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
@@ -2456,12 +2494,20 @@ claude_trust_dialog_clear() {
       case "$state" in
         trust-focused)
           [ "$clear_i" -lt "$clear_max" ] || return 1
+          if [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ]; then
+            claude_spawn_trust_authority_required
+            return 0
+          fi
           spawn_send_key "$T" Enter || return 1
           accept_attempted=1
           verification_due=1
           ;;
         trust-unfocused)
           [ "$clear_i" -lt "$clear_max" ] || return 1
+          if [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ]; then
+            claude_spawn_trust_authority_required
+            return 0
+          fi
           if ! fm_control_backend_supports_key "$BACKEND" Down; then
             claude_spawn_human_trust_required
             return 0
@@ -2495,6 +2541,13 @@ claude_spawn_fail() {  # <detail>
 claude_spawn_human_trust_required() {
   local line
   line="blocked: backend=$BACKEND task=$ID requires a human keystroke to clear Claude's workspace-trust dialog; select \"Yes, I trust this folder\" with Down, then press Enter; worker left alive on $T"
+  printf '%s\n' "$line" >> "$STATE/$ID.status"
+  printf '%s\n' "$line" >&2
+}
+
+claude_spawn_trust_authority_required() {
+  local line
+  line="blocked: backend=$BACKEND task=$ID requires explicit project-scoped --accept-claude-trust authority before Firstmate may accept Claude's persistent workspace-trust dialog; worker left alive on $T"
   printf '%s\n' "$line" >> "$STATE/$ID.status"
   printf '%s\n' "$line" >&2
 }
@@ -2942,7 +2995,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent claude_trust backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2962,6 +3015,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ] || echo "claude_trust=accept"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

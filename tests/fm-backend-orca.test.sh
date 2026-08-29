@@ -32,7 +32,11 @@ echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+if [ -f "$RESP/$n.out" ]; then
+  cat "$RESP/$n.out"
+elif [ "${1:-}:${2:-}" = terminal:read ]; then
+  printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":["Thinking... (esc to interrupt)"]}}}'
+fi
 exit 0
 SH
   chmod +x "$fb/orca"

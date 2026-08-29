@@ -116,6 +116,7 @@ case "${1:-}" in
     fi
     exit 0
     ;;
+  capture-pane) printf 'Thinking... (esc to interrupt)\n'; exit 0 ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
