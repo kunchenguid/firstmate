@@ -722,6 +722,7 @@ assert_grep 'remote_target=fm-remote:' "$PARENT/state/ios.meta" "parent metadata
 assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
+assert_grep "-c 'service_tier=\"default\"'" "$HERDR_LOG" "remote Codex launch omitted the standard service tier override"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
@@ -732,6 +733,15 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --fast-tier)
+assert_contains "$out" 'remote=remote-mac backend=herdr' "fast-tier remote spawn did not report its host-qualified route"
+assert_no_grep 'service_tier' "$HERDR_LOG" "remote Codex --fast-tier launch retained the standard service tier override"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "fast-tier remote endpoint was not projected alive from its own host"
+pass "remote Codex fast-tier opt-in omits the standard override end to end"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"

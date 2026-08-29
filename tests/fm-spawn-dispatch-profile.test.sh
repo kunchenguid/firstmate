@@ -379,8 +379,8 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "explicit harness launch did not thread model and effort"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"' --dangerously-bypass-approvals-and-sandbox" \
+    "explicit harness launch did not thread model, effort, and standard service tier"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
@@ -446,9 +446,27 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread model, reasoning effort, and standard service tier config"
+  pass "codex receives --model, model_reasoning_effort, and the standard service tier"
+}
+
+test_codex_fast_tier_skips_standard_override() {
+  local rec id out status launch
+  id=profile-codex-fast-tier-z3b
+  rec=$(make_spawn_case profile-codex-fast-tier codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high --fast-tier)
+  status=$?
+  expect_code 0 "$status" "codex spawn with --fast-tier should succeed"
+  launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
-  pass "codex receives --model and model_reasoning_effort profile flags"
+    "codex fast-tier launch did not preserve the model and reasoning effort config"
+  assert_not_contains "$launch" "service_tier" \
+    "codex --fast-tier launch must omit the standard service tier override"
+  pass "codex --fast-tier skips only the standard service tier override"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -462,8 +480,8 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'service_tier=\"default\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not preserve the model flag and standard service tier when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
@@ -839,6 +857,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_codex_fast_tier_skips_standard_override
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
