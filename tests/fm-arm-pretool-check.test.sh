@@ -43,6 +43,7 @@ matrix_case A14 allow "[ -f 'config/x-mode.env' ] && source 'config/x-mode.env';
 matrix_case A15 allow "cd $ROOT && exec bin/fm-watch-arm.sh"
 matrix_case A16 allow "export FM_HOME=$ROOT && bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A17 allow $'source "config/x-mode.env"\nbin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A18 allow 'exec bin/fm-watch-grok-longrun.sh'
 
 matrix_case R01 allow "pgrep -fl '/bin/fm-watch.sh' || true"
 matrix_case R02 allow "ps aux | rg '/bin/fm-watch.sh'"
@@ -122,6 +123,8 @@ matrix_case D55 deny 'while true; do pkill -f fm-watch; done'
 matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
 matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
 matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
+matrix_case D59 deny 'bin/fm-watch-grok-longrun.sh &'
+matrix_case D60 deny 'bin/fm-watch-grok-longrun.sh; echo after'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"

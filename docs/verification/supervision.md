@@ -446,7 +446,7 @@ Claude Code 2.1.219
 codex-cli 0.144.4
 OpenCode 1.17.18
 Pi 0.80.10
-grok 0.2.103 (89c3d36fb6f1) [stable]
+grok 1.0.5 (5115b46bc909)
 ```
 
 | Harness | Exact opt-in command | Observed guarantee |
@@ -455,7 +455,9 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
-| Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
+| Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | One tracked long-runner stayed open through quiet recovery with no primary turn or internal arm completion, then one actionable signal produced exactly one native task completion and a handled durable wake. |
+
+The Grok row was reverified on 2026-08-24 against Grok 1.0.5 after the tracked long-runner replaced close-per-routine-cycle supervision.
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 

@@ -63,6 +63,7 @@ A command word in executed position is a protected execution when its normalized
 ```text
 bin/fm-watch-arm.sh          (arm; blessed entry point)
 bin/fm-watch-checkpoint.sh   (checkpoint; blessed entry point)
+bin/fm-watch-grok-longrun.sh (Grok long-runner; blessed entry point)
 bin/fm-watch.sh              (watch; protected but never blessed)
 ```
 
@@ -90,7 +91,7 @@ An actual protected command with a heredoc still has a redirection and is denied
 ## Blessed syntax tree
 
 An allowed watcher program is one linear outer command list with zero or more approved setup nodes followed by exactly one direct protected node.
-`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
+`bin/fm-watch-arm.sh`, `bin/fm-watch-checkpoint.sh`, and `bin/fm-watch-grok-longrun.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
 
 Approved setup nodes are:
 

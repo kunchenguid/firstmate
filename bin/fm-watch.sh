@@ -1177,6 +1177,13 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
+  # A recovery marker can exist with no durable wake and no open decision.
+  # Closing that empty cycle makes Grok inject a billed completion prompt even
+  # though there is nothing to handle. Keep this watcher live through the quiet
+  # episode after the recovery state is safely consumed.
+  [ -s "$FM_WAKE_QUEUE" ] && wake "check: rearm-resurface"
+  open=$(scan_open_decisions "$STATE") || wake "check: rearm-resurface"
+  [ -n "$open" ] || return 0
   wake "check: rearm-resurface"
 }
 
