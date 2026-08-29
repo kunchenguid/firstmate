@@ -19,7 +19,11 @@ make_fixture() {
   git -C "$wt" checkout -qb fm/ship
   fm_write_meta "$home/state/ship.meta" "window=fm:fm-ship" "worktree=$wt" "project=sample" "harness=codex" "kind=ship" "mode=no-mistakes" "spawn_gen=g1"
   printf 'done: implementation committed and focused checks passed\n' > "$home/state/ship.status"
-  printf 'Delivery contract: mode=no-mistakes\nFirstmate will then instruct you to run /no-mistakes to validate and ship a PR.\n' > "$home/data/ship/brief.md"
+  cat > "$home/data/ship/brief.md" <<'EOF'
+Delivery contract: mode=no-mistakes
+When you believe it is complete, append `done: {summary}` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+EOF
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] ship - Ship task (repo: sample) (kind: ship)
@@ -96,9 +100,46 @@ test_active_run_and_unavailable_attribution_refuse() {
   [[ "$out" == 'result=already-active task=ship' ]] || fail "active run was not recognized: $out"
   make_state_stub "$state" unavailable
   out=$(run_continue "$home" "$send" "$state") || fail "unavailable attribution execution failed"
-  [[ "$out" == *'reason=validation-attribution-unavailable'* ]] || fail "unavailable run query did not fail closed: $out"
+  [ "$out" = 'result=retry task=ship reason=validation-attribution-unavailable' ] \
+    || fail "unavailable run query did not remain retryable: $out"
   [ ! -d "$home/state/ship.inbox" ] || fail "unavailable run attribution received validation delivery"
-  pass "active validation and unavailable attribution both prevent duplicate delivery"
+  pass "active validation stops delivery and unavailable attribution remains retryable"
+}
+
+test_current_brief_requires_canonical_receipt() {
+  local dir home send state out head
+  dir="$TMP_ROOT/current-receipt"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  cat > "$home/data/ship/brief.md" <<'EOF'
+Delivery contract: mode=no-mistakes
+Delivery receipt contract: committed-head-v1
+When you believe it is complete, append `done: committed $(git rev-parse HEAD) {summary}` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+EOF
+  printf 'done: validation complete\n' > "$home/state/ship.status"
+  out=$(run_continue "$home" "$send" "$state") || fail "noncanonical current receipt execution failed"
+  [ "$out" = 'result=refused task=ship reason=missing-committed-receipt' ] \
+    || fail "current brief accepted a noncanonical receipt: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "current noncanonical receipt created an inbox delivery"
+  head=$(git -C "$home/projects/ship" rev-parse HEAD)
+  printf 'done: committed %s validation complete\n' "$head" > "$home/state/ship.status"
+  out=$(run_continue "$home" "$send" "$state") || fail "canonical current receipt execution failed"
+  [ "$out" = 'result=sent task=ship' ] || fail "current canonical receipt did not deliver: $out"
+  pass "current briefs require canonical committed-head receipts"
+}
+
+test_inbox_failure_remains_retryable() {
+  local dir home send state out
+  dir="$TMP_ROOT/inbox-retry"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_state_stub "$state" absent
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$send"
+  chmod +x "$send"
+  out=$(run_continue "$home" "$send" "$state") || fail "inbox failure execution failed"
+  [ "$out" = 'result=retry task=ship reason=inbox-delivery-failed' ] \
+    || fail "inbox delivery failure did not remain retryable: $out"
+  pass "inbox delivery failures remain retry obligations"
 }
 
 test_strict_run_attribution_distinguishes_absence_from_query_failure() {
@@ -291,6 +332,8 @@ SH
 test_exactly_once_delivery_and_replay
 test_refusals_preserve_stop
 test_active_run_and_unavailable_attribution_refuse
+test_current_brief_requires_canonical_receipt
+test_inbox_failure_remains_retryable
 test_strict_run_attribution_distinguishes_absence_from_query_failure
 test_identity_and_committed_head_requirements
 test_terminal_receipt_and_existing_lease_retry

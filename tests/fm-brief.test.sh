@@ -256,6 +256,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
+  grep -qx "Delivery receipt contract: committed-head-v1" "$brief" \
+    || fail "explicit no-mistakes brief omitted the committed-head receipt contract"
   assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
   assert_grep 'done: committed $(git rev-parse HEAD) {summary}' "$brief" \

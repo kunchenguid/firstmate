@@ -3,6 +3,14 @@
 
 FM_DELIVERY_CONTINUATION_SCHEMA='fm-delivery-continuation.v1'
 
+fm_delivery_committed_receipt_contract() {
+  printf '%s\n' 'Delivery receipt contract: committed-head-v1'
+}
+
+fm_delivery_historical_receipt_contract() {
+  printf '%s\n' 'When you believe it is complete, append `done: {summary}` to the status file and stop.'
+}
+
 fm_delivery_continuation_id() {  # <task> <head> <spawn-gen>
   printf '%s' "$1:$2:$3:committed-to-validation" | shasum -a 256 | cut -c1-16
 }

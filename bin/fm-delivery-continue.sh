@@ -23,6 +23,11 @@ LEASE_BIN="${FM_DELIVERY_LEASE_BIN:-$SCRIPT_DIR/fm-lease.sh}"
 SEND_BIN="${FM_DELIVERY_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 CREW_STATE_BIN="${FM_DELIVERY_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 
+# shellcheck source=bin/fm-delivery-continuation-lib.sh
+. "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
+COMMITTED_RECEIPT_CONTRACT=$(fm_delivery_committed_receipt_contract)
+HISTORICAL_RECEIPT_CONTRACT=$(fm_delivery_historical_receipt_contract)
+
 usage() { echo "usage: fm-delivery-continue.sh <task-id>" >&2; exit 2; }
 TASK=${1:-}
 [ "$#" -eq 1 ] || usage
@@ -48,7 +53,7 @@ claim_out=$("$LEASE_BIN" claim-new "$TASK" 2>&1) || {
   claim_rc=$?
   if [ "$claim_rc" -eq 6 ]; then retry supervision-owner-active; fi
   printf '%s\n' "$claim_out" >&2
-  refuse lease-unavailable
+  retry lease-unavailable
 }
 CLAIMED=1
 
@@ -59,6 +64,23 @@ meta_get() { sed -n "s/^$1=//p" "$META" | tail -1; }
 [ "$(meta_get mode)" = no-mistakes ] || refuse unsupported-delivery-mode
 SPAWN_GEN=$(meta_get spawn_gen)
 case "$SPAWN_GEN" in ''|*[!A-Za-z0-9._-]*) refuse missing-task-incarnation ;; esac
+
+BRIEF="$DATA/$TASK/brief.md"
+[ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] || refuse missing-generated-delivery-contract
+grep -Fqx 'Delivery contract: mode=no-mistakes' "$BRIEF" || refuse delivery-contract-mismatch
+grep -Fqx 'Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.' "$BRIEF" \
+  || refuse validation-not-authorized
+if grep -Eq 'DRAFT_FOR_FIRSTMATE_REVIEW|Execution-Authorized:[[:space:]]*false|RESEARCH_ONLY|NO_ORDER|NO_PROMOTION' "$BRIEF"; then
+  refuse prohibited-research-or-promotion-scope
+fi
+LEGACY_RECEIPT=0
+if grep -Fqx "$COMMITTED_RECEIPT_CONTRACT" "$BRIEF"; then
+  :
+elif grep -Fqx "$HISTORICAL_RECEIPT_CONTRACT" "$BRIEF"; then
+  LEGACY_RECEIPT=1
+else
+  refuse delivery-contract-mismatch
+fi
 
 STATUS="$STATE/$TASK.status"
 [ -f "$STATUS" ] && [ ! -L "$STATUS" ] || refuse missing-committed-receipt
@@ -78,17 +100,9 @@ else
   case "$LAST" in
     'done: PR '*|'done: merged'*) refuse attributable-validation-terminal-receipt ;;
   esac
+  [ "$LEGACY_RECEIPT" = 1 ] || refuse missing-committed-receipt
   case "$LAST" in 'done: '*) ;; *) refuse missing-committed-receipt ;; esac
   HEAD=$CURRENT
-fi
-
-BRIEF="$DATA/$TASK/brief.md"
-[ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] || refuse missing-generated-delivery-contract
-grep -Fqx 'Delivery contract: mode=no-mistakes' "$BRIEF" || refuse delivery-contract-mismatch
-grep -Fqx 'Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.' "$BRIEF" \
-  || refuse validation-not-authorized
-if grep -Eq 'DRAFT_FOR_FIRSTMATE_REVIEW|Execution-Authorized:[[:space:]]*false|RESEARCH_ONLY|NO_ORDER|NO_PROMOTION' "$BRIEF"; then
-  refuse prohibited-research-or-promotion-scope
 fi
 
 # The status fold is the single owner of live keyed decisions and blockers.
@@ -104,15 +118,12 @@ case "$CREW_STATE" in
   'run-attribution: parked'*) refuse attributable-validation-parked ;;
   'run-attribution: terminal'*) refuse attributable-validation-terminal ;;
   'run-attribution: absent'*) ;;
-  *) refuse validation-attribution-unavailable ;;
+  *) retry validation-attribution-unavailable ;;
 esac
 
 # shellcheck source=bin/fm-task-inbox-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
-# shellcheck source=bin/fm-delivery-continuation-lib.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 DELIVERY=$(fm_delivery_continuation_id "$TASK" "$HEAD" "$SPAWN_GEN")
 MESSAGE=$(fm_delivery_continuation_message "$TASK" "$HEAD" "$SPAWN_GEN" "$DELIVERY")
 DELIVERY_STATE=$(fm_delivery_continuation_state "$STATE" "$TASK" "$SPAWN_GEN" "$HEAD" 2>/dev/null || true)
@@ -122,5 +133,5 @@ case "$DELIVERY_STATE" in
 esac
 
 FM_SEND_IDEMPOTENT=1 FM_SEND_EXPECTED_SPAWN_GEN="$SPAWN_GEN" \
-  "$SEND_BIN" "$TASK" "$MESSAGE" >/dev/null || refuse inbox-delivery-failed
+  "$SEND_BIN" "$TASK" "$MESSAGE" >/dev/null || retry inbox-delivery-failed
 result sent

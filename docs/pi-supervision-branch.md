@@ -30,7 +30,8 @@ This feature is Pi-only by construction and changes nothing anywhere else:
 - Branch model and effort selection: the same extension registers `/supervision-model`, which picks the branch's model and then its reasoning effort, and applies both at the branch-session creation boundary; [configuration.md](configuration.md#pi-supervision-branch-model-and-effort-configsupervision-branch-model-configsupervision-branch-effort) owns the operator-facing schema and behavior.
 - Branch system prompt: `bin/fm-branch-prompt.sh`; its header owns the byte-stable-prefix contract (no timestamps, no fleet snapshot, no per-wake content).
 - Committed-ready delivery: `bin/fm-delivery-continue.sh` is the narrow leased owner for a `ship` task's recorded `mode=no-mistakes` committed receipt.
-  The primary Pi watcher invokes it at the common wake-dispatch boundary before choosing main versus branch, binds the result to the exact queue sequences it inspected, retains a live-lease conflict as a retry obligation, and dispatches only after the result is a durable instruction or a proven stop.
+  New briefs record the `committed-head-v1` receipt contract, while only a brief carrying the exact historical `done: {summary}` producer contract may use clean-head compatibility.
+  The primary Pi watcher invokes it at the common wake-dispatch boundary before choosing main versus branch, binds the result to the exact queue sequences it inspected, retains lease, attribution, and inbox-delivery failures as retry obligations, and dispatches only after the result is a durable instruction or a proven stop.
   Strict run attribution fails closed when the no-mistakes query is unavailable, and an existing continuation is valid only for its recorded exact head.
   Its inbox delivery never grants merge authority.
 - Outcome store: `bin/fm-branch-outcome.sh`; its header owns the append-only format and the read cursor.

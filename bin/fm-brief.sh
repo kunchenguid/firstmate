@@ -80,7 +80,11 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-delivery-continuation-lib.sh
+. "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+COMMITTED_RECEIPT_CONTRACT=$(fm_delivery_committed_receipt_contract)
+COMMITTED_RECEIPT_EVENT='done: committed $(git rev-parse HEAD) {summary}'
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -394,6 +398,11 @@ case "$MODE" in
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+if [ "$MODE" = no-mistakes ]; then
+  DOD=${DOD/'Delivery contract: mode=no-mistakes'/"Delivery contract: mode=no-mistakes
+$COMMITTED_RECEIPT_CONTRACT"}
+  DOD=${DOD/'done: {summary}'/"$COMMITTED_RECEIPT_EVENT"}
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

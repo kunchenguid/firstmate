@@ -42,7 +42,7 @@ install_pi_watch_extension_fixture() {
 [ -z "${FM_DELIVERY_LOG:-}" ] || printf 'delivery=%s\n' "$1" >> "$FM_DELIVERY_LOG"
 if [ -n "${FM_DELIVERY_RETRY_MARK:-}" ] && [ ! -e "$FM_DELIVERY_RETRY_MARK" ]; then
   : > "$FM_DELIVERY_RETRY_MARK"
-  printf 'result=retry task=%s reason=supervision-owner-active\n' "$1"
+  printf 'result=retry task=%s reason=%s\n' "$1" "${FM_DELIVERY_RETRY_REASON:-supervision-owner-active}"
   exit 0
 fi
 printf 'result=refused task=%s reason=fixture-stop\n' "$1"
@@ -460,7 +460,7 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELIVERY_LOG="$log" FM_DELIVERY_RETRY_MARK="$repo/retried" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELIVERY_LOG="$log" FM_DELIVERY_RETRY_MARK="$repo/retried" FM_DELIVERY_RETRY_REASON=validation-attribution-unavailable FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -529,7 +529,7 @@ if (!accepted.offers[0].message.includes("result=refused task=branch-offer reaso
   throw new Error(`branch offer missed the common continuation result: ${accepted.offers[0].message}`);
 }
 if (accepted.rows.filter((row) => row === "delivery=branch-offer").length !== 2) {
-  throw new Error(`lease retry did not converge before the branch offer: ${accepted.rows.join(" | ")}`);
+  throw new Error(`transient preflight retry did not converge before the branch offer: ${accepted.rows.join(" | ")}`);
 }
 if (JSON.stringify(accepted.offers[0].projects) !== JSON.stringify(["/projects/approved"])) {
   throw new Error(`offer did not carry the queued task project: ${JSON.stringify(accepted.offers[0].projects)}`);
