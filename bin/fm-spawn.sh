@@ -1926,14 +1926,10 @@ if [ "$KIND" != secondmate ] && [ -n "$ARG3" ] && [ -f "$CONFIG/crew-dispatch.js
   exit 1
 fi
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
+# Muse has a verified ordinary-worker adapter but no primary supervision
+# protocol, so a persistent supervisor cannot run safely under it.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  echo "error: muse is a verified ordinary task adapter only and cannot run a persistent supervisor; it has no primary supervision protocol. Select a harness verified for persistent supervision." >&2
   exit 1
 fi
 

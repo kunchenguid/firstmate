@@ -573,7 +573,7 @@ HERDR_SECTION=$(printf '%s\n' \
 else
 IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
-**HARD SAFETY GATE:** this scaffold cannot inspect the task text filled in above.
+**HARD SAFETY GATE:** this scaffold cannot inspect the task text inserted after scaffolding.
 If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
@@ -842,7 +842,7 @@ Do not hand-edit, commit, or fix findings yourself while a run is active - the p
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
+  The repository owner applies \`ask-user-authority\` and obtains any required decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
