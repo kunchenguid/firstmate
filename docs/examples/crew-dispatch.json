@@ -7,8 +7,8 @@
     },
     {
       "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
-      "use": { "harness": "claude", "model": "haiku", "effort": "low" },
-      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
+      "use": { "harness": "claude", "model": "claude-sonnet-5", "effort": "low" },
+      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity. A claude dispatch profile must name an auto-capable model (Opus 4.6+, Sonnet 4.6+, or Fable 5), because any other model starts silently in Manual mode under --permission-mode auto and parks a crewmate on its first permission prompt."
     },
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",

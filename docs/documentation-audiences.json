@@ -353,6 +353,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/claude.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
