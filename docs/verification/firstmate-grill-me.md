@@ -32,23 +32,13 @@ Firstmate does not vendor the public skill, install it, invoke a public `Skill` 
 
 Retained home-local captain provenance identifies `note-to-node` as a method written by the captain and Firstmate together.
 
-The retained correction also establishes that the canonical spelling is `note-to-node` and that the method is local rather than an online command or third-party package.
+The canonical spelling is `note-to-node`, and the method is local rather than an online command or third-party package.
 
-The earlier scout's claim that no local owner existed is superseded by that captain provenance and is not repeated as a current finding here.
+The skill linked above owns the retained-evidence preflight and normative handoff boundary.
 
 Grill Me runs before the existing local method and adds no command, skill, package, timer, daemon, or replacement implementation for it.
 
-After confirmation, Grill Me hands off only the redacted plan packet, resolved project and task context, the current or first node pointer when one exists, and residuals.
-
-The Grill Me output is the packet and handoff context only.
-
-The existing local method retains its own input format, output format, node-level behavior, and authority decisions.
-
-This integration does not restate, broaden, or reinterpret that local method's contract.
-
-Diagnostic, credential, security, captain-decision, implementation, delivery, and external-write concerns remain with their existing owners.
-
-A missing retained owner or provenance remains a stop condition for a future handoff and never permits reconstruction or substitution.
+The focused Pi test below verifies the public ordering and absence boundary.
 
 ## Pi behavior verified
 
@@ -90,7 +80,7 @@ The test uses a temporary trusted project, an isolated Pi configuration director
 
 The test never sends a provider request to an external service and never uses a credential.
 
-The test exercises discovery, the explicit command, unique-name collision safety, exact-trigger description boundaries, public command expansion, the retained-evidence preflight, existing credential-owner routing, the plan-only boundary, the local handoff boundary, and the absence of a `skill:note-to-node` command.
+The test exercises discovery, the explicit command, unique-name collision safety, exact-trigger description boundaries, public command expansion, safe retained-evidence disclosure and redaction, existing credential-owner routing, bounded improvement residuals, the plan-only boundary, the local handoff boundary, and the absence of a `skill:note-to-node` command.
 
 Observed on 2026-08-29 with Pi `0.84.3`:
 

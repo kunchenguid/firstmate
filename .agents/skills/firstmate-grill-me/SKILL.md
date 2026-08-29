@@ -37,6 +37,10 @@ Do not create a second skill or questionnaire for a mode.
 ## Retained-evidence preflight
 
 Before building questions or preparing any handoff, reconcile retained local evidence in the current Firstmate home.
+Before reading any retained content beyond metadata, state the active provider and model and whether the route is local or hosted.
+Start with a metadata-only inventory of paths, ref names, worktree identities, report and brief identifiers, record kinds, owners, timestamps, and dirty or clean state; do not read payloads or values during this inventory.
+After that disclosure, read only the minimum redacted content needed to reconcile ownership and provenance, keep secrets and raw private, customer, payment, or personal values outside the interview context, and use opaque identifiers for sensitive source pointers.
+If safe redaction is impossible, stop that reconciliation branch and route it to the existing protected owner.
 Inspect the current tracked files and working state, all local Git refs and history including preserved task branches, all registered Treehouse worktrees and their retained uncommitted files, private reports and briefs, and durable Firstmate records.
 Separate current evidence from superseded reports, reconcile contradictions through the record owner that governs the fact, and record a safe source pointer, capture date, and confidence for each material conclusion.
 Confirm from that evidence the exact owner, input boundary, output boundary, and authority boundary of the existing local `note-to-node` method before composing its handoff.
@@ -268,8 +272,9 @@ Stop and request a redacted restatement or route the operation to the protected 
 
 ## Bounded improvement review
 
-A material late discovery can become one event-based, evidence-driven improvement-review candidate under the existing task lifecycle.
-Use the existing improvement owner and its bounded notification path when applicable.
+A material late discovery can become one event-based, evidence-driven improvement-review candidate only when an existing task names that follow-up.
+Route the candidate's durable record through `captain-hold-lifecycle` and surface it through the normal captain escalation in `AGENTS.md` section 9.
+If no named task or existing notification path accepts it, record a `RESIDUAL` owned by `captain-hold-lifecycle`, report it to the captain, and stop that branch.
 Do not create or widen a timer, daemon, generic advisor, recurring reviewer, second polling system, or self-restarting loop from this skill.
 No automatic code or documentation change follows a plan review.
 

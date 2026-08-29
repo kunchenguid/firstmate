@@ -152,6 +152,12 @@ export default function (pi: any): void {
         lavishAfterConfirmation: prompt.includes("local Lavish plan view after the same confirmation"),
         ownerBoundaries: prompt.includes("existing local method retains its own input format"),
         retainedEvidencePreflight: prompt.includes("Before building questions or preparing any handoff, reconcile retained local evidence"),
+        retainedEvidenceDisclosure: prompt.includes("Before reading any retained content beyond metadata, state the active provider and model and whether the route is local or hosted"),
+        retainedEvidenceMetadataOnly: prompt.includes("Start with a metadata-only inventory of paths, ref names, worktree identities, report and brief identifiers, record kinds, owners, timestamps, and dirty or clean state; do not read payloads or values during this inventory"),
+        retainedEvidenceRedaction: prompt.includes("After that disclosure, read only the minimum redacted content needed")
+          && prompt.includes("If safe redaction is impossible, stop that reconciliation branch and route it to the existing protected owner"),
+        disclosurePrecedesNonPublicContext: prompt.indexOf("Before reading any retained content beyond metadata") >= 0
+          && prompt.indexOf("Before reading any retained content beyond metadata") < prompt.indexOf("Before accepting non-public context"),
         retainedEvidenceInventory: prompt.includes("current tracked files and working state")
           && prompt.includes("all local Git refs and history including preserved task branches")
           && prompt.includes("all registered Treehouse worktrees and their retained uncommitted files")
@@ -162,6 +168,9 @@ export default function (pi: any): void {
           && prompt.includes("load `harness-adapters`")
           && prompt.includes("load `quota-array-dispatch`"),
         noLegacyCredentialBrokerRouting: !prompt.includes("Route protected values and credential questions to the existing `credential-broker` owner"),
+        improvementResidual: prompt.includes("Route the candidate's durable record through `captain-hold-lifecycle`")
+          && prompt.includes("record a `RESIDUAL` owned by `captain-hold-lifecycle`, report it to the captain, and stop that branch"),
+        noUnownedImprovementOwner: !prompt.includes("Use the existing improvement owner and its bounded notification path"),
         noLocalCommand: !prompt.includes("/skill:note-to-node"),
         noExternalWrites: prompt.includes("external writes, public sharing, deployment, activation, and publication are not performed"),
       }));
@@ -240,7 +249,10 @@ test_command_expansion_public_interface() {
     and .handoffAfterConfirmation and .handoffBeforeLocalStage and .planShape
     and .planOnly and .lavishAfterConfirmation and .ownerBoundaries
     and .retainedEvidencePreflight and .retainedEvidenceInventory
+    and .retainedEvidenceDisclosure and .retainedEvidenceMetadataOnly
+    and .retainedEvidenceRedaction and .disclosurePrecedesNonPublicContext
     and .missingEvidenceStopsHandoff and .credentialRouting and .noLegacyCredentialBrokerRouting
+    and .improvementResidual and .noUnownedImprovementOwner
     and .noLocalCommand and .noExternalWrites' "$capture" >/dev/null \
     || fail "Pi did not expand the explicit skill command with the plan-only local handoff boundary"
   pass "explicit command expansion reaches the public Pi lifecycle with arguments and handoff boundaries intact"
