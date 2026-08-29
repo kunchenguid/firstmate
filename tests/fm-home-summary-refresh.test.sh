@@ -347,6 +347,7 @@ grep -F 'summary producer failed' "$HOME_DIR/state/.home-summary-refresh.log" >/
 pass "best-effort publication logs and continues"
 
 LOCK_MARKER="$TMP_ROOT/lock-held"
+rm -f "$HOME_DIR/state/.home-summary-refresh.log"
 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" bash -c '
   . "$1/bin/fm-wake-lib.sh"
   fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
@@ -367,6 +368,11 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   || fail "lock timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
 [ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
+  || fail "repeated lock timeout changed the best-effort caller result"
+[ "$(grep -c 'refresh exceeded its 1-second deadline' "$HOME_DIR/state/.home-summary-refresh.log" 2>/dev/null || true)" -ge 2 ] \
+  || fail "repeated publication lock timeouts vanished from failure reporting"
 kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 LOCK_HOLDER_PID=
@@ -484,6 +490,15 @@ then
   fail "best-effort failure reporting was not fully bounded"
 fi
 pass "best-effort refresh bounds failure reporting fallback"
+
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "an unavailable failure record blocked valid publication"
+jq -e --arg now "$NOW_ONE" '.generated == $now' \
+  "$HOME_DIR/state/home-summary.json" >/dev/null \
+  || fail "valid publication did not replace the ledger with an unavailable failure record"
+rmdir "$HOME_DIR/state/.home-summary-refresh.log"
+pass "valid publication ignores an unavailable failure record"
 
 # --- publication cost, beacon isolation, and failure discoverability ---------
 #
@@ -820,66 +835,47 @@ run_bootstrap_detect() {
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
 
-SAME_SECOND_HOME="$TMP_ROOT/same-second-home"
-NO_SUBSECOND_BIN="$TMP_ROOT/no-subsecond-bin"
-mkdir -p "$SAME_SECOND_HOME/state" "$SAME_SECOND_HOME/data" \
-  "$SAME_SECOND_HOME/config" "$SAME_SECOND_HOME/projects" "$NO_SUBSECOND_BIN"
-printf '# Seeded Firstmate home\n' > "$SAME_SECOND_HOME/AGENTS.md"
-printf 'same-second\n' > "$SAME_SECOND_HOME/.fm-secondmate-home"
-cat > "$SAME_SECOND_HOME/data/backlog.md" <<'EOF'
+COMPAT_HOME="$TMP_ROOT/compat-home"
+mkdir -p "$COMPAT_HOME/state" "$COMPAT_HOME/data" "$COMPAT_HOME/config" \
+  "$COMPAT_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$COMPAT_HOME/AGENTS.md"
+printf 'compat\n' > "$COMPAT_HOME/.fm-secondmate-home"
+cat > "$COMPAT_HOME/data/backlog.md" <<'EOF'
 ## In flight
 
 ## Queued
 
 ## Done
 EOF
-REAL_DATE=$(command -v date)
-cat > "$NO_SUBSECOND_BIN/date" <<'SH'
-#!/usr/bin/env bash
-if [ "$#" -eq 2 ] && [ "$1" = -u ] && [ "$2" = +%Y-%m-%dT%H:%M:%SZ ]; then
-  printf '%s\n' "$FM_TEST_WHOLE_SECOND"
-  exit 0
-fi
-exec "$FM_TEST_REAL_DATE" "$@"
-SH
-cat > "$NO_SUBSECOND_BIN/perl" <<'SH'
-#!/usr/bin/env bash
-exit 127
-SH
-cat > "$NO_SUBSECOND_BIN/python3" <<'SH'
-#!/usr/bin/env bash
-exit 127
-SH
-chmod +x "$NO_SUBSECOND_BIN/date" "$NO_SUBSECOND_BIN/perl" \
-  "$NO_SUBSECOND_BIN/python3"
-same_second_publish() {
-  PATH="$NO_SUBSECOND_BIN:$FAKEBIN:$PATH" FM_TEST_REAL_DATE="$REAL_DATE" \
-    FM_TEST_WHOLE_SECOND="$NOW_ONE" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SAME_SECOND_HOME" FM_SNAPSHOT_NOW="$NOW_ONE" \
-    FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" "$WRITER"
-}
-same_second_fail() {
-  PATH="$FAILBIN:$NO_SUBSECOND_BIN:$FAKEBIN:$PATH" \
-    FM_TEST_REAL_DATE="$REAL_DATE" FM_TEST_WHOLE_SECOND="$NOW_ONE" \
-    FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_ROOT_OVERRIDE="$ROOT" \
-    FM_HOME="$SAME_SECOND_HOME" \
-    FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
-    "$WRITER" --best-effort
-}
-same_second_publish || fail "could not seed the same-second ledger"
-same_second_fail || fail "the first same-second failure changed its caller result"
-same_second_fail || fail "the second same-second failure changed its caller result"
-same_second_out=$(run_bootstrap_detect "$SAME_SECOND_HOME")
-printf '%s\n' "$same_second_out" | grep -F '2 failed attempt(s)' >/dev/null \
-  || fail "same-second publication failures were not reported: $same_second_out"
-same_second_publish || fail "could not republish inside the same second"
-same_second_out=$(run_bootstrap_detect "$SAME_SECOND_HOME")
-case "$same_second_out" in
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$COMPAT_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "could not seed the compatibility ledger"
+cat > "$COMPAT_HOME/state/.home-summary-refresh.log" <<'EOF'
+[2026-08-28T09:58:00Z] historical failure before publication
+[2026-08-28T09:59:00Z] historical failure before publication
+[2026-08-28T10:01:00Z] first failure after publication
+EOF
+compat_out=$(run_bootstrap_detect "$COMPAT_HOME")
+case "$compat_out" in
   *HOME_SUMMARY:*)
-    fail "same-second republish did not clear earlier failures: $same_second_out"
+    fail "historical failures satisfied the current publication threshold: $compat_out"
     ;;
 esac
-pass "same-second publication ordering remains observable"
+printf '[2026-08-28T10:02:00Z] second failure after publication\n' \
+  >> "$COMPAT_HOME/state/.home-summary-refresh.log"
+compat_out=$(run_bootstrap_detect "$COMPAT_HOME")
+printf '%s\n' "$compat_out" | grep -F '2 failed attempt(s)' >/dev/null \
+  || fail "current publication failures did not satisfy the report threshold: $compat_out"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$COMPAT_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  "$WRITER" || fail "could not republish the compatibility ledger"
+compat_out=$(run_bootstrap_detect "$COMPAT_HOME")
+case "$compat_out" in
+  *HOME_SUMMARY:*)
+    fail "republishing did not scope retained failure history: $compat_out"
+    ;;
+esac
+pass "bootstrap scopes retained failures to the current publication"
 
 # A timed-out attempt can finish recording after a newer ledger is published.
 # Its record must retain the attempt's ordering rather than look like a failure

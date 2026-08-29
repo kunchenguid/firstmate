@@ -1297,12 +1297,23 @@ detect_home_summary_publication() {
     since=$(LC_ALL=C sed -n 's/.*"generated"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
       "$ledger" 2>/dev/null | head -1)
   fi
-  counted=$(LC_ALL=C awk '
+  # Publication and failure stamps have whole-second precision, so failures in
+  # the publication's own second remain quiet until a later failure advances
+  # the record. That bounded delay avoids a precision dependency in bootstrap.
+  counted=$(LC_ALL=C awk -v since="$since" '
     match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\]/) {
-      n += 1
-      last = substr($0, RLENGTH + 2)
+      stamp = substr($0, 2, RLENGTH - 2)
+      if (since == "" || stamp > since) {
+        n += 1
+        last = substr($0, RLENGTH + 2)
+      } else if (stamp == since) {
+        same_second += 1
+      }
     }
-    END { printf "%d\t%s", n + 0, last }' "$log" 2>/dev/null) || return 0
+    END {
+      if (since != "" && n > 0) n += same_second
+      printf "%d\t%s", n + 0, last
+    }' "$log" 2>/dev/null) || return 0
   failures=${counted%%$'\t'*}
   last=${counted#*$'\t'}
   case "$failures" in ''|*[!0-9]*) return 0 ;; esac
