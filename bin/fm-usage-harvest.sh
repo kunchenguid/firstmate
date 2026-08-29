@@ -21,11 +21,13 @@
 #
 # Wall clock: status-file birth epoch -> status-file mtime epoch; the meta
 # file's mtime is the fallback end when the status file is absent, and a
-# missing birth timestamp falls back to the status mtime as the start.
+# missing birth timestamp falls back to the meta-file mtime (the spawn-time
+# marker, portable where birth time is unavailable) and then the status mtime
+# as the start.
 # Turn estimate: count of "^working:" lines in the status file.
 #
 # Per-request usage sources:
-#   harness=claude: <claude-projects>/<worktree with '/' -> '-'>/*.jsonl in
+#   harness=claude: <claude-projects>/<worktree with '/' and '.' -> '-'>/*.jsonl in
 #     the task window. Each assistant message carries one API request's usage
 #     at .message.usage (input_tokens, cache_read_input_tokens,
 #     cache_creation_input_tokens, output_tokens) and Claude logs one entry
@@ -109,7 +111,7 @@ iso_from_epoch() {  # <epoch>
 }
 
 END_EPOCH=$(file_mtime_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META")
-START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
+START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
 WALL=$((END_EPOCH - START_EPOCH))
 [ "$WALL" -ge 0 ] || WALL=0
 TURNS=$(grep -c '^working:' "$STATUS" 2>/dev/null || true)
@@ -155,6 +157,7 @@ case "$HARNESS" in
   claude)
     if [ -n "$WORKTREE" ]; then
       encoded=${WORKTREE//\//-}
+      encoded=${encoded//./-}
       files=$(matched_files "$CLAUDE_DIR/$encoded" 1)
       if [ -n "$files" ]; then
         SRC=claude-projects
