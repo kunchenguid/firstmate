@@ -170,7 +170,7 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'
       ;;
     opencode)
-      printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; do not arm manually.'
+      printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; drain queued wakes with bin/fm-wake-drain.sh first, translate per §9 and provide required/next-step follow-up, and do not arm manually.'
       ;;
     grok)
       printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'

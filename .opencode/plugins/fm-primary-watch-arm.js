@@ -245,7 +245,7 @@ async function deliverActionableWake(paths, client, sessionID, message, recovery
 }
 
 function wakePrompt(reason) {
-  return `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh and handle the reported wake. Watcher continuity is plugin-owned.\n\n${reason}`;
+  return `WATCHER FIRED - At the top of THIS turn, before any peek, read beyond the reason line, steer, or new work, run bin/fm-wake-drain.sh and handle EVERY queued wake plus its OPEN DECISIONS / UNREAD STATUS / RECORD DIVERGENCE sections (AGENTS.md §8 - session start is the only exception). After handling, run the exact WAKE_ACK_REQUIRED --ack-through command the drain prints; until that ack the work stays durable. Translate each durable result (e.g. done: PR https://...) into a captain-facing message per AGENTS.md §9: full https:// PR URL, concise outcome, and risk level for direct-PR; never relay raw done:/signal:/watcher: terms verbatim. After that translation, provide the required follow-up: if the wake was a terminal done/merged/failure/blocked, either state the required captain action (review URL, decision needed, blocker to clear) or advance to the next queued plan step (check tasks-axi ready / data/backlog.md and name the project + mode for the next work); do not stop after translation without a follow-up or next-step statement. Even if the prior turn was a user Q&A (e.g. Lavish), this wake-handling turn still drains first. Watcher continuity is plugin-owned; do not re-arm.\n\n${reason}`;
 }
 
 function surfaceFailure(paths, client, sessionID, reason) {

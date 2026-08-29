@@ -1369,13 +1369,49 @@ $pending
 EOF
       wake "$reason"
     else
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
-      done <<EOF
+      # Diagnostic + safety: a terminal done/blocked/failed line should never be absorbed as benign
+      # even if pane appears busy. Check last 5 non-blank lines for terminal verbs as fallback,
+      # and log last line + crew state for future diagnosis.
+      _absorb_override=0
+      for _f in $files; do
+        case "$_f" in *.status)
+          _last5=$(grep -v '^[[:space:]]*$' "$_f" 2>/dev/null | tail -5 || true)
+          if printf '%s' "$_last5" | grep -qiE 'done:|blocked:|failed:|needs-decision:'; then
+            _absorb_override=1
+            triage_log "absorbed benign override: terminal verb in last 5 lines for $_f last5=\"$(printf '%s' "$_last5" | tr '\n' ';' | cut -c1-200)\" -> forcing actionable"
+            break
+          fi
+          _last=$(last_status_line "$_f" 2>/dev/null || true)
+          _crew="unknown"
+          if signal_crew_provably_working "$_f" 2>/dev/null; then _crew="provably-working"; else _crew="not-working"; fi
+          triage_log "absorbed benign $reason last=\"$_last\" crew=$_crew file=$_f"
+          ;;
+        esac
+      done
+      if [ "$_absorb_override" -eq 1 ]; then
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          fm_wake_append signal "$(basename "$f")" "$reason (override: terminal verb)" || exit 1
+        done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          printf '%s' "$sig" > "$sf"
+          mark_surfaced "$f"
+        done <<EOF
+$pending
+EOF
+        wake "$reason (override: terminal verb)"
+      else
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          printf '%s' "$sig" > "$sf"
+        done <<EOF
+$pending
+EOF
+        triage_log "absorbed benign $reason"
+      fi
     fi
   fi
 
