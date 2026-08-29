@@ -1110,6 +1110,219 @@ assert_contains "$out" 'check pointers primary=GAP' "deleted live public-followu
 assert_contains "$out" 'state/public-followup/' "deleted live public-followup transport lost its evidence"
 pass "public-followup absence follows live typed commitment state"
 
+# --- primary-home-only pointers in secondmate homes -------------------------
+
+SECONDARY_PRIMARY_ONLY="$TMP_ROOT/secondary-primary-only"
+make_home "$SECONDARY_PRIMARY_ONLY"
+printf 'shipwright-reviewer\n' > "$SECONDARY_PRIMARY_ONLY/.fm-secondmate-home"
+cat > "$SECONDARY_PRIMARY_ONLY/data/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+Directory map: `data/tooling-limits.md` in the PRIMARY home only.
+Archives in `data/entities/retired-2026-08-24/` in the PRIMARY home only.
+EOF
+before=$(fingerprint "$SECONDARY_PRIMARY_ONLY")
+out=$(run_doctor "$SECONDARY_PRIMARY_ONLY" --home-local 2>"$TMP_ROOT/err.secondary-primary-only") && rc=0 || rc=$?
+after=$(fingerprint "$SECONDARY_PRIMARY_ONLY")
+assert_no_writes "$before" "$after" "secondary-primary-only"
+expect_code 0 "$rc" "primary-home-only pointers must not be threatening in a secondmate home"
+assert_contains "$out" 'check pointers primary=PASS' \
+  "primary-home-only pointers produced a threatening GAP in a secondmate home"
+case "$out" in
+  *'data/tooling-limits.md'*) fail "primary-home-only tooling-limits path was treated as missing: $out" ;;
+  *'data/entities/retired-2026-08-24/'*) fail "primary-home-only entities archive was treated as missing: $out" ;;
+esac
+
+PRIMARY_PRIMARY_ONLY="$TMP_ROOT/primary-primary-only"
+make_home "$PRIMARY_PRIMARY_ONLY"
+cat > "$PRIMARY_PRIMARY_ONLY/data/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+Directory map: `data/tooling-limits.md` in the PRIMARY home only.
+Archives in `data/entities/retired-2026-08-24/` in the PRIMARY home only.
+EOF
+out=$(run_doctor "$PRIMARY_PRIMARY_ONLY" --home-local 2>"$TMP_ROOT/err.primary-primary-only") && rc=0 || rc=$?
+expect_code 1 "$rc" "primary-home-only pointers must remain required in a primary home"
+assert_contains "$out" 'check pointers primary=GAP' \
+  "primary home did not require declared primary-only pointers"
+assert_contains "$out" 'data/tooling-limits.md' \
+  "primary-home-only tooling-limits gap lost its evidence"
+assert_contains "$out" 'data/entities/retired-2026-08-24/' \
+  "primary-home-only entities archive gap lost its evidence"
+pass "primary-home-only pointers are out of scope in secondmate homes only"
+
+SECONDARY_PRIMARY_ONLY_LINK="$TMP_ROOT/secondary-primary-only-link"
+make_home "$SECONDARY_PRIMARY_ONLY_LINK"
+printf 'shipwright-reviewer\n' > "$SECONDARY_PRIMARY_ONLY_LINK/.fm-secondmate-home"
+cat > "$SECONDARY_PRIMARY_ONLY_LINK/data/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+Directory map: [tooling limits](data/tooling-limits.md) in the PRIMARY home only.
+EOF
+out=$(run_doctor "$SECONDARY_PRIMARY_ONLY_LINK" --home-local 2>"$TMP_ROOT/err.secondary-primary-only-link") && rc=0 || rc=$?
+expect_code 0 "$rc" "Markdown primary-home-only links must be optional in a secondmate home"
+assert_contains "$out" 'check pointers primary=PASS' \
+  "Markdown primary-home-only link produced a threatening GAP"
+pass "Markdown primary-home-only links follow the secondmate exception"
+
+OVERRIDE_DATA="$TMP_ROOT/secondary-primary-only-override-data"
+mkdir -p "$OVERRIDE_DATA"
+cat > "$OVERRIDE_DATA/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+Directory map: `data/tooling-limits.md` in the PRIMARY home only.
+EOF
+out=$(run_doctor_with_dirs "$SECONDARY_PRIMARY_ONLY" "$SECONDARY_PRIMARY_ONLY/config" "$OVERRIDE_DATA" "$SECONDARY_PRIMARY_ONLY/state" --home-local 2>"$TMP_ROOT/err.secondary-primary-only-override") && rc=0 || rc=$?
+expect_code 0 "$rc" "primary-home-only declarations must use the effective data root"
+assert_contains "$out" 'check pointers primary=PASS' \
+  "effective data root was ignored for primary-home-only declarations"
+pass "primary-home-only declarations use the effective data root"
+
+SECONDARY_PRIMARY_ONLY_FRAGMENT="$TMP_ROOT/secondary-primary-only-fragment"
+make_home "$SECONDARY_PRIMARY_ONLY_FRAGMENT"
+printf 'shipwright-reviewer\n' > "$SECONDARY_PRIMARY_ONLY_FRAGMENT/.fm-secondmate-home"
+printf '%s\n' 'Pointer: [tooling limits](data/tooling-limits.md#section).' > "$SECONDARY_PRIMARY_ONLY_FRAGMENT/data/captain.md"
+cat > "$SECONDARY_PRIMARY_ONLY_FRAGMENT/data/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+Directory map: `data/tooling-limits.md` in the PRIMARY home only.
+EOF
+out=$(run_doctor "$SECONDARY_PRIMARY_ONLY_FRAGMENT" --home-local 2>"$TMP_ROOT/err.secondary-primary-only-fragment") && rc=0 || rc=$?
+expect_code 0 "$rc" "fragment-bearing primary-home-only pointers must be optional in a secondmate home"
+assert_contains "$out" 'check pointers primary=PASS' \
+  "fragment-bearing primary-home-only pointer produced a threatening GAP"
+pass "fragment-bearing primary-home-only pointers follow the secondmate exception"
+
+SECONDARY_LITERAL_PRIMARY_ONLY_DECL="$TMP_ROOT/secondary-literal-primary-only-decl"
+make_home "$SECONDARY_LITERAL_PRIMARY_ONLY_DECL"
+printf 'shipwright-reviewer\n' > "$SECONDARY_LITERAL_PRIMARY_ONLY_DECL/.fm-secondmate-home"
+cat > "$SECONDARY_LITERAL_PRIMARY_ONLY_DECL/data/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+Archives in `data/literal#hash.md` in the PRIMARY home only.
+EOF
+out=$(run_doctor "$SECONDARY_LITERAL_PRIMARY_ONLY_DECL" --home-local 2>"$TMP_ROOT/err.secondary-literal-primary-only-decl") && rc=0 || rc=$?
+expect_code 0 "$rc" "primary-home-only backtick paths with literal # must be optional in secondmate homes"
+assert_contains "$out" 'check pointers primary=PASS' \
+  "literal-hash primary-home-only declaration produced a threatening GAP"
+case "$out" in
+  *'data/literal#hash.md'*) fail "literal-hash primary-home-only declaration was still treated as missing: $out" ;;
+esac
+pass "primary-home-only backtick declarations preserve literal hash paths"
+
+SECONDARY_LITERAL_HASH="$TMP_ROOT/secondary-literal-hash"
+make_home "$SECONDARY_LITERAL_HASH"
+printf 'shipwright-reviewer\n' > "$SECONDARY_LITERAL_HASH/.fm-secondmate-home"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
+printf '%s\n' 'The local literal filename is `data/literal#hash.md`.' > "$SECONDARY_LITERAL_HASH/data/captain.md"
+cat > "$SECONDARY_LITERAL_HASH/data/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+The primary-only directory is `data/literal` in the PRIMARY home only.
+EOF
+out=$(run_doctor "$SECONDARY_LITERAL_HASH" --home-local 2>"$TMP_ROOT/err.secondary-literal-hash") && rc=0 || rc=$?
+expect_code 1 "$rc" "literal hash filenames must not match a different primary-only path"
+assert_contains "$out" 'check pointers primary=GAP' \
+  "literal hash filename was treated as a primary-only path"
+assert_contains "$out" 'data/literal#hash.md' \
+  "literal hash pointer gap lost its evidence"
+pass "literal hash filenames remain distinct from Markdown fragments"
+
+SECONDARY_MIXED_PRIMARY_ONLY="$TMP_ROOT/secondary-mixed-primary-only"
+make_home "$SECONDARY_MIXED_PRIMARY_ONLY"
+printf 'shipwright-reviewer\n' > "$SECONDARY_MIXED_PRIMARY_ONLY/.fm-secondmate-home"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
+printf '%s\n' 'The PRIMARY home owns `data/primary.md`; every home must retain `data/local-required.md`; only the primary copy is authoritative.' > "$SECONDARY_MIXED_PRIMARY_ONLY/data/captain-shared.md"
+out=$(run_doctor "$SECONDARY_MIXED_PRIMARY_ONLY" --home-local 2>"$TMP_ROOT/err.secondary-mixed-primary-only") && rc=0 || rc=$?
+expect_code 1 "$rc" "mixed declarations must preserve local pointer gaps"
+assert_contains "$out" 'data/local-required.md' \
+  "mixed declaration overmatched a local pointer"
+pass "mixed declarations scope the primary-only exception to one pointer"
+
+SECONDARY_ADJACENT_PRIMARY_ONLY="$TMP_ROOT/secondary-adjacent-primary-only"
+make_home "$SECONDARY_ADJACENT_PRIMARY_ONLY"
+printf 'shipwright-reviewer\n' > "$SECONDARY_ADJACENT_PRIMARY_ONLY/.fm-secondmate-home"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
+printf '%s\n' 'Pointer: `data/primary-only.md` in the PRIMARY home only: `data/local-required.md`' > "$SECONDARY_ADJACENT_PRIMARY_ONLY/data/captain-shared.md"
+out=$(run_doctor "$SECONDARY_ADJACENT_PRIMARY_ONLY" --home-local 2>"$TMP_ROOT/err.secondary-adjacent-primary-only") && rc=0 || rc=$?
+expect_code 1 "$rc" "an adjacent local pointer must not inherit a preceding primary-only declaration"
+assert_contains "$out" 'data/local-required.md' \
+  "adjacent local pointer was suppressed by a primary-only declaration"
+case "$out" in
+  *'data/primary-only.md'*) fail "the preceding primary-only pointer lost its exception: $out" ;;
+esac
+pass "adjacent primary-only declarations do not overmatch the next pointer"
+
+SECONDARY_PRIMARY_ONLY_PREFIX="$TMP_ROOT/secondary-primary-only-prefix"
+make_home "$SECONDARY_PRIMARY_ONLY_PREFIX"
+printf 'shipwright-reviewer\n' > "$SECONDARY_PRIMARY_ONLY_PREFIX/.fm-secondmate-home"
+cat > "$SECONDARY_PRIMARY_ONLY_PREFIX/data/captain-shared.md" <<'EOF'
+PRIMARY home only: `data/tooling-limits.md`.
+PRIMARY home only `data/entities/retired-2026-08-24/`.
+Pointer: `config/primary-only.json` (PRIMARY-home-only).
+EOF
+out=$(run_doctor "$SECONDARY_PRIMARY_ONLY_PREFIX" --home-local 2>"$TMP_ROOT/err.secondary-primary-only-prefix") && rc=0 || rc=$?
+expect_code 0 "$rc" "prefix primary-home-only declarations must be optional in a secondmate home"
+assert_contains "$out" 'check pointers primary=PASS' \
+  "prefix primary-home-only declaration produced a threatening GAP"
+pass "prefix primary-home-only declarations remain supported"
+
+OWNER_PRECEDENCE="$TMP_ROOT/owner-precedence"
+OWNER_PRECEDENCE_BIN="$TMP_ROOT/owner-precedence-bin"
+make_home "$OWNER_PRECEDENCE"
+printf 'shipwright-reviewer\n' > "$OWNER_PRECEDENCE/.fm-secondmate-home"
+printf 'FMX_PAIRING_TOKEN=fixture-token\n' > "$OWNER_PRECEDENCE/.env"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
+printf '%s\n' 'The PRIMARY home owns `state/public-followup/` in the PRIMARY home only.' > "$OWNER_PRECEDENCE/data/captain-shared.md"
+mkdir -p "$OWNER_PRECEDENCE_BIN"
+cat > "$OWNER_PRECEDENCE_BIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"public_followups":[{"id":"loop","state":"open","public_followup":{"delivery":{"state":"pending"}}}]}'
+SH
+chmod +x "$OWNER_PRECEDENCE_BIN/tasks-axi"
+out=$(PATH="$OWNER_PRECEDENCE_BIN:$PATH" run_doctor "$OWNER_PRECEDENCE" --home-local 2>"$TMP_ROOT/err.owner-precedence") && rc=0 || rc=$?
+expect_code 1 "$rc" "active owner state must remain authoritative over primary-only declarations"
+assert_contains "$out" 'check pointers primary=GAP' \
+  "primary-only declaration hid an active owner gap"
+assert_contains "$out" 'state/public-followup/' \
+  "active owner gap lost its pointer evidence"
+pass "owner-specific absence checks precede primary-only exceptions"
+
+REGISTRY_PRIMARY="$TMP_ROOT/registry-primary"
+REGISTRY_UNMARKED="$TMP_ROOT/registry-unmarked"
+make_home "$REGISTRY_PRIMARY"
+make_home "$REGISTRY_UNMARKED"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
+printf '%s\n' 'Directory map: `data/tooling-limits.md` in the PRIMARY home only.' > "$REGISTRY_UNMARKED/data/captain-shared.md"
+printf '%s\n' "- stale - review domain (home: $REGISTRY_UNMARKED; scope: review work; projects: demo; added 2026-08-02)" > "$REGISTRY_PRIMARY/data/secondmates.md"
+out=$(run_doctor "$REGISTRY_PRIMARY" 2>"$TMP_ROOT/err.registry-unmarked") && rc=0 || rc=$?
+expect_code 1 "$rc" "an unmarked registry home must retain primary pointer checks"
+assert_contains "$out" 'check pointers stale=GAP' \
+  "an unmarked registry home was treated as a valid secondmate"
+assert_contains "$out" 'data/tooling-limits.md' \
+  "the unmarked registry home gap lost its evidence"
+pass "registry homes require a validated secondmate marker"
+
+PRIMARY_SYMLINK_MARKER="$TMP_ROOT/primary-symlink-marker"
+make_home "$PRIMARY_SYMLINK_MARKER"
+printf 'shipwright-reviewer\n' > "$PRIMARY_SYMLINK_MARKER/.fm-secondmate-home-target"
+ln -s .fm-secondmate-home-target "$PRIMARY_SYMLINK_MARKER/.fm-secondmate-home"
+cat > "$PRIMARY_SYMLINK_MARKER/data/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+Directory map: `data/tooling-limits.md` in the PRIMARY home only.
+EOF
+out=$(run_doctor "$PRIMARY_SYMLINK_MARKER" --home-local 2>"$TMP_ROOT/err.primary-symlink-marker") && rc=0 || rc=$?
+expect_code 1 "$rc" "a symlink marker must not suppress primary pointer gaps"
+assert_contains "$out" 'check pointers primary=GAP' \
+  "a symlink marker was treated as a valid secondmate marker"
+pass "unsafe marker state fails closed as primary"
+
+PRIMARY_INVALID_MARKER="$TMP_ROOT/primary-invalid-marker"
+make_home "$PRIMARY_INVALID_MARKER"
+printf '%s\n' 'invalid/id' > "$PRIMARY_INVALID_MARKER/.fm-secondmate-home"
+cat > "$PRIMARY_INVALID_MARKER/data/captain-shared.md" <<'EOF'
+Shared captain preferences are main-authoritative and read-only in secondmate homes.
+Directory map: `data/tooling-limits.md` in the PRIMARY home only.
+EOF
+out=$(run_doctor "$PRIMARY_INVALID_MARKER" --home-local 2>"$TMP_ROOT/err.primary-invalid-marker") && rc=0 || rc=$?
+expect_code 1 "$rc" "an invalid marker must not suppress primary pointer gaps"
+assert_contains "$out" 'check pointers primary=GAP' \
+  "an invalid marker was treated as a valid secondmate marker"
+pass "invalid marker state fails closed as primary"
+
 # --- canonical optional home paths ------------------------------------------
 
 OPTIONAL_PATHS="$TMP_ROOT/optional-paths"
