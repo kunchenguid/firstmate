@@ -384,11 +384,10 @@ fm_backend_endpoint_atom_valid() {  # <value>
 }
 
 fm_backend_orca_worktree_id_valid() {  # <value>
-  # Orca records its worktree id in two shapes. A bare id is a plain endpoint
-  # atom. The live CLI also emits a composite "<pty-id>::<absolute-worktree-path>",
-  # which carries ":" and "/" by construction and so can never pass the plain
-  # atom check; validate each half for what it actually is instead. Accept both,
-  # because rejecting either strands a real task with no way to tear it down.
+  # The live CLI emits the composite "<pty-id>::<absolute-worktree-path>", which
+  # carries ":" and "/" by construction and so can never pass the plain atom
+  # check. Validate each half for what it actually is instead. Tests use bare
+  # atom ids, so accept those too without claiming they are live-CLI output.
   local id_part path_part
   case "$1" in
     *::*)
