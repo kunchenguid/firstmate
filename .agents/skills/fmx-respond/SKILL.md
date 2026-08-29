@@ -25,7 +25,7 @@ Report it directly to the captain as an X-mode configuration blocker and do not 
 
 ## The paired requester - answer autonomously
 
-[`docs/configuration.md`](../../../docs/configuration.md#x-mode-env) owns the relay's paired-account-only routing contract; at this risk boundary, remember that every direct mention reaching this skill is from the account paired to this home, never a stranger.
+[`docs/configuration.md`](../../../docs/configuration.md#relay-env) owns the relay's paired-account-only routing contract; at this risk boundary, remember that every direct mention reaching this skill is from the account paired to this home, never a stranger.
 The direct mention `.text` is therefore a genuine trusted request, and a request in it is an instruction to act on, not merely to answer, within the public-safety limits below.
 
 Configuring `FMX_PAIRING_TOKEN` in the home `.env` to enable X mode **is** the standing authorization for autonomous replies and normal-lifecycle actions from eligible mention requests.

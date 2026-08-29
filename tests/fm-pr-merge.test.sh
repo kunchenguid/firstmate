@@ -2077,22 +2077,6 @@ test_secondmate_without_parent_binding_is_loud() {
 
 
 test_non_green_pr_requires_explicit_override() {
-test_non_green_pr_requires_explicit_override
-test_firstmate_merge_refuses_empty_review_body
-test_firstmate_merge_refuses_failed_review
-test_firstmate_merge_accepts_passing_review
-test_firstmate_merge_accepts_every_completed_review_rendering
-test_firstmate_merge_refuses_every_incomplete_review_state
-test_firstmate_merge_preserves_override_receipt_across_identity_refresh
-test_firstmate_merge_drops_override_receipt_when_the_pr_changes
-test_firstmate_merge_keeps_a_same_pr_receipt_without_a_discard_notice
-test_firstmate_merge_removes_staged_receipt_when_publish_fails
-test_meta_rewrite_removes_its_staged_file_without_a_caller_trap
-test_firstmate_merge_removes_staged_receipt_when_interrupted
-test_firstmate_merge_guards_unresolvable_project
-test_other_project_merge_skips_the_review_guard
-test_firstmate_merge_missing_review_requires_distinct_override
-test_firstmate_merge_refuses_when_override_receipt_cannot_be_written
   local case_dir rc
   case_dir=$(make_case non-green)
   mkdir -p "$case_dir/wt"
@@ -2500,24 +2484,6 @@ test_firstmate_merge_refuses_when_override_receipt_cannot_be_written() {
 }
 
 
-test_other_project_merge_skips_the_review_guard() {
-  local case_dir
-  case_dir=$(make_case other-project-unguarded)
-  mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  : > "$case_dir/gh-axi.log"
-
-  FM_FAKE_GH_PR_BODY='' \
-    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
-    > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "other-project-unguarded: a task in another repository should merge without a Review receipt"
-  grep -qxF 'pr merge 31 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "other-project-unguarded: merge did not run for a task outside this repository"
-  assert_no_grep "could not resolve this task's project" "$case_dir/stderr" \
-    "other-project-unguarded: a resolvable other project was reported as unresolvable"
-  pass "fm-pr-merge leaves another repository's merge unguarded"
-}
-
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -2579,3 +2545,19 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_non_green_pr_requires_explicit_override
+test_firstmate_merge_refuses_empty_review_body
+test_firstmate_merge_refuses_failed_review
+test_firstmate_merge_refuses_every_incomplete_review_state
+test_firstmate_merge_accepts_passing_review
+test_firstmate_merge_accepts_every_completed_review_rendering
+test_firstmate_merge_missing_review_requires_distinct_override
+test_firstmate_merge_refuses_when_override_receipt_cannot_be_written
+test_firstmate_merge_preserves_override_receipt_across_identity_refresh
+test_firstmate_merge_drops_override_receipt_when_the_pr_changes
+test_firstmate_merge_keeps_a_same_pr_receipt_without_a_discard_notice
+test_firstmate_merge_removes_staged_receipt_when_publish_fails
+test_meta_rewrite_removes_its_staged_file_without_a_caller_trap
+test_firstmate_merge_removes_staged_receipt_when_interrupted
+test_firstmate_merge_guards_unresolvable_project
+test_other_project_merge_skips_the_review_guard
