@@ -74,7 +74,7 @@ This active probe is scoped to spawn-time worktree discovery and is not advertis
 The adapter records the previously active tab and immediately restores it with `go-to-tab-by-id`.
 There is a narrow visible race between those calls that no current Zellij flag can remove.
 
-An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Zellij's submit machinery.
+An ordinary metadata-routed `fm-send.sh` text steer uses the shared durable-inbox path; [architecture](architecture.md#event-driven-supervision) owns its best-effort doorbell and proven-agent-free refusal, and only an accepted doorbell reaches Zellij's submit machinery.
 On the typed plane, literal send uses bracketed paste followed by a separate explicit Enter.
 Before sending Enter, the adapter proves that the selected composer's normalized content changed by exactly the pasted text; an unreadable composer, a paste that lands elsewhere, or unrelated pane output fails without submitting.
 The adapter supports `Enter`, `Esc`, and the one-argument key expression `Ctrl c` through the shared key vocabulary.
@@ -89,6 +89,7 @@ A short viewport may expose fewer lines than requested.
 
 Closing a pane leaves an empty tab.
 Cleanup resolves and verifies the owning tab, then uses `close-tab-by-id` so both the task pane and tab disappear.
+It re-reads the exact tab inventory and retains task state plus the Treehouse reservation unless that tab is structurally absent, under the shared [worktree retirement contract](architecture.md#worktrees-not-branches-in-your-checkout).
 Real test cleanup uses only an isolated non-`firstmate` session and the guard in `tests/zellij-test-safety.sh`; it never calls all-session deletion commands.
 
 ## Active limits

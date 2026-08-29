@@ -90,7 +90,7 @@ Capture remains bounded and locally trimmed after `read-screen` becomes availabl
 `current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
 Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
 
-An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through cmux's submit machinery.
+An ordinary metadata-routed `fm-send.sh` text steer uses the shared durable-inbox path; [architecture](architecture.md#event-driven-supervision) owns its best-effort doorbell and proven-agent-free refusal, and only an accepted doorbell reaches cmux's submit machinery.
 On the typed plane, literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
 The composer verifier is a thin adapter: it captures a bounded plain-text tail and hands it with cmux's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape, including Claude's borderless `❯` row with its U+00A0 separator.
@@ -108,6 +108,7 @@ The sibling never carries an `fm-` title and is ignored by recovery.
 The exact window membership is re-read before this operation.
 A selected workspace that is not last closes normally; selection itself is not the trigger.
 Firstmate does not attempt to close the macOS window because cmux's socket cannot close a window holding a live terminal.
+After the close attempt, cleanup requires the exact workspace id to be absent from every readable window inventory and otherwise retains task state plus the Treehouse reservation under the shared [worktree retirement contract](architecture.md#worktrees-not-branches-in-your-checkout).
 
 Real tests share the captain's running app rather than creating an isolated cmux session.
 `tests/cmux-test-safety.sh` permits cleanup only for an exact currently listed `fm-test-` workspace and never enumerates and closes unrelated workspaces or relaunches the app.

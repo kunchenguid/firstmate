@@ -126,7 +126,15 @@ phase_spawn() {
   assert_grep "FM_HOME='$SUB_ABS'" "$LOG" "secondmate launch did not set FM_HOME to the subhome"
   assert_grep 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$LOG" "launch did not clear operational overrides"
   assert_grep 'FM_CONFIG_OVERRIDE=' "$LOG" "launch did not clear the config override"
-  assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"
+  # The launch line reads the POINTER, never the charter body: a command
+  # substitution's result becomes one argv element, so expanding the charter
+  # here would put its whole text in the agent's own process arguments
+  # (tests/fm-spawn-brief-argv.test.sh). The charter is still what the
+  # secondmate is launched against - the pointer names it.
+  assert_grep "$HOME_DIR/state/design.launch-pointer" "$LOG" \
+    "secondmate launch did not read its own launch pointer"
+  assert_grep "$SUB_ABS/data/charter.md" "$HOME_DIR/state/design.launch-pointer" \
+    "the launch pointer did not name the persistent charter"
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
   assert_no_grep 'treehouse get' "$LOG" "secondmate spawn ran a project treehouse get"
@@ -138,7 +146,8 @@ phase_send() {
   printf '❯\n' > "$PANE"
   # The meta window (firstmate:fm-design) must win over a foreign same-named
   # window returned by list-windows.
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="other-session:fm-design" \
+  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_FAKE_TMUX_WINDOW="other-session:fm-design firstmate:fm-design" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-send.sh" fm-design 'route this work' >/dev/null 2>&1 \
     || fail "fm-send failed for a bare firstmate window with home metadata"

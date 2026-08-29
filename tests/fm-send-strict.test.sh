@@ -61,6 +61,11 @@ case "${1:-}" in
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
+    # The foreign row above is what the target-resolution cases assert against.
+    # The rows below name the panes these cases model as LIVE, which the
+    # doorbell's live-agent gate reads: without them every modelled endpoint
+    # would read as retired and refuse its ring.
+    printf '%s\n' ${FM_FAKE_TMUX_WINDOWS:-fm-lane-ok fm-lane-key fm-mpf-lane-m8}
     exit 0 ;;
 esac
 exit 0

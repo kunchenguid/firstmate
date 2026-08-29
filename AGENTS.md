@@ -94,6 +94,7 @@ state/               runtime records and signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
+  <id>.launch-pointer  the short launch prompt fm-spawn hands the harness in place of the brief body, so no brief text reaches the agent process argv; removed by teardown
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown
   <id>.cursor-session  cursor busy-source binding (projects root, task worktree, prior conversations) written by fm-spawn; removed by teardown
   <id>.reconcile-nudged  epoch second of the last inventory-reconcile nudge sent to this secondmate; bin/fm-secondmate-reconcile.sh owns its per-home cooldown window
@@ -416,7 +417,7 @@ When Relay-linked work reaches a milestone or terminal state, load `fmx-respond`
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
 Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
-Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.
+Never kill processes by pattern - not `pkill -f`, `killall`, or `ps | grep | xargs kill` - because every worker on this machine runs its own copy of the same project, so one pattern reaches sibling firstmate homes and other workers' agents alike; kill only a PID you captured or verified as yours.
 A forced repair must use the home-scoped owner path emitted by supervision instructions.
 
 Guard warnings do not replace the contract.

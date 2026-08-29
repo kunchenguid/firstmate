@@ -26,13 +26,38 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  has-session|new-session|new-window|send-keys|kill-window|set-window-option)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     exit 0
     ;;
   list-windows)
+    # `list-windows -t <session> -F '#{window_name}'` emits WINDOW NAMES for the
+    # requested session only - never a session-qualified name. Honour that here:
+    # a FM_FAKE_TMUX_WINDOW of "<session>:<window>" belongs to that session
+    # alone, and a bare value is a window in whichever session is asked. Both
+    # the doorbell's live-agent gate and teardown's endpoint-confirmation gate
+    # look this window up by exact name, so a stub that emits the qualified form
+    # never matches and reports every modelled endpoint as retired.
     if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
-      printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+      _lw_want=
+      _lw_prev=
+      for _lw_arg in "$@"; do
+        if [ "$_lw_prev" = -t ]; then _lw_want=$_lw_arg; fi
+        _lw_prev=$_lw_arg
+      done
+      # FM_FAKE_TMUX_WINDOW may name SEVERAL windows, whitespace separated, so a
+      # case can model a real session's window and a same-named foreign one at
+      # once - which is what a server with both actually looks like.
+      for _lw_entry in $FM_FAKE_TMUX_WINDOW; do
+        case "$_lw_entry" in
+          *:*)
+            if [ -z "$_lw_want" ] || [ "$_lw_want" = "${_lw_entry%%:*}" ]; then
+              printf '%s\n' "${_lw_entry#*:}"
+            fi
+            ;;
+          *) printf '%s\n' "$_lw_entry" ;;
+        esac
+      done
     fi
     exit 0
     ;;

@@ -31,8 +31,7 @@
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
-# `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a non-tmux
+# `backend=tmux` for a default-backend task. Only a task spawned on a non-tmux
 # spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
 # carries an explicit `backend=` line.
 #
@@ -364,8 +363,9 @@ fm_backend_target_of_meta() {  # <meta-file>
 # from its durable metadata before any runtime command or cleanup mutation.
 # The validation binds the exact task id, selected backend, target, project,
 # and worktree. New non-tmux records carry endpoint_task_id because their
-# opaque runtime ids do not encode the task label. Legacy tmux records remain
-# valid only when their window name itself is exactly fm-<task-id>.
+# opaque runtime ids do not encode the task label. New tmux records additionally
+# carry a stable window id, while legacy records remain valid only when their
+# window name itself is exactly fm-<task-id>.
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
@@ -386,6 +386,7 @@ fm_backend_endpoint_atom_valid() {  # <value>
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
+  local tmux_window_id_count tmux_window_id
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -450,6 +451,26 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: tmux endpoint '$window' is malformed or does not belong to task $id; preserving task state." >&2
         return 1
       fi
+      tmux_window_id_count=$(grep -c '^tmux_window_id=' "$meta" 2>/dev/null || true)
+      case "$tmux_window_id_count" in
+        0) ;;
+        1)
+          tmux_window_id=$(fm_backend_meta_exact_value "$meta" tmux_window_id) || tmux_window_id=
+          case "$tmux_window_id" in
+            @|@*[!0-9]*) tmux_window_id= ;;
+            @*) ;;
+            *) tmux_window_id= ;;
+          esac
+          [ -n "$tmux_window_id" ] || {
+            echo "REFUSED: tmux endpoint metadata for task $id has a malformed stable window identity; preserving task state." >&2
+            return 1
+          }
+          ;;
+        *)
+          echo "REFUSED: tmux endpoint metadata for task $id has an ambiguous stable window identity; preserving task state." >&2
+          return 1
+          ;;
+      esac
       ;;
     herdr)
       [ "$binding" = "$id" ] || {

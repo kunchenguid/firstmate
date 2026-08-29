@@ -72,7 +72,12 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # The fixture models a LIVE worker's pane. The doorbell's live-agent gate
+    # reads this inventory, so an empty answer here would describe a retired
+    # endpoint and correctly refuse the ring.
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-fm-t1}"
+    exit 0 ;;
 esac
 exit 0
 SH

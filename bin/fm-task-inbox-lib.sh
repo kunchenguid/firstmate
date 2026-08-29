@@ -44,7 +44,8 @@
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
-# attempt may ring or be skipped to protect proven pending composer text. After
+# attempt may ring, be skipped to protect proven pending composer text, or be
+# refused because the endpoint holds no agent. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy check (a busy pane just waits - the record is durable and
 # the worker reaches a turn boundary) and the wake emission; this library owns
@@ -255,11 +256,27 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$abs" "$abs"
 }
 
-# Ring the doorbell, best-effort: one advisory composer pre-check, then the
-# backend's submit machinery with a minimal retry budget, verdict discarded.
+# Ring the doorbell, best-effort: a live-agent gate, one advisory composer
+# pre-check, then the backend's submit machinery with a minimal retry budget,
+# verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed. No return value is
-# delivery proof; the acknowledgement move is the only delivery signal.
+# (the watcher re-rings later), 2 the backend send failed, 3 refused because the
+# endpoint PROVABLY holds no agent. No return value is delivery proof; the
+# acknowledgement move is the only delivery signal.
+#
+# The live-agent gate exists because the doorbell is submitted as keystrokes to
+# whatever owns the endpoint. When the agent has exited, that owner is the
+# worker's SHELL, sitting at a prompt in the task worktree with the operator's
+# full privileges, and the doorbell line is executed as a command
+# ("bash: Firstmate: command not found", observed three times on one pane).
+# Nothing about this path guarantees a harmless first token, so a proven-absent
+# agent refuses instead of typing. The gate is deliberately narrow - only the
+# recovery-grade `dead`/`missing` verdicts refuse, the same confident states
+# bin/fm-bootstrap.sh acts on - so an ambiguous, unreadable, or unverified-
+# backend endpoint still rings exactly as before and no live worker is starved.
+# Refusing loses nothing: the record is durable, the caller still consumes ladder
+# budget, and a worker that never acknowledges escalates into
+# stuck-crewmate-recovery through the ordinary stale wake.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -269,6 +286,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   line=$(fm_task_inbox_doorbell_line "$rec")
+  [ "$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf 'unknown')" != dead ] || return 3
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending) return 1 ;;

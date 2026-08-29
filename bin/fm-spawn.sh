@@ -158,7 +158,10 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEFPOINTER__ quoted path to the short launch prompt naming the resolved brief;
+#                      raw launch commands must use this for prompt input
+#     __BRIEF__        absolute brief path reserved for internal non-prompt arguments;
+#                      raw launch commands containing it are refused
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -967,8 +970,7 @@ fi
 # default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
-# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# window_backend/fm_backend_of_meta already treat an absent backend= as tmux).
 if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
@@ -1136,21 +1138,21 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1160,7 +1162,7 @@ launch_template() {
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
     # --yolo does NOT cover and which would otherwise block every spawn, since
     # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -1173,7 +1175,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1200,7 +1202,7 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEFPOINTER__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1208,6 +1210,12 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    case "$LAUNCH" in
+      *'__BRIEF__'*)
+        echo "error: raw launch commands cannot expand __BRIEF__ because brief text must never enter agent argv; use __BRIEFPOINTER__ for the prompt argument" >&2
+        exit 1
+        ;;
+    esac
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -1734,6 +1742,48 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+# Refuse a worktree that another LIVE task's record still names.
+#
+# A worktree belongs to exactly one live task, and several safety properties
+# quietly depend on it - most sharply bin/fm-teardown.sh's leaked-process reap,
+# which sends TERM then KILL to every process whose cwd is "this task's own
+# worktree" precisely because that root is supposed to be unique. When two tasks
+# hold one worktree, tearing either one down kills the other's agent inside a
+# worktree it is still working in.
+#
+# That double-assignment is reachable whenever a worktree returns to the pool
+# while a record in this home still claims it (a half-retired teardown, or a
+# hand-edited or restored record), so the invariant is checked here rather than
+# assumed. This backend-independent check is separate from teardown's endpoint
+# retirement confirmation. Cross-home allocation is owned by treehouse's owner
+# reservation, which teardown retains until its endpoint is confirmed retired.
+# The task's OWN record is skipped: a relaunch legitimately re-enters the
+# worktree its meta already names.
+#
+# This is a pre-publication check, so it cannot by itself serialize two spawns
+# racing for one slot; the task-set lock held across meta publication owns that.
+# Its job is the far more common case - a stale claim already on disk in this
+# home's state before the spawn starts.
+refuse_worktree_claimed_by_live_task() {  # <source> <worktree-real>
+  local source=$1 wt_real=$2 meta claim_id claim_wt claim_real
+  [ -n "$wt_real" ] || return 0
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    claim_id=${meta##*/}
+    claim_id=${claim_id%.meta}
+    [ "$claim_id" != "$ID" ] || continue
+    claim_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$claim_wt" ] || continue
+    if ! claim_real=$(cd "$claim_wt" 2>/dev/null && pwd -P); then
+      claim_real=$claim_wt
+    fi
+    [ "$claim_real" = "$wt_real" ] || continue
+    echo "error: $source handed $ID the worktree $wt_real, which task $claim_id still claims in $meta; refusing to launch two live tasks into one worktree (tearing either one down would kill the other's agent). Retire or correct $claim_id first." >&2
+    exit 1
+  done
+}
+
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
   wt_real=
@@ -1750,6 +1800,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  refuse_worktree_claimed_by_live_task "$source" "$wt_real"
 }
 
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
@@ -1916,6 +1967,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+TMUX_WINDOW_ID=
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -1927,6 +1979,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
   WT_TARGET=$T
   SES=${T%%:*}
+  [ "$BACKEND" != tmux ] || TMUX_WINDOW_ID=$(fm_meta_get "$RELAUNCH_META" tmux_window_id)
 else
 case "$BACKEND" in
   tmux)
@@ -1936,9 +1989,10 @@ case "$BACKEND" in
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
     # non-default tmux config cannot rename the window away from fm-<id> once
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
-    # rename-critical worktree-detection steps below; the persisted window= handle
-    # stays $T (the name form), which is safe now that rename is disabled.
+    # rename-critical worktree-detection steps below; metadata retains both the
+    # caller-facing name and the stable id used to confirm endpoint retirement.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    TMUX_WINDOW_ID=$WID
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2702,7 +2756,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend tmux_window_id herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2723,10 +2777,10 @@ preserve_relaunch_meta() {
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # backend= is written only for a non-default (non-tmux) backend; absent
+  # backend= means tmux under data/fm-backend-design-d7's P1 contract.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  [ -z "$TMUX_WINDOW_ID" ] || echo "tmux_window_id=$TMUX_WINDOW_ID"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
@@ -2776,6 +2830,28 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# The launch prompt must never carry the brief's own text. A command
+# substitution's result becomes one argv element, so a brief expanded straight
+# into the launch line lands in the agent's /proc/<pid>/cmdline and in every
+# `ps` listing on the host. A crewmate then cleaning up stray project processes
+# with the ordinary `pkill -f <pattern>` or `ps | grep | xargs kill` idiom
+# matches SIBLING agents whose briefs merely mention that pattern, and kills
+# them: on 2026-08-29 one such sweep for a project's own script name terminated
+# four working crewmates within 330ms, because every one of their briefs
+# contained the matched word. argv therefore carries a short fixed pointer and
+# the brief stays on disk, which is how kimi has always been launched
+# (kimi_wait_for_ready above). Refuse the spawn when the pointer cannot be
+# written: launching on an empty prompt would leave a silent idle agent.
+# ONE owner of the pointer sentence: the file below and kimi's typed delivery
+# must stay byte-identical, and kimi's live delivery check greps its leading
+# "Read the brief at" verbatim.
+BRIEF_POINTER_TEXT="Read the brief at $BRIEF_REAL and follow it exactly. It is your entire job description for this session: work on your own and start immediately without waiting for further input."
+BRIEF_POINTER="$STATE/$ID.launch-pointer"
+if ! printf '%s\n' "$BRIEF_POINTER_TEXT" > "$BRIEF_POINTER"; then
+  echo "error: cannot write the launch-brief pointer $BRIEF_POINTER; refusing to launch $ID on an empty prompt" >&2
+  exit 1
+fi
+sq_briefpointer=$(shell_quote "$BRIEF_POINTER")
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -2788,6 +2864,7 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
+LAUNCH=${LAUNCH//__BRIEFPOINTER__/$sq_briefpointer}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
@@ -2889,7 +2966,7 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_POINTER=$BRIEF_POINTER_TEXT
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}

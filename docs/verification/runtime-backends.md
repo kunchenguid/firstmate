@@ -580,9 +580,10 @@ The teardown-level record-retention gate was verified on 2026-07-28 with metadat
 ```sh
 tests/fm-teardown.test.sh
 tests/fm-backend-herdr.test.sh
+tests/fm-worktree-ownership.test.sh
 ```
 
-Observed guarantees: a contended presentation lock refused the teardown before the isolated copy was returned, with the task branch, every durable record, and the endpoint intact and no pane close attempted; the retry after the contention cleared returned the copy, closed the pane under the lock, and removed the records; an unknown structured-presence result after an attempted projected close retained the journal and every record with a nonzero exit; and every presence-gate mode accepted only a structured not-found as gone.
+Observed guarantees: a contended presentation lock refused the teardown before the isolated copy was returned, with the task branch, every durable record, and the endpoint intact and no pane close attempted; the retry after the contention cleared closed the pane under the lock, removed the records, and only then returned the copy; an unknown structured-presence result after an attempted projected close retained the journal and every record with a nonzero exit; and every presence-gate mode accepted only a structured not-found as gone.
 
 The same fixtures verified three further boundaries on 2026-07-29: missing or malformed endpoint identity and an unparseable pane presence refused record removal with everything retained; the SIGKILL escalation re-read the exact pane's process information and refused to signal when a different shell pid owned the pane, falling back to the plain close with the original process untouched; and a reposition whose removal then failed on every path restored the exact original workspace order through a second verified move and reported the close as failed.
 
@@ -922,7 +923,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 
 A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` on a real cursor worker and driven to completion:
 
-1. the launch delivered its brief positionally and the agent executed it;
+1. the launch delivered its positional prompt and the agent executed it;
 2. `state/<id>.cursor-session` was written with the task worktree;
 3. the transcript fold read `busy` mid-turn and `idle` after it;
 4. `bin/fm-send.sh` delivered a steer through the then-current typed path and exited 0;

@@ -815,6 +815,7 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
     "decisions_reviewed=1" "decision_keys="
   orca_case teardown
   printf '{"ok":true,"result":{"worktree":{"id":"wt-teardown","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -887,6 +888,7 @@ test_teardown_removes_orca_worktree_when_path_missing() {
     "backend=orca" "orca_worktree_id=wt-missing-path" \
     "decisions_reviewed=1" "decision_keys="
   orca_case missing-path
+  printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -903,7 +905,7 @@ test_teardown_removes_orca_worktree_when_path_missing() {
   pass "fm-teardown.sh backend=orca: releases terminal/worktree when path is absent"
 }
 
-test_teardown_preserves_metadata_when_orca_remove_error_json() {
+test_teardown_retires_metadata_before_orca_remove_error_json() {
   local proj wt data state config id out rc neutral
   id="orcaremoveerrz2"
   proj="$TMP_ROOT/remove-error-project"
@@ -931,8 +933,8 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   set -e
   [ "$rc" -ne 0 ] || fail "Orca teardown should fail when worktree removal returns ok:false JSON"
   assert_contains "$out" "worktree not removed" "teardown should surface the Orca removal error"
-  assert_present "$state/$id.meta" "failed Orca removal should preserve task metadata"
-  pass "fm-teardown.sh backend=orca: preserves metadata on remove ok:false JSON"
+  assert_absent "$state/$id.meta" "Orca provider release should run only after task metadata retires"
+  pass "fm-teardown.sh backend=orca: provider release runs after metadata retirement"
 }
 
 test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
@@ -1012,6 +1014,7 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
     "backend=orca" "orca_worktree_id=wt-ship-match"
   orca_case ship-match
   printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1343,7 +1346,7 @@ test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
-test_teardown_preserves_metadata_when_orca_remove_error_json
+test_teardown_retires_metadata_before_orca_remove_error_json
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
