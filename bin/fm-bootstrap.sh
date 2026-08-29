@@ -1297,23 +1297,10 @@ detect_home_summary_publication() {
     since=$(LC_ALL=C sed -n 's/.*"generated"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
       "$ledger" 2>/dev/null | head -1)
   fi
-  # One pass over the bounded record: count the failures recorded after the
-  # ledger's own last publication stamp (all of them when there is no ledger),
-  # and keep the newest message. Both stamps are the same UTC ISO-8601 format,
-  # so a plain string comparison orders them.
-  counted=$(LC_ALL=C awk -v since="$since" '
-    function ordered_stamp(stamp) {
-      sub(/Z$/, "", stamp)
-      if (stamp !~ /\./) stamp = stamp ".000000"
-      return stamp
-    }
-    BEGIN { since_ordered = ordered_stamp(since) }
-    match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9](\.[0-9]+)?Z\]/) {
-      stamp = substr($0, 2, RLENGTH - 2)
-      if (since == "" || ordered_stamp(stamp) > since_ordered) {
-        n += 1
-        last = substr($0, RLENGTH + 2)
-      }
+  counted=$(LC_ALL=C awk '
+    match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\]/) {
+      n += 1
+      last = substr($0, RLENGTH + 2)
     }
     END { printf "%d\t%s", n + 0, last }' "$log" 2>/dev/null) || return 0
   failures=${counted%%$'\t'*}

@@ -367,9 +367,6 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   || fail "lock timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
 [ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
-grep -F 'refresh exceeded its 1-second deadline' \
-  "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
-  || fail "publication lock timeout was not logged"
 kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 LOCK_HOLDER_PID=
@@ -824,8 +821,9 @@ run_bootstrap_detect() {
 }
 
 SAME_SECOND_HOME="$TMP_ROOT/same-second-home"
+NO_SUBSECOND_BIN="$TMP_ROOT/no-subsecond-bin"
 mkdir -p "$SAME_SECOND_HOME/state" "$SAME_SECOND_HOME/data" \
-  "$SAME_SECOND_HOME/config" "$SAME_SECOND_HOME/projects"
+  "$SAME_SECOND_HOME/config" "$SAME_SECOND_HOME/projects" "$NO_SUBSECOND_BIN"
 printf '# Seeded Firstmate home\n' > "$SAME_SECOND_HOME/AGENTS.md"
 printf 'same-second\n' > "$SAME_SECOND_HOME/.fm-secondmate-home"
 cat > "$SAME_SECOND_HOME/data/backlog.md" <<'EOF'
@@ -835,30 +833,46 @@ cat > "$SAME_SECOND_HOME/data/backlog.md" <<'EOF'
 
 ## Done
 EOF
+REAL_DATE=$(command -v date)
+cat > "$NO_SUBSECOND_BIN/date" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = -u ] && [ "$2" = +%Y-%m-%dT%H:%M:%SZ ]; then
+  printf '%s\n' "$FM_TEST_WHOLE_SECOND"
+  exit 0
+fi
+exec "$FM_TEST_REAL_DATE" "$@"
+SH
+cat > "$NO_SUBSECOND_BIN/perl" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+cat > "$NO_SUBSECOND_BIN/python3" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+chmod +x "$NO_SUBSECOND_BIN/date" "$NO_SUBSECOND_BIN/perl" \
+  "$NO_SUBSECOND_BIN/python3"
 same_second_publish() {
-  local stamp=$1
-  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SAME_SECOND_HOME" \
-    FM_HOME_SUMMARY_STAMP_OVERRIDE="$stamp" FM_SNAPSHOT_NOW="$stamp" \
+  PATH="$NO_SUBSECOND_BIN:$FAKEBIN:$PATH" FM_TEST_REAL_DATE="$REAL_DATE" \
+    FM_TEST_WHOLE_SECOND="$NOW_ONE" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SAME_SECOND_HOME" FM_SNAPSHOT_NOW="$NOW_ONE" \
     FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" "$WRITER"
 }
 same_second_fail() {
-  local stamp=$1
-  PATH="$FAILBIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_HOME="$SAME_SECOND_HOME" FM_HOME_SUMMARY_STAMP_OVERRIDE="$stamp" \
-    FM_SNAPSHOT_NOW="$stamp" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  PATH="$FAILBIN:$NO_SUBSECOND_BIN:$FAKEBIN:$PATH" \
+    FM_TEST_REAL_DATE="$REAL_DATE" FM_TEST_WHOLE_SECOND="$NOW_ONE" \
+    FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$SAME_SECOND_HOME" \
+    FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
     "$WRITER" --best-effort
 }
-same_second_publish '2026-08-28T10:00:00.500000Z' \
-  || fail "could not seed the same-second ledger"
-same_second_fail '2026-08-28T10:00:00.600000Z' \
-  || fail "the first same-second failure changed its caller result"
-same_second_fail '2026-08-28T10:00:00.700000Z' \
-  || fail "the second same-second failure changed its caller result"
+same_second_publish || fail "could not seed the same-second ledger"
+same_second_fail || fail "the first same-second failure changed its caller result"
+same_second_fail || fail "the second same-second failure changed its caller result"
 same_second_out=$(run_bootstrap_detect "$SAME_SECOND_HOME")
 printf '%s\n' "$same_second_out" | grep -F '2 failed attempt(s)' >/dev/null \
   || fail "same-second publication failures were not reported: $same_second_out"
-same_second_publish '2026-08-28T10:00:00.800000Z' \
-  || fail "could not republish inside the same second"
+same_second_publish || fail "could not republish inside the same second"
 same_second_out=$(run_bootstrap_detect "$SAME_SECOND_HOME")
 case "$same_second_out" in
   *HOME_SUMMARY:*)
@@ -917,8 +931,8 @@ done
 order_started=$(python3 -c 'import time; print(time.time())')
 PATH="$ORDER_DATE_BIN:$FAKEBIN:$PATH" FM_TEST_REAL_DATE="$REAL_DATE" \
   FM_TEST_ORDER_START="$order_started" FM_TEST_ORDER_EARLY="$NOW_ONE" \
-  FM_TEST_ORDER_LATE="$NOW_THREE" FM_HOME_SUMMARY_STAMP_OVERRIDE="$NOW_ONE" \
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ORDER_HOME" FM_HOME_SUMMARY_TIMEOUT=2 \
+  FM_TEST_ORDER_LATE="$NOW_THREE" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$ORDER_HOME" FM_HOME_SUMMARY_TIMEOUT=2 \
   "$WRITER" --best-effort \
   || fail "ordered timeout changed the best-effort caller result"
 kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true

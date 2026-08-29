@@ -42,7 +42,7 @@ HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
-HOME_SUMMARY_FAILURE_STAMP=
+HOME_SUMMARY_PARENT_LEDGER=
 HOME_SUMMARY_TMP=
 HOME_SUMMARY_ERR_TMP=
 HOME_SUMMARY_LOCK_HELD=0
@@ -98,23 +98,17 @@ home_summary_fail() {
   return 1
 }
 
-home_summary_timestamp() {
-  if [ -n "${FM_HOME_SUMMARY_STAMP_OVERRIDE:-}" ]; then
-    printf '%s\n' "$FM_HOME_SUMMARY_STAMP_OVERRIDE"
-  elif command -v perl >/dev/null 2>&1; then
-    perl -MTime::HiRes=time -MPOSIX=strftime -e '
-      $now = time; $seconds = int($now);
-      printf "%s.%06dZ\n", strftime("%Y-%m-%dT%H:%M:%S", gmtime($seconds)), int(($now - $seconds) * 1000000);
-    '
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))'
-  else
-    date -u +%Y-%m-%dT%H:%M:%SZ
+home_summary_ledger_identity() {
+  local inode
+  if [ -f "$LEDGER" ] && [ ! -L "$LEDGER" ]; then
+    inode=$(LC_ALL=C ls -di "$LEDGER" 2>/dev/null | awk '{print $1}') || inode=
+    [ -n "$inode" ] && printf 'present:%s\n' "$inode" && return 0
   fi
+  printf 'absent\n'
 }
 
 home_summary_refresh_once() {
-  local producer_rc producer_error snapshot_stamp
+  local producer_rc producer_error
   if ! mkdir -p "$STATE" 2>/dev/null; then
     home_summary_fail "state directory is unavailable: $STATE"
     return 1
@@ -129,11 +123,6 @@ home_summary_refresh_once() {
     fm_lock_acquire_wait "$REFRESH_LOCK"
   fi
   HOME_SUMMARY_LOCK_HELD=1
-  if [ -z "${FM_SNAPSHOT_NOW:-}" ]; then
-    snapshot_stamp=$(home_summary_timestamp 2>/dev/null) || snapshot_stamp=
-    FM_SNAPSHOT_NOW=$snapshot_stamp
-    export FM_SNAPSHOT_NOW
-  fi
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
     return 1
@@ -195,6 +184,13 @@ home_summary_refresh_once() {
     home_summary_fail "could not set the publication file mode"
     return 1
   fi
+  if [ -e "$ERROR_LOG" ] || [ -L "$ERROR_LOG" ]; then
+    if [ ! -f "$ERROR_LOG" ] || [ -L "$ERROR_LOG" ] \
+      || ! rm -f -- "$ERROR_LOG" 2>/dev/null; then
+      home_summary_fail "could not reset the publication failure record"
+      return 1
+    fi
+  fi
   if ! mv -f -- "$HOME_SUMMARY_TMP" "$LEDGER" 2>/dev/null; then
     home_summary_fail "atomic ledger replacement failed: $LEDGER"
     return 1
@@ -207,10 +203,8 @@ home_summary_refresh_once() {
 }
 
 home_summary_log_failure() {
-  local size stamp tmp
-  stamp=$HOME_SUMMARY_FAILURE_STAMP
-  [ -n "$stamp" ] || stamp=$(home_summary_timestamp)
-  if ! printf '[%s] %s\n' "$stamp" "$HOME_SUMMARY_ERROR" >> "$ERROR_LOG" 2>/dev/null; then
+  local size tmp
+  if ! printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOME_SUMMARY_ERROR" >> "$ERROR_LOG" 2>/dev/null; then
     printf 'fm-home-summary-refresh: %s\n' "$HOME_SUMMARY_ERROR" >&2
     return 0
   fi
@@ -228,13 +222,24 @@ home_summary_log_failure() {
 
 if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
   HOME_SUMMARY_ERROR=${FM_HOME_SUMMARY_PARENT_ERROR:-"refresh worker failed"}
-  HOME_SUMMARY_FAILURE_STAMP=${FM_HOME_SUMMARY_PARENT_STAMP:-}
-  home_summary_log_failure
+  HOME_SUMMARY_PARENT_LEDGER=${FM_HOME_SUMMARY_PARENT_LEDGER:-absent}
+  trap home_summary_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  fm_lock_try_acquire "$REFRESH_LOCK" || exit 0
+  HOME_SUMMARY_LOCK_HELD=1
+  if [ "$(home_summary_ledger_identity)" = "$HOME_SUMMARY_PARENT_LEDGER" ]; then
+    home_summary_log_failure
+  fi
+  fm_lock_release "$REFRESH_LOCK"
+  HOME_SUMMARY_LOCK_HELD=0
+  trap - EXIT HUP INT TERM
   exit 0
 fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
-  attempt_stamp=$(home_summary_timestamp 2>/dev/null) || attempt_stamp=
+  parent_ledger=$(home_summary_ledger_identity)
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
     FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
@@ -251,7 +256,7 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
     fi
     fm_run_timed 2 env \
       FM_HOME_SUMMARY_PARENT_ERROR="$parent_error" \
-      FM_HOME_SUMMARY_PARENT_STAMP="$attempt_stamp" \
+      FM_HOME_SUMMARY_PARENT_LEDGER="$parent_ledger" \
       "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_log-failure >/dev/null || true
     exit 0
   fi
