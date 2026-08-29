@@ -9,10 +9,11 @@
 # one down kills the other's agent inside a worktree it is still working in.
 #
 # The invariant was reachable from both directions. A teardown released the
-# worktree to the pool BEFORE retiring the endpoint, so a refused pane close
-# left the task half-retired: pool says free, this task's record still claims
-# it, next spawn gets it. And the spawn path accepted whatever worktree it was
-# handed without checking whether a live record already named it.
+# worktree to the pool BEFORE retiring the endpoint and durable task state, so
+# either failure could leave the task half-retired: pool says free, this task's
+# record still claims it, next spawn gets it. And the spawn path accepted
+# whatever worktree it was handed without checking whether a live record already
+# named it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -158,8 +159,30 @@ test_teardown_retires_the_endpoint_before_releasing_the_worktree() {
   pass "teardown: the endpoint is retired before the worktree returns to the pool"
 }
 
+test_teardown_failure_preserves_the_record_and_provider_reservation() {
+  local dir id=retire-failure out rc=0
+  dir=$(make_teardown_case teardown-retirement-failure)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=sess:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "mode=no-mistakes"
+  mkdir "$dir/home/state/$id.pr-poll-merge-notified"
+
+  out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "unsafe post-endpoint retirement state did not fail teardown"
+  grep -Fq 'tmux <kill-window' "$dir/runtime.log" \
+    || fail "teardown did not reach endpoint retirement before the fixture failure: $out"
+  if grep -Fq 'treehouse <return' "$dir/runtime.log"; then
+    fail "failed task-state retirement returned the worktree to the provider"
+  fi
+  [ -f "$dir/home/state/$id.meta" ] \
+    || fail "failed task-state retirement removed the worktree ownership record"
+  pass "teardown: failed state retirement preserves the claim and reservation"
+}
+
 test_spawn_refuses_a_worktree_another_live_task_claims
 test_spawn_accepts_the_worktree_its_own_record_names
 test_teardown_retires_the_endpoint_before_releasing_the_worktree
+test_teardown_failure_preserves_the_record_and_provider_reservation
 
 echo "# all fm-worktree-ownership tests passed"

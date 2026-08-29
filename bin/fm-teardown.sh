@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Tear down a finished task: kill the recorded runtime endpoint, then - only
-# once that retirement is confirmed - return the treehouse worktree, release the
-# Orca worktree, or retire a secondmate home, clear volatile state,
-# refresh/prune the project's clone for PR-based ship
-# tasks, then print a backlog-refresh reminder for ship and scout teardowns
-# (a secondmate teardown prints none, since secondmates are not backlog items).
+# once that retirement is confirmed - retire its volatile task state before
+# returning a treehouse worktree or releasing an Orca worktree. A secondmate
+# instead retires its home through the dedicated home lifecycle. PR-based ship
+# tasks then refresh/prune the project's clone, and ship/scout teardowns print a
+# backlog-refresh reminder (a secondmate teardown prints none).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -2754,14 +2754,8 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 
-# The isolated copy is released LAST, only once the endpoint is confirmed
-# retired above. Releasing it earlier is what let a refused pane close leave a
-# half-retired task: the worktree went back to the pool while this task's meta
-# still named it, the next spawn was handed that same worktree, and the later
-# successful teardown then reaped processes inside a worktree a different live
-# task owned. reap_task_worktree_processes above is only safe because a
-# worktree belongs to exactly one live task, so the release and the endpoint
-# retirement have to succeed or fail together.
+TASK_WORKTREE_RELEASE=none
+post_lock_cleanup_check=
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -2779,7 +2773,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  TASK_WORKTREE_RELEASE=orca
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -2790,18 +2784,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
-  post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  TASK_WORKTREE_RELEASE=treehouse
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -2839,6 +2825,22 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+# Release the isolated copy only after the endpoint is confirmed retired and
+# every fallible task-state retirement, including meta removal, has succeeded.
+# A provider release failure here can leak a reserved worktree, which is
+# recoverable; releasing earlier can let another home acquire it while a retry
+# still trusts stale metadata and reaps that home's live processes.
+case "$TASK_WORKTREE_RELEASE" in
+  orca)
+    fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+    ;;
+  treehouse)
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+    ;;
+esac
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
