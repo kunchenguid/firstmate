@@ -5,6 +5,7 @@
 # Mutation (LEDGER_MUTATE=1): a fake codex is planted on PATH - a correct chain
 # then records 'lens: codex', failing the 'lens: none' assertions.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-verdict-lib.sh
 . "$ROOT/bin/fm-verdict-lib.sh"

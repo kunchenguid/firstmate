@@ -1,8 +1,9 @@
 # Gate Ledger
 
-## Drain list (1)
+## Drain list (2)
 
 - [ ] gate-l2-loop-audit-level — loop-audit scores the repo at level L2 or better (score >= 58) (red) **ready**
+- [ ] m1-hook-registered — bin/fm-boot-context.sh is registered as a real SessionStart hook (red) **ready**
 
 ## All gates
 
@@ -28,3 +29,10 @@
 | gate-l1-drain-instrumented | green | Wake drain appends a run-log JSON line and stamps STATE.md; FM_LOOP_LOG=0 disables; log failure never breaks the drain |
 | gate-l2-loop-audit-level | red | loop-audit scores the repo at level L2 or better (score >= 58) |
 | g-boot-digest | frozen | Boot-time reconciliation digest in captain context; fm-watch-arm --status read-only |
+| m0-ledger-shape | frozen | Gate harness loads: gates/ledger.json is an array, and a broken ledger fails loudly |
+| m1-hook-registered | red | bin/fm-boot-context.sh is registered as a real SessionStart hook |
+| m2-boot-emitter-is-read-only | frozen | A full boot through bin/fm-boot-context.sh performs zero writes |
+| m4-boot-budget-hostile | frozen | Boot holds its budget by enforced deadline and concurrent helpers, leaks nothing, and never elides a peer |
+| m5-digest-never-silent | frozen | A section that fails to build says so; failure is never silent |
+| gate-ci-declared-red | frozen | CI skips a test only when its gate is red AND declared accepted |
+| gate-status-verb | frozen | Status reporting is a verb a crewmate whose redirect is refused can still use |

@@ -5,6 +5,7 @@
 # Mutation (LEDGER_MUTATE=1): the revising stub emits proceed - the revise-path
 # assertions then fail on a correct implementation.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-intake-lib.sh
 . "$ROOT/bin/fm-intake-lib.sh"

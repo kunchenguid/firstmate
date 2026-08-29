@@ -51,6 +51,19 @@ Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default
 Bootstrap also runs the guarded local secondmate sync for recorded live secondmate homes.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable reason, and `NUDGE_SECONDMATES:` only when a running home advanced and its instruction surface changed.
 
+## Boot context (SessionStart hook)
+
+`bin/fm-boot-context.sh` prints one `additionalContext` block at session start, so a firstmate session knows what the fleet is doing without spending a tool call on it.
+It is strictly read-only: it writes, moves, creates, and deletes nothing, takes no lock, and never creates a missing directory - a home it cannot read is reported as unreadable, never as idle.
+The block has two tiers.
+Tier 1 is universal - this home's identity plus one line per fleet instance read from `FM_BOOT_FLEET_DIR` - and a peer is never elided.
+Tier 2 adds spawn lifecycle, projects, secondmates, backlog, and the reconciliation digest, and only for the session that is actually steering, which is decided from the session lock; when the lock or the ancestry probe cannot be read the block says steering is unknown and withholds Tier 2 rather than guessing.
+The whole hook holds the `FM_BOOT_TOTAL_BUDGET` wall-clock ceiling: helpers run concurrently under one shared deadline, and a helper still running at that deadline is killed as a process group and rendered as a degradation marker.
+A section that fails to build is replaced by an explicit `UNAVAILABLE (reason)` marker naming it, so a boot that lost its fleet context never looks like a healthy one.
+
+Registering the hook is not a change in this repo.
+`~/.claude/settings.json` is rendered from `mac-config`'s desired state, and a render deletes every key it does not declare, so registration is a declared change there; [`docs/declarations/2026-08-27-boot-context-hook-registration.md`](declarations/2026-08-27-boot-context-hook-registration.md) carries the exact edits, and gate `m1-hook-registered` stays red until they are applied.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -62,6 +75,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_WAKE_LIB_READONLY=    # set to 1 by read-only callers so sourcing the wake lib never creates the state dir
 FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
@@ -97,4 +111,11 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+# boot context (bin/fm-boot-context.sh); the read-only SessionStart hook
+FM_BOOT_FLEET_DIR=~/.local/state/firstmate/fleet   # shared fleet view the boot context reads
+FM_BOOT_TOTAL_BUDGET=1.5           # seconds; hard wall-clock ceiling for the whole hook
+FM_BOOT_HELPER_TIMEOUT=0.45        # seconds allowed per concurrently executed helper relay
+FM_CTX_INJECT_CAP=10000            # injected-context ceiling in characters
+FM_BOOTSTRAP_BIN=                  # helper dir the boot context resolves relays through; the test stub seam
+FM_BOOT_FORCE_FAIL=                # test seam: comma-separated section names (or "all") forced to raise; never set in production
 ```

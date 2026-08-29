@@ -4,6 +4,7 @@
 # Mutation (LEDGER_MUTATE=1): seed only ONE prior reject - a correct cap then
 # does NOT escalate on the next reject, failing the escalate assertions.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-verdict-lib.sh
 . "$ROOT/bin/fm-verdict-lib.sh"
@@ -37,7 +38,7 @@ fm_verdict_append "$S" q5task reject "(attempt 1 of 3) seeded"
 [ "${LEDGER_MUTATE:-}" = 1 ] || fm_verdict_append "$S" q5task reject "(attempt 2 of 3) seeded"
 
 # next reject is the third -> reject AND escalate, exit 3
-out=$("$ROOT/bin/fm-verify.sh" q5task 2>&1); code=$?
+"$ROOT/bin/fm-verify.sh" q5task >/dev/null 2>&1; code=$?
 V=$(fm_verdict_file "$S" q5task)
 expect_code 3 "$code" "third reject must exit 3 (escalate)"
 assert_grep "reject: (attempt 3 of 3)" "$V" "third reject line recorded before the escalate"
@@ -50,7 +51,7 @@ fm_write_meta "$S/q5b.meta" \
   "window=firstmate:fm-q5b" "worktree=$WT" "project=$REPO" \
   "harness=echo" "kind=ship" "mode=local-only" "yolo=off"
 fm_verdict_append "$S" q5b reject "1"; fm_verdict_append "$S" q5b reject "2"; fm_verdict_append "$S" q5b reject "3"
-out=$("$ROOT/bin/fm-verify.sh" q5b 2>&1); code=$?
+"$ROOT/bin/fm-verify.sh" q5b >/dev/null 2>&1; code=$?
 expect_code 3 "$code" "at-cap task must escalate immediately"
 assert_absent "$TMP/verifier-ran" "verifier must not run for an at-cap task"
 assert_grep "escalate: attempt cap reached" "$(fm_verdict_file "$S" q5b)" "at-cap escalate recorded"

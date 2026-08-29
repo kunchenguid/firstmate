@@ -9,7 +9,14 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
-mkdir -p "$STATE"
+# Sourcing this normally implies intent to use the queue or a lock, so the
+# state dir is created up front. FM_WAKE_LIB_READONLY=1 opts out, for callers
+# that only ever read: the boot-context emitter relays `fm-watch-arm.sh
+# --status` and must write nothing at all, and a reporting path that creates
+# the directory it reports on is not read-only. Only the read-only paths set
+# it; every writer leaves it unset and gets the dir. Gate m2 asserts a full
+# boot leaves a bare home completely empty.
+[ "${FM_WAKE_LIB_READONLY:-}" = 1 ] || mkdir -p "$STATE"
 
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"

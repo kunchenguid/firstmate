@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # Cortana firstmate-captain bootstrap.
-# Emitted into every Claude Code session via a global SessionStart hook so this
-# harness always boots AS the captain — knowing the spawn lifecycle and live
-# fleet state without rediscovering them mid-task.
+#
+# STATUS: NOT REGISTERED. This was a global SessionStart hook until 2026-08-14,
+# when the control plane evicted it with cause and now bans it by name: it
+# mutates durable files on every session start (it archives the handoff and
+# removes the resume directive) on behalf of a subsystem whose writer is dead.
+# The boot context is emitted instead by the strictly read-only
+# bin/fm-boot-context.sh — see docs/specs/2026-08-27-n-concurrent-firstmates.md
+# and docs/declarations/2026-08-27-boot-context-hook-registration.md. What
+# follows describes how this script behaves when run, not where it runs from.
+#
+# Written to emit into every Claude Code session so the harness boots AS the
+# captain — knowing the spawn lifecycle and live fleet state without
+# rediscovering them mid-task.
 #
 # REHYDRATE (context watchdog): if a handoff doc for THIS pane's window exists
 # (state/handoff-<window>.md), this session is a watchdog-driven restart — inject

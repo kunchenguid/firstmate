@@ -79,7 +79,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
-  <id>.status        appended by crewmates: "<state>: <note>" lines
+  <id>.status        appended by crewmates through bin/fm-status.sh: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
@@ -648,6 +648,8 @@ If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholde
 Keep the charter focused on persistent responsibility, available project clones, escalation back to the main firstmate status file, and the idle-by-default contract: reconcile only its own in-flight work and then wait, never self-initiating a survey or audit.
 Before seeding, loading, handing backlog to, or launching a secondmate home, load `secondmate-provisioning`.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
+Reporting is a verb, not a redirect: every brief hands the crewmate a `bin/fm-status.sh` command instead of an `echo ... >>` into the status file, because the permission profile classifies a redirect into this tree as an edit and refuses it, which loses the report silently.
+The scaffold pins the reporting home into that command, so a secondmate's escalation lands in the status file of the home that generated the brief rather than its own; do not rewrite the command to depend on the launched session's environment.
 For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.
 

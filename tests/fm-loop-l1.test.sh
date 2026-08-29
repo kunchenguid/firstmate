@@ -7,6 +7,7 @@
 # while the test still asserts the log line appears - a correct guard writes
 # nothing, failing the assertions.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP=$(fm_test_tmproot fm-loop-l1)

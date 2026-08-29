@@ -21,6 +21,19 @@ A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for 
 Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 `fm-send.sh` adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that pause.
 
+The other half of that channel is the crewmate's own report, and it is a verb rather than a shell redirect.
+Briefs hand each crewmate a `bin/fm-status.sh` command, because a redirect into the firstmate tree is classified as an edit and refused by the permission profile - a refusal that leaves no status file and no report, which reads as silence rather than as an error.
+The scaffold pins the reporting home into the command, so a secondmate escalates into the status file of the home that dispatched it rather than its own.
+
+## Boot context is read-only
+
+`bin/fm-boot-context.sh` is a `SessionStart` hook that prints what the fleet is doing, so a session starts oriented without spending a tool call on it.
+It writes, moves, creates, and deletes nothing, takes no lock, and never creates a missing directory; a home it cannot read is reported as unreadable rather than as idle.
+Its first tier is universal - this home's identity and one line per fleet instance, with no peer ever elided - and the second tier, the spawn lifecycle, projects, secondmates, backlog, and reconciliation digest, is added only for the session that actually holds the steering lock.
+The whole hook holds a wall-clock ceiling by running its helpers concurrently under one shared deadline and killing, as a process group, any that overruns it.
+Nothing degrades silently: a helper that is killed and a section that fails to build each leave an explicit marker in the output.
+Registering it is not a change in this repo: the harness settings file is rendered from control-plane desired state, so the hook is declared there and goes live when that declaration is applied; see [configuration.md](configuration.md).
+
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees so parallel tasks on one repo cannot collide.

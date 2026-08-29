@@ -6,6 +6,7 @@ Each file also starts with a short header comment.
 | Script                   | Description                                                                                                         |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `fm-bootstrap.sh`        | Detect required toolchain problems, optional capability facts, and primary-checkout `TANGLE:` problems; locally sync live secondmate homes; refresh clones best-effort; install tools only after consent |
+| `fm-boot-context.sh`     | Strictly read-only `SessionStart` boot-context emitter: fleet identity for every session, steering detail only for the session that holds the lock, under a hard wall-clock budget |
 | `fm-fleet-sync.sh`       | Fetch clones, clean-fast-forward their checked-out default branches, and safely prune branches whose remote is gone |
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
@@ -28,6 +29,7 @@ Each file also starts with a short header comment.
 | `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a crewmate window; exits non-zero when Enter is positively swallowed; text sends pause `FM_SEND_SETTLE` seconds after success |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, and verified submit retry |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate pane                                                                             |
+| `fm-status.sh`           | Append one crewmate status line to a home's status file; briefs teach this verb because a shell redirect into the firstmate tree is refused as an edit |
 | `fm-pr-check.sh`         | Record a PR-ready task and arm the watcher's merge poll                                                             |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
 | `fm-teardown.sh`         | Return the worktree or retire/release a secondmate home; protects ship work, requires scout reports, checks child work, and prints the backlog reminder |

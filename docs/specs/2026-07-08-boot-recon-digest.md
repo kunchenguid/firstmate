@@ -1,5 +1,9 @@
 # Boot-time reconciliation digest (gate g-boot-digest)
 
+> **Status:** the digest contract below still stands and `g-boot-digest` still freezes it, but the hook it was written against does not.
+> `bin/fm-captain-bootstrap.sh` was evicted from the boot path with cause - it mutates durable files on every session start - and the boot context is now emitted by the strictly read-only `bin/fm-boot-context.sh`, which carries this digest as part of its steering tier.
+> See [`2026-08-27-n-concurrent-firstmates.md`](2026-08-27-n-concurrent-firstmates.md) for the replacement design.
+
 ## Problem
 
 The SessionStart hook (`bin/fm-captain-bootstrap.sh`) injects the captain context block (projects, secondmates, tmux windows, backlog head), but the section-5 recovery signals are missing.

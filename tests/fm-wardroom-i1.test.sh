@@ -5,6 +5,7 @@
 # Mutation (LEDGER_MUTATE=1): assert an invalid-kind append SUCCEEDS - a correct
 # validator refuses, so the assertion fails.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-intake-lib.sh
 . "$ROOT/bin/fm-intake-lib.sh"

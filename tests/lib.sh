@@ -18,8 +18,9 @@
 
 # Idempotent guard: behavior-area helper files (secondmate-helpers.sh,
 # wake-helpers.sh) source this library for ROOT/fail/pass, and the test that
-# includes them may also source it directly. Re-sourcing must not wipe the
-# registered-cleanup array or reset state.
+# includes them may also source it directly. Re-sourcing must not re-point the
+# cleanup registry file or reinstall its EXIT trap, both of which are set up
+# once below.
 if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
   return 0
 fi
@@ -43,34 +44,48 @@ pass() {
 
 # --- self-cleaning temp root ------------------------------------------------
 #
-# fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# fm_test_tmproot <prefix> echoes a fresh temp dir and appends it to a registry
+# FILE at $TMPDIR/fm-test-cleanup.<pid>; the EXIT trap that reads that file back
+# and removes every listed dir is installed unconditionally at source time, in
+# the sourcing shell. A test file that needs extra teardown (e.g. killing a
+# daemon) should define its own EXIT trap and call fm_test_cleanup from inside
+# it so registered dirs are still removed.
 
-FM_TEST_CLEANUP_DIRS=()
+# Registration crosses a subshell boundary, so it goes through a FILE, not an
+# array. fm_test_tmproot is called as `TMP=$(fm_test_tmproot x)`, and a command
+# substitution runs in a subshell: an array appended there, or a trap installed
+# there, belongs to the subshell and dies with it. That is not theoretical - it
+# was live. The subshell's own EXIT trap fired the moment the function returned
+# and deleted the directory it had just created, so callers received a path that
+# did not exist, and the parent's array stayed empty so nothing was ever cleaned
+# up. 2,308 temp directories had accumulated across the suites before this was
+# found. Tests survived only because each one mkdir -p's its own subpaths.
+#
+# A file appended by the subshell is visible to the parent, and the trap is
+# installed here at SOURCE time, which is the parent's shell.
+FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.$$"
 
 fm_test_cleanup() {
   local d
-  for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
-  done
-  # The loop's last test is falsy when the array expands to one empty element,
-  # which would make cleanup return 1. The header above tells suites to call
-  # this from their own EXIT trap, so a nonzero return here fails a suite whose
-  # every test passed. Cleanup succeeding is not a test result.
+  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+    while read -r d; do
+      [ -n "$d" ] && rm -rf "$d"
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
+  # Cleanup succeeding is not a test result: never let it decide a suite's exit
+  # code. The header above tells suites to call this from their own EXIT trap.
   return 0
 }
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
-  FM_TEST_CLEANUP_DIRS+=("$root")
+  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"
   printf '%s\n' "$root"
 }
+
+trap fm_test_cleanup EXIT
 
 # --- fakebin / PATH shims ---------------------------------------------------
 #
@@ -99,7 +114,9 @@ SH
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
-# fixture commits never depend on the host git config.
+# fixture commits never depend on the host git config. Both arguments are
+# optional, so callers may invoke it bare.
+# shellcheck disable=SC2120  # optional args; bare calls are intentional
 fm_git_identity() {
   export GIT_AUTHOR_NAME=${1:-fmtest} GIT_AUTHOR_EMAIL=${2:-fmtest@example.invalid}
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL

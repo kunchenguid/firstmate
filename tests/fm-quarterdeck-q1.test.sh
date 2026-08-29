@@ -5,6 +5,7 @@
 # it to SUCCEED — a correct validator refuses, so the assertion fails, proving
 # the test is keyed to real validation.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # shellcheck source=bin/fm-verdict-lib.sh

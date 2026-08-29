@@ -5,6 +5,7 @@
 # Mutation (LEDGER_MUTATE=1): the "rejecting" stub emits approve - every
 # reject-path assertion then fails on a correct implementation.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-verdict-lib.sh
 . "$ROOT/bin/fm-verdict-lib.sh"

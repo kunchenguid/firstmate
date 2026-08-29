@@ -5,6 +5,7 @@
 # Mutation (LEDGER_MUTATE=1): with the last verdict a reject, the test asserts
 # the merge SUCCEEDS - a correct gate refuses, failing the test.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-verdict-lib.sh
 . "$ROOT/bin/fm-verdict-lib.sh"

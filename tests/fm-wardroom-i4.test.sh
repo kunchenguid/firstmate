@@ -5,6 +5,7 @@
 # Mutation (LEDGER_MUTATE=1): seed NO prior revise - a correct cap then does
 # NOT escalate on the next revise, failing the escalate assertions.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-intake-lib.sh
 . "$ROOT/bin/fm-intake-lib.sh"
@@ -31,7 +32,7 @@ export FM_LENS_CMD="echo stub-lens"
 
 # 1. seeded revise + revising panel -> revise #2 AND escalate, exit 3
 [ "${LEDGER_MUTATE:-}" = 1 ] || fm_intake_append "$S" i4task revise "(revise 1 of 2) seeded"
-out=$(FM_INTAKE_CMD="$TMP/think-revise.sh" "$ROOT/bin/fm-intake.sh" i4task "$PROJ" 2>&1); code=$?
+FM_INTAKE_CMD="$TMP/think-revise.sh" "$ROOT/bin/fm-intake.sh" i4task "$PROJ" >/dev/null 2>&1; code=$?
 V=$(fm_intake_file "$S" i4task)
 expect_code 3 "$code" "second revise must exit 3 (escalate)"
 assert_grep "revise: (revise 2 of 2)" "$V" "second revise line recorded before the escalate"
@@ -42,13 +43,13 @@ assert_grep "escalate: revise cap reached" "$V" "escalate recorded at the cap"
 rm -f "$TMP/thinker-ran"
 fm_intake_append "$S" i4cap revise "1"
 fm_intake_append "$S" i4cap revise "2"
-out=$(FM_INTAKE_CMD="$TMP/think-revise.sh" "$ROOT/bin/fm-intake.sh" i4cap "$PROJ" 2>&1); code=$?
+FM_INTAKE_CMD="$TMP/think-revise.sh" "$ROOT/bin/fm-intake.sh" i4cap "$PROJ" >/dev/null 2>&1; code=$?
 expect_code 3 "$code" "at-cap intake must escalate immediately"
 assert_absent "$TMP/thinker-ran" "thinkers must not run for an at-cap intake"
 assert_grep "escalate: revise cap reached" "$(fm_intake_file "$S" i4cap)" "at-cap escalate recorded"
 
 # 3. PANEL-less thinker -> escalate, never proceed
-out=$(FM_INTAKE_CMD="$TMP/think-mute.sh" "$ROOT/bin/fm-intake.sh" i4mute "$PROJ" 2>&1); code=$?
+FM_INTAKE_CMD="$TMP/think-mute.sh" "$ROOT/bin/fm-intake.sh" i4mute "$PROJ" >/dev/null 2>&1; code=$?
 expect_code 3 "$code" "PANEL-less thinker must exit 3"
 V=$(fm_intake_file "$S" i4mute)
 assert_grep "thinker infrastructure failure" "$V" "fail-closed reason recorded"

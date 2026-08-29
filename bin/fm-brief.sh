@@ -57,6 +57,28 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+# Reporting is a verb, not a redirect. The global permission profile denies
+# Edit(~/firstmate/**) and classifies a shell redirect into that tree as an
+# edit, so `echo "..." >> <status file>` is refused for the very agents that
+# need it - observed five times in one task, with the status file never created
+# and no report ever reaching firstmate. bin/fm-status.sh does the append from
+# inside the script, which the profile permits. Gate fm-status-verb freezes it.
+#
+# The home is PINNED into the command rather than inherited from the runtime
+# environment. fm-status.sh resolves its state dir from FM_HOME, and a
+# secondmate is launched under FM_HOME=<its own home> (bin/fm-spawn.sh), so an
+# unpinned verb would append the charter's escalation to the secondmate's own
+# state dir - not the main firstmate's status file the brief names and its
+# watcher polls (AGENTS.md section 7). Pinning makes the command reach the state
+# dir of the home that GENERATED this brief, which is $STATUS_FILE below.
+#
+# Both variables are pinned, not just FM_HOME: fm-status.sh reads
+# FM_STATE_OVERRIDE ahead of FM_HOME, so a stale override in the launched
+# session's environment would still divert the line, and an override in force at
+# scaffold time is not derivable from FM_HOME. Pinning the pair makes the
+# command resolve to exactly $STATUS_FILE whatever it inherits.
+STATUS_ENV="FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE")"
+STATUS_CMD="$STATUS_ENV bash $(shell_quote "$SCRIPT_DIR/fm-status.sh") $(shell_quote "$ID")"
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -93,7 +115,8 @@ Never start a survey, audit, or "find improvements" sweep on your own initiative
 # Escalation to main firstmate
 Handle routine work yourself.
 Escalate only true captain-relevant outcomes by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`$STATUS_CMD "{state}: {one short line}"\`
+   (Reporting is a verb: this appends to $STATUS_FILE from inside the script, and the command pins that home itself so the line always lands there. A direct \`>>\` redirect into that path is refused by the permission profile and your report would be silently lost.)
 States: working, needs-decision, blocked, done, failed.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
@@ -133,7 +156,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`$STATUS_CMD "{state}: {one short line}"\`
+   (Reporting is a verb: this appends to $STATUS_FILE from inside the script, and the command pins that home itself so the line always lands there. A direct \`>>\` redirect into that path is refused by the permission profile and your report would be silently lost.)
    States: working, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/done/failed states. No step-by-step
@@ -241,7 +265,8 @@ $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`$STATUS_CMD "{state}: {one short line}"\`
+   (Reporting is a verb: this appends to $STATUS_FILE from inside the script, and the command pins that home itself so the line always lands there. A direct \`>>\` redirect into that path is refused by the permission profile and your report would be silently lost.)
    States: working, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the

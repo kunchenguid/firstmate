@@ -54,8 +54,11 @@ reset_calls() { : > "$CALLS"; }
 test_explicit_fm_mux_wins() {
   local got
   got=$(FM_MUX=tmux HERDR_ENV=1 fm_mux_driver)
-  [ "$got" = tmux ] && pass "FM_MUX=tmux overrides an in-herdr environment" \
-                    || fail "FM_MUX ignored: got '$got'"
+  if [ "$got" = tmux ]; then
+    pass "FM_MUX=tmux overrides an in-herdr environment"
+  else
+    fail "FM_MUX ignored: got '$got'"
+  fi
 }
 
 # Absent an explicit choice, only a genuine in-herdr environment selects herdr.
@@ -63,9 +66,11 @@ test_autodetect_requires_herdr_env() {
   local a b
   a=$(FM_MUX="" HERDR_ENV=1 fm_mux_driver)
   b=$(FM_MUX="" HERDR_ENV="" fm_mux_driver)
-  [ "$a" = herdr ] && [ "$b" = tmux ] \
-    && pass "autodetect: herdr inside herdr, tmux otherwise" \
-    || fail "autodetect wrong: in-herdr='$a' outside='$b'"
+  if [ "$a" = herdr ] && [ "$b" = tmux ]; then
+    pass "autodetect: herdr inside herdr, tmux otherwise"
+  else
+    fail "autodetect wrong: in-herdr='$a' outside='$b'"
+  fi
 }
 
 # An unknown driver must fail loudly rather than silently doing nothing.
@@ -110,8 +115,11 @@ test_send_delivers_and_submits() {
 test_blocked_agent_is_refused_distinctly() {
   local rc
   HERDR_BLOCKED=1 FM_MUX=herdr fm_mux_send w9:t7 "hello" 2>/dev/null; rc=$?
-  [ "$rc" = 3 ] && pass "blocked agent returns a distinct code, not a generic failure" \
-                || fail "blocked agent returned $rc, expected 3"
+  if [ "$rc" = 3 ]; then
+    pass "blocked agent returns a distinct code, not a generic failure"
+  else
+    fail "blocked agent returned $rc, expected 3"
+  fi
 }
 
 # is_busy is where the drivers genuinely differ: tmux pattern-matches rendered

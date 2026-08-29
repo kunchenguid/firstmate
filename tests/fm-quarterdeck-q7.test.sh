@@ -5,6 +5,7 @@
 # approve and exits 0 - a correct implementation then approves, failing the
 # escalate assertions.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-verdict-lib.sh
 . "$ROOT/bin/fm-verdict-lib.sh"
@@ -41,7 +42,7 @@ chmod +x "$TMP/verify-crash.sh" "$TMP/verify-mute.sh"
 fm_write_meta "$S/q7task.meta" \
   "window=firstmate:fm-q7task" "worktree=$WT" "project=$REPO" \
   "harness=echo" "kind=ship" "mode=local-only" "yolo=off"
-out=$(FM_VERIFY_CMD="$TMP/verify-crash.sh" "$ROOT/bin/fm-verify.sh" q7task 2>&1); code=$?
+FM_VERIFY_CMD="$TMP/verify-crash.sh" "$ROOT/bin/fm-verify.sh" q7task >/dev/null 2>&1; code=$?
 expect_code 3 "$code" "crashing verifier must exit 3"
 V=$(fm_verdict_file "$S" q7task)
 assert_grep "escalate: verifier infrastructure failure" "$V" "infra failure recorded as escalate"
@@ -51,7 +52,7 @@ assert_no_grep "approve:" "$V" "no approve may appear on infra failure"
 fm_write_meta "$S/q7b.meta" \
   "window=firstmate:fm-q7b" "worktree=$WT" "project=$REPO" \
   "harness=echo" "kind=ship" "mode=local-only" "yolo=off"
-out=$(FM_VERIFY_CMD="$TMP/verify-mute.sh" "$ROOT/bin/fm-verify.sh" q7b 2>&1); code=$?
+FM_VERIFY_CMD="$TMP/verify-mute.sh" "$ROOT/bin/fm-verify.sh" q7b >/dev/null 2>&1; code=$?
 expect_code 3 "$code" "verdict-less verifier must exit 3"
 assert_grep "escalate: verifier infrastructure failure" "$(fm_verdict_file "$S" q7b)" "mute verifier escalates"
 

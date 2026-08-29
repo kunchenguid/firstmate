@@ -8,10 +8,12 @@
 # (AGENTS.md only - no STATE.md/LOOP.md/loop docs/agents) - a correct audit
 # scores it far below 58, failing the assertion.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 command -v loop-audit >/dev/null 2>&1 || {
-  echo "loop-audit CLI not on PATH - install: npm i -g @cobusgreyling/loop-audit" >&2
+  # See tests/run-all.sh: exit 2 is only treated as a skip when the test says so.
+  echo "PREREQUISITE MISSING: loop-audit CLI not on PATH - install: npm i -g @cobusgreyling/loop-audit" >&2
   exit 2
 }
 

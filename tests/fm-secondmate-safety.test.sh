@@ -28,16 +28,28 @@ test_fm_home_parameterization() {
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app >/dev/null || fail "brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-a/brief.md"
   [ -f "$brief" ] || fail "brief was not written under FM_HOME/data"
-  grep -F ">> '$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
+  grep -F "'$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
+  # The prose naming the status file is not enough: assert the emitted COMMAND
+  # carries the home. fm-status.sh resolves its state dir from the runtime
+  # FM_HOME, and a secondmate runs under its own FM_HOME, so an unpinned verb
+  # would silently report into the wrong home. This must fail if it misroutes.
+  grep -F "FM_HOME='$home_one' FM_STATE_OVERRIDE='$home_one/state' bash '$ROOT/bin/fm-status.sh' 'task-a'" "$brief" >/dev/null \
+    || fail "brief's status command did not pin FM_HOME to the generating home"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-b app --scout >/dev/null || fail "scout brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-b/brief.md"
-  grep -F ">> '$home_one/state/task-b.status'" "$brief" >/dev/null || fail "scout brief did not shell-quote FM_HOME state path"
+  grep -F "'$home_one/state/task-b.status'" "$brief" >/dev/null || fail "scout brief did not shell-quote FM_HOME state path"
+  grep -F "FM_HOME='$home_one' FM_STATE_OVERRIDE='$home_one/state' bash '$ROOT/bin/fm-status.sh' 'task-b'" "$brief" >/dev/null \
+    || fail "scout brief's status command did not pin FM_HOME to the generating home"
 
   FM_HOME="$home_one" FM_SECONDMATE_CHARTER='ops domain' "$ROOT/bin/fm-brief.sh" task-c --secondmate app >/dev/null \
     || fail "secondmate brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-c/brief.md"
-  grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
+  grep -F "'$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
+  # The charter's escalation must reach the MAIN firstmate that generated it,
+  # not the secondmate's own state dir, where nothing is watching.
+  grep -F "FM_HOME='$home_one' FM_STATE_OVERRIDE='$home_one/state' bash '$ROOT/bin/fm-status.sh' 'task-c'" "$brief" >/dev/null \
+    || fail "secondmate charter's status command did not pin FM_HOME to the main home"
 
   printf 'project=x\n' > "$home_one/state/task-a.meta"
   # quarterdeck: this assertion tests FM_HOME parameterization, not verification,

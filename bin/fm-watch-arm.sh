@@ -30,10 +30,12 @@
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
 #
-# --status: read-only snapshot (used by the boot-time reconciliation digest in
-# fm-captain-bootstrap.sh). Reuses healthy_watcher() — the same honesty gate —
-# and never arms, restarts, or signals anything, and never creates, modifies,
-# or deletes lock/beacon files. Prints exactly one line and always exits 0:
+# --status: read-only snapshot (relayed verbatim into the boot context by
+# bin/fm-boot-context.sh, which runs it with FM_WAKE_LIB_READONLY=1 so sourcing
+# the shared libs creates no state dir either). Reuses healthy_watcher() — the
+# same honesty gate — and never arms, restarts, or signals anything, and never
+# creates, modifies, or deletes lock/beacon files. Prints exactly one line and
+# always exits 0:
 #   watcher-status: healthy pid=<pid> beacon-age=<secs>s
 #   watcher-status: stale pid=<pid|none> beacon-age=<secs|none>
 #   watcher-status: none

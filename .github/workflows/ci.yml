@@ -33,11 +33,15 @@ jobs:
             exit 1
           }
           tmux -V
-      - run: |
-          set -eu
-          for test_script in tests/*.test.sh; do
-            "$test_script"
-          done
+      # tests/run-all.sh, not a bare loop over tests/*.test.sh. A gate that is
+      # deliberately red - an accepted baseline, or one whose other half lives
+      # in another repo - would otherwise fail this job forever, and the wrong
+      # fix would be to make its test pass, which is the false green the gate
+      # ledger exists to prevent. The runner skips such a test only when the
+      # gate is BOTH red in gates/ledger.json AND declared in
+      # gates/accepted-red.md, announces every skip by name in the log, and
+      # skips nothing at all if either file is missing or unreadable.
+      - run: tests/run-all.sh
 
   invariants:
     name: Repo invariants

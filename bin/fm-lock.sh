@@ -12,7 +12,10 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
-mkdir -p "$STATE"
+# Deliberately NOT created here. `status` is relayed verbatim into the boot
+# context by the read-only emitter (bin/fm-boot-context.sh), and a reporting
+# path that creates a directory is not read-only. The acquire path below makes
+# the dir; status only reads. Gate m2 asserts a full boot writes nothing.
 
 # Known harness command names; extend when a new adapter is verified.
 HARNESS_RE='claude|codex|opencode|^pi$'
@@ -49,6 +52,7 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
+mkdir -p "$STATE"
 me=$(harness_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
 if [ -f "$LOCK" ]; then
   old=$(cat "$LOCK")

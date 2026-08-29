@@ -4,6 +4,7 @@
 # Mutation (LEDGER_MUTATE=1): with a trailing reject the test asserts arming
 # SUCCEEDS - a correct gate refuses, failing the test.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-verdict-lib.sh
 . "$ROOT/bin/fm-verdict-lib.sh"
