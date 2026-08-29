@@ -272,6 +272,51 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+# --branch-prefix never touches the default "<mode> <yolo>" output (order- and
+# presence-independent), defaults an unregistered/plain project to the legacy
+# "fm/" prefix, and resolves an empty override to "" for a bare <task-id> branch.
+test_project_mode_resolves_branch_prefix() {
+  local home out
+  home="$TMP_ROOT/project-mode-branch/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- plainproj - fixture with no annotation (added 2026-01-01)
+- modeonlyproj [direct-PR] - fixture with a mode only (added 2026-01-01)
+- overrideproj [direct-PR branch=fix/] - fixture with mode then branch override (added 2026-01-01)
+- reorderedproj [branch=contrib/ direct-PR +yolo] - fixture with branch before mode (added 2026-01-01)
+- bareproj [no-mistakes branch=] - fixture with an empty override (added 2026-01-01)
+
+EOF
+  out=$(FM_HOME="$home" "$PROJECT_MODE" plainproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "an unrelated branch=<prefix> query must not change the default mode/yolo output (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix plainproj 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "a project with no branch= annotation must resolve to the legacy fm/ prefix (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix modeonlyproj 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "a project registering only a mode must still default to fm/ (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" overrideproj 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "a branch= token must not leak into the mode/yolo output (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix overrideproj 2>/dev/null)
+  [ "$out" = "fix/" ] || fail "a registered branch= override after the mode was not resolved (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" reorderedproj 2>/dev/null)
+  [ "$out" = "direct-PR on" ] || fail "a branch= token before the mode must not be mistaken for the mode (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix reorderedproj 2>/dev/null)
+  [ "$out" = "contrib/" ] || fail "a registered branch= override before the mode was not resolved (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix bareproj 2>/dev/null)
+  [ "$out" = "" ] || fail "an empty branch= override must resolve to an empty prefix, not fm/ (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix never-registered 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "an unregistered project must default its branch prefix to fm/ (got '$out')"
+
+  out=$(FM_HOME="$TMP_ROOT/project-mode-branch/no-registry-home" "$PROJECT_MODE" --branch-prefix anyproj 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "an absent registry must default the branch prefix to fm/ (got '$out')"
+  pass "fm-project-mode: --branch-prefix resolves order-independently and defaults to the legacy fm/ prefix"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -279,4 +324,5 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
+test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"

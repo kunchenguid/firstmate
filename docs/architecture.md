@@ -192,7 +192,7 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
-Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating its ship branch (`fm/<id>` by default, or the project's registered prefix), then stop with a blocked status if it landed in the primary checkout.
 
 ## No-mistakes gate authority boundary
 
@@ -269,6 +269,7 @@ The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed e
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
 `data/projects.md` records each project's standing posture and optional `+yolo` merge flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
 `bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` skip and home seeding's refusal and no-mistakes initialization.
+The registry's optional `branch=<prefix>` annotation overrides a project's ship-branch prefix (default `fm/`) the same way: firstmate resolves it via `bin/fm-project-mode.sh --branch-prefix` at intake and passes it explicitly to `bin/fm-brief.sh --branch-prefix`, which never reads the registry itself; each script's own header owns its side of that contract.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-viewable validation evidence to an orphan evidence branch that shares no history with code branches, so it never enters the crew branch or the default branch.
 This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
