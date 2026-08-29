@@ -46,8 +46,8 @@ A `wall` needs the vendor's phrasing and, on a different line of the same eviden
 That corroboration closes one sentence of prose narrating both facts at once, and it does not close an evidence window quoting a real transcript, so three tracked files still read as a wall: `docs/verification/usage-limits.md`, `bin/fm-usage-wall.sh` itself, and `tests/fm-usage-wall.test.sh`.
 If a worker had any of them on screen when its endpoint died, treat an endpoint-sourced wall as unproven and read the step log before believing it.
 [`docs/usage-limit-survivability.md`](../../../docs/usage-limit-survivability.md) owns the rule, the measured scope of that residual, and the condition that should make someone revisit it.
-Read the verdict's own disclosure before trusting a negative: `checked=` names what was actually read, `unread=` names logs that resisted a read, and `unscanned=` names logs the scan's budget never reached.
-A verdict carrying either list is a partial scan, so read those logs yourself before concluding anything.
+Read the verdict's own disclosure before trusting a negative: `checked=` names what was actually read, `unread=` names evidence that was attempted and yielded nothing - the terminal capture appears there as `endpoint`, not only step logs - and `unscanned=` names logs the scan's budget never reached.
+A verdict carrying either list is a partial scan, so read that evidence yourself before concluding anything.
 
 **Diagnose from the step log, not the run status.**
 A run that died on the wall reports `status: failed`, which reads like a verdict on the code and is not one.

@@ -1097,9 +1097,48 @@ fake_tmux_wedged "$CASE_FB" fm-wedgedlonecrew
 OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_CAPTURE_TIMEOUT=1 \
   "$WALL" diagnose wedgedlonecrew 2>&1 )
 assert_contains "$OUT" 'USAGE_WALL: wedgedlonecrew unknown' 'an unattributable run is still unknown'
+assert_contains "$OUT" 'unread=endpoint' \
+  'an inconclusive verdict carries the same unread= token the skill teaches a reader to look for'
 assert_contains "$OUT" 'endpoint capture did not complete within 1s' \
   'an inconclusive verdict names the endpoint evidence it never read either'
 pass 'diagnose carries the unread endpoint onto an inconclusive verdict too'
+
+# The endpoint-only path uses that one shape too. It is the path the digest runs
+# for every endpoint it cannot read as alive, so it is where a reader meets the
+# disclosure most often, and it used to append the reason with no token at all.
+CASE="$TMP_ROOT/dx-endpoint-unread-cheap"; mkdir -p "$CASE"
+make_task "$CASE" wedgedcheapcrew
+fake_tmux_wedged "$CASE_FB" fm-wedgedcheapcrew
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_CAPTURE_TIMEOUT=1 \
+  "$WALL" diagnose wedgedcheapcrew --endpoint-only 2>&1 )
+assert_contains "$OUT" 'unread=endpoint' \
+  'the endpoint-only verdict carries the same unread= token as every other path'
+assert_contains "$OUT" 'endpoint capture did not complete within 1s' \
+  'the endpoint-only verdict still names why the capture yielded nothing'
+pass 'diagnose uses one disclosure shape on the endpoint-only path too'
+
+# A task that never had a terminal is NOT an unread endpoint. Nothing was
+# attempted, so there is no gap for a reader to close, and the skill sends
+# anyone who sees `unread=` off to read evidence that does not exist. Reporting
+# it is the same false precision as labelling a percentage with a window it did
+# not come from - and it is a state the digest itself calls out separately.
+CASE="$TMP_ROOT/dx-endpoint-unrecorded"; mkdir -p "$CASE"
+make_task "$CASE" nowindowcrew
+fm_write_meta "$CASE_HOME/state/nowindowcrew.meta" \
+  "worktree=$CASE_WT" "project=$CASE/repo" "harness=claude" "kind=ship" \
+  "mode=no-mistakes" "yolo=off" "backend=tmux"
+fake_tmux "$CASE_FB" fm-nowindowcrew -
+fake_nm_perstep "$CASE_FB" "fm/nowindowcrew" RUNNOWIN failed \
+  '    review,failed,0,120'
+printf 'tests failed: 3 assertions\n' > "$CASE_FB/log-review"
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" "$WALL" diagnose nowindowcrew 2>&1 )
+assert_contains "$OUT" 'no-signature' 'a readable clean step log still yields no-signature'
+assert_not_contains "$OUT" 'unread=endpoint' \
+  'an endpoint that was never attempted must not be claimed as one that resisted a read'
+assert_not_contains "$OUT" 'checked=endpoint' 'an absent endpoint is not checked either'
+assert_contains "$OUT" 'no endpoint is recorded for this task' \
+  'the absence is still stated, so the reader knows why no terminal evidence appears'
+pass 'diagnose does not claim an unread endpoint for a task that never had one'
 
 # --- diagnose: an EMPTY successful log read is not a read -------------------
 #

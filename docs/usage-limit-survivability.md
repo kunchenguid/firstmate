@@ -103,6 +103,10 @@ The same rule governs evidence that could not be read at all.
 `no-signature` means the evidence was read and nothing matched, so a step log that failed to read reports `unknown reason=step-log-unreadable` instead, and a step nothing looked at is never listed as checked.
 A step the scan budget never reached is a third fact again, disclosed as `unscanned=` rather than as `unread=`, because a read nothing attempted is not a read that failed.
 
+`unread=` names evidence that was attempted and yielded nothing, and the terminal capture belongs to that list as much as a step log does: it appears there as the token `endpoint`, the same token `checked=` uses when the capture succeeded, with the concrete reason trailing the verdict.
+A wedged terminal costs the whole capture bound and then contributes nothing, so a verdict naming only the step logs it did read would look cleaner than the evidence behind it.
+A task with no endpoint recorded at all is not an unread endpoint and never carries the token, because nothing was attempted and there is no gap for a reader to close; its absence is stated as a trailing reason instead.
+
 ## Why a wall verdict needs corroboration
 
 This detector reads a terminal capture and a pipeline step log, and both can contain this repository's own documentation of the detector.
@@ -146,7 +150,7 @@ The digest's per-task scans share one budget across the whole fleet-state sectio
 `bin/fm-fleet-view.sh` bounds its gauge read for the same reason, because the heartbeat review must cost a constant too.
 
 A budget that runs out never buys silence.
-Whatever it could not reach is named as unscanned - `scan-budget-exhausted` in the digest, `unscanned=` on a `diagnose` verdict, separate from the `unread=` list of logs that resisted a read - so a partial scan can never be read as a clean one.
+Whatever it could not reach is named as unscanned - `scan-budget-exhausted` in the digest, `unscanned=` on a `diagnose` verdict, separate from the `unread=` list of evidence that was attempted and yielded nothing - so a partial scan can never be read as a clean one.
 That is the same rule the gauge follows: unmeasured is unknown, never fine.
 
 The step-log scan is deliberately uncapped by count.
