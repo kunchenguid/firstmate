@@ -18,7 +18,6 @@ import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   createBranchDispatchOffer,
-  deliveryPreflightForUnreadWake,
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
@@ -89,7 +88,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
-const deliveryContinueScript = `${fmRoot}/bin/fm-delivery-continue.sh`;
+const deliveryPreflightScript = `${fmRoot}/bin/fm-delivery-preflight.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -320,35 +319,39 @@ export default function (pi: ExtensionAPI) {
 
   function runDeliveryContinuations(): { results: string[]; seqs: string[] } {
     let lockPid = "";
-    const results: string[] = [];
-    const preflight = deliveryPreflightForUnreadWake(state);
     try {
       lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
     } catch {}
-    for (const task of preflight.tasks) {
-      const result = spawnSync("bash", [deliveryContinueScript, task], {
-        cwd: fmRoot,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          FM_HOME: fmHome,
-          FM_STATE_OVERRIDE: state,
-          FM_ROOT_OVERRIDE: fmRoot,
-          FM_SUPERVISION_ACTOR: "main",
-          FM_LEASE_HOLDER_PID: lockPid,
-        },
-      });
-      const line = (result.stdout || "").trim();
-      if (
-        result.status !== 0 ||
-        !/^result=(sent|already-delivered|already-active|retry|refused) task=[A-Za-z0-9._-]+(?: reason=[A-Za-z0-9._-]+)?$/.test(line)
-      ) {
-        const detail = (result.stderr || "").trim();
-        throw new Error(`delivery continuation failed for ${task}: ${detail || line || `status=${result.status ?? "none"}`}`);
-      }
-      results.push(line);
+    const result = spawnSync("bash", [deliveryPreflightScript], {
+      cwd: fmRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_STATE_OVERRIDE: state,
+        FM_ROOT_OVERRIDE: fmRoot,
+        FM_SUPERVISION_ACTOR: "main",
+        FM_LEASE_HOLDER_PID: lockPid,
+      },
+    });
+    const lines = (result.stdout || "").trim().split(/\r?\n/).filter(Boolean);
+    if (result.status !== 0) {
+      const detail = (result.stderr || "").trim();
+      throw new Error(`delivery continuation preflight failed: ${detail || lines.join("; ") || `status=${result.status ?? "none"}`}`);
     }
-    return { results, seqs: preflight.seqs };
+    const results: string[] = [];
+    const seqs: string[] = [];
+    for (const line of lines) {
+      if (/^sequence=[0-9]+$/.test(line)) {
+        seqs.push(line.slice("sequence=".length));
+      } else if (/^result=(sent|already-delivered|already-active|retry|refused) task=[A-Za-z0-9._-]+(?: reason=[A-Za-z0-9._-]+)?$/.test(line)) {
+        results.push(line);
+      } else {
+        throw new Error(`delivery continuation preflight returned malformed output: ${line}`);
+      }
+    }
+    if (new Set(seqs).size !== seqs.length) throw new Error("delivery continuation preflight returned duplicate sequences");
+    return { results, seqs };
   }
 
   async function deliverActionableWake(

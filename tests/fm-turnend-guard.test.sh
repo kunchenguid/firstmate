@@ -1157,6 +1157,14 @@ await handlers.get("agent_settled")({ type: "agent_settled" }, {});
 if (!existsSync(`${process.env.FM_HOME}/state/.lease-task-race`)) throw new Error("main settled cleanup removed continuation custody");
 result = runBash("FM_SUPERVISION_ACTOR=main FM_LEASE_OWNER=delivery-owner bin/fm-lease.sh release task-race --actor main");
 if (result.status !== 0) throw new Error(`continuation fixture release failed: ${result.stderr}`);
+
+writeFileSync(`${process.env.FM_HOME}/state/.lease-task-legacy`, `main\t${process.pid}\t1\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.lease-task-orphan`, `main\t${process.pid}\t1\tpi-main-orphan\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.lease-task-delivery`, `main\t${process.pid}\t1\tdelivery-task\n`);
+await handlers.get("session_start")({ type: "session_start", reason: "reload" }, {});
+if (existsSync(`${process.env.FM_HOME}/state/.lease-task-legacy`)) throw new Error("activation retained a legacy MAIN lease");
+if (existsSync(`${process.env.FM_HOME}/state/.lease-task-orphan`)) throw new Error("activation retained an orphaned MAIN turn lease");
+if (!existsSync(`${process.env.FM_HOME}/state/.lease-task-delivery`)) throw new Error("activation removed continuation custody");
 EOF
   )
   status=$?

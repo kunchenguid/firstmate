@@ -28,7 +28,8 @@
 #     concurrent operations by the same actor. A live claim from another
 #     actor or owner is refused, release removes only the exact actor and
 #     owner, and release-owner provides deterministic settled-operation
-#     cleanup. release-actor is reserved for generation activation recovery.
+#     cleanup. release-turns clears only model-turn owner families at generation
+#     activation, while release-actor remains the branch-wide recovery surface.
 #   - Staleness: the recorded pid is the long-lived supervising process (the
 #     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), and
 #     both actors live inside that one pi process, so a dead recorded pid

@@ -278,13 +278,22 @@ test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak() {
   mkdir -p "$data/malformed"
   cp "$data/t/brief.md" "$data/malformed/brief.md"
   printf 'blocked: prose mentions [key=other] before the final detail [key=main-custody]\n' > "$dir/malformed.status"
-  FM_DATA_OVERRIDE="$data" assert_fold "$dir/malformed.status" "" "multiple legacy tokens stay non-authoritative"
+  FM_DATA_OVERRIDE="$data" assert_fold "$dir/malformed.status" \
+    "$(printf 'default\tblocked\tprose mentions [key=other] before the final detail [key=main-custody]\n')" \
+    "malformed legacy blocker stays open under default"
+  printf 'resolved: prose mentions [key=other] before the final detail [key=main-custody]\n' >> "$dir/malformed.status"
+  FM_DATA_OVERRIDE="$data" assert_fold "$dir/malformed.status" \
+    "$(printf 'default\tblocked\tprose mentions [key=other] before the final detail [key=main-custody]\n')" \
+    "malformed legacy resolution cannot close the default blocker"
   printf 'blocked: waiting while docs mention [key=route] in prose\n' > "$dir/mid-note.status"
   assert_fold "$dir/mid-note.status" \
     "$(printf 'default\tblocked\twaiting while docs mention [key=route] in prose\n')" \
     "mid-note key prose retains the default blocker"
   printf 'needs-decision [key=q1]: choose the route\nresolved: docs still mention [key=q1]\n' > "$dir/current.status"
   assert_fold "$dir/current.status" "$(printf 'q1\tneeds-decision\tchoose the route\n')" "unproven trailing prose"
+  printf 'blocked: keyless custody stop\nresolved: docs still mention [key=q1]\n' > "$dir/current-default.status"
+  assert_fold "$dir/current-default.status" "$(printf 'default\tblocked\tkeyless custody stop\n')" \
+    "unproven trailing resolution cannot close the default blocker"
   pass "only a legacy generated brief enables the trailing-key compatibility form"
 }
 

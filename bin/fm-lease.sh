@@ -30,6 +30,8 @@
 #       leases never outlive it.
 #   fm-lease.sh release-owner --actor main|branch --owner <owner>
 #       Drop every lease held by that exact operation owner.
+#   fm-lease.sh release-turns --actor main|branch
+#       Drop legacy and operation-owned model-turn leases for one generation.
 #   fm-lease.sh sweep
 #       Remove every provably stale lease in this home. Run at session start
 #       (a lease held by a dead actor is cleared at session start); safe to
@@ -55,7 +57,7 @@ fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
 trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
 
 usage() {
-  echo "usage: fm-lease.sh claim|claim-new|release <task> [--actor main|branch] [--owner owner] | release-actor --actor main|branch | release-owner --actor main|branch --owner owner | check <task> | sweep" >&2
+  echo "usage: fm-lease.sh claim|claim-new|release <task> [--actor main|branch] [--owner owner] | release-actor --actor main|branch | release-owner --actor main|branch --owner owner | release-turns --actor main|branch | check <task> | sweep" >&2
   exit 2
 }
 
@@ -94,7 +96,7 @@ case "$CMD" in
     [ "$#" -le 1 ] || usage
     fm_lease_valid_id "$TASK" || usage
     ;;
-  release-actor|release-owner)
+  release-actor|release-owner|release-turns)
     ACTOR=
     OWNER=
     while [ "$#" -gt 0 ]; do
@@ -214,6 +216,24 @@ case "$CMD" in
       fm_lease_valid_id "$TASK" || continue
       if fm_lease_read "$TASK" && [ "$FM_LEASE_ACTOR" = "$ACTOR" ] && [ "$FM_LEASE_RECORD_OWNER" = "$OWNER" ]; then
         rm -f -- "$LEASE"
+      fi
+    done
+    ;;
+  release-turns)
+    CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+    if [ "$ACTOR" != "$CALLER" ]; then
+      echo "error: release-turns refused - the $CALLER supervision actor cannot release leases as $ACTOR" >&2
+      exit "$FM_LEASE_REFUSE_EXIT"
+    fi
+    for LEASE in "$STATE"/.lease-*; do
+      [ -e "$LEASE" ] || continue
+      case "$LEASE" in *.lock) continue ;; esac
+      TASK=${LEASE##*/.lease-}
+      fm_lease_valid_id "$TASK" || continue
+      if fm_lease_read "$TASK" && [ "$FM_LEASE_ACTOR" = "$ACTOR" ]; then
+        case "$ACTOR:$FM_LEASE_RECORD_OWNER" in
+          main:main|main:pi-main-*|branch:branch|branch:pi-branch-*) rm -f -- "$LEASE" ;;
+        esac
       fi
     done
     ;;

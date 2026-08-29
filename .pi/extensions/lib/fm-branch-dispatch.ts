@@ -51,26 +51,22 @@ const UNSAFE_SCOPE: UnreadWakeScope = { status: "unsafe", eligible: false, proje
 
 type TaskMetadata = {
   projectByKey: Map<string, string>;
-  taskByKey: Map<string, string>;
 };
 
 function readTaskMetadata(state: string): TaskMetadata {
   const projectByKey = new Map<string, string>();
-  const taskByKey = new Map<string, string>();
   for (const name of readdirSync(state)) {
     if (!name.endsWith(".meta")) continue;
     const task = name.slice(0, -5);
     const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
     const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
     const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
-    taskByKey.set(task, task);
-    if (window) taskByKey.set(window, task);
     if (project) {
       projectByKey.set(task, project);
       if (window) projectByKey.set(window, project);
     }
   }
-  return { projectByKey, taskByKey };
+  return { projectByKey };
 }
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
@@ -257,39 +253,6 @@ export interface BranchDispatchOffer {
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
   accept(): void;
-}
-
-export type DeliveryPreflightScope = {
-  seqs: string[];
-  tasks: string[];
-};
-
-export function deliveryPreflightForUnreadWake(state: string): DeliveryPreflightScope {
-  const queue = readFileSync(`${state}/.wake-queue`, "utf8");
-  const metadata = readTaskMetadata(state);
-  const seqs: string[] = [];
-  const tasks = new Set<string>();
-  for (const row of queue.split(/\r?\n/)) {
-    if (!row) continue;
-    const fields = row.split("\t");
-    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) throw new Error("the unread wake queue is malformed");
-    seqs.push(fields[1]);
-    if (fields[2] === "signal") {
-      const task = fields[3].replace(/\.(?:status|turn-ended)$/, "");
-      if (!/^[A-Za-z0-9._-]+$/.test(task)) throw new Error("the unread signal task identity is malformed");
-      tasks.add(task);
-    } else if (fields[2] === "stale") {
-      const key = fields[3];
-      const task = metadata.taskByKey.get(key) ?? metadata.taskByKey.get(key.replace(/^fm-/, "")) ?? "";
-      if (!task) throw new Error("the unread stale task identity is unresolvable");
-      tasks.add(task);
-    }
-  }
-  return { seqs, tasks: [...tasks].sort() };
-}
-
-export function deliveryTasksForUnreadWake(state: string): string[] {
-  return deliveryPreflightForUnreadWake(state).tasks;
 }
 
 export function createBranchDispatchOffer(

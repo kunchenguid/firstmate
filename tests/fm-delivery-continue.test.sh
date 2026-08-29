@@ -335,6 +335,66 @@ SH
   pass "advanced committed heads refuse stale delivery and surface the conflict"
 }
 
+test_pi_drain_preflights_before_presenting_committed_ready_rows() {
+  local dir home state stub log out err status first_label first_row
+  dir="$TMP_ROOT/pi-drain-preflight"
+  home="$dir/home"
+  state="$home/state"
+  stub="$dir/continue"
+  log="$dir/delivery.log"
+  mkdir -p "$state"
+  printf '%s\n' "$$" > "$state/.lock"
+  fm_write_meta "$state/ship.meta" "window=default:w1:p1" "project=sample"
+  printf 'done: committed fixture\n' > "$state/ship.status"
+  printf '1\t1\tsignal\tship.status\tsignal: ship.status\n' > "$state/.wake-queue"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_PREFLIGHT_RETRY:-0}" = 1 ]; then
+  printf 'result=retry task=%s reason=validation-attribution-unavailable\n' "$1"
+  exit 0
+fi
+if [ -e "${FM_PREFLIGHT_MARK:?}" ]; then
+  printf 'result=already-delivered task=%s\n' "$1"
+else
+  printf '%s\n' "$1" > "$FM_PREFLIGHT_MARK"
+  printf 'sent\n' >> "${FM_PREFLIGHT_LOG:?}"
+  printf 'result=sent task=%s\n' "$1"
+fi
+SH
+  chmod +x "$stub"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_MARK="$dir/delivered" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-wake-drain.sh" 2> "$dir/first.err") || fail "Pi preflight drain failed: $(cat "$dir/first.err")"
+  first_label=$(printf '%s\n' "$out" | grep -n '^Deterministic delivery continuation preflight:$' | cut -d: -f1)
+  first_row=$(printf '%s\n' "$out" | grep -n "$(printf '\tsignal\tship.status\t')" | cut -d: -f1)
+  [ -n "$first_label" ] && [ -n "$first_row" ] && [ "$first_label" -lt "$first_row" ] \
+    || fail "Pi drain presented committed-ready work before deterministic continuation: $out"
+  [ "$(cat "$log")" = sent ] || fail "Pi drain did not create exactly one continuation"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_MARK="$dir/delivered" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-wake-drain.sh" 2> "$dir/replay.err") || fail "Pi replay drain failed: $(cat "$dir/replay.err")"
+  printf '%s\n' "$out" | grep -q '^result=already-delivered task=ship$' \
+    || fail "Pi replay did not converge on the durable continuation: $out"
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ] || fail "Pi replay created a second continuation"
+
+  rm -f "$dir/delivered"
+  : > "$log"
+  status=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 FM_PREFLIGHT_RETRY=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_MARK="$dir/delivered" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/retry.out" 2> "$dir/retry.err" || status=$?
+  [ "$status" -ne 0 ] || fail "transient Pi preflight still presented the wake"
+  err=$(cat "$dir/retry.err")
+  printf '%s\n' "$err" | grep -q '^result=retry task=ship reason=validation-attribution-unavailable$' \
+    || fail "transient Pi preflight did not preserve its retry obligation: $err"
+  ! grep -q "$(printf '\tsignal\tship.status\t')" "$dir/retry.out" \
+    || fail "transient Pi preflight exposed committed-ready work before settling"
+  grep -q "$(printf '\tsignal\tship.status\t')" "$state/.wake-queue" \
+    || fail "transient Pi preflight consumed its durable wake"
+  pass "Pi queue intake preflights committed-ready rows before presentation"
+}
+
 test_exactly_once_delivery_and_replay
 test_refusals_preserve_stop
 test_active_run_and_unavailable_attribution_refuse
@@ -345,4 +405,5 @@ test_identity_and_committed_head_requirements
 test_terminal_receipt_and_existing_lease_retry
 test_fleet_and_bearings_project_pending_continuation
 test_advanced_head_surfaces_continuation_conflict
+test_pi_drain_preflights_before_presenting_committed_ready_rows
 echo "all fm-delivery-continue tests passed"

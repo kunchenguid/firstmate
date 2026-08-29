@@ -403,15 +403,13 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   else
     if k=$(_fm_key_at_note_head "$1"); then
       :
-    elif [ "${FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY:-0}" = 1 ]; then
-      if k=$(_fm_key_at_note_tail_compat "$1"); then
-        :
-      elif _fm_has_note_tail_key_position "$1"; then
-        return 1
-      else
-        printf 'default'
-        return 0
-      fi
+    elif [ "${FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY:-0}" = 1 ] \
+      && k=$(_fm_key_at_note_tail_compat "$1"); then
+      :
+    elif _fm_has_note_tail_key_position "$1"; then
+      [ "$(status_line_verb "$1")" = blocked ] || return 1
+      printf 'default'
+      return 0
     else
       printf 'default'
       return 0

@@ -37,6 +37,7 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-delivery-preflight.sh" "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/"
   cat > "$repo/bin/fm-delivery-continue.sh" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_DELIVERY_LOG:-}" ] || printf 'delivery=%s\n' "$1" >> "$FM_DELIVERY_LOG"
@@ -51,7 +52,7 @@ if [ -n "${FM_DELIVERY_RETRY_MARK:-}" ] && [ ! -e "$FM_DELIVERY_RETRY_MARK" ]; t
 fi
 printf 'result=refused task=%s reason=fixture-stop\n' "$1"
 SH
-  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-delivery-continue.sh"
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-delivery-continue.sh" "$repo/bin/fm-delivery-preflight.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON

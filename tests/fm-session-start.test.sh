@@ -1393,6 +1393,9 @@ EOF
   printf 'branch\t999999\t123\n' > "$home/state/.lease-task-dead"
   FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-live --actor branch \
     || fail "could not seed the live lease"
+  printf 'main\t%s\t123\n' "$SESSION_START_TEST_HARNESS_PID" > "$home/state/.lease-main-legacy"
+  printf 'main\t%s\t123\tpi-main-orphan\n' "$SESSION_START_TEST_HARNESS_PID" > "$home/state/.lease-main-orphan"
+  printf 'main\t%s\t123\tdelivery-live\n' "$SESSION_START_TEST_HARNESS_PID" > "$home/state/.lease-main-delivery"
 
   out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):" \
@@ -1400,6 +1403,9 @@ EOF
   assert_contains "$out" "https://example.com/pr/b" "replayed outcome lost its content"
   [ ! -e "$home/state/.lease-task-dead" ] || fail "locked start left a provably dead lease in place"
   [ -e "$home/state/.lease-task-live" ] || fail "locked start swept a live lease"
+  [ ! -e "$home/state/.lease-main-legacy" ] || fail "locked start retained a legacy MAIN lease"
+  [ ! -e "$home/state/.lease-main-orphan" ] || fail "locked start retained an orphaned MAIN turn lease"
+  [ -e "$home/state/.lease-main-delivery" ] || fail "locked start removed continuation custody"
 
   # Replay is one-shot: presenting the digest is the delivery, so the next
   # locked start stays silent about the same outcome.
@@ -1408,6 +1414,36 @@ EOF
     *"BRANCH OUTCOMES"*) fail "second start re-presented already-replayed branch outcomes" ;;
   esac
   pass "locked Pi session start replays unread branch outcomes once and sweeps only dead leases"
+}
+
+test_pi_session_start_preflights_wakes_before_presentation() {
+  local rec root home fakebin stub log out label row
+  rec=$(new_world pi-startup-preflight)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  stub="$TMP_ROOT/pi-startup-preflight/continue"
+  log="$TMP_ROOT/pi-startup-preflight/delivery.log"
+  fm_write_meta "$home/state/ship.meta" "window=default:w1:p1" "project=sample"
+  printf 'done: committed fixture\n' > "$home/state/ship.status"
+  append_wake "$home/state" signal ship.status "signal: ship.status"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "${FM_PREFLIGHT_LOG:?}"
+printf 'result=sent task=%s\n' "$1"
+SH
+  chmod +x "$stub"
+
+  out=$(FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_LOG="$log" \
+    run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  label=$(printf '%s\n' "$out" | grep -n '^Deterministic delivery continuation preflight:$' | cut -d: -f1)
+  row=$(printf '%s\n' "$out" | grep -n "$(printf '\tsignal\tship.status\t')" | cut -d: -f1)
+  [ -n "$label" ] && [ -n "$row" ] && [ "$label" -lt "$row" ] \
+    || fail "Pi session start presented committed-ready work before its continuation result: $out"
+  [ "$(cat "$log")" = ship ] || fail "Pi session start did not invoke one deterministic continuation owner"
+  pass "Pi session start preflights committed-ready wakes before presentation"
 }
 
 test_non_pi_session_start_leaves_branch_state_untouched() {
@@ -2487,6 +2523,7 @@ test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_and_lease_sweep
+test_pi_session_start_preflights_wakes_before_presentation
 test_non_pi_session_start_leaves_branch_state_untouched
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder

@@ -487,6 +487,25 @@ export default function (pi: ExtensionAPI) {
   let sessionstartGeneration: SessionstartGeneration | null = null;
   let sessionstartExitListenerRegistered = false;
   let mainLeaseOwner = "";
+  let mainLeaseRecoveryFailed = false;
+  const releaseMainLeaseGeneration = (): boolean => {
+    if (lockOwnership() !== "owned") return true;
+    const result = spawnSync("bash", [leaseScript, "release-turns", "--actor", "main"], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_STATE_OVERRIDE: state,
+        FM_ROOT_OVERRIDE: root,
+        FM_SUPERVISION_ACTOR: "main",
+      },
+    });
+    if (result.status !== 0) return false;
+    mainLeaseOwner = "";
+    mainLeaseRecoveryFailed = false;
+    return true;
+  };
   const releaseMainLeaseOwner = (): boolean => {
     if (!mainLeaseOwner) return true;
     const result = spawnSync("bash", [leaseScript, "release-owner", "--actor", "main", "--owner", mainLeaseOwner], {
@@ -540,6 +559,7 @@ export default function (pi: ExtensionAPI) {
       ? startupRebuildSource(ctx) ?? "startup"
       : { new: "clear", resume: "resume", fork: "fork" }[reason];
     markLoaded();
+    mainLeaseRecoveryFailed = !releaseMainLeaseGeneration();
     if (!source) return;
     registerSessionstartExitListener();
     sessionstartGeneration = createSessionstartGeneration(
@@ -549,6 +569,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("before_agent_start", async (_event, ctx) => {
+    if (mainLeaseRecoveryFailed && !releaseMainLeaseGeneration()) {
+      return { message: "MAIN supervision lease recovery failed. Retry session activation before handling fleet work." };
+    }
     const generation = sessionstartGeneration;
     if (!generation) return;
     const message = await claimSessionstartMessage(generation, ctx);
@@ -588,6 +611,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    if (mainLeaseRecoveryFailed) {
+      return { block: true, reason: "MAIN supervision lease recovery has not completed" };
+    }
     const command = String((event.input as { command?: unknown })?.command ?? "");
     if (!command) return {};
     const cdResult = await runCdCheck(command);
@@ -599,8 +625,8 @@ export default function (pi: ExtensionAPI) {
       return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
     }
     if (mainLeaseOwner) {
-      event.input.command = `export FM_SUPERVISION_ACTOR=main FM_LEASE_OWNER=${mainLeaseOwner}
-readonly FM_SUPERVISION_ACTOR FM_LEASE_OWNER
+      event.input.command = `export FM_SUPERVISION_ACTOR=main FM_LEASE_OWNER=${mainLeaseOwner} FM_PI_DELIVERY_PREFLIGHT=1
+readonly FM_SUPERVISION_ACTOR FM_LEASE_OWNER FM_PI_DELIVERY_PREFLIGHT
 (
 ${command}
 )`;

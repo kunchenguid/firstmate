@@ -59,6 +59,7 @@ ACTOR=$(fm_lease_actor) || exit 2
 ELIGIBLE_ROWS_FILE="$STATE/.branch-eligible-rows"
 ELIGIBLE_OWNER_FILE="$STATE/.branch-eligible-owner"
 MAIN_ROWS_FILE="$STATE/.main-eligible-rows"
+DELIVERY_PREFLIGHT_BIN="${FM_DELIVERY_PREFLIGHT_BIN:-$SCRIPT_DIR/fm-delivery-preflight.sh}"
 
 rows_file_valid() {
   [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
@@ -528,6 +529,25 @@ if [ "$ACTOR" = main ]; then
     (print_status_presentation) || true
     assert_watcher_liveness
     exit 0
+  fi
+  if [ "${FM_PI_DELIVERY_PREFLIGHT:-0}" = 1 ]; then
+    DELIVERY_PREFLIGHT_OUT=$(FM_DELIVERY_PREFLIGHT_ROWS_FILE="$MAIN_ROWS_FILE" \
+      FM_DELIVERY_PREFLIGHT_LOCK_HELD=1 bash "$DELIVERY_PREFLIGHT_BIN" 2>&1) || {
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+        DRAIN_LOCK_HELD=false
+        printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_OUT" >&2
+        exit 1
+      }
+    if printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" | grep -q '^result=retry '; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      DRAIN_LOCK_HELD=false
+      printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_OUT" >&2
+      exit 1
+    fi
+    DELIVERY_PREFLIGHT_RESULTS=$(printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" | grep '^result=' || true)
+    if [ -n "$DELIVERY_PREFLIGHT_RESULTS" ]; then
+      printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_RESULTS"
+    fi
   fi
 fi
 
