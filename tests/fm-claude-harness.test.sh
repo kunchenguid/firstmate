@@ -245,7 +245,7 @@ run_orca_spawn() {
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_ORCA_WT="$wt" TMUX= \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_ORCA_WT="$wt" TMUX='' \
     FM_FAKE_ORCA_LOG="$case_dir/orca.log" \
     FM_FAKE_CLAUDE_STATE="$case_dir/claude.state" \
     FM_CLAUDE_TRUST_POLLS=2 FM_CLAUDE_TRUST_CLEAR_POLLS=2 \
