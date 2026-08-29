@@ -1132,14 +1132,15 @@ launch_template() {
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
     # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
+    # --permission-mode auto. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
-    # --yolo does NOT cover and which would otherwise block every spawn, since
-    # each task gets a fresh worktree path cursor has never seen. --yolo is the
-    # --force alias whose TUI label is "Run Everything". --workspace pins the
+    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt that
+    # would otherwise block every spawn, since each task gets a fresh worktree
+    # path cursor has never seen, and it is also what loads the project hooks.
+    # --auto-review --sandbox enabled replaces the former blanket --yolo bypass
+    # with a sandboxed, auto-reviewing autonomy posture. --workspace pins the
     # exact worktree. -w/--worktree is deliberately never passed: it allocates a
     # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
     # isolation contract. The binary is resolved rather than named because
