@@ -1487,6 +1487,46 @@ EOF
   pass "session start: the wall scan bounds its endpoint capture below its own bound"
 }
 
+# The scan's fallback names why the scan produced nothing, and only
+# bin/fm-timeout-lib.sh knows what a non-zero bounded exit means. The digest
+# passes operator-set FM_USAGE_WALL_* values through to the scan, and the child
+# refuses a bad one with a usage exit rather than a timeout - which a fixed
+# "did not complete" would report as the scan running out of time when it never
+# started. Driven through the real knob rather than a stub, because that is the
+# input that actually reaches it.
+test_wall_scan_fallback_names_the_true_reason() {
+  local rec root home fakebin out
+  rec=$(new_world wall-scan-reason)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+  printf 'window=fm-sess:dead-window\nkind=ship\nbackend=tmux\n' > "$home/state/task-refused.meta"
+
+  # The whole line, not the reason phrase alone: the same bad tunable also
+  # refuses the digest's headroom read, whose fallback already names a usage
+  # error, so a bare substring here would pass against a scan that still said
+  # nothing of the sort.
+  out=$(FM_USAGE_WALL_CAPTURE_TIMEOUT=0 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" \
+    "USAGE_WALL: task-refused unknown reason=the wall scan was refused as a usage error (exit 2) checked=none" \
+    "a scan refused for a bad tunable must name the usage error, not a timeout"
+  assert_not_contains "$out" "USAGE_WALL: task-refused unknown reason=the wall scan did not complete" \
+    "a scan that never started must not be reported as one that ran out of time"
+
+  # The timeout case still reads as a timeout, so routing through the owner did
+  # not simply relabel every failure as the new one.
+  make_fake_tmux_slow_capture "$fakebin" "fm-sess:live-window"
+  out=$(FM_SESSION_START_WALL_TIMEOUT=2 FM_USAGE_WALL_CAPTURE_TIMEOUT=30 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" \
+    "USAGE_WALL: task-refused unknown reason=the wall scan did not complete within 2s checked=none" \
+    "a scan the digest's own bound killed must still read as a timeout"
+  pass "session start: the wall scan's fallback names the true reason for a scan that produced nothing"
+}
+
 # An endpoint with NO recorded window is not alive either, and it is itself a
 # named recovery trigger, so it must get the same scan and the same routing text
 # as a dead one. It used to be the one not-alive state outside the surface three
@@ -2771,6 +2811,7 @@ test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_wall_scan_budget_is_shared_across_tasks
 test_wall_scan_bounds_the_capture_below_its_own_bound
+test_wall_scan_fallback_names_the_true_reason
 test_wall_scan_covers_an_endpoint_with_no_window
 test_wall_scan_budget_covers_no_window_endpoints
 test_wall_scan_budget_leaves_a_healthy_fleet_alone

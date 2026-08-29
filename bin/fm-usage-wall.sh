@@ -104,10 +104,15 @@
 #                 nothing to read lands here (`reason=step-log-unreadable`),
 #                 never on `no-signature`, because "nothing matched" is a claim
 #                 about evidence that was actually read.
-# A partial scan discloses both of its gaps separately: `unread=` names logs that
-# yielded no evidence - the read failed, or it succeeded with no content at all,
+# A partial scan discloses both of its gaps separately: `unread=` names evidence
+# that yielded nothing - the read failed, or it succeeded with no content at all,
 # which `axi logs` does for a step that never produced one - and `unscanned=`
-# names logs the budget never reached. Diagnose
+# names logs the budget never reached. `unread=` covers the ENDPOINT as well as
+# the step logs, under the same `endpoint` token `checked=` uses, with the
+# capture's concrete reason trailing the line: a wedged terminal costs the whole
+# capture bound and then contributes no evidence, so a verdict that named only
+# the step logs it did read would look cleaner than the evidence behind it.
+# Diagnose
 # always attempts at least one log, so budget truncation reaches a reader here as
 # `unscanned=` rather than as a reason slug of its own; the reason
 # `scan-budget-exhausted` belongs to the digest's fleet-wide scan
@@ -873,13 +878,14 @@ cmd_diagnose() {
     return 0
   fi
 
-  local checked='' evidence status reason line wt
+  local checked='' evidence status reason line wt endpoint_note=''
   evidence=$(endpoint_evidence "$meta" "$id")
   status=${evidence%%	*}
   evidence=${evidence#*	}
   reason=${evidence%%	*}
   line=${evidence#*	}
   line=${line%$'\n'}
+  [ "$status" = readable ] || endpoint_note=$reason
   if [ "$status" = readable ]; then
     checked=endpoint
     if [ -n "$line" ]; then
@@ -904,14 +910,14 @@ cmd_diagnose() {
 
   wt=$(fm_meta_get_local "$meta" worktree)
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
-    diagnose_inconclusive "$id" "${checked:-none}" no-local-copy 'the pipeline logs need a readable local copy to read them from'
+    diagnose_inconclusive "$id" "${checked:-none}" no-local-copy 'the pipeline logs need a readable local copy to read them from' "$endpoint_note"
     return 0
   fi
 
   local run steps step log_line=''
   run=$(attributed_run "$wt") || run=
   if [ -z "$run" ]; then
-    diagnose_inconclusive "$id" "${checked:-none}" no-attributed-run 'no pipeline run is attributed to this local copy'
+    diagnose_inconclusive "$id" "${checked:-none}" no-attributed-run 'no pipeline run is attributed to this local copy' "$endpoint_note"
     return 0
   fi
   local run_id
@@ -919,7 +925,7 @@ cmd_diagnose() {
   steps=$(failed_steps "$run")
   [ -n "$steps" ] || steps=$(last_step "$run")
   if [ -z "$steps" ]; then
-    diagnose_inconclusive "$id" "${checked:-none}" no-readable-steps "pipeline run $run_id lists no readable steps"
+    diagnose_inconclusive "$id" "${checked:-none}" no-readable-steps "pipeline run $run_id lists no readable steps" "$endpoint_note"
     return 0
   fi
   # `unread` and `unscanned` are separate lists on purpose. A log that failed to
@@ -970,16 +976,21 @@ cmd_diagnose() {
   # rather than replacing it.
   if [ "$readable" -eq 0 ]; then
     diagnose_inconclusive "$id" "${checked:-none}" step-log-unreadable \
-      "no step log of pipeline run $run_id could be read (unread: ${unread:-none}${unscanned:+; unscanned: $unscanned})"
+      "no step log of pipeline run $run_id could be read (unread: ${unread:-none}${unscanned:+; unscanned: $unscanned})" \
+      "$endpoint_note"
     return 0
   fi
-  printf 'USAGE_WALL: %s no-signature checked=%s run=%s%s%s\n' "$id" "$checked" "$run_id" \
-    "${unread:+ unread=$unread}" "${unscanned:+ unscanned=$unscanned}"
+  local unread_all=$unread
+  [ -z "$endpoint_note" ] || unread_all="endpoint${unread:+,$unread}"
+  printf 'USAGE_WALL: %s no-signature checked=%s run=%s%s%s%s\n' "$id" "$checked" "$run_id" \
+    "${unread_all:+ unread=$unread_all}" "${unscanned:+ unscanned=$unscanned}" \
+    "${endpoint_note:+ - $endpoint_note}"
   printf 'USAGE_WALL_NEXT: no usage-limit signature is present in what was readable; this is not proof the work crashed, so keep reading the evidence itself.\n'
 }
 
-diagnose_inconclusive() {  # <id> <checked> <reason-slug> <detail>
-  printf 'USAGE_WALL: %s unknown reason=%s checked=%s - %s\n' "$1" "$3" "$2" "$4"
+diagnose_inconclusive() {  # <id> <checked> <reason-slug> <detail> [<endpoint-note>]
+  printf 'USAGE_WALL: %s unknown reason=%s checked=%s - %s%s\n' "$1" "$3" "$2" "$4" \
+    "${5:+; $5}"
   printf 'USAGE_WALL_NEXT: the evidence that separates a usage wall from a crash could not be read; do not record a failure until it can.\n'
 }
 

@@ -898,7 +898,7 @@ WALL_BUDGET_EXHAUSTED=0
 # branch, so no endpoint state can drift out of the scan by being written up
 # separately.
 wall_scan() {  # <task-id>
-  local scan_id=$1 scan_bound scan_started
+  local scan_id=$1 scan_bound scan_started scan_out scan_rc
   scan_bound=$SESSION_START_WALL_TIMEOUT
   [ "$scan_bound" -le "$WALL_BUDGET_LEFT" ] || scan_bound=$WALL_BUDGET_LEFT
   if [ "$scan_bound" -le 0 ]; then
@@ -913,11 +913,21 @@ wall_scan() {  # <task-id>
   # endpoint would read as `scan-did-not-complete` instead of naming the wedged
   # capture - the concrete reason the scan exists to produce. Derived per scan
   # because this bound shrinks as the shared budget is spent.
-  FM_USAGE_WALL_CAPTURE_TIMEOUT=${FM_USAGE_WALL_CAPTURE_TIMEOUT:-$(fm_inner_bound "$scan_bound")} \
-  fm_run_timed "$scan_bound" \
-    "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$scan_id" --endpoint-only 2>/dev/null |
-    grep '^USAGE_WALL:' ||
-    printf 'USAGE_WALL: %s unknown reason=scan-did-not-complete checked=none\n' "$scan_id"
+  scan_out=$(FM_USAGE_WALL_CAPTURE_TIMEOUT=${FM_USAGE_WALL_CAPTURE_TIMEOUT:-$(fm_inner_bound "$scan_bound")} \
+    fm_run_timed "$scan_bound" \
+      "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$scan_id" --endpoint-only 2>/dev/null)
+  # Captured from the run itself rather than read after the pipeline, where it
+  # would be grep's status and never the scan's. The reason then comes from
+  # bin/fm-timeout-lib.sh, the one owner of what a non-zero bounded exit means,
+  # as the headroom fallback above and bin/fm-fleet-view.sh already do: only 124
+  # is a timeout, and this scan passes operator-set FM_USAGE_WALL_* values
+  # through to a child that refuses a bad one with exit 2, so a fixed
+  # "did not complete" here would report a scan that never started as one that
+  # ran out of time.
+  scan_rc=$?
+  printf '%s\n' "$scan_out" | grep '^USAGE_WALL:' ||
+    printf 'USAGE_WALL: %s unknown reason=%s checked=none\n' "$scan_id" \
+      "$(fm_run_timed_reason "$scan_rc" "$scan_bound" 'wall scan')"
   WALL_BUDGET_LEFT=$((WALL_BUDGET_LEFT - ($(date +%s) - scan_started)))
   [ "$WALL_BUDGET_LEFT" -ge 0 ] || WALL_BUDGET_LEFT=0
 }

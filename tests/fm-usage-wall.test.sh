@@ -1066,6 +1066,41 @@ assert_contains "$OUT" 'step-log:review' 'the log that was read is named as chec
 assert_contains "$OUT" 'unread=test' 'the log that was NOT read is disclosed on the same line'
 pass 'diagnose discloses a partially read scan instead of reporting it clean'
 
+# The ENDPOINT is disclosed on the same terms as a step log. A wedged terminal
+# costs the whole capture bound and then contributes no evidence, so a verdict
+# that named only the step logs it did read would look cleaner than the evidence
+# behind it - the unmeasured-presented-as-measured failure this command exists
+# to refuse. The full path used to compute the capture's reason and discard it.
+CASE="$TMP_ROOT/dx-endpoint-unread"; mkdir -p "$CASE"
+make_task "$CASE" wedgedfullcrew
+fake_tmux_wedged "$CASE_FB" fm-wedgedfullcrew
+fake_nm_perstep "$CASE_FB" "fm/wedgedfullcrew" RUNWEDGE failed \
+  '    review,failed,0,120'
+printf 'tests failed: 3 assertions\n' > "$CASE_FB/log-review"
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_CAPTURE_TIMEOUT=1 \
+  "$WALL" diagnose wedgedfullcrew 2>&1 )
+assert_contains "$OUT" 'no-signature' 'a readable clean step log still yields no-signature'
+assert_contains "$OUT" 'checked=step-log:review' 'the step log that was read is named as checked'
+assert_not_contains "$OUT" 'checked=endpoint' 'a capture that never returned must not be named as checked'
+assert_contains "$OUT" 'unread=endpoint' \
+  'the endpoint that yielded no evidence is disclosed beside the logs'
+assert_contains "$OUT" 'endpoint capture did not complete within 1s' \
+  'the verdict names why the endpoint yielded nothing, not merely that it did'
+pass 'diagnose discloses an unread endpoint on the full path, with its reason'
+
+# The same disclosure reaches the inconclusive verdicts, which is where a reader
+# lands when the pipeline evidence is unavailable too: without it, a task whose
+# terminal is wedged AND whose run is unattributable reports only the second.
+CASE="$TMP_ROOT/dx-endpoint-unread-inconclusive"; mkdir -p "$CASE"
+make_task "$CASE" wedgedlonecrew
+fake_tmux_wedged "$CASE_FB" fm-wedgedlonecrew
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_CAPTURE_TIMEOUT=1 \
+  "$WALL" diagnose wedgedlonecrew 2>&1 )
+assert_contains "$OUT" 'USAGE_WALL: wedgedlonecrew unknown' 'an unattributable run is still unknown'
+assert_contains "$OUT" 'endpoint capture did not complete within 1s' \
+  'an inconclusive verdict names the endpoint evidence it never read either'
+pass 'diagnose carries the unread endpoint onto an inconclusive verdict too'
+
 # --- diagnose: an EMPTY successful log read is not a read -------------------
 #
 # `axi logs` exits 0 and prints nothing for a step that never produced a log (a
