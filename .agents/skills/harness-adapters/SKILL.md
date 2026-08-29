@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse, plus the candidate omp adapter.
 user-invocable: false
 metadata:
   internal: true
@@ -534,3 +534,47 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+
+## omp (CANDIDATE, NOT LIVE-VERIFIED - Oh My Pi v17.2.9)
+
+Oh My Pi is a CANDIDATE CREWMATE and SCOUT adapter.
+The adapter is wired and deterministically proven by `tests/fm-omp-harness.test.sh` and `tests/fm-busy-adapter-wiring.test.sh` against a stub executable, but no live omp session has ever run under firstmate.
+Do not describe omp as live-verified, and do not dispatch real work on it, until the separately approved first live pilot passes.
+Until then it is dormant: it is reachable only through an explicit `--harness omp` or a later explicit local `config/crew-harness` value, and the shipped `config/crew-harness` is unchanged.
+omp is never a coordinator, a backend, or an implicit default; Orca stays the execution backend and firstmate stays the sole coding supervisor.
+`bin/fm-spawn.sh` refuses `--secondmate` on omp on adapter identity alone, whatever its model, before the watcher guard runs and before any lock, endpoint, worktree, state, or config mutation, and omp has no supervision protocol under `docs/supervision-protocols/`.
+The same early gate refuses any resolved backend other than `orca`, retaining that read-only resolution so the refusal and endpoint creation cannot drift.
+A `--relaunch` binds one read-only regular-file metadata snapshot before every lock so those same model and backend gates, plus any unsafe relaunch record, refuse before mutation.
+omp also forces effective trace propagation off and strips `TRACEPARENT` from the child; it does not inherit the home's frozen trace-context decision.
+
+The facts below come from static inspection of the pinned installed asset plus the release provenance record, NOT from a live session, which is exactly why the pilot is still required.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `omp` from `PATH`, resolved to an absolute path. The launch refuses if it is absent, and refuses again unless `omp --version` reports exactly `omp/17.2.9`, so a drifted or substituted build never runs. That `--version` probe is the only invocation of the installed asset on the spawn path. |
+| Launch | Positional prompt, the Pi/grok/muse shape, so the brief rides the launch command. |
+| Autonomy | `--approval-mode yolo`, the targeted equivalent of claude's `--dangerously-skip-permissions`. |
+| Presentation | `--no-title` leaves the pane title firstmate's to own. |
+| Tools | `--tools read,write,edit,ls,grep,find,bash`, an ALLOWLIST that limits the initially active set. It deliberately excludes omp's `task` subagent delegation and its browser, computer, `web_search`, and MCP surface. omp rejects an unknown `--tools` name with a usage error rather than narrowing silently, so every name was confirmed present in the pinned asset before being listed. |
+| Extensions | `--no-extensions` plus `--no-skills` drop every auto-discovered user/project extension and the ambient skill surface, so the single `-e state/<id>.omp-ext.ts` file firstmate writes is the ONLY extension loaded. |
+| Busy state | `omp-ext`, the per-task extension above. `agent_start` opens busy; the settle event closes to idle only when `ctx.isIdle()` confirms omp is no longer streaming; `turn_end` stays a wake notification touch. |
+| Environment marker | None of its own. `bin/fm-spawn.sh` clears every foreign marker `bin/fm-harness.sh` tests ahead of omp - `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, `FM_PI_HARNESS`, `CURSOR_AGENT`, and `CURSOR_INVOKED_AS` - whose detection precedence would otherwise mask omp, and sets the firstmate-owned `FM_OMP_HARNESS=1` that `bin/fm-harness.sh` reads. The same `env -u` prefix also strips `TRACEPARENT`. Adding a marker ahead of omp in that resolver means adding it here too; cursor is the worked example, because cursor-agent does not clear its own markers. |
+| Liveness | `bin/backends/tmux.sh` classifies the exact process name `omp` as an agent. Never widen that to `*omp*`: `omp` is a substring of ordinary shell machinery such as `compinit`, `compdef`, and `composer`. |
+| Backend | `orca` only. The spawn resolves the backend read-only before any mutation, retains that value, and refuses any other resolved backend at the same early gate as the model pin. |
+| Model | A REQUIRED launch pin. Every omp spawn must carry an explicit `--model <provider>/<model>` flag of its own, validated structurally - exactly one slash between two segments of letters, digits, dot, underscore, or dash - then passed through byte-for-byte on omp's `--model` flag. `fm-spawn` reads no omp default, writes no configuration, and never passes omp's legacy `--provider` flag, so no fuzzy match, provider cycle, or fallback is reachable from the launch; the pin exists because omp would otherwise do all three itself. It cannot see where a caller obtained the flag's value and claims nothing about that, so firstmate resolves the identifier at intake from the discovery surfaces above; no model catalog is queried on the spawn path. An absent, unqualified, malformed, or ambiguous value refuses the spawn before the watcher guard runs and before any lock, endpoint, worktree, state, config, registry, metadata, or extension mutation, for an explicit, positional, configured, or batch selection alike. A `--relaunch` carries no recorded model forward, so relaunching an omp task needs the flag again; that check now runs from the read-only metadata preflight before every lock. |
+| Trace | Forced off. Spawn sets the effective decision to off, records no `traceparent=`, and strips `TRACEPARENT` from the child even when the home session froze trace on. |
+| Effort | Not wired. The effort axis stays outside this adapter until the live pilot pins it under its own approval, so no effort flag reaches the launch command. |
+
+### The settle event is named `agent_end` on this build
+
+The frozen adapter contract names Pi's `agent_settled` as the settle event.
+The pinned `omp/17.2.9` asset does not contain that string at all; it emits `agent_end`, carries a `willContinue` field, and exposes `ctx.isIdle()` as `() => !isStreaming` (verified by static inspection of the installed executable).
+`agent_settled` is the upstream Pi lineage's name for the same edge, which this fork renamed.
+The generated extension therefore registers ONE settle handler under BOTH names, each registration guarded, so whichever name the running build emits drives the same `ctx.isIdle()`-gated transition and a build that rejects an unknown event name cannot strand a task busy.
+The live pilot is what confirms which name actually fires; treat that as an open question until then.
+
+### Teardown removes the extension
+
+`bin/fm-teardown.sh` removes `state/<id>.omp-ext.ts` in both its top-level and its secondmate-child cleanup lists, alongside `state/<id>.pi-ext.ts` and the other per-task artifacts.
+An omp task therefore leaves no state behind, which is what the live pilot's zero-remaining-state proof depends on.
+`tests/fm-backend-orca.test.sh` seeds both extensions and asserts both are gone after a guarded teardown, so narrowing that list to one harness would fail.

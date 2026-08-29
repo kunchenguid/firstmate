@@ -383,6 +383,26 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+fm_backend_orca_worktree_id_valid() {  # <value> <recorded-worktree-path>
+  local value=$1 worktree=$2 prefix path
+  # Older Orca releases and the hermetic adapter tests use opaque atom ids.
+  fm_backend_endpoint_atom_valid "$value" && return 0
+
+  # Current Orca emits a durable composite handle: <repo-id>::<absolute-path>.
+  # Bind that embedded path to the separately recorded worktree identity so
+  # accepting ':' and '/' cannot weaken cleanup target validation.
+  case "$value" in
+    *::/*)
+      prefix=${value%%::*}
+      path=${value#*::}
+      fm_backend_endpoint_atom_valid "$prefix" || return 1
+      [ "$path" = "$worktree" ] || return 1
+      case "$path" in /*) return 0 ;; esac
+      ;;
+  esac
+  return 1
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -503,7 +523,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id" "$worktree"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi

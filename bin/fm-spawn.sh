@@ -167,6 +167,9 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __OMPBIN__   absolute path to the pinned omp executable resolved from PATH
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state extension,
+#                  written by this script; outside the worktree like the pi one)
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -185,6 +188,25 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# omp (Oh My Pi) loads one firstmate-owned state/<id>.omp-ext.ts extension for its
+# semantic busy state; omp is crewmate/scout only and is refused for --secondmate.
+# omp also REQUIRES an explicit --model <provider>/<model> flag on every spawn.
+# The value is validated structurally (exactly one slash between two identifier
+# segments of letters, digits, dot, underscore, or dash), passed through
+# byte-for-byte on omp's --model flag, and never accompanied by omp's legacy
+# --provider flag. This script does not inspect where a caller obtained that
+# value and claims nothing about it; it reads no omp default and writes no
+# configuration. An absent, unqualified, or malformed value refuses the spawn
+# before the watcher guard and before any lock, endpoint, worktree, state,
+# config, registry, metadata, or extension mutation.
+# omp is Orca-only: the backend is resolved read-only before any mutation and
+# retained so the refusal and endpoint creation cannot drift. Any other backend
+# refuses at that same early gate.
+# omp forces effective trace propagation off and strips TRACEPARENT from the
+# child; it does not inherit the home's frozen trace-context decision.
+# A --relaunch binds one read-only regular-file metadata snapshot before every
+# lock so omp's model and backend gates, and any unsafe relaunch record, refuse
+# before mutation. The locked endpoint validation below remains authoritative.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -272,9 +294,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+# The watcher guard is deliberately NOT invoked here. It writes home state, so it
+# runs below, after the arguments are parsed and the effective selection has been
+# validated: a launch this script is going to refuse must not leave a guard
+# episode behind first.
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -404,6 +427,272 @@ else
     }
   fi
 fi
+
+# omp launch pin: every omp spawn carries one explicit `--model <provider>/<model>`
+# flag of its own, or it does not happen. omp's own selection surface fuzzy-matches
+# a bare model name, cycles providers, and falls back to whatever default its
+# configuration names, so an absent or unqualified value would launch a candidate
+# adapter on a provider nobody chose. This script cannot see where a caller got the
+# flag's value, and it makes no claim about that; what it requires is that the
+# value arrive on this spawn's own flag, and it neither reads nor writes an omp
+# default of its own. Validation is structural only - no model catalog is queried
+# and an accepted value is passed through byte-for-byte.
+require_omp_launch_model() {
+  if [ "$MODEL_SET" -ne 1 ] || [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    echo "error: omp requires an explicit --model <provider>/<model> flag on every spawn; without one omp would resolve the provider itself" >&2
+    return 1
+  fi
+  if [[ ! $MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "error: omp --model must be exactly '<provider>/<model>' - one slash between two identifier segments of letters, digits, dot, underscore, or dash (got '$MODEL')" >&2
+    return 1
+  fi
+  return 0
+}
+
+# omp is a CANDIDATE crewmate/scout adapter only. A secondmate is a firstmate
+# instance, so it needs a primary supervision protocol; omp has none under
+# docs/supervision-protocols/, and its own `task` subagent surface is exactly the
+# delegation shape a firstmate primary must not stand up.
+refuse_omp_secondmate() {
+  echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+}
+
+# omp is an Orca-only worker adapter. Resolve the same backend precedence used
+# by the launch path while the invocation is still read-only, then retain that
+# result so it cannot drift between this refusal and endpoint creation.
+OMP_RESOLVED_BACKEND=
+require_omp_orca_backend() {
+  local recorded_backend
+  if [ "$RELAUNCH" -eq 1 ]; then
+    recorded_backend=$(relaunch_preflight_meta_get backend)
+    OMP_RESOLVED_BACKEND=${recorded_backend:-tmux}
+  elif [ "$BACKEND_SET" -eq 1 ]; then
+    OMP_RESOLVED_BACKEND=$BACKEND_ARG
+  else
+    OMP_RESOLVED_BACKEND=$(fm_backend_name)
+  fi
+  if [ "$OMP_RESOLVED_BACKEND" != orca ]; then
+    echo "error: omp requires backend=orca; resolved backend '$OMP_RESOLVED_BACKEND' is not authorized for this adapter" >&2
+    return 1
+  fi
+  return 0
+}
+
+# --- effective selection, resolved once and before anything mutates ----------
+
+# A relaunch may use its durable record for early adapter policy only after it
+# binds one stable identity and content snapshot. Two independent read-only
+# descriptors must name the same regular inode and yield the same complete byte
+# sequence; the still-nonsymlink path must then name that inode and content too.
+# Downstream pre-lock consumers read the in-memory snapshot, never the path.
+RELAUNCH_PREFLIGHT_ID=
+RELAUNCH_PREFLIGHT_META=
+RELAUNCH_PREFLIGHT_META_CONTENT=
+
+relaunch_preflight_path_signature() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%d:%i:%z:%HT' "$1" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%d:%i:%s:%F' "$1" 2>/dev/null
+  fi
+}
+
+relaunch_preflight_fd_signature() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%i:%z:%HT' "/dev/fd/$1" 2>/dev/null
+  else
+    LC_ALL=C stat -L -c '%i:%s:%F' "/dev/fd/$1" 2>/dev/null
+  fi
+}
+
+relaunch_preflight_content_length() {
+  local LC_ALL=C
+  printf '%s' "${#1}"
+}
+
+relaunch_preflight_meta_get() {
+  local key=$1 line value=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done <<EOF
+$RELAUNCH_PREFLIGHT_META_CONTENT
+EOF
+  printf '%s' "$value"
+}
+
+relaunch_preflight_snapshot_refuse() {
+  { exec 8<&-; } 2>/dev/null || true
+  { exec 9<&-; } 2>/dev/null || true
+  echo "error: --relaunch could not bind a stable regular, non-symlink metadata snapshot for $RELAUNCH_PREFLIGHT_ID" >&2
+  exit 1
+}
+
+if [ "$RELAUNCH" -eq 1 ]; then
+  [ "${#POS[@]}" -eq 1 ] || {
+    echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
+    exit 1
+  }
+  RELAUNCH_PREFLIGHT_ID=${POS[0]}
+  fm_task_id_creation_valid "$RELAUNCH_PREFLIGHT_ID" || {
+    echo "error: --relaunch requires a valid task id" >&2
+    exit 2
+  }
+  RELAUNCH_PREFLIGHT_META="$STATE/$RELAUNCH_PREFLIGHT_ID.meta"
+  if [ -L "$RELAUNCH_PREFLIGHT_META" ] || [ ! -f "$RELAUNCH_PREFLIGHT_META" ]; then
+    echo "error: --relaunch needs an existing task record that is a regular, non-symlink metadata file for $RELAUNCH_PREFLIGHT_ID" >&2
+    exit 1
+  fi
+  RELAUNCH_PREFLIGHT_PATH_A=$(relaunch_preflight_path_signature "$RELAUNCH_PREFLIGHT_META") \
+    || relaunch_preflight_snapshot_refuse
+  exec 8< "$RELAUNCH_PREFLIGHT_META" || relaunch_preflight_snapshot_refuse
+  exec 9< "$RELAUNCH_PREFLIGHT_META" || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_FD_A=$(relaunch_preflight_fd_signature 8) \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_FD_B=$(relaunch_preflight_fd_signature 9) \
+    || relaunch_preflight_snapshot_refuse
+  case "$RELAUNCH_PREFLIGHT_FD_A" in
+    *':Regular File'|*':regular file') ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  [ "$RELAUNCH_PREFLIGHT_FD_A" = "$RELAUNCH_PREFLIGHT_FD_B" ] \
+    || relaunch_preflight_snapshot_refuse
+  [ "${RELAUNCH_PREFLIGHT_PATH_A#*:}" = "$RELAUNCH_PREFLIGHT_FD_A" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_A=$({ cat <&8 && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_B=$({ cat <&9 && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  exec 8<&-
+  exec 9<&-
+  case "$RELAUNCH_PREFLIGHT_META_A:$RELAUNCH_PREFLIGHT_META_B" in
+    *$'\034:'*$'\034') ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  RELAUNCH_PREFLIGHT_META_A=${RELAUNCH_PREFLIGHT_META_A%$'\034'}
+  RELAUNCH_PREFLIGHT_META_B=${RELAUNCH_PREFLIGHT_META_B%$'\034'}
+  [ "$RELAUNCH_PREFLIGHT_META_A" = "$RELAUNCH_PREFLIGHT_META_B" ] \
+    || relaunch_preflight_snapshot_refuse
+  # Strip the trailing type field before comparing the byte count.
+  RELAUNCH_PREFLIGHT_SIZE_AND_TYPE=${RELAUNCH_PREFLIGHT_FD_A#*:}
+  RELAUNCH_PREFLIGHT_SIZE=${RELAUNCH_PREFLIGHT_SIZE_AND_TYPE%%:*}
+  [ "$(relaunch_preflight_content_length "$RELAUNCH_PREFLIGHT_META_A")" = "$RELAUNCH_PREFLIGHT_SIZE" ] \
+    || relaunch_preflight_snapshot_refuse
+  [ ! -L "$RELAUNCH_PREFLIGHT_META" ] && [ -f "$RELAUNCH_PREFLIGHT_META" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_CURRENT=$({ cat -- "$RELAUNCH_PREFLIGHT_META" && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  case "$RELAUNCH_PREFLIGHT_META_CURRENT" in
+    *$'\034') RELAUNCH_PREFLIGHT_META_CURRENT=${RELAUNCH_PREFLIGHT_META_CURRENT%$'\034'} ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  RELAUNCH_PREFLIGHT_PATH_B=$(relaunch_preflight_path_signature "$RELAUNCH_PREFLIGHT_META") \
+    || relaunch_preflight_snapshot_refuse
+  [ ! -L "$RELAUNCH_PREFLIGHT_META" ] && [ -f "$RELAUNCH_PREFLIGHT_META" ] \
+    && [ "$RELAUNCH_PREFLIGHT_PATH_B" = "$RELAUNCH_PREFLIGHT_PATH_A" ] \
+    && [ "$RELAUNCH_PREFLIGHT_META_CURRENT" = "$RELAUNCH_PREFLIGHT_META_A" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_CONTENT=$RELAUNCH_PREFLIGHT_META_A
+fi
+
+# Batch dispatch (see header): an `id=repo` first positional means EVERY positional
+# is a pair, so a batch carries no positional harness argument and resolves its
+# harness exactly like a single-task spawn. Detected here so the selection below
+# knows which shape it is reading; the batch branch further down reuses these values.
+SPAWN_IDPART=${POS[0]:-}
+SPAWN_IDPART=${SPAWN_IDPART%%=*}
+SPAWN_IS_BATCH=0
+if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$SPAWN_IDPART" ] && case "$SPAWN_IDPART" in */*) false ;; *) true ;; esac; then
+  SPAWN_IS_BATCH=1
+fi
+
+# The positional split for a fresh single-task spawn. This is pure string work, so
+# it happens here rather than after the per-task lock: the harness this invocation
+# would actually launch has to be known before the watcher guard runs and before
+# anything is created. A --relaunch still adopts every identity axis from the
+# task's own durable record under the task's locks; the read-only preflight
+# above only lets omp's model and backend gates precede those locks.
+PROJ=
+ARG3=
+FIRSTMATE_HOME=
+if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_IS_BATCH" -eq 0 ]; then
+  if [ "$KIND" = secondmate ]; then
+    case "${POS[1]:-}" in
+      ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
+        ARG3=${POS[1]:-}
+        ;;
+      *' '*)
+        if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+          FIRSTMATE_HOME=${POS[1]}
+          ARG3=${POS[2]:-}
+        else
+          ARG3=${POS[1]}
+        fi
+        ;;
+      *)
+        FIRSTMATE_HOME=${POS[1]}
+        ARG3=${POS[2]:-}
+        ;;
+    esac
+  else
+    PROJ=${POS[1]}
+    ARG3=${POS[2]:-}
+  fi
+fi
+[ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+
+# Does this invocation select omp? Read exactly the way the launch path resolves
+# the harness below - an explicit --harness, then the back-compat positional
+# argument, then this home's configured crew/secondmate harness - without copying
+# any adapter table. A positional carrying a space is a raw launch command, which
+# stays outside every adapter contract.
+spawn_selection_is_omp() {
+  local configured=
+  case "$ARG3" in
+    *' '*) return 1 ;;
+    omp) return 0 ;;
+    '') : ;;
+    *) return 1 ;;
+  esac
+  # A relaunch with no explicit harness adopts the recorded harness. A bounded
+  # read-only preflight lets omp's model/backend gates still precede every lock;
+  # the normal locked endpoint validation below remains authoritative.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    configured=$(relaunch_preflight_meta_get harness)
+    [ "$configured" = omp ]
+    return
+  fi
+  if [ "$KIND" = secondmate ]; then
+    configured=$("$FM_ROOT/bin/fm-harness.sh" secondmate 2>/dev/null || true)
+  elif [ ! -f "$CONFIG/crew-dispatch.json" ]; then
+    # With a dispatch profile active the launch path refuses an implicit harness
+    # instead of reading config/crew-harness, so neither does this.
+    configured=$("$FM_ROOT/bin/fm-harness.sh" crew 2>/dev/null || true)
+  fi
+  [ "$configured" = omp ]
+}
+
+# Every omp refusal for a fresh spawn lands here: before the watcher guard, before
+# the batch re-exec, before the per-task spawn lock, and before every endpoint,
+# worktree, state, configuration, registry, metadata, and extension mutation. It
+# covers an explicit --harness omp, the back-compat positional token, a configured
+# crew or secondmate harness, and a batch carrying any of those.
+if spawn_selection_is_omp; then
+  # A secondmate selection is refused first and unconditionally - its model is
+  # never even consulted, because the refusal is on adapter identity alone.
+  if [ "$KIND" = secondmate ]; then
+    refuse_omp_secondmate
+    exit 1
+  fi
+  require_omp_launch_model || exit 1
+  require_omp_orca_backend || exit 1
+fi
+
+# Now the watcher guard, which writes home state. Skipped when re-exec'd for one
+# pair of a batch (FM_SPAWN_NO_GUARD is set by the batch loop below), so the guard
+# runs once for the batch, not once per pair.
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -856,13 +1145,11 @@ spawn_herdr_presentation_order_lock_release() {
 # the single path verbatim. A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
-idpart=${POS[0]:-}
-idpart=${idpart%%=*}
-if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$SPAWN_IDPART" ]; then
   echo "error: --relaunch is single-task only; relaunch each task explicitly" >&2
   exit 1
 fi
-if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+if [ "$SPAWN_IS_BATCH" -eq 1 ]; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -970,7 +1257,9 @@ fi
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
 if [ "$RELAUNCH" -eq 0 ]; then
-  if [ "$BACKEND_SET" -eq 1 ]; then
+  if [ -n "$OMP_RESOLVED_BACKEND" ]; then
+    BACKEND=$OMP_RESOLVED_BACKEND
+  elif [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
   else
     BACKEND=$(fm_backend_name)
@@ -995,9 +1284,6 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
-PROJ=
-ARG3=
-FIRSTMATE_HOME=
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -1069,29 +1355,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
-elif [ "$KIND" = secondmate ]; then
-  case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
-      ARG3=${POS[1]:-}
-      ;;
-    *' '*)
-      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-        FIRSTMATE_HOME=${POS[1]}
-        ARG3=${POS[2]:-}
-      else
-        ARG3=${POS[1]}
-      fi
-      ;;
-    *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
-      ;;
-  esac
-else
-  PROJ=${POS[1]}
-  ARG3=${POS[2]:-}
 fi
-[ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 shell_quote() {
   printf "'"
@@ -1201,6 +1465,37 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # omp (Oh My Pi): a positional prompt starts the supervised interactive session,
+    # the Pi/grok/muse shape this fork inherits. omp is a CANDIDATE crewmate/scout
+    # adapter pending its separately approved first live pilot, so every axis below
+    # is deliberately narrow.
+    # --approval-mode yolo is the autonomy flag an unattended crewmate needs, the
+    # targeted equivalent of claude's --dangerously-skip-permissions.
+    # --no-title leaves the pane title firstmate's to own, --no-extensions drops
+    # every auto-discovered user/project extension, and --no-skills drops the
+    # ambient skill surface, so the only loaded extension is the firstmate-owned
+    # -e __OMPEXT__ busy-state file written below.
+    # --tools is an ALLOWLIST that limits the initially active toolset. It names
+    # only core coding tools and therefore excludes omp's `task` subagent
+    # delegation plus its extended/network surface (browser, computer,
+    # web_search, mcp). Every name here was confirmed present in the pinned
+    # v17.2.9 asset by static inspection, because omp rejects an unknown --tools
+    # name with a usage error rather than narrowing silently.
+    # __MODELFLAG__ appears exactly once and always renders: require_omp_launch_model
+    # above refuses the spawn unless this exact launch was given a fully qualified
+    # provider/model, so omp never selects a provider for itself. No
+    # __EFFORTFLAG__: the effort axis stays outside this adapter until the live
+    # pilot pins it under its own approval.
+    # The env -u prefix clears the foreign primary markers whose detection
+    # precedence would otherwise outrank omp's own, plus TRACEPARENT so an
+    # ambient carrier cannot reach the child after spawn forces effective
+    # trace off. FM_OMP_HARNESS=1 is the firstmate-owned launch marker that
+    # replaces the foreign markers. The list must cover EVERY marker
+    # bin/fm-harness.sh tests before FM_OMP_HARNESS, which is why the cursor
+    # pair is here: cursor-agent does not clear its own markers, so an omp
+    # worker launched from a cursor primary would otherwise inherit them and
+    # self-report cursor.
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1250,6 +1545,25 @@ esac
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+# Both omp refusals already ran for every fresh-spawn selection shape and for
+# every relaunch the read-only preflight could classify, before the watcher
+# guard and every lock. This is defense in depth for a --relaunch that named
+# --harness omp explicitly after that preflight, and still lands before any
+# launch command is built or delivered. Scoped to a relaunch on purpose: a raw
+# launch command stays outside every adapter contract, exactly as it does for
+# the early gate.
+if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
+  if [ "$KIND" = secondmate ]; then
+    refuse_omp_secondmate
+    exit 1
+  fi
+  require_omp_launch_model || exit 1
+  if [ "$BACKEND" != orca ]; then
+    echo "error: omp requires backend=orca; resolved backend '$BACKEND' is not authorized for this adapter" >&2
+    exit 1
+  fi
 fi
 
 case "$HARNESS" in
@@ -1333,6 +1647,43 @@ resolve_kimi_binary() {
   return 1
 }
 
+# The one Oh My Pi release this adapter is pinned to. omp is a candidate adapter
+# whose first live pilot is still separately approval-gated, so the launch takes
+# the EXACT reported version and refuses anything else: an absent, drifted, or
+# substituted binary must fail loudly instead of silently running an unproven
+# build under a firstmate contract written against 17.2.9.
+# Deliberately a literal with NO environment override: a pin that any caller
+# could relax is not a pin. Moving to another release is a code change that
+# comes with fresh verification.
+FM_OMP_REQUIRED_VERSION='omp/17.2.9'
+
+# resolve_omp_binary: absolute path to the pinned `omp` on PATH, or a refusal.
+# The `--version` identity probe is the ONLY invocation of the installed asset
+# on this path - no provider call, model discovery, prompt, or session - and it
+# runs after the executable itself has been resolved.
+resolve_omp_binary() {
+  local candidate dir reported
+  candidate=$(command -v omp 2>/dev/null || true)
+  if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
+    echo "error: omp executable not found on PATH; install the pinned Oh My Pi release ($FM_OMP_REQUIRED_VERSION) or select a different verified harness" >&2
+    return 1
+  fi
+  case "$candidate" in
+    /*) ;;
+    *)
+      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+      [ -n "$dir" ] || { echo "error: omp executable '$candidate' could not be resolved to an absolute path" >&2; return 1; }
+      candidate="$dir/$(basename "$candidate")"
+      ;;
+  esac
+  reported=$("$candidate" --version 2>/dev/null | head -n 1 | tr -d '[:space:]') || reported=
+  if [ "$reported" != "$FM_OMP_REQUIRED_VERSION" ]; then
+    echo "error: omp version drift: expected '$FM_OMP_REQUIRED_VERSION', got '${reported:-<none>}'; refusing to launch an unpinned Oh My Pi build" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
 resolve_muse_binary() {
   local candidate dir
   candidate=$(command -v muse 2>/dev/null || true)
@@ -1386,7 +1737,12 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
+      # omp reaches here only after require_omp_launch_model accepted a fully
+      # qualified provider/model, so the exact supplied identifier is quoted
+      # through omp's own --model flag. Its legacy --provider flag is never
+      # passed: a provider argument alongside a qualified model is the ambiguity
+      # this pin exists to remove.
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1466,6 +1822,13 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__MUSEBIN__/$(shell_quote "$MUSE_BIN")}
     LAUNCH=${LAUNCH//__MUSECONFIG__/$(shell_quote "$MUSE_CONFIG_HOME")}
     LAUNCH=${LAUNCH//__MUSEDATA__/$(shell_quote "$MUSE_DATA_HOME")}
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__OMPBIN__*)
+    OMP_BIN=$(resolve_omp_binary) || exit 1
+    LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN")}
     ;;
 esac
 
@@ -2389,7 +2752,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|omp)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2513,6 +2876,51 @@ export default function (pi: any) {
     return busyEvent("idle", "agent-settled");
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+}
+EOF
+      ;;
+    omp)
+      # Written OUTSIDE the worktree for the same reason as the pi extension: an
+      # explicit -e path outside the project loads without the fork's
+      # project-trust gate. Lives in state/, and --no-extensions on the launch
+      # command means this is the ONLY extension omp loads.
+      cat > "$STATE/$ID.omp-ext.ts" <<EOF
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Semantic state: "agent_start" -> busy when an agent run begins; the SETTLE
+// event -> idle only when ctx.isIdle() confirms omp is no longer streaming, so
+// auto-retries, tool loops, and queued continuations all keep the run
+// un-settled. "turn_end" fires at every inner turn boundary and stays a wake
+// NOTIFICATION touch for the watcher, never current-state truth.
+// The settle event is registered under BOTH names on purpose. The pinned
+// omp/17.2.9 asset emits "agent_end" (verified by static inspection of the
+// installed executable); "agent_settled" is the name the upstream Pi lineage
+// this fork came from uses. Registering both means whichever name the running
+// build actually emits drives the same handler, and each registration is
+// guarded so a build that rejects an unknown event name cannot break the
+// extension - and therefore cannot strand a task busy.
+import { execFile } from "node:child_process";
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
+export default function (omp: any) {
+  omp.on("agent_start", () => busyEvent("busy", "agent-start"));
+  const settled = (_event: any, ctx: any) => {
+    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    return busyEvent("idle", "agent-end");
+  };
+  for (const name of ["agent_end", "agent_settled"]) {
+    try {
+      omp.on(name, settled);
+    } catch (_err) {
+      // This build does not know that settle-event name; the other one covers it.
+    }
+  }
+  omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
       ;;
@@ -2676,7 +3084,13 @@ fi
 # carrier, and this host only delivers it. The validated --traceparent value
 # then IS the decision, so the enablement snapshot handed to the new Secondmate
 # agrees with the carrier it receives exactly as on the local path.
-if [ "$TRACEPARENT_SET" -eq 1 ]; then
+if [ "$HARNESS" = omp ]; then
+  # omp is deliberately outside trace propagation until its live worker path
+  # is approved. This overrides both the frozen home decision and any ambient
+  # carrier; the launch template also removes TRACEPARENT from the child.
+  SPAWN_TRACE_EFFECTIVE=off
+  SPAWN_TRACEPARENT=
+elif [ "$TRACEPARENT_SET" -eq 1 ]; then
   SPAWN_TRACE_EFFECTIVE=on
   SPAWN_TRACEPARENT=$TRACEPARENT_ARG
 else
@@ -2757,6 +3171,11 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+META_WRITE_STATUS=$?
+if [ "$BACKEND" = orca ] && [ "$META_WRITE_STATUS" -ne 0 ]; then
+  echo "error: failed to publish Orca metadata for $ID; aborting launch" >&2
+  exit "$META_WRITE_STATUS"
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
@@ -2779,6 +3198,7 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -2790,6 +3210,7 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}

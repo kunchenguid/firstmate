@@ -197,6 +197,8 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
+`omp` (Oh My Pi) is a CANDIDATE crewmate/scout adapter, not a verified one: its adapter is wired and deterministically proven, but its first live pilot is still separately approval-gated, so do not dispatch real work on it and do not describe it as live-verified until that pilot passes.
+It is reachable only through an explicit `--harness omp`, is refused for a secondmate, and is never a coordinator, backend, or implicit default.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
