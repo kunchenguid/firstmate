@@ -195,6 +195,31 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+# This fence is included in every scaffold kind because Red Zone safety survives
+# hand-offs only when it travels with the worker's instructions.
+IFS= read -r -d '' REDZONE_SECTION <<'EOF' || true
+# Red Zone prohibition - permanent safety boundary
+1. The rule. Never edit, and never make a read that leads to a write, anywhere in Red Zone. This is permanent until the captain personally lifts it.
+2. The named paths.
+- `app/(sales)/sales-hub/redzone/**`
+- `app/api/sales/redzone/**`
+- `app/api/redzone/**`
+- `app/api/cron/redzone-followups-sweep/**`
+- `components/sales-hub/redzone/**`
+- `lib/sales-hub/redzone/**`
+- `docs/sales-hub/redzone/**` including the n8n pipeline JSON
+- `docs/adr/0044-unify-suite-redzone-action-architecture.md`
+3. The check that actually works. Ask whether Red Zone RENDERS this file, not whether the path contains `redzone`.
+Red Zone renders shared components that live outside its own directory, so every "is this under redzone/" test passed while four changes altered what Red Zone displayed.
+4. The escape. If a task appears to REQUIRE a Red Zone change, that is NOT a green light - append `blocked: {why}` and return it to the captain.
+Never resolve it by editing, and never by inventing a fork on your own judgement.
+
+The Red Zone tab in the product UI is off limits to QA-style work.
+Do not exercise it, click through it, or file tickets against it.
+A journey that routes into it stops at the boundary and says so.
+EOF
+REDZONE_SECTION=${REDZONE_SECTION%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -221,6 +246,8 @@ You are a persistent second mate managed by the main firstmate. Work on your own
 
 # Charter
 $SECONDMATE_CHARTER
+
+$REDZONE_SECTION
 
 # Routing scope
 $SECONDMATE_SCOPE
@@ -325,6 +352,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$REDZONE_SECTION
 
 $HERDR_SECTION
 
@@ -438,6 +467,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$REDZONE_SECTION
 
 $HERDR_SECTION
 
