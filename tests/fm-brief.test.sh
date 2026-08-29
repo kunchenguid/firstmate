@@ -733,7 +733,7 @@ assert_redzone_fence() {
     "$label brief missing the renders-this-file check"
   assert_grep 'Red Zone renders shared components that live outside its own directory' "$brief" \
     "$label brief missing the shared-component warning"
-  assert_grep "4. The escape. If a task appears to REQUIRE a Red Zone change, that is NOT a green light - append \`blocked: {why}\` and return it to the captain." "$brief" \
+  assert_grep "4. The escape. If a task appears to REQUIRE a Red Zone change, that is NOT a green light - append \`blocked: {why}\` and return it through firstmate to the captain." "$brief" \
     "$label brief missing the blocked escape"
   assert_grep 'Never resolve it by editing, and never by inventing a fork on your own judgement.' "$brief" \
     "$label brief missing the no-fork escape"

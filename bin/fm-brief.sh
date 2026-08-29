@@ -214,7 +214,7 @@ IFS= read -r -d '' REDZONE_SECTION <<'EOF' || true
 - `docs/adr/0044-unify-suite-redzone-action-architecture.md`
 3. The check that actually works. Ask whether Red Zone RENDERS this file, not whether the path contains `redzone`.
 Red Zone renders shared components that live outside its own directory, so every "is this under redzone/" test passed while four changes altered what Red Zone displayed.
-4. The escape. If a task appears to REQUIRE a Red Zone change, that is NOT a green light - append `blocked: {why}` and return it to the captain.
+4. The escape. If a task appears to REQUIRE a Red Zone change, that is NOT a green light - append `blocked: {why}` and return it through firstmate to the captain.
 Never resolve it by editing, and never by inventing a fork on your own judgement.
 
 The Red Zone tab in the product UI is off limits to QA-style work.
