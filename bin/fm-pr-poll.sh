@@ -4,8 +4,9 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own standard CLI, gh for GitHub, glab for
+# GitLab, and forgejo-axi for Forgejo, so an upstream checkout needs no extra
+# tooling to follow any of them.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -104,6 +105,47 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  forgejo)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    [ "$host" != github.com ] && [ "$host" != gitlab.com ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    # A Forgejo project is exactly one owner and one repository, so the stored
+    # path splits once and neither half may contain a further separator.
+    owner=${path%%/*}
+    repo=${path#*/}
+    [ "$owner/$repo" = "$path" ] || exit 0
+    [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 40 ] || exit 0
+    case "$owner" in
+      [!A-Za-z0-9]*|*[!A-Za-z0-9._-]*|*[-._]) exit 0 ;;
+      *--*|*-.*|*-_*|*.-*|*..*|*._*|*_-*|*_.*|*__*) exit 0 ;;
+    esac
+    # These rules are the ones bin/fm-pr-lib.sh applies; they are repeated here
+    # because this poll re-validates its sidecar rather than trusting it, so a
+    # change to either side needs the matching change to the other. "-" is one
+    # of the exact names the forge reserves, and it lowercases a name before
+    # comparing, so the reserved suffixes are matched without regard to case.
+    [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
+    case "$repo" in
+      .|..|-|*[!A-Za-z0-9._-]*) exit 0 ;;
+      *.[gG][iI][tT]|*.[wW][iI][kK][iI]|*.[rR][sS][sS]|*.[aA][tT][oO][mM]) exit 0 ;;
+    esac
+    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    # --base-url is what binds this read to the instance the record names.
+    # forgejo-axi takes a pull request URL too, but it reads only the
+    # owner/repository/number out of one and still sends the request to whatever
+    # host its own configuration resolves, so passing the URL alone would let an
+    # ambient default answer for the host in the record.
+    # Its errors exit non-zero and carry no "merged:" line of their own, so an
+    # unreachable instance stays silent instead of reporting a merge.
+    raw=$(forgejo-axi pr merged --base-url "https://$host" --repo "$owner/$repo" "$number" 2>/dev/null) || exit 0
+    state=$(printf '%s\n' "$raw" | awk '
+      $1 == "merged:" { count++; value = $2 }
+      END { if (count == 1 && value != "") print value; else exit 1 }
+    ') || exit 0
+    [ "$state" = true ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac
