@@ -90,7 +90,7 @@ The test uses a temporary trusted project, an isolated Pi configuration director
 
 The test never sends a provider request to an external service and never uses a credential.
 
-The test exercises discovery, the explicit command, unique-name collision safety, exact-trigger description boundaries, public command expansion, the plan-only boundary, the local handoff boundary, and the absence of a `skill:note-to-node` command.
+The test exercises discovery, the explicit command, unique-name collision safety, exact-trigger description boundaries, public command expansion, the retained-evidence preflight, existing credential-owner routing, the plan-only boundary, the local handoff boundary, and the absence of a `skill:note-to-node` command.
 
 Observed on 2026-08-29 with Pi `0.84.3`:
 

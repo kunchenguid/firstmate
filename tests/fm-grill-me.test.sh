@@ -151,6 +151,17 @@ export default function (pi: any): void {
         planOnly: prompt.includes("PLAN ONLY: this packet does not authorize implementation"),
         lavishAfterConfirmation: prompt.includes("local Lavish plan view after the same confirmation"),
         ownerBoundaries: prompt.includes("existing local method retains its own input format"),
+        retainedEvidencePreflight: prompt.includes("Before building questions or preparing any handoff, reconcile retained local evidence"),
+        retainedEvidenceInventory: prompt.includes("current tracked files and working state")
+          && prompt.includes("all local Git refs and history including preserved task branches")
+          && prompt.includes("all registered Treehouse worktrees and their retained uncommitted files")
+          && prompt.includes("private reports and briefs")
+          && prompt.includes("durable Firstmate records"),
+        missingEvidenceStopsHandoff: prompt.includes("stop the handoff, and report the missing local source instead of substituting a new owner"),
+        credentialRouting: prompt.includes("Route a needed credential or login to the captain under `AGENTS.md` section 9")
+          && prompt.includes("load `harness-adapters`")
+          && prompt.includes("load `quota-array-dispatch`"),
+        noLegacyCredentialBrokerRouting: !prompt.includes("Route protected values and credential questions to the existing `credential-broker` owner"),
         noLocalCommand: !prompt.includes("/skill:note-to-node"),
         noExternalWrites: prompt.includes("external writes, public sharing, deployment, activation, and publication are not performed"),
       }));
@@ -228,6 +239,8 @@ test_command_expansion_public_interface() {
   jq -e '.expanded and .args and .registered and .rawCommandAbsent
     and .handoffAfterConfirmation and .handoffBeforeLocalStage and .planShape
     and .planOnly and .lavishAfterConfirmation and .ownerBoundaries
+    and .retainedEvidencePreflight and .retainedEvidenceInventory
+    and .missingEvidenceStopsHandoff and .credentialRouting and .noLegacyCredentialBrokerRouting
     and .noLocalCommand and .noExternalWrites' "$capture" >/dev/null \
     || fail "Pi did not expand the explicit skill command with the plan-only local handoff boundary"
   pass "explicit command expansion reaches the public Pi lifecycle with arguments and handoff boundaries intact"

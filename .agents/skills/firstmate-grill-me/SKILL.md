@@ -34,6 +34,17 @@ The command is an invocation route to this owner, not a second alias or a permis
 `one-at-a-time` changes only the presentation order.
 Do not create a second skill or questionnaire for a mode.
 
+## Retained-evidence preflight
+
+Before building questions or preparing any handoff, reconcile retained local evidence in the current Firstmate home.
+Inspect the current tracked files and working state, all local Git refs and history including preserved task branches, all registered Treehouse worktrees and their retained uncommitted files, private reports and briefs, and durable Firstmate records.
+Separate current evidence from superseded reports, reconcile contradictions through the record owner that governs the fact, and record a safe source pointer, capture date, and confidence for each material conclusion.
+Confirm from that evidence the exact owner, input boundary, output boundary, and authority boundary of the existing local `note-to-node` method before composing its handoff.
+Confirm the existing owners for project intake, diagnosis, captain-held choices, process events, credentials, delivery, and memory before routing any branch to them.
+Do not infer a missing owner from a name, reconstruct a missing method, or proceed on an unresolved provenance conflict.
+If any required evidence class, owner, or boundary cannot be located or safely reconciled, record the missing item as a residual, stop the handoff, and report the missing local source instead of substituting a new owner.
+Only after this preflight succeeds may the interview proceed to its ordinary subject and fact work.
+
 ## Boundary and owner composition
 
 At activation, say that this is a bounded Grill Me alignment session and that explicit confirmation can produce a plan only.
@@ -52,14 +63,16 @@ If a visual plan review or feedback source is requested, use `process-event-sour
 Do not create a Grill Me poller or read a blocking visual process in the conversational turn.
 A visual response is plan feedback, never implementation approval.
 
-Route protected values and credential questions to the existing `credential-broker` owner.
+Route a needed credential or login to the captain under `AGENTS.md` section 9.
+For non-secret authentication-surface facts, load `harness-adapters`; when the question arises while resolving a matched dispatch-profile array, also load `quota-array-dispatch`.
+These existing owners cover their respective authentication and routing evidence procedures; no `credential-broker` owner is assumed or introduced.
 Never request, read, echo, store, test, or infer a password, token, API key, OAuth grant, cookie, private key, or secret header in this interview.
 Route durable preference or knowledge changes through the existing captain, learnings, backlog, and `stow` owners rather than persisting a transcript here.
 
 ## Existing local note-to-node stage
 
-The retained local provenance identifies `note-to-node` as a method written by the captain and Firstmate together.
-That provenance identifies the owner, but it does not authorize this skill to reconstruct its source, invent an interface, or replace its authority.
+The retained-evidence preflight identifies the local owner of `note-to-node` as a method written by the captain and Firstmate together.
+That evidence identifies the owner, but it does not authorize this skill to reconstruct its source, invent an interface, or replace its authority.
 
 Grill Me runs before that existing local stage.
 After explicit plan confirmation, its handoff envelope contains only the redacted `GRILL_ME_PLAN v1` packet, resolved project and task context, the current or first node pointer when one exists, and the residual list.
