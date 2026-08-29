@@ -120,19 +120,6 @@ META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
-TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
-{
-  echo "kind=ship"
-  echo "mode=$MODE"
-  echo "yolo=$YOLO"
-} >> "$TMP"
-mv "$TMP" "$META"
-TMP=
-fm_lock_release "$META_LOCK"
-META_LOCK_HELD=0
-
-HOME_Q=$(printf '%q' "$FM_HOME")
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
@@ -157,6 +144,20 @@ EOF
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
+
+TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+{
+  echo "kind=ship"
+  echo "mode=$MODE"
+  echo "yolo=$YOLO"
+} >> "$TMP"
+mv "$TMP" "$META"
+TMP=
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
+
+HOME_Q=$(printf '%q' "$FM_HOME")
 INSTRUCTIONS_Q=$(printf '%q' "$INSTRUCTIONS")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
 echo "wrote ship instructions for mode=$MODE: $INSTRUCTIONS"

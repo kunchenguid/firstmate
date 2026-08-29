@@ -201,7 +201,7 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status
+  local home meta out status blocked_data
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state"
   meta="$home/state/promote-d1.meta"
@@ -226,6 +226,16 @@ test_promote_requires_and_records_the_delivery_contract() {
   status=$?
   [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
   assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
+
+  blocked_data="$home/data-blocked"
+  printf 'not a directory\n' > "$blocked_data"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$blocked_data" \
+    "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion without writable instruction storage should exit non-zero"
+  assert_grep 'kind=scout' "$meta" "failed instruction publication still promoted the task"
+  assert_no_grep '^mode=' "$meta" "failed instruction publication recorded a delivery mode"
+  assert_no_grep '^yolo=' "$meta" "failed instruction publication recorded a merge posture"
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?
