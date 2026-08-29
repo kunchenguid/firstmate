@@ -117,9 +117,12 @@ make_case() {
 }
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# the combined headRefOid/baseRefName query for fm-pr-check.sh's pr_head and
+# pr_dest lookup with a tab-joined "<head_sha>\t<dest_branch>" line, the same
+# shape bin/fm-pr-check.sh's own -q expression produces from the real gh CLI.
+# Args: case_dir head_sha [dest_branch]
 add_gh_mocks() {
-  local case_dir=$1 head=$2
+  local case_dir=$1 head=$2 dest=${3:-main}
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -138,7 +141,7 @@ printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
-      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *headRefOid*) printf '%s\t%s\n' '$head' '$dest' ; exit 0 ;;
     esac
     ;;
   "api graphql")

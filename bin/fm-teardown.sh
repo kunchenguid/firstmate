@@ -10,9 +10,14 @@
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# already present in the up-to-date recorded destination branch, or the default
+# branch when no destination was recorded. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# on a remote yet the change is fully in the destination. Comparing only against
+# the default branch used to be unconditional and was wrong for any pull request
+# targeting something else; bin/fm-pr-check.sh now records that destination as
+# pr_dest= at arm time (on every forge it can derive one for) precisely so this
+# check compares against the branch the pull request actually targets.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -681,6 +686,15 @@ if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+# The pull request's destination branch, when bin/fm-pr-check.sh recorded one;
+# empty means "no destination was recorded", and content_in_branch's own
+# fallback is what treats that as the repository's default branch. Revalidated
+# here rather than trusted verbatim, exactly like every other recorded value
+# this script reads from meta.
+PR_DEST=$(grep '^pr_dest=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$PR_DEST" ] && ! git check-ref-format --branch "$PR_DEST" >/dev/null 2>&1; then
+  PR_DEST=
+fi
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -985,7 +999,7 @@ remove_pr_poll_artifacts() {
   fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust" || return 1
+    "$state_dir/$id.check-trust" "$state_dir/$id.pr-poll-git-tip" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
@@ -1096,20 +1110,49 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+# Is the branch's content already present in the up-to-date <name> branch - the
+# recorded pull request destination when one was recorded (PR_DEST), or the
+# repository's default branch when <name> is empty? Fetches first, then 3-way
+# merges that branch with HEAD: when HEAD introduces nothing the branch does not
+# already contain (e.g. its change landed via squash) the merged tree equals
+# that branch's tree. This isolates branch-only changes, so unrelated commits
+# the branch gained past the merge-base do not count as "added". Comparing
+# against the wrong branch is not hypothetical: most pull requests target the
+# default branch, so it went unnoticed until one that did not target it was
+# checked here. Returns non-zero when inconclusive (no such ref, or a merge
+# conflict), so the caller refuses rather than guesses.
+#
+# Trusting "origin" at all requires it to survive fm_pr_git_origin_matches_repo
+# (bin/fm-pr-lib.sh) first: a false "landed" here does not cost a spurious
+# wake like it would in bin/fm-pr-poll.sh, it discards genuinely unlanded
+# commits at the REFUSED guard below, so a repointed "origin" (a corporate
+# insteadOf rewrite, a redirected multi-valued url, or a sibling task's own
+# git config - a linked worktree's remote config is the project clone's
+# shared config) must never read as landed evidence just because a remote
+# called "origin" resolves to SOMETHING. When a pull request is recorded
+# (PR_URL), that check also binds origin to the pull request's own
+# destination repository, so a same-named branch in an unrelated project or a
+# fork cannot read as landed either. With no recorded PR_URL there is no
+# destination to bind against, so origin is trusted on transport safety alone
+# - matching prior behavior for that case (bin/fm-teardown.sh's own tests
+# cover a genuine no-PR content-landed scenario). The worktree's own local
+# branch is a fallback only in local-only mode, where "landed" already means
+# "merged into local $DEFAULT_BRANCH" rather than "merged upstream" - never in
+# a mode where landing means the pull request merged on the forge.
+content_in_branch() {
+  local name=$1 ref default_tree merged_tree host path
+  [ -n "$name" ] || name=$(default_branch) || return 1
+  host=
+  path=
+  if [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL"; then
+    host=$FM_PR_HOST
+    path=$FM_PR_PATH
+  fi
+  if fm_pr_git_origin_matches_repo "$WT" "$host" "$path"; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif [ "$MODE" = local-only ] \
+    && git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
@@ -1123,13 +1166,14 @@ content_in_default() {
 
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# current local work is contained in the PR head, OR the content is already in
+# the recorded destination branch, or the default branch when none was recorded
+# (fallback, which also covers the no-PR and gh-error paths). False only for
+# genuinely unlanded work.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
-  content_in_default
+  content_in_branch "$PR_DEST"
 }
 
 backlog_refresh_reminder() {

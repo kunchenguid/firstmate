@@ -4,13 +4,20 @@
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub and
+# Bitbucket Cloud and an arbitrarily nested group/subgroup/project namespace on
+# GitLab. A GitLab project can sit at any depth, so no owner/repository pair
+# can address one and the sidecar carries the whole path instead. GitLab also
+# runs on self-hosted instances, so the host is part of that identity rather
+# than a constant; Bitbucket Cloud's host is the fixed bitbucket.org, the same
+# way GitHub's is the fixed github.com. Every consumer re-derives the identity
+# from the stored URL and refuses any record whose parts do not reconstruct
+# that exact URL.
+#
+# Bitbucket has no forge CLI integration here: bin/fm-pr-poll.sh detects a
+# Bitbucket merge through the git-based landed-work test only (bin/fm-pr-lib.sh
+# and bin/fm-pr-poll.sh's own headers own that test), never through a forge API
+# call, so arming a Bitbucket watch needs no additional tool on PATH.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -74,6 +81,7 @@ FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
 FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY=
 FM_PR_POLL_SNAPSHOT_REG_HASH=
 FM_PR_POLL_SNAPSHOT_REG_IDENTITY=
+FM_PR_POLL_SNAPSHOT_DEST=
 FM_PR_RETIRE_ID=
 FM_PR_RETIRE_PROVIDER=
 FM_PR_RETIRE_URL=
@@ -112,16 +120,17 @@ fm_task_id_creation_valid() {
 # GitLab serves self-hosted instances, so the host is part of the identity
 # rather than a constant. It is accepted only as a lowercase DNS name with no
 # userinfo, port, or trailing dot, which keeps one canonical spelling per MR.
-# github.com is refused here even though its shape is otherwise valid: it is
-# GitHub's own host and never a GitLab instance, so a URL like
-# https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a GitLab watch that can never succeed.
+# github.com and bitbucket.org are refused here even though their shape is
+# otherwise valid: each is another forge's own fixed host and never a GitLab
+# instance, so a URL like https://github.com/o/r/-/merge_requests/1 (a typo'd
+# or spoofed URL) would otherwise be armed as a GitLab watch that can never
+# succeed.
 fm_pr_gitlab_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
   [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
-  [ "$host" != github.com ] || return 1
+  [ "$host" != github.com ] && [ "$host" != bitbucket.org ] || return 1
   case "$host" in
     .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
   esac
@@ -149,11 +158,22 @@ fm_pr_gitlab_path_valid() {
   IFS=/ read -ra segments <<< "$path"
   [ "${#segments[@]}" -ge 2 ] && [ "${#segments[@]}" -le 20 ] || return 1
   for segment in "${segments[@]}"; do
-    [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
-    case "$segment" in
-      .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) return 1 ;;
-    esac
+    fm_pr_path_segment_valid "$segment" || return 1
   done
+}
+
+# Shared per-segment shape used by both GitLab's namespace and Bitbucket
+# Cloud's fixed workspace/repository pair: alnum, dot, hyphen, underscore, no
+# leading hyphen, and no ".git"/".atom" suffix, which a real slug never needs
+# and which would otherwise let a crafted segment look like a different kind
+# of reference.
+fm_pr_path_segment_valid() {
+  local segment=${1-}
+  local LC_ALL=C
+  [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
+  case "$segment" in
+    .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
 }
 
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
@@ -191,6 +211,20 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
+  # Bitbucket Cloud has a fixed host and a flat workspace/repository pair, with
+  # no nested namespace and no self-hosted variant to address, so both segments
+  # share GitLab's per-segment shape rather than GitHub's username rule.
+  pattern='^https://bitbucket\.org/([A-Za-z0-9._-]{1,255})/([A-Za-z0-9._-]{1,255})/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    fm_pr_path_segment_valid "${BASH_REMATCH[1]}" || return 1
+    fm_pr_path_segment_valid "${BASH_REMATCH[2]}" || return 1
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_URL=$raw
+    FM_PR_HOST=bitbucket.org
+    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
@@ -211,6 +245,65 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+# Is <wt>'s "origin" remote safe to trust, and - when <host>/<path> are given -
+# does it address the exact same forge repository? bin/fm-pr-poll.sh's
+# git_origin_matches_repo owns an independent copy of this exact logic for its
+# own hash-registered bytes (its header owns why); this copy is for every
+# other caller that already sources this library, currently
+# bin/fm-teardown.sh's content_in_branch. Always requires the EFFECTIVE URL
+# (`git remote get-url origin`, which resolves any local `insteadOf` rewrite
+# and picks the first value of a multi-valued `remote.origin.url`) to be
+# byte-identical to the CONFIGURED URL (`git config --get remote.origin.url`,
+# which does neither) and to parse as one of: https(s)://[user[:token]@]host
+# [:port]/path(.git)?/?, ssh://[user@]host[:port]/path(.git)?/? (also spelled
+# git+ssh:// or ssh+git://), and the [user@]host:path(.git)?/? scp-like form
+# (recognized, like git itself, only when the colon precedes any slash). Any
+# other shape, a configured/effective mismatch, or no origin remote at all, is
+# unusable regardless of <host>/<path>. With <host> empty (no recorded pull
+# request to bind against - bin/fm-teardown.sh's content_in_branch takes this
+# path when no pr= was ever recorded, matching prior behavior for that case),
+# a well-formed, transport-safe origin is itself the match; with <host> set,
+# it must additionally equal <host>/<path>.
+fm_pr_git_origin_matches_repo() {
+  local wt=$1 host=${2-} path=${3-} url effective rest host_part path_part before_colon
+  url=$(git -C "$wt" config --get remote.origin.url 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  effective=$(git -C "$wt" remote get-url origin 2>/dev/null) || return 1
+  [ "$url" = "$effective" ] || return 1
+  case "$url" in
+    *://*)
+      case "$url" in
+        https://*|http://*|ssh://*|git+ssh://*|ssh+git://*) ;;
+        *) return 1 ;;
+      esac
+      rest=${url#*://}
+      rest=${rest#*@}
+      host_part=${rest%%/*}
+      path_part=${rest#*/}
+      ;;
+    *:*)
+      before_colon=${url%%:*}
+      case "$before_colon" in
+        */*) return 1 ;;
+      esac
+      rest=${url#*@}
+      host_part=${rest%%:*}
+      path_part=${rest#*:}
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  host_part=${host_part%%:*}
+  path_part=${path_part%/}
+  path_part=${path_part%.git}
+  path_part=${path_part%/}
+  [ -n "$host_part" ] && [ -n "$path_part" ] || return 1
+  [ -n "$host" ] || return 0
+  host_part=$(printf '%s' "$host_part" | tr '[:upper:]' '[:lower:]')
+  [ "$host_part" = "$host" ] && [ "$path_part" = "$path" ]
 }
 
 fm_pr_file_mode() {
@@ -292,6 +385,7 @@ fm_pr_metadata_identity_parse() {
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
+  FM_PR_META_DEST=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -313,6 +407,16 @@ fm_pr_metadata_identity_parse() {
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
           fm_pr_head_valid "$value" || post_pr_invalid=1
+        fi
+        ;;
+      pr_dest=*)
+        if [ "$seen_pr" -eq 1 ]; then
+          value=${line#pr_dest=}
+          if git check-ref-format --branch "$value" >/dev/null 2>&1; then
+            FM_PR_META_DEST=$value
+          else
+            post_pr_invalid=1
+          fi
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
@@ -625,6 +729,14 @@ fm_pr_poll_snapshot_capture() {
   FM_PR_POLL_SNAPSHOT_REG_HASH=$(fm_pr_sha256 "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_REG_IDENTITY=$(fm_pr_file_identity "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_ID=$id
+  # The recorded destination is enrichment, not part of the tamper-evident
+  # identity above: fm_pr_poll_artifacts_valid's trailing call to
+  # fm_pr_metadata_identity_parse already re-read and validated it from the
+  # task's own metadata, so it is captured here purely so bin/fm-watch.sh can
+  # pass a validated branch name to the git-based landed-work test in
+  # bin/fm-pr-poll.sh, never to gate a merge verdict on its own.
+  # shellcheck disable=SC2034
+  FM_PR_POLL_SNAPSHOT_DEST=$FM_PR_META_DEST
   FM_PR_POLL_SNAPSHOT_PROVIDER=$FM_PR_DATA_PROVIDER
   FM_PR_POLL_SNAPSHOT_URL=$FM_PR_DATA_URL
   FM_PR_POLL_SNAPSHOT_HOST=$FM_PR_DATA_HOST
