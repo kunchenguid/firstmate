@@ -785,7 +785,7 @@ EOF
   assert_not_contains "$out" "drain them with bin/fm-wake-drain.sh" "read-only guard printed a mutating drain instruction"
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
-  assert_not_contains "$out" "git -C $root checkout main" "read-only bootstrap printed a state-changing checkout remediation"
+  assert_not_contains "$out" "git -C $root switch main" "read-only bootstrap printed a state-changing checkout remediation"
 
   # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
   # tasks-axi, so bootstrap's own read-only tool-detection line fires
@@ -2225,7 +2225,7 @@ EOF
 
   # A re-emit skips the sweeps because it ALREADY ran them, not because it lacks
   # the lock, so it must still own repair rather than deferring to a lock holder.
-  assert_contains "$reemit" "restore the primary with: git -C $root checkout main" \
+  assert_contains "$reemit" "restore the primary with: git -C $root switch main" \
     "--reemit disowned a repair it is entitled to perform"
   assert_not_contains "$reemit" "must leave restore work to the session holding the fleet lock" \
     "--reemit misreported itself as an unlocked read-only session"

@@ -141,7 +141,7 @@ if [ -n "$tangle_branch" ]; then
       printf '●  This read-only session must leave restore work to a session with verified fleet-lock ownership.\n'
     else
       printf "●  Restore the primary to '%s':\n" "$tangle_default"
-      printf '●      git -C %s checkout %s\n' "$FM_ROOT" "$tangle_default"
+      printf '●      git -C %s switch %s\n' "$FM_ROOT" "$tangle_default"
       printf "●  then re-validate '%s' in a proper isolated worktree.\n" "$tangle_branch"
     fi
     printf '●%s\n' "$trule"
