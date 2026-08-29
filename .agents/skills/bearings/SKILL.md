@@ -165,7 +165,7 @@ These practices apply to the Captain's Call sentences, the one-line items in the
 - Keep sentences short with one idea each, and name concrete nouns and the actor rather than a feeling, so "the staging login expired" beats "there may be an authentication concern".
 - Skip AI-vocabulary filler such as "additionally", "crucial", "delve", "leverage", and "utilize", and skip the forced rule of three; use the natural number of items and the plain word.
 - Use plain dashes, never em dashes, and a colon only before a list.
-- A link or explanation is not a list, so do not introduce one with a colon.
+- A link or explanation is not a list; write `The invoice fix landed at https://...` and `The receipt export is waiting on checkout retries` instead of attaching either after a colon.
 - Keep the required direct address to the captain, but do not pad prose to reach it.
 
 - The optional file-mode report is a private, captain-facing internal artifact that lives in gitignored `data/`, so unlike normal captain chat it MAY reference task ids, PR URLs, and repo names.
