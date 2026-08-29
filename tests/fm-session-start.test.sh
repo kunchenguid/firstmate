@@ -729,17 +729,98 @@ EOF
 
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
+  assert_contains "$out" "config/captain-style.json" "digest did not label the captain-style.json section"
 
-  # Exactly four context ABSENT markers (secondmates.md, captain-shared.md,
-  # learnings.md; backlog.md is covered by its own test) - and the
-  # present-but-empty captain.md must NOT print ABSENT.
+  # Exactly five context ABSENT markers (secondmates.md, captain-shared.md,
+  # learnings.md, captain-style.json; backlog.md is covered by its own test) -
+  # and the present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 4 ] || fail "expected 4 ABSENT markers (secondmates.md, captain-shared.md, learnings.md, backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 5 ] || fail "expected 5 ABSENT markers (secondmates.md, captain-shared.md, learnings.md, captain-style.json, backlog.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+# mirror_path_without <dir> <tool> [<bindir> ...]: the whole search path
+# re-exposed by symlink except one tool, because a real copy anywhere on PATH
+# would prove nothing. The named bindirs are mirrored ahead of the search
+# path, so a case's own fakes answer for every tool that is not the omitted
+# one and the refusal names that tool alone whatever the host has installed.
+# Mirrors tests/fm-pr-merge.test.sh's helper of the same name.
+mirror_path_without() {
+  local dir=$1 omit=$2 search bindir entry name
+  shift 2
+  mkdir -p "$dir"
+  search=$(printf '%s\n' "$@"; printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=${entry##*/}
+      [ "$name" = "$omit" ] && continue
+      [ -e "$dir/$name" ] || ln -s "$entry" "$dir/$name" 2>/dev/null
+    done
+  done <<EOF
+$search
+EOF
+  ! PATH="$dir" command -v "$omit" >/dev/null 2>&1 \
+    || fail "the $omit-free search path still resolved $omit"
+}
+
+test_context_digest_valid_captain_style_survives_missing_jq() {
+  local rec root home fakebin noqjq out cap_section
+  rec=$(new_world context-digest-no-jq)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mkdir -p "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-helm.sh" set --language vi --response-tone 'blunt and playful' \
+    >/dev/null || fail "fixture setup: fm-helm.sh set exited non-zero"
+
+  noqjq="$home/no-jq-path"
+  mirror_path_without "$noqjq" jq "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$noqjq")
+
+  cap_section=$(printf '%s\n' "$out" | awk '/^config\/captain-style\.json \(/{flag=1;next}flag&&/^-{10,}$/{next}flag&&/^$/{exit}flag')
+  case "$cap_section" in
+    *INVALID*)
+      fail "a valid captain-style.json with jq absent from PATH was reported as schema-invalid instead of a missing dependency: $cap_section"
+      ;;
+  esac
+  assert_contains "$cap_section" "MISSING: jq" \
+    "a valid captain-style.json with jq absent from PATH must name the missing dependency loudly, not silently default: $cap_section"
+
+  pass "context digest reports a missing jq by name rather than discarding a valid captain-style.json as schema-invalid"
+}
+
+test_context_digest_empty_captain_style_is_invalid_not_blank() {
+  local rec root home fakebin out cap_section
+  rec=$(new_world context-digest-empty-captain-style)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mkdir -p "$home/config"
+  : > "$home/config/captain-style.json"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  cap_section=$(printf '%s\n' "$out" | awk '/^config\/captain-style\.json \(/{flag=1;next}flag&&/^-{10,}$/{next}flag&&/^$/{exit}flag')
+  assert_contains "$cap_section" "INVALID" \
+    "a zero-byte captain-style.json must fail /helm's schema validation, not print as a neutral empty record"
+  case "$cap_section" in
+    *'(present, empty)'*) fail "empty captain-style.json bypassed schema validation and printed as a neutral empty record: $cap_section" ;;
+  esac
+
+  pass "context digest treats a zero-byte captain-style.json as invalid, not as an empty-but-present record"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -944,7 +1025,7 @@ SH
 # still leads, live fleet identity now outranks curated memory, and the
 # read-once contract arrives before the payload it governs.
 test_output_ordering_diagnostics_lead() {
-  local rec root home fakebin out lock_line boot_line wake_line read_once_line
+  local rec root home fakebin nonode out lock_line boot_line wake_line read_once_line
   local context_line fleet_line next_line inventory_line missing_line
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
@@ -953,12 +1034,17 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
+  # A plain PATH="$fakebin:$BASE_PATH" with $fakebin/node removed is not
+  # enough: a host with node installed system-wide (e.g. /usr/bin/node) would
+  # still resolve it off BASE_PATH, so node must be excluded from the whole
+  # search path, not just the fixture's own bindir.
+  nonode="$home/no-node-path"
+  mirror_path_without "$nonode" node "$fakebin"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$nonode")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1350,19 +1436,23 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin nonode out
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
+  # node must be excluded from the whole search path, not just the fixture's
+  # own bindir - a host with node installed system-wide (e.g. /usr/bin/node)
+  # would still resolve it off BASE_PATH otherwise.
+  nonode="$home/no-node-path"
+  mirror_path_without "$nonode" node "$fakebin"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$nonode")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
@@ -2463,6 +2553,8 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_context_digest_empty_captain_style_is_invalid_not_blank
+test_context_digest_valid_captain_style_survives_missing_jq
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

@@ -49,7 +49,8 @@
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
-#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   8. context digest - data/projects.md, data/secondmates.md,
+#                       config/captain-style.json, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   9. closing reminder - prints the context-specific watcher next step; this
@@ -381,6 +382,40 @@ print_file_or_absent() {
 
 print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+}
+
+# print_captain_style <path> <label>: like print_file_or_absent, but any
+# present file (including an empty one) is run through `fm-helm.sh show`
+# first so the same schema check /helm enforces on write (JSON object,
+# string "language"/"response_tone" fields) also gates what reaches the
+# standing session context - a file that /helm would refuse, empty or
+# otherwise, is never surfaced as if it were an active preference.
+# `fm-helm.sh show` exits 3 specifically when jq itself is missing (a tool
+# problem, not a content problem); that case must not be reported as an
+# invalid file - a valid captain-style.json would then be silently discarded
+# - so it is surfaced as its own loud, dependency-named diagnostic instead,
+# in the same "MISSING: <tool> (install: <command>)" shape
+# bin/fm-bootstrap.sh uses for every other missing-tool diagnostic. jq is an
+# accepted, documented hard dependency for /helm (bin/fm-helm.sh's header),
+# not something this caller works around.
+print_captain_style() {
+  local path=$1 label=$2
+  subsection "$label"
+  if [ ! -f "$path" ]; then
+    printf 'ABSENT\n'
+    return
+  fi
+  local out status
+  out=$(FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-helm.sh" show 2>&1) && status=0 || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s\n' "$out"
+  elif [ "$status" -eq 3 ]; then
+    printf 'MISSING: jq (install: brew install jq  # or the platform'"'"'s package manager) - required for /helm; %s stays unread and firstmate defaults apply until jq is installed\n' \
+      "$label"
+  else
+    printf 'INVALID: %s failed /helm'"'"'s schema validation - ignored, firstmate defaults apply (%s)\n' \
+      "$label" "$out"
+  fi
 }
 
 # A queued title line whose own text already marks it held or blocked. The
@@ -781,8 +816,8 @@ section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+data/projects.md, data/secondmates.md, config/captain-style.json,
+data/captain.md, data/captain-shared.md, and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -904,6 +939,7 @@ stage context
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+print_captain_style "$CONFIG/captain-style.json" "config/captain-style.json (canonical language/response_tone captain-style preferences, set via /helm; ABSENT means firstmate's built-in defaults apply)"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
