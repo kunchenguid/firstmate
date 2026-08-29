@@ -253,7 +253,7 @@ test_acquired_worktree_is_seeded_with_local_env_file() {
 # Seeding on every acquisition must refresh it, so a rotated credential never loses
 # to a stale leftover. Compare checksums so no credential value is ever printed.
 test_acquired_worktree_refreshes_a_stale_local_env_file() {
-  local rec id out status source_sum target_sum
+  local rec id out status source_sum target_sum source_mode target_mode source_uid target_uid source_gid target_gid
   id='pool-env-local-r3'
   rec=$(make_case env-local-stale "$id")
   read_case_record "$rec"
@@ -271,6 +271,24 @@ test_acquired_worktree_refreshes_a_stale_local_env_file() {
   target_sum=$(cksum < "$POOL_DIR/.env.local")
   [ "$target_sum" = "$source_sum" ] \
     || fail "spawn left a stale .env.local in the acquired pool slot"
+  source_mode=$(stat -c %a "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %Lp "$PROJECT_DIR/.env.local")
+  target_mode=$(stat -c %a "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %Lp "$POOL_DIR/.env.local")
+  [ "$target_mode" = "$source_mode" ] \
+    || fail "reissued .env.local did not preserve its mode"
+  source_uid=$(stat -c %u "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %u "$PROJECT_DIR/.env.local")
+  target_uid=$(stat -c %u "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %u "$POOL_DIR/.env.local")
+  [ "$target_uid" = "$source_uid" ] \
+    || fail "reissued .env.local did not preserve its owner"
+  source_gid=$(stat -c %g "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %g "$PROJECT_DIR/.env.local")
+  target_gid=$(stat -c %g "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %g "$POOL_DIR/.env.local")
+  [ "$target_gid" = "$source_gid" ] \
+    || fail "reissued .env.local did not preserve its group"
   pass "an acquired pooled worktree's stale local environment file is refreshed from the primary checkout"
 }
 
