@@ -24,7 +24,8 @@
 #      typed, and a just-created pending-reply expectation is discarded.
 #  10. An expected-head enqueue holds Git's own HEAD transaction across final
 #      validation and record publication, so a concurrent commit cannot race
-#      a stale head-bound instruction into the durable inbox.
+#      a stale head-bound instruction into the durable inbox, and an exact
+#      replay remains one durable record without retaining the transaction.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -362,7 +363,7 @@ test_expected_worktree_head_is_revalidated_before_enqueue() {
 }
 
 test_expected_head_enqueue_excludes_concurrent_commit() {
-  local dir err wt expected current sender i real_mktemp rc body
+  local dir err wt expected current sender i real_mktemp rc body records
   dir=$(setup_case expected-head-race); err="$dir/send.err"
   wt="$dir/worktree"
   fm_git_init_commit "$wt"
@@ -415,10 +416,21 @@ SH
   [ "$current" = "$expected" ] || fail "HEAD changed while the bound instruction was published"
   body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
   [ "$body" = "validate exact head $expected" ] || fail "the head-bound record was not published intact: $body"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_WORKTREE_HEAD="$expected" \
+    FM_REAL_MKTEMP="$real_mktemp" \
+    FM_EXPECTED_HEAD_RACE_READY="$dir/race-ready" \
+    FM_EXPECTED_HEAD_RACE_RELEASE="$dir/race-release" \
+    -- t1 "validate exact head $expected" \
+    || fail "the exact-head replay failed: $(cat "$err")"
+  records=("$dir/home/state/t1.inbox"/*.msg)
+  [ "${#records[@]}" -eq 1 ] \
+    || fail "the exact-head replay created ${#records[@]} durable records instead of one"
   git -C "$wt" -c user.name='Firstmate Test' -c user.email='firstmate-test@example.invalid' \
     commit -q --allow-empty -m advance-after-publication \
-    || fail "the expected-head transaction remained locked after publication"
-  pass "fm-send inbox: expected-head publication and direct commits are mutually exclusive"
+    || fail "the expected-head transaction remained locked after replay"
+  pass "fm-send inbox: expected-head publication excludes commits and replay stays idempotent"
 }
 
 test_unwritable_inbox_fails_loudly() {
