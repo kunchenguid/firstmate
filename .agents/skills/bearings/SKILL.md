@@ -156,7 +156,7 @@ Rules that keep the contract unambiguous:
 ## Tone and content rules
 
 Write every digest, in all three modes, in plain, direct prose.
-These practices apply to the Captain's Call sentences, the one-line items in the other three sections, the file-mode report, and the board copy alike; the `/unslop` skill holds the fuller catalog if you want it.
+These practices apply to the Captain's Call sentences, the one-line items in the other three sections, the file-mode report, and the board copy alike; the `/unslop` skill holds the fuller catalog.
 
 - Cut puffery, hedging, and filler such as "it is important to note", "in order to", "could potentially", and generic wrap-up lines; state what happened and what to do instead.
 - Drop chatbot and sycophancy phrases such as "I hope this helps", "great question", "of course", and "let me know if".
