@@ -60,15 +60,20 @@ export_harvest_env() {  # <home-data>
 # --- claude: request dedupe, cache folding, encoding resolution, window -----
 
 claude_case() {
-  local id=usageclaude1 wt="$TMP_ROOT/wt-usageclaude1"
+  # The worktree path carries a dot segment (as every firstmate home under
+  # .no-mistakes does) so a slash-only encoding would resolve to the wrong
+  # on-disk project directory.
+  local id=usageclaude1 wt="$TMP_ROOT/.no-mistakes/wt-usageclaude1"
   local data home state ledger row
   data=$(harvest_case "$id" claude "$wt" default default)
   home=$(dirname "$data")
   state="$home/state"
   export_harvest_env "$home"
 
-  # The encoded directory is the worktree path with every '/' turned into '-'.
+  # Claude Code encodes the project directory by mapping BOTH '/' and '.' to
+  # '-', so the fixture log dir mirrors that full sanitization.
   local encoded=${wt//\//-}
+  encoded=${encoded//./-}
   local logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
   mkdir -p "$logdir"
   cat > "$logdir/session-a.jsonl" <<'JSON'
@@ -194,6 +199,71 @@ cursor_case() {
   pass "cursor harvest: unavailable source renders null token fields"
 }
 
+# --- claude: window survives a host without usable birth time ---------------
+
+# A stat shim that reports no birth time (GNU statx unsupported returns 0 for
+# %W) while still answering mtime, so the harvest must fall back to the meta
+# mtime for the window start instead of collapsing to the status mtime.
+nobirth_stat_bin() {  # <dir>
+  mkdir -p "$1"
+  cat > "$1/stat" <<'SH'
+#!/usr/bin/env bash
+fmt=""; file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -f) exit 1 ;;
+    -c) fmt="$2"; shift 2 ;;
+    --) shift; file="$1"; shift ;;
+    *) file="$1"; shift ;;
+  esac
+done
+case "$fmt" in
+  %W) printf '0\n' ;;
+  %Y) /usr/bin/stat -f %m -- "$file" 2>/dev/null || /usr/bin/stat -c %Y -- "$file" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$1/stat"
+}
+
+claude_nobirth_case() {
+  local id=usagenobirth1 wt="$TMP_ROOT/.no-mistakes/wt-usagenobirth1"
+  local data home state ledger row out fb base
+  data=$(harvest_case "$id" claude "$wt" default default)
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+
+  local encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  local logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgN","model":"claude-test","usage":{"input_tokens":12,"output_tokens":8}}}
+JSON
+
+  # Pin an explicit window: status finishes at T, meta was spawned 100s earlier,
+  # and the session log lands mid-window. Without the meta-mtime start fallback
+  # the birthless window collapses to [T, T] and drops the earlier log.
+  base=$(file_mtime_epoch "$state/$id.status")
+  touch -t "$(date -r "$base" +%Y%m%d%H%M.%S)" "$state/$id.status"
+  touch -t "$(date -r $((base - 100)) +%Y%m%d%H%M.%S)" "$state/$id.meta"
+  touch -t "$(date -r $((base - 50)) +%Y%m%d%H%M.%S)" "$logdir/session.jsonl"
+
+  fb="$TMP_ROOT/nobirth-fakebin"
+  nobirth_stat_bin "$fb"
+  out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "birthless claude harvest should succeed"$'\n'"$out"
+  ledger="$data/usage-ledger.jsonl"
+  row=$(cat "$ledger")
+  assert_contains "$row" '"source":"claude-projects"' \
+    "birthless harvest still finds the in-window log via the meta-mtime start"
+  assert_contains "$row" '"input_tokens":12' "birthless harvest sums the in-window usage"
+  assert_contains "$row" '"wall_secs":100' \
+    "birthless window spans meta -> status instead of collapsing to zero"
+  pass "claude harvest: window survives a host without usable birth time"
+}
+
 # --- report: per-model totals and per-task rows -----------------------------
 
 report_case() {
@@ -258,6 +328,7 @@ SH
 }
 
 claude_case
+claude_nobirth_case
 codex_case
 cursor_case
 report_case
