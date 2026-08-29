@@ -43,8 +43,10 @@
 #     output_tokens, reasoning_output_tokens); summing those deltas equals the
 #     final cumulative total. cached_input_tokens folds cached + cache_write
 #     (subsets of input_tokens); the model comes from the turn_context.
-#   harness=cursor, an absent log tree, or no in-window match: token fields
-#     are null with source "unavailable".
+#   harness=cursor, a task with a recorded remote_host (its worker ran on
+#     another machine, so its logs are not on this filesystem), an absent log
+#     tree, or no in-window match: token fields are null with source
+#     "unavailable".
 # A corrupt log line is skipped best-effort by the parser.
 #
 # Idempotent: if the ledger already contains a line whose "task" is
@@ -68,6 +70,13 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CLAUDE_DIR="${FM_USAGE_CLAUDE_DIR:-${HOME:-}/.claude/projects}"
 CODEX_DIR="${FM_USAGE_CODEX_DIR:-${HOME:-}/.codex/sessions}"
 
+# Portable directory-lock helpers (fm_lock_acquire_wait / fm_lock_release) let
+# the idempotent check-and-append below run as one critical section, so two
+# concurrent harvests of the same task cannot both pass the existence check and
+# each append a duplicate row.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
 err() { printf 'error: %s\n' "$1" >&2; }
 
 if [ "$#" -ne 1 ] || [ -z "$1" ] || case "$1" in *[!A-Za-z0-9._-]*) true ;; *) false ;; esac; then
@@ -88,6 +97,12 @@ HARNESS=$(meta_get harness)
 WORKTREE=$(meta_get worktree)
 MODEL_META=$(meta_get model)
 EFFORT_META=$(meta_get effort)
+# A remote secondmate's worker ran on another machine, so its session logs are
+# not on this filesystem. Harvesting the local claude/codex trees for such a
+# task would at best find nothing and at worst misattribute an unrelated local
+# session that happens to match the worktree path, so a task with a recorded
+# remote_host is recorded as source=unavailable without a local scan.
+REMOTE_HOST=$(meta_get remote_host)
 
 file_mtime_epoch() {  # <file>
   local t
@@ -120,7 +135,15 @@ case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
 # Ref files pin find's mtime window portably (BSD and GNU find both compare
 # against -newer file mtimes, and touch -t exists on both).
 REFDIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-harvest.XXXXXX")
-trap 'rm -rf -- "$REFDIR"' EXIT
+LEDGER_LOCK=
+LEDGER_LOCK_HELD=0
+harvest_cleanup() {
+  local rc=$?
+  [ "$LEDGER_LOCK_HELD" != 1 ] || fm_lock_release "$LEDGER_LOCK" || true
+  rm -rf -- "$REFDIR"
+  return "$rc"
+}
+trap harvest_cleanup EXIT
 epoch_to_touch() {  # <epoch>
   date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$1" +%Y%m%d%H%M.%S
 }
@@ -155,7 +178,7 @@ matched_files() {  # <dir> <maxdepth-or-empty> : print in-window *.jsonl paths
 IT=null; CT=null; OT=null; RT=null
 case "$HARNESS" in
   claude)
-    if [ -n "$WORKTREE" ]; then
+    if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
       encoded=${WORKTREE//\//-}
       encoded=${encoded//./-}
       files=$(matched_files "$CLAUDE_DIR/$encoded" 1)
@@ -196,7 +219,7 @@ FMINNER
     fi
     ;;
   codex)
-    if [ -n "$WORKTREE" ]; then
+    if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
       files=$(matched_files "$CODEX_DIR" "")
       if [ -n "$files" ]; then
         IT=0; CT=0; OT=0; RT=0
@@ -248,6 +271,18 @@ SPAWNED=$(iso_from_epoch "$START_EPOCH" || true)
 COMPLETED=$(iso_from_epoch "$END_EPOCH" || true)
 
 mkdir -p -- "$DATA"
+# Serialize the check-and-append: the unlocked pre-check above is only a fast
+# path, so acquire the ledger lock and re-test under it before writing. Two
+# concurrent harvests of the same task then cannot both append a row.
+LEDGER_LOCK="$DATA/.usage-ledger.lock"
+fm_lock_acquire_wait "$LEDGER_LOCK"
+LEDGER_LOCK_HELD=1
+if [ -f "$LEDGER" ] && grep -qF "\"task\":\"$ID\"" "$LEDGER" 2>/dev/null; then
+  exit 0
+fi
+# Test seam: widen the check-to-append window so a concurrency regression (a
+# removed lock) is observable deterministically; unset in production.
+[ -z "${FM_USAGE_HARVEST_APPEND_DELAY:-}" ] || sleep "$FM_USAGE_HARVEST_APPEND_DELAY"
 jq -cn \
   --arg task "$ID" --arg harness "$HARNESS" \
   --arg model "$MODEL" --arg effort "$EFFORT" \

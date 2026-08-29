@@ -264,6 +264,63 @@ JSON
   pass "claude harvest: window survives a host without usable birth time"
 }
 
+# --- remote secondmate: local logs are never harvested for remote work ------
+
+remote_case() {
+  local id=usageremote1 wt="$TMP_ROOT/wt-usageremote1"
+  local data home ledger row out
+  data=$(harvest_case "$id" codex "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  # The task ran on a remote secondmate host (fm-spawn records remote_host=).
+  printf 'remote_host=box.example\n' >> "$home/state/$id.meta"
+  # Seed a LOCAL codex session whose cwd matches the worktree: without the
+  # remote-host guard the harvest would misattribute this local session to the
+  # remote task; with it, the row is honestly unavailable and its tokens null.
+  local d1="$FM_USAGE_CODEX_DIR/2026/08/28"
+  mkdir -p "$d1"
+  cat > "$d1/rollout-localmatch.jsonl" <<JSON
+{"type":"session_meta","payload":{"cwd":"$wt"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":500,"output_tokens":400}}}}
+{"type":"turn_context","payload":{"cwd":"$wt","model":"glm-5.3"}}
+JSON
+  touch -m -r "$d1/rollout-localmatch.jsonl" "$home/state/$id.status"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "remote harvest should succeed"$'\n'"$out"
+  ledger="$home/data/usage-ledger.jsonl"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 1 ] || fail "remote harvest wrote no single row"
+  row=$(cat "$ledger")
+  assert_contains "$row" '"source":"unavailable"' \
+    "remote task records unavailable, not a local session"
+  assert_contains "$row" '"input_tokens":null' \
+    "remote task tokens are null (no local misattribution)"
+  pass "remote secondmate harvest: local logs are never misattributed"
+}
+
+# --- concurrency: the ledger lock keeps the append idempotent ---------------
+
+race_case() {
+  local id=usagerace1 wt="$TMP_ROOT/wt-usagerace1"
+  local data home ledger p1 p2
+  data=$(harvest_case "$id" cursor "$wt" cursor-x "")
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  ledger="$home/data/usage-ledger.jsonl"
+  # Two concurrent harvests with a widened check-to-append window: the ledger
+  # lock must serialize them so exactly one row is appended. Without the lock
+  # both pass the existence check and each append, yielding two rows.
+  FM_USAGE_HARVEST_APPEND_DELAY=1 "$HARVEST" "$id" >/dev/null 2>&1 &
+  p1=$!
+  FM_USAGE_HARVEST_APPEND_DELAY=1 "$HARVEST" "$id" >/dev/null 2>&1 &
+  p2=$!
+  wait "$p1"; wait "$p2"
+  [ -f "$ledger" ] || fail "concurrent harvest wrote no ledger"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 1 ] \
+    || fail "concurrent harvests appended more than one row"
+  pass "usage harvest: concurrent harvests append exactly one row"
+}
+
 # --- report: per-model totals and per-task rows -----------------------------
 
 report_case() {
@@ -331,5 +388,7 @@ claude_case
 claude_nobirth_case
 codex_case
 cursor_case
+remote_case
+race_case
 report_case
 teardown_case
