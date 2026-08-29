@@ -300,4 +300,21 @@ assert_contains "$(cat "$ARGVOUT")" 'one arg; with *glob* and "quotes"' \
   "an argument with spaces and shell metacharacters is never re-split or interpreted"
 pass "stored argv is executed directly without re-splitting"
 
+# --- retire leaves an unhandled result behind; re-arming the same name is refused ---
+H="$TMP_ROOT/h-rearm"; new_home "$H"
+per "$H" arm rearm --interval 3600 --timeout 60 -- "$DIRTY" >/dev/null
+pe "$H" start periodic-rearm >/dev/null
+wait_for_result "$H" periodic-rearm 1 || fail "the reporting run captured no result"
+per "$H" retire rearm >/dev/null
+assert_present "$(result_path "$H" periodic-rearm 1)" "retire leaves the captured result in place"
+if per "$H" arm rearm --interval 3600 --timeout 60 -- "$CLEAN" 2>"$TMP_ROOT/rearm.err"; then
+  fail "re-arming a name with an unhandled captured result must be refused"
+fi
+assert_grep "unhandled captured result" "$TMP_ROOT/rearm.err" "the refusal names the unhandled result"
+assert_absent "$H/state/periodic/periodic-rearm.spec" "the refused re-arm leaves no new spec behind"
+pe "$H" handled periodic-rearm 1 >/dev/null
+out=$(per "$H" arm rearm --interval 3600 --timeout 60 -- "$CLEAN")
+assert_contains "$out" "armed: periodic-rearm" "handling the stale result unblocks re-arming"
+pass "retire leaves an unhandled result behind and blocks re-arming until it is handled"
+
 echo "all periodic-check adapter tests passed"

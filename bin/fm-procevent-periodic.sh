@@ -224,6 +224,9 @@ cmd_arm() {
       die "periodic check already exists or left state behind: $leftover (retire it first)"
     fi
   done
+  local pending
+  pending=$(fm_procevent_pending "$STATE" | grep -c "/$sid\." || true)
+  [ "$pending" -eq 0 ] || die "an unhandled captured result exists for $sid; handle it before re-arming"
 
   (umask 077; mkdir -p "$PERIODIC_DIR") || die "cannot create the periodic directory"
   [ -d "$PERIODIC_DIR" ] && [ ! -L "$PERIODIC_DIR" ] || die "periodic directory is unavailable"
