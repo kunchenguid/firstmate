@@ -409,6 +409,12 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     printf 'escalate|unreadable status span for %s' "$task"
     return
   fi
+  if [ "$rc" -eq 0 ]; then
+    rest=${record#*$'\t'}
+    event=${rest#*$'\t'}
+    printf 'escalate|stale + actionable status: %s' "$event"
+    return
+  fi
   if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
     # A DECLARED external-wait pause or a verified captain-held transfer
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
@@ -417,12 +423,6 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     # reuses the status line already read, no fm-crew-state.sh call, mirroring the
     # daemon's existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
-    return
-  fi
-  if [ "$rc" -eq 0 ]; then
-    rest=${record#*$'\t'}
-    event=${rest#*$'\t'}
-    printf 'escalate|stale + actionable status: %s' "$event"
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -1351,7 +1351,10 @@ handle_wake() {  # <reason> <state>
                 pause) : ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
-                       decision="escalate|${reason#stale: }" ;;
+                       last=$(last_status_line "$state/$task.status")
+                       status_is_paused_or_captain_held "$last" \
+                         || decision="escalate|${reason#stale: }"
+                       ;;
                    esac ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
@@ -1361,6 +1364,11 @@ handle_wake() {  # <reason> <state>
   action=${decision%%|*}
   distilled=${decision#*|}
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
+  if [ "$kind" = stale ] && [ "$action" = escalate ]; then
+    task=$(window_to_task "$arg" "$state")
+    last=$(last_status_line "$state/$task.status")
+    reconcile_pause_tracking "$arg" "$state" "$last"
+  fi
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"

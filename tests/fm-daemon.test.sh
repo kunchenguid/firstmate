@@ -772,6 +772,39 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
+test_stale_actionable_wait_escalates_and_keeps_pause_cadence() {
+  local dir state win key out reason resumed_win resumed_key
+  dir=$(make_supercase stale-actionable-wait); state="$dir/state"
+  win="sess:fm-waiting-r10"; key=$(printf '%s' waiting-r10 | tr ':/.' '___')
+  printf 'blocked [key=release]: need captain approval\npaused: waiting for release access\n' \
+    > "$state/waiting-r10.status"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in escalate\|*"blocked [key=release]: need captain approval"*) ;;
+    *) fail "a current wait hid an unreported blocker from stale classification: $out" ;;
+  esac
+  reason="stale: $win (idle 250s, possible wedge, escalation 3, demand-deep-inspection: inspect the repeated wedge)"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "$reason" "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked [key=release]: need captain approval"*) ;;
+    *) fail "the stale escalation did not name the blocker behind the current wait: $out" ;;
+  esac
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "an actionable current wait did not retain its pause cadence"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "an actionable current wait was also aged as a wedge"
+
+  resumed_win="sess:fm-resumed-r10"; resumed_key=$(printf '%s' resumed-r10 | tr ':/.' '___')
+  printf 'paused: old wait\nworking: resumed after access arrived\n' > "$state/resumed-r10.status"
+  printf '1' > "$state/.subsuper-paused-$resumed_key"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: $resumed_win" "$state"
+  [ ! -e "$state/.subsuper-paused-$resumed_key" ] \
+    || fail "an older pause declaration kept a resumed crew on pause cadence"
+  [ -e "$state/.subsuper-stale-$resumed_key" ] \
+    || fail "a resumed crew did not return to ordinary stale aging"
+  pass "stale escalation and current wait cadence remain independent"
+}
+
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
@@ -781,7 +814,7 @@ test_stale_paused_classifies_pause() {
   state="$dir/state"
   pause_reason='paused: waiting for upstream checks green, merged, and blocked state to clear'
   status_is_captain_relevant "$pause_reason" && fail "pause reason phrases made the status captain-relevant"
-  printf 'blocked: older blocker\n%s\n' "$pause_reason" > "$state/held-w9.status"
+  printf '%s\n' "$pause_reason" > "$state/held-w9.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
   pass "paused reasons with captain phrases remain pause-classified"
@@ -796,7 +829,7 @@ test_stale_captain_held_classifies_pause() {
   state="$dir/state"
   held_reason='captain-held [key=route]: tracked by task-decision-route'
   status_is_captain_relevant "$held_reason" && fail "a captain-held transfer line was treated as captain-relevant"
-  printf 'needs-decision: older question\n%s\n' "$held_reason" > "$state/held-w9h.status"
+  printf '%s\n' "$held_reason" > "$state/held-w9h.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9h" "$state")
   case "$out" in pause\|*) ;; *) fail "captain-held transfer did not classify as pause: $out" ;; esac
   pass "a captain-held transfer classifies as pause, not as a wedge candidate"
@@ -2593,6 +2626,7 @@ test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
+test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
