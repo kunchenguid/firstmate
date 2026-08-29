@@ -575,6 +575,49 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   pass "terminal single-owner stale status decisions do not block empty inventory"
 }
 
+# A descoped decision is the one keyed event that done: does NOT supersede: the
+# worker is required to append descoped before done:, and the fold keeps it open
+# until a resolved/captain-held line carries its key. origin_open_decisions must
+# honor that instead of its blanket suppress-on-done rule, so a done worker's
+# descoped decision still reaches the captain-held inventory rather than being
+# silently swallowed.
+test_descoped_decision_survives_done_and_reaches_inventory() {
+  local home id open
+  home=$(make_home descoped-survives-done)
+  id=sample-descoped-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Ship a descoped sample item" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the ship fixture"
+  write_origin_meta "$home" "$id" ship
+  printf 'descoped [key=descope-x]: dropped the sample cleanup acceptance criterion\ndone: report complete\n' \
+    > "$home/state/$id.status"
+  printf '# Descoped sample review\n\nOne requirement was dropped and still needs a captain ruling.\n' \
+    > "$home/data/$id/report.md"
+
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  assert_contains "$open" "descope-x" "fixture must fold the descoped decision open"
+
+  if run_captain "$home" complete "$id" --none > "$home/none.out" 2> "$home/none.err"; then
+    fail "--none attested while a descoped decision was still open in the status stream"
+  fi
+  assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "failed completion recorded a false completion attestation"
+
+  run_captain "$home" hold sample-descope-call \
+    --title "Rule on the dropped sample cleanup criterion" \
+    --reason "descoped requirement needs a captain ruling" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task for the descoped decision"
+  run_captain "$home" complete "$id" sample-descope-call >/dev/null \
+    || fail "completion could not transfer the descoped decision to the inventory"
+  grep -F 'captain-held [key=descope-x]: tracked by sample-descope-call' "$home/state/$id.status" >/dev/null \
+    || fail "the descoped decision was not transferred to the captain-held inventory"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verify saw an untransferred descoped decision"
+  pass "a descoped decision survives done: and routes into the captain-held inventory"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate fakebin origin json
   parent=$(make_home main-routing)
@@ -1177,6 +1220,7 @@ test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_descoped_decision_survives_done_and_reaches_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold

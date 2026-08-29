@@ -220,6 +220,10 @@ test_classifier_primitives() {
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
+  status_is_captain_relevant "descoped [key=descope-x]: dropped the follow-up" \
+    || fail "keyed descoped not recognized as captain-relevant"
+  status_is_terminal_verb "descoped [key=descope-x]: dropped the follow-up" \
+    && fail "descoped wrongly classed as a terminal wait verb"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
   # Incident regression: free-text "merged" inside a nonterminal working: line must
   # not become captain-relevant (AFK false-terminal path).

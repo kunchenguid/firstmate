@@ -49,6 +49,9 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship scaffolds also require a keyed descoped: event before done: when any
+# task-section requirement is dropped, deferred, or narrowed; a silent omission
+# is a contract violation. bin/fm-classify-lib.sh owns how that event folds.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
@@ -423,7 +426,9 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), RE-READ the PR title and body as published on GitHub: the pipeline can inject local evidence paths into the body, and no machine path, home directory, username, or other local-environment detail may remain public; scrub any with \`gh pr edit\` before reporting.
+Remove machine paths, home directories, usernames, and local-environment details ONLY; never remove or rewrite whole sections (Intent, What Changed, Testing) while scrubbing: redact within lines, keep the document structure.
+Then append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac
@@ -456,10 +461,10 @@ $RULE1
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   States: working, needs-decision, blocked, $PAUSED_VERB, descoped, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
-   needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
+   needs-decision/blocked/paused/descoped/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
@@ -467,6 +472,7 @@ $RULE1
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   If you drop, defer, or narrow ANY requirement from the \`# Task\` section (including acceptance criteria), you MUST append a keyed status event \`descoped [key=descope-<slug>]: {what was dropped and why}\` for each dropped item, BEFORE your \`done:\` line. A \`done:\` that silently omits brief scope without a matching \`descoped:\` event is a contract violation.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.

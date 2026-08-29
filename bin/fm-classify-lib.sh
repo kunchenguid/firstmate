@@ -61,7 +61,7 @@ unset _fm_classify_nounset
 # verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
 # merely because its prose contains one of those tokens (for example
 # "working: rebased onto merged #76").
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|descoped:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -86,9 +86,10 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
-# status decision opened by needs-decision or blocked. See status_open_decisions
-# below for the status-fold contract. The transfer verb is written only after
-# fm-captain-hold.sh has verified the corresponding captain-held backlog item.
+# status decision opened by needs-decision, blocked, or descoped. See
+# status_open_decisions below for the status-fold contract. The transfer verb is
+# written only after fm-captain-hold.sh has verified the corresponding
+# captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
@@ -102,6 +103,8 @@ last_status_line() {
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
 # (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.
+# descoped is captain-relevant and opens a keyed decision, but it is not a
+# terminal wait: the worker continues to done: after recording the drop.
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1
@@ -129,7 +132,7 @@ status_is_captain_relevant() {
   esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
+      done|needs-decision|blocked|failed|descoped) return 0 ;;
     esac
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
@@ -176,11 +179,12 @@ status_is_paused_or_captain_held() {  # <status-line>
 # The status stream is an append-only EVENT log. Reading it last-event-wins
 # (last_status_line above) cannot represent "an earlier decision is still open
 # after a later, unrelated event": a subsequent done/paused/working line silently
-# masks a still-open needs-decision. status_open_decisions is the ONE authoritative
-# statement of the status-fold contract that fixes this - a needs-decision/blocked
-# line OPENS a keyed decision, and only an explicit resolution or a verified
-# captain-held backlog transfer referencing that key CLOSES it; a later unrelated
-# terminal line never clears an open captain decision.
+# masks a still-open needs-decision, blocked, or descoped event.
+# status_open_decisions is the ONE authoritative statement of the status-fold
+# contract that fixes this - a needs-decision/blocked/descoped line OPENS a
+# keyed decision, and only an explicit resolution or a verified captain-held
+# backlog transfer referencing that key CLOSES it; a later unrelated terminal
+# line never clears an open captain decision.
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
 # at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
 # worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
@@ -362,8 +366,9 @@ EOF
   printf '%s' "$out"
 }
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
-# set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
+# set, applying the same needs-decision/blocked/descoped-opens,
+# resolved/captain-held-closes rule status_open_decisions documents above. Pure
+# text transform, no file I/O.
 # This is the ONE place the per-line open/resolved rule is written; both the
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
@@ -413,7 +418,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
-    needs-decision|blocked)
+    needs-decision|blocked|descoped)
       note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
@@ -473,7 +478,7 @@ EOF
 
 # The verb that last moved <key> in a status stream, which is what tells a
 # consumer HOW the status side currently reads that key. Prints the opening verb
-# (needs-decision or blocked) while the key is still open, the closing verb
+# (needs-decision, blocked, or descoped) while the key is still open, the closing verb
 # (resolved, or the captain-held durable-transfer verb) once it is closed, and
 # nothing at all when no line in the stream ever stated a transition for it.
 #
@@ -1181,9 +1186,9 @@ EOF
 
 # Fold material routed-work phases in the same keyed event stream.
 # A working or declared-pause event opens or replaces one phase for its key.
-# A later done, failed, needs-decision, blocked, or resolved event carrying that
-# key closes the phase, because it has moved to a terminal or separately tracked
-# state.
+# A later done, failed, needs-decision, blocked, descoped, or resolved event
+# carrying that key closes the phase, because it has moved to a terminal or
+# separately tracked state.
 # A bare legacy event uses the default key, preserving one-phase behavior.
 # This fold is evidence about whether a parent event was explicitly superseded.
 # It is never authoritative current crew state, and consumers must not let an open
@@ -1205,7 +1210,7 @@ _fm_status_open_activities_stream() {
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
+      done|failed|needs-decision|blocked|descoped|"$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;

@@ -145,8 +145,8 @@
 # change ordinary sends.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
-# before the message) when this send answers an open keyed needs-decision: or
-# blocked: record in the target task's state/<id>.status. fm-send itself
+# before the message) when this send answers an open keyed needs-decision:,
+# blocked:, or descoped: record in the target task's state/<id>.status. fm-send itself
 # appends the closing "resolved [key=<key>]: answered: <capped excerpt>" line
 # to that status file, so the captain-facing OPEN DECISIONS record closes at
 # answer time and never depends on the busy worker writing a matching resolved

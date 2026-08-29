@@ -282,6 +282,22 @@ meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# Keep only the descoped rows of a folded open set. A non-secondmate origin
+# whose last status line is done/failed still owns an open descoped decision:
+# done: never closes a descoped key (bin/fm-classify-lib.sh), so the
+# suppress-on-done rule below must not swallow it the way it swallows a stale
+# needs-decision/blocked that the worker abandoned.
+open_decisions_descoped_only() {  # <open-set>
+  local key verb note
+  while IFS=$'\t' read -r key verb note; do
+    [ -n "$key" ] || continue
+    [ "$verb" = descoped ] || continue
+    printf '%s\t%s\t%s\n' "$key" "$verb" "$note"
+  done <<EOF
+$1
+EOF
+}
+
 origin_open_decisions() {  # <origin-id>
   local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
   open=$(status_open_decisions "$status_file")
@@ -293,7 +309,10 @@ origin_open_decisions() {  # <origin-id>
     last=$(last_status_line "$status_file")
     verb=$(status_line_verb "$last")
     case "$verb" in
-      done|failed) return 0 ;;
+      done|failed)
+        open=$(open_decisions_descoped_only "$open")
+        [ -n "$open" ] || return 0
+        ;;
     esac
   fi
   printf '%s' "$open"

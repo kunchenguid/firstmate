@@ -21,6 +21,9 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
+# A live firstmate launch exports these; this suite must own the directories
+# it resolves into generated briefs.
+unset FM_DATA_OVERRIDE FM_STATE_OVERRIDE
 
 # The script itself must always parse under the ambient bash. That is Bash 5 in
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
@@ -694,7 +697,9 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    states="working, needs-decision, blocked, awaiting, done, failed"
+    [ "$kind" = ship ] && states="working, needs-decision, blocked, awaiting, descoped, done, failed"
+    assert_grep "States: $states." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
@@ -727,6 +732,55 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   assert_grep "load \`captain-hold-lifecycle\`" "$charter" \
     "secondmate charter did not load the shared captain-call policy for detailed investigations"
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
+}
+
+# A ship worker may descope, but never silently: the generated status protocol
+# requires a keyed descoped: event before done:. The no-mistakes DOD's published
+# PR scrub must delete local details in place and must never drop whole sections.
+test_ship_descoped_and_pr_scrub_contracts() {
+  local home id brief mode
+  home="$TMP_ROOT/descoped-scrub-home"
+  mkdir -p "$home/data"
+
+  for id_mode in "brief-descope-nm:no-mistakes" "brief-descope-dpr:direct-PR" "brief-descope-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "ship --mode $mode brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_grep 'descoped [key=descope-<slug>]: {what was dropped and why}' "$brief" \
+      "$mode ship brief missing the keyed descoped: status event"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'BEFORE your `done:` line' "$brief" \
+      "$mode ship brief missing the before-done: descope ordering"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'A `done:` that silently omits brief scope without a matching `descoped:` event is a contract violation' "$brief" \
+      "$mode ship brief missing the silent-descope contract violation"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-descope-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "scout brief should scaffold"
+  assert_no_grep 'descoped [key=descope-<slug>]: {what was dropped and why}' \
+    "$home/data/brief-descope-scout/brief.md" \
+    "scout brief must not carry the ship-only descoped: contract"
+
+  brief="$home/data/brief-descope-nm/brief.md"
+  assert_grep 'RE-READ the PR title and body as published' "$brief" \
+    "no-mistakes DOD missing the published-PR re-read"
+  assert_grep 'Remove machine paths, home directories, usernames, and local-environment details ONLY' "$brief" \
+    "no-mistakes DOD missing the details-only scrub bound"
+  assert_grep 'never remove or rewrite whole sections (Intent, What Changed, Testing) while scrubbing' "$brief" \
+    "no-mistakes DOD missing the keep-sections scrub contract"
+  assert_grep 'redact within lines, keep the document structure' "$brief" \
+    "no-mistakes DOD missing the in-place redact instruction"
+
+  assert_no_grep 'never remove or rewrite whole sections (Intent, What Changed, Testing) while scrubbing' \
+    "$home/data/brief-descope-dpr/brief.md" \
+    "direct-PR brief must not carry the no-mistakes PR-body scrub"
+  assert_no_grep 'never remove or rewrite whole sections (Intent, What Changed, Testing) while scrubbing' \
+    "$home/data/brief-descope-lo/brief.md" \
+    "local-only brief must not carry the no-mistakes PR-body scrub"
+  pass "fm-brief.sh: ship scaffolds carry keyed descoped: and no-mistakes PR scrub keeps sections"
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.
@@ -771,4 +825,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_ship_descoped_and_pr_scrub_contracts
 test_scout_and_secondmate_scaffold

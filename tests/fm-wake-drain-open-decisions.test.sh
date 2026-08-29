@@ -158,6 +158,36 @@ test_buried_decision_surfaces_on_the_empty_queue_fast_path() {
   pass "a buried open decision surfaces even when the wake queue itself is empty"
 }
 
+# A keyed descoped: event must keep re-presenting on later drains (the
+# session-start / restart path) until a matching resolved line lands. A later
+# done: is the measured burial: the drop used to vanish into PR prose.
+test_descoped_surfaces_across_restart_until_resolved() {
+  local dir state out
+  dir=$(make_case descoped-restart)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'descoped [key=descope-x]: dropped the follow-up because it was out of scope\n' \
+    > "$state/task-descope.status"
+  printf 'done: shipped the remaining half\n' >> "$state/task-descope.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "first drain failed on a keyed descoped event"
+  grep -F 'OPEN DECISIONS' "$out" >/dev/null \
+    || fail "keyed descoped produced no OPEN DECISIONS section"
+  grep -F 'task-descope' "$out" | grep -F '[key=descope-x]' | grep -F 'dropped the follow-up' >/dev/null \
+    || fail "keyed descoped was not surfaced with its task, key, and note"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "restart drain failed while descoped stayed open"
+  grep -F 'task-descope' "$out" | grep -F '[key=descope-x]' | grep -F 'dropped the follow-up' >/dev/null \
+    || fail "keyed descoped disappeared across a simulated restart"
+
+  printf 'resolved [key=descope-x]: routed to a follow-up task\n' >> "$state/task-descope.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after resolving the descoped key"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a resolved descoped key still printed as open: $(cat "$out")"
+  fi
+  pass "a keyed descoped event surfaces, survives restart, and closes on matching resolved"
+}
+
 test_status_symlink_is_not_followed() {
   local dir state out
   dir=$(make_case status-symlink)
@@ -223,4 +253,5 @@ test_reserved_key_namespace_is_owned_by_its_library
 test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
+test_descoped_surfaces_across_restart_until_resolved
 test_status_symlink_is_not_followed
