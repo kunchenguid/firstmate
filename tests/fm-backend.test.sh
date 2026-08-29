@@ -1059,6 +1059,32 @@ test_spawn_default_backend_writes_no_meta_field() {
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }
 
+test_spawn_removes_tmux_endpoint_when_metadata_publication_fails() {
+  local proj wt data id state config out status fb log
+  proj="$TMP_ROOT/meta-publication-project"; wt="$TMP_ROOT/meta-publication-wt"
+  data="$TMP_ROOT/meta-publication-data"; id="metapublicationz6"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/meta-publication-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/meta-publication-state"; config="$TMP_ROOT/meta-publication-config"
+  mkdir -p "$state/$id.meta" "$config"
+  log="$TMP_ROOT/meta-publication.log"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should fail when its metadata path is a directory"
+  assert_contains "$out" "Is a directory" "metadata publication failure should reach the operator"
+  assert_contains "$(cat "$log")" $'tmux\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" \
+    "metadata publication failure left the newly-created tmux endpoint running"
+  [ -d "$state/$id.meta" ] || fail "metadata publication failure should not replace the blocking directory"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: metadata publication failure removes the newly-created tmux endpoint"
+}
+
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   local proj wt data id state config out fb
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
@@ -1138,5 +1164,6 @@ test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
+test_spawn_removes_tmux_endpoint_when_metadata_publication_fails
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently

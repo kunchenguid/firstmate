@@ -673,6 +673,9 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+SPAWN_ENDPOINT_ABORT_CLEANUP=0
+SPAWN_ENDPOINT_ABORT_BACKEND=
+SPAWN_ENDPOINT_ABORT_TARGET=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -743,6 +746,10 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ "$SPAWN_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_ENDPOINT_ABORT_CLEANUP=0
+    fm_backend_kill "$SPAWN_ENDPOINT_ABORT_BACKEND" "$SPAWN_ENDPOINT_ABORT_TARGET" 2>/dev/null || true
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -2159,6 +2166,17 @@ EOF
     ;;
 esac
 fi
+# A fresh ordinary endpoint has no durable identity until metadata is published.
+# If that publication fails, remove the endpoint instead of leaving an orphan
+# that normal teardown cannot address. Orca owns a worktree as well and has its
+# dedicated rollback above; projected Herdr panes have their exact journal-led
+# cleanup already armed.
+if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ] \
+   && { [ "$BACKEND" != herdr ] || [ "${HERDR_PROJECTED:-0}" -ne 1 ]; }; then
+  SPAWN_ENDPOINT_ABORT_BACKEND=$BACKEND
+  SPAWN_ENDPOINT_ABORT_TARGET=$T
+  SPAWN_ENDPOINT_ABORT_CLEANUP=1
+fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -2773,6 +2791,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
+SPAWN_ENDPOINT_ABORT_CLEANUP=0
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
