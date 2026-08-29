@@ -28,6 +28,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh inventory-state <origin-id>
 #   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
@@ -342,19 +343,25 @@ resolution_block() {  # <mode>
 
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
-verify_hold_durable() {  # <task-id>
+hold_durable_state() {  # <task-id>
   local id=$1 show state hold_kind body
   show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
   if body_has_resolution_record "$body"; then
+    printf 'answered\n'
     return 0
   fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
+    printf 'open\n'
     return 0
   fi
   fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+}
+
+verify_hold_durable() {  # <task-id>
+  hold_durable_state "$1" >/dev/null
 }
 
 # Resolve one inventory entry or channel key to the task that carries it: the
@@ -839,9 +846,8 @@ EOF
   printf 'complete: %s captain-call inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"
 }
 
-command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open
-  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+captain_hold_inventory_states() {  # <origin-id>
+  local origin=$1 meta reviewed keys entry id state key open
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
@@ -852,7 +858,9 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
+      id=$(resolve_entry "$origin" "$entry")
+      state=$(hold_durable_state "$id")
+      printf '%s\t%s\n' "$state" "$id"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -864,7 +872,19 @@ EOF
   done <<EOF
 $open
 EOF
+}
+
+command_verify() {
+  local origin=${1:-}
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  captain_hold_inventory_states "$origin" >/dev/null
   printf 'verified: %s captain-call inventory\n' "$origin"
+}
+
+command_inventory_state() {
+  local origin=${1:-}
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  captain_hold_inventory_states "$origin"
 }
 
 # --- record divergence ------------------------------------------------------
@@ -995,6 +1015,7 @@ case "${1:-}" in
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  inventory-state) shift; command_inventory_state "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;

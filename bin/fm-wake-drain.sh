@@ -397,6 +397,7 @@ trap 'exit 143' TERM
 
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
+[ -e "$FM_WAKE_QUEUE" ] || : > "$FM_WAKE_QUEUE"
 reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
@@ -531,7 +532,6 @@ if [ "$ACTOR" = main ]; then
 fi
 
 if [ ! -s "$FM_WAKE_QUEUE" ]; then
-  : > "$FM_WAKE_QUEUE"
   fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
   RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
   case "$RECOVERY_MARKER_TOKEN" in

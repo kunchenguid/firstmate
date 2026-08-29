@@ -151,6 +151,17 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_absent_home_snapshot_remains_read_only() {
+  local home out
+  home="$TMP_ROOT/absent-home"
+  mkdir -p "$home"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) || fail "absent-home snapshot failed"
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.tasks | length) == 0' >/dev/null \
+    || fail "absent-home snapshot output was invalid: $out"
+  [ ! -e "$home/state" ] || fail "read-only snapshot created an absent state directory"
+  pass "fleet snapshot leaves absent runtime state untouched"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -800,6 +811,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_absent_home_snapshot_remains_read_only
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness

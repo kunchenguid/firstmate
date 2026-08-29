@@ -355,6 +355,41 @@ SH
   pass "Pi startup intake recovers committed-ready state without a wake row"
 }
 
+test_non_pi_empty_drain_initializes_missing_queue() {
+  local dir home out
+  dir="$TMP_ROOT/non-pi-empty-drain"; mkdir -p "$dir"
+  home="$dir/home"
+  mkdir -p "$home/state"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-wake-drain.sh") || fail "non-Pi empty drain failed"
+  [ -z "$out" ] || fail "non-Pi empty drain was not silent: $out"
+  [ -f "$home/state/.wake-queue" ] && [ ! -s "$home/state/.wake-queue" ] \
+    || fail "non-Pi empty drain did not initialize its durable queue"
+  pass "non-Pi empty drains initialize their durable queue"
+}
+
+test_transferred_captain_hold_stops_delivery() {
+  local dir home send state out
+  dir="$TMP_ROOT/captain-held-decision"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  printf 'needs-decision [key=route]: choose the delivery route\n' >> "$home/state/ship.status"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" hold ship-route \
+      --title "Choose the delivery route" --reason "captain route decision pending" \
+      --repo sample --origin ship >/dev/null \
+    || fail "could not create the captain-held delivery decision"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" complete ship ship-route >/dev/null \
+    || fail "could not transfer the delivery decision to its durable hold"
+  out=$(run_continue "$home" "$send" "$state") || fail "captain-held continuation execution failed"
+  [ "$out" = 'result=refused task=ship reason=open-decision-or-blocker' ] \
+    || fail "captain-held decision did not stop validation delivery: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "captain-held task received validation delivery"
+  pass "transferred captain holds remain validation blockers"
+}
+
 test_fleet_and_bearings_project_pending_continuation() {
   local dir home send state fakebin snapshot bearings head active_snapshot active_bearings monitoring_bearings terminal_bearings
   dir="$TMP_ROOT/fleet-projection"; mkdir -p "$dir"
@@ -560,6 +595,8 @@ test_terminal_receipt_and_existing_lease_retry
 test_killed_delivery_operation_does_not_strand_session_lease
 test_reused_delivery_pid_does_not_preserve_lease
 test_pi_empty_drain_recovers_unqueued_durable_candidate
+test_non_pi_empty_drain_initializes_missing_queue
+test_transferred_captain_hold_stops_delivery
 test_fleet_and_bearings_project_pending_continuation
 test_advanced_head_surfaces_continuation_conflict
 test_pi_drain_preflights_before_presenting_committed_ready_rows

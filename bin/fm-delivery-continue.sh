@@ -22,6 +22,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 LEASE_BIN="${FM_DELIVERY_LEASE_BIN:-$SCRIPT_DIR/fm-lease.sh}"
 SEND_BIN="${FM_DELIVERY_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 CREW_STATE_BIN="${FM_DELIVERY_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+CAPTAIN_HOLD_BIN="${FM_DELIVERY_CAPTAIN_HOLD_BIN:-$SCRIPT_DIR/fm-captain-hold.sh}"
 
 # shellcheck source=bin/fm-delivery-continuation-lib.sh
 . "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
@@ -100,6 +101,14 @@ WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null) || refuse u
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 [ -z "$(status_open_decisions "$STATUS")" ] || refuse open-decision-or-blocker
+DECISION_KEYS=$(meta_get decision_keys)
+if [ -n "$DECISION_KEYS" ]; then
+  CAPTAIN_HOLD_STATE=$("$CAPTAIN_HOLD_BIN" inventory-state "$TASK" 2>/dev/null) \
+    || retry captain-hold-state-unavailable
+  if printf '%s\n' "$CAPTAIN_HOLD_STATE" | grep -q "^open$(printf '\t')"; then
+    refuse open-decision-or-blocker
+  fi
+fi
 
 if [ -n "$HEAD_SHORT" ]; then
   case "$HEAD_SHORT" in ???????*) ;; *) refuse invalid-committed-head ;; esac

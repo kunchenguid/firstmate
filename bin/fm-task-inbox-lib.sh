@@ -55,22 +55,32 @@
 # deduplication marker: normal polls surface a message once, while a crash or
 # marker failure may produce a rare duplicate rather than silently lose a wake.
 #
-# fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
-# other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
-# and tests. No side effects on source beyond its sourced libraries.
+# fm_task_inbox_ring requires bin/fm-backend.sh's dispatch; lock and age helpers
+# require bin/fm-wake-lib.sh. Both dependencies load only when their functions
+# are invoked. Sourced by bin/fm-send.sh, bin/fm-watch.sh, and tests. No side
+# effects on source.
 #
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Both dependencies are canonical lint roots in their own right. Keep them as
-# analysis boundaries here so ShellCheck's external-source traversal does not
-# recursively duplicate the full backend graph for every inbox consumer.
-# shellcheck source=/dev/null
-. "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
-# shellcheck source=/dev/null
-. "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+
+fm_task_inbox_wake_helpers() {
+  command -v fm_lock_try_create >/dev/null 2>&1 \
+    && command -v fm_path_age >/dev/null 2>&1 \
+    && return 0
+  # shellcheck source=/dev/null
+  . "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
+}
+
+fm_task_inbox_backend_helpers() {
+  command -v fm_backend_composer_state >/dev/null 2>&1 \
+    && command -v fm_backend_send_text_submit >/dev/null 2>&1 \
+    && return 0
+  # shellcheck source=/dev/null
+  . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+}
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
@@ -122,6 +132,7 @@ fm_task_inbox_next_seq() {  # <inbox-dir>
 fm_task_inbox_lock_acquire() {  # <lock-path>
   local lock=$1 wait=${FM_TASK_INBOX_LOCK_WAIT_SECS:-$FM_TASK_INBOX_LOCK_WAIT_DEFAULT}
   local deadline probe
+  fm_task_inbox_wake_helpers || return 1
   case "$wait" in ''|*[!0-9]*) wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT ;; esac
   probe=$(mktemp "${lock%/*}/.lock-probe.XXXXXX") || return 1
   rm -f "$probe" || return 1
@@ -268,6 +279,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  fm_task_inbox_backend_helpers || return 2
   line=$(fm_task_inbox_doorbell_line "$rec")
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
@@ -321,6 +333,7 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
   local dir oldest base now grace max ladder rec_base count last
+  fm_task_inbox_wake_helpers || return 1
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
