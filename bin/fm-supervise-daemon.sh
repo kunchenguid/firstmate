@@ -598,7 +598,7 @@ mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
 mark_escalated_seen() {  # <state> <captured-endpoint-file>
   local state=$1 capture=$2 task endpoint ident rc=0
   [ -f "$capture" ] || return 1
-  grep -q '^ERROR' "$capture" 2>/dev/null && return 0
+  grep -q '^ERROR' "$capture" 2>/dev/null && return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     mark_status_seen "$state" "$task" "$endpoint" "$ident" || rc=1
@@ -1292,7 +1292,7 @@ is_wake_reason() {  # <reason>
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest
-  local kind="" arg=""
+  local kind="" arg="" classification_failed=0
   : > "$capture" || return 1
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1349,7 +1349,7 @@ handle_wake() {  # <reason> <state>
       # A terminal-stale escalate must not leave a persistence marker behind, or
       # housekeeping re-escalates the same pane as a false wedge later.
       [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-      mark_escalated_seen "$state" "$capture"
+      mark_escalated_seen "$state" "$capture" || classification_failed=1
       [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       ;;
     pause)
@@ -1396,9 +1396,10 @@ handle_wake() {  # <reason> <state>
       ;;
   esac
   if [ "$action" = self ] && { [ "$kind" = signal ] || [ "$kind" = stale ]; }; then
-    mark_escalated_seen "$state" "$capture" || { rm -f "$capture"; return 1; }
+    mark_escalated_seen "$state" "$capture" || classification_failed=1
   fi
   rm -f "$capture"
+  [ "$classification_failed" -eq 0 ]
 }
 
 handle_durable_wakes() {  # <watcher-reason> <state>

@@ -12,6 +12,9 @@
 # FM_CAPTAIN_RE override. Consumers layer their own dedup/marker state on top (the
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
+# A successful span classification reports every actionable event through its
+# captured endpoint, while a failed classification reports no committable endpoint.
+# Consumers may advance only after the actionable or routine success outcomes.
 #
 # There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
@@ -1358,7 +1361,7 @@ _fm_status_open_decision_origins() {  # <status-file>
 
 status_span_first_actionable_record() {  # <status-file> <start-offset>
   local f=$1 start=${2:-0} size ident cur_ident scratch chunk_file full_file prefix_file
-  local line verb key origins='' folded=0 rc=1 prefix_lines=0 line_number=0 live_line='' _line _key
+  local line verb key origins='' folded=0 rc=1 prefix_lines=0 line_number=0 live_line='' events='' _line _key
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
   size=$(_fm_status_file_size "$f") || return 2
@@ -1382,9 +1385,18 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
     verb=$(status_line_verb "$line")
     case "$verb" in
       needs-decision|blocked)
-        key=$(_fm_decision_key "$line") || { rc=0; break; }
-        _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
-          || { rc=0; break; }
+        key=$(_fm_decision_key "$line") || {
+          [ -n "$events" ] && events="${events} ; "
+          events="${events}${line}"
+          rc=0
+          continue
+        }
+        _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
+          [ -n "$events" ] && events="${events} ; "
+          events="${events}${line}"
+          rc=0
+          continue
+        }
         if [ "$folded" -eq 0 ]; then
           _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
             || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
@@ -1405,13 +1417,19 @@ $origins
 EOF
 )
         [ -n "$live_line" ] && [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
-        rc=0; break
+        [ -n "$events" ] && events="${events} ; "
+        events="${events}${line}"
+        rc=0
         ;;
-      *) rc=0; break ;;
+      *)
+        [ -n "$events" ] && events="${events} ; "
+        events="${events}${line}"
+        rc=0
+        ;;
     esac
   done < "$chunk_file"
   rm -f "$chunk_file" "$full_file" "$prefix_file"
-  if [ "$rc" -eq 0 ]; then printf '%s\t%s\t%s' "$size" "$ident" "$line"; else printf '%s\t%s' "$size" "$ident"; fi
+  if [ "$rc" -eq 0 ]; then printf '%s\t%s\t%s' "$size" "$ident" "$events"; else printf '%s\t%s' "$size" "$ident"; fi
   return "$rc"
 }
 

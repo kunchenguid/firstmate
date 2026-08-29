@@ -133,7 +133,7 @@ test_classify_signal_survives_a_later_routine_append() {
   dir=$(make_supercase classify-masked)
   state="$dir/state"
 
-  printf 'working: setup\nblocked: cannot reach the release host\nworking: retrying the upload\n' \
+  printf 'working: setup\nblocked [key=release]: cannot reach the release host\nfailed: release verification broke\nworking: retrying the upload\n' \
     > "$state/mask-b1.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/mask-b1.status" "$state")
   case "$out" in
@@ -141,8 +141,8 @@ test_classify_signal_survives_a_later_routine_append() {
     *) fail "a blocker hidden behind a later working: line was self-handled: $out" ;;
   esac
   case "$out" in
-    *"blocked: cannot reach the release host"*) ;;
-    *) fail "the escalation named the routine line instead of the blocker: $out" ;;
+    *"blocked [key=release]: cannot reach the release host"*"failed: release verification broke"*) ;;
+    *) fail "the escalation did not report every actionable event before its endpoint: $out" ;;
   esac
 
   # The captain-reported shape: a finished release/install followed by routine
@@ -335,18 +335,45 @@ EOF
   pass "classification failure retains the complete durable wake batch"
 }
 
+test_unreadable_durable_signal_surfaces_without_acknowledgement() {
+  local dir state fakebin out
+  dir=$(make_supercase durable-unreadable); state="$dir/state"; fakebin="$dir/daemon-bin"
+  printf 'blocked: status cannot be classified\n' > "$state/unreadable-r7.status"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf ack > "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\tunreadable-r7.status\tsignal: $state/unreadable-r7.status\n'
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  (
+    FM_DAEMON_DIR="$fakebin"
+    _fm_status_read_span() { return 1; }
+    ! handle_durable_wakes fallback "$state"
+  ) || fail "an unreadable signal was treated as successfully classified"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;;
+    *) fail "an unreadable durable signal did not surface its diagnostic: $out" ;;
+  esac
+  [ ! -e "$dir/acked" ] || fail "an unreadable durable signal was acknowledged"
+  pass "unreadable durable signals surface and remain retryable"
+}
+
 test_catchall_scan_surfaces_a_masked_event() {
   local dir state
   dir=$(make_supercase catchall-masked)
   state="$dir/state"
-  printf 'working: setup\nneeds-decision: pick A or B\nworking: tidying the branch\n' \
+  printf 'working: setup\nneeds-decision [key=release]: pick A or B\nfailed: release build broke\nworking: tidying the branch\n' \
     > "$state/catch-m1.status"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] \
     || fail "the catch-all scan missed a decision hidden behind a later working: line"
-  grep -F "needs-decision: pick A or B" "$state/.subsuper-escalations" >/dev/null \
-    || fail "the catch-all scan escalated something other than the decision it found"
+  grep -F "needs-decision [key=release]: pick A or B" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the catch-all scan omitted the decision it found"
+  grep -F "failed: release build broke" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the catch-all scan committed past a failure it did not report"
   # And it records progress, so the next scan does not re-fire the same event.
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-last-scan"
@@ -2437,6 +2464,7 @@ test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
 test_catchall_advances_routine_then_surfaces_append
 test_durable_wake_failure_retains_entire_batch
+test_unreadable_durable_signal_surfaces_without_acknowledgement
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
