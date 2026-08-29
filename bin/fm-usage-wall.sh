@@ -154,6 +154,10 @@
 #                                   rather than growing with failed-step count
 #   FM_USAGE_WALL_SNAPSHOT_TIMEOUT  bound on the fleet snapshot (default 300s)
 #   FM_USAGE_WALL_CAPTURE_LINES     endpoint lines scanned by diagnose (default 200)
+#   FM_USAGE_WALL_CAPTURE_TIMEOUT   bound on diagnose's endpoint capture (default
+#                                   15s), because a tmux server whose socket
+#                                   still exists but is wedged never answers and
+#                                   this command runs on the recovery path
 #   FM_USAGE_WALL_TIGHT_PCT         percent at or below which a reading is
 #                                   labelled tight (default 20)
 #   FM_USAGE_WALL_TIGHT_RUNWAY_SECS runway at or below which a reading is
@@ -186,6 +190,7 @@ NM_TIMEOUT=${FM_USAGE_WALL_NM_TIMEOUT:-20}
 SCAN_BUDGET=${FM_USAGE_WALL_SCAN_BUDGET:-60}
 SNAPSHOT_TIMEOUT=${FM_USAGE_WALL_SNAPSHOT_TIMEOUT:-300}
 CAPTURE_LINES=${FM_USAGE_WALL_CAPTURE_LINES:-200}
+CAPTURE_TIMEOUT=${FM_USAGE_WALL_CAPTURE_TIMEOUT:-15}
 TIGHT_PCT=${FM_USAGE_WALL_TIGHT_PCT:-20}
 TIGHT_RUNWAY=${FM_USAGE_WALL_TIGHT_RUNWAY_SECS:-3600}
 
@@ -297,19 +302,23 @@ USAGE_WALL_EXIT_PATTERNS="$USAGE_WALL_EXIT_PATTERNS|exit(ed with)? code [1-9]"
 # It is a whole-evidence rule, deliberately not a proximity or window one: a
 # narrowed window trades a real detection for an accident of layout.
 #
-# THE GAP THIS LEAVES OPEN, measured rather than assumed: sliding the default
-# 200-line capture window over this repository's tracked files and running this
-# rule over each window, two files still read as a wall - the verification
-# record, which quotes a real step log verbatim, and THIS FILE, whose header
-# above quotes a limit phrasing while a later line carries an independent exit
-# phrase. The detector's own source trips the detector. Anyone editing this
-# function is already reading the text that causes it, which is why the gap is
-# recorded here and not only in the feature document.
+# THE GAP THIS LEAVES OPEN, measured rather than assumed. The method first,
+# because the first answer here was wrong by sampling: a 200-line capture window
+# reads as a wall exactly when some limit line and some exit line that does not
+# itself carry a limit phrasing lie within 199 lines of each other, which is
+# decidable per file from the two line-number sets without sliding a window at
+# all. By that test THREE tracked files still read as a wall - the verification
+# record, which quotes a real step log verbatim; THIS FILE, whose header above
+# quotes a limit phrasing while a later line carries an independent exit phrase;
+# and tests/fm-usage-wall.test.sh, whose fixtures build the vendor lines from the
+# same real text. The detector's own source trips the detector. Anyone editing
+# this function is already reading the text that causes it, which is why the gap
+# is recorded here and not only in the feature document.
 #
 # Revisit it if the vendor emits the phrasing and the exit on one line, if a
-# real transcript turns up a multi-line wall being missed, or if this text
-# drifts so a window over some third file starts reading as a wall. The open
-# question behind it, which widening this disclosure again will not answer, is
+# real transcript turns up a multi-line wall being missed, or if a FOURTH tracked
+# file starts reading as a wall. The open question behind it, which widening this
+# disclosure again will not answer, is
 # whether a wall verdict should be authoritative only where a structural signal
 # exists - the harness's own non-zero exit together with the vendor's final line
 # in a pipeline step log - and be demoted to a non-asserting hint on the pane
@@ -387,7 +396,7 @@ humanize_secs() {  # <seconds>
 }
 
 cmd_headroom() {
-  local json=0 out rc quota_version build_state=ok build_note='' line
+  local json=0 out rc quota_version build_state=ok build_note='' rowcount
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=1 ;;
@@ -561,6 +570,18 @@ EOF
     summary_verdict=ok
   fi
 
+  # Every effective row was model-scoped, so no account-level gauge was read at
+  # all. That is the same condition as a gauge that could not be read, and it
+  # leaves through the same single exit - otherwise the text emitter names the
+  # reason and the JSON emitter returns an empty one, and `fm-usage-wall-headroom.v1`
+  # stops meaning one shape.
+  rowcount=$(printf '%s' "$rows" | grep -c . 2>/dev/null) || rowcount=0
+  if [ "$rowcount" -eq 0 ]; then
+    headroom_unmeasurable no-effective-rows \
+      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
+    return 0
+  fi
+
   if [ "$json" -eq 1 ]; then
     headroom_json "$summary_verdict" "$measured" "$tight" "$wall" "$unknown" \
       "$quota_version" "$build_state" "$rows"
@@ -589,8 +610,6 @@ EOF
       printf 'HEADROOM_NEXT: %s/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.\n' "$FM_ROOT"
       ;;
   esac
-  line=$(printf '%s' "$rows" | grep -c . 2>/dev/null) || line=0
-  [ "$line" -gt 0 ] || printf 'HEADROOM: (no provider rows) unknown reason=no-effective-rows\n'
 }
 
 headroom_unknown_reason() {  # <scope> <provider-status>
@@ -678,28 +697,46 @@ load_backend_lib() {
   FM_USAGE_WALL_BACKEND_LOADED=1
 }
 
-# endpoint_wall_line: first usage-wall line in the recorded endpoint's captured
-# output, or nothing. Prints the capture status on fd 3 so the caller can tell
-# "read it, nothing there" from "could not read it".
-endpoint_evidence() {  # <meta> <task-id> -> "readable|unreadable\t<line>"
-  local meta=$1 id=$2 backend target capture line
+# endpoint_evidence: the first usage-wall line in the recorded endpoint's
+# captured output, with the capture's own status and, when it failed, the
+# concrete reason it failed. The caller needs all three to tell "read it,
+# nothing there" from "could not read it, and here is why".
+#
+# The capture is BOUNDED like every other read in this command. A pane capture
+# is a bare `tmux capture-pane`, which blocks forever against a server whose
+# socket still exists but is wedged - and this command is what an agent runs by
+# hand once a provider wall has stranded a worker, precisely the state in which
+# a backend is most likely to be wedged rather than absent. Unbounded, it would
+# hang with no verdict at all on the one path that exists to produce one.
+# bin/fm-fleet-snapshot.sh bounds this same call the same way; the reason text
+# comes from fm_run_timed_reason, the one owner of what a non-zero bounded exit
+# actually means, so a timeout is never reported as something else.
+endpoint_evidence() {  # <meta> <task-id> -> "readable|unreadable\t<reason>\t<line>"
+  local meta=$1 id=$2 backend target capture rc line
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
   if [ -z "$target" ]; then
-    printf 'unreadable\t\n'
+    printf 'unreadable\tno endpoint is recorded for this task\t\n'
     return 0
   fi
-  capture=$(fm_backend_capture "$backend" "$target" "$CAPTURE_LINES" "fm-$id" 2>/dev/null) || {
-    printf 'unreadable\t\n'
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  capture=$(fm_run_timed "$CAPTURE_TIMEOUT" bash -c \
+    '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5"' \
+    fm-usage-wall-capture "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" \
+    "$CAPTURE_LINES" "fm-$id" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'unreadable\t%s\t\n' \
+      "$(fm_run_timed_reason "$rc" "$CAPTURE_TIMEOUT" 'endpoint capture')"
     return 0
-  }
+  fi
   if [ -z "$capture" ]; then
-    printf 'unreadable\t\n'
+    printf 'unreadable\tthe endpoint capture returned nothing to read\t\n'
     return 0
   fi
   line=$(first_wall_line "$capture")
-  printf 'readable\t%s\n' "$line"
+  printf 'readable\t\t%s\n' "$line"
 }
 
 # attributed_run: the no-mistakes run report that belongs to <worktree>, or
@@ -831,9 +868,11 @@ cmd_diagnose() {
     return 0
   fi
 
-  local checked='' evidence status line wt
+  local checked='' evidence status reason line wt
   evidence=$(endpoint_evidence "$meta" "$id")
   status=${evidence%%	*}
+  evidence=${evidence#*	}
+  reason=${evidence%%	*}
   line=${evidence#*	}
   line=${line%$'\n'}
   if [ "$status" = readable ]; then
@@ -848,7 +887,12 @@ cmd_diagnose() {
     # A cheap scan that found nothing proves nothing: the 2026-08-23 evidence was
     # in the pipeline step logs, not the terminal. So an endpoint-only negative
     # is reported as unknown, never as a clean bill of health.
-    printf 'USAGE_WALL: %s unknown reason=endpoint-only-scan-inconclusive checked=%s\n' "$id" "${checked:-none}"
+    # An endpoint that could not be read at all names WHY beside the verdict.
+    # "The capture did not complete within 15s" and "there is no endpoint
+    # recorded" send a reader to two different places, and a bare
+    # `checked=none` sends them to neither.
+    printf 'USAGE_WALL: %s unknown reason=endpoint-only-scan-inconclusive checked=%s%s\n' \
+      "$id" "${checked:-none}" "${reason:+ - $reason}"
     printf 'USAGE_WALL_NEXT: run %s/bin/fm-usage-wall.sh diagnose %s for the pipeline step logs before treating this as a crash.\n' "$FM_ROOT" "$id"
     return 0
   fi
@@ -962,6 +1006,12 @@ now_stamp() {
 # printed only when the pipeline has something to say about branch ownership.
 # Scoped to that block so a same-named key elsewhere in the report (`status:`
 # exists at run level too) can never be read as custody.
+#
+# NOT for `state`: bin/fm-nm-run-lib.sh declares itself the owner of that one
+# key and this file already sources it. Two readers of the same contract is how
+# the fallbacks in this change drifted apart once already, so `state` goes
+# through fm_nm_branch_sync_state and this helper covers only the nested keys
+# that library does not expose.
 branch_sync_field() {  # <axi-status-toon> <key>
   printf '%s\n' "$1" | awk -v key="$2" '
     /^[[:space:]]*branch_sync:[[:space:]]*$/ { inblock = 1; next }
@@ -1184,7 +1234,7 @@ resume_pipeline_line() {  # <worktree>
   run_status=$(fm_nm_strip_quotes "$(fm_nm_field "$run" status)")
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$run" head)")
   failed=$(failed_steps "$run" | tr '\n' ',' | sed 's/,$//')
-  custody=$(branch_sync_field "$run" state)
+  custody=$(fm_nm_branch_sync_state "$run")
   next=$(branch_sync_field "$run" code)
   binding=$(head_binding "$wt" "$run_head")
   printf -- '- pipeline: run=%s status=%s failed-steps=%s custody=%s next-action=%s head=%s (%s)\n' \

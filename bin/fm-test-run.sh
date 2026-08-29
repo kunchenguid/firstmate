@@ -1135,8 +1135,20 @@ families_for_changed_path() {
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
+    bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-quota-axi-lib.sh)
+      # The version floor, its extraction and its comparison, read from three
+      # directions: bin/fm-bootstrap.sh's operator MISSING diagnostic
+      # (session-bootstrap), bin/fm-usage-wall.sh's headroom gauge
+      # (pure-contract-unit), and the secondmate sync fixture that serves a real
+      # `quota-axi --version` banner (secondmate). The extraction is a
+      # deliberately non-obvious regex, so an edit to it must select every suite
+      # that would catch a regression in it rather than only the first.
+      printf '%s\n' session-bootstrap
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

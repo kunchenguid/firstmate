@@ -133,7 +133,7 @@ A 200-line window reads as a wall exactly when some limit line and some exit lin
 An earlier count slid a window in fifty-line steps, never landed on the offsets that trip the third file, and reported two - a number produced by a method that could not have found the third.
 Closing it would mean either degrading a record whose value depends on quoting real evidence, or guessing from layout, and both are worse trades than the residual.
 
-Revisit this if the vendor emits the phrasing and the exit on one line, if a real transcript turns up a multi-line wall being missed, or if either file's text drifts so that a window over some third file starts reading as a wall.
+Revisit this if the vendor emits the phrasing and the exit on one line, if a real transcript turns up a multi-line wall being missed, or if a fourth tracked file starts reading as a wall.
 The open question behind it, which a fourth round of widening this disclosure will not answer, is whether a wall verdict should be authoritative only where a structural signal exists - the harness's own non-zero exit together with the vendor's final line in a pipeline step log - and be demoted to a non-asserting hint on the pane path, where only a screen scrape is available and this repository's own text can be on screen.
 
 ## Why every bounded scan discloses what it skipped

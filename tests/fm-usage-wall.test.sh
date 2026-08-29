@@ -70,8 +70,24 @@ fm_git_identity
 # header deliberately reproduces the vendor's own quirk of declaring a count
 # that does not match its field list, so the parser is pinned against the real
 # shape rather than a tidied one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-effective|reordered|divergent|singular-only>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-effective|model-scoped-only|reordered|divergent|singular-only>
   case "$1" in
+    model-scoped-only)
+      # An effective block that PARSES but carries no account-level row: every
+      # row is scoped to one model, which quota-axi owns the meaning of and
+      # which is not the dispatch gauge. Nothing was read, so both emitters owe
+      # the same reason for the same unknown.
+      cat <<'EOF'
+bin: /fake/quota-axi
+providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
+  claude,max,oauth,fresh,unknown,none
+windows[1]{provider,id,label,percentRemaining,resetsAt,pace,state}:
+  claude,five_hour,session,84,"2026-08-27T02:19:59Z",ahead,fresh
+effective[7]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowId,runway,usableRunwaySeconds,projectionConfidence}:
+  claude,claude-opus-5,84,five_hour,five_hour,projected_exhaustion,14400,early
+EOF
+      return 0
+      ;;
     no-effective)
       cat <<'EOF'
 bin: /fake/quota-axi
@@ -337,6 +353,24 @@ assert_contains "$OUT" 'unknown reason=quota-axi printed no effective-headroom b
   'a report without derived headroom is unmeasurable, not inferred from raw windows'
 assert_not_contains "$OUT" 'pct=84' 'a raw window percent is never presented as effective headroom'
 pass 'headroom refuses to infer headroom from raw windows alone'
+
+# An effective block that parses but yields no account-level row is a reading
+# nobody got, and the two emitters must say so identically. The text form used
+# to name `no-effective-rows` while --json returned an empty reason and
+# unknown=0, so a programmatic reader branching on .verdict got an unknown it
+# could not explain from a schema id that promises a reason on every path.
+CASE="$TMP_ROOT/hr-modelscoped"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" model-scoped-only
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'unknown reason=no-effective-rows'   'a report with only model-scoped rows names why no account-level gauge was read'
+assert_contains "$OUT" 'verdict=unknown' 'a report with no account-level row summarizes as unknown'
+assert_not_contains "$OUT" 'pct=84' 'a model-scoped row is never presented as the dispatch gauge'
+if command -v jq >/dev/null 2>&1; then
+  OUT=$(run_headroom "$CASE/fakebin" --json)
+  printf '%s' "$OUT" | jq -e '.verdict == "unknown" and .measured == 0 and .unknown == 1 and .reason == "no-effective-rows"' >/dev/null \
+    || fail "--json must carry the same reason as the text form for a row-less read: $OUT"
+fi
+pass 'headroom reports a row-less effective block as unknown with the same reason on both emitters'
 
 # --- headroom: auth_required is unknown, with the one-time command ----------
 
@@ -946,6 +980,42 @@ OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose darkcrew --endpoint-only)
 assert_contains "$OUT" 'USAGE_WALL: darkcrew unknown' 'an unreadable endpoint is unknown'
 assert_contains "$OUT" 'checked=none' 'an unreadable endpoint is not counted as checked'
 pass 'diagnose reports an unreadable endpoint as unknown'
+
+# fake_tmux_wedged <fakebin> <window>: the endpoint answers liveness instantly
+# but its capture never returns. That is the shape of a tmux server whose socket
+# still exists while the server itself is wedged - the state a diagnose run is
+# most likely to meet, because it is run by hand right after a provider wall has
+# stranded the worker.
+fake_tmux_wedged() {  # <fakebin> <window>
+  local fb=$1 window=$2
+  cat > "$fb/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list-windows) printf '%s\n' "$window"; exit 0 ;;
+  display-message) printf '%%1\n'; exit 0 ;;
+  capture-pane) sleep 60; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+}
+
+# The endpoint capture is bounded like every other read here. Unbounded, a
+# wedged tmux server makes `diagnose` hang forever with no verdict at all - on
+# the one path an agent runs by hand once a wall has stranded a worker. The
+# bound must produce an unknown that names the timeout as the timeout, never a
+# clean negative and never silence.
+CASE="$TMP_ROOT/dx-wedged"; mkdir -p "$CASE"
+make_task "$CASE" wedgedcrew
+fake_tmux_wedged "$CASE_FB" fm-wedgedcrew
+OUT=$( PATH="$CASE_FB:$PATH" FM_HOME="$CASE_HOME" FM_USAGE_WALL_CAPTURE_TIMEOUT=1 \
+  "$WALL" diagnose wedgedcrew --endpoint-only 2>&1 )
+assert_contains "$OUT" 'USAGE_WALL: wedgedcrew unknown' 'a wedged endpoint capture must still produce a verdict'
+assert_contains "$OUT" 'endpoint capture did not complete within 1s' \
+  'a bounded capture that timed out names the timeout as the reason'
+assert_contains "$OUT" 'checked=none' 'a capture that never returned is not counted as checked'
+assert_not_contains "$OUT" 'no-signature' 'a capture that never returned must never read as a clean scan'
+pass 'diagnose bounds a wedged endpoint capture and reports why it is unknown'
 
 CASE="$TMP_ROOT/dx-cheap"; mkdir -p "$CASE"
 make_task "$CASE" cheapcrew

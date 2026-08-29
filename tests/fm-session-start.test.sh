@@ -1383,7 +1383,7 @@ SH
 
 test_wall_scan_budget_is_shared_across_tasks() {
   local rec root home fakebin out unbudgeted_out n
-  local budgeted_ms unbudgeted_ms started exhausted scanned lines
+  local exhausted scanned lines
   rec=$(new_world wall-budget)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1398,22 +1398,10 @@ EOF
     printf 'window=fm-sess:dead-%s\nkind=ship\nbackend=tmux\n' "$n" > "$home/state/task-$n.meta"
   done
 
-  # The property under test is that total scan cost is bounded by the BUDGET
-  # rather than by task count, so it is measured as a difference between two
-  # runs of the same fixture. An absolute threshold would be measuring the whole
-  # digest's overhead, not the scan.
-  started=$(date +%s)
   out=$(FM_SESSION_START_WALL_TIMEOUT=1 FM_SESSION_START_WALL_BUDGET=2 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  budgeted_ms=$(( $(date +%s) - started ))
-
-  started=$(date +%s)
   unbudgeted_out=$(FM_SESSION_START_WALL_TIMEOUT=1 FM_SESSION_START_WALL_BUDGET=600 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  unbudgeted_ms=$(( $(date +%s) - started ))
-
-  [ "$budgeted_ms" -lt "$(( unbudgeted_ms - 1 ))" ] \
-    || fail "the shared budget must bound total scan cost (budgeted ${budgeted_ms}s vs per-task ${unbudgeted_ms}s over 6 dead endpoints)"
 
   # What the budget cut must read as UNSCANNED, never as clean. That is the same
   # rule the gauge follows: an unknown is unknown, not fine.
@@ -1424,11 +1412,22 @@ EOF
   assert_not_contains "$out" "no-signature" \
     "a budget-exhausted scan must never report a clean read"
 
-  # The budget must actually stop work: strictly fewer tasks scanned than exist.
+  # The shared-budget property itself, asserted on the scan's OWN disclosure
+  # rather than on a wall-clock difference between two runs. Timing the two runs
+  # against each other measured the whole digest, not the scan: the separation
+  # was about four seconds at one-second granularity, and the first run pays
+  # one-off baseline costs (the read-once and AGENTS markers) the second does
+  # not, so an unlucky machine could collapse the inequality with nothing
+  # regressed. What distinguishes a shared budget from a per-task bound is
+  # visible without a clock: a per-task bound would have spent its full second
+  # on each of the six wedged captures and scanned all six, while one 2s budget
+  # spent at 1s a scan can only afford a couple before it is gone.
   exhausted=$(printf '%s\n' "$out" | grep -c 'scan-budget-exhausted' || true)
   [ "$exhausted" -ge 1 ] || fail "the budget never stopped any scan: $out"
   scanned=$(( 6 - exhausted ))
-  [ "$scanned" -lt 6 ] || fail "the budget scanned every task, so it bounded nothing"
+  [ "$scanned" -ge 1 ] || fail "the budget must still scan the first task: $out"
+  [ "$scanned" -le 3 ] \
+    || fail "a 2s budget over 1s captures scanned $scanned of 6 tasks, so the budget is per-task, not shared: $out"
 
   # Bounding the scan must not silently drop tasks: every one still gets a line,
   # under both budgets.
