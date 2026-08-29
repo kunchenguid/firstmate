@@ -154,9 +154,6 @@ touch -t "$(epoch_to_touch "$((START_EPOCH - 1))")" "$REFDIR/start"
 touch -t "$(epoch_to_touch "$((END_EPOCH + 1))")" "$REFDIR/end"
 
 LEDGER="$DATA/usage-ledger.jsonl"
-if [ -f "$LEDGER" ] && grep -qF "\"task\":\"$ID\"" "$LEDGER" 2>/dev/null; then
-  exit 0
-fi
 
 SRC=unavailable
 MODEL_LOG=
@@ -271,9 +268,10 @@ SPAWNED=$(iso_from_epoch "$START_EPOCH" || true)
 COMPLETED=$(iso_from_epoch "$END_EPOCH" || true)
 
 mkdir -p -- "$DATA"
-# Serialize the check-and-append: the unlocked pre-check above is only a fast
-# path, so acquire the ledger lock and re-test under it before writing. Two
-# concurrent harvests of the same task then cannot both append a row.
+# Serialize the check-and-append as one critical section: acquire the ledger
+# lock, then test for an existing row for this task and append only when
+# absent. Two concurrent harvests of the same task cannot both pass the
+# existence test and each append a duplicate row.
 LEDGER_LOCK="$DATA/.usage-ledger.lock"
 fm_lock_acquire_wait "$LEDGER_LOCK"
 LEDGER_LOCK_HELD=1
