@@ -68,7 +68,10 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
-In the default Codex mode, a true value lets the second stop finish after one forced continuation.
+Codex registers the guard with `--codex`.
+Its bounded foreground checkpoint has released the watcher's singleton lock before the next turn boundary, so a true value cannot prove supervision.
+The Codex mode therefore rechecks the PID-strict watcher lock and beacon predicate on every stop and returns exit 2 until a real identity-matched watcher owns the home lock.
+The generic default retains its one-follow-up loop guard for adapters that provide their own continuity mechanism.
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.

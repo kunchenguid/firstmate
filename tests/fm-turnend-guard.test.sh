@@ -195,6 +195,12 @@ run_hook() {
   printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
+run_hook_codex() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1
+}
+
 nonexistent_pid() {
   local pid=999999
   while kill -0 "$pid" 2>/dev/null; do
@@ -431,6 +437,22 @@ test_hook_loop_guard_allows_retry() {
   expect_code 0 "$status" "hook must allow the stop when stop_hook_active is already true"
   [ -z "$out" ] || fail "hook produced output on the loop-guarded retry: $out"
   pass "fm-turnend-guard: stop_hook_active=true always allows the stop (never blocks twice in one turn)"
+}
+
+# End-user regression: a Codex foreground checkpoint has just returned, so its
+# watcher has released the singleton lock. The first forced continuation stops
+# with stop_hook_active=true. A fresh heartbeat from that completed checkpoint
+# is not supervision and must not let the primary end blind.
+test_codex_mode_reblocks_checkpoint_continuation_without_live_watcher() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/codex-checkpoint-continuation")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_codex "$dir" true); status=$?
+  expect_code 2 "$status" "Codex continuation must block when no watcher owns the home lock"
+  assert_contains "$out" "TURN WOULD END BLIND" "Codex continuation must surface the blind-turn alarm"
+  assert_contains "$out" "no live watcher holds this home lock" "a fresh heartbeat must not satisfy Codex watcher ownership"
+  pass "fm-turnend-guard --codex: re-blocks a checkpoint continuation until a live watcher owns the home lock"
 }
 
 # A secondmate's OWN home runs a primary firstmate session and must be guarded
@@ -857,9 +879,10 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   expected_root=$(cd "$dir" && pwd -P)
   outside="$TMP_ROOT/codex-hook-outside"
   mkdir -p "$outside"
-  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'guard=%s\n' "$0"
+printf 'args=%s\n' "$*"
 cat
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
@@ -867,6 +890,7 @@ EOF
   out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
   assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
+  assert_contains "$out" "args=--codex" "codex hook must select the Codex continuity mode"
   assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
   pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
 }
@@ -893,9 +917,10 @@ printf 'nested guard executed\n'
 exit 99
 EOF
   chmod +x "$nested/bin/fm-turnend-guard.sh"
-  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'guard=%s\n' "$0"
+printf 'args=%s\n' "$*"
 cat
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
@@ -905,6 +930,7 @@ EOF
   out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must not execute a nested project guard"
   assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
+  assert_contains "$out" "args=--codex" "codex hook must select the Codex continuity mode"
   assert_not_contains "$out" "nested guard executed" "codex hook must not execute nested project code"
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
 }
@@ -1771,6 +1797,7 @@ test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
+test_codex_mode_reblocks_checkpoint_continuation_without_live_watcher
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry
