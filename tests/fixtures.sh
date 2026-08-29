@@ -106,7 +106,27 @@ fm_test_fake_tmux_spawn() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # Each task gets its OWN worktree in production, because treehouse hands out
+    # a distinct slot per acquire and bin/fm-spawn.sh refuses a worktree another
+    # live task's record already names. FM_FAKE_PANE_PATH_MAP ("<target>=<path>;...")
+    # models that for a multi-task case such as a batch spawn; a single
+    # FM_FAKE_PANE_PATH stays the one-task default.
+    if [ -n "${FM_FAKE_PANE_PATH_MAP:-}" ]; then
+      _pp_want=
+      _pp_prev=
+      for _pp_arg in "$@"; do
+        if [ "$_pp_prev" = -t ]; then _pp_want=$_pp_arg; fi
+        _pp_prev=$_pp_arg
+      done
+      _pp_entries=$FM_FAKE_PANE_PATH_MAP
+      while [ -n "$_pp_entries" ]; do
+        _pp_entry=${_pp_entries%%;*}
+        case "$_pp_entries" in *\;*) _pp_entries=${_pp_entries#*;} ;; *) _pp_entries= ;; esac
+        case "$_pp_entry" in "$_pp_want="*) printf '%s\n' "${_pp_entry#*=}"; exit 0 ;; esac
+      done
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
