@@ -620,7 +620,7 @@ EOF
   pass "Pi dispatcher flags a fleet-wide heartbeat offer as branch-eligible"
 }
 
-test_pi_heartbeat_with_main_owned_queue_row_stays_on_main() {
+test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-heartbeat-mixed-queue-root"
   home="$TMP_ROOT/pi-heartbeat-mixed-queue-home"
@@ -684,23 +684,28 @@ writeFileSync(
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-heartbeat-mixed-queue", {}, undefined, undefined, {});
-for (let i = 0; i < 250 && !prompt; i += 1) {
+// The offer is what this asserts on, so wait for it and then give any
+// erroneous main delivery a real chance to land before calling it absent.
+for (let i = 0; i < 250 && offers.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if (offers.length !== 1 || offers[0].heartbeat !== true || offers[0].eligible !== false) {
-  throw new Error(`mixed heartbeat offer had unsafe eligibility: ${JSON.stringify(offers)}`);
+for (let i = 0; i < 25 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if (!prompt.includes("FIRSTMATE WATCHER WAKE: heartbeat")) {
-  throw new Error(`mixed heartbeat wake did not stay on main: ${prompt}`);
+if (offers.length !== 1 || offers[0].heartbeat !== true || offers[0].eligible !== true) {
+  throw new Error(`a co-present check row made the heartbeat offer ineligible: ${JSON.stringify(offers)}`);
+}
+if (prompt) {
+  throw new Error(`a co-present check row rode the heartbeat into main: ${prompt}`);
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "heartbeat with a main-owned queue row must stay on main: $out"
+  expect_code 0 "$status" "a heartbeat must not ride a co-present check row into main: $out"
   [ -z "$out" ] || fail "Pi mixed heartbeat-queue test printed output: $out"
-  pass "heartbeat with a main-owned queue row stays on main"
+  pass "a co-present check row neither vetoes nor rides a heartbeat into main"
 }
 
 # Every check the main session alone can act on stays on main, even when an

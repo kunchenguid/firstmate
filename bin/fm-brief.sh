@@ -491,8 +491,10 @@ When a routed-work phase has a supervisor-actionable material change worth repor
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
-\`resolved\` separately closes an escalated decision or blocker, and only a \`resolved\` line carrying that decision's exact key closes it: a later \`done\` or \`working\` event never does, even when the answer is what started that work.
-The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
+A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+A keyed decision closes only with \`resolved\` naming that key; a bare \`resolved\` with only a correlation token does not close it.
+\`done\` records work completion and never closes a decision key.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -610,6 +612,7 @@ IFS= read -r -d '' SCOUT_RULES_3_TO_7 <<EOF || true
    Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   \`done\` records work completion and never closes a decision key.
 7. Never stop, restart, or update a \`no-mistakes\` daemon. The default instance is private to this
    Firstmate home, while an explicit operator \`NM_HOME\` remains authoritative; the legacy shared
    default root and its parked runs are outside this task. On ANY no-mistakes daemon error, append
@@ -970,6 +973,7 @@ $RULE1
    Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   \`done\` records work completion and never closes a decision key.
 7. Never stop, restart, or update a \`no-mistakes\` daemon. The default instance is private to this
    Firstmate home, while an explicit operator \`NM_HOME\` remains authoritative; the legacy shared
    default root and its parked runs are outside this task. On ANY no-mistakes daemon error, append

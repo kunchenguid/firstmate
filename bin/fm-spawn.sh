@@ -3650,11 +3650,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reade
   validate_spawn_worktree "treehouse get" "$T"
 
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
-fi
-
-if [ "$TREEHOUSE_NEW_ALLOCATION" -eq 1 ]; then
+if [ "$TREEHOUSE_NEW_ALLOCATION" -eq 1 ] || { [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; }; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
