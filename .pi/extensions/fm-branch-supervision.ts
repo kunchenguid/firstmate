@@ -69,6 +69,7 @@ import {
   keyHint,
   ModelRuntime,
   SessionManager,
+  ToolExecutionComponent,
   type AgentSession,
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -132,7 +133,6 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
-const OUTCOMES_TOOL_PREVIEW_LINES = 10;
 // Carried inside the captain note's own text because that text is the only
 // part of a custom message Pi gives the model (see mergeIntoMain).
 //
@@ -1400,6 +1400,43 @@ ${context.command}
       .replace(/\r/g, "");
   };
 
+  let stockOutcomesPreviewLines: number | null | undefined;
+  const getStockOutcomesPreviewLines = (): number | undefined => {
+    if (stockOutcomesPreviewLines !== undefined) return stockOutcomesPreviewLines ?? undefined;
+    const probeTokens = Array.from(
+      { length: 64 },
+      (_, index) => `FM_OUTCOMES_PREVIEW_PROBE_${String(index).padStart(2, "0")}`,
+    );
+    try {
+      const probeDefinition: ToolDefinition = {
+        name: "fm_outcomes_preview_probe",
+        label: "Preview probe",
+        description: "Preview probe",
+        parameters: Type.Object({}),
+        execute: async () => ({ content: [], details: undefined }),
+      };
+      const probe = new ToolExecutionComponent(
+        probeDefinition.name,
+        "fm-outcomes-preview-probe",
+        {},
+        { showImages: false },
+        probeDefinition,
+        { requestRender() {} } as ConstructorParameters<typeof ToolExecutionComponent>[5],
+        root,
+      );
+      probe.updateResult({
+        content: [{ type: "text", text: probeTokens.join("\n") }],
+        isError: false,
+      });
+      const rendered = probe.render(4096).join("\n");
+      const visibleLines = probeTokens.filter((token) => rendered.includes(token)).length;
+      stockOutcomesPreviewLines = visibleLines > 0 && visibleLines < probeTokens.length ? visibleLines : null;
+    } catch {
+      stockOutcomesPreviewLines = null;
+    }
+    return stockOutcomesPreviewLines ?? undefined;
+  };
+
   type OutcomesToolShellState = {
     shell?: Box;
     call?: Text;
@@ -1452,7 +1489,8 @@ ${context.command}
       // Keep each line's ANSI scope independent, matching Pi's stock fallback.
       // Pi 0.84.4 no longer supplies an implicit reset at multiline boundaries.
       const lines = output.split("\n");
-      const displayLines = options.expanded ? lines : lines.slice(0, OUTCOMES_TOOL_PREVIEW_LINES);
+      const previewLines = getStockOutcomesPreviewLines();
+      const displayLines = options.expanded || previewLines === undefined ? lines : lines.slice(0, previewLines);
       const remaining = lines.length - displayLines.length;
       let renderedOutput = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
       if (remaining > 0) {

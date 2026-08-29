@@ -51,6 +51,17 @@ export function keyHint(_keybinding, description) {
   return `ctrl+o ${description}`;
 }
 
+export class ToolExecutionComponent {
+  updateResult(result) {
+    this.result = result;
+  }
+  render() {
+    return (this.result?.content ?? [])
+      .filter((item) => item.type === "text")
+      .flatMap((item) => item.text.split("\n"));
+  }
+}
+
 export class UserMessageComponent {}
 
 export class DynamicBorder {
@@ -694,6 +705,23 @@ if (calmOffCall.constructor.name !== "Box" || calmOffCall.paddingX !== 1 || calm
 }
 if (calmOffResult.constructor.name !== "Container" || calmOffCall.children[0]?.text !== "fm_branch_outcomes" || calmOffCall.children[1]?.text !== "OUTCOME_DUMP") {
   throw new Error("fm_branch_outcomes changed its ordinary call or result rendering");
+}
+const legacyStockResult = {
+  content: [{
+    type: "text",
+    text: Array.from({ length: 12 }, (_, index) => `LEGACY_OUTCOME_${String(index + 1).padStart(2, "0")}`).join("\n"),
+  }],
+};
+const legacyRenderContext = { state: {}, isError: false, isPartial: false };
+const legacyCall = outcomesTool.renderCall({}, renderTheme, legacyRenderContext);
+outcomesTool.renderResult(legacyStockResult, { expanded: false, isPartial: false }, renderTheme, legacyRenderContext);
+const collapsedLegacyText = legacyCall.children[1]?.text;
+if (!collapsedLegacyText?.includes("LEGACY_OUTCOME_12") || collapsedLegacyText.includes("more lines")) {
+  throw new Error("legacy all-line stock capability did not preserve collapsed Calm-off output");
+}
+outcomesTool.renderResult(legacyStockResult, { expanded: true, isPartial: false }, renderTheme, legacyRenderContext);
+if (legacyCall.children[1]?.text !== collapsedLegacyText) {
+  throw new Error("legacy all-line stock capability changed expanded Calm-off output");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 const calmOnCall = outcomesTool.renderCall({}, renderTheme, renderContext);
