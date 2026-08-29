@@ -69,6 +69,9 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-jq-arg-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-jq-arg-lib.sh"  # fm_jq_inputs: fleet-sized JSON reaches jq on stdin, never argv
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -259,7 +262,8 @@ EOF
       cnt=$(printf '%s' "$repo_rows" | jq 'length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      rows=$(fm_jq_inputs "$rows" "$repo_rows" \
+        | jq -n '(input) as $a | (input) as $b | $a + $b')
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
@@ -283,7 +287,7 @@ case "$BEARINGS_TODAY" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
   *) BEARINGS_TODAY=$(date -u +%Y-%m-%d) ;;
 esac
-MODEL=$(printf '%s' "$SNAP" | jq \
+MODEL=$(fm_jq_inputs "$SNAP" "$CANDIDATE_PRS" | jq \
   --arg home "$HOME_LABEL" \
   --arg now "$NOW" \
   --arg today "$BEARINGS_TODAY" \
@@ -311,7 +315,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  '(input) as $candidate_prs
+  |
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
