@@ -20,7 +20,8 @@ $ printf '  cmdline bytes for pid %s: %s\n' "$CLAUDE_PID" "$(wc -c < /proc/$CLAU
   cmdline bytes for pid 2187488: 12455
 ```
 
-Any word of that brief then selects the agent itself. With a worker launched the pre-fix way from a brief naming a project script:
+Any word of that brief then selects the agent itself.
+With a worker launched the pre-fix way from a brief naming a project script:
 
 ```
 $ ps -ef | grep "[z]qreprosentinel7x" | awk '{printf "pid=%-9s cmd=%.20s\n", $2, $8}'
