@@ -113,9 +113,10 @@ outcome_count() { # <home> <suffix>
 }
 
 prime_seen() { # <state> <status>
-  local state=$1 status=$2 sig
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$status"); else sig=$(stat -c '%s:%Y' "$status"); fi
-  printf '%s' "$sig" > "$state/.seen-$(basename "$status" | tr '.' '_')"
+  local state=$1 status=$2 size ident
+  size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  if [ "$(uname)" = Darwin ]; then ident=$(stat -f '%d:%i' "$status"); else ident=$(stat -c '%d:%i' "$status"); fi
+  printf '%s@%s' "$size" "$ident" > "$state/.seen-$(basename "$status" | tr '.' '_')"
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }

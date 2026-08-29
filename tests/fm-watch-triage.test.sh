@@ -140,7 +140,17 @@ set_mtime() {  # <epoch> <file>
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
-  if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+  local size ident
+  case "$1" in
+    *.status)
+      size=$(size_of "$1")
+      if [ "$(uname)" = Darwin ]; then ident=$(stat -f '%d:%i' "$1" 2>/dev/null); else ident=$(stat -c '%d:%i' "$1" 2>/dev/null); fi
+      printf '%s@%s' "$size" "$ident"
+      ;;
+    *)
+      if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+      ;;
+  esac
 }
 
 # Prime <file>'s .seen-* suppressor to its CURRENT signature, so the per-poll
@@ -237,11 +247,11 @@ test_status_span_respects_decision_closure() {
     && fail "a decision the same span already closed was still classified actionable"
   # Reopening the SAME key after a close must survive: the close belongs to the
   # earlier opening, not to the one that came after it.
-  printf 'needs-decision [key=api]: pick A or B\nresolved [key=api]: took A\nneeds-decision [key=api]: A broke, pick again\n' \
+  printf 'needs-decision [key=api]: pick A or B\nresolved [key=api]: took A\nneeds-decision: [key=api] pick A or B\n' \
     > "$state/reopened.status"
   event=$(status_span_first_actionable "$state/reopened.status" 0) \
     || fail "a decision reopened under a key that was closed earlier was classified routine"
-  [ "$event" = "needs-decision [key=api]: A broke, pick again" ] \
+  [ "$event" = "needs-decision: [key=api] pick A or B" ] \
     || fail "the reopened key surfaced its closed opening instead of the live reopening: $event"
   # A terminal event is never retired by a later closure line.
   printf 'failed: build broke on main\nresolved [key=api]: unrelated\n' > "$state/term.status"
@@ -2865,8 +2875,10 @@ test_heartbeat_backstop_surfaces_a_masked_status() {
   wait_for_exit "$pid" 100 \
     || fail "heartbeat backstop missed a decision hidden behind a later working: line"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
-  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "$(size_of "$state/miss.status")" ] \
-    || fail "backstop did not record the masked status as surfaced through its end"
+  case "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" in
+    "$(size_of "$state/miss.status")"@*) ;;
+    *) fail "backstop did not record the masked status as surfaced through its end" ;;
+  esac
   pass "the heartbeat backstop surfaces a captain event hidden behind a later routine append"
 }
 
@@ -2885,8 +2897,10 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pid=$!
   wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
-  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "$(size_of "$state/miss.status")" ] \
-    || fail "backstop did not record the status as surfaced through its end (would re-fire next heartbeat)"
+  case "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" in
+    "$(size_of "$state/miss.status")"@*) ;;
+    *) fail "backstop did not record the status as surfaced through its end (would re-fire next heartbeat)" ;;
+  esac
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
@@ -2937,8 +2951,10 @@ test_afk_signal_records_heartbeat_endpoint() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "afk watcher did not hand the actionable signal to the daemon"
-  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "$(size_of "$status_file")" ] \
-    || fail "afk signal did not record the endpoint handed to the daemon"
+  case "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" in
+    "$(size_of "$status_file")"@*) ;;
+    *) fail "afk signal did not record the endpoint handed to the daemon" ;;
+  esac
   unset FM_FAKE_CREW_STATE
   pass "an afk signal records its captured heartbeat endpoint"
 }

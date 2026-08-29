@@ -95,11 +95,10 @@ write_remote_delta() {  # <result-path> <status-line>
 }
 
 status_signature() {  # <status-path>
-  if [ "$(uname)" = Darwin ]; then
-    stat -f '%z:%Fm' "$1"
-  else
-    stat -c '%s:%Y' "$1"
-  fi
+  local size ident
+  size=$(LC_ALL=C wc -c < "$1" | tr -d '[:space:]')
+  if [ "$(uname)" = Darwin ]; then ident=$(stat -f '%d:%i' "$1"); else ident=$(stat -c '%d:%i' "$1"); fi
+  printf '%s@%s' "$size" "$ident"
 }
 
 wait_for_file_text() {  # <file> <fixed-text>

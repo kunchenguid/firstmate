@@ -99,9 +99,10 @@ test_daemon_state_root_uses_fm_home() {
 log_size() { LC_ALL=C wc -c < "$1" | tr -d '[:space:]'; }
 
 seen_through() {  # <state> <task>
-  local state=$1 task=$2 key
+  local state=$1 task=$2 key ident
   key=$(printf '%s' "$task" | tr ':/.' '___')
-  log_size "$state/$task.status" > "$state/.subsuper-seen-status-$key"
+  ident=$(_fm_open_decisions_file_ident "$state/$task.status")
+  printf '%s@%s' "$(log_size "$state/$task.status")" "$ident" > "$state/.subsuper-seen-status-$key"
 }
 
 # The reported bug in away mode: the captain is away, a worker reports something
@@ -165,8 +166,10 @@ test_classification_commits_its_captured_endpoint() {
   printf 'failed: second release verification failed\n' >> "$state/race-r1.status"
   mark_escalated_seen "$state" "$capture"
   key=$(printf '%s' race-r1 | tr ':/.' '___')
-  [ "$(cat "$state/.subsuper-seen-status-$key")" = "$captured" ] \
-    || fail "the daemon advanced past bytes appended after classification"
+  case "$(cat "$state/.subsuper-seen-status-$key")" in
+    "$captured"@*) ;;
+    *) fail "the daemon advanced past bytes appended after classification" ;;
+  esac
   out=$(classify_signal "$state/race-r1.status" "$state")
   case "$out" in
     escalate\|*"failed: second release verification failed"*) ;;
@@ -183,8 +186,10 @@ test_stale_masked_event_escalates_at_captured_endpoint() {
   out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
   case "$out" in *"blocked: release host unavailable"*) ;; *) fail "a stale wake hid the blocker behind routine progress: $out" ;; esac
   key=$(printf '%s' stale-r2 | tr ':/.' '___')
-  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$(log_size "$state/stale-r2.status")" ] \
-    || fail "the stale escalation did not commit its captured endpoint"
+  case "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" in
+    "$(log_size "$state/stale-r2.status")"@*) ;;
+    *) fail "the stale escalation did not commit its captured endpoint" ;;
+  esac
   pass "a stale wake escalates a blocker hidden by later progress"
 }
 
@@ -1120,8 +1125,10 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/sig-t8.status" "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not escalated"
   key=$(printf '%s' "sig-t8" | tr ':/.' '___')
-  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$(log_size "$state/sig-t8.status")" ] \
-    || fail "captain signal escalate did not record the escalated-through offset"
+  case "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" in
+    "$(log_size "$state/sig-t8.status")"@*) ;;
+    *) fail "captain signal escalate did not record the escalated-through offset" ;;
+  esac
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"

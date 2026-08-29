@@ -121,27 +121,30 @@ _hb_surfaced_path() {
 # line) reads 0, so the log is re-classified and the backstop errs toward
 # surfacing rather than swallowing.
 hb_surfaced_offset() {  # <task>
-  local raw
+  local raw offset ident current
   raw=$(cat "$(_hb_surfaced_path "$1")" 2>/dev/null) || { printf '0'; return 0; }
-  case "$raw" in
-    ''|*[!0-9]*) printf '0' ;;
-    *) printf '%s' "$raw" ;;
-  esac
+  case "$raw" in *@*) offset=${raw%%@*}; ident=${raw#*@} ;; *) printf '0'; return 0 ;; esac
+  case "$offset" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  current=$(_fm_open_decisions_file_ident "$STATE/$1.status") || { printf '0'; return 0; }
+  [ -n "$ident" ] && [ "$ident" = "$current" ] || { printf '0'; return 0; }
+  printf '%s' "$offset"
 }
 
 # Record a status log as surfaced through the captured classification endpoint
 # after its durable wake has been enqueued.
-mark_surfaced() {  # <status-file> <captured-end-offset>
-  local f=$1 size=$2 task
+mark_surfaced() {  # <status-file> <captured-end-offset> <captured-identity>
+  local f=$1 size=$2 ident=$3 task current
   case "$f" in *.status) ;; *) return 0 ;; esac
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  current=$(_fm_open_decisions_file_ident "$f") || return 0
+  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 0
   task=$(basename "$f"); task="${task%.status}"
-  printf '%s' "$size" > "$(_hb_surfaced_path "$task")"
+  printf '%s@%s' "$size" "$ident" > "$(_hb_surfaced_path "$task")"
 }
 
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason span_record surface_end=''
+  local backend=$1 session=$2 record=$3 pane_id to window task reason span_record rest surface_end='' surface_ident=''
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
@@ -158,10 +161,12 @@ handle_push_transition() {  # <backend> <session> <record>
   fi
   span_record=$(status_span_first_actionable_record "$STATE/$task.status" \
     "$(hb_surfaced_offset "$task")")
-  case $? in 0|1) surface_end=${span_record%%$'\t'*} ;; esac
+  case $? in
+    0|1) surface_end=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; surface_ident=${rest%%$'\t'*} ;;
+  esac
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
-  mark_surfaced "$STATE/$task.status" "$surface_end"
+  mark_surfaced "$STATE/$task.status" "$surface_end" "$surface_ident"
   wake "$reason"
 }

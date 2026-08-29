@@ -1520,11 +1520,24 @@ fm_wake_print_deduped() {
 # writers.
 
 fm_wake_signal_sig() {  # <file> -> "size:mtime"
-  if [ "$_FM_UNAME" = Darwin ]; then
-    stat -f '%z:%Fm' "$1" 2>/dev/null
-  else
-    stat -c '%s:%Y' "$1" 2>/dev/null
-  fi
+  local size ident
+  case "$1" in
+    *.status)
+      if [ "$_FM_UNAME" = Darwin ]; then
+        size=$(stat -f '%z' "$1" 2>/dev/null) || return 1
+        ident=$(stat -f '%d:%i' "$1" 2>/dev/null) || return 1
+      else
+        size=$(stat -c '%s' "$1" 2>/dev/null) || return 1
+        ident=$(stat -c '%d:%i' "$1" 2>/dev/null) || return 1
+      fi
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ -n "$ident" ] || return 1
+      printf '%s@%s' "$size" "$ident"
+      ;;
+    *)
+      if [ "$_FM_UNAME" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+      ;;
+  esac
 }
 
 fm_wake_signal_seen_path() {  # <state> <file>
@@ -1532,7 +1545,7 @@ fm_wake_signal_seen_path() {  # <state> <file>
   case "$2" in
     *.status)
       task=$(basename "$2"); task=${task%.status}
-      status_signal_seen_marker_path "$1" "$task"
+      printf '%s/.seen-%s' "$1" "$(printf '%s.status' "$task" | tr '.' '_')"
       ;;
     *) printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')" ;;
   esac
@@ -1545,17 +1558,22 @@ fm_wake_signal_seen_path() {  # <state> <file>
 # span from here to the current size rather than only the log's last line. A 0
 # means "classify the whole file", which surfaces events rather than losing them.
 fm_wake_signal_seen_size() {  # <state> <file>
-  local marker sig size mtime mtime_digits
+  local marker sig size ident current
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   sig=$(cat "$marker" 2>/dev/null) || { printf '0'; return 0; }
-  case "$sig" in
-    *:*) size=${sig%%:*}; mtime=${sig#*:} ;;
-    *) printf '0'; return 0 ;;
+  case "$2" in
+    *.status)
+      case "$sig" in *@*) size=${sig%%@*}; ident=${sig#*@} ;; *) printf '0'; return 0 ;; esac
+      case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+      if [ "$_FM_UNAME" = Darwin ]; then current=$(stat -f '%d:%i' "$2" 2>/dev/null); else current=$(stat -c '%d:%i' "$2" 2>/dev/null); fi
+      [ -n "$ident" ] && [ "$ident" = "$current" ] || { printf '0'; return 0; }
+      printf '%s' "$size"
+      ;;
+    *)
+      case "$sig" in *:*) size=${sig%%:*} ;; *) size=0 ;; esac
+      case "$size" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
+      ;;
   esac
-  case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
-  case "$mtime" in ''|*[!0-9.]*|.*|*.|*.*.*) printf '0'; return 0 ;; esac
-  mtime_digits=${mtime//./}
-  case "$mtime_digits" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
 }
 
 # 0 when <file>'s current signature exactly matches its recorded seen marker,
@@ -1599,8 +1617,8 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
   [ "$(cat "$marker" 2>/dev/null)" = "$pre_sig" ] || return 1
   post_sig=$(fm_wake_signal_sig "$file") || return 1
   [ -n "$post_sig" ] || return 1
-  pre_size=${pre_sig%%:*}
-  post_size=${post_sig%%:*}
+  pre_size=${pre_sig%%@*}
+  post_size=${post_sig%%@*}
   case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
   printf '%s' "$post_sig" > "$marker" 2>/dev/null || return 1

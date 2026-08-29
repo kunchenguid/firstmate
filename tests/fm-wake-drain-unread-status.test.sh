@@ -212,7 +212,7 @@ test_snapshot_does_not_ack_a_later_append() {
 }
 
 test_retired_task_id_starts_new_status_unread() {
-  local dir state out offset event
+  local dir state out offset event old_ident
   dir=$(make_case retired-task-reuse)
   state="$dir/state"
   out="$dir/drain.out"
@@ -224,9 +224,10 @@ test_retired_task_id_starts_new_status_unread() {
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
-    printf "40:123" > "$(status_signal_seen_marker_path "$STATE" reused)"
-    printf "40" > "$(status_heartbeat_seen_marker_path "$STATE" reused)"
-    printf "40" > "$(status_daemon_seen_marker_path "$STATE" reused)"
+    _fm_open_decisions_file_ident "$STATE/reused.status" > "$2"
+    printf "40@$(cat "$2")" > "$(status_signal_seen_marker_path "$STATE" reused)"
+    printf "40@$(cat "$2")" > "$(status_heartbeat_seen_marker_path "$STATE" reused)"
+    printf "40@$(cat "$2")" > "$(status_daemon_seen_marker_path "$STATE" reused)"
     status_retire_presentation_task "$STATE" reused || exit 1
     for marker in \
       "$(status_signal_seen_marker_path "$STATE" reused)" \
@@ -234,14 +235,17 @@ test_retired_task_id_starts_new_status_unread() {
       "$(status_daemon_seen_marker_path "$STATE" reused)"; do
       [ ! -e "$marker" ] && [ ! -L "$marker" ] || exit 1
     done
-  ' _ "$ROOT" || fail "retiring the reused task presentation state failed"
+  ' _ "$ROOT" "$dir/old-ident" || fail "retiring the reused task presentation state failed"
   printf 'blocked: release host unavailable\nworking: routine padding after the reused task started again\nnote: first event from reused task id\n' \
     > "$state/reused.status"
+  old_ident=$(cat "$dir/old-ident")
+  printf '40@%s' "$old_ident" > "$state/.seen-reused_status"
   offset=$(bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
     fm_wake_signal_seen_size "$2" "$2/reused.status"
   ' _ "$ROOT" "$state")
+  [ "$offset" = 0 ] || fail "a retired file identity restored a stale offset after task reuse"
   event=$(bash -c '
     . "$1/bin/fm-classify-lib.sh"
     status_span_first_actionable "$2/reused.status" "$3"

@@ -957,7 +957,7 @@ run_check_capture() {
 # no verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal is
 # only benign when the crew is also provably working (signal_crew_provably_working).
 signal_files_actionable() {  # <status-file> ...
-  local f record rc found=1
+  local f record rest endpoint ident rc found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
   FM_SIGNAL_CLASSIFY_ERROR=0
   for f in "$@"; do
@@ -971,7 +971,8 @@ signal_files_actionable() {  # <status-file> ...
       found=0
       continue
     fi
-    FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${record%%$'\t'*}"$'\n'
+    endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+    FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
     [ "$rc" -eq 0 ] && found=0
   done
   return "$found"
@@ -983,11 +984,11 @@ signal_files_actionable() {  # <status-file> ...
 # scan. Called after the backstop enqueues its wake, so the same events are not
 # re-surfaced by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f endpoint
+  local f endpoint ident
   [ "${FM_HEARTBEAT_SCAN_ERROR:-0}" -eq 0 ] || return 0
-  while IFS=$(printf '\t') read -r f endpoint; do
+  while IFS=$(printf '\t') read -r f endpoint ident; do
     [ -n "$f" ] || continue
-    mark_surfaced "$f" "$endpoint"
+    mark_surfaced "$f" "$endpoint" "$ident"
   done <<EOF
 $FM_HEARTBEAT_SURFACE_ENDPOINTS
 EOF
@@ -1004,7 +1005,7 @@ EOF
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task record rc found=1
+  local f task record rest endpoint ident rc found=1
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   FM_HEARTBEAT_SCAN_ERROR=0
   for f in "$STATE"/*.status; do
@@ -1018,7 +1019,8 @@ heartbeat_scan_finds_actionable() {
       continue
     fi
     if [ "$rc" -eq 0 ]; then
-      FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${record%%$'\t'*}"$'\n'
+      endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+      FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
       found=0
     fi
   done
@@ -1416,13 +1418,14 @@ EOF
       if [ "$FM_SIGNAL_CLASSIFY_ERROR" -eq 0 ]; then
         while IFS=$(printf '\t') read -r sf sig f; do
           [ -n "$sf" ] || continue
-          printf '%s' "$sig" > "$sf"
+          case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
         done <<EOF
 $pending
 EOF
-        while IFS=$(printf '\t') read -r f surface_end; do
+        while IFS=$(printf '\t') read -r f surface_end surface_ident; do
           [ -n "$f" ] || continue
-          mark_surfaced "$f" "$surface_end"
+          printf '%s@%s' "$surface_end" "$surface_ident" > "$(fm_wake_signal_seen_path "$STATE" "$f")"
+          mark_surfaced "$f" "$surface_end" "$surface_ident"
         done <<EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
@@ -1431,9 +1434,15 @@ EOF
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
+        case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
       done <<EOF
 $pending
+EOF
+      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+        [ -n "$f" ] || continue
+        printf '%s@%s' "$surface_end" "$surface_ident" > "$(fm_wake_signal_seen_path "$STATE" "$f")"
+      done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       triage_log "absorbed benign $reason"
     fi
@@ -1526,8 +1535,11 @@ EOF
               clear_write_tracking "$key"
               stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
               stale_record=$(status_span_first_actionable_record "$stale_status" 0)
-              case $? in 0|1) stale_end=${stale_record%%$'\t'*} ;; *) stale_end='' ;; esac
-              mark_surfaced "$stale_status" "$stale_end"
+              case $? in
+                0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
+                *) stale_end=''; stale_ident='' ;;
+              esac
+              mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then

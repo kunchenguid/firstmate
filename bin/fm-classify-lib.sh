@@ -1304,41 +1304,67 @@ window_to_task() {
 # is the single owner of that open/closed rule, including its same-key reopening
 # behavior, so this never re-derives it. Every other captain-relevant event
 # (`done`, `failed`, a legacy bare line) is terminal and always actionable.
-_fm_status_last_exact_line_number() {  # <status-file> <line>
-  local f=$1 want=$2 line number=0 last=0
-  while IFS= read -r line || [ -n "$line" ]; do
-    number=$((number + 1))
-    [ "$line" = "$want" ] && last=$number
-  done < "$f"
-  printf '%s' "$last"
+_fm_decision_origin_drop() {  # <origins> <key>
+  local origin
+  while IFS= read -r origin; do
+    case "$origin" in "$2"$'\t'*) ;; *) [ -n "$origin" ] && printf '%s\n' "$origin" ;; esac
+  done <<EOF
+$1
+EOF
 }
 
-# Print "<captured-end-offset>\t<event>" for the first actionable event and
-# return 0, print only the captured end and return 1 when there is no event, or
-# return 2 without output when the classification snapshot cannot be read.
+_fm_status_open_decision_origins() {  # <status-file>
+  local f=$1 line open='' after key verb note number=0 origins=''
+  local resolve held
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
+    after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    key=$(_fm_decision_key "$line") || { open=$after; continue; }
+    verb=$(status_line_verb "$line")
+    note=$(status_line_note "$line")
+    case "$verb" in
+      needs-decision|blocked)
+        if _fm_open_set_has "$after" "$key" \
+          && [ "$(_fm_open_set_verb "$after" "$key")" = "$verb" ]; then
+          case "$after" in
+            "$key"$'\t'"$verb"$'\t'"$note"|*$'\n'"$key"$'\t'"$verb"$'\t'"$note")
+              origins=$(_fm_decision_origin_drop "$origins" "$key")
+              [ -n "$origins" ] && origins="${origins}"$'\n'
+              origins="${origins}${key}"$'\t'"${number}"
+              ;;
+          esac
+        fi
+        ;;
+      "$resolve"|"$held")
+        _fm_open_set_has "$after" "$key" || origins=$(_fm_decision_origin_drop "$origins" "$key")
+        ;;
+    esac
+    open=$after
+  done < "$f"
+  printf '%s' "$origins"
+}
+
 status_span_first_actionable_record() {  # <status-file> <start-offset>
-  local f=$1 start=${2:-0} size full_file chunk_file prefix_file line verb key
-  local open='' folded=0 rc=1 prefix_lines=0 line_number=0 live_line=0
+  local f=$1 start=${2:-0} size ident cur_ident scratch chunk_file full_file prefix_file
+  local line verb key origins='' folded=0 rc=1 prefix_lines=0 line_number=0 live_line='' _line _key
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
+  ident=$(_fm_open_decisions_file_ident "$f") || return 2
   size=$(_fm_status_file_size "$f") || return 2
   size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 2 ;; esac
   case "$start" in ''|*[!0-9]*) start=0 ;; esac
   [ "$start" -le "$size" ] || start=0
-  full_file=$(_fm_status_span_scratch "$f") || return 2
-  chunk_file="${full_file}.span"
-  prefix_file="${full_file}.prefix"
-  _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
-    || { rm -f "$full_file" "$chunk_file" "$prefix_file"; return 2; }
-  if [ "$start" -gt 0 ]; then
-    _fm_status_read_span "$full_file" 0 "$start" > "$prefix_file" 2>/dev/null \
-      || { rm -f "$full_file" "$chunk_file" "$prefix_file"; return 2; }
-    while IFS= read -r line || [ -n "$line" ]; do
-      prefix_lines=$((prefix_lines + 1))
-    done < "$prefix_file"
-  fi
-  _fm_status_read_span "$full_file" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
-    || { rm -f "$full_file" "$chunk_file" "$prefix_file"; return 2; }
+  [ "$start" -lt "$size" ] || { printf '%s\t%s' "$size" "$ident"; return 1; }
+  scratch=$(_fm_status_span_scratch "$f") || return 2
+  chunk_file="${scratch}.span"; full_file="${scratch}.full"; prefix_file="${scratch}.prefix"
+  _fm_status_read_span "$f" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
+    || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || {
+    rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2;
+  }
+  [ "$cur_ident" = "$ident" ] || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
@@ -1350,43 +1376,43 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
           || { rc=0; break; }
         if [ "$folded" -eq 0 ]; then
-          open=$(status_open_decisions "$full_file") || {
-            rm -f "$full_file" "$chunk_file" "$prefix_file"
-            return 2
+          _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
+            || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
+          if [ "$start" -gt 0 ]; then
+            _fm_status_read_span "$full_file" 0 "$start" > "$prefix_file" 2>/dev/null \
+              || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
+            while IFS= read -r _line || [ -n "$_line" ]; do prefix_lines=$((prefix_lines + 1)); done < "$prefix_file"
+          fi
+          origins=$(_fm_status_open_decision_origins "$full_file") || {
+            rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2;
           }
           folded=1
         fi
-        _fm_open_set_has "$open" "$key" || continue
-        [ "$(_fm_open_set_verb "$open" "$key")" = "$verb" ] || continue
-        case "$open" in
-          "$key"$'\t'"$verb"$'\t'"$(status_line_note "$line")"|*$'\n'"$key"$'\t'"$verb"$'\t'"$(status_line_note "$line")") ;;
-          *) continue ;;
-        esac
-        live_line=$(_fm_status_last_exact_line_number "$full_file" "$line") || {
-          rm -f "$full_file" "$chunk_file" "$prefix_file"
-          return 2
-        }
-        [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
-        rc=0
-        break
+        live_line=$(while IFS=$(printf '\t') read -r _key _line; do
+          [ "$_key" = "$key" ] && { printf '%s' "$_line"; break; }
+        done <<EOF
+$origins
+EOF
+)
+        [ -n "$live_line" ] && [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
+        rc=0; break
         ;;
       *) rc=0; break ;;
     esac
   done < "$chunk_file"
-  rm -f "$full_file" "$chunk_file" "$prefix_file"
-  if [ "$rc" -eq 0 ]; then
-    printf '%s\t%s' "$size" "$line"
-  else
-    printf '%s' "$size"
-  fi
+  rm -f "$chunk_file" "$full_file" "$prefix_file"
+  if [ "$rc" -eq 0 ]; then printf '%s\t%s\t%s' "$size" "$ident" "$line"; else printf '%s\t%s' "$size" "$ident"; fi
   return "$rc"
 }
 
 status_span_first_actionable() {  # <status-file> <start-offset>
-  local record rc
+  local record rc rest
   record=$(status_span_first_actionable_record "$1" "${2:-0}")
   rc=$?
-  [ "$rc" -eq 0 ] && printf '%s' "${record#*$'\t'}"
+  if [ "$rc" -eq 0 ]; then
+    rest=${record#*$'\t'}
+    printf '%s' "${rest#*$'\t'}"
+  fi
   return "$rc"
 }
 

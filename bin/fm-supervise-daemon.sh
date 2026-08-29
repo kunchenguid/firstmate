@@ -342,7 +342,7 @@ _collapse_newlines() {  # <text>
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last event record endpoint rc distilled="" rel="" seen_rel="" task
+  local reason=$1 state=$2 f last event record rest endpoint ident rc distilled="" rel="" seen_rel="" task
   for f in $reason; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
@@ -357,10 +357,11 @@ classify_signal() {  # <reason-after-colon> <state>
       continue
     fi
     endpoint=${record%%$'\t'*}
+    rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
     [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
-      && printf '%s\t%s\n' "$task" "$endpoint" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
+      && printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
     if [ "$rc" -eq 0 ]; then
-      event=${record#*$'\t'}
+      event=${rest#*$'\t'}
       distilled="${distilled}$(basename "$f"): ${event} | "
       rel=1
       continue
@@ -391,7 +392,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state> [<span-record> <span-status>]
-  local win=$1 state=$2 record=${3-} rc=${4-} task last event
+  local win=$1 state=$2 record=${3-} rc=${4-} task last event rest
   task=$(window_to_task "$win" "$state")
   if [ -z "$rc" ]; then
     record=$(status_span_first_actionable_record "$state/$task.status" \
@@ -414,7 +415,8 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     return
   fi
   if [ "$rc" -eq 0 ]; then
-    event=${record#*$'\t'}
+    rest=${record#*$'\t'}
+    event=${rest#*$'\t'}
     printf 'escalate|stale + actionable status: %s' "$event"
     return
   fi
@@ -569,33 +571,36 @@ _seen_status_path() {  # <state> <task>
 # 0 the same way: the events it covered are re-offered to the captain once,
 # which is the safe direction on the very boundary this fix protects.
 status_seen_offset() {  # <state> <task>
-  local raw
+  local raw offset ident current
   raw=$(cat "$(_seen_status_path "$1" "$2")" 2>/dev/null) || { printf '0'; return 0; }
-  case "$raw" in
-    ''|*[!0-9]*) printf '0' ;;
-    *) printf '%s' "$raw" ;;
-  esac
+  case "$raw" in *@*) offset=${raw%%@*}; ident=${raw#*@} ;; *) printf '0'; return 0 ;; esac
+  case "$offset" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  current=$(_fm_open_decisions_file_ident "$1/$2.status") || { printf '0'; return 0; }
+  [ -n "$ident" ] && [ "$ident" = "$current" ] || { printf '0'; return 0; }
+  printf '%s' "$offset"
 }
 
 # Advance <task>'s escalated-through offset to the end of its status log, so the
 # heartbeat catch-all scan does not re-fire the events just escalated. The single
 # source of truth for the .subsuper-seen-status-<task> dedup state: called from
 # both the per-wake escalate path and the catch-all scan.
-mark_status_seen() {  # <state> <task> <captured-end-offset>
-  local state=$1 task=$2 size=$3
+mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
+  local state=$1 task=$2 size=$3 ident=$4 current
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
-  printf '%s' "$size" > "$(_seen_status_path "$state" "$task")"
+  current=$(_fm_open_decisions_file_ident "$state/$task.status") || return 0
+  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 0
+  printf '%s@%s' "$size" "$ident" > "$(_seen_status_path "$state" "$task")"
 }
 
 # Advance the offset for every task a per-wake classification escalated, so the
 # catch-all scan does not re-escalate the same events within HEARTBEAT_SCAN_SECS.
 mark_escalated_seen() {  # <state> <captured-endpoint-file>
-  local state=$1 capture=$2 task endpoint
+  local state=$1 capture=$2 task endpoint ident
   [ -f "$capture" ] || return 0
   grep -q '^ERROR' "$capture" 2>/dev/null && return 0
-  while IFS=$(printf '\t') read -r task endpoint; do
+  while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
-    mark_status_seen "$state" "$task" "$endpoint"
+    mark_status_seen "$state" "$task" "$endpoint" "$ident"
   done < "$capture"
 }
 
@@ -1133,7 +1138,7 @@ housekeeping() {  # <state>
   #     read decides relevance, and the escalated-through offset is the dedup.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local event record endpoint rc
+    local event record rest endpoint ident rc
     for f in "$state"/*.status; do
       [ -e "$f" ] || continue
       task=$(basename "$f"); task="${task%.status}"
@@ -1146,9 +1151,9 @@ housekeeping() {  # <state>
       fi
       [ "$rc" -eq 0 ] || continue
       endpoint=${record%%$'\t'*}
-      event=${record#*$'\t'}
+      rest=${record#*$'\t'}; ident=${rest%%$'\t'*}; event=${rest#*$'\t'}
       escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"
-      mark_status_seen "$state" "$task" "$endpoint"
+      mark_status_seen "$state" "$task" "$endpoint" "$ident"
     done
   fi
 }
@@ -1280,7 +1285,7 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
-  local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint
+  local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest
   local kind="" arg=""
   : > "$capture" || return 1
   if should_force_self "$reason"; then
@@ -1299,7 +1304,7 @@ handle_wake() {  # <reason> <state>
                   "$(status_seen_offset "$state" "$task")")
                 span_rc=$?
                 case "$span_rc" in
-                  0|1) endpoint=${span_record%%$'\t'*}; printf '%s\t%s\n' "$task" "$endpoint" > "$capture" ;;
+                  0|1) endpoint=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; ident=${rest%%$'\t'*}; printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" > "$capture" ;;
                   *) printf 'ERROR\t%s\n' "$task" > "$capture" ;;
                 esac
               else
