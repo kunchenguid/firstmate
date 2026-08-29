@@ -342,7 +342,7 @@ _collapse_newlines() {  # <text>
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last event record rest endpoint ident rc distilled="" rel="" seen_rel="" task
+  local reason=$1 state=$2 f last event record rest endpoint ident rc distilled="" rel="" seen_rel="" task sig marker
   for f in $reason; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
@@ -352,10 +352,12 @@ classify_signal() {  # <reason-after-colon> <state>
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      # Could not classify this log: escalate rather than self-handling, and
-      # record no classified endpoint for it, so its content is classified again
-      # once it is readable.
+      sig=$(status_observed_signature "$f")
+      marker=$(_seen_status_path "$state" "$task")
+      status_presentation_marker_reported_matches "$marker" "$sig" && continue
       distilled="${distilled}$(basename "$f"): unreadable status span | "
+      [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
+        && printf 'ERROR\t%s\t%s\n' "$task" "$sig" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
       rel=1
       continue
     fi
@@ -463,9 +465,9 @@ classify_unknown() {  # <reason>
 # --- stale marker + escalation buffer (stateful, but via explicit state dir) -
 # Marker:   state/.subsuper-stale-<key>   contains the epoch first seen idle.
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
-# Seen:     state/.subsuper-seen-status-<task>  byte offset in that task's status
-#           log up to which events were escalated, so the catch-all does not
-#           re-fire them (see status_seen_offset for why a position, not a line).
+# Seen:     state/.subsuper-seen-status-<task>  last reported file signature and
+#           classified byte offset, so failures and events do not re-fire while
+#           unread bytes remain recoverable.
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
@@ -574,13 +576,7 @@ _seen_status_path() {  # <state> <task>
 # 0 the same way: the events it covered are re-offered to the captain once,
 # which is the safe direction on the very boundary this fix protects.
 status_seen_offset() {  # <state> <task>
-  local raw offset ident current
-  raw=$(cat "$(_seen_status_path "$1" "$2")" 2>/dev/null) || { printf '0'; return 0; }
-  case "$raw" in *@*) offset=${raw%%@*}; ident=${raw#*@} ;; *) printf '0'; return 0 ;; esac
-  case "$offset" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
-  current=$(_fm_open_decisions_file_ident "$1/$2.status") || { printf '0'; return 0; }
-  [ -n "$ident" ] && [ "$ident" = "$current" ] || { printf '0'; return 0; }
-  printf '%s' "$offset"
+  status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status"
 }
 
 # Advance <task>'s escalated-through offset to the end of its status log, so the
@@ -588,28 +584,25 @@ status_seen_offset() {  # <state> <task>
 # source of truth for the .subsuper-seen-status-<task> dedup state: called from
 # both the per-wake escalate path and the catch-all scan.
 mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
-  local state=$1 task=$2 size=$3 ident=$4 current
-  case "$size" in ''|*[!0-9]*) return 1 ;; esac
-  current=$(_fm_open_decisions_file_ident "$state/$task.status") || return 1
-  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
-  printf '%s@%s' "$size" "$ident" > "$(_seen_status_path "$state" "$task")"
+  status_presentation_marker_commit "$(_seen_status_path "$1" "$2")" \
+    "$1/$2.status" "$3" "$4"
 }
 
 # Advance the offset for every task a per-wake classification escalated, so the
 # catch-all scan does not re-escalate the same events within HEARTBEAT_SCAN_SECS.
-# An ERROR row names a task whose log could not be classified: its position is
-# deliberately left where it was, so the content is classified again once the log
-# is readable, while the wake itself is still acknowledged. Retaining the wake
-# instead would re-report an unchanged permanent failure on every pass, and a
-# repeating alarm buries the events this supervision exists to deliver. That
-# residual risk is accepted and bounded: the failure is reported again whenever
-# the log next changes, and a locked session start replays the durable queue.
+# An ERROR row names a task whose log could not be classified and carries the
+# observed file signature.
+# Recording that signature bounds the report while leaving its classification
+# position unchanged, so readable recovery resumes from the last proven byte.
 mark_escalated_seen() {  # <state> <captured-endpoint-file>
   local state=$1 capture=$2 task endpoint ident rc=0
   [ -f "$capture" ] || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
-    [ "$task" = ERROR ] && continue
+    if [ "$task" = ERROR ]; then
+      status_presentation_marker_report "$(_seen_status_path "$state" "$endpoint")" "$ident" || rc=1
+      continue
+    fi
     mark_status_seen "$state" "$task" "$endpoint" "$ident" || rc=1
   done < "$capture"
   return "$rc"
@@ -1157,9 +1150,11 @@ housekeeping() {  # <state>
         "$(status_seen_offset "$state" "$task")")
       rc=$?
       if [ "$rc" -eq 2 ]; then
-        # Could not classify: report it and commit no position, so the log is
-        # classified again once it is readable.
+        ident=$(status_observed_signature "$f")
+        status_presentation_marker_reported_matches "$(_seen_status_path "$state" "$task")" "$ident" \
+          && continue
         escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
+        status_presentation_marker_report "$(_seen_status_path "$state" "$task")" "$ident" || true
         continue
       fi
       [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
@@ -1303,8 +1298,8 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
-  local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest
-  local kind="" arg="" classification_failed=0
+  local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
+  local kind="" arg="" classification_failed=0 span_failure_repeat=0
   : > "$capture" || return 1
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1326,16 +1321,24 @@ handle_wake() {  # <reason> <state>
                     if [ -n "$span_record" ]; then endpoint=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; ident=${rest%%$'\t'*}; printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" > "$capture"; fi
                     ;;
                   *)
-                    # Could not classify: classify_stale surfaces it, and no
-                    # position is committed for this task.
-                    printf 'ERROR\t%s\n' "$task" > "$capture"
+                    sig=$(status_observed_signature "$state/$task.status")
+                    marker=$(_seen_status_path "$state" "$task")
+                    if status_presentation_marker_reported_matches "$marker" "$sig"; then
+                      span_failure_repeat=1
+                    else
+                      printf 'ERROR\t%s\t%s\n' "$task" "$sig" > "$capture"
+                    fi
                     ;;
                 esac
               else
                 span_rc=2
                 printf 'ERROR\t%s\n' "$arg" > "$capture"
               fi
-              decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")
+              if [ "$span_failure_repeat" -eq 1 ]; then
+                decision="self|unreadable status span already reported for $task"
+              else
+                decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")
+              fi
               # An enriched wedge reason carries the watcher's own escalation count
               # and its "do not re-absorb on the run-step/pane state alone" demand,
               # so it outranks this daemon's cheaper status-log absorption - EXCEPT

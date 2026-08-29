@@ -121,25 +121,22 @@ _hb_surfaced_path() {
 # line) reads 0, so the log is re-classified and the backstop errs toward
 # surfacing rather than swallowing.
 hb_surfaced_offset() {  # <task>
-  local raw offset ident current
-  raw=$(cat "$(_hb_surfaced_path "$1")" 2>/dev/null) || { printf '0'; return 0; }
-  case "$raw" in *@*) offset=${raw%%@*}; ident=${raw#*@} ;; *) printf '0'; return 0 ;; esac
-  case "$offset" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
-  current=$(_fm_open_decisions_file_ident "$STATE/$1.status") || { printf '0'; return 0; }
-  [ -n "$ident" ] && [ "$ident" = "$current" ] || { printf '0'; return 0; }
-  printf '%s' "$offset"
+  status_presentation_marker_offset "$(_hb_surfaced_path "$1")" "$STATE/$1.status"
 }
 
 # Record a status log as surfaced through the captured classification endpoint
 # after its durable wake has been enqueued.
 mark_surfaced() {  # <status-file> <captured-end-offset> <captured-identity>
-  local f=$1 size=$2 ident=$3 task current
+  local f=$1 task
   case "$f" in *.status) ;; *) return 0 ;; esac
-  case "$size" in ''|*[!0-9]*) return 1 ;; esac
-  current=$(_fm_open_decisions_file_ident "$f") || return 1
-  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
   task=$(basename "$f"); task="${task%.status}"
-  printf '%s@%s' "$size" "$ident" > "$(_hb_surfaced_path "$task")"
+  status_presentation_marker_commit "$(_hb_surfaced_path "$task")" "$f" "$2" "$3"
+}
+
+mark_surface_reported() {  # <status-file> <reported-signature>
+  local f=$1 task
+  task=$(basename "$f"); task="${task%.status}"
+  status_presentation_marker_report "$(_hb_surfaced_path "$task")" "$2"
 }
 
 # Act on a fresh actionable transition from a push-capable backend.

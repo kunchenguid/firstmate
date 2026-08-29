@@ -1515,23 +1515,18 @@ fm_wake_print_deduped() {
 # --- signal announcement signatures -----------------------------------------
 #
 # The watcher's per-file signal scan (bin/fm-watch.sh scan_signals) detects a
-# status or turn-ended change by comparing a size:mtime signature against a
-# persisted state/.seen-* marker, and advances that marker only after the change
-# has been surfaced to firstmate or deliberately absorbed by the signal triage.
-# These three helpers plus the guarded append below are the ONE owner of that
-# signature and marker format, shared by the scan itself, by the drain-time
-# historical-annotation staleness check, and by this home's own bookkeeping
-# writers.
+# status or turn-ended change by comparing a file signature against a persisted
+# state/.seen-* marker, and advances that marker only after the change has been
+# surfaced to firstmate or deliberately absorbed by the signal triage.
+# Status markers independently retain the last reported signature and the last
+# classified position, while turn-ended markers retain their legacy signature.
+# These helpers plus the guarded append below are the ONE owner of that marker
+# behavior, shared by the scan, drain-time staleness checks, and bookkeeping writers.
 
 fm_wake_signal_sig() {  # <file> -> "size:mtime"
-  local size ident
   case "$1" in
     *.status)
-      if [ "$_FM_UNAME" = Darwin ]; then size=$(stat -f '%z' "$1" 2>/dev/null); else size=$(stat -c '%s' "$1" 2>/dev/null); fi
-      case "$size" in ''|*[!0-9]*) printf 'unverifiable'; return 0 ;; esac
-      ident=$(_fm_open_decisions_file_ident "$1") || { printf 'unverifiable'; return 0; }
-      [ -n "$ident" ] || { printf 'unverifiable'; return 0; }
-      printf '%s@%s' "$size" "$ident"
+      status_observed_signature "$1"
       ;;
     *)
       if [ "$_FM_UNAME" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
@@ -1551,24 +1546,17 @@ fm_wake_signal_seen_path() {  # <state> <file>
 }
 
 # The byte size recorded in <file>'s seen marker, or 0 when no marker exists, it
-# cannot be read, or it does not hold this "size:mtime" format. That size is the
-# position the watcher has already classified, so it is also the start offset of
-# the bytes it has not: fm-classify-lib.sh's status_span_has_actionable reads the
-# span from here to the current size rather than only the log's last line. A 0
-# means "classify the whole file", which surfaces events rather than losing them.
+# cannot be read, or it does not hold the supported presentation-marker format.
+# That size is the position the watcher has already classified, independently of
+# the file signature it has already reported. A 0 means "classify the whole
+# file", which surfaces events rather than losing them.
 fm_wake_signal_seen_size() {  # <state> <file>
-  local marker sig size ident current
+  local marker sig size
   marker=$(fm_wake_signal_seen_path "$1" "$2")
-  sig=$(cat "$marker" 2>/dev/null) || { printf '0'; return 0; }
   case "$2" in
-    *.status)
-      case "$sig" in *@*) size=${sig%%@*}; ident=${sig#*@} ;; *) printf '0'; return 0 ;; esac
-      case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
-      current=$(_fm_open_decisions_file_ident "$2") || { printf '0'; return 0; }
-      [ -n "$ident" ] && [ "$ident" = "$current" ] || { printf '0'; return 0; }
-      printf '%s' "$size"
-      ;;
+    *.status) status_presentation_marker_offset "$marker" "$2" ;;
     *)
+      sig=$(cat "$marker" 2>/dev/null) || { printf '0'; return 0; }
       case "$sig" in *:*) size=${sig%%:*} ;; *) size=0 ;; esac
       case "$size" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
       ;;
@@ -1580,17 +1568,22 @@ fm_wake_signal_seen_size() {  # <state> <file>
 # A missing marker or unreadable signature is NOT a match, so uncertainty reads
 # as "unannounced bytes present".
 fm_wake_signal_seen_current() {  # <state> <file>
-  local sig
+  local sig marker
   sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
-  [ "$(cat "$(fm_wake_signal_seen_path "$1" "$2")" 2>/dev/null)" = "$sig" ]
+  marker=$(fm_wake_signal_seen_path "$1" "$2")
+  case "$2" in
+    *.status) status_presentation_marker_reported_matches "$marker" "$sig" ;;
+    *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;
+  esac
+}
+
+fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>
+  status_presentation_marker_report "$(fm_wake_signal_seen_path "$1" "$2")" "$3"
 }
 
 fm_wake_status_seen_commit() {  # <state> <status-file> <captured-end> <captured-identity>
-  local current
-  current=$(_fm_open_decisions_file_ident "$2") || return 1
-  [ -n "$4" ] && [ "$4" = "$current" ] || return 1
-  printf '%s@%s' "$3" "$4" > "$(fm_wake_signal_seen_path "$1" "$2")"
+  status_presentation_marker_commit "$(fm_wake_signal_seen_path "$1" "$2")" "$2" "$3" "$4"
 }
 
 # Guarded self-announced status append - the one dedup primitive for a status
@@ -1620,14 +1613,15 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
   fi
   printf '%s\n' "$line" >> "$file" || return 2
   [ -n "$pre_sig" ] || return 1
-  [ "$(cat "$marker" 2>/dev/null)" = "$pre_sig" ] || return 1
+  status_presentation_marker_reported_matches "$marker" "$pre_sig" || return 1
+  pre_size=${pre_sig%%@*}
+  [ "$(status_presentation_marker_offset "$marker" "$file")" = "$pre_size" ] || return 1
   post_sig=$(fm_wake_signal_sig "$file") || return 1
   [ -n "$post_sig" ] || return 1
-  pre_size=${pre_sig%%@*}
   post_size=${post_sig%%@*}
   case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
-  printf '%s' "$post_sig" > "$marker" 2>/dev/null || return 1
+  fm_wake_status_seen_commit "$state" "$file" "$post_size" "${post_sig#*@}" || return 1
   return 0
 }
 

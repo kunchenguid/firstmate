@@ -911,6 +911,51 @@ test_routine_appends_after_a_classified_event_stay_absorbed() {
   pass "a routine append after an already-classified event is absorbed (no re-wake)"
 }
 
+test_unreadable_status_reports_once_per_file_state() {
+  local dir state fakebin out status_file target marker sig pid
+  dir=$(make_case unreadable-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; status_file="$state/task.status"; target="$dir/status-target"
+  printf 'blocked: release host unavailable\n' > "$target"
+  ln -s "$target" "$status_file"
+  marker="$state/.seen-task_status"
+
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an unreadable status was not reported"; }
+  sig=$(status_observed_signature "$status_file")
+  status_presentation_marker_reported_matches "$marker" "$sig" \
+    || fail "the unreadable status report did not advance its wake signature"
+  [ "$(status_presentation_marker_offset "$marker" "$status_file")" = 0 ] \
+    || fail "the unreadable status report advanced its classification position"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first unreadable-status wake"
+  touch "$state/.last-check" "$state/.last-heartbeat"
+
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "an unchanged unreadable status reported again after restart: $(cat "$out")"; }
+  reap "$pid"
+
+  printf 'blocked: changed target state with a longer path\n' > "$dir/status-target-two-longer"
+  ln -snf "$dir/status-target-two-longer" "$status_file"
+  target="$dir/status-target-two-longer"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a changed unreadable status did not report again"; }
+  [ "$(status_presentation_marker_offset "$marker" "$status_file")" = 0 ] \
+    || fail "a changed unreadable status advanced its classification position"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the changed unreadable-status wake"
+
+  rm -f "$status_file"
+  cp "$target" "$status_file"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a readable replacement did not surface preserved content"; }
+  [ "$(status_presentation_marker_offset "$marker" "$status_file")" = "$(size_of "$status_file")" ] \
+    || fail "readable recovery did not classify content written before the failure"
+  pass "unreadable status reports are bounded without advancing classification"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2864,10 +2909,9 @@ test_heartbeat_no_change_absorbed() {
   [ ! -s "$out" ] || fail "no-change heartbeat printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "no-change heartbeat enqueued a durable wake record"
   [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] || fail "heartbeat backoff streak did not advance while absorbing"
-  case "$(cat "$state/.hb-surfaced-routine" 2>/dev/null || true)" in
-    "$(size_of "$state/routine.status")"@*) ;;
-    *) fail "routine heartbeat classification did not commit its captured endpoint" ;;
-  esac
+  [ "$(status_presentation_marker_offset "$state/.hb-surfaced-routine" "$state/routine.status")" = \
+    "$(size_of "$state/routine.status")" ] \
+    || fail "routine heartbeat classification did not commit its captured endpoint"
   reap "$pid"
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
 }
@@ -2887,10 +2931,9 @@ test_heartbeat_backstop_surfaces_a_masked_status() {
   wait_for_exit "$pid" 100 \
     || fail "heartbeat backstop missed a decision hidden behind a later working: line"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
-  case "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" in
-    "$(size_of "$state/miss.status")"@*) ;;
-    *) fail "backstop did not record the masked status as surfaced through its end" ;;
-  esac
+  [ "$(status_presentation_marker_offset "$state/.hb-surfaced-miss" "$state/miss.status")" = \
+    "$(size_of "$state/miss.status")" ] \
+    || fail "backstop did not record the masked status as surfaced through its end"
   pass "the heartbeat backstop surfaces a captain event hidden behind a later routine append"
 }
 
@@ -2909,10 +2952,9 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pid=$!
   wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
-  case "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" in
-    "$(size_of "$state/miss.status")"@*) ;;
-    *) fail "backstop did not record the status as surfaced through its end (would re-fire next heartbeat)" ;;
-  esac
+  [ "$(status_presentation_marker_offset "$state/.hb-surfaced-miss" "$state/miss.status")" = \
+    "$(size_of "$state/miss.status")" ] \
+    || fail "backstop did not record the status as surfaced through its end (would re-fire next heartbeat)"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
@@ -2963,10 +3005,9 @@ test_afk_signal_records_heartbeat_endpoint() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "afk watcher did not hand the actionable signal to the daemon"
-  case "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" in
-    "$(size_of "$status_file")"@*) ;;
-    *) fail "afk signal did not record the endpoint handed to the daemon" ;;
-  esac
+  [ "$(status_presentation_marker_offset "$state/.hb-surfaced-task" "$status_file")" = \
+    "$(size_of "$status_file")" ] \
+    || fail "afk signal did not record the endpoint handed to the daemon"
   unset FM_FAKE_CREW_STATE
   pass "an afk signal records its captured heartbeat endpoint"
 }
@@ -3053,6 +3094,7 @@ test_actionable_signal_surfaced
 test_actionable_signal_survives_a_later_routine_append
 test_release_completion_survives_a_later_routine_append
 test_routine_appends_after_a_classified_event_stay_absorbed
+test_unreadable_status_reports_once_per_file_state
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

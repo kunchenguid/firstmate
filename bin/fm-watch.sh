@@ -807,9 +807,11 @@ scan_signals() {
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
-    if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
-      printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
-    fi
+    case "$f" in
+      *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
+      *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
+    esac
+    printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
   done
   return 0
 }
@@ -991,7 +993,11 @@ mark_all_captain_relevant_surfaced() {
   local f endpoint ident rc=0
   while IFS=$(printf '\t') read -r f endpoint ident; do
     [ -n "$f" ] || continue
-    mark_surfaced "$f" "$endpoint" "$ident" || rc=1
+    if [ "$endpoint" = ERROR ]; then
+      mark_surface_reported "$f" "$ident" || rc=1
+    else
+      mark_surfaced "$f" "$endpoint" "$ident" || rc=1
+    fi
   done <<EOF
 $FM_HEARTBEAT_SURFACE_ENDPOINTS
 EOF
@@ -1009,7 +1015,7 @@ EOF
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task record rest endpoint ident rc found=1
+  local f task record rest endpoint ident rc found=1 sig marker
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || [ -L "$f" ] || continue
@@ -1018,7 +1024,10 @@ heartbeat_scan_finds_actionable() {
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      # Could not classify: surface, and record no endpoint for this log.
+      sig=$(status_observed_signature "$f")
+      marker=$(_hb_surfaced_path "$task")
+      status_presentation_marker_reported_matches "$marker" "$sig" && continue
+      FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"ERROR"$'\t'"${sig}"$'\n'
       found=0
       continue
     fi
@@ -1424,7 +1433,13 @@ EOF
       # an unreadable log's content is still classified once it becomes readable.
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
+        case "$f" in
+          *.status)
+            fm_wake_status_reported_commit "$STATE" "$f" "$sig" || true
+            mark_surface_reported "$f" "$sig" || true
+            ;;
+          *) printf '%s' "$sig" > "$sf" ;;
+        esac
       done <<EOF
 $pending
 EOF
