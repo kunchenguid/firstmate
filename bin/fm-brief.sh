@@ -337,6 +337,12 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+   That includes PROCESSES: other workers share this machine, each in its own copy of
+   this repo running identical command lines, so a pattern kill reaches into their
+   copies too. Never kill by pattern - no \`pkill -f\`, no \`killall\`, no
+   \`ps | grep | xargs kill\`. Kill only a PID you captured yourself
+   (\`npm run check & CHECK_PID=\$!\` then \`kill "\$CHECK_PID"\`), or confirm the process is
+   yours with \`pgrep -af <pattern> | grep "\$PWD"\` and kill it by explicit PID.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -453,6 +459,12 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
+   That includes PROCESSES: other workers share this machine, each in its own copy of
+   this repo running identical command lines, so a pattern kill reaches into their
+   copies too. Never kill by pattern - no \`pkill -f\`, no \`killall\`, no
+   \`ps | grep | xargs kill\`. Kill only a PID you captured yourself
+   (\`npm run check & CHECK_PID=\$!\` then \`kill "\$CHECK_PID"\`), or confirm the process is
+   yours with \`pgrep -af <pattern> | grep "\$PWD"\` and kill it by explicit PID.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

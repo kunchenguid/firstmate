@@ -1734,6 +1734,45 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+# Refuse a worktree that another LIVE task's record still names.
+#
+# A worktree belongs to exactly one live task, and several safety properties
+# quietly depend on it - most sharply bin/fm-teardown.sh's leaked-process reap,
+# which sends TERM then KILL to every process whose cwd is "this task's own
+# worktree" precisely because that root is supposed to be unique. When two tasks
+# hold one worktree, tearing either one down kills the other's agent inside a
+# worktree it is still working in.
+#
+# That double-assignment is reachable whenever a worktree returns to the pool
+# while a record still claims it (a half-retired teardown, a hand-edited or
+# restored record, a pool reused across homes), so the invariant is checked here
+# rather than assumed. The task's OWN record is skipped: a relaunch legitimately
+# re-enters the worktree its meta already names.
+#
+# This is a pre-publication check, so it cannot by itself serialize two spawns
+# racing for one slot; the task-set lock held across meta publication owns that.
+# Its job is the far more common case - a stale claim that is already on disk
+# before this spawn starts.
+refuse_worktree_claimed_by_live_task() {  # <source> <worktree-real>
+  local source=$1 wt_real=$2 meta claim_id claim_wt claim_real
+  [ -n "$wt_real" ] || return 0
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    claim_id=${meta##*/}
+    claim_id=${claim_id%.meta}
+    [ "$claim_id" != "$ID" ] || continue
+    claim_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$claim_wt" ] || continue
+    if ! claim_real=$(cd "$claim_wt" 2>/dev/null && pwd -P); then
+      claim_real=$claim_wt
+    fi
+    [ "$claim_real" = "$wt_real" ] || continue
+    echo "error: $source handed $ID the worktree $wt_real, which task $claim_id still claims in $meta; refusing to launch two live tasks into one worktree (tearing either one down would kill the other's agent). Retire or correct $claim_id first." >&2
+    exit 1
+  done
+}
+
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
   wt_real=
@@ -1750,6 +1789,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  refuse_worktree_claimed_by_live_task "$source" "$wt_real"
 }
 
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:

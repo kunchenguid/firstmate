@@ -221,6 +221,37 @@ test_ship_modes_generate_clean_briefs() {
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
 # mode, and its refusal must say to classify the task's surface first.
+# Every worker kind gets the process-isolation rule at launch. Workers share one
+# machine, each in its own copy of the repo running identical command lines, so a
+# pattern kill from one lane reaches into every other lane. On 2026-08-29 one
+# such sweep for a project's own script name ended four working sessions at
+# once. bin/fm-spawn.sh keeps a worker's brief out of its own argv so the agent
+# itself is no longer matchable; this rule is what stops a lane's RUN being
+# killed under it, which no launch change can prevent.
+test_briefs_carry_the_process_isolation_rule() {
+  local home id brief kind
+  home="$TMP_ROOT/proc-rule-home"
+  write_registry "$home"
+  for kind in ship scout; do
+    id="brief-procrule-$kind"
+    if [ "$kind" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+        || fail "$kind: scaffold failed"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+        || fail "$kind: scaffold failed"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep 'Never kill by pattern' "$brief" \
+      "$kind: brief must ban pattern kills, which reach every other worker's copy"
+    assert_grep 'pkill -f' "$brief" "$kind: brief must name the pkill form it bans"
+    assert_grep 'CHECK_PID' "$brief" \
+      "$kind: brief must show the explicit-PID alternative, or the ban has no remedy"
+  done
+  pass "fm-brief.sh: ship and scout briefs ban pattern kills and give the explicit-PID remedy"
+}
+
 test_ship_mode_is_required_and_closed_set() {
   local home id out status label flag expect
   home="$TMP_ROOT/mode-required-home"
@@ -755,6 +786,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_briefs_carry_the_process_isolation_rule
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
