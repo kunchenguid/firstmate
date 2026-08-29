@@ -76,6 +76,7 @@ esac
 
 case "${2:-}" in
   list)
+    [ -n "${FM_TB_LIST_EXIT:-}" ] && { echo "database is locked" >&2; exit "$FM_TB_LIST_EXIT"; }
     printf '['
     first=1
     while IFS=$'\t' read -r uuid name pane btype hook; do
@@ -257,7 +258,8 @@ reset_world() {
   export FM_TB_PANES="%20"
   unset FM_TB_FAKE_VERSION FM_TB_FAKE_SOCKET FM_TB_CREATE_UUID FM_TB_CREATE_PANE \
         FM_TB_CREATE_EXIT FM_TB_AGENTS_TOML FM_TB_CURSOR_Y FM_TB_PANE_PATH \
-        FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT FM_TB_PS FM_TB_PANE_TTY 2>/dev/null || true
+        FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT FM_TB_PS FM_TB_PANE_TTY \
+        FM_TB_LIST_EXIT 2>/dev/null || true
   FM_BACKEND_THURBOX_SOCKET_CACHE=''
   # The adapter's own RESOLUTION output, not fixture state: target_ready and
   # resolve_row set these in whatever shell calls them, so a case run directly
@@ -503,6 +505,48 @@ test_create_task_refuses_duplicate_name() {
   assert_contains "$out" "already exists" "duplicate refusal names the collision"
   assert_no_grep $'session\x1fcreate' "$FM_TB_LOG" "duplicate check must run BEFORE create"
   pass "create_task refuses a duplicate name thurbox itself would have allowed"
+}
+
+test_create_task_refuses_when_the_duplicate_check_cannot_run() {
+  reset_world
+  # thurbox is reachable enough to be invoked but cannot answer - a locked
+  # database, a mid-upgrade daemon. An empty list is then absence of EVIDENCE,
+  # never evidence of absence: thurbox enforces no name uniqueness itself
+  # (finding 2), so creating anyway is what puts two live sessions behind one
+  # scoped title and makes first-match lookup pick an arbitrary one.
+  export FM_TB_LIST_EXIT=1
+  local out rc
+  out=$(fm_backend_thurbox_create_task fm-t1 /w 2>&1); rc=$?
+  expect_code 1 "$rc" "create_task when the duplicate check itself failed"
+  case "$out" in
+    *"could not list thurbox sessions"*) : ;;
+    *) fail "create_task did not explain the unprovable duplicate check: $out" ;;
+  esac
+  grep -q $'session\x1fcreate' "$FM_TB_LOG" \
+    && fail "create_task created a session despite an unprovable duplicate check"
+  pass "create_task refuses when the duplicate check could not be answered"
+}
+
+test_create_task_rolls_back_a_session_that_never_gets_a_pane() {
+  reset_world
+  # thurbox creates the row but never publishes a backend_id, so the bounded
+  # poll times out. The row still holds the scoped title, so leaving it behind
+  # would trip create_task's OWN duplicate refusal on every later spawn of this
+  # task id - a permanent, operator-only-recoverable wedge for one timeout.
+  export FM_TB_CREATE_UUID=$UUID FM_TB_CREATE_PANE=-
+  local out rc
+  out=$(fm_backend_thurbox_create_task fm-t1 /w 2>&1); rc=$?
+  expect_code 1 "$rc" "create_task when no pane is ever reported"
+  assert_grep $'session\x1fdelete\x1f'"$UUID" "$FM_TB_LOG" \
+    "create_task did not roll back the session it created"
+  grep -q "	$TITLE	" "$FM_TB_ROWS" \
+    && fail "create_task left '$TITLE' behind, reserving the name against every retry"
+  # The name being free again is the whole point of the rollback.
+  export FM_TB_CREATE_PANE=%31
+  export FM_TB_PANES="%20 %31"
+  out=$(fm_backend_thurbox_create_task fm-t1 /w) || fail "retry after rollback failed"
+  [ "$out" = "$UUID %31" ] || fail "retry returned '$out', expected '$UUID %31'"
+  pass "create_task rolls back a paneless session so the task id stays spawnable"
 }
 
 test_create_task_passes_configured_agent() {
@@ -1066,6 +1110,8 @@ test_configured_agent_name_is_honored
 test_create_task_returns_uuid_and_polled_pane
 test_create_task_refuses_duplicate_name
 test_create_task_passes_configured_agent
+test_create_task_refuses_when_the_duplicate_check_cannot_run
+test_create_task_rolls_back_a_session_that_never_gets_a_pane
 test_parse_target_splits_on_first_colon
 test_target_ready_reresolves_pane_after_restart
 test_target_ready_refuses_name_mismatch

@@ -366,10 +366,20 @@ fm_backend_thurbox_session_row() {  # <uuid>
 # equals <label>, or empty. thurbox enforces no name uniqueness (finding 2), so
 # this adopts the FIRST match, mirroring herdr's/zellij's/cmux's posture; the
 # duplicate refusal in create_task is what keeps a second one from appearing.
+#
+# "No such session" and "could not ask" are DIFFERENT answers and are reported
+# differently: a listing that ran and matched nothing echoes nothing and
+# succeeds, while a `session list` that failed - or answered something that is
+# not a JSON array - returns non-zero and echoes nothing. Collapsing the two
+# would let a locked database read as proof that a name is free, which is
+# exactly the proof create_task's duplicate refusal rests on.
 fm_backend_thurbox_session_id_for_label() {  # <label>
-  local label=$1
-  fm_backend_thurbox_cli session list --json 2>/dev/null \
-    | jq -r --arg want "$label" '.[]? | select(.name == $want) | .id' 2>/dev/null | head -1
+  local label=$1 list ids
+  list=$(fm_backend_thurbox_cli session list --json 2>/dev/null) || return 1
+  ids=$(printf '%s' "$list" | jq -r --arg want "$label" \
+    'if type == "array" then (.[] | select(.name == $want) | .id) else error("not an array") end' \
+    2>/dev/null) || return 1
+  printf '%s' "$ids" | head -1
 }
 
 # fm_backend_thurbox_pane_exists: does <pane-id> currently exist on thurbox's
@@ -394,7 +404,10 @@ fm_backend_thurbox_pane_exists() {  # <pane-id>
 fm_backend_thurbox_create_task() {  # <label> <cwd> -> "<uuid> <pane_id>"
   local label=$1 cwd=$2 title dup agent out uuid pane i
   title=$(fm_backend_thurbox_scoped_title "$label") || return 1
-  dup=$(fm_backend_thurbox_session_id_for_label "$title")
+  dup=$(fm_backend_thurbox_session_id_for_label "$title") || {
+    echo "error: could not list thurbox sessions, so '$title' cannot be proven free; refusing to create a possible duplicate" >&2
+    return 1
+  }
   if [ -n "$dup" ]; then
     echo "error: thurbox session '$title' already exists ($dup)" >&2
     return 1
@@ -415,7 +428,18 @@ fm_backend_thurbox_create_task() {  # <label> <cwd> -> "<uuid> <pane_id>"
     [ -n "$pane" ] && break
     sleep 0.25
   done
-  [ -n "$pane" ] || { echo "error: thurbox did not report a tmux pane id for session '$title' ($uuid) within 5s" >&2; return 1; }
+  if [ -z "$pane" ]; then
+    echo "error: thurbox did not report a tmux pane id for session '$title' ($uuid) within 5s" >&2
+    # Roll the half-formed session back. The row already holds the scoped
+    # title, and the duplicate refusal above is exact-match on that title, so
+    # a session left here would fail EVERY later spawn of this task id until
+    # an operator deleted it by hand - a permanent wedge earned by one timeout.
+    # --force because reclaiming the window is the point; a soft delete would
+    # leave the row, and the row is what reserves the name.
+    fm_backend_thurbox_cli session delete "$uuid" --force --json >/dev/null 2>&1 \
+      || echo "warning: could not roll back thurbox session '$title' ($uuid); it still holds that name, so delete it with: thurbox-cli session delete $uuid --force" >&2
+    return 1
+  fi
   printf '%s %s' "$uuid" "$pane"
 }
 
