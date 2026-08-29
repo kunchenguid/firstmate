@@ -335,6 +335,28 @@ EOF
   pass "classification failure retains the complete durable wake batch"
 }
 
+test_missing_status_stale_is_acknowledged_without_diagnostic() {
+  local dir state fakebin
+  dir=$(make_supercase durable-no-status); state="$dir/state"; fakebin="$dir/daemon-bin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tstale\tmissing-r8\tstale: sess:fm-missing-r8\n'
+printf 'WAKE_ACK_REQUIRED: ordinary --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "a stale wake without a status file was retained for retry"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "repeated missing-status handling became a classification failure"
+  [ "$(wc -l < "$dir/acked" | tr -d ' ')" = 2 ] \
+    || fail "a missing-status stale wake was not acknowledged"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a missing status file produced an unreadable-span escalation"
+  pass "missing-status stale wakes remain ordinary and acknowledgeable"
+}
+
 test_unreadable_durable_signal_surfaces_without_acknowledgement() {
   local dir state fakebin out
   dir=$(make_supercase durable-unreadable); state="$dir/state"; fakebin="$dir/daemon-bin"
@@ -2464,6 +2486,7 @@ test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
 test_catchall_advances_routine_then_surfaces_append
 test_durable_wake_failure_retains_entire_batch
+test_missing_status_stale_is_acknowledged_without_diagnostic
 test_unreadable_durable_signal_surfaces_without_acknowledgement
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal

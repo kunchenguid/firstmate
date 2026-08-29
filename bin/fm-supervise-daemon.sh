@@ -350,6 +350,7 @@ classify_signal() {  # <reason-after-colon> <state>
     record=$(status_span_first_actionable_record "$f" \
       "$(status_seen_offset "$state" "$task")")
     rc=$?
+    [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
         && printf 'ERROR\t%s\n' "$f" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
@@ -1151,6 +1152,7 @@ housekeeping() {  # <state>
         escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
         continue
       fi
+      [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
       endpoint=${record%%$'\t'*}
       rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
       if [ "$rc" -eq 0 ]; then
@@ -1310,7 +1312,7 @@ handle_wake() {  # <reason> <state>
                   "$(status_seen_offset "$state" "$task")")
                 span_rc=$?
                 case "$span_rc" in
-                  0|1) endpoint=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; ident=${rest%%$'\t'*}; printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" > "$capture" ;;
+                  0|1) if [ -n "$span_record" ]; then endpoint=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; ident=${rest%%$'\t'*}; printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" > "$capture"; fi ;;
                   *) printf 'ERROR\t%s\n' "$task" > "$capture" ;;
                 esac
               else

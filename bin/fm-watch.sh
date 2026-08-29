@@ -966,6 +966,7 @@ signal_files_actionable() {  # <status-file> ...
     record=$(status_span_first_actionable_record "$f" \
       "$(fm_wake_signal_seen_size "$STATE" "$f")")
     rc=$?
+    [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       FM_SIGNAL_CLASSIFY_ERROR=1
       found=0
@@ -1014,6 +1015,7 @@ heartbeat_scan_finds_actionable() {
     task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
+    [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       FM_HEARTBEAT_SCAN_ERROR=1
       found=0

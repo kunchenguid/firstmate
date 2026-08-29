@@ -14,6 +14,8 @@
 # signatures).
 # A successful span classification reports every actionable event through its
 # captured endpoint, while a failed classification reports no committable endpoint.
+# An absent status file is a successful empty span, while an existing status object
+# that cannot be read or identified is a retryable classification failure.
 # Consumers may advance only after the actionable or routine success outcomes.
 #
 # There are three documented exceptions. The absorb classification
@@ -1362,6 +1364,7 @@ _fm_status_open_decision_origins() {  # <status-file>
 status_span_first_actionable_record() {  # <status-file> <start-offset>
   local f=$1 start=${2:-0} size ident cur_ident scratch chunk_file full_file prefix_file
   local line verb key origins='' folded=0 rc=1 prefix_lines=0 line_number=0 live_line='' events='' _line _key
+  [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
   size=$(_fm_status_file_size "$f") || return 2
