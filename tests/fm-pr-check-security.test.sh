@@ -3676,6 +3676,64 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_migration_classifies_each_check_kind() {
+  local dir state x_before x_after custom_before custom_after poll_before poll_after
+  dir=$(make_case migration-four-kinds)
+  state="$dir/home/state"
+
+  # Kind 1: a valid current X-mode shim.
+  fmx_poll_shim_content "$dir/home" "$ROOT" > "$state/x-watch.check.sh"
+  chmod 0700 "$state/x-watch.check.sh"
+
+  # Kind 2: a registered custom check.
+  printf 'trusted custom check bytes\n' > "$state/custom.check.sh"
+  chmod 0700 "$state/custom.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register the custom check"
+
+  # Kind 3: a canonical armed PR poll.
+  write_poll_meta "$state" task-poll https://github.com/o/r/pull/30
+  seed_canonical_poll "$dir" task-poll https://github.com/o/r/pull/30
+  fm_pr_poll_artifacts_valid "$state" task-poll "$POLL" \
+    || fail "canonical poll fixture was not armed"
+
+  # Kind 4: a legacy check whose metadata is ambiguous, so migration quarantines
+  # and disarms it rather than rebuilding a canonical poll.
+  fm_write_meta "$state/task-legacy.meta" \
+    'window=fm-task-legacy' \
+    'pr=https://github.com/o/r/pull/31' \
+    'window=injected-after-pr'
+  printf 'legacy bytes\n' > "$state/task-legacy.check.sh"
+  chmod 0644 "$state/task-legacy.check.sh"
+
+  x_before=$(state_snapshot "$state" | grep 'x-watch.check.sh')
+  custom_before=$(state_snapshot "$state" | grep 'custom.check.sh')
+  poll_before=$(poll_artifact_snapshot "$state" task-poll)
+
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "four-kind migration failed: $(cat "$dir/migrate.err")"
+
+  # Only the legacy check is quarantined and disarmed.
+  [ ! -e "$state/task-legacy.check.sh" ] || fail "legacy check remained armed after migration"
+  find "$state/.pr-check-quarantine" -name 'task-legacy.check.*' -type f | grep . >/dev/null \
+    || fail "legacy check was not quarantined"
+
+  # The other three kinds are untouched, and none of them was quarantined.
+  x_after=$(state_snapshot "$state" | grep 'x-watch.check.sh')
+  [ "$x_after" = "$x_before" ] || fail "migration changed the X-mode shim"
+  custom_after=$(state_snapshot "$state" | grep 'custom.check.sh')
+  [ "$custom_after" = "$custom_before" ] || fail "migration changed the registered custom check"
+  fm_pr_poll_artifacts_valid "$state" task-poll "$POLL" \
+    || fail "migration disarmed the canonical poll"
+  poll_after=$(poll_artifact_snapshot "$state" task-poll)
+  [ "$poll_after" = "$poll_before" ] || fail "migration changed the canonical poll artifacts"
+  [ -z "$(find "$state/.pr-check-quarantine" \
+    \( -name 'custom.*' -o -name 'task-poll.*' -o -name 'x-watch.*' \) -type f)" ] \
+    || fail "migration quarantined a non-legacy check kind"
+
+  pass "migration quarantines only the legacy check when all four check kinds coexist"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3716,4 +3774,5 @@ test_bootstrap_migrates_before_other_mutations
 test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
+test_migration_classifies_each_check_kind
 test_teardown_removes_poll_artifacts
