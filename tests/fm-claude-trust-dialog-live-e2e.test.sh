@@ -7,6 +7,9 @@
 # An unrelated repository must show its own dialog, proving that acceptance persists per repository.
 set -u
 
+# This is an isolated test-harness fleet, not the live Firstmate fleet.
+export FM_GATE_REFUSE_BYPASS=1
+
 if [ "${FM_CLAUDE_TRUST_DIALOG_LIVE:-0}" != 1 ]; then
   echo "skip: set FM_CLAUDE_TRUST_DIALOG_LIVE=1 to run the Claude trust-dialog regression"
   exit 0
@@ -45,6 +48,11 @@ trap cleanup EXIT
 
 mkdir -p "$PROJECT" "$FM_TEST_HOME/state" "$FM_TEST_HOME/data" \
   "$FM_TEST_HOME/config" "$CLAUDE_TEST_CONFIG" "$SHIM"
+if ! CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" claude auth status --json >/dev/null 2>&1; then
+  printf 'skip: EVIDENCE_INCOMPLETE - isolated-profile authentication unavailable; Claude %s repository trust not verified here\n' \
+    "$CLAUDE_VERSION"
+  exit 0
+fi
 git -C "$PROJECT" init -q --initial-branch=main
 git -C "$PROJECT" config user.name fm-live-test
 git -C "$PROJECT" config user.email fm-live-test@example.invalid
@@ -108,7 +116,11 @@ run_spawn() {
     CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" \
     FM_CLAUDE_TRUST_POLLS=80 FM_CLAUDE_TRUST_POLL_INTERVAL=0.5 \
     "$ROOT/bin/fm-spawn.sh" "$id" --relaunch --harness claude > "$out" 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || fail "$id: fm-spawn failed under Claude $CLAUDE_VERSION: $(tail -1 "$out")"
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$id: visible pane at failure:" >&2
+    "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:fm-$id" -S -60 >&2 || true
+    fail "$id: fm-spawn failed under Claude $CLAUDE_VERSION: $(tail -1 "$out")"
+  fi
 }
 
 wait_for_marker() {

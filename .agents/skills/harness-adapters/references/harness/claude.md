@@ -20,6 +20,9 @@ Accepting the dialog for a git worktree persists under the repository's own chec
 On a capable backend, a spawn that observes the dialog but cannot clear it or confirm that the launch brief resumed processing fails loudly in `state/<id>.status` rather than leaving a silently idle pane.
 An unreadable detection window fails separately because a dialog may still be pending, while a definitely already-trusted launch retains the existing spawn path without a new processing requirement.
 Treat either failure like any other failed spawn by inspecting the pane and using `stuck-crewmate-recovery` if it recurs.
+A genuinely fresh isolated `CLAUDE_CONFIG_DIR` requires a human-completed OAuth login before Claude Code shows repository trust and does not inherit the machine's existing Keychain credentials.
+Testing a fresh isolated store therefore needs that human login before the repository-trust check; the ordinary Firstmate deployment shares its already-onboarded and authenticated `CLAUDE_CONFIG_DIR` with Claude workers.
+The first-run theme picker is outside this automatic trust handling because selecting a theme still leads to the same human login wall and cannot make a fresh isolated store unattended.
 
 ## Composer ghost
 
