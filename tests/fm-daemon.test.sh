@@ -210,6 +210,52 @@ test_stale_read_failure_surfaces_without_advancing_seen() {
   pass "a stale span read failure surfaces without advancing its marker"
 }
 
+test_recreated_status_rejects_captured_identity() {
+  local dir state reader record rest endpoint ident out
+  dir=$(make_supercase recreated-identity); state="$dir/state"
+  reader="$dir/identity-reader"
+  cat > "$reader" <<EOF
+#!/usr/bin/env bash
+cat "$dir/identity-value"
+EOF
+  chmod +x "$reader"
+  printf '1:2:old-birth' > "$dir/identity-value"
+  printf 'done: old task complete\n' > "$state/reused-r4.status"
+  record=$(FM_STATUS_IDENTITY_READER="$reader" \
+    status_span_first_actionable_record "$state/reused-r4.status" 0)
+  endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+  rm -f "$state/reused-r4.status"
+  printf 'blocked: replacement task needs captain\nworking: routine padding after replacement\n' \
+    > "$state/reused-r4.status"
+  printf '1:2:new-birth' > "$dir/identity-value"
+  FM_STATUS_IDENTITY_READER="$reader" mark_status_seen "$state" reused-r4 "$endpoint" "$ident"
+  [ ! -e "$state/.subsuper-seen-status-reused-r4" ] \
+    || fail "a stale captured identity advanced the replacement task marker"
+  out=$(FM_STATUS_IDENTITY_READER="$reader" classify_signal "$state/reused-r4.status" "$state")
+  case "$out" in escalate\|*"blocked: replacement task needs captain"*) ;;
+    *) fail "the replacement task blocker did not surface after identity rejection: $out" ;;
+  esac
+  pass "a recreated status rejects the old captured identity"
+}
+
+test_unverifiable_identity_surfaces_without_marker() {
+  local dir state reader key out
+  dir=$(make_supercase unverifiable-identity); state="$dir/state"
+  reader="$dir/identity-reader"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"; chmod +x "$reader"
+  printf 'working: routine progress\n' > "$state/unknown-r5.status"
+  key=$(printf '%s' unknown-r5 | tr ':/.' '___')
+  (
+    FM_STATUS_IDENTITY_READER="$reader" FM_ESCALATE_BATCH_SECS=999 \
+      handle_wake "signal: $state/unknown-r5.status" "$state"
+  )
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;; *) fail "an unverifiable identity was silently absorbed" ;; esac
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "an unverifiable identity advanced the daemon marker"
+  pass "an unverifiable status identity surfaces without advancing markers"
+}
+
 test_status_read_failure_surfaces_without_advancing_seen() {
   local dir state key out
   dir=$(make_supercase unreadable-span); state="$dir/state"
@@ -2324,6 +2370,8 @@ test_classify_signal_survives_a_later_routine_append
 test_classification_commits_its_captured_endpoint
 test_stale_masked_event_escalates_at_captured_endpoint
 test_stale_read_failure_surfaces_without_advancing_seen
+test_recreated_status_rejects_captured_identity
+test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal

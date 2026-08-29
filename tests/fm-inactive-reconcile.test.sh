@@ -115,7 +115,11 @@ outcome_count() { # <home> <suffix>
 prime_seen() { # <state> <status>
   local state=$1 status=$2 size ident
   size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
-  if [ "$(uname)" = Darwin ]; then ident=$(stat -f '%d:%i' "$status"); else ident=$(stat -c '%d:%i' "$status"); fi
+  if [ "$(uname)" = Darwin ]; then
+    ident=$(stat -f '%d:%i:%FB' "$status")
+  else
+    ident="$(stat -c '%d:%i' "$status"):$(stat -c '%w' "$status")"
+  fi
   printf '%s@%s' "$size" "$ident" > "$state/.seen-$(basename "$status" | tr '.' '_')"
 }
 

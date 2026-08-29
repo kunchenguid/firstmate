@@ -144,7 +144,11 @@ seen_sig() {
   case "$1" in
     *.status)
       size=$(size_of "$1")
-      if [ "$(uname)" = Darwin ]; then ident=$(stat -f '%d:%i' "$1" 2>/dev/null); else ident=$(stat -c '%d:%i' "$1" 2>/dev/null); fi
+      if [ "$(uname)" = Darwin ]; then
+        ident=$(stat -f '%d:%i:%FB' "$1" 2>/dev/null)
+      else
+        ident="$(stat -c '%d:%i' "$1" 2>/dev/null):$(stat -c '%w' "$1" 2>/dev/null)"
+      fi
       printf '%s@%s' "$size" "$ident"
       ;;
     *)

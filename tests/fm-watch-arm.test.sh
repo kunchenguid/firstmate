@@ -97,7 +97,11 @@ write_remote_delta() {  # <result-path> <status-line>
 status_signature() {  # <status-path>
   local size ident
   size=$(LC_ALL=C wc -c < "$1" | tr -d '[:space:]')
-  if [ "$(uname)" = Darwin ]; then ident=$(stat -f '%d:%i' "$1"); else ident=$(stat -c '%d:%i' "$1"); fi
+  if [ "$(uname)" = Darwin ]; then
+    ident=$(stat -f '%d:%i:%FB' "$1")
+  else
+    ident="$(stat -c '%d:%i' "$1"):$(stat -c '%w' "$1")"
+  fi
   printf '%s@%s' "$size" "$ident"
 }
 

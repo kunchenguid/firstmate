@@ -13,6 +13,9 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
+if ! command -v _fm_open_decisions_file_ident >/dev/null 2>&1; then
+  . "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
+fi
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -1523,15 +1526,10 @@ fm_wake_signal_sig() {  # <file> -> "size:mtime"
   local size ident
   case "$1" in
     *.status)
-      if [ "$_FM_UNAME" = Darwin ]; then
-        size=$(stat -f '%z' "$1" 2>/dev/null) || return 1
-        ident=$(stat -f '%d:%i' "$1" 2>/dev/null) || return 1
-      else
-        size=$(stat -c '%s' "$1" 2>/dev/null) || return 1
-        ident=$(stat -c '%d:%i' "$1" 2>/dev/null) || return 1
-      fi
-      case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ -n "$ident" ] || return 1
+      if [ "$_FM_UNAME" = Darwin ]; then size=$(stat -f '%z' "$1" 2>/dev/null); else size=$(stat -c '%s' "$1" 2>/dev/null); fi
+      case "$size" in ''|*[!0-9]*) printf 'unverifiable'; return 0 ;; esac
+      ident=$(_fm_open_decisions_file_ident "$1") || { printf 'unverifiable'; return 0; }
+      [ -n "$ident" ] || { printf 'unverifiable'; return 0; }
       printf '%s@%s' "$size" "$ident"
       ;;
     *)
@@ -1565,7 +1563,7 @@ fm_wake_signal_seen_size() {  # <state> <file>
     *.status)
       case "$sig" in *@*) size=${sig%%@*}; ident=${sig#*@} ;; *) printf '0'; return 0 ;; esac
       case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
-      if [ "$_FM_UNAME" = Darwin ]; then current=$(stat -f '%d:%i' "$2" 2>/dev/null); else current=$(stat -c '%d:%i' "$2" 2>/dev/null); fi
+      current=$(_fm_open_decisions_file_ident "$2") || { printf '0'; return 0; }
       [ -n "$ident" ] && [ "$ident" = "$current" ] || { printf '0'; return 0; }
       printf '%s' "$size"
       ;;
@@ -1585,6 +1583,13 @@ fm_wake_signal_seen_current() {  # <state> <file>
   sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
   [ "$(cat "$(fm_wake_signal_seen_path "$1" "$2")" 2>/dev/null)" = "$sig" ]
+}
+
+fm_wake_status_seen_commit() {  # <state> <status-file> <captured-end> <captured-identity>
+  local current
+  current=$(_fm_open_decisions_file_ident "$2") || return 1
+  [ -n "$4" ] && [ "$4" = "$current" ] || return 1
+  printf '%s@%s' "$3" "$4" > "$(fm_wake_signal_seen_path "$1" "$2")"
 }
 
 # Guarded self-announced status append - the one dedup primitive for a status
