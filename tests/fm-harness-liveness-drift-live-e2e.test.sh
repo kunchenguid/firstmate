@@ -121,17 +121,21 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=
+  started=0
   for _ in $(seq 1 300); do
     state=$(fm_backend_agent_state tmux "$target")
-    [ "$state" = alive ] && break
+    if [ "$state" = alive ] && fm_backend_agent_started tmux "$target"; then
+      started=1
+      break
+    fi
     sleep 0.2
   done
 
   title=$(fm_backend_tmux_current_command "$target")
   comms=$(fm_backend_tmux_foreground_comms "$target" | tr '\n' ' ')
 
-  [ "$state" = alive ] || fail \
-    "LIVENESS DRIFT: $harness $version is running but classifies '$state', not 'alive'. Supervision and lifecycle control treat this endpoint as unattributable. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/backends/tmux.sh's fm_backend_tmux_classify_process_name the identity this release actually reports."
+  [ "$state" = alive ] && [ "$started" = 1 ] || fail \
+    "LIVENESS DRIFT: $harness $version is running but recovery state is '$state' and replacement-start proof is '$started'. Supervision and lifecycle control treat this endpoint as unattributable. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/backends/tmux.sh's fm_backend_tmux_classify_process_name the identity this release actually reports."
 
   note "$harness $version: title='$title' foreground=[$comms]"
 

@@ -1921,6 +1921,26 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
+# fm_backend_herdr_agent_started: positive replacement-launch proof. Native
+# registration must name a live agent, and process-info must show a foreground
+# process group distinct from the endpoint shell. This rejects a surviving
+# fish, bash, or zsh prompt even when native agent registration is stale.
+fm_backend_herdr_agent_started() {  # <target>
+  local target=$1 info shell_pid foreground_pgid
+  fm_backend_herdr_parse_target "$target" || return 1
+  [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = live ] || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  foreground_pgid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  [ "$foreground_pgid" != "$shell_pid" ]
+}
+
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,

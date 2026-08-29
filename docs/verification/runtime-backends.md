@@ -95,6 +95,15 @@ ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
 # checked 7 installed harness(es)
 ```
 
+The stricter foreground-process replacement-start proof was reverified on 2026-08-29 with the same command against every installed harness on the machine.
+
+```text
+ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
+ok - harness liveness: codex codex-cli 0.146.0 classifies alive
+ok - harness liveness: pi 0.84.4 classifies alive
+# checked 3 installed harness(es)
+```
+
 Installed-wrapper checks:
 
 ```sh

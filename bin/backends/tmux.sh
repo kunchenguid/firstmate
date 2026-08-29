@@ -246,6 +246,29 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+# fm_backend_tmux_agent_started: positive replacement-launch proof from the
+# foreground process group only. Unlike recovery state below, it deliberately
+# ignores pane_current_command: that title can remain agent-shaped over a live
+# shell and must not turn a submitted launch line into relaunch success.
+fm_backend_tmux_agent_started() {  # <target>
+  local target=$1 names name
+  names=$(fm_backend_tmux_foreground_comms "$target")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] && return 0
+  done <<EOF
+$names
+EOF
+  names=$(fm_backend_tmux_foreground_argv0s "$target")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] && return 0
+  done <<EOF
+$names
+EOF
+  return 1
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for

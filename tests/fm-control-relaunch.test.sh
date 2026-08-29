@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. Relaunch success requires a foreground agent, not a surviving shell with
+#      a stale agent-shaped terminal title.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -73,10 +75,16 @@ case "${1:-}" in
       case "$payload" in
         /exit|/quit)
           printf 'zsh' > "$D/command"
+          printf 'zsh' > "$D/foreground"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
         *'encode launch-brief'*)
           cat "$D/becomes" > "$D/command"
+          if [ -n "${FM_FAKE_STALE_LAUNCH_TITLE:-}" ]; then
+            printf 'zsh' > "$D/foreground"
+          else
+            cat "$D/becomes" > "$D/foreground"
+          fi
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
@@ -100,6 +108,7 @@ case "${1:-}" in
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_tty*) printf '/dev/fm-fake\n'; exit 0 ;;
         *pane_current_path*)
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
             : > "$FM_FAKE_CWD_RACE_READY"
@@ -115,6 +124,20 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -t ] && [ "${2:-}" = fm-fake ]; then
+  printf '4242 4242 4242 %s\n' "$(cat "$FM_FAKE_DIR/foreground")"
+  exit 0
+fi
+if [ "${1:-}" = -p ] && [ "${2:-}" = 4242 ] && [ "${3:-}" = -o ] && [ "${4:-}" = args= ]; then
+  cat "$FM_FAKE_DIR/foreground"
+  printf '\n'
+  exit 0
+fi
+exec /bin/ps "$@"
+SH
+  chmod +x "$fb/ps"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -129,6 +152,7 @@ new_case() {
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   printf 'claude' > "$dir/fake/command"
+  printf 'claude' > "$dir/fake/foreground"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   make_tmux_stub "$dir"
@@ -171,6 +195,7 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_STALE_LAUNCH_TITLE="${FM_FAKE_STALE_LAUNCH_TITLE:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -314,14 +339,14 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_EXPORTED="$exported" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
   [ -e "$prepare" ] || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
+    fail "relaunch did not reach trace delivery: $(cat "$dir/control.out")"
   }
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REAL_MV="$(command -v mv)" \
@@ -332,7 +357,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
       --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
   link_pid=$!
   i=0
-  while { [ ! -e "$ready" ] || [ ! -e "$exported" ]; } && [ "$i" -lt 200 ]; do
+  while { [ ! -e "$ready" ] || [ ! -e "$exported" ]; } && [ "$i" -lt 500 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -359,7 +384,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
 }
 
 test_disabled_relaunch_clears_prior_trace_context() {
-  local dir out rc
+  local dir out rc launch
   dir=$(new_case trace-off rl33)
   add_ship_task "$dir" rl33 claude
   printf '%s\n' 'traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
@@ -371,11 +396,24 @@ test_disabled_relaunch_clears_prior_trace_context() {
   expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
-    || fail "disabled relaunch must clear the pane carrier before replacement launch"
+  launch=$(tail -1 "$dir/fake/literal")
+  case "$launch" in
+    'env -u TRACEPARENT '*) ;;
+    *) fail "disabled relaunch must clear the pane carrier with shell-agnostic env -u: $launch" ;;
+  esac
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
-  pass "fm-control relaunch: disabling tracing clears metadata and pane context"
+  if command -v fish >/dev/null 2>&1; then
+    cat > "$dir/fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s' "${TRACEPARENT-unset}" > "$FM_FAKE_DIR/fish-traceparent"
+SH
+    chmod +x "$dir/fakebin/claude"
+    TRACEPARENT=stale PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" fish -c "$launch" >/dev/null 2>&1
+    [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
+      || fail "the real fish launch retained stale TRACEPARENT"
+  fi
+  pass "fm-control relaunch: disabling tracing clears metadata and pane context in fish and POSIX shells"
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
@@ -452,6 +490,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness() {
   dir=$(new_case prefixcontrol rl32)
   add_ship_task "$dir" rl32 grok-2
   printf 'grok-2' > "$dir/fake/command"
+  printf 'grok-2' > "$dir/fake/foreground"
   mkdir -p "$dir/grokhome/hooks/fm-turn-end.d"
   printf 'fm.abcdefabcdef\n' > "$dir/home/state/rl32.grok-turnend-token"
   auth="$dir/grokhome/hooks/fm-turn-end.d/fm.abcdefabcdef"
@@ -479,6 +518,7 @@ test_prefixed_recorded_harness_requires_explicit_replacement() {
   dir=$(new_case prefixrefuse rl34)
   add_ship_task "$dir" rl34 grok-2
   printf 'grok-2' > "$dir/fake/command"
+  printf 'grok-2' > "$dir/fake/foreground"
   meta="$dir/home/state/rl34.meta"
   brief="$dir/home/data/rl34/brief.md"
   cp "$meta" "$dir/meta.before"
@@ -550,6 +590,7 @@ test_prior_harness_turnend_registry_entry_is_cleared() {
   auth="$dir/grokhome/hooks/fm-turn-end.d/fm.abcdefabcdef"
   printf '%s\n' "$dir/home/state/rl9.turn-ended" > "$auth"
   printf 'grok' > "$dir/fake/command"
+  printf 'grok' > "$dir/fake/foreground"
   printf 'grok' > "$dir/fake/becomes"
   run_control "$dir" rl9 relaunch --note "restart on the same runtime" >/dev/null
   [ ! -e "$auth" ] \
@@ -778,6 +819,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   mkdir -p "$dir/home/config"
   printf 'codex\n' > "$dir/home/config/crew-harness"
   printf 'zsh' > "$dir/fake/command"
+  printf 'zsh' > "$dir/fake/foreground"
   out=$(run_spawn "$dir" rl21 --relaunch)
   [ "$(meta_field "$dir" rl21 harness)" = claude ] \
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
@@ -800,6 +842,7 @@ test_prefixed_prior_harness_wiring_is_still_retired() {
   printf '%s\n' "$dir/home/state/rl30.turn-ended" > "$auth"
   printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
   printf 'zsh' > "$dir/fake/command"
+  printf 'zsh' > "$dir/fake/foreground"
   run_spawn "$dir" rl30 --relaunch --harness claude >/dev/null
   [ ! -e "$auth" ] \
     || fail "a prefixed prior harness must still have its turn-end registry entry revoked"
@@ -822,6 +865,7 @@ test_muse_session_binding_is_retired_on_a_harness_switch() {
     > "$dir/home/state/rl31.muse-session"
   printf '/nonexistent/session.jsonl\n' > "$dir/home/state/rl31.muse-session-current"
   printf 'zsh' > "$dir/fake/command"
+  printf 'zsh' > "$dir/fake/foreground"
   run_spawn "$dir" rl31 --relaunch --harness claude >/dev/null
   [ ! -e "$dir/home/state/rl31.muse-session" ] \
     || fail "the retired muse incarnation's session binding must not outlive it"
@@ -837,6 +881,7 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   printf 'workspace=%s\nprior_conversation=old-conversation\n' "$dir/wt" \
     > "$dir/home/state/rl35.cursor-session"
   printf 'zsh' > "$dir/fake/command"
+  printf 'zsh' > "$dir/fake/foreground"
   run_spawn "$dir" rl35 --relaunch --harness claude >/dev/null
   [ ! -e "$dir/home/state/rl35.cursor-session" ] \
     || fail "the retired cursor incarnation's session binding must not outlive it"
@@ -929,6 +974,20 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
   assert_grep "carry this forward" "$dir/home/data/rl13/brief.md" \
     "the progress note must survive so a later recovery still has it"
   pass "fm-control relaunch: a launch failure after the stop keeps the prior record and reports the real state"
+}
+
+test_relaunch_refuses_a_stale_agent_title_over_a_live_shell() {
+  local dir out rc
+  dir=$(new_case false-success rl36)
+  add_ship_task "$dir" rl36 claude
+  out=$(FM_FAKE_STALE_LAUNCH_TITLE=1 \
+    run_control "$dir" rl36 relaunch --note "retry safely"); rc=$?
+  expect_code 1 "$rc" "a shell-only replacement must not count as a successful relaunch"$'\n'"$out"
+  assert_contains "$out" "no running agent could be confirmed" \
+    "the failure must distinguish the live shell from a started replacement agent"
+  [ "$(cat "$dir/fake/foreground")" = zsh ] \
+    || fail "the false-success fixture must leave only the endpoint shell"
+  pass "fm-control relaunch: a stale agent title cannot turn a live shell into launch success"
 }
 
 test_prepublication_failure_keeps_concurrent_durable_metadata() {
@@ -1210,6 +1269,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   dir=$(new_case spawnlock rl26)
   add_ship_task "$dir" rl26 claude
   printf 'zsh' > "$dir/fake/command"
+  printf 'zsh' > "$dir/fake/foreground"
   lock="$dir/home/state/.control-rl26.lock"
   (
     . "$ROOT/bin/fm-wake-lib.sh"
@@ -1278,6 +1338,7 @@ test_spawn_relaunch_refuses_contradicting_flags() {
   dir=$(new_case flags rl16)
   add_ship_task "$dir" rl16 claude
   printf 'zsh' > "$dir/fake/command"
+  printf 'zsh' > "$dir/fake/foreground"
   out=$(run_spawn "$dir" rl16 --relaunch --backend herdr); rc=$?
   expect_code 1 "$rc" "--backend should be refused alongside --relaunch"
   assert_contains "$out" "recorded backend" "the refusal should name the recorded backend rule"
@@ -1305,6 +1366,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   dir=$(new_case wrongcwd rl18)
   add_ship_task "$dir" rl18 claude
   printf 'zsh' > "$dir/fake/command"
+  printf 'zsh' > "$dir/fake/foreground"
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
   out=$(run_spawn "$dir" rl18 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "a pane outside the worktree should refuse"
@@ -1342,6 +1404,7 @@ test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_keeps_the_prior_record_and_reports_it
+test_relaunch_refuses_a_stale_agent_title_over_a_live_shell
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent

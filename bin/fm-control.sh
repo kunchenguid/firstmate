@@ -342,6 +342,28 @@ wait_agent_state() {  # <timeout> <wanted>...
   return 1
 }
 
+wait_replacement_agent() {  # <timeout>
+  local timeout=$1 state elapsed=0 confirmations=0
+  while :; do
+    if fm_backend_agent_started "$BACKEND" "$T"; then
+      confirmations=$((confirmations + 1))
+      if [ "$confirmations" -ge 2 ]; then
+        printf 'alive'
+        return 0
+      fi
+    else
+      confirmations=0
+    fi
+    state=$(agent_state)
+    [ "$state" != alive ] || state=unconfirmed
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "$state"
+  return 1
+}
+
 require_state_verified_backend() {  # <verb>
   fm_control_backend_state_verified "$BACKEND" && return 0
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
@@ -839,7 +861,7 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+  state=$(wait_replacement_agent "$LAUNCH_WAIT") || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1

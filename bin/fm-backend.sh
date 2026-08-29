@@ -895,6 +895,21 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_agent_started: positive proof that a replacement launch produced
+# a harness agent rather than merely leaving its terminal endpoint alive.
+# Recovery state is intentionally conservative against duplicate launches and
+# may accept a stale agent-shaped title; lifecycle success needs this stricter
+# foreground-process proof.
+fm_backend_agent_started() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_agent_started "$target" ;;
+    herdr) fm_backend_herdr_agent_started "$target" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.

@@ -91,7 +91,7 @@ for _ in $(seq 1 100); do
 done
 [ "$SHELL_READY" = true ] || fail "the tmux task shell did not become ready"
 
-tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ ' && clear && printf 'setup-%s\\n' ready" Enter
+tmux send-keys -t "$TARGET" "cd /tmp && clear && printf 'setup-%s\\n' ready" Enter
 wait_for_capture_text "$TARGET" "setup-ready" || fail "the tmux task shell did not complete setup"
 
 fm_backend_tmux_send_text_line "$TARGET" "printf 'captain-on-deck-%s\\n' line" \
@@ -126,7 +126,7 @@ pass "real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter s
 # earliest lines scroll out of a small window) while a large one reaches back
 # far enough to still see the earliest line - the same -S -N bounding fm-peek.sh
 # and fm-watch.sh rely on for a bounded, cheap pane read.
-fm_backend_tmux_send_text_line "$TARGET" "for i in \$(seq 1 80); do echo tag-line-\$i; done"
+fm_backend_tmux_send_text_line "$TARGET" "seq -f 'tag-line-%g' 1 80"
 wait_for_capture_text "$TARGET" "tag-line-80" \
   || fail "the numbered output did not complete before capture"
 small=$(fm_backend_tmux_capture "$TARGET" 3) || fail "fm_backend_tmux_capture (small window) failed"

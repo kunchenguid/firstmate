@@ -153,7 +153,9 @@ assert_sources_disagree() {  # <target> <label>
 new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
-pass "tmux liveness: a harness-named foreground process classifies alive"
+fm_backend_agent_started tmux "$SESSION:agent" \
+  || fail "a running harness-named foreground process must prove replacement start"
+pass "tmux liveness: a harness-named foreground process classifies alive and proves replacement start"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
@@ -239,6 +241,9 @@ kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process is not running, so this case would prove nothing"
 wait_for_state "$SESSION:background" dead \
   || fail "a pane whose only harness-named process is backgrounded must classify dead"
+if fm_backend_agent_started tmux "$SESSION:background"; then
+  fail "a background harness process over a live shell must not prove replacement start"
+fi
 kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process died during the check, so this case proves nothing"
 pass "tmux liveness: a harness-named background process in an idle pane still classifies dead"
