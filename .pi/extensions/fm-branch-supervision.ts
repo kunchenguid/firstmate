@@ -5,8 +5,9 @@
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh) and then
-// merges an append-only note to main's tail. Main's captain/assistant dialog
-// is mirrored into the branch as read-only fm-main-mirror context from Pi's
+// persists a sequence-keyed visible record in main's transcript.
+// Main's captain/assistant dialog is mirrored into the branch as read-only
+// fm-main-mirror context from Pi's
 // before_agent_start prompt and at main's turn_end. Pi-only by construction: this
 // file lives in .pi/extensions, so no
 // other harness ever loads it. Supervision is default-on for every task once
@@ -133,24 +134,20 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
-// Carried inside the captain note's own text because that text is the only
-// part of a custom message Pi gives the model (see mergeIntoMain).
-//
-// The note still needs to identify itself so main cannot mistake an incoming
-// outcome for its own earlier answer and silently lose the outcome. Event
-// ownership forbids a second fleet operation, while the captain-facing verdict
-// requires a visible response and leaves its wording to main.
-const CAPTAIN_OUTCOME_INSTRUCTION =
-  "This is a supervision outcome delivered automatically by the supervision branch. " +
-  "It was not typed by the captain. " +
-  "The fleet event is already handled: do not re-drain, re-run, or acknowledge it. " +
-  "This outcome is captain-facing: give the captain a visible response now. " +
-  "Use your judgment over the wording and how to incorporate it, not whether to surface it. " +
-  "An outcome that directly answers an explicit captain request is captain-facing, regardless of whether it is healthy, routine, measured, actionable, or requires a decision.";
+const VISIBLE_OUTCOME_ANCHOR = "⚓";
+const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
 type LockOwnership = "owned" | "other" | "missing";
+type OutcomeRow = {
+  seq: number;
+  task: string;
+  verdict: Verdict;
+  summary: string;
+  silent: boolean;
+};
+type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
 
 const scriptEnv = {
   ...process.env,
@@ -340,8 +337,35 @@ function writeMirrorCursor(cursor: MirrorCursor): void {
 
 type ReadonlyEntries = {
   getSessionFile(): string | undefined;
-  getEntries(): Array<{ type: string }>;
+  getEntries(): Array<{ type: string; customType?: string; data?: unknown }>;
 };
+
+function parseOutcomeRow(value: unknown): OutcomeRow | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return null;
+  if (typeof row.task !== "string" || !row.task) return null;
+  if (row.verdict !== "routine" && row.verdict !== "captain") return null;
+  if (typeof row.summary !== "string" || !row.summary) return null;
+  if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
+  const silent = row.silent === true;
+  if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
+  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
+}
+
+function parseVisibleOutcomeRecord(value: unknown): VisibleOutcomeRecord | null {
+  if (!value || typeof value !== "object" || (value as { version?: unknown }).version !== 1) return null;
+  const row = parseOutcomeRow(value);
+  return row ? { version: 1, ...row } : null;
+}
+
+function sameOutcome(left: OutcomeRow, right: OutcomeRow): boolean {
+  return left.seq === right.seq &&
+    left.task === right.task &&
+    left.verdict === right.verdict &&
+    left.summary === right.summary &&
+    left.silent === right.silent;
+}
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
 // session replacement boundary, so a replacement extension instance
@@ -593,71 +617,72 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Append-only merge into main. The store row is already durable when this
-  // runs; the note is a cache of it at main's tail. Delivery modes per the
-  // design: routine+idle appends now with no turn, routine+busy appends after
-  // the captain's next prompt, captain-relevant triggers exactly one turn
-  // (queued as a follow-up while main is busy) - that follow-up turn is
-  // itself the captain-visible outcome, so the captain-facing note is
-  // delivered silently (display: false) rather than printed or rendered a
-  // second time; routine notes stay rendered except an explicitly silent
-  // no-change heartbeat. The read cursor advances once the note is handed to
-  // Pi; a crash inside Pi's
-  // own delivery window leaves the outcome durable in the store, where
-  // main's fm_branch_outcomes tool still reads it on demand.
-  //
-  // Pi keeps only `content` when it converts a custom message for the model:
-  // customType, display, and details never reach the provider. A captain note
-  // therefore has to carry its own identity inside `content`, or main receives
-  // an unattributed user message written in main's own captain-facing voice
-  // and cannot tell an incoming outcome from its own earlier answer. When that
-  // happens main can lose the outcome while deciding how to handle it. The
-  // typed operational envelope is what makes the note self-describing; it stays
-  // invisible to the captain because the note is never rendered. The
-  // instruction preserves the event-ownership boundary while requiring the
-  // captain-facing response and leaving its wording to main.
-  //
-  // Encoding shells out, so it can fail on a broken checkout. This file's
-  // failure direction applies: an outcome that cannot be typed is still
-  // delivered, carrying the same instruction as plain text, because an
-  // untyped outcome main can still read beats an outcome the captain never
-  // sees.
-  function captainOutcomeInput(task: string, summary: string): string {
-    const body = `${CAPTAIN_OUTCOME_INSTRUCTION}\n\n${task}: ${summary}`;
-    try {
-      return encodeFirstmateOperationalInput("branch-outcome", body);
-    } catch {
-      return body;
+  // A captain outcome is delivered by a durable, rendered session entry, not
+  // by asking main's model to acknowledge a hidden custom message. The store
+  // sequence is the idempotency key: a reload after appendEntry but before
+  // mark-read finds the same record and advances the cursor without appending
+  // a duplicate. A conflicting record for one sequence fails closed.
+  function ensureVisibleCaptainOutcome(row: OutcomeRow): boolean {
+    if (!currentMainSession || row.verdict !== "captain") return false;
+    let matching = false;
+    for (const entry of currentMainSession.getEntries()) {
+      if (entry.type !== "custom" || entry.customType !== VISIBLE_OUTCOME_ENTRY_TYPE) continue;
+      const entrySeq = entry.data && typeof entry.data === "object"
+        ? (entry.data as { seq?: unknown }).seq
+        : undefined;
+      if (entrySeq !== row.seq) continue;
+      const recorded = parseVisibleOutcomeRecord(entry.data);
+      if (!recorded || !sameOutcome(recorded, row)) return false;
+      matching = true;
     }
+    if (matching) return true;
+    const record: VisibleOutcomeRecord = { version: 1, ...row };
+    try {
+      pi.appendEntry(VISIBLE_OUTCOME_ENTRY_TYPE, record);
+    } catch {
+      return false;
+    }
+    return currentMainSession.getEntries().some((entry) => {
+      if (entry.type !== "custom" || entry.customType !== VISIBLE_OUTCOME_ENTRY_TYPE) return false;
+      const recorded = parseVisibleOutcomeRecord(entry.data);
+      return recorded !== null && sameOutcome(recorded, row);
+    });
   }
 
-  function mergeIntoMain(
-    expectedGeneration: number,
-    seq: string,
-    task: string,
-    verdict: Verdict,
-    summary: string,
-    silent: boolean,
-  ): boolean {
-    if (!actingAsOwner(expectedGeneration)) return false;
-    if (verdict === "captain") {
-      const message = {
-        customType: "fm-branch-merge",
-        content: captainOutcomeInput(task, summary),
-        display: false,
-      };
-      pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
-    } else {
-      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
-      if (mainStreaming) {
-        pi.sendMessage(message, { deliverAs: "nextTurn" });
-      } else {
-        pi.sendMessage(message, {});
+  function deliverRoutineOutcome(row: OutcomeRow): void {
+    const message = {
+      customType: "fm-branch-merge",
+      content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
+      display: !(row.task === "fleet" && row.silent),
+    };
+    if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
+    else pi.sendMessage(message, {});
+  }
+
+  // Reconcile in sequence order so the cursor can never cross a captain row
+  // whose visible entry is absent. This is also the reload/crash recovery
+  // path and runs before new branch work is accepted.
+  function reconcileUnreadOutcomes(expectedGeneration: number): boolean {
+    if (!generationOwnsLock(expectedGeneration)) return false;
+    const unread = runOutcomeScript(["unread"]);
+    if (!unread.ok) return false;
+    if (!unread.stdout) return true;
+    if (!currentMainSession) return false;
+    for (const line of unread.stdout.split("\n")) {
+      let row: OutcomeRow | null = null;
+      try {
+        row = parseOutcomeRow(JSON.parse(line));
+      } catch {
+        row = null;
       }
-    }
-    if (/^[0-9]+$/.test(seq)) {
-      if (!actingAsOwner(expectedGeneration)) return false;
-      return runOutcomeScript(["mark-read", "--through", seq]).ok;
+      if (!row || !generationOwnsLock(expectedGeneration)) return false;
+      if (row.verdict === "captain") {
+        if (!ensureVisibleCaptainOutcome(row)) return false;
+      } else {
+        deliverRoutineOutcome(row);
+      }
+      if (!generationOwnsLock(expectedGeneration)) return false;
+      if (!runOutcomeScript(["mark-read", "--through", String(row.seq)]).ok) return false;
     }
     return true;
   }
@@ -667,7 +692,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry without a model turn; routine notes render unless silent marks a no-change heartbeat.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -714,15 +739,16 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent)) {
+        const seq = Number(appended.stdout);
+        if (!Number.isSafeInteger(seq) || seq < 1 || !reconcileUnreadOutcomes(toolGeneration)) {
           return {
-            content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
+            content: [{ type: "text", text: `recorded seq ${appended.stdout}, but visible delivery or cursor advancement failed` }],
             details: undefined,
             isError: true,
           };
         }
         return {
-          content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
+          content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}] into main` }],
           details: undefined,
         };
       },
@@ -1016,6 +1042,10 @@ ${context.command}
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
+    if (!reconcileUnreadOutcomes(generation)) {
+      branchBroken = "could not reconcile unread supervision outcomes into main";
+      return;
+    }
     if (!collectCurrentMainDialog()) return;
     offer.accept();
     enqueueWake(offer.message, generation);
@@ -1075,7 +1105,9 @@ ${context.command}
     shuttingDown = false;
     branchBroken = "";
     generation += 1;
-    actingAsOwner(generation);
+    if (actingAsOwner(generation) && !reconcileUnreadOutcomes(generation)) {
+      branchBroken = "could not reconcile unread supervision outcomes into main";
+    }
   });
 
   // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is
@@ -1518,9 +1550,22 @@ ${context.command}
     },
   });
 
-  // Pi only calls this renderer for a message with display: true, which
-  // mergeIntoMain sets for every routine note except an explicitly silent
-  // fleet heartbeat; captain-facing notes are never printed or rendered here.
+  // Captain outcomes are transcript entries rather than model messages. Their
+  // payload is the durable store row plus a schema version, and the renderer
+  // displays the exact stored summary without asking a model to paraphrase or
+  // acknowledge it.
+  pi.registerEntryRenderer?.(VISIBLE_OUTCOME_ENTRY_TYPE, (entry, _options, theme) => {
+    const record = parseVisibleOutcomeRecord(entry.data);
+    if (!record || record.verdict !== "captain") return undefined;
+    return new Text(
+      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` ${record.task}: ${record.summary}`)}`,
+      1,
+      0,
+    );
+  });
+
+  // Pi only calls this renderer for a message with display: true, which every
+  // routine note uses except an explicitly silent fleet heartbeat.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);

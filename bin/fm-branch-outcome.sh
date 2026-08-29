@@ -13,15 +13,14 @@
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
-#     Pi as an append-only merge note, emitted by the locked session-start
-#     replay, or silently consumed there because `silent` is true. Records
-#     above the cursor are "unread": the branch stored them but
-#     did not reach either handoff. A crash inside Pi's delivery window after
-#     cursor advancement does not auto-replay the row; it remains durable and
-#     available through the main session's fm_branch_outcomes tool.
+#     Pi as a routine merge note, persisted as a sequence-keyed visible captain
+#     entry, emitted by the locked session-start replay, or silently consumed
+#     there because `silent` is true. Records above the cursor are unread.
+#     A captain row advances only after its matching visible entry exists in
+#     Pi's session, so reload recovery is idempotent across that crash window.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
-#   - The store is written BEFORE the merge note is appended to main
+#   - The store is written BEFORE the outcome is delivered to main
 #     (store-first durability): nothing about a handled event depends on
 #     conversation memory.
 #
@@ -36,11 +35,13 @@
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
-#     Session-start recovery: print visible unread records under a labeled
-#     header into the locked startup digest, skip rows whose `silent` field is
-#     true, and mark every unread row read. Prints nothing when nothing visible
-#     is unread, so a home that never ran the branch stays silent. Run it only
-#     when the session holds the lock (fm-session-start.sh owns the call site).
+#     Session-start recovery: print the leading routine unread records under a
+#     labeled header into the locked startup digest, skip rows whose `silent`
+#     field is true, and mark those leading routine rows read. Stop before the
+#     first captain row because only Pi's sequence-keyed visible entry may
+#     acknowledge that row. Prints nothing when nothing replayable is unread.
+#     Run it only when the session holds the lock (fm-session-start.sh owns the
+#     call site).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -189,12 +190,17 @@ case "$CMD" in
     fm_lock_acquire_wait "$LOCK"
     UNREAD=$(print_unread)
     if [ -n "$UNREAD" ]; then
-      VISIBLE=$(printf '%s\n' "$UNREAD" | jq -c 'select(.silent != true)')
+      REPLAYABLE=$(printf '%s\n' "$UNREAD" | jq -sc '
+        map(.verdict) as $verdicts
+        | ($verdicts | index("captain")) as $captain
+        | .[0:($captain // length)][]
+      ')
+      VISIBLE=$(printf '%s\n' "$REPLAYABLE" | jq -c 'select(.silent != true)')
       if [ -n "$VISIBLE" ]; then
         printf 'BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):\n'
         printf '%s\n' "$VISIBLE"
       fi
-      LAST=$(record_seq "$(printf '%s\n' "$UNREAD" | tail -n 1)")
+      LAST=$(record_seq "$(printf '%s\n' "$REPLAYABLE" | tail -n 1)")
       [ -z "$LAST" ] || advance_cursor "$LAST"
     fi
     fm_lock_release "$LOCK"

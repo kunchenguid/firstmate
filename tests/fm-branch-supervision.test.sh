@@ -92,13 +92,18 @@ PY
   esac
   [ "$(cat "$store")" = "$snapshot" ] || fail "mark-read rewrote the append-only store"
 
-  # startup-replay surfaces the unread remainder once, then goes silent, and
-  # later appends land strictly after the earlier bytes (append-only merge).
+  # startup-replay must stop before an unread captain row. Only Pi's durable
+  # visible entry may acknowledge it, so the cursor cannot skip past it.
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "startup-replay failed"
-  assert_contains "$replay" "BRANCH OUTCOMES" "replay lost its section header"
-  assert_contains "$replay" "https://example.com/pr/2" "replay lost the unread outcome"
-  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay)" ] \
-    || fail "startup-replay re-presented already-read outcomes"
+  [ -z "$replay" ] || fail "startup-replay printed a captain row before Pi persisted its visible entry"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
+    "https://example.com/pr/2" "startup-replay advanced past an unrendered captain row"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] \
+    || fail "startup-replay moved the cursor across the captain row"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 \
+    || fail "synthetic Pi acknowledgement failed"
+
+  # Later appends land strictly after the earlier bytes (append-only merge).
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-3 --verdict routine --summary 'later outcome' >/dev/null || fail "third append failed"
   case "$(cat "$store")" in
@@ -142,6 +147,29 @@ test_outcome_startup_replay_preserves_silence() {
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the legacy row read"
   pass "startup replay skips silent outcomes and preserves visible and legacy rows"
+}
+
+test_outcome_startup_replay_stops_at_captain_barrier() {
+  local home replay unread
+  home="$TMP_ROOT/store-captain-barrier-home"
+  mkdir -p "$home/state"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'leading routine' >/dev/null || fail "leading append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'captain must render in Pi' >/dev/null || fail "captain append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict routine --summary 'routine behind captain' >/dev/null || fail "trailing append failed"
+
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "barrier replay failed"
+  assert_contains "$replay" "leading routine" "startup replay lost the leading routine row"
+  assert_not_contains "$replay" "captain must render in Pi" "startup replay rendered the captain row"
+  assert_not_contains "$replay" "routine behind captain" "startup replay crossed the captain barrier"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "cursor crossed the captain barrier"
+  unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "barrier unread failed"
+  assert_contains "$unread" '"seq":2' "captain row did not remain unread"
+  assert_contains "$unread" '"seq":3' "row behind captain did not remain unread"
+  pass "startup replay cannot advance the cursor across an unrendered captain outcome"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -539,6 +567,7 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
+test_outcome_startup_replay_stops_at_captain_barrier
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

@@ -1375,7 +1375,7 @@ EOF
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
 
-test_branch_outcome_replay_and_lease_sweep() {
+test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep() {
   local rec root home fakebin out
   rec=$(new_world branch-recovery)
   IFS='|' read -r root home fakebin <<EOF
@@ -1384,9 +1384,12 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_harness "$fakebin" pi
 
-  # A crash window the locked start must close: the supervision branch stored
-  # an outcome durably that never reached main, plus one lease whose
+  # A crash window the locked start must preserve: the supervision branch
+  # stored a leading routine row and a captain row that never reached Pi, plus one lease whose
   # supervising process died and one still held by a live process.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'worker recovered automatically' >/dev/null \
+    || fail "could not seed the unread routine branch outcome"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-b --verdict captain --summary 'PR https://example.com/pr/b checks green' >/dev/null \
     || fail "could not seed the unread branch outcome"
@@ -1396,18 +1399,24 @@ EOF
 
   out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):" \
-    "locked start did not replay the unread branch outcome"
-  assert_contains "$out" "https://example.com/pr/b" "replayed outcome lost its content"
+    "locked start did not replay the leading routine branch outcome"
+  assert_contains "$out" "worker recovered automatically" "replayed routine outcome lost its content"
+  assert_not_contains "$out" "https://example.com/pr/b" "locked start crossed the captain delivery barrier"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
+    "https://example.com/pr/b" "locked start marked the unrendered captain outcome read"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "locked start advanced past the captain row"
   [ ! -e "$home/state/.lease-task-dead" ] || fail "locked start left a provably dead lease in place"
   [ -e "$home/state/.lease-task-live" ] || fail "locked start swept a live lease"
 
-  # Replay is one-shot: presenting the digest is the delivery, so the next
-  # locked start stays silent about the same outcome.
+  # Routine replay is one-shot, while the captain row remains held for Pi's
+  # sequence-keyed visible-entry reconciliation.
   out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   case "$out" in
     *"BRANCH OUTCOMES"*) fail "second start re-presented already-replayed branch outcomes" ;;
   esac
-  pass "locked Pi session start replays unread branch outcomes once and sweeps only dead leases"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
+    "https://example.com/pr/b" "second start consumed the captain row without a Pi entry"
+  pass "locked Pi session start replays leading routine outcomes, preserves the captain barrier, and sweeps only dead leases"
 }
 
 test_non_pi_session_start_leaves_branch_state_untouched() {
@@ -2486,7 +2495,7 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
-test_branch_outcome_replay_and_lease_sweep
+test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
