@@ -131,6 +131,7 @@ const offer = {
   projects: [approvedProject],
   heartbeat: false,
   eligible: true,
+  preflightedSeqs: ["1"],
   accepted: false,
   accept() {
     offer.accepted = true;
@@ -179,6 +180,7 @@ const pinOffer = {
   projects: [approvedProject],
   heartbeat: false,
   eligible: true,
+  preflightedSeqs: ["2"],
   accepted: false,
   accept() {
     pinOffer.accepted = true;

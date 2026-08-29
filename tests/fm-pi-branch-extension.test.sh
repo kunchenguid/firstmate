@@ -520,6 +520,7 @@ function makeOffer(message, projects = [approvedProject], heartbeat = false, eli
     projects,
     heartbeat,
     eligible,
+    preflightedSeqs: ["1"],
     accepted: false,
     accept() {
       offer.accepted = true;
@@ -1370,6 +1371,57 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "pre-drain eligibility re-check must exclude only the new main-owned row: $out"
   pass "pre-drain eligibility re-check excludes a newly main-owned row without deferring eligible work"
+}
+
+test_branch_grant_excludes_task_row_arriving_after_preflight() {
+  local repo home out status
+  repo="$TMP_ROOT/preflight-sequence-root"
+  home="$TMP_ROOT/preflight-sequence-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home, realRoot }; })()`);
+const { dispatch, settle, home, realRoot } = globalThis.__t;
+import { appendFileSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+globalThis.__fmOnBranchPrompt = async () => {
+  const env = {
+    ...process.env,
+    FM_HOME: home,
+    FM_STATE_OVERRIDE: `${home}/state`,
+    FM_ROOT_OVERRIDE: realRoot,
+    FM_SUPERVISION_ACTOR: "branch",
+  };
+  const drained = spawnSync("bash", [`${realRoot}/bin/fm-wake-drain.sh`], { encoding: "utf8", env });
+  if (drained.status !== 0) throw new Error(`branch drain failed: ${drained.stderr}`);
+  const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
+  if (!ack) throw new Error(`branch drain omitted acknowledgement: ${drained.stderr}`);
+  const acknowledged = spawnSync(
+    "bash",
+    [`${realRoot}/bin/fm-wake-drain.sh`, "--ack-through", ack[1], "--recovery-generation", ack[2]],
+    { encoding: "utf8", env },
+  );
+  if (acknowledged.status !== 0) throw new Error(`branch acknowledgement failed: ${acknowledged.stderr}`);
+};
+
+const offer = dispatch("signal: preflighted task wake");
+if (!offer.accepted) throw new Error("preflighted task wake was not accepted");
+appendFileSync(`${home}/state/.wake-queue`, "2\t2\tsignal\tbranch-driver.status\tsignal: later task wake\n");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "sequence-bound branch prompt");
+await settle(() => !readFileSync(`${home}/state/.wake-queue`, "utf8").includes("\t1\tsignal\t"), "preflighted row acknowledgement");
+const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
+if (!queue.includes("\t2\tsignal\tbranch-driver.status\t")) {
+  throw new Error(`task row arriving after preflight was consumed by the earlier grant: ${queue}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "branch grants must consume only exact preflighted sequence ids: $out"
+  pass "branch grant leaves a later task row queued for its own continuation preflight"
 }
 
 test_settled_branch_prompt_releases_unacknowledged_grant() {
@@ -2494,6 +2546,53 @@ EOF
   pass "replacement activation cleans old branch leases and retries failed cleanup"
 }
 
+test_settled_branch_turn_cleans_omitted_lease_release() {
+  local repo home out status
+  repo="$TMP_ROOT/turn-lease-cleanup-root"
+  home="$TMP_ROOT/turn-lease-cleanup-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home, realRoot }; })()`);
+const { dispatch, settle, home, realRoot } = globalThis.__t;
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+globalThis.__fmOnBranchPrompt = async () => {
+  if (globalThis.__fmTurnLeaseClaimed) return;
+  const claimed = spawnSync("bash", [`${realRoot}/bin/fm-lease.sh`, "claim", "task-turn", "--actor", "branch"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      FM_HOME: home,
+      FM_STATE_OVERRIDE: `${home}/state`,
+      FM_ROOT_OVERRIDE: realRoot,
+      FM_SUPERVISION_ACTOR: "branch",
+      FM_LEASE_HOLDER_PID: String(process.pid),
+    },
+  });
+  if (claimed.status !== 0) throw new Error(`branch lease claim failed: ${claimed.stderr}`);
+  if (!existsSync(`${home}/state/.lease-task-turn`)) throw new Error("branch turn did not hold its claimed lease");
+  globalThis.__fmTurnLeaseClaimed = true;
+};
+
+if (!dispatch("signal: branch lease cleanup").accepted) throw new Error("lease-cleanup wake was not accepted");
+await settle(() => globalThis.__fmTurnLeaseClaimed === true, "branch turn lease claim");
+await settle(() => !existsSync(`${home}/state/.lease-task-turn`), "settled branch turn lease cleanup");
+if (!dispatch("signal: wake after omitted release").accepted) {
+  throw new Error("a later wake was blocked after runtime lease cleanup");
+}
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "wake after runtime lease cleanup");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "settled branch turns must clean leases omitted by the model: $out"
+  pass "settled branch turns clean omitted lease releases before later wakes"
+}
+
 test_cold_start_activates_after_lock_acquisition() {
   local repo home out status
   repo="$TMP_ROOT/coldstart-root"
@@ -2739,6 +2838,7 @@ const offer = {
   projects: [`${home}/projects/approved`],
   heartbeat: false,
   eligible: true,
+  preflightedSeqs: ["1"],
   accepted: false,
   accept() {
     offer.accepted = true;
@@ -3160,6 +3260,7 @@ test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
+test_branch_grant_excludes_task_row_arriving_after_preflight
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_main_owned_grant_result_falls_back_to_main
 test_branch_predrain_recheck_noops_already_drained_wake
@@ -3175,6 +3276,7 @@ test_unpinned_branch_follows_main_effort_changes_live
 test_supervision_model_command_picks_effort_after_the_model
 test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure
+test_settled_branch_turn_cleans_omitted_lease_release
 test_cold_start_activates_after_lock_acquisition
 test_queued_actions_recheck_lock_ownership
 test_stale_generation_boundaries_are_side_effect_free

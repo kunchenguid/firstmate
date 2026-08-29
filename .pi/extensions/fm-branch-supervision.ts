@@ -161,7 +161,10 @@ const scriptEnv = {
 };
 
 function offerEligible(offer: BranchDispatchOffer): boolean {
-  return offer.eligible === true;
+  return offer.eligible === true
+    && Array.isArray(offer.preflightedSeqs)
+    && offer.preflightedSeqs.length > 0
+    && offer.preflightedSeqs.every((seq) => /^[0-9]+$/.test(seq));
 }
 
 function afkActive(): boolean {
@@ -538,9 +541,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // A replaced branch conversation must not leave its per-task leases behind
-  // (the session-lock holder pid is still alive, so the sweep alone would
-  // keep them). One bulk release per generation, at activation.
+  // Branch leases are operation-scoped even though their liveness pid is the
+  // Pi process: activation clears replacement residue, and every settled
+  // branch turn clears anything its model did not release itself.
   function releaseBranchLeases(expectedGeneration: number): boolean {
     if (!generationOwnsLock(expectedGeneration)) return false;
     try {
@@ -908,7 +911,7 @@ ${context.command}
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number): void {
+  function enqueueWake(message: string, acceptedGeneration: number, preflightedSeqs: readonly string[]): void {
     branchChain = branchChain
       .then(async () => {
         if (shuttingDown || acceptedGeneration !== generation) {
@@ -919,7 +922,7 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        const scope = scopeForUnreadWake(state, heartbeat);
+        const scope = scopeForUnreadWake(state, heartbeat, preflightedSeqs);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
@@ -943,11 +946,15 @@ ${context.command}
         );
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
-        // A row can still arrive between this re-check and the model starting
-        // the drain; that residual is accepted by the confused-agent-grade boundary.
-        await session.prompt(
-          `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
-        );
+        try {
+          await session.prompt(
+            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
+          );
+        } finally {
+          if (generationOwnsLock(acceptedGeneration) && !releaseBranchLeases(acceptedGeneration)) {
+            throw new Error("could not release the branch turn's supervision leases");
+          }
+        }
         if (!releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }
@@ -1018,7 +1025,7 @@ ${context.command}
     if (branchBroken) return; // fail back to today's wake-to-main path
     if (!collectCurrentMainDialog()) return;
     offer.accept();
-    enqueueWake(offer.message, generation);
+    enqueueWake(offer.message, generation, [...offer.preflightedSeqs]);
   });
 
   pi.on?.("before_agent_start", (event, ctx) => {

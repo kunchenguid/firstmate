@@ -18,7 +18,7 @@ import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   createBranchDispatchOffer,
-  deliveryTasksForUnreadWake,
+  deliveryPreflightForUnreadWake,
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
@@ -299,7 +299,7 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
-  function offerWakeToBranch(message: string): boolean {
+  function offerWakeToBranch(message: string, preflightedSeqs: readonly string[]): boolean {
     const heartbeat = /^heartbeat($|:)/.test(message);
     // A check-kind close (merge-confirmation polls, Relay mentions,
     // credential/auth failures, and every other legitimately main-only
@@ -311,20 +311,21 @@ export default function (pi: ExtensionAPI) {
     // signal/stale row still reach the branch on this cycle; it must never
     // also let a check-kind trigger itself slip past main's delivery.
     const isCheckTrigger = /^check:/.test(message);
-    const scope = scopeForUnreadWake(state, heartbeat);
+    const scope = scopeForUnreadWake(state, heartbeat, preflightedSeqs);
     const eligible = !isCheckTrigger && scope.eligible;
-    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible, preflightedSeqs);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted;
   }
 
-  function runDeliveryContinuations(): string[] {
+  function runDeliveryContinuations(): { results: string[]; seqs: string[] } {
     let lockPid = "";
     const results: string[] = [];
+    const preflight = deliveryPreflightForUnreadWake(state);
     try {
       lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
     } catch {}
-    for (const task of deliveryTasksForUnreadWake(state)) {
+    for (const task of preflight.tasks) {
       const result = spawnSync("bash", [deliveryContinueScript, task], {
         cwd: fmRoot,
         encoding: "utf8",
@@ -347,7 +348,7 @@ export default function (pi: ExtensionAPI) {
       }
       results.push(line);
     }
-    return results;
+    return { results, seqs: preflight.seqs };
   }
 
   async function deliverActionableWake(
@@ -369,10 +370,13 @@ export default function (pi: ExtensionAPI) {
       }
     }
     let continuationResults: string[] = [];
+    let preflightedSeqs: string[] = [];
     let continuationAttempt = 0;
     while (generationIsLive(owner)) {
       try {
-        continuationResults = runDeliveryContinuations();
+        const preflight = runDeliveryContinuations();
+        continuationResults = preflight.results;
+        preflightedSeqs = preflight.seqs;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         await sendWake(owner, `${message}\n\nwatcher: FAILED - ${detail}`);
@@ -386,7 +390,7 @@ export default function (pi: ExtensionAPI) {
     const handlingMessage = continuationResults.length > 0
       ? `${message}\n\nDeterministic delivery continuation preflight:\n${continuationResults.join("\n")}`
       : message;
-    if (!repairFailed && offerWakeToBranch(handlingMessage)) return;
+    if (!repairFailed && offerWakeToBranch(handlingMessage, preflightedSeqs)) return;
     await sendWake(owner, handlingMessage);
   }
 

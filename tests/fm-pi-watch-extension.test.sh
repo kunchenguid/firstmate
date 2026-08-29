@@ -488,7 +488,7 @@ async function runScenario(withAcceptor) {
       if (!readFileSync(process.env.FM_DELIVERY_LOG, "utf8").includes("delivery=branch-offer")) {
         throw new Error("branch offer arrived before the common delivery continuation preflight");
       }
-      offers.push({ message: offer.message, projects: offer.projects });
+      offers.push({ message: offer.message, projects: offer.projects, preflightedSeqs: offer.preflightedSeqs });
       offer.accept();
     });
   }
@@ -533,6 +533,9 @@ if (accepted.rows.filter((row) => row === "delivery=branch-offer").length !== 2)
 }
 if (JSON.stringify(accepted.offers[0].projects) !== JSON.stringify(["/projects/approved"])) {
   throw new Error(`offer did not carry the queued task project: ${JSON.stringify(accepted.offers[0].projects)}`);
+}
+if (JSON.stringify(accepted.offers[0].preflightedSeqs) !== JSON.stringify(["1"])) {
+  throw new Error(`offer was not bound to its preflighted queue row: ${JSON.stringify(accepted.offers[0].preflightedSeqs)}`);
 }
 if (accepted.mainPrompt !== "") throw new Error(`accepted offer still reached main: ${accepted.mainPrompt}`);
 if (!accepted.rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {

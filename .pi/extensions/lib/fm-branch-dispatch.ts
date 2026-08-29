@@ -102,7 +102,11 @@ function readTaskMetadata(state: string): TaskMetadata {
 // this repo's fm_wake_append could never have produced (an unknown kind, or a
 // line that fails the structural tab-field check) also still vetoes the whole
 // scan - that is queue corruption, not an everyday mixed queue.
-export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
+export function scopeForUnreadWake(
+  state: string,
+  heartbeat: boolean,
+  allowedSeqs?: readonly string[],
+): UnreadWakeScope {
   let queue = "";
   try {
     queue = readFileSync(`${state}/.wake-queue`, "utf8");
@@ -112,6 +116,11 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
   const rows = queue.split(/\r?\n/).filter((line) => line.length > 0);
   if (rows.length === 0) return EMPTY_SCOPE;
+
+  const allowed = allowedSeqs === undefined ? null : new Set(allowedSeqs);
+  if (allowed && (allowed.size !== allowedSeqs.length || allowedSeqs.some((seq) => !/^[0-9]+$/.test(seq)))) {
+    return UNSAFE_SCOPE;
+  }
 
   const projects = new Set<string>();
   let metadata: TaskMetadata;
@@ -124,8 +133,10 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const eligibleSeqs: string[] = [];
   for (const line of rows) {
     const fields = line.split("\t");
-    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
+    if (!/^[0-9]+$/.test(fields[1] ?? "")) return UNSAFE_SCOPE;
     const seq = fields[1];
+    if (allowed && !allowed.has(seq)) continue;
+    if (fields.length < 5) return UNSAFE_SCOPE;
     const kind = fields[2];
     const key = fields[3];
     if (kind === "heartbeat") {
@@ -241,19 +252,28 @@ export interface BranchDispatchOffer {
   heartbeat: boolean;
   /** True only when at least one currently unread row is safe for branch handling. */
   eligible: boolean;
+  /** Exact queue rows covered by the common delivery-continuation preflight. */
+  preflightedSeqs: readonly string[];
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
   accept(): void;
 }
 
-export function deliveryTasksForUnreadWake(state: string): string[] {
+export type DeliveryPreflightScope = {
+  seqs: string[];
+  tasks: string[];
+};
+
+export function deliveryPreflightForUnreadWake(state: string): DeliveryPreflightScope {
   const queue = readFileSync(`${state}/.wake-queue`, "utf8");
   const metadata = readTaskMetadata(state);
+  const seqs: string[] = [];
   const tasks = new Set<string>();
   for (const row of queue.split(/\r?\n/)) {
     if (!row) continue;
     const fields = row.split("\t");
     if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) throw new Error("the unread wake queue is malformed");
+    seqs.push(fields[1]);
     if (fields[2] === "signal") {
       const task = fields[3].replace(/\.(?:status|turn-ended)$/, "");
       if (!/^[A-Za-z0-9._-]+$/.test(task)) throw new Error("the unread signal task identity is malformed");
@@ -265,7 +285,11 @@ export function deliveryTasksForUnreadWake(state: string): string[] {
       tasks.add(task);
     }
   }
-  return [...tasks].sort();
+  return { seqs, tasks: [...tasks].sort() };
+}
+
+export function deliveryTasksForUnreadWake(state: string): string[] {
+  return deliveryPreflightForUnreadWake(state).tasks;
 }
 
 export function createBranchDispatchOffer(
@@ -273,12 +297,14 @@ export function createBranchDispatchOffer(
   projects: readonly string[] = [],
   heartbeat = false,
   eligible = false,
+  preflightedSeqs: readonly string[] = [],
 ): BranchDispatchOffer {
   const offer: BranchDispatchOffer = {
     message,
     projects: [...projects],
     heartbeat,
     eligible,
+    preflightedSeqs: [...preflightedSeqs],
     accepted: false,
     accept() {
       offer.accepted = true;
