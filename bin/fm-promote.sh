@@ -137,7 +137,7 @@ Your scout task has been promoted to a ship task, mode=$MODE. Your window, workt
 2. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
 3. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 4. If you reproduced a bug, turn that reproduction into a regression test.
-5. Everything else in your original instructions still applies - the same status protocol, the same steering inbox, and the same escalation rules.
+5. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; the worktree isolation assertion; and every safety rule.
 
 EOF
   fm_dod_block "$MODE" "$ID"

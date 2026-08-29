@@ -298,8 +298,14 @@ STUB
   assert_grep "It is banned fleet-wide" "$payload" \
     "promoted no-mistakes worker did not receive the fleet-wide ban wording"
 
+  payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"
+  assert_grep "supersede the scout delivery rules and report-based Definition of done" "$payload" \
+    "promoted worker retained the scout delivery contract"
+  assert_grep "status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; the worktree isolation assertion; and every safety rule" "$payload" \
+    "promoted worker lost the scout protocols and safety rules that still apply"
+
   # The faster paths keep their own contracts rather than inheriting the pipeline's.
-  assert_grep "Do NOT run /no-mistakes" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
+  assert_grep "Do NOT run /no-mistakes" "$payload" \
     "promoted direct-PR worker lost its no-pipeline contract"
   assert_grep "Do NOT push, do NOT open a PR, do NOT merge" "$TMP_ROOT/promote-dod/payload-promote-dod-local-only" \
     "promoted local-only worker lost its no-remote contract"
