@@ -68,7 +68,12 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # These fixtures model a LIVE worker's pane. The doorbell's live-agent gate
+    # reads this inventory, so an empty answer here would describe a retired
+    # endpoint and correctly refuse the ring.
+    printf '%s\n' ${FM_FAKE_TMUX_WINDOWS:-fm-t1 fm-t2 fm-t3 fm-t4 fm-t5 fm-t6 fm-t7 fm-t8 fm-t9}
+    exit 0 ;;
 esac
 exit 0
 SH

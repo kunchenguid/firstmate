@@ -642,7 +642,16 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # Fully faked tmux, so the modelled inventory is whatever this fixture's own
+    # records claim: an endpoint a meta names is present. The doorbell's
+    # live-agent gate reads this, and an empty answer would describe every
+    # recorded endpoint as retired and refuse each ring.
+    for m in "${FM_HOME:-}"/state/*.meta; do
+      [ -f "$m" ] || continue
+      sed -n 's/^window=[^:]*://p' "$m"
+    done
+    exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
