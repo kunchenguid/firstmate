@@ -92,6 +92,8 @@ make_fake_root() {
   # .env.local is the copy firstmate seeded. Inert in this fixture, whose
   # worktree does not exist, but a real sibling teardown requires.
   ln -s "$ROOT/bin/fm-env-local-lib.sh" "$fake/bin/fm-env-local-lib.sh"
+  ln -s "$ROOT/bin/fm-remote-job-reap-orphans.sh" "$fake/bin/fm-remote-job-reap-orphans.sh"
+  ln -s "$ROOT/bin/fm-remote-job-lib.sh" "$fake/bin/fm-remote-job-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
