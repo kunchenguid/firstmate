@@ -182,6 +182,7 @@ test_status_read_failure_surfaces_without_advancing_seen() {
   key=$(printf '%s' read-r1 | tr ':/.' '___')
   printf '3' > "$state/.subsuper-seen-status-$key"
   (
+    last_status_line() { return 0; }
     _fm_status_read_span() { return 1; }
     FM_ESCALATE_BATCH_SECS=999 handle_wake "signal: $state/read-r1.status" "$state"
   )

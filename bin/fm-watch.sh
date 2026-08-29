@@ -1404,7 +1404,9 @@ EOF
     FM_SIGNAL_SURFACE_ENDPOINTS=''
     FM_SIGNAL_CLASSIFY_ERROR=0
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_files_actionable $files || ! signal_crew_provably_working $files; then
+    signal_files_actionable $files
+    signal_actionable=$?
+    if afk_present || [ "$signal_actionable" -eq 0 ] || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1

@@ -345,14 +345,6 @@ classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last event record endpoint rc distilled="" rel="" seen_rel="" task
   for f in $reason; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
-    # What the captain must hear is read over the bytes appended since this task
-    # was last escalated, never over the last line alone: away mode is exactly
-    # where a routine `working:` append landing after a `blocked:` must not
-    # decide there is nothing to hear. fm-classify-lib.sh owns that span rule,
-    # and the digest quotes the EVENT it found rather than whatever line happens
-    # to sit last, so a masked decision is not escalated under a routine summary.
     task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" \
       "$(status_seen_offset "$state" "$task")")
@@ -373,6 +365,8 @@ classify_signal() {  # <reason-after-colon> <state>
       rel=1
       continue
     fi
+    last=$(last_status_line "$f")
+    [ -n "$last" ] || continue
     distilled="${distilled}$(basename "$f"): ${last} | "
     # Nothing captain-relevant is left ahead of the recorded offset. When the log
     # nonetheless ends on a captain-relevant line, this signal is a re-notification

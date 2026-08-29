@@ -2927,6 +2927,22 @@ test_beacon_stays_fresh_while_absorbing() {
 
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
+test_afk_signal_records_heartbeat_endpoint() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case afk-heartbeat-endpoint); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; status_file="$state/task.status"
+  printf 'needs-decision: choose release target\nworking: preparing both targets\n' > "$status_file"
+  date '+%s' > "$state/.afk"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "afk watcher did not hand the actionable signal to the daemon"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "$(size_of "$status_file")" ] \
+    || fail "afk signal did not record the endpoint handed to the daemon"
+  unset FM_FAKE_CREW_STATE
+  pass "an afk signal records its captured heartbeat endpoint"
+}
+
 test_afk_present_reverts_watcher_to_one_shot() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case afk-coherence); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3050,5 +3066,6 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
+test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
