@@ -1,9 +1,9 @@
 ---
 name: updatefirstmate
 description: >-
-  Self-update a running firstmate and its secondmates to the latest from origin.
-  Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
-  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+  Self-update a running firstmate and its secondmates to the latest from origin through the
+  guarded fast-forward path. Load when the captain invokes /updatefirstmate or asks to update
+  firstmate or pull the latest firstmate.
 user-invocable: true
 metadata:
   internal: true

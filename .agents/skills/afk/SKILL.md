@@ -1,8 +1,10 @@
 ---
 name: afk
 description: >-
-  Enter away-mode supervision when the captain invokes /afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
+  Enter away-mode supervision. Load when the captain invokes /afk or says they are going afk, when
+  state/.afk exists, when an incoming message starts with FM_INJECT_MARK, or when any
+  state/.subsuper-* marker is involved. It owns the away daemon and the automatic exit when a real
+  unmarked message returns.
 user-invocable: true
 metadata:
   internal: true

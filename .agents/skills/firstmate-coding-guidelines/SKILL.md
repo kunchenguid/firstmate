@@ -1,9 +1,9 @@
 ---
 name: firstmate-coding-guidelines
 description: >-
-  Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
-  Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
+  Agent-only reference for changing firstmate's own shared, tracked material as defined by
+  AGENTS.md section 1. Load before editing any of it, whether working as firstmate directly or as
+  a crewmate briefed on a firstmate-repo task.
 user-invocable: false
 metadata:
   internal: true
@@ -72,6 +72,8 @@ Briefs for tasks that touch firstmate's own tracked material should tell the cre
 `bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string with no reliable signal that it names firstmate's own repo, unlike a project registered in `data/projects.md`, so there is no clean point inside the scaffold to detect this case automatically.
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
+A SKILL.md front-matter description states only its load trigger, while the body owns the operating contract.
+The combined name+description listing every session carries must stay within the per-session budget past which entries truncate - re-measure it when adding a skill.
 
 ## Compatibility and enforcement
 
