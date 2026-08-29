@@ -321,6 +321,32 @@ race_case() {
   pass "usage harvest: concurrent harvests append exactly one row"
 }
 
+# A held ledger lock must never block the (teardown-synchronous) harvest
+# forever: the acquire is bounded, so a second harvest whose lock-wait is
+# shorter than the holder's critical section gives up best-effort (non-zero,
+# no duplicate row) instead of hanging until the holder releases.
+lock_bound_case() {
+  local id=usagelockbound1 wt="$TMP_ROOT/wt-usagelockbound1"
+  local data home ledger p1 rc
+  data=$(harvest_case "$id" cursor "$wt" cursor-x "")
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  ledger="$home/data/usage-ledger.jsonl"
+  # Holder keeps the lock across a 4s critical section.
+  FM_USAGE_HARVEST_APPEND_DELAY=4 "$HARVEST" "$id" >/dev/null 2>&1 &
+  p1=$!
+  # Let the holder acquire before the bounded harvester starts spinning.
+  sleep 1
+  rc=0
+  FM_USAGE_LEDGER_LOCK_WAIT=1 "$HARVEST" "$id" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "bounded harvest returned 0 while the ledger lock was held"
+  wait "$p1"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 1 ] \
+    || fail "bounded give-up appended a duplicate row"
+  pass "usage harvest: a held ledger lock bounds the acquire, no hang or dup"
+}
+
 # --- report: per-model totals and per-task rows -----------------------------
 
 report_case() {
@@ -390,5 +416,6 @@ codex_case
 cursor_case
 remote_case
 race_case
+lock_bound_case
 report_case
 teardown_case
