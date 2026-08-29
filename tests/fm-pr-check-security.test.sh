@@ -7,6 +7,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-check-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
@@ -43,6 +45,55 @@ file_mode() {
   else
     stat -c %a "$1"
   fi
+}
+
+LINK_KIND=
+LINK_TARGET=
+LINK_CONTENT=
+LINK_MODE=
+make_private_symlink() {
+  local base=$1 destination=$2 kind=$3
+  LINK_KIND=$kind
+  LINK_TARGET="$base/target-$kind"
+  LINK_CONTENT=
+  LINK_MODE=
+  case "$kind" in
+    regular)
+      LINK_CONTENT='external sentinel'
+      printf '%s\n' "$LINK_CONTENT" > "$LINK_TARGET"
+      chmod 0644 "$LINK_TARGET"
+      LINK_MODE=644
+      ;;
+    dangling)
+      rm -f "$LINK_TARGET"
+      ;;
+    directory)
+      mkdir "$LINK_TARGET"
+      printf 'outside\n' > "$LINK_TARGET/keep"
+      chmod 0755 "$LINK_TARGET"
+      LINK_MODE=755
+      ;;
+    *) fail "unknown symlink fixture kind" ;;
+  esac
+  ln -s "$LINK_TARGET" "$destination"
+}
+
+assert_private_symlink_unchanged() {
+  local link=$1
+  [ -L "$link" ] || fail "private destination symlink was replaced"
+  case "$LINK_KIND" in
+    regular)
+      [ "$(cat "$LINK_TARGET")" = "$LINK_CONTENT" ] || fail "external regular target content changed"
+      [ "$(file_mode "$LINK_TARGET")" = "$LINK_MODE" ] || fail "external regular target mode changed"
+      ;;
+    dangling)
+      [ ! -e "$LINK_TARGET" ] || fail "dangling target was created"
+      ;;
+    directory)
+      [ -f "$LINK_TARGET/keep" ] || fail "external directory target contents changed"
+      [ "$(file_mode "$LINK_TARGET")" = "$LINK_MODE" ] || fail "external directory target mode changed"
+      ;;
+  esac
 }
 
 state_snapshot() {
@@ -747,6 +798,115 @@ SH
     n=$((n + 1))
   done
   pass "concurrent watchers observe only complete private poll publications"
+}
+
+test_poll_publication_refuses_unsafe_destinations() {
+  local artifact kind dir state destination
+  for artifact in task-a.pr-poll task-a.pr-poll-registration task-a.check.sh; do
+    for kind in regular dangling directory; do
+      dir=$(make_case "poll-path-${artifact//./-}-$kind")
+      state="$dir/home/state"
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+        || fail "could not stage poll symlink refusal fixture"
+      destination="$state/$artifact"
+      make_private_symlink "$dir" "$destination" "$kind"
+      if fm_pr_poll_publish_prepared; then
+        fail "poll publication accepted a private destination symlink"
+      fi
+      fm_pr_poll_cleanup
+      assert_private_symlink_unchanged "$destination"
+      [ ! -e "$state/task-a.pr-poll" ] || [ "$artifact" = task-a.pr-poll ] \
+        || fail "check destination refusal published the sidecar"
+    done
+
+    dir=$(make_case "poll-path-${artifact//./-}-direct-directory")
+    state="$dir/home/state"
+    fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+      || fail "could not stage poll directory refusal fixture"
+    destination="$state/$artifact"
+    mkdir "$destination"
+    if fm_pr_poll_publish_prepared; then
+      fail "poll publication accepted a directory destination"
+    fi
+    fm_pr_poll_cleanup
+    [ -d "$destination" ] || fail "poll publication replaced a directory destination"
+    [ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print)" ] \
+      || fail "poll publication wrote inside a directory destination"
+  done
+  pass "poll publication paths refuse symlinks and directories"
+}
+
+test_live_artifact_single_link_and_privacy_validation() {
+  local artifact dir state alias rc
+  for artifact in check.sh pr-poll pr-poll-registration; do
+    dir=$(make_case "single-link-live-${artifact//./-}")
+    state="$dir/home/state"
+    write_task_meta "$dir"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/10 >/dev/null 2>/dev/null \
+      || fail "could not publish $artifact hard-link fixture"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$artifact fixture was not initially authenticated"
+    alias="$dir/$artifact.alias"
+    ln "$state/task-a.$artifact" "$alias"
+    if [ "$artifact" = pr-poll ]; then
+      printf '%s\n%s\n%s\n%s\n' https://github.com/o/r/pull/11 o r 11 > "$alias"
+    fi
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$artifact hard link remained authenticated"
+    [ -e "$alias" ] || fail "$artifact hard-link refusal removed the external alias"
+  done
+
+  dir=$(make_case single-link-custom-check-registration)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
+  chmod 0700 "$state/custom.check.sh"
+  alias="$dir/custom-check.alias"
+  ln "$state/custom.check.sh" "$alias"
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "custom check registration accepted a hard-linked source"
+  [ ! -e "$state/custom.check-trust" ] || fail "rejected hard-linked custom check received a trust record"
+  rm -f "$alias"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register the custom check single-link fixture"
+  ln "$state/custom.check.sh" "$alias"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "registered custom check remained authenticated after source hard-linking"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a hard-linked custom check source"
+  fm_custom_check_snapshot_cleanup
+  rm -f "$alias"
+  alias="$dir/custom-trust.alias"
+  ln "$state/custom.check-trust" "$alias"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "hard-linked custom check trust remained authenticated"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a hard-linked custom check trust record"
+  fm_custom_check_snapshot_cleanup
+  [ -e "$alias" ] || fail "custom-check hard-link refusal removed the external alias"
+
+  dir=$(make_case private-custom-check-source)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
+  chmod 0755 "$state/custom.check.sh"
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "custom check registration accepted a non-private source"
+  [ ! -e "$state/custom.check-trust" ] || fail "non-private custom check received a trust record"
+  chmod 0700 "$state/custom.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register private custom check fixture"
+  chmod 0755 "$state/custom.check.sh"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "registered custom check remained authenticated after becoming non-private"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a non-private custom check source"
+  fm_custom_check_snapshot_cleanup
+  pass "live poll and custom-check artifacts require private single-link files"
 }
 
 install_final_publication_fault() {
@@ -1971,6 +2131,8 @@ test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
+test_poll_publication_refuses_unsafe_destinations
+test_live_artifact_single_link_and_privacy_validation
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
