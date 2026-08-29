@@ -374,7 +374,7 @@ sleep_until_due() {  # <source-id>
 }
 
 cmd_run() {
-  local sid=${1-} out rc ran_at next_due
+  local sid=${1-} out rc ran_at next_due elapsed
   fm_procevent_source_id_valid "$sid" || die "source id must be path-safe: $sid"
 
   if ! positive_int "$OUTPUT_TAIL_BYTES"; then
@@ -428,22 +428,39 @@ cmd_run() {
   ran_at=$(date +%s)
   fm_run_timed "$SPEC_TIMEOUT" "${CHECK_ARGV[@]}" 2>&1 | tail -c "$OUTPUT_TAIL_BYTES" > "$out"
   rc=${PIPESTATUS[0]}
+  elapsed=$(( $(date +%s) - ran_at ))
 
   # The next due time is recorded BEFORE the outcome is emitted, so the cadence
   # advances even if this process dies between here and capture. Without that
   # order a crash in the emit path would leave the schedule in the past and the
   # runner's own restart would re-run the check immediately, turning one cadence
-  # into a hot loop.
+  # into a hot loop. A failure to record it must never be papered over: it is
+  # announced as its own refusal instead of letting a normal outcome mask a
+  # schedule that is about to go stale and hot-loop on the next reconcile.
   next_due=$(( ran_at + SPEC_INTERVAL ))
-  write_due "$sid" "$next_due" || true
+  if ! write_due "$sid" "$next_due"; then
+    emit_doc "$sid" rejected \
+      "the check ran but its next-due time could not be recorded; re-arm to restore the cadence" \
+      "$rc" "$ran_at" "$next_due" "$out"
+    exit 0
+  fi
 
   case "$rc" in
+    # fm_run_timed reproduces GNU timeout's convention where 124 is overloaded:
+    # it means "the bound was hit" UNLESS the check's own exit is naturally
+    # 124, which a real timeout-kill can never return in under SPEC_TIMEOUT
+    # seconds (the mechanism waits out the full bound before killing). Elapsed
+    # wall time is what tells the two apart; the exit code alone cannot.
+    124)
+      if [ "$elapsed" -ge "$SPEC_TIMEOUT" ]; then
+        emit_doc "$sid" timeout \
+          "the check did not finish within ${SPEC_TIMEOUT}s and was stopped" '' "$ran_at" "$next_due" "$out"
+      else
+        emit_doc "$sid" report "the check exited $rc and reported something to read" "$rc" "$ran_at" "$next_due" "$out"
+      fi
+      ;;
     0)
       emit_doc "$sid" clean "the check exited 0" "$rc" "$ran_at" "$next_due" "$out"
-      ;;
-    124)
-      emit_doc "$sid" timeout \
-        "the check did not finish within ${SPEC_TIMEOUT}s and was stopped" '' "$ran_at" "$next_due" "$out"
       ;;
     *)
       emit_doc "$sid" report "the check exited $rc and reported something to read" "$rc" "$ran_at" "$next_due" "$out"

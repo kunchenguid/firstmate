@@ -317,4 +317,65 @@ out=$(per "$H" arm rearm --interval 3600 --timeout 60 -- "$CLEAN")
 assert_contains "$out" "armed: periodic-rearm" "handling the stale result unblocks re-arming"
 pass "retire leaves an unhandled result behind and blocks re-arming until it is handled"
 
+# --- a check that naturally exits 124 is a report, not a timeout ------------
+# fm_run_timed reproduces GNU timeout's convention where 124 also means "the
+# bound was hit". A check that exits 124 on its own, fast, must still land as
+# a report so its nonzero exit is not misclassified as the runner stopping it.
+H="$TMP_ROOT/h-nat124"; new_home "$H"
+NAT124="$TMP_ROOT/nat124.sh"
+cat > "$NAT124" <<'SH'
+#!/usr/bin/env bash
+echo "== daily sweep header"
+echo "-- DRIFT: exiting with the timeout-shaped code on purpose"
+exit 124
+SH
+chmod +x "$NAT124"
+per "$H" arm nat124 --interval 3600 --timeout 60 -- "$NAT124" >/dev/null
+pe "$H" start periodic-nat124 >/dev/null
+wait_for_result "$H" periodic-nat124 1 || fail "the natural-124 run captured no result"
+RESULT=$(result_path "$H" periodic-nat124 1)
+assert_grep 'status: report' "$RESULT" "a fast natural exit 124 is a report, not a timeout"
+assert_grep 'check_exit: 124' "$RESULT" "the outcome records the check's real exit code"
+assert_grep 'DRIFT: exiting with the timeout-shaped code' "$RESULT" "the report keeps its evidence"
+assert_contains "$(per "$H" classify "$RESULT")" report "classify reads the outcome as a report"
+if per "$H" silent "$RESULT"; then
+  fail "a report outcome must never declare silence"
+fi
+assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-nat124 1" \
+  "a natural exit 124 wakes firstmate the same as any other report"
+pass "a check that exits 124 on its own is reported, not mistaken for a timeout"
+
+# --- a failed schedule write is announced, not swallowed --------------------
+# write_due renames its temp file onto <sid>.due with `mv -f`. A PATH-shimmed
+# mv that fails only for that exact rename target reproduces a write failure
+# (a full or read-only filesystem) without disturbing any other file under
+# PERIODIC_DIR, so the check itself still runs normally.
+H="$TMP_ROOT/h-duewrite"; new_home "$H"
+per "$H" arm duewrite --interval 3600 --timeout 60 -- "$CLEAN" >/dev/null
+real_mv=$(command -v mv) || fail "could not locate mv for the schedule-write fixture"
+FAKEBIN="$TMP_ROOT/duewrite-fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/mv" <<SH
+#!/usr/bin/env bash
+last=\${!#}
+if [ "\$last" = "$H/state/periodic/periodic-duewrite.due" ]; then
+  exit 1
+fi
+exec "$real_mv" "\$@"
+SH
+chmod +x "$FAKEBIN/mv"
+PATH="$FAKEBIN:$PATH" pe "$H" start periodic-duewrite >/dev/null
+wait_for_result "$H" periodic-duewrite 1 || fail "the failed-schedule-write run captured no result"
+RESULT=$(result_path "$H" periodic-duewrite 1)
+assert_grep 'status: rejected' "$RESULT" "a failed schedule write is announced as a refusal"
+assert_grep 'next-due time could not be recorded' "$RESULT" \
+  "the refusal names the schedule write as the cause"
+assert_grep 'daily sweep header' "$RESULT" "the refusal still keeps the check's own evidence"
+assert_contains "$(per "$H" classify "$RESULT")" rejected "classify reads the refusal"
+if per "$H" silent "$RESULT"; then
+  fail "a refusal must never declare silence"
+fi
+assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-duewrite 1" \
+  "a failed schedule write wakes firstmate instead of masking the outcome"
+pass "a check that ran but could not have its schedule recorded announces instead of masking it"
+
 echo "all periodic-check adapter tests passed"
