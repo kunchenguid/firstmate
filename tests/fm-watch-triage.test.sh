@@ -183,6 +183,8 @@ test_signal_reason_is_actionable_classifier() {
   signal_reason_is_actionable "$state/d.status" || fail "a failed: line was not actionable"
   printf 'merged\n' > "$state/e.status"
   signal_reason_is_actionable "$state/e.status" || fail "a legacy merged line was not actionable"
+  printf 'needs-validation: implementation committed\n' > "$state/f.status"
+  signal_reason_is_actionable "$state/f.status" || fail "a needs-validation: handoff was not actionable"
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
@@ -190,14 +192,18 @@ test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
   printf 'done: ready in branch fm/x\n' > "$state/term.status"
-  stale_is_terminal "sess:fm-term" "$state" || fail "terminal stale status not classified terminal"
+  stale_is_terminal "sess:fm-term" "$state" || fail "terminal stale status not classified actionable"
   fm_write_meta "$state/herdr-term.meta" "window=default:w1:p2" "backend=herdr"
   printf 'done: ready in branch fm/herdr\n' > "$state/herdr-term.status"
   stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
+  printf 'needs-validation: implementation committed\n' > "$state/handoff.status"
+  stale_is_terminal "sess:fm-handoff" "$state" || fail "non-terminal validation handoff not classified actionable"
+  status_is_terminal_verb "$(last_status_line "$state/handoff.status")" \
+    && fail "actionable validation handoff was classified terminal"
   printf 'working: compiling\n' > "$state/nonterm.status"
-  stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
-  stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
-  pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
+  stale_is_terminal "sess:fm-nonterm" "$state" && fail "routine non-terminal stale classified actionable"
+  stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified actionable"
+  pass "stale_is_terminal treats needs-validation as actionable but non-terminal"
 }
 
 test_scan_captain_relevant_statuses_classifier() {
@@ -206,20 +212,28 @@ test_scan_captain_relevant_statuses_classifier() {
   printf 'working: a\n' > "$state/one.status"
   printf 'blocked: no perms\n' > "$state/two.status"
   printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
+  printf 'needs-validation: implementation committed\n' > "$state/four.status"
   out=$(scan_captain_relevant_statuses "$state")
   printf '%s' "$out" | grep -F "two.status" >/dev/null || fail "scan missed a blocked: status"
   printf '%s' "$out" | grep -F "three.status" >/dev/null || fail "scan missed a done: status"
   printf '%s' "$out" | grep -F "one.status" >/dev/null && fail "scan surfaced a benign working: status"
+  printf '%s' "$out" | grep -F "four.status" >/dev/null || fail "scan missed a needs-validation: handoff"
   pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
 }
 
 test_classifier_primitives() {
-  local dir state open activity
+  local dir state open activity legacy_captain_re
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
+  status_is_captain_relevant "needs-validation: implementation committed" \
+    || fail "needs-validation: handoff not recognized as captain-relevant"
+  status_is_validation_handoff "needs-validation: implementation committed" \
+    || fail "needs-validation: handoff verb not recognized"
+  status_is_terminal_verb "needs-validation: implementation committed" \
+    && fail "needs-validation: implementation handoff was classed as terminal"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
   # Incident regression: free-text "merged" inside a nonterminal working: line must
   # not become captain-relevant (AFK false-terminal path).
@@ -234,6 +248,8 @@ test_classifier_primitives() {
     || fail "genuine done: checks green not captain-relevant"
   status_is_terminal_verb "done: PR https://x/pull/76 checks green" \
     || fail "done: not a terminal verb"
+  status_is_validation_handoff "done: PR https://x/pull/76 checks green" \
+    && fail "terminal done: PR event was classed as an implementation handoff"
   status_is_terminal_verb "working: rebased onto merged #76" \
     && fail "working: wrongly classed as terminal verb"
   status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
@@ -244,6 +260,12 @@ test_classifier_primitives() {
   [ "$(window_to_task "default:w1:p2" "$state")" = "herdr-task" ] || fail "window_to_task did not resolve opaque backend target through metadata"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" || fail "FM_CAPTAIN_RE override not honored"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "done: x" && fail "FM_CAPTAIN_RE override did not replace the default verb set"
+  legacy_captain_re='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+  FM_CAPTAIN_RE="$legacy_captain_re" status_is_captain_relevant "needs-validation: implementation committed" \
+    || fail "a legacy FM_CAPTAIN_RE override suppressed the required validation handoff"
+  FM_CLASSIFY_NEEDS_VALIDATION_VERB=validate-next FM_CAPTAIN_RE="$legacy_captain_re" \
+    status_is_captain_relevant "validate-next: implementation committed" \
+    || fail "the overridden validation handoff verb was suppressed by FM_CAPTAIN_RE"
   FM_CAPTAIN_RE='merged|custom-verb:' status_is_captain_relevant "working: rebased onto merged #76" \
     && fail "FM_CAPTAIN_RE override bypassed working: suppression"
   FM_CAPTAIN_RE='checks green|custom-verb:' status_is_captain_relevant "paused: checks green pending approval" \
@@ -267,6 +289,8 @@ resolved [key=phase7]: Phase 7 completed and moved to Done
 paused [key=legal]: awaiting external counsel
 resolved [key=legal]: legal item returned to the queue
 working [key=phase8]: Phase 8 started
+working [key=phase9]: Phase 9 implementation
+needs-validation [key=phase9]: Phase 9 committed
 EOF
   activity=$(status_open_activities "$state/activity.status")
   printf '%s' "$activity" | grep -F $'phase8\tworking\tPhase 8 started' >/dev/null \
@@ -277,6 +301,8 @@ EOF
     && fail "a same-key terminal event did not supersede the older working phase"
   printf '%s' "$activity" | grep -F $'legal\t' >/dev/null \
     && fail "a keyed resolved event did not close the declared pause"
+  printf '%s' "$activity" | grep -F $'phase9\t' >/dev/null \
+    && fail "a keyed needs-validation handoff did not close the implementation activity"
   printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
@@ -769,12 +795,12 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
-# --- stale pane, STALE terminal status overridden by an active run: absorbed ---
+# --- stale pane, STALE actionable status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
 # (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
-# pre-validation "done:" line as the LAST line for the run's entire (possibly
-# many-minutes) duration. stale_is_terminal alone has no run-step awareness and
+# pre-validation needs-validation: line as the LAST line for the run's entire
+# (possibly many-minutes) duration. stale_is_terminal alone has no run-step awareness and
 # would treat that leftover as still-current every time the pane goes quiet,
 # immediately surfacing a crew that is actively validating. crew_is_provably_working
 # must get a chance to override a captain-relevant-but-stale status line, exactly
@@ -786,10 +812,10 @@ test_stale_terminal_status_overridden_by_active_run() {
   window="test:fm-validating"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
-  # The crew reported done BEFORE firstmate triggered no-mistakes validation;
+  # The crew requested validation BEFORE firstmate triggered no-mistakes;
   # this line never gets superseded by a newer status-log entry while the
   # pipeline itself runs.
-  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  printf 'needs-validation: implementation complete and committed\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "no-mistakes axi run: validating...")
@@ -798,16 +824,16 @@ test_stale_terminal_status_overridden_by_active_run() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   # Phase A: a high escalation threshold means the first sighting is absorbed,
-  # not surfaced, despite the captain-relevant "done:" status-log line.
+  # not surfaced, despite the captain-relevant needs-validation: status-log line.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "watcher exited for a stale terminal-looking status the run-step overrides (should absorb): $(cat "$out")"
+    reap "$pid"; fail "watcher exited for a stale actionable status the run-step overrides (should absorb): $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "the overridden stale terminal status printed a wake reason during absorb"
-  [ ! -s "$state/.wake-queue" ] || fail "the overridden stale terminal status enqueued a wake during absorb"
+  [ ! -s "$out" ] || fail "the overridden stale actionable status printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "the overridden stale actionable status enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
   [ -s "$state/.stale-since-$key" ] || fail "stale-since escalation timer was not recorded on absorb"
   [ ! -e "$state/.hb-surfaced-validating" ] || fail "an absorbed wake must not mark the status line as surfaced"
@@ -822,11 +848,11 @@ test_stale_terminal_status_overridden_by_active_run() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not escalate an overridden stale terminal status past the threshold"
+  wait_for_exit "$pid" 100 || fail "watcher did not escalate an overridden stale actionable status past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
   unset FM_FAKE_CREW_STATE
-  pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
+  pass "a stale actionable status is overridden while validation runs, then wedge-escalated"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -2311,7 +2337,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
   mkdir -p "$wt/src"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/chain-first.meta"
-  printf 'done: implementation complete, ready to validate\n' > "$state/chain-first.status"
+  printf 'needs-validation: implementation complete and committed\n' > "$state/chain-first.status"
   sig=$(seen_sig "$state/chain-first.status"); printf '%s' "$sig" > "$state/.seen-chain-first_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "no-mistakes axi run: validating...")
@@ -2331,7 +2357,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "the overridden terminal status was not absorbed on first sight: $(cat "$out")"
+    reap "$pid"; fail "the overridden actionable status was not absorbed on first sight: $(cat "$out")"
   fi
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
     || { reap "$pid"; fail "the first-sight absorb did not advance the stale suppressor"; }

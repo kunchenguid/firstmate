@@ -106,7 +106,7 @@ test_classify_terminal_signal_escalates() {
   local dir state kw out
   dir=$(make_supercase classify-terminal)
   state="$dir/state"
-  for kw in "done: PR https://x/y/pull/1" "needs-decision: pick A" "blocked: no perms" \
+  for kw in "done: PR https://x/y/pull/1" "needs-validation: implementation committed" "needs-decision: pick A" "blocked: no perms" \
             "failed: rc 2" "PR ready https://x/y/pull/2" "checks green" \
             "ready in branch fm/t1" "merged"; do
     printf 'working\n%s\n' "$kw" > "$state/t.status"

@@ -322,7 +322,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
-  local home id brief
+  local home id brief handoff_line validation_line final_line handoff_text legacy_handoff_text final_text
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
@@ -345,13 +345,32 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  assert_grep 'States: working, needs-validation, needs-decision, blocked, paused, done, failed.' "$brief" \
+    "no-mistakes brief did not advertise its distinct implementation handoff state"
+  # shellcheck disable=SC2016 # Literal backticks and braces are generated brief output.
+  handoff_text='append `needs-validation: {summary}` to the status file and stop.'
+  # shellcheck disable=SC2016 # Literal backticks and braces are generated brief output.
+  legacy_handoff_text='append `done: {summary}` to the status file and stop.'
+  # shellcheck disable=SC2016 # Literal backticks and braces are generated brief output.
+  final_text='append `done: PR {url} checks green` and stop. You are finished.'
+  assert_grep "$handoff_text" "$brief" \
+    "no-mistakes DOD did not render the non-terminal implementation handoff"
+  assert_no_grep "$legacy_handoff_text" "$brief" \
+    "no-mistakes DOD still reused done: for the pre-validation implementation handoff"
+  assert_grep "$final_text" "$brief" \
+    "no-mistakes DOD changed the terminal checks-green completion event"
+  handoff_line=$(grep -nF "$handoff_text" "$brief" | cut -d: -f1)
+  validation_line=$(grep -nF 'You drive no-mistakes by responding to its gates' "$brief" | cut -d: -f1)
+  final_line=$(grep -nF "$final_text" "$brief" | cut -d: -f1)
+  [ "$handoff_line" -lt "$validation_line" ] && [ "$validation_line" -lt "$final_line" ] \
+    || fail "no-mistakes DOD no longer orders implementation handoff, triggered validation, and terminal PR completion"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
   # guards the structure that makes it safe.
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+  pass "fm-brief.sh: no-mistakes DOD keeps two-phase handoff/validation semantics and parse-safe prose"
 }
 
 test_ship_project_memory_wording() {
@@ -673,7 +692,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief expected_states
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -683,18 +702,21 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       ship)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
           "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+        expected_states='States: working, needs-validation, needs-decision, blocked, awaiting, done, failed.'
         ;;
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
           "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        expected_states='States: working, needs-decision, blocked, awaiting, done, failed.'
         ;;
       secondmate)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
           "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        expected_states='States: working, needs-decision, blocked, awaiting, done, failed.'
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    assert_grep "$expected_states" "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \

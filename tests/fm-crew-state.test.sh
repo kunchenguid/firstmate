@@ -389,6 +389,23 @@ test_stale_blocked_superseded() {
   pass "stale blocked over active run is superseded"
 }
 
+# A validation run is the authoritative evidence that firstmate acted on the
+# non-terminal implementation handoff, so the older status line is superseded.
+test_validation_handoff_superseded_by_active_run() {
+  reset_fakes
+  local d; d=$(new_case validation-handoff-superseded)
+  make_repo_on_branch "$d/wt" fm/feat-bv
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bv.meta" "window=fm:fm-feat-bv" "worktree=$d/wt" "kind=ship"
+  printf 'needs-validation: implementation committed\n' > "$d/state/feat-bv.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bv)"
+  local out; out=$(run_crew_state "$d" feat-bv)
+  assert_contains "$out" "state: working" "triggered validation -> working despite handoff log"
+  assert_contains "$out" "source: run-step" "triggered validation -> run-step source"
+  assert_contains "$out" "superseded by validation run" "implementation handoff not reconciled against active validation"
+  pass "an active validation run supersedes the non-terminal implementation handoff"
+}
+
 # (c) genuine parked run + needs-decision log AGREE -> parked, NOT superseded
 test_genuine_parked_not_superseded() {
   reset_fakes
@@ -768,7 +785,7 @@ test_other_branch_run_ignored() {
   make_repo_on_branch "$d/wt" fm/feat-g
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-g.meta" "window=fm:fm-feat-g" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'done: implemented, ready to validate\n' > "$d/state/feat-g.status"
+  printf 'needs-validation: implemented, ready to validate\n' > "$d/state/feat-g.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/some-other)"
   FM_FAKE_RUNS_LIST="$(cat <<'EOF'
   running    fm/some-other aaaaaaa  2026-07-02 22:10
@@ -779,8 +796,9 @@ EOF
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
-  pass "another branch's run is ignored, falls back"
+  assert_contains "$out" "state: parked" "implementation handoff remains parked pending this branch's validation"
+  assert_not_contains "$out" "state: done" "implementation handoff must not read as terminal"
+  pass "another branch's run is ignored and the implementation handoff remains parked"
 }
 
 # (f) no run for this crew + a busy pane -> working via pane
@@ -1551,6 +1569,7 @@ test_missing_run_head_falls_back_to_current_state() {
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
+test_validation_handoff_superseded_by_active_run
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
