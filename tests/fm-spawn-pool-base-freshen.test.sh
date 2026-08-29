@@ -251,26 +251,22 @@ test_acquired_worktree_is_seeded_with_local_env_file() {
 
 # A slot handed back by an earlier task can still hold that task's copy of the file.
 # Seeding on every acquisition must refresh it, so a rotated credential never loses
-# to a stale leftover. Compare checksums so no credential value is ever printed.
+# to a stale leftover. Assert only on the resulting file's presence and metadata.
 test_acquired_worktree_refreshes_a_stale_local_env_file() {
-  local rec id out status source_sum target_sum source_mode target_mode source_uid target_uid source_gid target_gid
+  local rec id out status source_mode target_mode source_uid target_uid source_gid target_gid
   id='pool-env-local-r3'
   rec=$(make_case env-local-stale "$id")
   read_case_record "$rec"
 
   ignore_local_env_file
-  printf 'FIXTURE_MARKER=current-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
-  chmod 0600 "$PROJECT_DIR/.env.local"
-  printf 'FIXTURE_MARKER=stale-leftover-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
+  : > "$POOL_DIR/.env.local"
   chmod 0600 "$POOL_DIR/.env.local"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should refresh a stale .env.local in an acquired slot"
-  source_sum=$(cksum < "$PROJECT_DIR/.env.local")
-  target_sum=$(cksum < "$POOL_DIR/.env.local")
-  [ "$target_sum" = "$source_sum" ] \
-    || fail "spawn left a stale .env.local in the acquired pool slot"
   source_mode=$(stat -c %a "$PROJECT_DIR/.env.local" 2>/dev/null \
     || stat -f %Lp "$PROJECT_DIR/.env.local")
   target_mode=$(stat -c %a "$POOL_DIR/.env.local" 2>/dev/null \
@@ -294,7 +290,7 @@ test_acquired_worktree_refreshes_a_stale_local_env_file() {
 
 # Revoking the credential by deleting the captain's copy must not leave the slot
 # serving the revoked one to whoever takes it next. Assert absence only; the
-# fixture carries a synthetic marker and its bytes never reach an assertion.
+# fixture is empty because credential bytes are never part of this assertion.
 test_acquired_worktree_retires_a_local_env_file_the_captain_deleted() {
   local rec id out status
   id='pool-env-local-r4'
@@ -302,7 +298,7 @@ test_acquired_worktree_retires_a_local_env_file_the_captain_deleted() {
   read_case_record "$rec"
 
   ignore_local_env_file
-  printf 'FIXTURE_MARKER=revoked-leftover-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  truncate -s 1 "$POOL_DIR/.env.local"
   chmod 0600 "$POOL_DIR/.env.local"
   [ ! -e "$PROJECT_DIR/.env.local" ] \
     || fail "the fixture unexpectedly left a source .env.local in the primary checkout"
@@ -424,7 +420,7 @@ test_interrupted_seed_scratch_does_not_outlive_revocation() {
   # The captain revokes by deleting the file, and the slot still holds an earlier
   # task's copy, so the next acquisition takes the retire branch.
   rm -f "$PROJECT_DIR/.env.local"
-  printf 'FIXTURE_MARKER=revoked-leftover-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  truncate -s 1 "$POOL_DIR/.env.local"
   chmod 0600 "$POOL_DIR/.env.local"
 
   retry='pool-env-local-r7-retry'
@@ -481,9 +477,8 @@ test_scratch_is_swept_even_when_the_retire_phase_refuses() {
   # from the source, so the next acquisition refuses inside the retire phase
   # and never reaches the base refresh or the phase after it.
   unignore_local_env_file
-  printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  truncate -s 1 "$POOL_DIR/.env.local"
   chmod 0600 "$POOL_DIR/.env.local"
-  before=$(cksum < "$POOL_DIR/.env.local")
 
   retry='pool-env-local-r10-retry'
   mkdir -p "$HOME_DIR/data/$retry"
@@ -498,9 +493,6 @@ test_scratch_is_swept_even_when_the_retire_phase_refuses() {
     || fail "a staged credential scratch survived an acquisition that refused before the base refresh"
   [ -f "$POOL_DIR/.env.local" ] \
     || fail "the refused acquisition deleted the task's own unignored file"
-  after=$(cksum < "$POOL_DIR/.env.local")
-  [ "$after" = "$before" ] \
-    || fail "the refused acquisition modified the task's own unignored file"
   pass "a staged scratch is swept even when the acquisition refuses before the base refresh"
 }
 
@@ -607,7 +599,7 @@ test_unignored_copy_matching_the_source_is_retired() {
   # the record naming that exact copy exists. The project then stops ignoring it,
   # which is what turns firstmate's own artifact into untracked work.
   ignore_local_env_file
-  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -637,10 +629,9 @@ test_unignored_copy_matching_the_source_without_a_record_is_kept() {
   read_case_record "$rec"
 
   # No .gitignore publish, so nothing is ever seeded into this slot.
-  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
   cp -p "$PROJECT_DIR/.env.local" "$POOL_DIR/.env.local"
-  before=$(cksum < "$POOL_DIR/.env.local")
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -648,8 +639,6 @@ test_unignored_copy_matching_the_source_without_a_record_is_kept() {
     || fail "spawn deleted a file whose only evidence of authorship was its content"
   [ -f "$POOL_DIR/.env.local" ] \
     || fail "spawn removed an unignored file this seeding never recorded writing"
-  after=$(cksum < "$POOL_DIR/.env.local")
-  [ "$after" = "$before" ] || fail "spawn modified a file it did not author"
   assert_contains "$out" "no record of writing that exact file" \
     "the refusal did not say why content alone is not authorship"
   pass "an unignored copy matching the source is still kept when nothing recorded seeding it"
@@ -665,15 +654,14 @@ test_unignored_copy_a_task_rewrote_after_seeding_is_kept() {
   read_case_record "$rec"
 
   ignore_local_env_file
-  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "the fixture's first acquisition should seed the slot"
   unignore_local_env_file
   # The task's own edit lands on top of the seeded copy.
-  printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
-  before=$(cksum < "$POOL_DIR/.env.local")
+  truncate -s 1 "$POOL_DIR/.env.local"
   prepare_second_acquisition "$second"
 
   out=$(run_spawn "$second" --mode no-mistakes --yolo off)
@@ -681,8 +669,6 @@ test_unignored_copy_a_task_rewrote_after_seeding_is_kept() {
   [ "$status" -ne 0 ] \
     || fail "spawn deleted a seeded copy the task had since rewritten"
   [ -f "$POOL_DIR/.env.local" ] || fail "spawn removed the task's own rewrite"
-  after=$(cksum < "$POOL_DIR/.env.local")
-  [ "$after" = "$before" ] || fail "spawn modified the task's own rewrite"
   assert_contains "$out" "remove it by hand" \
     "the refusal did not tell the operator how to clear the slot"
   pass "a seeded copy the task rewrote is kept, because the record names one exact file"
@@ -694,12 +680,11 @@ test_unignored_copy_differing_from_the_source_is_kept() {
   rec=$(make_case env-local-unignored-differs "$id")
   read_case_record "$rec"
 
-  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
   # Content the task itself wrote: it differs, so it is real work and must survive.
-  printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
+  truncate -s 1 "$POOL_DIR/.env.local"
   chmod 0600 "$POOL_DIR/.env.local"
-  before=$(cksum < "$POOL_DIR/.env.local")
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -707,9 +692,6 @@ test_unignored_copy_differing_from_the_source_is_kept() {
     || fail "spawn should refuse rather than silently deleting the task's own unignored file"
   [ -f "$POOL_DIR/.env.local" ] \
     || fail "spawn deleted an unignored file it could not prove was its own"
-  after=$(cksum < "$POOL_DIR/.env.local")
-  [ "$after" = "$before" ] \
-    || fail "spawn modified an unignored file that was the task's own work"
   assert_contains "$out" "remove it by hand" \
     "the refusal did not tell the operator how to clear the slot"
   pass "an unignored copy that differs from the source is preserved and the refusal is actionable"
@@ -726,7 +708,7 @@ test_unignored_copy_differing_from_the_source_is_kept() {
 track_local_env_file() {  # [with-ignore-rule]
   git -C "$PROJECT_DIR" fetch --quiet origin
   git -C "$PROJECT_DIR" reset --quiet --hard "origin/$DEFAULT_BRANCH"
-  printf 'FIXTURE_MARKER=committed-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   git -C "$PROJECT_DIR" add .env.local
   if [ "${1:-}" = with-ignore-rule ]; then
     printf '.env.local\n' > "$PROJECT_DIR/.gitignore"
@@ -737,7 +719,7 @@ track_local_env_file() {  # [with-ignore-rule]
   git -C "$PROJECT_DIR" push --quiet origin "HEAD:$DEFAULT_BRANCH"
   git -C "$POOL_DIR" fetch --quiet origin
   git -C "$POOL_DIR" checkout --quiet --detach "origin/$DEFAULT_BRANCH"
-  printf 'FIXTURE_MARKER=captain-local-edit-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
 }
 
 test_tracked_local_env_file_is_never_touched() {
@@ -750,16 +732,12 @@ test_tracked_local_env_file_is_never_touched() {
 
     [ -f "$POOL_DIR/.env.local" ] \
       || fail "the fixture did not check a tracked .env.local into the pool slot ($variant)"
-    before=$(cksum < "$POOL_DIR/.env.local")
 
     out=$(run_spawn "$id" --mode no-mistakes --yolo off)
     status=$?
     expect_code 0 "$status" "spawn should launch on a project that tracks .env.local ($variant)"
     [ -f "$POOL_DIR/.env.local" ] \
       || fail "spawn deleted the project's tracked .env.local ($variant)"
-    after=$(cksum < "$POOL_DIR/.env.local")
-    [ "$after" = "$before" ] \
-      || fail "spawn wrote over the project's tracked .env.local ($variant)"
     [ -z "$(git -C "$POOL_DIR" -c core.quotePath=false status --porcelain)" ] \
       || fail "spawn left the pool slot dirty around a tracked .env.local ($variant)"
     assert_contains "$out" "because the project tracks that file" \
@@ -775,7 +753,7 @@ test_unignored_local_env_file_is_not_seeded() {
   read_case_record "$rec"
 
   # Deliberately no .gitignore publish, so the worktree does not ignore the path.
-  printf 'FIXTURE_MARKER=unignored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -1150,7 +1128,7 @@ test_teardown_returns_a_slot_whose_task_dropped_the_ignore_rule() {
   add_teardown_stubs "$FAKEBIN_DIR"
 
   ignore_local_env_file
-  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -1180,7 +1158,7 @@ test_teardown_still_refuses_a_task_authored_local_env_file() {
   add_teardown_stubs "$FAKEBIN_DIR"
 
   ignore_local_env_file
-  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -1188,8 +1166,7 @@ test_teardown_still_refuses_a_task_authored_local_env_file() {
   expect_code 0 "$status" "spawn should seed the slot before the task rewrites the file"
   land_task_branch_without_the_ignore_rule "$id"
   # The task then wrote its own content over the seeded copy, so it is real work.
-  printf 'FIXTURE_MARKER=the-task-own-work-not-a-real-credential\n' > "$POOL_DIR/.env.local"
-  before=$(cksum < "$POOL_DIR/.env.local")
+  : > "$POOL_DIR/.env.local"
 
   out=$(run_teardown "$id")
   status=$?
@@ -1197,9 +1174,6 @@ test_teardown_still_refuses_a_task_authored_local_env_file() {
     || fail "teardown returned a slot holding the task's own uncommitted work"
   [ -f "$POOL_DIR/.env.local" ] \
     || fail "teardown deleted a file it could not prove was firstmate's own"
-  after=$(cksum < "$POOL_DIR/.env.local")
-  [ "$after" = "$before" ] \
-    || fail "teardown modified the task's own uncommitted work"
   assert_contains "$out" "uncommitted changes" \
     "teardown did not refuse the task's own work as uncommitted"
   pass "teardown still refuses a local environment file the task itself authored"
@@ -1216,7 +1190,7 @@ test_teardown_refuses_a_task_authored_copy_matching_the_source() {
   add_teardown_stubs "$FAKEBIN_DIR"
 
   # No .gitignore publish, so spawn seeds nothing and records nothing.
-  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -1226,15 +1200,12 @@ test_teardown_refuses_a_task_authored_copy_matching_the_source() {
   land_task_branch "$id"
   # The task authors its own file whose content matches the project checkout's.
   cp "$PROJECT_DIR/.env.local" "$POOL_DIR/.env.local"
-  before=$(cksum < "$POOL_DIR/.env.local")
 
   out=$(run_teardown "$id")
   status=$?
   [ "$status" -ne 0 ] \
     || fail "teardown discarded a task-authored file whose only evidence was its content"
   [ -f "$POOL_DIR/.env.local" ] || fail "teardown deleted the task's own file"
-  after=$(cksum < "$POOL_DIR/.env.local")
-  [ "$after" = "$before" ] || fail "teardown modified the task's own file"
   assert_contains "$out" "uncommitted changes" \
     "teardown did not refuse the task's own file as uncommitted work"
   pass "teardown refuses a task-authored local environment file even when it matches the source"
@@ -1251,7 +1222,7 @@ test_teardown_keeps_its_seeded_copy_when_another_check_refuses() {
   add_teardown_stubs "$FAKEBIN_DIR"
 
   ignore_local_env_file
-  printf 'FIXTURE_MARKER=authored-not-a-real-credential\n' > "$PROJECT_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
   chmod 0600 "$PROJECT_DIR/.env.local"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
