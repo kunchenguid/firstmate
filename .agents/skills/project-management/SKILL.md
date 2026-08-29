@@ -21,6 +21,7 @@ It does not replace `secondmate-provisioning`, which owns project clones inside 
 
 Projects live flat under `projects/`, and `data/projects.md` is the private fleet registry.
 Use the registry format and parser contract owned by the header of `bin/fm-project-mode.sh`.
+Register a project only at its own repository's top level, never at a directory inside one, because a ship or scout spawn refuses a project that does not anchor a repository identity of its own ([`docs/architecture.md`](../../../docs/architecture.md#worktrees-not-branches-in-your-checkout) owns that boundary).
 Keep each registry description useful for identifying the project, but keep delivery posture, captain-private state, and detailed project knowledge in their existing designated homes.
 Do not turn the registry into project documentation.
 

@@ -173,6 +173,112 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+## Worker isolation repository identity
+
+The spawn-time worker-isolation boundary was validated on 2026-08-11 with git 2.50.1 on macOS 15.6.1 arm64.
+`bin/fm-spawn.sh` proves two separate properties before a worker is armed, and refuses when either one cannot be established.
+The first is membership: the task worktree's physically resolved `git rev-parse --git-common-dir` must equal the project's, and the project directory must itself be its repository's top level, since that query walks up and would otherwise answer with the identity of whichever repository sits above it.
+Both shapes that walk up are refused and both are driven: a project directory swallowed by a repository that is not the project's, and a project registered at a genuine subdirectory of its own repository, where the refusal states the top-level requirement without claiming a foreign repository.
+The second is isolation: the worker root must not be one of firstmate's own homes, which membership cannot establish, because in the self-hosted fleet a firstmate home is a linked worktree of the very repository the task belongs to.
+Path shape carries no weight in either decision, because any other repository is also a real worktree root distinct from the project.
+
+| Backend | Path into the assertion | Result |
+| --- | --- | --- |
+| tmux, herdr, zellij, cmux | Treehouse pools the worktree, and each adapter opens the task endpoint with the project as its working directory, so `treehouse get` acquires a worktree of the project's own repository | Verified live: a pooled worktree and its project checkout resolve to the same git common directory, and a worktree created from an already linked worktree resolves there too, so the pooled shape passes membership and is separated from a firstmate home by the isolation check alone |
+| orca | Orca registers the project repository and returns its own worktree path, which the spawn validates directly from that result instead of a pane path | Verified against the Orca call site with a fake Orca CLI: a foreign worktree refuses and a worktree of the project's repository still spawns |
+| relaunch, every backend | The worktree recorded in the task's metadata | Verified at that call site: a task whose recorded worktree belongs to another repository is refused before a ship or scout replacement is armed, where the unfixed assertion armed one; a secondmate relaunch skips it exactly as a secondmate spawn does |
+| self-hosted fleet, every backend | firstmate is its own project, so its active home and its leased secondmate homes are linked worktrees of the project's repository and pass membership | Refused by the isolation check on its own diagnostic, while an ordinary linked worktree of that same repository still spawns |
+| secondmate spawns | Not applicable after inspecting the spawn path: a secondmate home is a firstmate home rather than a project worktree, so the assertion is deliberately skipped there and is unchanged | Unchanged |
+
+```sh
+tests/fm-spawn-worktree-identity.test.sh
+tests/fm-spawn-worktree-settle.test.sh
+```
+
+Bounded output from the identity regression:
+
+```text
+ok - a pane sitting in the firstmate home is refused, not recorded as the task worktree
+ok - a real worktree of an unrelated repository is refused
+ok - an unreadable worktree repository identity refuses the launch instead of passing
+ok - a project whose repository identity cannot be established refuses the launch
+ok - a legitimate worktree of the project's repository still spawns
+ok - a firstmate home that belongs to the project's own repository is still refused
+ok - a seeded firstmate home in the project's own repository is refused
+ok - a secondmate identity marker alone refuses the checkout as a task worktree
+ok - a symlinked operational path does not argue a marked home out of being one
+ok - the firstmate repository root is refused even when it belongs to the project's repository
+ok - a directory holding the running fleet's operational state is refused as a home
+ok - a symlinked operational override still identifies the home it points into
+ok - an isolated worktree still spawns when firstmate's own homes share that repository
+ok - a project nested inside another repository refuses the launch instead of borrowing its identity
+ok - a project below its own repository's top level is refused without accusing a foreign repository
+ok - a relaunch whose recorded worktree belongs to another repository is refused
+ok - an Orca worktree belonging to another repository is refused
+ok - an Orca worktree of the project's own repository still spawns
+```
+
+The unreadable-identity case drives the query to fail, to return empty, and to return an unresolvable path, and every one of the three refuses.
+The self-hosted cases and the nested-project case were each run against the unfixed assertion first, where all three spawned instead of refusing, reporting `worktree=<firstmate home>`, `worktree=<seeded home>`, and `worktree=<enclosing repository's worktree>` respectively.
+The relaunch case reuses a recorded worktree rather than acquiring one, and was run against the unfixed assertion too, where it armed a replacement agent into the foreign worktree the earlier acceptance had recorded.
+The isolation refusal names what identified the home: the active firstmate home, the firstmate repository root, the seeded-home marker, or a directory holding the running fleet's operational directories.
+Each of those four signals has its own case, so the enumeration claims nothing that is not driven through the executable.
+The marker decides on its own: a checkout a secondmate identity was written into is refused whatever else of that home survives, and a marked home whose operational directory was symlinked away is refused too, so breaking a home's shape cannot argue it into being an ordinary task worktree.
+The operational-directory signal is driven twice, through a plain override and through a symlinked one, because stepping up from the override textually answers with the parent of the link instead of the home it points into; the symlinked case spawned into that home before the fix.
+Keeping a pooled checkout free of a stale marker belongs to retirement rather than to this gate, and the section below records that evidence.
+The Orca cases need `node`, which the Orca adapter's JSON helpers require, and report themselves as not run when it is absent.
+
+## Retired home identity and the treehouse pool
+
+The pooled-home retirement boundary was validated on 2026-08-12 with treehouse v2.1.1, git 2.50.1, on macOS 15.6.1 arm64.
+A leased worktree carrying `.fm-secondmate-home` plus `data/`, `state/`, `config/` and `projects/` was returned with `treehouse return --force`, and every one of those paths survived the return and was handed straight back on the next `treehouse get --lease`.
+`git status --porcelain` reported nothing at any point, because a firstmate checkout gitignores all of them, which is why no cleanliness gate anywhere in the fleet catches this residue.
+So a returned pool slot kept a retired secondmate's identity, and the next ship or scout dispatched into it was refused by the spawn-time isolation guard until someone deleted the file by hand.
+The residue is created by the home lifecycle, so it is cleared by the home lifecycle: `bin/fm-home-return-lib.sh` stages those artifacts aside after every ownership and safety check has passed and while the lease is still held, returns the checkout, and deletes the staging only once the return succeeded.
+Both lifecycle paths that hand a leased home back call it - retirement in `bin/fm-teardown.sh` and failed-seed rollback in `bin/fm-home-seed.sh` - so neither can return a marked slot.
+What counts as a retirable home is one boundary shared by the pooled and the standalone path, `validate_firstmate_operational_dirs_for_removal`, and the pooled path adds no rule of its own.
+It stages exactly what removing the home outright would have removed: every link entry, plus that link's resolved target whenever the target lives inside the home, folded into whichever owned path already contains it.
+That covers an identity file's target as much as an operational directory's, and a target outside the home is never followed, which is also what removing the home would have left alone.
+An operational directory whose target escapes the home, dangles, resolves nowhere, or is the home itself is refused on both paths by that one validator.
+Which refusals may release a pooled lease is a boundary of its own: proven foreign ownership - the marker present and naming a different secondmate - answers with its own outcome and is the only one that hands the lease back, because it is the only refusal that touched nothing this run wrote.
+Every other refusal or failure keeps the lease, since releasing a slot that still carries this run's markers hands the pool a worktree the spawn-time isolation guard refuses for every task dispatched into it, so nothing is handed back half cleared.
+
+```sh
+tests/fm-teardown-home-identity.test.sh
+```
+
+Bounded output from the lifecycle regression:
+
+```text
+ok - a seeded home in service keeps its identity and operational state
+ok - a successful retirement returns a reusable checkout with no home residue
+ok - a failed return restores the complete home and keeps its registration
+ok - a staging holding unaccounted content is kept and reported, never deleted
+ok - the double-fault path names every location holding the home and rearms nothing under it
+ok - supported home layouts retire through the pooled and the standalone path alike
+ok - unsafe home layouts refuse on both paths with the same reason
+ok - an unrelated reusable checkout in the same pool is untouched
+ok - no identity is cleared before the ownership check passes
+ok - the next lease after a retirement reuses the retired slot and carries no home residue
+ok - a rolled-back seed returns its lease with no seeded identity on the slot
+ok - a seed rollback whose return fails restores the identity it staged
+ok - a seed rollback that cannot clear its own identity keeps the lease instead of poisoning the slot
+ok - a seed rollback that owns nothing on the slot hands its lease back untouched
+```
+
+Each case leases from a throwaway repository whose `treehouse.toml` points `root` inside that case's own temporary tree and outside the repository, so no live fleet pool, home, or task id is touched, and the file reports itself as not run when the real treehouse binary is absent rather than passing vacuously.
+The clean-checkout case and the next-lease case were both run against the unretired teardown first, where the marker survived retirement and was handed to the next lease, which is the reported failure end to end.
+The next-lease case caps that pool at one tree and compares the leased path, and the lease id too when a JSON reader is present, so it proves the retired slot was released and reacquired rather than a fresh tree being handed out; without a reader it says so and asserts the reuse by path alone.
+The four seed cases drive the real seeder against the real pool and fail it at a command it reaches only after both markers are on disk, which is the sibling path that returns a leased home without retiring it; the successful one was run against the unfixed rollback first, where the marker survived and went back to the pool.
+The two lease-boundary cases observe the pool itself with the pool capped at one tree, so a lease granted afterwards is that slot having been released rather than a fresh worktree: the case whose identity staging cannot be created keeps its lease and leaves its marker on the slot, and the case whose slot is stamped with another secondmate's id hands the lease straight back with that marker untouched.
+The first was run against the rollback that released every refusal alike, where the pool handed the marked slot straight back to the next lease.
+The failed-return cases on both paths drive a treehouse whose `return` fails and assert that the home gets its identity, its contents, and its registration back, matching the existing contract that a home whose lease cannot be released is preserved rather than half cleared.
+The staging's manifest is never the sole authority on what it holds: a staging still carrying content the manifest does not name is kept and reported rather than deleted, since deleting it would destroy the only copy of something the transaction moved.
+When the identity cannot be put back at all, the home's process events are deliberately left retired rather than rearmed into a home whose `state/` is still staged, and the diagnostic names the identity staging, the process-event staging, and the retired waits so one hand repair can reach all of it.
+The two parity cases drive each layout through the pooled path and through the standalone path where the home is a plain directory, so neither can quietly hold a different opinion about which homes are retirable.
+Symlinked operational directories, a target nested under another owned path, a target whose name carries a space and a glob character, and a symlinked identity marker retire on both, and each retired case asserts the resolved target came off the returned checkout rather than only the link that named it.
+An escaping target, a dangling link, a link that resolves nowhere, and a target that is the home itself refuse on both with the same reason.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

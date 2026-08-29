@@ -86,39 +86,57 @@ path_is_ancestor_of() {
 
 VALIDATED_HOME=""
 VALIDATION_ERROR=""
+VALIDATION_ERROR_PATH=""
 
-validate_operational_dirs() {
+# The operational-directory rules for a secondmate home: data/, state/, config/
+# and projects/ must each resolve INSIDE the home and never into the active
+# firstmate home or the firstmate repo. This is the owner for every caller that
+# sources this library, which is bin/fm-spawn.sh plus this file's own callers;
+# bin/fm-backlog-handoff.sh and bin/fm-home-seed.sh deliberately keep their own
+# same-named validators and do not source this library, so a change here does
+# not reach them.
+# VALIDATION_ERROR carries the reason, VALIDATION_ERROR_PATH the offending path.
+# shellcheck disable=SC2034 # VALIDATION_ERROR_PATH is an output global read by sourcing callers (bin/fm-spawn.sh).
+validate_operational_dirs() {  # <abs-home> <abs-active-home> <abs-root>
   local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
+  VALIDATION_ERROR_PATH=""
   for name in data state config projects; do
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
       VALIDATION_ERROR="secondmate $name directory must resolve inside the secondmate home"
+      VALIDATION_ERROR_PATH="$dir"
       return 1
     fi
     if [ -d "$dir" ]; then
       abs_dir=$(cd "$dir" && pwd -P) || {
         VALIDATION_ERROR="secondmate $name directory cannot be resolved"
+        VALIDATION_ERROR_PATH="$dir"
         return 1
       }
     elif [ -e "$dir" ]; then
       VALIDATION_ERROR="secondmate $name path is not a directory"
+      VALIDATION_ERROR_PATH="$dir"
       return 1
     else
       abs_dir="$abs_home/$name"
     fi
     if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
       VALIDATION_ERROR="secondmate $name directory must resolve inside the secondmate home"
+      VALIDATION_ERROR_PATH="$dir"
       return 1
     fi
     if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
       VALIDATION_ERROR="secondmate $name directory cannot be inside the active firstmate home"
+      VALIDATION_ERROR_PATH="$dir"
       return 1
     fi
     if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
       VALIDATION_ERROR="secondmate $name directory cannot be inside the firstmate repo"
+      VALIDATION_ERROR_PATH="$dir"
       return 1
     fi
   done
+  return 0
 }
 
 validate_secondmate_home() {

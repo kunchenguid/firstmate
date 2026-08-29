@@ -133,7 +133,22 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root that shares the project's git common directory and is
+#   distinct from the primary project checkout. A worktree of any other
+#   repository is refused by name, and so is either side whose repository
+#   identity cannot be established; the project directory must also be its own
+#   repository's top level, since --git-common-dir otherwise walks up and hands
+#   back the identity of whichever repository sits above it.
+#   Repository membership is not isolation, so the worker root is refused
+#   separately when it is a firstmate home - the active home, the firstmate
+#   repo, a directory carrying the seeded-home marker, or the holder of this
+#   fleet's operational directories - which repository identity alone cannot
+#   catch when firstmate itself is the project and its homes are worktrees of
+#   that same repository. The marker alone is enough to refuse; keeping a
+#   returned pool worktree free of one belongs to the home lifecycle
+#   (bin/fm-home-return-lib.sh, called by retirement and by failed-seed
+#   rollback), not to this gate.
+#   Secondmate spawns keep skipping this assertion.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1500,17 +1515,6 @@ resolve_project_dir_arg() {
   esac
 }
 
-path_is_ancestor_of() {
-  local ancestor=$1 path=$2
-  [ -n "$ancestor" ] || return 1
-  [ -n "$path" ] || return 1
-  [ "$ancestor" != "$path" ] || return 1
-  case "$path" in
-    "$ancestor"/*) return 0 ;;
-  esac
-  return 1
-}
-
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
@@ -1565,35 +1569,20 @@ validate_firstmate_home_for_spawn() {
   printf '%s\n' "$abs_home"
 }
 
+# The operational-directory rules themselves come from bin/fm-ff-lib.sh
+# (validate_operational_dirs), which this script sources; this is only the
+# launch-time refusal voice for them, so a secondmate launch and the shared
+# seeded-home validation can never drift apart on what a safe home directory is.
+# bin/fm-backlog-handoff.sh and bin/fm-home-seed.sh still carry their own
+# same-named validators and do not source that library, so editing it changes
+# this caller and bin/fm-ff-lib.sh's own callers, not those two.
 validate_firstmate_operational_dirs() {
-  local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
-  for name in data state config projects; do
-    dir="$abs_home/$name"
-    if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
-      return 1
-    fi
-    if [ -d "$dir" ]; then
-      abs_dir=$(cd "$dir" && pwd -P)
-    elif [ -e "$dir" ]; then
-      echo "error: secondmate $name path is not a directory: $dir" >&2
-      return 1
-    else
-      abs_dir="$abs_home/$name"
-    fi
-    if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
-      return 1
-    fi
-    if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
-      return 1
-    fi
-    if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
-      return 1
-    fi
-  done
+  local abs_home=$1 abs_active_home=$2 abs_root=$3
+  if validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root"; then
+    return 0
+  fi
+  echo "error: $VALIDATION_ERROR: $VALIDATION_ERROR_PATH" >&2
+  return 1
 }
 
 if [ "$KIND" = secondmate ]; then
@@ -1726,6 +1715,76 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Physical git common directory of <dir>, i.e. the identity of the repository
+# that directory belongs to: one repository's main checkout and every linked
+# worktree of it share this path, and no other repository does. Empty output
+# with a non-zero return means the identity could not be established (not a
+# repository, git failed, empty or unexpected output, unresolvable path), which
+# every caller must treat as a refusal rather than a pass. `git -C` runs with
+# <dir> as its cwd, so a relative answer is relative to <dir>; joining it here
+# rather than asking git for an absolute one keeps this fail-closed gate working
+# on every git that ships rev-parse, with no version floor of its own.
+git_common_dir_real() {  # <dir>
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P) || return 1
+}
+
+# Whether <resolved-dir> is one of firstmate's OWN homes rather than a task
+# worktree, echoing what identified it (empty output means it is not one).
+# Belonging to the project's repository does not answer this question: when
+# firstmate itself is the project, a treehouse-leased secondmate home is a
+# linked worktree of that same repository, so it shares the project's git
+# common directory exactly as a legitimate task worktree does. The signals are
+# the ones this script already owns - the active home, the firstmate repo, the
+# seeded-home marker, and the operational directories this process is actually
+# reading and writing - and every comparison is between physically resolved
+# paths, never a path prefix, so a symlinked home cannot slip past by spelling.
+# The marker alone is sufficient: a directory a secondmate identity was written
+# into is not a task worktree, whatever else of that home is still on disk, and
+# demanding more of the shape would arm a worker inside a marked home that had
+# lost any one of its operational directories. The marker outliving a worktree's
+# return to the pool is a lifecycle defect and is fixed at the lifecycle owner
+# (bin/fm-home-return-lib.sh clears identity before the return, on both paths
+# that release a lease), never by teaching this gate to overlook an identity it
+# can see.
+firstmate_home_reason() {  # <resolved-dir>
+  local dir=$1 candidate owner
+  if [ -z "$dir" ]; then
+    printf '%s\n' 'its path could not be resolved'
+    return 0
+  fi
+  if [ "$dir" = "$(real_path_or_raw "$FM_HOME")" ]; then
+    printf '%s\n' 'it is the active firstmate home'
+    return 0
+  fi
+  if [ "$dir" = "$(real_path_or_raw "$FM_ROOT")" ]; then
+    printf '%s\n' 'it is the firstmate repository root'
+    return 0
+  fi
+  if [ -f "$dir/$SUB_HOME_MARKER" ]; then
+    printf "it carries the seeded firstmate home marker %s\n" "$SUB_HOME_MARKER"
+    return 0
+  fi
+  for candidate in "$STATE" "$DATA" "$PROJECTS" "$CONFIG"; do
+    [ -d "$candidate" ] || continue
+    # Resolve the candidate itself before stepping up: `cd "$candidate/.."`
+    # would strip the last component textually and answer with the parent of a
+    # SYMLINKED override rather than the parent of the home it points into.
+    owner=$(cd "$candidate" 2>/dev/null && cd -P .. && pwd -P) || continue
+    if [ "$dir" = "$owner" ]; then
+      printf "it holds this fleet's operational directory %s\n" "$candidate"
+      return 0
+    fi
+  done
+  return 0
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1735,7 +1794,8 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real wt_repo proj_repo
+  local proj_top proj_top_real home_reason
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1748,6 +1808,64 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  # Being SOME real worktree other than the primary checkout is not enough: a
+  # worktree of a DIFFERENT repository passes every check above while putting
+  # the worker somewhere the task's work can never land. Seen live: a pane that
+  # never left the firstmate home recorded worktree=<firstmate home> and passed,
+  # because that home is a real git top-level distinct from the project - which
+  # would have launched a project worker straight into firstmate's own primary
+  # checkout. Prove repository identity positively (a shared git common
+  # directory, not a path prefix) and refuse whenever it cannot be established.
+  proj_repo=$(git_common_dir_real "$PROJ_ABS") || proj_repo=
+  if [ -z "$proj_repo" ]; then
+    echo "error: the repository identity of project '$PROJ_ABS' could not be established (its git common directory did not resolve); refusing to launch $source's worktree '$WT' without proof it belongs to the project's repository. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  # That identity is only the project's own if the project directory IS its
+  # repository's top level: --git-common-dir walks UP, so a project path that is
+  # any subdirectory silently answers with the identity of whichever repository
+  # is above it, and every worktree of that repository would then be accepted as
+  # the project's own. The refusal covers both shapes it walks up into - a
+  # directory swallowed by a repository that is not the project's, and a genuine
+  # subdirectory of the project's own repository - because neither anchors an
+  # identity of its own. The worktree side is already anchored by the
+  # --show-toplevel equality above; anchor this side the same way rather than
+  # trusting a walked-up answer.
+  proj_top=$(git -C "$PROJ_ABS" rev-parse --show-toplevel 2>/dev/null || true)
+  proj_top_real=
+  if [ -n "$proj_top" ]; then
+    proj_top_real=$(cd "$proj_top" 2>/dev/null && pwd -P) || proj_top_real=
+  fi
+  if [ -z "$proj_top_real" ]; then
+    echo "error: the git top level of project '$PROJ_ABS' could not be established (rev-parse --show-toplevel gave '${proj_top:-nothing}'); refusing to launch $source's worktree '$WT' without proof of which repository the project itself is. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  if [ "$proj_top_real" != "$proj_real" ]; then
+    echo "error: project '$PROJ_ABS' is not the top level of the repository it resolves to, and a project has to be registered at its repository's top level for the repository identity '$proj_repo' to be the project's own rather than one walked up to from a subdirectory. The repository top level resolved from it is '$proj_top_real'; re-register this project at '$proj_top_real', or give this directory a repository of its own, and dispatch again. Refusing to launch $source's worktree '$WT' against an identity the project itself does not anchor. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  wt_repo=$(git_common_dir_real "$wt_real") || wt_repo=
+  if [ -z "$wt_repo" ]; then
+    echo "error: the repository identity of $source's worktree '$WT' could not be established (its git common directory did not resolve); refusing to launch without proof it belongs to the project's repository '$proj_repo'. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  if [ "$wt_repo" != "$proj_repo" ]; then
+    echo "error: $source yielded a worktree that belongs to a different repository (resolved '$WT'; its repository '$wt_repo'; the project's repository '$proj_repo'); refusing to launch a worker for $PROJ_ABS outside that project's own repository. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  # Membership in the project's repository is NOT isolation, and proving the
+  # first never proves the second. When firstmate is its own project - the
+  # self-hosted fleet this runs in - a leased secondmate home is a linked
+  # worktree of that very repository, so it satisfies every check above while
+  # being firstmate's operational home (state/, data/, config/). That is the
+  # live incident's shape exactly: a pane that never left the home. Establish
+  # the second property on its own terms, so no repository configuration can
+  # arm a worker against a firstmate home.
+  home_reason=$(firstmate_home_reason "$wt_real")
+  if [ -n "$home_reason" ]; then
+    echo "error: $source yielded a firstmate home, not a task worktree (resolved '$WT'; $home_reason); refusing to launch a worker for $PROJ_ABS inside firstmate's own home even though it belongs to the project's repository '$proj_repo'. Inspect target $inspect_target" >&2
     exit 1
   fi
 }

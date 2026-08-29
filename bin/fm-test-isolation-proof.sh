@@ -106,7 +106,8 @@ exclusion_reason() {
     fm-backend.test.sh)
       printf '%s\n' 'old-vs-new main checkout diff fixture; gray-zone concurrent git/worktree cost'
       ;;
-    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh|fm-trace-context-spawn.test.sh)
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-spawn-worktree-identity.test.sh|fm-trace-context-spawn.test.sh)
       printf '%s\n' 'real isolated git worktrees plus spawn settle loops; gray zone until dedicated proof'
       ;;
     fm-pr-check-security.test.sh)
@@ -114,6 +115,9 @@ exclusion_reason() {
       ;;
     fm-teardown.test.sh)
       printf '%s\n' 'landed-work + lock-race teardown matrix; keep serial with forge/git stress peers'
+      ;;
+    fm-teardown-home-identity.test.sh)
+      printf '%s\n' 'real treehouse pool leases and returns; gray zone until dedicated proof'
       ;;
     fm-herdr-session-cleanup.test.sh)
       printf '%s\n' 'session-start task/presentation lock matrix; keep serial until dedicated concurrent proof'
@@ -201,9 +205,11 @@ fm-backend-tmux-smoke.test.sh
 fm-backend.test.sh
 fm-spawn-dispatch-profile.test.sh
 fm-spawn-worktree-settle.test.sh
+fm-spawn-worktree-identity.test.sh
 fm-trace-context-spawn.test.sh
 fm-pr-check-security.test.sh
 fm-teardown.test.sh
+fm-teardown-home-identity.test.sh
 fm-watcher-lock.test.sh
 fm-wake-queue.test.sh
 fm-afk-inject-e2e.test.sh

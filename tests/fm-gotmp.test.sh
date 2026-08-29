@@ -89,6 +89,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
+  # fm-home-return-lib.sh: teardown sources it unconditionally for the shared
+  # clear-identity-around-the-pool-return transaction on home retirement. It
+  # does nothing in this fixture, which retires no home, but it is a real
+  # sibling teardown now requires at source time.
+  ln -s "$ROOT/bin/fm-home-return-lib.sh" "$fake/bin/fm-home-return-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -176,6 +181,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
+  # fm-home-return-lib.sh: teardown sources it unconditionally for the shared
+  # clear-identity-around-the-pool-return transaction on home retirement.
+  ln -s "$ROOT/bin/fm-home-return-lib.sh" "$fake/bin/fm-home-return-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
