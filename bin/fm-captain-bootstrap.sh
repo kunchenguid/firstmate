@@ -29,11 +29,22 @@ FM="${FM_HOME:-$HOME/firstmate}"
 # Helper scripts (fm-watch-arm.sh --status, fm-lock.sh status) resolve through
 # this script's own bin dir; FM_BOOTSTRAP_BIN overrides it (the test stub seam).
 FM_BIN="${FM_BOOTSTRAP_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# The digest inventories the fleet by shelling out to herdr, and every herdr verb
+# takes its session from $HERDR_SESSION alone. bin/fm-herdr.sh owns turning the
+# firstmate-side pin FM_HERDR_SESSION into that export, and it only lands in a
+# shell that SOURCED the library - which this hook is not, being launched by the
+# harness rather than by fm-spawn. Without it a pinned fleet reads as empty:
+# the digest queries `default` and reports "nothing in flight" while crew are
+# live in the pinned session. Sourced from this script's OWN bin dir, never from
+# FM_BOOTSTRAP_BIN, which is the test stub seam and holds no library.
+FM_HERDR_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-herdr.sh"
+# shellcheck source=/dev/null
+[ -r "$FM_HERDR_LIB" ] && . "$FM_HERDR_LIB"
 # Capture the SessionStart hook payload from stdin into an env var: the python
 # program itself arrives on python's stdin via the heredoc, so the program reads
 # the hook JSON from the environment, not sys.stdin.
 FM_HOOK_JSON="$(cat)" FM_BOOTSTRAP_FM="$FM" FM_BOOTSTRAP_BIN="$FM_BIN" python3 - <<'PY'
-import os, json, glob, subprocess, time, shutil
+import os, re, json, glob, subprocess, time, shutil
 fm = os.environ["FM_BOOTSTRAP_FM"]
 bindir = os.environ.get("FM_BOOTSTRAP_BIN", "")
 
@@ -259,22 +270,63 @@ if role == "captain":
     projects    = read(os.path.join(fm, "data/projects.md")).strip()
     secondmates = read(os.path.join(fm, "data/secondmates.md")).strip()
     backlog     = read(os.path.join(fm, "data/backlog.md"), 1500).strip()
-    try:
-        wins = subprocess.run(["tmux","list-windows","-t","firstmate","-F","#{window_name}"],
-                              capture_output=True, text=True, timeout=3).stdout.strip()
-    except Exception:
-        wins = ""
+    # Inventory the fleet where it actually LIVES. Crewmates run in herdr, so
+    # listing only tmux showed a restarted supervisor an EMPTY fleet while real
+    # crew were live - and tmux still matters for windows predating the cutover,
+    # which are being drained. Both, labelled, or the digest lies by omission.
+    def _run(cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            return ""
+    # herdr's AgentInfo carries NO name field - verified against herdr 0.8.2,
+    # whose records hold agent, agent_status, pane_id, tab_id, workspace_id and
+    # the terminal title, and nothing else. The readable name firstmate gives a
+    # crewmate lives on its TAB (fm_herdr_label renames tab and agent to the same
+    # <project>-<work> string), so the tab label is what makes this digest legible.
+    # A pane id is the LAST RESORT and says so: `unnamed:wM:p9` tells the captain
+    # the pane has no name, where a bare id read like one.
+    def _herdr_names():
+        try:
+            agents = json.loads(_run(["herdr", "agent", "list"]))["result"]["agents"]
+        except Exception:
+            return []
+        labels = {}
+        try:
+            for t in json.loads(_run(["herdr", "tab", "list"]))["result"]["tabs"]:
+                labels[t.get("tab_id")] = t.get("label") or ""
+        except Exception:
+            pass
+        out = []
+        for a in agents:
+            label = labels.get(a.get("tab_id"), "")
+            pane = a.get("pane_id") or ""
+            if re.match(r"^[a-z][a-z0-9_-]{0,31}$", label):
+                out.append(label)
+            elif pane:
+                out.append("unnamed:" + pane)
+        return sorted(set(out))
+    herdr_names = _herdr_names()
+    tmux_wins = [w for w in _run(
+        ["tmux", "list-windows", "-t", "firstmate", "-F", "#{window_name}"]).splitlines() if w.strip()]
+    parts = []
+    if herdr_names:
+        parts.append("herdr: " + ", ".join(herdr_names))
+    if tmux_wins:
+        parts.append("tmux (draining): " + ", ".join(tmux_wins))
+    wins = "\n".join(parts)
     ctx = f"""# You are Cortana — firstmate captain (this session)
-Operating manual: {fm}/AGENTS.md — READ IT before any software orchestration (full lifecycle, recovery, harness adapters, delivery modes). Your conversation memory is a cache; truth lives in tmux + {fm}/state + data/backlog.md + treehouse.
+Operating manual: {fm}/AGENTS.md — READ IT before any software orchestration (full lifecycle, recovery, harness adapters, delivery modes). Your conversation memory is a cache; truth lives in the panes (herdr, or tmux for windows still draining) + {fm}/state + data/backlog.md + treehouse.
 You delegate every piece of project work to a crewmate/secondmate you spawn, supervise, and tear down. Never do project work inline.
 
 ## Spawn lifecycle (know this cold — do not rediscover live)
 1. Project must be registered: a git repo at {fm}/projects/<name> + one line in data/projects.md (name, delivery mode, optional +yolo, one-line desc).
 2. Brief:  bin/fm-brief.sh <task-id> <repo-name> [--scout | --secondmate <proj>...]
    then edit data/<task-id>/brief.md, replacing {{TASK}} with task + acceptance criteria + context.
-3. Spawn:  bin/fm-spawn.sh <task-id> <project-dir> [claude|codex|opencode|pi] [--scout|--secondmate]
-   -> opens tmux window fm-<id> in session 'firstmate', runs `treehouse get` for an isolated worktree, launches the harness on the brief. Peek the pane within ~20s and clear any trust dialog with bin/fm-send.sh <win> --key Enter.
+3. Spawn:  bin/fm-spawn.sh <task-id> <project-dir> [claude|codex|opencode|pi] [--scout|--secondmate] [--name <work>]
+   -> creates a HERDR tab named <project>-<work> in that project's workspace, runs `treehouse get` for an isolated worktree, launches the harness on the brief. herdr is the only surface: no reachable server means the spawn STOPS and escalates - it never falls back to a pane you cannot see. Peek within ~20s and clear any trust dialog with bin/fm-send.sh <win> --key enter.
 4. Supervise:  bin/fm-watch.sh · peek bin/fm-peek.sh <win> · steer bin/fm-send.sh <win> · teardown bin/fm-teardown.sh <id>
+   Address a crewmate by fm-<task-id>; state/<id>.meta carries the pane and, in mux=, which surface made it (herdr, or tmux for a window still draining).
 Delivery mode per project (data/projects.md via fm-project-mode.sh): no-mistakes (default: implement -> /no-mistakes -> PR -> captain merge) | direct-PR | local-only.
 
 ## Live fleet state
@@ -284,8 +336,8 @@ Registered projects:
 Secondmates:
 {secondmates or '(none registered)'}
 
-Open 'firstmate' tmux windows:
-{wins or '(none — no session yet)'}
+Live crew panes:
+{wins or '(none — nothing in flight)'}
 
 Recent backlog:
 {backlog or '(empty)'}

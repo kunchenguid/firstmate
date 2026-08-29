@@ -9,9 +9,9 @@
 # resolution ignore FM_HOME (resolve A's state for both) so B leaks into A's scope ->
 # the isolation assertion fails, proving the scope actually gates the selection.
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
-pass() { printf 'ok - %s\n' "$1"; }
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # shellcheck source=bin/fm-context-watch.sh disable=SC1091
 . "$ROOT/bin/fm-context-watch.sh"

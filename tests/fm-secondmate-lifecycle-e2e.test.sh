@@ -118,6 +118,7 @@ phase_spawn() {
   # test records the intent instead of detaching a real looping daemon.
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    CALLS="$LOG" HERDR_PANE_CWD="$SUB_ABS" HERDR_WORKSPACES="w1=$(basename "$SUB_ABS")" \
     FM_CTX_WATCH_START_CMD="printf '%s\\n' >> \"$watchlog\"" \
     "$ROOT/bin/fm-spawn.sh" design "$SUB" codex --secondmate >/dev/null \
     || fail "secondmate spawn failed"
@@ -142,13 +143,20 @@ phase_spawn() {
 
 phase_send() {
   : > "$LOG"
-  # The meta window (firstmate:fm-design) must win over a foreign same-named
-  # window returned by list-windows.
+  local target
+  target=$(grep '^window=' "$HOME_DIR/state/design.meta" | cut -d= -f2-)
+  [ -n "$target" ] || fail "spawn recorded no window for the secondmate"
+  # The pane recorded in THIS home's meta must win over a foreign same-named
+  # window that list-windows would offer. Delivery is now the acknowledged
+  # herdr prompt rather than tmux keystrokes; which target it addresses is the
+  # property under test, and that is unchanged.
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="other-session:fm-design" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    CALLS="$LOG" HERDR_PANE_CWD="$SUB_ABS" HERDR_WORKSPACES="w1=$(basename "$SUB_ABS")" \
     "$ROOT/bin/fm-send.sh" fm-design 'route this work' >/dev/null 2>&1 \
     || fail "fm-send failed for a bare firstmate window with home metadata"
-  assert_grep 'send-keys -t firstmate:fm-design -l route this work' "$LOG" "send did not use the window recorded in this home's meta"
+  assert_grep "agent prompt $target route this work" "$LOG" "send did not use the pane recorded in this home's meta"
+  assert_no_grep 'other-session' "$LOG" "send used a foreign same-named window instead of the recorded pane"
   assert_no_grep 'send-keys -t other-session:fm-design' "$LOG" "send targeted a foreign same-named window"
   pass "send: a bare fm-<id> routes to the window recorded in this home's meta"
 }
@@ -196,13 +204,18 @@ phase_recovery() {
   # persistent home (no explicit home argument).
   rm -f "$HOME_DIR/state/design.meta"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    CALLS="$LOG" HERDR_PANE_CWD="$SUB_ABS" HERDR_WORKSPACES="w1=$(basename "$SUB_ABS")" \
     FM_CTX_WATCH_START_CMD=: \
     "$ROOT/bin/fm-spawn.sh" design "echo relaunch" --secondmate >/dev/null 2>&1 \
     || fail "recovery respawn failed"
   local meta="$HOME_DIR/state/design.meta"
   assert_grep "home=$SUB_ABS" "$meta" "respawn did not preserve the persistent home from the registry"
   assert_grep 'projects=alpha, beta, gamma' "$meta" "respawn did not preserve the project list from the registry"
-  assert_grep 'window=firstmate:fm-design' "$meta" "respawn did not reconstruct the direct-report window"
+  # A respawned secondmate is a herdr pane like any other direct report; what
+  # matters is that a window IS reconstructed and marked as a herdr one, so a
+  # later steer addresses it with herdr verbs rather than the drain path.
+  assert_grep 'window=' "$meta" "respawn did not reconstruct the direct-report window"
+  assert_grep 'mux=herdr' "$meta" "respawn did not record the pane as a herdr pane"
   pass "recovery: respawns from the durable registry and persistent home"
 }
 

@@ -4,6 +4,7 @@
 #          Detect: prints one line per problem or capability fact and exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
+#                 "NEEDS_HERDR_SERVER: <remediation>",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -20,6 +21,14 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
+#          herdr is where every crewmate runs, so an unusable herdr means the
+#          fleet can dispatch NOTHING - and it must be said here, at startup,
+#          not discovered one escalation at a time on first spawn. It has two
+#          distinct failures with different fixes, so it gets two distinct lines:
+#          an absent binary is an ordinary MISSING (install it), while a binary
+#          with no running server is NEEDS_HERDR_SERVER (start or attach one).
+#          Reporting the second as MISSING would send the captain to reinstall a
+#          tool that is already installed.
 #          tasks-axi is an OPTIONAL backlog-management capability reported only
 #          when tasks-axi --version is 0.1.1 or newer. It is never a MISSING
 #          line and never prompts an install.
@@ -40,6 +49,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# fm_herdr_up is the canonical reachability predicate; one fact, one owner.
+# shellcheck source=bin/fm-herdr.sh
+. "$SCRIPT_DIR/fm-herdr.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 
@@ -119,7 +131,7 @@ secondmate_sync() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|gh) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node|gh|herdr) echo "brew install $1  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -127,11 +139,16 @@ install_cmd() {
   esac
 }
 
-TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
+TOOLS="tmux herdr node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
+
+# Sourced for its resolvers only (tests assert install_cmd without invoking any
+# installer). Stops before the detection body, which would run fleet syncs.
+# shellcheck disable=SC2317  # the exit is the executed-not-sourced path
+if [ -n "${FM_BOOTSTRAP_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 if [ "${1:-}" = "install" ]; then
   shift
@@ -152,6 +169,17 @@ if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+
+# herdr is the only surface crewmates run on (AGENTS.md, herdr workspace
+# hygiene), and fm-spawn refuses rather than degrading when it cannot reach a
+# server. An installed binary with no server therefore means every dispatch will
+# fail - so say it once, here, instead of once per task later. Only reachability
+# is checked; the MISSING sweep above already covers an absent binary, and
+# reporting both would read as two problems when there is one.
+if command -v herdr >/dev/null 2>&1 && ! fm_herdr_up; then
+  herdr_sess=$(fm_herdr_session)
+  echo "NEEDS_HERDR_SERVER: herdr session '$herdr_sess' is not running - crewmates cannot be spawned until it is, and every herdr verb targets that session only, so another session being up does not help. Start or attach it with \`herdr session attach $herdr_sess\` (or \`herdr\` for the default session), then retry."
+fi
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

@@ -20,17 +20,25 @@
 #
 # Mutation (LEDGER_MUTATE=1): the wake-queue fixture records are not written, so
 # the queue-depth assertion fails.
+#
+# HERMETICITY. This suite rolled its own ROOT/fail/pass and so sat OUTSIDE the
+# net that tests/lib.sh installs - which stopped being harmless the moment the
+# digest began inventorying the fleet: every run then queried the captain's REAL
+# herdr and tmux servers, and its output depended on whichever crew happened to
+# be live. The net is opt-in-by-sourcing, so the rule is the fix: a suite comes
+# under it by sourcing tests/lib.sh, not by remembering to stub what it happens
+# to call today. Case F prepends its own fake ahead of the refusers, which is
+# how a case that WANTS a herdr gets one.
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
-pass() { printf 'ok - %s\n' "$1"; }
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOOT="$ROOT/bin/fm-captain-bootstrap.sh"
 WATCHARM="$ROOT/bin/fm-watch-arm.sh"
 DISCLAIMER='Snapshot as of boot — run bin/fm-wake-drain.sh before acting on the fleet.'
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-boot-digest.XXXXXX")
-trap 'rm -rf "$TMP"' EXIT
+TMP=$(fm_test_tmproot fm-boot-digest)
 
 path_mtime() {
   if [ "$(uname)" = Darwin ]; then stat -f %m "$1"; else stat -c %Y "$1"; fi
@@ -211,5 +219,34 @@ printf '%s' "$line" | grep -Eq "^watcher-status: stale pid=$$ beacon-age=[0-9]+$
 ls "$S2"/.watch-arm-output.* >/dev/null 2>&1 && fail "E3: --status must not fork a watcher child"
 
 pass "E: fm-watch-arm.sh --status honors pinned grammar in all three states, side-effect-free"
+
+# --- Case F: the fleet inventory obeys the session pin -----------------------
+# Every herdr verb takes its session from $HERDR_SESSION alone, and bin/fm-herdr.sh
+# owns turning the firstmate-side FM_HERDR_SESSION pin into that export. The
+# digest is not launched by fm-spawn, so before it sourced the library it queried
+# `default` and reported an empty fleet while crew were live in the pinned
+# session. The fake records the session it was called in, which is the only way
+# to catch a probe and its verbs aiming at different places.
+FMF="$TMP/homeF"
+mkdir -p "$FMF/data" "$FMF/state" "$TMP/fakebin"
+printf -- '- demo [no-mistakes] - a demo project\n' > "$FMF/data/projects.md"
+CALLS_F="$TMP/herdr-calls"
+: > "$CALLS_F"
+cat > "$TMP/fakebin/herdr" <<'EOF'
+#!/usr/bin/env bash
+printf 'session=%s argv=%s\n' "${HERDR_SESSION:-UNSET}" "$*" >> "$CALLS"
+case "$1 $2" in
+  "agent list") printf '%s\n' '{"result":{"agents":[{"tab_id":"t1","pane_id":"wM:p9"}]}}' ;;
+  "tab list")   printf '%s\n' '{"result":{"tabs":[{"tab_id":"t1","label":"demo-fix-login"}]}}' ;;
+esac
+EOF
+chmod +x "$TMP/fakebin/herdr"
+outF=$(CALLS="$CALLS_F" PATH="$TMP/fakebin:$PATH" FM_HERDR_SESSION=fleet \
+  FIRSTMATE_ROLE=captain run_boot "$FMF" | ctx_of) || fail "case F: bootstrap must exit 0"
+grep -q '^session=fleet argv=agent list$' "$CALLS_F" \
+  || fail "case F: the digest queried the wrong session (got: $(head -1 "$CALLS_F"))"
+printf '%s' "$outF" | grep -q 'herdr: demo-fix-login' \
+  || fail "case F: a pinned fleet must be inventoried, not reported empty"
+pass "F: the fleet inventory resolves FM_HERDR_SESSION like the herdr verbs do"
 
 pass "g-boot-digest: boot-time reconciliation digest behaves as pinned"

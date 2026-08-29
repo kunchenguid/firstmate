@@ -4,6 +4,12 @@
 # tmux session (never a real fleet pane). Mutation (LEDGER_MUTATE=1): make the same
 # pane idle instead of busy — fm_ctx_can_fire then returns true, so the "must be
 # blocked" assertion fails (proving the guard, not a constant, drives the result).
+# HERMETICITY-WAIVER: outside the tests/lib.sh deny net on purpose. The context
+# watchdog is a tmux-only subsystem and this case drives a DISPOSABLE scratch
+# session it creates and kills itself, so the refusing shim would deny the very
+# server under test. The migration this marks: opt in with FM_TEST_ALLOW_LIVE_TMUX=1
+# before sourcing lib.sh and export FM_TEST_LIVE_TMUX_SESSION="$SESS", which scopes
+# its kills to its own session instead of trusting them.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }

@@ -87,6 +87,84 @@ fm_test_tmproot() {
 
 trap fm_test_cleanup EXIT
 
+# --- keeping tests off the captain's live multiplexers ----------------------
+#
+# herdr is the only surface firstmate spawns onto, so any suite that drives
+# fm-spawn/fm-send/fm-peek without faking `herdr` will reach the CAPTAIN'S REAL
+# SERVER and create real tabs in his real workspaces. That is not hypothetical:
+# it happened twice during this migration, leaving stray `design-home`,
+# `spawn-proj` and `alpha` workspaces behind for someone to notice and clean up.
+#
+# tmux is guarded the SAME WAY, and it is the more dangerous of the two. The
+# cutover deliberately keeps the drain paths open, so `tmux kill-window`,
+# `send-keys` and `capture-pane` are still live call sites - and a stray
+# kill-window does not leave clutter for someone to tidy, it CLOSES a
+# pre-cutover crewmate that may be holding unlanded commits. This class of
+# accident is proven on this branch: an early cut of gate h3 drove the real tmux
+# server and left `firstmate:fm-fallback-t8` behind in the captain's live
+# session. That one was a create; a kill would not have been recoverable.
+#
+# There is no longer an FM_MUX to pin, and there should not be - headless is not
+# a flag anyone gets to flip. So the net is a PATH shim instead: a `herdr` and a
+# `tmux` that refuse loudly. A suite that fakes either one prepends its own
+# fakebin ahead of these and never sees them; a suite that forgot gets an
+# obvious, greppable failure rather than silently touching the fleet.
+#
+# The two opt-outs are SEPARATE because the need is separate: a gate that drives
+# the real herdr binary has no business reaching real tmux, and vice versa. A
+# live gate sets FM_TEST_ALLOW_LIVE_HERDR=1 and/or FM_TEST_ALLOW_LIVE_TMUX=1
+# BEFORE sourcing this file, which is deliberate and visible at the top of those
+# files, and scopes itself to a throwaway session or a private socket it created
+# - never the fleet's.
+#
+# THE SHIMS ARE COMMITTED FILES, not temp dirs, because they are static content
+# and every temp-dir shape had a defect the files do not: minting one per
+# sourcing suite leaked a directory per test FILE forever, and a shared fixed
+# path let one worktree's run truncate a shim another run was exec'ing while
+# putting a guessable, world-creatable directory on PATH. Repo-owned needs no
+# trap, cannot race, and cannot be pre-created by anyone who could not already
+# edit the tests. They live one-per-tool so each can be withheld on its own.
+if [ "${FM_TEST_ALLOW_LIVE_HERDR:-0}" != 1 ]; then
+  FM_TEST_DENY_BIN="$ROOT/tests/denybin/herdr"
+  PATH="$FM_TEST_DENY_BIN:$PATH"
+  export PATH
+fi
+if [ "${FM_TEST_ALLOW_LIVE_TMUX:-0}" != 1 ]; then
+  FM_TEST_DENY_TMUX_BIN="$ROOT/tests/denybin/tmux"
+  PATH="$FM_TEST_DENY_TMUX_BIN:$PATH"
+  export PATH
+else
+  # Opted in, but not unguarded. The opt-in hands a suite the same
+  # `tmux kill-window` that closes a live pre-cutover crewmate carrying unlanded
+  # commits, and a kill does not come back the way a stray create does. So the
+  # real binary is reached through a guard that passes everything through EXCEPT
+  # the destructive verbs, which it allows only against the throwaway session
+  # the suite declares in FM_TEST_LIVE_TMUX_SESSION. No declaration means the
+  # kill is refused, not aimed at whatever session happens to be current.
+  PATH="$ROOT/tests/denybin/live-tmux:$PATH"
+  export PATH
+fi
+
+# --- hermetic against the captain's own session pin -------------------------
+#
+# fm_herdr_up probes ${HERDR_SESSION:-default} because that is the session every
+# herdr verb targets, and FM_HERDR_SESSION exports it. So a captain who runs his
+# fleet under a named session - the configuration that pin exists for - would
+# otherwise change what every fake-server suite asserts: the probe asks for
+# `fleet` while a fake modelling `default` answers, and suites go red for a
+# reason that has nothing to do with the behavior under test.
+#
+# Neutralising it here rather than per file is deliberate. "Remember to unset
+# it" is a hope, not a property: one suite remembered and six did not, which is
+# exactly how the divergence stayed invisible. A case that WANTS a named session
+# sets it per invocation (env VAR=... or a prefix), which still works.
+#
+# The live gates are excluded on purpose: they drive the real binary, so the
+# captain's pin is the session they must actually reach.
+if [ "${FM_TEST_ALLOW_LIVE_HERDR:-0}" != 1 ]; then
+  unset HERDR_SESSION FM_HERDR_SESSION
+fi
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to

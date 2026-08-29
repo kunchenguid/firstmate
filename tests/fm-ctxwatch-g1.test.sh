@@ -5,9 +5,9 @@
 # correct fm_ctx_select then stops selecting it, so the assertion fails (proving
 # the test is keyed to the real threshold behavior, not vacuous).
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
-pass() { printf 'ok - %s\n' "$1"; }
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # shellcheck source=bin/fm-context-watch.sh
 . "$ROOT/bin/fm-context-watch.sh"

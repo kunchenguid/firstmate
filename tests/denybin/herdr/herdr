@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+echo "fm-test: this suite reached the REAL herdr binary." >&2
+echo "  A test must never touch the captain's live server. Install a fake herdr" >&2
+echo "  on PATH (tests/herdr-helpers.sh: fm_herdr_fake_server), or set" >&2
+echo "  FM_TEST_ALLOW_LIVE_HERDR=1 before sourcing tests/lib.sh if this suite is" >&2
+echo "  a live gate that genuinely needs the real server." >&2
+exit 97

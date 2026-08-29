@@ -18,7 +18,7 @@ A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if 
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
-Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh` - which since the herdr cutover uses it only for panes that predate it, delivering to every new crewmate through the acknowledged `herdr agent prompt --wait` in `bin/fm-herdr.sh` - so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent for the panes that still need them; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 `fm-send.sh` adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that pause.
 
 The other half of that channel is the crewmate's own report, and it is a verb rather than a shell redirect.
@@ -33,6 +33,30 @@ Its first tier is universal - this home's identity and one line per fleet instan
 The whole hook holds a wall-clock ceiling by running its helpers concurrently under one shared deadline and killing, as a process group, any that overruns it.
 Nothing degrades silently: a helper that is killed and a section that fails to build each leave an explicit marker in the output.
 Registering it is not a change in this repo: the harness settings file is rendered from control-plane desired state, so the hook is declared there and goes live when that declaration is applied; see [configuration.md](configuration.md).
+
+## Where the crew runs
+
+Every crewmate runs in a herdr pane, and herdr is the only surface firstmate spawns onto.
+`bin/fm-herdr.sh` is the single library behind that surface, and the reconcile CLI for it; `bin/fm-spawn.sh`, `bin/fm-send.sh`, `bin/fm-peek.sh`, and `bin/fm-teardown.sh` address panes through it rather than calling a multiplexer directly.
+
+The fleet stays legible because it is organised the same way every time.
+One workspace per project, resolved explicitly from the project name and created when it is absent, never left to whichever workspace happens to be focused; `FM_HERDR_WORKSPACE` pins it, and `bin/fm-herdr.sh` with no arguments prints a plan of the missing ones while `--apply` creates them.
+Each pane is named `<project>-<work>` in kebab-case under 28 characters - `afs-resource-registry`, `firstmate-fleet-view` - because herdr addresses an agent by that name.
+`fm-spawn.sh --name <work>` supplies the work half; without it the half is derived from the task id by dropping its random `-<letter><digit>` suffix.
+The task id itself stays in `state/<id>.meta`, which also records the pane id in `window=` and marks the crewmate `mux=herdr`; firstmate keeps addressing crewmates as `fm-<id>` and resolves them through that file.
+`bin/fm-herdr.sh --name <pane> <project> <work>` renames a live pane to the same convention.
+
+There is no automatic fallback to a headless surface.
+When no herdr server is reachable for the session the verbs actually use, `fm_herdr_require` fails and the spawn stops with nothing created - no window, no tab, no meta - because believing you are watching the fleet while work lands somewhere invisible is worse than being told it cannot start.
+Bootstrap reports the same condition once at session start as `NEEDS_HERDR_SERVER:`, kept distinct from `MISSING: herdr` because installing a tool and starting its server are different fixes.
+
+Steering is acknowledged rather than inferred.
+`fm-send.sh` delivers through `herdr agent prompt --wait`, so a crewmate at an approval dialog is refused instead of typed over, a pane with no agent is refused instead of having the steer executed as a shell command, and a steer that goes in without an observed state change is reported as unconfirmed - assumed delivered and never re-sent, since re-sending a steer the crewmate already holds is the worse of the two errors.
+
+Panes created before the herdr cutover are still being drained.
+Their meta has no `mux=herdr` line, and they stay readable, steerable, and closable over tmux through `bin/fm-tmux-lib.sh` until they are torn down: a watcher that cannot read a live crewmate is blind, and some of that work carries unlanded commits.
+Nothing new is ever created there, and `fm_herdr_drain_pending` answers whether any home still has one, which is when `fm-tmux-lib.sh` can go.
+Two supervision paths have not moved yet: `bin/fm-watch.sh` still reads panes over tmux, so stale-pane detection is inert for a herdr crewmate and a wedged one is caught by its status file and the heartbeat review instead, and the context watchdog has no herdr path at all, so context on a long-running crewmate is watched by hand.
 
 ## Worktrees, not branches in your checkout
 
@@ -55,7 +79,7 @@ Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`,
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
-`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
+`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it into a herdr pane through the same status-file path as any direct report.
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
 If returning the lease fails during teardown, firstmate leaves the route and home intact instead of hiding a still-held lease.
@@ -99,7 +123,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 ## Restart-proof
 
-All state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
+All state lives in the panes themselves - herdr for anything spawned after the cutover, tmux for windows still draining - plus status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
 Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## Development notes

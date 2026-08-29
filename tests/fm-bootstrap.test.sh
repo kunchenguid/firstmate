@@ -20,6 +20,20 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node no-mistakes gh-axi chrome-devtools-axi lavish-axi
+  # herdr is a required tool now (crewmates run nowhere else), and bootstrap
+  # checks both that the binary exists and that a server answers. A stub that
+  # reports a running server keeps the "silent = all good" cases silent; the
+  # herdr-specific reporting is gated in tests/fm-herdr-h9-startup.
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "session list") printf 'name    status
+default %s
+' "${HERDR_SERVER:-running}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then

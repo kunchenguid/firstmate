@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Guard shim for a suite that opted into a REAL tmux server
+# (FM_TEST_ALLOW_LIVE_TMUX=1). It passes every verb through to the real binary
+# except the destructive ones, which it allows only against the throwaway
+# session the suite declared in FM_TEST_LIVE_TMUX_SESSION.
+#
+# The opt-in alone would already be an improvement on nothing, but it is a
+# blanket one: it hands a suite the same `tmux kill-window` that closes a live
+# pre-cutover crewmate holding unlanded commits. A create leaves clutter someone
+# tidies up; a kill does not come back. So the destructive verbs stay scoped to
+# a session the suite made itself, and a suite that declares none gets a refusal
+# rather than the fleet's server - fail closed, never open.
+set -u
+
+_fmg_die() {
+  printf 'fm-test: refusing a destructive tmux verb against the live server.\n' >&2
+  printf '  %s\n' "$1" >&2
+  printf '  This suite opted into a real tmux (FM_TEST_ALLOW_LIVE_TMUX=1); it must\n' >&2
+  printf '  scope its own throwaway session in FM_TEST_LIVE_TMUX_SESSION and aim\n' >&2
+  printf '  every kill at that session, never the fleet'"'"'s.\n' >&2
+  exit 97
+}
+
+# The real binary. Skips this guard dir so we do not re-exec ourselves, and any
+# other tests/denybin entry a nesting caller left on PATH: a refuser is by
+# definition not the real binary, and resolving to one would report a refusal
+# for a verb this guard had already decided to allow.
+_fmg_real() {
+  local p parts=() out=''
+  IFS=: read -r -a parts <<< "$PATH"
+  for p in "${parts[@]}"; do
+    case "$p" in */tests/denybin/*) continue ;; esac
+    out="${out:+$out:}$p"
+  done
+  PATH=$out command -v tmux
+}
+
+# Scan a COPY of the argument list: the real one has to survive intact for the
+# exec below, so this must never shift "$@". args is 0-indexed, so index 0 is
+# the verb and the flags run to n-1; reading args[n] would be past the end, and
+# under `set -u` that aborts the guard instead of refusing.
+_fmg_target_of() {  # <args...> -> the -t value, or empty
+  local args=("$@") i=1 n=$#
+  while [ "$i" -lt "$n" ]; do
+    case "${args[i]}" in
+      -t) i=$((i + 1)); [ "$i" -lt "$n" ] && printf '%s' "${args[i]}"; return 0 ;;
+      -t*) printf '%s' "${args[i]#-t}"; return 0 ;;
+    esac
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# tmux's -a INVERTS a kill: `kill-session -a -t X` kills every session EXCEPT X.
+# Scoping the -t target is therefore not just insufficient there, it is exactly
+# backwards - a correctly declared throwaway session would spare itself and take
+# the fleet's with it. There is no scoped form of "all but", so it is refused.
+#
+# This walks the argv the same way _fmg_target_of does, and it has to: -t carries
+# a VALUE, so `-t bar` and the combined `-tbar` are targets, not flag bundles. A
+# plain "does any arg contain an a" scan reads `-tbar` as -a and refuses a kill
+# that was correctly scoped - failing closed, but for a reason that is a lie.
+_fmg_has_all_flag() {  # <args...>
+  local args=("$@") i=1 n=$#
+  while [ "$i" -lt "$n" ]; do
+    case "${args[i]}" in
+      --) return 1 ;;
+      -t) i=$((i + 2)); continue ;;
+      -t*) i=$((i + 1)); continue ;;
+      -a|-a[!-]*) return 0 ;;
+      -*a*) case "${args[i]}" in --*) ;; *) return 0 ;; esac ;;
+    esac
+    i=$((i + 1))
+  done
+  return 1
+}
+
+case "${1:-}" in
+  kill-server)
+    _fmg_die "kill-server can never be scoped to one session." ;;
+  kill-session|kill-window|kill-pane)
+    _fmg_has_all_flag "$@" \
+      && _fmg_die "$1 -a means ALL BUT the target, which no -t can scope."
+    _fmg_want=${FM_TEST_LIVE_TMUX_SESSION:-}
+    [ -n "$_fmg_want" ] \
+      || _fmg_die "$1 was called with no declared throwaway session."
+    _fmg_target=$(_fmg_target_of "$@")
+    [ -n "$_fmg_target" ] \
+      || _fmg_die "$1 was called with no -t target, so it would hit the current session."
+    # A target is <session>[:<window>[.<pane>]]; only the session part is ours.
+    case "${_fmg_target%%:*}" in
+      "$_fmg_want") ;;
+      *) _fmg_die "$1 -t '$_fmg_target' is outside the declared session '$_fmg_want'." ;;
+    esac
+    ;;
+esac
+
+_fmg_bin=$(_fmg_real)
+# An absent real binary must SAY so. Sitting first on PATH, this guard makes
+# `command -v tmux` succeed, so a caller probing for tmux would otherwise be
+# told it is installed and then fail on an empty exec with no explanation.
+[ -n "$_fmg_bin" ] || {
+  printf 'fm-test: no real tmux binary on PATH behind the live-tmux guard.\n' >&2
+  printf '  This suite opted into a real tmux, but there is none installed to\n' >&2
+  printf '  reach - so its live half cannot run, and did not silently pass.\n' >&2
+  exit 97
+}
+
+exec "$_fmg_bin" "$@"

@@ -77,7 +77,9 @@ opencode, and pi).
 ## Busy-guard and composer guard
 
 The daemon never injects into an in-use pane. Two checks run before every
-injection (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`):
+injection (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`; since the herdr cutover
+`fm-send.sh` uses that path only for panes predating it, and reaches every new crewmate
+through the acknowledged `herdr agent prompt --wait` in `bin/fm-herdr.sh`):
 
 - **`pane_is_busy`** - the harness shows a busy footer (agent mid-turn).
 - **`pane_input_pending`** - the cursor line holds real unsubmitted text (a
@@ -136,7 +138,9 @@ Classify each wake this way:
   `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a
   possible wedge. This bounds wedge-detection latency to the threshold plus a
   tick: a delay, never a loss. Healthy crewmates are autonomous and do not wait
-  on firstmate mid-task.
+  on firstmate mid-task. Since the herdr cutover the watcher emits no stale wake
+  for a herdr pane, so this path covers only panes still draining on tmux; the
+  gap and what covers it instead are in AGENTS.md, "herdr workspace hygiene".
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.

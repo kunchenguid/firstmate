@@ -22,6 +22,11 @@
 #
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
 # appearance — terminal line-wrapping looks like newlines but isn't.
+# HERMETICITY-WAIVER: outside the tests/lib.sh deny net on purpose. The daemon is
+# exercised against a PRIVATE tmux socket (tmux -L afk-e2e-<pid>) this file creates
+# and tears down, reached through its own shim - the real binary IS the thing under
+# test, so the refusing shim would deny it. Nothing here can reach the fleet's
+# socket; the waiver records that the exemption is deliberate, not forgotten.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

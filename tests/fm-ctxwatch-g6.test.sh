@@ -8,6 +8,12 @@
 # the handoff -> the cycle times out, issues NO /clear, no cooldown marker -> assert
 # fails (proving the gate observes the real checkpoint->clear wiring through the
 # command, not a constant).
+# HERMETICITY-WAIVER: outside the tests/lib.sh deny net on purpose. The context
+# watchdog is a tmux-only subsystem and this case drives a DISPOSABLE scratch
+# session it creates and kills itself, so the refusing shim would deny the very
+# server under test. The migration this marks: opt in with FM_TEST_ALLOW_LIVE_TMUX=1
+# before sourcing lib.sh and export FM_TEST_LIVE_TMUX_SESSION="$SESS", which scopes
+# its kills to its own session instead of trusting them.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }

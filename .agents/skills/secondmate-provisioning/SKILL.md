@@ -75,7 +75,7 @@ bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
 After seeding, run this handoff for the new secondmate's in-scope queued items.
 The helper resolves the secondmate home from `data/secondmates.md` and mechanically moves each named item from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
 It preserves the line and its section, so the item is neither duplicated nor lost.
-It refuses `## In flight` entries because active task ownership also lives in tmux and `state/`.
+It refuses `## In flight` entries because active task ownership also lives in the crewmate's live pane and `state/`.
 It is idempotent; an item already in the secondmate backlog is skipped.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
 Do not hand off `local-only` items.
@@ -106,7 +106,11 @@ Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or mai
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
-When safe, teardown kills the direct tmux window, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
+When safe, teardown closes the secondmate's pane through `fm_herdr_close_pane`, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
+That close routes to herdr for any post-cutover pane and falls back to `tmux kill-window` only for a window that predates the cutover, and a pane that is already gone counts as closed.
+A close it genuinely could not perform is REPORTED - `warning: teardown could not close <pane> for <id>` - rather than swallowed, and the task record is KEPT at `state/<id>.orphan-pane` in the home that ran the teardown, holding the meta lines plus `orphan-pane=`, `orphan-mux=`, and `orphan-since=`.
+Treat that warning as real: read the record, close the leftover pane it names, then delete the record, before considering the retirement finished.
+The record lives outside the `state/*.meta` glob so a retired secondmate never reads as in flight, and a later teardown that does close the pane clears it, so its presence always means a pane is still open.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
 A plain-clone home with no pool slot is simply removed.
 If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.

@@ -8,9 +8,9 @@
 # frontier text -> fails (proving the bootstrap actually keys off the directive, not a
 # constant).
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
-pass() { printf 'ok - %s\n' "$1"; }
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 FM=$(mktemp -d "${TMPDIR:-/tmp}/fm-ctx-g7.XXXXXX")
 STATE="$FM/state"; mkdir -p "$STATE" "$FM/data"

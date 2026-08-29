@@ -5,9 +5,9 @@
 # the bootstrap's rendered additionalContext. Mutation (LEDGER_MUTATE=1): shrink the
 # "large" handoff below the cap, so the pointer assertion fails.
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
-pass() { printf 'ok - %s\n' "$1"; }
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # shellcheck source=bin/fm-ctx-lib.sh
 . "$ROOT/bin/fm-ctx-lib.sh"

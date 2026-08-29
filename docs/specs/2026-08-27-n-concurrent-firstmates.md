@@ -11,6 +11,22 @@ authority for the helper budget.
 
 # N concurrent firstmates — design
 
+> **Superseded in part (2026-08-28, the herdr cutover).** §8's "the mux seam GAINS a workspace
+> verb" is overtaken: the driver seam was collapsed rather than extended, so `fm-mux-lib.sh` and
+> `fm-herdr-workspaces.sh` no longer exist and every file/line reference to them below is
+> historical. `bin/fm-herdr.sh` is now the single herdr-native library, herdr is the only surface
+> firstmate spawns onto, and an unreachable herdr escalates instead of degrading (AGENTS.md,
+> "herdr workspace hygiene"). The two latent bugs §8 names are fixed there: `fm_herdr_workspace_id`
+> keys idempotency on `workspace_id` instead of matching labels with `grep -qw`, and pane names
+> join their halves with a hyphen because herdr rejects the `/` the old builder emitted.
+> One workspace per project is resolved explicitly from the project name (`FM_HERDR_WORKSPACE`
+> pins it, `FM_HERDR_SESSION` pins the session), which closes §9's leak 1 for anything spawned
+> after the cutover. The other three leaks are open, not fixed: leak 2 changed shape rather than
+> going away, leak 3's session-name "managed" test is untouched because the context watchdog has
+> no herdr path at all (docs/specs/context-watchdog.md), and leak 4's global window scan still
+> runs in the away-mode daemon - see AGENTS.md, "herdr workspace hygiene", for each one's current
+> status. The rest of this design stands.
+
 Scout `fmx-design-q2`. Design only; a mechanical build brief should be written from this.
 Every claim is from the binary, the files, or a command I ran. Measurements are reproduced inline.
 

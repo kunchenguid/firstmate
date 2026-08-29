@@ -5,9 +5,9 @@
 # rehydrate block is absent. Mutation (LEDGER_MUTATE=1): remove the handoff before
 # running — the injected output then lacks the handoff marker, failing the assert.
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
-pass() { printf 'ok - %s\n' "$1"; }
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOOT="$ROOT/bin/fm-captain-bootstrap.sh"
 FM=$(mktemp -d "${TMPDIR:-/tmp}/fm-ctx-g3.XXXXXX")

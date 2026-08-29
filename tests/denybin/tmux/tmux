@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+echo "fm-test: this suite reached the REAL tmux binary." >&2
+echo "  A test must never touch the captain's live session: the drain paths still" >&2
+echo "  call tmux, and kill-window against a live pre-cutover crewmate closes a" >&2
+echo "  pane that may hold unlanded commits. Install a fake tmux on PATH" >&2
+echo "  (tests/herdr-helpers.sh: fm_herdr_fake_tmux), or set" >&2
+echo "  FM_TEST_ALLOW_LIVE_TMUX=1 before sourcing tests/lib.sh if this suite is" >&2
+echo "  a live gate that genuinely needs a real server - and scope it to its own" >&2
+echo "  throwaway session or private socket, never the fleet's." >&2
+exit 97

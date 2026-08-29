@@ -1,5 +1,12 @@
 # cmux + herdr — the two-surface operating model
 
+> **Superseded in part (2026-08-28).** W1's driver seam (`fm-mux-lib.sh`, drivers behind
+> `FM_MUX`, tmux default) shipped and was then collapsed: herdr is the only surface, there is
+> no driver selection, and `bin/fm-herdr.sh` is the single herdr-native library. Headless is
+> never selected automatically - an unreachable herdr escalates rather than degrading
+> (AGENTS.md, "herdr workspace hygiene"). Panes predating the cutover are still read, steered
+> and closed over tmux until they drain. The rest of this plan stands.
+
 **Status:** design, grilled. 2026-08-09.
 **Thesis:** cmux is the *glass*, herdr is the *engine room*. Cortana lives on the glass;
 every other agent lives in the engine room.

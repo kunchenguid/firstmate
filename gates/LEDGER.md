@@ -36,3 +36,13 @@
 | m5-digest-never-silent | frozen | A section that fails to build says so; failure is never silent |
 | gate-ci-declared-red | frozen | CI skips a test only when its gate is red AND declared accepted |
 | gate-status-verb | frozen | Status reporting is a verb a crewmate whose redirect is refused can still use |
+| gate-h2-mux-workspace-scoping | green | Workspace scoping: resolved by project label, FM_HERDR_WORKSPACE overrides, missing is created, never focus-luck |
+| gate-h3-spawn-named-herdr-tab | green | fm-spawn lands a crewmate as a named herdr tab in the project workspace; an unreachable herdr stops it |
+| gate-h4-send-peek-routed-by-meta | green | fm-send/fm-peek use acknowledged herdr delivery and route by the meta, never by ambience |
+| gate-h5-herdr-live-roundtrip | green | LIVE herdr: workspace, tab, shell readiness, run/read, naming accepted by the binary, acknowledged send, close |
+| gate-h1-herdr-only-surface | green | Selection: herdr is the only surface - no driver selector, no FM_MUX; an unreachable herdr escalates |
+| gate-h6-drain-open-nothing-new-on-tmux | green | Cutover: nothing new is created on tmux, and the drain stays open for pre-cutover panes |
+| gate-h7-drain-live-roundtrip | green | LIVE drain: a real pre-cutover tmux pane is still readable, steerable and closable |
+| gate-h8-teardown-closes-the-pane | green | Teardown closes the pane on the surface that created it, and reports a close it could not do |
+| gate-h9-startup-reports-unusable-herdr | green | Startup says the fleet cannot dispatch: herdr is a bootstrap tool, and a stopped server is its own problem line |
+| gate-h10-busy-agent-acknowledgment | green | Acknowledgment is real for a BUSY agent, or it is reported as unconfirmed rather than claimed |

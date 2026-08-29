@@ -6,7 +6,7 @@
 
 ## Problem
 
-The SessionStart hook (`bin/fm-captain-bootstrap.sh`) injects the captain context block (projects, secondmates, tmux windows, backlog head), but the section-5 recovery signals are missing.
+The SessionStart hook (`bin/fm-captain-bootstrap.sh`) injects the captain context block (projects, secondmates, live crew panes, backlog head), but the section-5 recovery signals are missing.
 A captain session must run several live bash calls (wake drain, status reads, watcher checks) before it can safely act, which makes boot slow.
 
 ## Contract

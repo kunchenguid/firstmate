@@ -6,6 +6,14 @@ restart. Built as a daemon sibling of `fm-supervise-daemon.sh`, reusing its
 plumbing (busy-guard via `fm-tmux-lib.sh`, portable mkdir lock via
 `fm-wake-lib.sh`, `state/` sentinel files).
 
+> **Status note (herdr cutover, 2026-08-28).** This spec still describes a tmux-only
+> watchdog, and that is what is implemented. `fm-ctx-statusline.sh` can only stamp
+> `managed:true` for a pane in firstmate's tmux session, and `fm-context-watch.sh`
+> re-confirms the target through tmux at fire time, so no crewmate spawned into a herdr
+> pane is ever selected for a checkpoint - it simply hits its context ceiling with no
+> handoff written. Until the watchdog is re-sourced onto `bin/fm-herdr.sh`, context on a
+> long-running crewmate is watched by hand (AGENTS.md, "herdr workspace hygiene").
+
 ## Components
 
 1. **MEASURE** — `bin/fm-ctx-statusline.sh` (a Claude Code statusLine) reads the

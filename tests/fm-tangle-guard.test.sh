@@ -19,6 +19,10 @@ export FM_SKIP_SHELL_READY=1  # readiness gate: this suite tests spawn machinery
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# fm-spawn creates crewmates in herdr, so a spawn fixture must fake herdr as
+# well as tmux - otherwise it reaches the captain's live server.
+# shellcheck source=tests/herdr-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-helpers.sh"
 
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$ROOT/bin/fm-tangle-lib.sh"
@@ -164,18 +168,22 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_herdr_fake_server "$dir" >/dev/null
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
 
 run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
+  local launchlog="${FM_FAKE_TMUX_LOG:-/dev/null}"
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    HERDR_PANE_CWD="$pane" HERDR_WORKSPACES="w1=spawn-proj" \
+    CALLS="$launchlog" \
     FM_FAKE_TMUX_LOG="${FM_FAKE_TMUX_LOG:-}" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
@@ -209,6 +217,8 @@ test_spawn_isolation_abort() {
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
+  # The launch line now goes out as `herdr pane run`, not tmux send-keys, so the
+  # fake herdr records it - but what is asserted is unchanged.
   # Path-B routing: a crew launch pins FM_HOME to the SPAWNING home so its context
   # sentinels land in that home's state dir (where a secondmate's scoped watch sees its
   # own crewmates); the main firstmate's crew keep landing in the main state dir. Role is

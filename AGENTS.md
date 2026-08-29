@@ -81,8 +81,9 @@ projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates through bin/fm-status.sh: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, mux=, name=, kind=, mode=, yolo=; `bin/fm-herdr.sh` owns what window= and mux= mean (section 8); kind=secondmate also records home= and projects= (fm-pr-check appends pr=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
+  <id>.orphan-pane   kept by fm-teardown ONLY when it could not close the task's pane: the task's meta lines plus orphan-pane=, orphan-mux=, orphan-since=. Deliberately outside the `*.meta` glob so a finished task never reads as in flight; close the leftover pane, then delete the file - a later teardown that does close the pane clears it, so its presence always means a pane is still open
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
@@ -93,7 +94,10 @@ state/               volatile runtime signals; gitignored
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-The tmux window for a task is always named `fm-<id>`.
+The suffix has a SHAPE, and it is load-bearing rather than decorative: one lowercase letter followed by one digit, `-k3` / `-z1` / `-h2`.
+`bin/fm-spawn.sh` derives a pane's work half by dropping exactly that shape, so an id minted outside it (`-ab`, `-3k`, `-k39`) keeps its suffix in the name the captain reads.
+Mint ids to the shape; for a task whose name genuinely needs something else, pass `--name <work>` to `bin/fm-spawn.sh` and choose the pane name outright.
+A task's pane is a herdr tab named `<project>-<work>` in that project's workspace (section 8); firstmate addresses it as `fm-<id>`, which `state/<id>.meta` resolves. Panes predating the herdr cutover are tmux windows named `fm-<id>` and are still being drained.
 
 ## 3. Bootstrap (run at every session start)
 
@@ -113,6 +117,11 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `MISSING: herdr (install: ...)` - herdr is where every crewmate runs, so this means the fleet can dispatch NOTHING until it is installed.
+  Treat it as blocking, not advisory: raise it with the captain and get consent to install before taking on any work.
+- `NEEDS_HERDR_SERVER: <remediation>` - herdr is installed but no server is running, so every spawn will stop and escalate.
+  Ask the captain to start or attach one with `! herdr`; you cannot do it for them, and no work can be dispatched until it is up.
+  This is deliberately distinct from `MISSING: herdr`: the fixes differ, and reporting a stopped server as a missing tool would send the captain to reinstall something already installed.
 - `TANGLE: <remediation>` - the firstmate primary checkout (the repo root, `FM_ROOT`) is stranded on a feature branch instead of its default branch: a crewmate working firstmate-on-itself branched/committed in the primary instead of its own isolated worktree (section 8). The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree. This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.
@@ -160,8 +169,9 @@ Reconcile reality with your records before doing anything else:
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
 2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
 3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
-4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those tmux panes.
-   Do not sweep every `fm-*` tmux window across all sessions during recovery; another firstmate home's child panes may share that namespace and are not this home's orphans.
+4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those panes.
+   A meta's `mux=` says which surface to check it on: `mux=herdr` is a herdr pane id (`herdr pane get`, `bin/fm-peek.sh`), and a meta with no `mux=` line predates the herdr cutover and is a tmux window still being drained (section 8).
+   Do not sweep every `fm-*` tmux window across all sessions during recovery; another firstmate home's child panes may share that namespace and are not this home's orphans, and post-cutover crewmates are not in tmux at all.
 5. If a recorded direct-report window is missing, reconcile it through its meta as described below.
 6. For meta with no window, reconcile by kind.
    For ordinary crewmates, check `treehouse status` in that project, salvage or report.
@@ -175,7 +185,7 @@ Reconcile reality with your records before doing anything else:
 10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
 
 A firstmate restart must be a non-event.
-All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
+All truth lives in the panes themselves - herdr for anything spawned after the cutover, tmux for windows still draining - plus state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
 
 ## 6. Project management
 
@@ -354,7 +364,7 @@ If one pair fails, the rest still run and the batch exits non-zero.
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
-For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
+For ship and scout tasks, the script creates the pane (a herdr tab in the project's workspace, resolved by project name and created if absent), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
 Before launching a secondmate, the script fast-forwards its home worktree to firstmate's own current default-branch commit, so a freshly spawned or recovery-respawned secondmate always starts on firstmate's current version.
 This is a purely local fast-forward of tracked files - never a fetch from origin, and never touching the gitignored operational dirs - so the secondmate's backlog, projects, and any prior in-flight work are untouched; a dirty, diverged, or in-flight home is left as-is and launches unchanged.
@@ -508,7 +518,7 @@ Heartbeats back off exponentially while they are the only wakes firing (600s dou
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional.
-tmux is the ground truth.
+The panes are the ground truth - herdr for anything spawned after the cutover, tmux for windows still draining.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.
@@ -542,11 +552,225 @@ Silence is the correct state while a healthy background watcher is waiting.
 
 ### herdr workspace hygiene
 
-When the crew runs on herdr, the fleet stays legible only if it is organised:
+**Agents run in herdr, and herdr is the only surface.**
+A pane the captain cannot see does not count, so `bin/fm-spawn.sh` puts every crewmate in
+herdr - no flag, no opt-in, nothing to remember. The captain stated this rule on 2026-08-28; where he
+keeps his own copy of it (`data/captain.md`, section "Where agents run") is local to a
+firstmate home and gitignored, so this section is the shared statement of record.
+
+**Headless is never selected automatically.** No code path may choose tmux, or any other
+headless transport, on its own - not from a reachability probe, not from a missing binary,
+not from an environment variable, and not loudly. Degrading is the decision the captain
+reserved for himself: believing he is watching the fleet while work lands somewhere he
+cannot see is worse than knowing it is invisible, and a warning in a log nobody is reading
+at 2am does not close that gap.
+
+**An unreachable herdr is an escalation, not a branch.** `fm_herdr_require` checks
+reachability before a pane is created; when no server can be reached it fails non-zero with
+a message naming the reason, and `fm-spawn.sh` stops. Nothing is created - no window, no
+tab, no meta. Any tier may *recommend* a headless run, but it recommends by stopping and
+saying why; the captain decides.
+
+**There is no override to set.** With one surface there is no driver to select, so headless
+is not a flag someone can flip by accident or by habit - it is a conversation with the
+captain. `FM_MUX` was an interim override and is read by nothing.
+
+The three entry points firstmate creates, steers, and observes direct reports with -
+`bin/fm-spawn.sh`, `bin/fm-send.sh`, `bin/fm-peek.sh` - address panes through
+`bin/fm-herdr.sh`, never tmux directly. There is one library and one surface, so there is
+no driver to select and nothing to configure. `state/<id>.meta` records the herdr pane id
+in `window=` and marks the crewmate post-cutover with `mux=herdr`.
+`fm-send.sh` delivers through `herdr agent prompt`, and how strong the acknowledgment is
+depends on what the crewmate was doing, so read the exit code rather than assuming:
+
+- **Idle crewmate:** `--wait` is real acknowledgment. herdr requires an observed state
+  change before it matches, so a match means the agent moved because of this steer.
+- **Busy crewmate:** `--wait` is NOT evidence about your steer. The binary is explicit -
+  "it does not track turns: if the agent is already working, that active turn's completion
+  may match" - so leaning on it would report the turn that was already running as proof
+  your steer landed. Instead the steer is submitted and firstmate watches for the current
+  turn to end and a new one to begin, which only the queued steer causes. If that happens
+  inside the budget the steer is acknowledged; if it does not, the delivery is reported as
+  UNCONFIRMED, not as success and not as failure.
+- A crewmate blocked at an approval dialog is refused rather than typed over, and a pane
+  with no agent is refused without executing the steer as a shell command.
+
+An unconfirmed delivery is assumed sent and never re-sent: re-sending a steer the crewmate
+already holds is the worse of the two available errors.
+
+**The drain.** Crewmates spawned before the cutover live in tmux windows and their meta has
+no `mux=herdr` line. Those stay readable, steerable and closable until they are torn down:
+a watcher that cannot read a live crewmate is blind, a supervisor that can watch but not
+correct it has lost half of supervision, and a teardown that cannot close it strands work
+carrying unlanded commits. `bin/fm-tmux-lib.sh` is therefore retired for NEW use - nothing
+spawns onto it - but kept while any such meta exists. Which panes are draining is derived
+from the metas, never a hardcoded list; `fm_herdr_drain_pending` answers it, and when it
+reports nothing pending in every home the legacy library can go.
+
+Beyond spawning, the fleet stays legible only if it is organised:
 **one workspace per project, and every agent pane named for the work it is doing**,
-not for its task id. herdr addresses agents by name, so the name is the address.
-`bin/fm-herdr-workspaces.sh` reconciles workspaces against `data/projects.md` and
-carries the naming convention; run it with no arguments for a plan that changes nothing.
+not for its task id. The name is what herdr itself addresses an agent by; firstmate's own
+scripts still address a crewmate as `fm-<id>`, which `state/<id>.meta` resolves.
+The workspace is resolved explicitly from the project name and created if absent - never
+left to whichever workspace happens to be focused; `FM_HERDR_WORKSPACE` overrides it.
+
+The herdr *session* is resolved the same way, and `FM_HERDR_SESSION` pins it. Every herdr
+verb takes its session from `HERDR_SESSION` and defaults to `default`, so the pin exports
+rather than merely filtering: a pin that moved the reachability probe but not the verbs is
+what once reported a fleet reachable while every verb aimed at a session that was not up.
+A pane's shell is forked by the herdr server, not by firstmate, so the pin cannot be
+inherited - `bin/fm-spawn.sh` prepends `HERDR_SESSION` to the launch string alongside the
+`FM_*` pins, which is what lets a secondmate (a full firstmate in its own home) probe the
+session its own pane lives in instead of `default`.
+
+**Pane naming: `<project-short>-<what-the-work-is>`, kebab-case, under 28 characters.**
+`afs-resource-registry`, `mac-config-cutover-guard`, `firstmate-fleet-view`,
+`archify-leak-fixes`. One hyphen joins the halves; **never a slash**. That is not a style
+preference - herdr rejects an agent name that is not `^[a-z][a-z0-9_-]{0,31}$`, so a
+slashed name renames nothing and leaves the pane unaddressable. No task suffix: the id
+lives in `state/<id>.meta`, which is where an id belongs. `fm-spawn.sh --name <work>`
+supplies the work half; absent it, the id's random suffix is dropped and the rest is used.
+`bin/fm-herdr.sh` is both the library and the reconcile CLI: run it with no arguments for a
+plan that changes nothing, `--apply` to create the missing workspaces, and
+`--name <pane> <project> <work>` to name a live pane. It is deliberately not called `herdr`,
+which would shadow the real binary and make every call site depend on `PATH` order.
+
+Not yet migrated, and the gaps are NOT equally covered - know which is which before
+relying on any of them:
+
+- `bin/fm-watch.sh` still reads `window=` and calls tmux on it, which is what keeps the
+  drain working. For a herdr crewmate, stale-pane detection is inert, so a wedged crewmate
+  is caught by its status file and the heartbeat review instead. That is a degraded path
+  with a real fallback. (`bin/fm-ff-lib.sh` is NOT part of this gap - it only collects
+  `window=` values into `FF_NUDGE_WINDOWS` for `bin/fm-send.sh`, which resolves a herdr
+  pane id correctly; it calls tmux nowhere.) Whoever migrates fm-watch must move
+  `window_for_task` in `bin/fm-supervise-daemon.sh` in the same change: it enumerates
+  `tmux list-windows -a` for `:fm-` names, and away-mode's stale recheck reads an empty
+  result as "task torn down, nothing to escalate". That path is dormant only because
+  fm-watch never emits a stale wake for a herdr pane; the moment it does, a wedged
+  crewmate would be silently dropped instead of escalated.
+- **The context watchdog has NO fallback.** `bin/fm-ctx-statusline.sh` stamps a session
+  `managed:false` when `TMUX_PANE` is unset, and `fm-context-watch.sh` re-confirms the
+  target through tmux at fire time, so no herdr crewmate is ever selected for a compaction
+  checkpoint. A crewmate that reaches its context ceiling simply dies with no handoff
+  written. Until this moves, watch context on long crewmates yourself.
+
+Twelve more are known and deliberately deferred. Each errs toward a false negative or a
+loud refusal - none of them loses work - but each is worth acting on:
+
+- **Relaunching an exited agent has no operator-facing wrapper.** `fm-send.sh` refuses a
+  pane holding no agent on purpose - the only way to put text into a shell pane is to run
+  it, so forwarding a steer there would EXECUTE it - which leaves the stuck-crewmate
+  playbook's own relaunch step with no firstmate command. `fm_herdr_run` in
+  `bin/fm-herdr.sh` does exactly the right thing but is library-level only, and that
+  script's CLI exposes just `--name` and the workspace reconcile. Nothing is stranded:
+  `harness-adapters` and `stuck-crewmate-recovery` now name the binary's own verb,
+  `herdr pane run <pane-id> '<launch command>'`, which is what `fm-spawn.sh` uses to start
+  every agent. A wrapper would only save the operator from assembling the env prefix by
+  hand, so it is a convenience, not a gap in the procedure.
+
+- **A child pane teardown could not close leaves nothing durable behind.**
+  `cleanup_firstmate_home_children` in `bin/fm-teardown.sh` is the task's own pane path
+  one level down and one step behind it: on a `--force` secondmate retirement it routes
+  each child's close through `fm_herdr_close_pane`, warns on failure, then deletes that
+  child's meta unconditionally, while `remove_firstmate_home` removes the whole
+  secondmate home including its `state/` dir. So a child pane that could not be closed
+  survives as two agents still running behind a stderr line naming `<child_t>
+  (<child_id>)`, and no restart can reconstruct which panes they were. The remedy is the
+  one the task's own pane already has: write `$STATE/<child_id>.orphan-pane` in the
+  PARENT's state dir, which is still writable at that point and outlives the removed
+  home. Deferred, not dismissed: it is not a regression this branch introduced - the
+  child path was `tmux kill-window ... || true` plus the same unconditional meta delete
+  before it - and editing the `--force` discard path is exactly the widening this branch
+  was told to avoid.
+- **`state/*.orphan-pane` is durable but not discoverable.** Nothing reads it. Recovery
+  (section 5, step 3) enumerates `data/backlog.md`, `data/secondmates.md`, every
+  `state/*.meta` and every `state/*.status`, and `state/*.orphan-pane` is in none of
+  them, so a firstmate restarted after a failed teardown learns nothing and the leftover
+  pane is announced only by the one stderr line of the run that failed. An operator who
+  reads that warning can act on it today - it names the file, and section 2 documents
+  what the file means - so what is missing is automatic discovery, not the record. The
+  fix is one clause in recovery step 3 ("and any `state/*.orphan-pane`, which names a
+  pane teardown could not close"), plus closing and deleting each one found. Deferred
+  because it changes how every firstmate reconciles rather than anything in this cutover,
+  and that deserves its own slice.
+
+- **A steer to an idle crewmate reports "did not acknowledge" almost every time.**
+  `fm_herdr_prompt`'s idle path submits with `--wait --until idle|done|blocked`, and
+  `--wait` blocks until the agent SETTLES into one of those states, i.e. until the turn
+  finishes. A real steer runs for minutes, so herdr times out at 15s and `fm-send.sh`
+  prints the unconfirmed warning for a steer that landed - which makes the genuine
+  unconfirmed signal meaningless. The state that means "consumed" is `working`; wait for
+  the agent to START working, the same signal the busy path already uses.
+- **The busy-crewmate acknowledgment can miss the settle.** It polls `agent get` every
+  `FM_HERDR_ACK_POLL` (0.25s) and needs to see an `idle`/`done` sample before a `working`
+  one, but herdr queues the prompt and the harness starts the next turn immediately, so
+  that window is often shorter than the poll. The miss costs a 16s stall and an
+  unconfirmed report for a steer that landed. The agent record carries monotonic
+  `revision` and `state_change_seq`; capture the seq before submitting and treat any
+  advance as the transition - a counter cannot be missed by a sampling gap.
+- **Pane-name uniqueness replaced task-id uniqueness.** `fm-spawn.sh` derives the pane
+  name by stripping the id's random suffix, and refuses a duplicate label in the
+  workspace, so two concurrent tasks whose ids share a stem (`fix-login-k3` and
+  `fix-login-m9`) collide and the second spawn hard-fails - which contradicts "there is
+  no concurrency cap" in section 7. It fails loudly and creates nothing, so no work is
+  lost; pass `--name <work>` to disambiguate until it either appends the id suffix on
+  collision or says so in the refusal.
+- **The key vocabulary is still tmux's.** `--key Enter` / `--key Escape` / `C-c` appear
+  in the harness-adapters and stuck-crewmate-recovery skills, `fm-send.sh`'s header, and
+  `docs/scripts.md`, while herdr documents `esc` and `ctrl+c`. Verified against herdr
+  0.8.2: it accepts all of them, so the documented procedures work today and no crewmate
+  can be stranded by it. Tidiness, not correctness.
+- **The captain's boot digest inventories every agent on the machine.** `_herdr_names()`
+  in `bin/fm-captain-bootstrap.sh` lists every herdr agent whose tab label looks like a
+  name, so the captain's own non-fleet panes read as fleet, where the tmux inventory it
+  replaced was scoped to the `firstmate` session. Whether to scope it to the workspaces
+  in `data/projects.md` is the captain's call about what he wants to see at boot.
+- **A pane name is not a resolvable target for firstmate's own scripts.** herdr addresses
+  an agent by name and `fm-spawn.sh` records `name=<project>-<work>` in the meta, but
+  `fm_herdr_resolve`'s catch-all branch is drain-only: a bare argument that carries no
+  colon and no `fm-` prefix is looked up with `tmux list-windows`, so
+  `bin/fm-peek.sh afs-resource-registry` fails with `no window named ...`. It fails
+  loudly and `fm-<id>` still works, so nothing is stranded; resolve a name against this
+  home's metas (`grep -lFx "name=<want>"`) before falling through to tmux.
+- **The tests' live-tmux guard scopes kills, not creates or sends.**
+  `tests/denybin/live-tmux/tmux` allows every non-kill verb straight through to the real
+  server once a suite sets `FM_TEST_ALLOW_LIVE_TMUX=1`, so `new-window` / `new-session`
+  can still leave a stray window in the captain's live session - which is the accident
+  that actually happened on this branch (`firstmate:fm-fallback-t8`) - and an unscoped
+  `send-keys` would type into a live pre-cutover crewmate's composer. The asymmetry is
+  deliberate: a create leaves clutter someone tidies up, a kill against a draining
+  crewmate takes unlanded commits with it, so the guard covers the irreversible half
+  first. Extending the same `-t`-must-name-`FM_TEST_LIVE_TMUX_SESSION` check to the
+  create and send verbs closes the rest.
+- **The launch prefix does not survive an agent restarted in its own pane.**
+  `bin/fm-spawn.sh` passes `HERDR_SESSION`, `FM_HOME` and the operational overrides as a
+  `VAR=x <cmd>` prefix on the launch string, which scopes them to the harness process
+  only - not to the pane's shell. So if a crewmate's agent exits and the captain restarts
+  it in that same pane, every pin is gone, and a secondmate restarted that way probes the
+  `default` session while its fleet lives elsewhere. `herdr tab create` has `--env
+  <KEY=VALUE>` (verified against 0.8.2), which sets the variable on the launched process
+  so it survives, and bypasses the shell quoting the launch string otherwise needs.
+  Deferred because it changes the launch contract of every direct report, not because
+  the spawn path is wrong today.
+- **Four test suites are outside the deny net rather than opted into it.**
+  `tests/fm-ctxwatch-g2/g4/g6/g9` each carry a permanent `HERMETICITY-WAIVER` and are
+  the last code in `tests/` that reaches the captain's real tmux server with no guard
+  shim at all: they create a session on it, send keys to it, and kill it. (The other
+  waiver, `tests/fm-afk-inject-e2e.test.sh`, drives a private `tmux -L` socket it
+  creates itself, so it cannot reach the fleet's.) The practical risk is low today
+  because each one's kill targets the `$$`-suffixed session it made, but that is
+  discipline rather than a property. The fix is the opt-in each waiver already
+  describes: set `FM_TEST_ALLOW_LIVE_TMUX=1` before sourcing `tests/lib.sh` and export
+  `FM_TEST_LIVE_TMUX_SESSION="$SESS"`, which makes the shim scope their kills to their
+  own session instead of trusting them. Deferred because their exposure predates the
+  cutover - this branch built the net and waived them, rather than introducing the gap.
+
+The two "not yet migrated" gaps above - `fm-watch.sh` (with the away-mode daemon's
+`window_for_task`) and the context watchdog - should move onto `fm-herdr.sh` once the
+drain is empty, and the watchdog first.
+`bin/fm-teardown.sh` HAS moved: it closes through `fm_herdr_close_pane`, which routes a
+herdr pane to herdr and a draining window to tmux.
 
 ### Away-mode stub
 

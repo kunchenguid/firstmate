@@ -45,7 +45,12 @@ Launch mechanics, including the verified command templates, live in [`bin/fm-spa
 
 ## Toolchain
 
-On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+On first launch the first mate detects what its required toolchain is missing or too old (herdr, tmux, node, gh, treehouse with durable lease support, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+`herdr` is not one dependency among many: every crewmate runs in a herdr pane, so without it nothing dispatches at all.
+Bootstrap reports its two failure modes separately because the fixes differ.
+`MISSING: herdr` means the binary is absent and has to be installed.
+`NEEDS_HERDR_SERVER:` means herdr is installed but no server is reachable for the session the verbs use; start or attach one with `herdr`, or point firstmate at the running session with `FM_HERDR_SESSION` below.
+Reporting a stopped server as a missing tool would send you to reinstall something already installed, so the two lines never collapse into one.
 If compatible `tasks-axi` is already on `PATH`, bootstrap records it as an optional capability fact and firstmate uses its verbs for routine backlog mutations; when it is absent or incompatible, firstmate keeps hand-editing `data/backlog.md` exactly as before.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 Bootstrap also runs the guarded local secondmate sync for recorded live secondmate homes.
@@ -76,6 +81,10 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_WAKE_LIB_READONLY=    # set to 1 by read-only callers so sourcing the wake lib never creates the state dir
+FM_HERDR_SESSION=        # herdr session firstmate probes AND exports to the herdr verbs; empty means $HERDR_SESSION, else `default`
+FM_HERDR_WORKSPACE=      # pin the workspace a spawn lands in; a label if one matches, else a literal workspace id, refused loudly if it names nothing live
+FM_HERDR_SEND_TIMEOUT_MS=15000   # budget for one steer to be acknowledged before fm-send reports it unconfirmed
+FM_HERDR_ACK_POLL=0.25   # seconds between acknowledgment polls of a busy crewmate
 FM_POLL=15              # seconds between watcher cycles
 FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap

@@ -30,7 +30,7 @@ You can run one coding agent easily.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
+You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents into their own herdr panes, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 For larger fleets, you can opt in to persistent secondmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
 There is no app to install; the orchestrator is `AGENTS.md`, bundled skills, and helper scripts that any terminal coding agent can follow.
 
@@ -40,20 +40,21 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 ## Features
 
 - **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
-- **A visible crew** - every crewmate works in its own tmux window you can watch or type into; the first mate reconciles.
+- **A visible crew** - every crewmate works in its own herdr pane, one workspace per project and each pane named for the work, that you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.
 - **Guarded by construction** - the first mate is read-only over your projects outside clean default-branch refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind your merge approval.
-- **Restart-proof** - all state lives on disk and in tmux; kill the session anytime and the next one reconciles and carries on.
+- **Restart-proof** - all state lives on disk and in the crew panes; kill the session anytime and the next one reconciles and carries on.
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, or pi), git with GitHub auth, and tmux for the crew windows.
+**Requirements:** a verified agent harness (claude, codex, opencode, or pi), git with GitHub auth, and a running herdr server for the crew panes.
+tmux is still installed alongside it: away-mode supervision uses it, and so do any crew panes that predate the herdr cutover.
 The first mate detects and offers to install everything else.
 
 ```sh
@@ -68,8 +69,8 @@ Then just talk:
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
 
 # firstmate checks its toolchain (asking your consent before installing anything),
-# clones the project under projects/, and spawns two crewmates in tmux windows
-# fm-fix-login-k3 and fm-dark-mode-p7.
+# clones the project under projects/, and spawns two crewmates into the xyz herdr
+# workspace as panes xyz-fix-login and xyz-dark-mode.
 # Minutes later:
 
   PR ready for review, captain: https://github.com/you/xyz/pull/42
@@ -78,8 +79,8 @@ Then just talk:
 > alright merge it
 ```
 
-Run it inside tmux for the best experience: launching your harness from inside tmux puts every crewmate window in your own session, where you can watch the crew work in real time or type into any window to intervene.
-Outside tmux, crewmates land in a detached `firstmate` session you can attach to.
+Start or attach a herdr server before you dispatch: every crewmate becomes a named pane in that project's herdr workspace, where you can watch the crew work in real time or type into any pane to intervene.
+There is no second surface to fall back to - when no herdr server is reachable, the first mate stops and says so rather than putting an agent somewhere you cannot see it.
 
 ## How It Works
 
@@ -92,10 +93,10 @@ Outside tmux, crewmates land in a detached `firstmate` session you can attach to
  │ reads projects/ + firstmate routes  │
  │ writes guarded backlog/briefs/state │
  └──┬──────────────┬───────────────┬───┘
-    │ tmux send-keys / status files │
+    │ herdr prompt / status files  │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows you can watch
+ │fm-task1│   │fm-task2│  ... │fm-taskN│   herdr panes you can watch
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
@@ -107,7 +108,7 @@ Outside tmux, crewmates land in a detached `firstmate` session you can attach to
 ```
 
 You chat with the first mate.
-It routes each request to a crewmate in its own tmux window and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
+It routes each request to a crewmate in its own herdr pane and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 Persistent secondmate homes are linked firstmate worktrees; startup syncs live ones and secondmate launch syncs the target home to the primary default-branch commit without fetching from origin when it is safe.
 A presence-gated sub-supervisor (`/afk`) can self-handle routine events and batch only what matters while you step away.
 When firstmate works on itself, spawn-time isolation checks and a primary-checkout tangle alarm keep the operating checkout on its default branch and stop a crewmate that did not land in a separate worktree.

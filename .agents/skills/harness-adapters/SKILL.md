@@ -18,7 +18,7 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults (herdr reads agent state natively, so the signature only matters for panes predating the herdr cutover), any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
 
 ## Detection
 
@@ -30,6 +30,27 @@ When verifying a new adapter, record its env marker and command name in `bin/fm-
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
+
+## Relaunching or resuming an exited agent
+
+Every resume and relaunch command below is a SHELL command, and an exited agent leaves a bare shell in its pane.
+`bin/fm-send.sh` cannot deliver it: it refuses a pane with no detected agent, reporting that nothing was delivered and nothing was executed.
+That refusal is deliberate rather than a defect.
+The only way to get text into a shell pane is to run it, so forwarding a steer there would EXECUTE it, and an ordinary corrective line such as `git reset --hard origin/main` would run inside the crewmate's worktree.
+Read the refusal as the guard working, and do not look for a way around it.
+
+Use herdr's own verb, the same one `bin/fm-spawn.sh` uses to start an agent in a fresh pane:
+
+```sh
+herdr pane run <pane-id> '<resume or launch command>'
+```
+
+The pane id is the `window=` value in `state/<id>.meta` for a post-cutover pane, the ones marked `mux=herdr`.
+Carry the same `FM_HOME=` / `HERDR_SESSION=` / `FM_*_OVERRIDE=` env prefix `fm-spawn` puts on its own launch string, or the relaunched agent loses the pins naming which firstmate home it belongs to.
+For a pane predating the cutover, `window=` is a tmux session:window and `bin/fm-send.sh` types into that shell exactly as it always did.
+
+There is no firstmate wrapper for this.
+`fm_herdr_run` in `bin/fm-herdr.sh` is library-level only, and that script's CLI exposes only `--name` and the workspace reconcile, so the binary's verb is the supported route.
 
 ## no-mistakes skill invocation
 
@@ -60,7 +81,7 @@ Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE
 The CLI's `--prompt-suggestions` flag is print/SDK-mode only and does not suppress the interactive composer ghost text, verified empirically on v2.1.186.
 As defense in depth for any pane that flag cannot reach, including the captain's own firstmate composer that away-mode reads, the pane reader in `bin/fm-tmux-lib.sh` captures only the composer line with ANSI styling, drops dim/faint SGR 2 runs, and ignores them, so only normal-intensity typed text counts as pending input.
 That styled capture is internal to the boolean detector only.
-`fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
+`fm-peek` and every other human or LLM-facing capture path stays a plain, escape-code-free read: `herdr agent read` (falling back to `herdr pane read`) for a post-cutover pane, `tmux capture-pane` for one still draining.
 
 ## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
 
@@ -77,6 +98,7 @@ The decision persists for the repo, so later worktrees of the same project skip 
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
+Deliver it with `herdr pane run`, not `fm-send`; see "Relaunching or resuming an exited agent" above.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.3)
 
@@ -88,8 +110,8 @@ The session id is printed on quit.
 
 No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
-If a pane shows the exit banner, relaunch with `--continue` to resume the session.
-`--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
+If a pane shows the exit banner, relaunch with `--continue` to resume the session, delivering that command with `herdr pane run` rather than `fm-send`; see "Relaunching or resuming an exited agent" above.
+`--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up - by then the pane holds an agent again, which is what `fm-send` needs.
 
 ## pi (VERIFIED 2026-06-11)
 

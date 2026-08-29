@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree or retire a
-# secondmate home, kill the tmux window, clear volatile state, refresh/prune
+# secondmate home, close the pane on the surface that created it (herdr, or tmux
+# for a window still draining), clear volatile state, refresh/prune
 # the project's clone for PR-based ship tasks, then print a backlog-refresh
 # reminder.
 # REFUSES if the worktree holds work not on any remote, because treehouse return
@@ -19,6 +20,10 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# A pane that could NOT be closed is warned about AND recorded: the task's meta
+# is kept aside as state/<id>.orphan-pane so the leftover pane stays findable
+# after the volatile state is cleared. A later run that does close the pane
+# clears that record, so it never outlives the leak it names.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips the unpushed-work check for ordinary tasks and discards
 #   secondmate child work for kind=secondmate. Only use it when the captain has
@@ -32,6 +37,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# Closing a pane goes through the surface that created it (herdr for anything
+# spawned after the cutover, tmux for a window still draining).
+# shellcheck source=bin/fm-herdr.sh
+. "$SCRIPT_DIR/fm-herdr.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -48,6 +57,9 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
+# Which surface created this pane. Absent means a window that predates the
+# herdr cutover and is still being drained (bin/fm-herdr.sh, "the drain").
+MUX=$(grep '^mux=' "$META" | tail -1 | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
@@ -361,7 +373,9 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ -n "$child_t" ]; then
-      tmux kill-window -t "$child_t" 2>/dev/null || true
+      # Same routing for a child: its own meta says which surface made it.
+      fm_herdr_close_pane "$child_t" "$(meta_value "$child_meta" mux)" \
+        || echo "warning: could not close child pane $child_t ($child_id)" >&2
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
@@ -473,15 +487,76 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
-tmux kill-window -t "$T" 2>/dev/null || true
+# Close the pane on the surface that created it, and say so if it could not be
+# closed. Reporting "teardown complete" over a leaked tab is the defect this
+# replaces (Quarterdeck reject, attempt 1).
+#
+# AND KEEP THE RECORD WHEN THE CLOSE FAILED. The warning names a pane, and the
+# only durable thing tying that pane to this task is the meta deleted a few
+# lines below - so the operator was told to go hunting and the map was burned in
+# the same run. A copy of the record is kept aside before that delete: it holds
+# every meta line (window=, mux=, project=, kind=) plus how it was orphaned, so a
+# later reconcile can still find and close the leftover pane.
+#
+# It is a separate `.orphan-pane` file rather than the meta left in place on
+# purpose. Every in-flight scan in the fleet - fm-guard's alarm, fm-watch's task
+# set, secondmate teardown's refusal, the boot digest - globs `state/*.meta`, so
+# keeping the meta would report a finished task as live forever. Misleading a
+# supervisor is the same class of defect as the leak itself; `.orphan-pane` is
+# outside that glob.
+#
+# The record means exactly one thing - a pane for this task is still open - so
+# it must be cleared the moment that stops being true. A teardown can be retried
+# (the first run may fail after this point, e.g. on a secondmate home whose
+# treehouse return failed), and a record left behind by that first run would
+# outlive the pane it names: the same "sent hunting for something that is not
+# there" defect, pointed the other way. It is dropped below only on a close this
+# run actually proved, never merely because no record was written.
+#
+# Whether the close succeeded and whether the record got written are two
+# independent facts, and every report below is keyed on the first. Keying the
+# operator's summary on the file would let a failed record write print the
+# ordinary completion line over a pane teardown demonstrably could not close -
+# the plain-success-over-a-leaked-tab report this whole block exists to remove.
+# A record that could not be written leaves the operator with LESS to work with,
+# so that path is louder, never a quiet downgrade of the close report.
+ORPHAN_RECORD=""
+ORPHAN_PATH=""
+CLOSE_OK=1
+if ! fm_herdr_close_pane "$T" "$MUX"; then
+  CLOSE_OK=0
+  ORPHAN_PATH="$STATE/$ID.orphan-pane"
+  if {
+    printf '# firstmate: teardown of %s could not close its pane; this record is kept\n' "$ID"
+    printf '# so the leftover pane stays findable. Close it, then delete this file.\n'
+    cat "$META"
+    printf 'orphan-pane=%s\n' "$T"
+    printf 'orphan-mux=%s\n' "${MUX:-tmux-drain}"
+    printf 'orphan-since=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$ORPHAN_PATH"; then
+    ORPHAN_RECORD="$ORPHAN_PATH"
+    echo "warning: teardown could not close $T for $ID; kept the task record at $ORPHAN_RECORD so the leftover pane stays findable - close the pane, then delete that file" >&2
+  else
+    echo "warning: teardown could not close $T for $ID, AND could not write the task record at $ORPHAN_PATH - anything left there is incomplete, so nothing durable names the leftover pane: close $T by hand now" >&2
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
 fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
+if [ "$CLOSE_OK" = 1 ]; then rm -f "$STATE/$ID.orphan-pane"; fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
-echo "teardown $ID complete (window $T, worktree $WT)"
+if [ "$CLOSE_OK" != 1 ]; then
+  if [ -n "$ORPHAN_RECORD" ]; then
+    echo "teardown $ID complete (worktree $WT); pane $T was NOT closed - record kept at $ORPHAN_RECORD"
+  else
+    echo "teardown $ID complete (worktree $WT); pane $T was NOT closed and no record could be written at $ORPHAN_PATH - close $T by hand"
+  fi
+else
+  echo "teardown $ID complete (window $T, worktree $WT)"
+fi
 backlog_refresh_reminder

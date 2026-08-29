@@ -9,6 +9,8 @@
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/herdr-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-helpers.sh"
 
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
@@ -92,6 +94,11 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   chmod +x "$fakebin/treehouse"
+  # fm-spawn creates panes in herdr, so a spawn fixture must fake herdr too or
+  # it reaches the captain's live server. Its call log goes to the same
+  # FM_FAKE_TMUX_LOG the assertions already read, so what they assert is
+  # unchanged - only which binary carried the launch line.
+  fm_herdr_fake_server "$dir" >/dev/null
   : > "$dir/tmux.log"
   printf '%s\n' "$fakebin"
 }
