@@ -139,10 +139,10 @@
 # doorbell surfaces through the parent's pending-reply recovery and escalation,
 # whose recovery request re-rings the remote doorbell when it is enqueued;
 # fire-and-forget delivery deliberately arms neither mechanism. Internal
-# semantic callers may set FM_SEND_EXPECTED_SPAWN_GEN or
-# FM_SEND_EXPECTED_REMOTE_HOST to require that sampled identity to still match
-# during the final locked remote-route validation; unset or empty guards do not
-# change ordinary sends.
+# semantic callers may set FM_SEND_EXPECTED_SPAWN_GEN,
+# FM_SEND_EXPECTED_REMOTE_HOST, or FM_SEND_EXPECTED_WORKTREE_HEAD to require
+# sampled identity and local worktree state to still match during final locked
+# target validation; unset or empty guards do not change ordinary sends.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -892,21 +892,42 @@ else
     CURRENT_INBOX_TARGET=
     CURRENT_INBOX_BACKEND=
     CURRENT_INBOX_SPAWN_GEN=
+    CURRENT_INBOX_WORKTREE=
+    CURRENT_INBOX_HEAD=
+    CURRENT_INBOX_STATUS=
     if [ -f "$TARGET_META" ]; then
       CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
       CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
       CURRENT_INBOX_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
+      CURRENT_INBOX_WORKTREE=$(fm_meta_get "$TARGET_META" worktree)
+    fi
+    if [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ]; then
+      case "$FM_SEND_EXPECTED_WORKTREE_HEAD" in
+        *[!0-9A-Fa-f]*) CURRENT_INBOX_HEAD=invalid ;;
+        *)
+          case "${#FM_SEND_EXPECTED_WORKTREE_HEAD}" in
+            40|64)
+              CURRENT_INBOX_HEAD=$(git -C "$CURRENT_INBOX_WORKTREE" rev-parse --verify HEAD 2>/dev/null || true)
+              CURRENT_INBOX_STATUS=$(git -C "$CURRENT_INBOX_WORKTREE" status --porcelain 2>/dev/null || printf 'unreadable')
+              ;;
+            *) CURRENT_INBOX_HEAD=invalid ;;
+          esac
+          ;;
+      esac
     fi
     if [ "$CURRENT_INBOX_TARGET" != "$T" ] \
       || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] \
       || { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
         && [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } \
+      || { [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ] \
+        && { [ "$CURRENT_INBOX_HEAD" != "$FM_SEND_EXPECTED_WORKTREE_HEAD" ] \
+          || [ -n "$CURRENT_INBOX_STATUS" ]; }; } \
       || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
       fm_lock_release "$INBOX_META_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
+      echo "error: steer not sent to $INBOX_TASK_ID: the task retired, changed endpoint, or changed its expected worktree state during target resolution" >&2
       exit 1
     fi
     if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then

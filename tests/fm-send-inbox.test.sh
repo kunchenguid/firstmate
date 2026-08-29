@@ -335,6 +335,29 @@ test_meta_lock_contention_fails_bounded() {
   pass "fm-send inbox: metadata lock contention fails bounded without enqueue"
 }
 
+test_expected_worktree_head_is_revalidated_before_enqueue() {
+  local dir err wt expected current rc
+  dir=$(setup_case expected-worktree-head); err="$dir/send.err"
+  wt="$dir/worktree"
+  fm_git_init_commit "$wt"
+  expected=$(git -C "$wt" rev-parse HEAD)
+  printf 'worktree=%s\n' "$wt" >> "$dir/home/state/t1.meta"
+  git -C "$wt" -c user.name='Firstmate Test' -c user.email='firstmate-test@example.invalid' \
+    commit -q --allow-empty -m advance-before-enqueue
+  run_send "$dir" "$err" FM_SEND_EXPECTED_WORKTREE_HEAD="$expected" -- t1 "validate exact head"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale expected worktree head should refuse delivery"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a stale expected-head send enqueued a record"
+  assert_contains "$(cat "$err")" "changed its expected worktree state" \
+    "the exact-head refusal should name the changed worktree boundary"
+  current=$(git -C "$wt" rev-parse HEAD)
+  run_send "$dir" "$err" FM_SEND_EXPECTED_WORKTREE_HEAD="$current" -- t1 "validate exact head" \
+    || fail "the exact current worktree head should permit delivery"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] \
+    || fail "the matching expected-head send did not enqueue its record"
+  pass "fm-send inbox: final target validation refuses a stale expected worktree head"
+}
+
 test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable); err="$dir/send.err"
@@ -362,4 +385,5 @@ test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
+test_expected_worktree_head_is_revalidated_before_enqueue
 test_unwritable_inbox_fails_loudly

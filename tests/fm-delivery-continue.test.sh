@@ -18,6 +18,8 @@ make_fixture() {
   wt="$home/projects/ship"
   mkdir -p "$home/state" "$home/data/ship" "$home/projects"
   fm_git_init_commit "$wt"
+  git -C "$wt" config user.name 'Firstmate Test'
+  git -C "$wt" config user.email 'firstmate-test@example.invalid'
   git -C "$wt" checkout -qb fm/ship
   head=$(git -C "$wt" rev-parse HEAD)
   fm_write_meta "$home/state/ship.meta" "window=fm:fm-ship" "worktree=$wt" "project=sample" "harness=codex" "kind=ship" "mode=no-mistakes" "spawn_gen=g1"
@@ -47,6 +49,7 @@ set -eu
 task=$1; shift
 message=$*
 [ "${FM_SEND_EXPECTED_SPAWN_GEN:-}" = g1 ] || exit 11
+[ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ] || exit 12
 . "${FM_TEST_ROOT:?}/bin/fm-task-inbox-lib.sh"
 fm_task_inbox_write_idempotent "${FM_STATE_OVERRIDE:?}" "$task" "$message" >/dev/null
 SH
@@ -205,6 +208,30 @@ test_replacement_incarnation_rejects_prior_receipt() {
     || fail "prior incarnation receipt reached its replacement worker: $out"
   [ ! -d "$home/state/ship.inbox" ] || fail "replacement worker received prior incarnation validation"
   pass "committed receipts cannot authorize replacement incarnations"
+}
+
+test_head_advance_during_attribution_refuses_stale_delivery() {
+  local dir home send state out before after
+  dir="$TMP_ROOT/head-advance-during-attribution"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"
+  before=$(git -C "$home/projects/ship" rev-parse HEAD)
+  cat > "$state" <<'SH'
+#!/usr/bin/env bash
+set -eu
+git -C "${FM_ADVANCE_WORKTREE:?}" commit -q --allow-empty -m advance-during-attribution
+printf 'run-attribution: absent\n'
+SH
+  chmod +x "$state"
+  out=$(FM_ADVANCE_WORKTREE="$home/projects/ship" run_continue "$home" "$send" "$state") \
+    || fail "head-advance execution failed"
+  after=$(git -C "$home/projects/ship" rev-parse HEAD)
+  [ "$after" != "$before" ] || fail "the attribution fixture did not advance the worktree"
+  [ "$out" = 'result=refused task=ship reason=committed-head-mismatch' ] \
+    || fail "a head advanced during attribution reached stale delivery: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "a stale exact-head instruction was enqueued"
+  [ ! -e "$home/state/.lease-ship" ] || fail "the refused head race stranded its lease"
+  pass "a head advance during run attribution cannot enqueue stale validation authority"
 }
 
 test_historical_receipt_requires_exact_head_provenance() {
@@ -590,6 +617,7 @@ test_inbox_failure_remains_retryable
 test_strict_run_attribution_distinguishes_absence_from_query_failure
 test_identity_and_committed_head_requirements
 test_replacement_incarnation_rejects_prior_receipt
+test_head_advance_during_attribution_refuses_stale_delivery
 test_historical_receipt_requires_exact_head_provenance
 test_terminal_receipt_and_existing_lease_retry
 test_killed_delivery_operation_does_not_strand_session_lease
