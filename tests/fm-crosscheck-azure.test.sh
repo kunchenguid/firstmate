@@ -2353,6 +2353,7 @@ marker = 'python3 - "$SNAPSHOT" "$REPOSITORY" "$INPUT" <<\'PY\'\n'
 start = guest.index(marker) + len(marker)
 end = guest.index('\nPY\nrm -f "$SNAPSHOT"', start)
 extractor = guest[start:end]
+assert "if len(members) > 15002:" in extractor
 
 def run(*argv, cwd):
     return subprocess.run(
@@ -2432,13 +2433,36 @@ with tempfile.TemporaryDirectory() as temporary:
     assert built["digest"] == repeated["digest"]
     assert built["manifest_digest"] == repeated["manifest_digest"]
     module._git_bytes = original_git_bytes
+    class PacketCore:
+        @staticmethod
+        def run_command(command, **_kwargs):
+            completed = subprocess.run(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            return type("Result", (), {
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            })()
+    packet = module.static_review_packet(
+        PacketCore,
+        repo,
+        {"base_sha": base, "head_sha": head},
+    )
+    assert ".crosscheck-review/exact.diff" in packet
+    assert "Digest: sha256:" in packet
+    assert len(packet.encode("utf-8")) < 256 * 1024
     exclusions = {item["path"]: item for item in built["manifest"]["exclusions"]}
     assert exclusions["binary.dat"]["reason"] == "binary"
     assert exclusions["ordinary-big.txt"]["reason"] == "oversized"
     included = {item["path"]: item for item in built["manifest"]["included"]}
+    assert built["manifest"]["virtual_file_count"] == 1
     assert included["changed.txt"]["changed"] is True
     assert included["changed.txt"]["size"] == 3 * 1024 * 1024
     assert included["safe-link"]["kind"] == "symlink"
+    exact_diff = included[".crosscheck-review/exact.diff"]
+    assert exact_diff["kind"] == "metadata" and exact_diff["changed"] is True
     manifest_bytes = module.canonical_bytes(built["manifest"]) + b"\n"
     assert built["uncompressed_bytes"] == (
         sum(item["size"] for item in built["manifest"]["included"])
@@ -2468,6 +2492,11 @@ with tempfile.TemporaryDirectory() as temporary:
         names = archive.getnames()
         assert all(".git" not in Path(name).parts for name in names)
         assert "repository/.crosscheck-snapshot/manifest.json" in names
+        assert "repository/.crosscheck-review/exact.diff" in names
+        archived_diff = archive.extractfile(
+            "repository/.crosscheck-review/exact.diff"
+        ).read()
+        assert module.digest_bytes(archived_diff) == exact_diff["content_sha256"]
         manifest = archive.extractfile(
             "repository/.crosscheck-snapshot/manifest.json"
         ).read()
@@ -2479,6 +2508,10 @@ with tempfile.TemporaryDirectory() as temporary:
     assert (output / "changed.txt").stat().st_size == 3 * 1024 * 1024
     assert os.readlink(output / "safe-link") == "plain.txt"
     assert (output / ".crosscheck-snapshot/manifest.json").is_file()
+    assert (output / ".crosscheck-review/exact.diff").is_file()
+    assert "diff --git a/changed.txt b/changed.txt" in (
+        output / ".crosscheck-review/exact.diff"
+    ).read_text(encoding="utf-8")
     assert (output / "plain.txt").stat().st_mode & 0o222 == 0
     assert output.stat().st_mode & 0o222 == 0
 

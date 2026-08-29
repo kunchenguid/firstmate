@@ -96,14 +96,20 @@ The reviewer must:
 
 - review the exact supplied head;
 - cite a repository path and line for every finding or suspicion;
-- retract any provisional finding or suspicion that does not survive the in-session re-check;
+- complete an independent challenge followed by a fresh authoritative synthesis;
+- verify every challenge hypothesis it carries into the synthesis;
+- retract any provisional finding or suspicion that does not survive re-checking;
 - update known finding lifecycles explicitly;
 - call `finish_review` exactly once;
-- return `BLOCKING` whenever an unresolved suspicion or an unresolved severity-`blocking` finding remains.
+- return `BLOCKING` whenever an unresolved suspicion or an unresolved `must-fix` finding remains.
 
 `report_finding` and `report_suspicion` return stable provisional IDs for the current review.
 `retract_review_item` removes a disproved item from the final verdict without discarding its append-only report and retraction events.
-High, medium, and low severity findings remain durable advisories and do not block merge.
+Severity describes impact (`high`, `medium`, or `low`) independently from merge
+disposition. A definite correctness, security, data-loss, runtime,
+compatibility, or contract defect is `must-fix`; an issue is `advisory` only
+when it is demonstrably safe to defer. Historical severity-`blocking` findings
+remain loadable and are interpreted as `must-fix`.
 
 The controller independently replays the accepted structured tool log. A
 missing, multiple, malformed, or contradictory final verdict gets one bounded
@@ -154,9 +160,16 @@ result. Reviewer homes are inspected before dispatch and credentials are not
 written into the repository or result.
 
 Pi starts without repository context files or extension discovery. Crosscheck
-loads only its tracked verdict extension, which exposes seven bounded tools:
-snapshot search/read, finding/suspicion/update reporting, one optional lookup
-request, and finalization.
+loads only its tracked verdict extension, which exposes ten bounded tools:
+single and batched snapshot search/read, finding/suspicion/update reporting,
+one optional lookup request, and finalization. Batch calls reduce model turns
+without widening repository or network access.
+
+The Pi runtime performs both review stages inside the same isolated Azure
+generation, so stronger recall does not add another provisioning or staging
+cycle. Only the synthesis event log becomes ledger authority; challenge output
+is bounded and injected as untrusted hypotheses. Telemetry combines both
+stages and identifies the two-stage review process.
 
 ## Ketch lookup
 
@@ -183,6 +196,13 @@ run-command child and staged input, credential, snapshot, and output blobs. The
 host remains warm for the next review. Concurrent generations never share a
 working directory or credential file.
 
+Snapshot capture streams Git blobs through one persistent `cat-file` process
+instead of launching one process per file. A complete exact diff up to 8 MiB
+is included as read-only snapshot metadata. Large diffs use a compact initial
+overview and paginated reads of `.crosscheck-review/exact.diff`, so exceeding
+the prompt packet cap no longer turns a reviewable PR into an infrastructure
+failure.
+
 The first run after a clean deployment creates the host from the pinned model
 image. Later runs only confirm the existing host identity and submit their
 generation, so ordinary latency is snapshot transfer plus reviewer time rather
@@ -201,12 +221,17 @@ FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS=7200
 ```
 
 `bin/fm-crosscheck-azure.py lanes` reports running and queued local lanes.
+Each admitted run records queue wait, snapshot-build time, reviewer latency,
+turns, tokens, and cost. Four shared lanes remain the default. Add another
+warm reviewer host when sustained queue-wait percentiles, rather than one
+burst, show that capacity is the bottleneck.
 
 ## Economics and reuse
 
-Each run records available Pi tokens, declared model cost, reviewer latency,
-outcome, finding disposition, lookup use, and phase timings. Provider-reported
-cost remains separate from locally calculated cost.
+Each run records available Pi tokens, declared model cost, queue wait, snapshot
+build time, reviewer latency, review-process mode, outcome, finding disposition,
+lookup use, and phase timings. Provider-reported cost remains separate from
+locally calculated cost.
 
 An accepted clear review can be reused without another model request only when
 the head SHA, reviewed merge base, stable claims digest, reviewer identity, and

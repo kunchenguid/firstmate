@@ -185,7 +185,8 @@ class CrosscheckLedgerValidationTests(unittest.TestCase):
             )
             records = [
                 event(1, "report_finding", {
-                    "severity": "blocking",
+                    "severity": "high",
+                    "merge_disposition": "must-fix",
                     "title": "Semantic defect",
                     "citations": [{"path": "source.py", "line": 1}],
                     "explanation": "The exact-head implementation has a release blocker.",

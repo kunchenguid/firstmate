@@ -385,6 +385,7 @@ for selector in OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN CODEX_REFRESH_TO
 done
 [ "${FM_TEST_PI_FAIL_FOLLOWUP:-0}" != 1 ] \
   || [ "${FM_CROSSCHECK_LOOKUP_ALLOWED:-0}" = 1 ] \
+  || [ "${FM_CROSSCHECK_REVIEW_STAGE:-synthesis}" = challenge ] \
   || exit 43
 [ -z "${FM_TEST_PI_EXIT:-}" ] || exit "$FM_TEST_PI_EXIT"
 mode=
@@ -422,7 +423,7 @@ done
 [ "$provider" = "${FM_TEST_PI_EXPECT_PROVIDER:-openai-codex}" ] || exit 65
 [ "$model" = "${FM_TEST_PI_EXPECT_MODEL:-gpt-5.6-sol}" ] || exit 66
 [ "$thinking" = xhigh ] || [ "$thinking" = low ] || exit 67
-[ "$tools" = repo_search,repo_read,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review ] || exit 68
+[ "$tools" = repo_search,repo_search_batch,repo_read,repo_read_batch,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review ] || exit 68
 [ -f "$extension" ] && [ -f "${FM_CROSSCHECK_REVIEW_SCHEMA:-}" ] \
   && [ -n "$system_prompt" ] || exit 97
 [ "$context_isolated" = yes ] || {
@@ -625,7 +626,10 @@ elif scenario in {"new-finding", "advisory-finding"}:
     os.chmod(reproduction, 0o755)
     finding = {
         "title": "Reproduced defect",
-        "severity": "high" if scenario == "advisory-finding" else "blocking",
+        "severity": "high",
+        "merge_disposition": (
+            "advisory" if scenario == "advisory-finding" else "must-fix"
+        ),
         "description": "The executable reproduction demonstrates the defect.",
         "citations": [{"path": "app.txt", "line": 1}],
     }
@@ -1916,7 +1920,7 @@ test_pi_reviewer_executes_bound_policy_profile() {
     || fail "Pi reviewer did not complete"
   assert_contains "$output" 'crosscheck clear' \
     "Pi reviewer did not earn a clear result"
-  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools repo_search,repo_read,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review --extension' \
+  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools repo_search,repo_search_batch,repo_read,repo_read_batch,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review --extension' \
     "$case_dir/pi.log" \
     "Pi reviewer was not invoked with its pinned provider, model, effort, and tools"
   assert_grep '--no-context-files' "$case_dir/pi.log" \
@@ -1933,7 +1937,7 @@ assert reviewer["executing_account_home"] == sys.argv[2]
 assert reviewer["execution_home"].endswith("/.crosscheck/pi-home")
 assert reviewer["account_selector"] == "PI_CODING_AGENT_DIR"
 assert reviewer["credential_source"] == "pi-openai-codex-oauth-file"
-assert reviewer["reviewer_turn_count"] == "1"
+assert reviewer["reviewer_turn_count"] == "2"
 assert reviewer["evidence_policy"] == "conditional-v1"
 assert reviewer["evidence_mode"] == "identity-only-v1"
 assert "execution_proof" not in reviewer
@@ -1956,7 +1960,7 @@ test_pi_lookup_refusal_still_reaches_fresh_final_review() {
   assert_contains "$output" 'crosscheck clear' \
     "the fresh post-lookup pass did not earn a clear result"
   launches=$(wc -l < "$case_dir/pi.log" | tr -d ' ')
-  [ "$launches" = 2 ] || fail "lookup flow launched Pi $launches times, expected 2"
+  [ "$launches" = 4 ] || fail "lookup flow launched Pi $launches times, expected 4"
   assert_grep 'LOOKUP FOLLOW-UP PASS' "$case_dir/prompt.log" \
     "the final pass did not receive the bound lookup follow-up"
   assert_grep 'lookup query names the private repository' "$case_dir/prompt.log" \
@@ -1972,9 +1976,9 @@ assert run["state"] == "clear", run
 assert lookup["requested"] is True and lookup["follow_up_pass"] is True, lookup
 assert lookup["completed"] == 0 and lookup["failed"] == 1, lookup
 assert lookup["digest"].startswith("sha256:"), lookup
-assert run["telemetry"]["turns"] == 2, run["telemetry"]
+assert run["telemetry"]["turns"] == 4, run["telemetry"]
 assert run["telemetry"]["finish_repairs"] == 0, run["telemetry"]
-assert run["reviewer"]["reviewer_turn_count"] == "2", run["reviewer"]
+assert run["reviewer"]["reviewer_turn_count"] == "4", run["reviewer"]
 PY
   pass "a refused lookup has no authority and still reaches a fresh final review"
 }
@@ -2004,7 +2008,7 @@ assert run["state"] == "tool-failure", run
 assert lookup["requested"] is True and lookup["follow_up_pass"] is True, lookup
 assert lookup["completed"] == 0 and lookup["failed"] == 1, lookup
 assert lookup["digest"].startswith("sha256:"), lookup
-assert telemetry["turns"] == 1 and telemetry["finish_repairs"] == 0, telemetry
+assert telemetry["turns"] == 2 and telemetry["finish_repairs"] == 0, telemetry
 assert telemetry["costs_usd"]["declared"] is not None, telemetry
 PY
   pass "a failed fresh follow-up preserves provisional spend and lookup identity"
@@ -2134,7 +2138,7 @@ test_clear_review_uses_policy_contract() {
     "Codex reviewer loaded untrusted repository instructions"
   assert_grep 'BEGIN UNTRUSTED PR CLAIMS DATA' "$case_dir/prompt.log" \
     "PR claims were not delimited as untrusted data"
-  assert_grep 'Inspect the full diff and use bounded repository reads for focused context' "$case_dir/prompt.log" \
+  assert_grep 'Inspect the full diff and use bounded repository reads and searches for focused context' "$case_dir/prompt.log" \
     "reviewer was not directed toward a focused semantic review"
   assert_no_grep 'SAME-MODEL REVIEW' "$case_dir/prompt.log" \
     "an ordinary cross-model review received the reduced-independence prompt"
@@ -2224,7 +2228,7 @@ PY
       || fail "$model reviewer did not complete"
     assert_contains "$output" 'crosscheck clear' \
       "$model reviewer did not earn a clear result"
-    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools repo_search,repo_read,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review --extension" \
+    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools repo_search,repo_search_batch,repo_read,repo_read_batch,report_finding,report_suspicion,retract_review_item,update_finding,request_lookup,finish_review --extension" \
       "$case_dir/pi.log" \
       "$model reviewer was not invoked on the $slot provider with its pinned model, effort, and tools"
     assert_no_grep 'CROSSCHECK DEGRADED' "$case_dir/err" \
@@ -2248,18 +2252,18 @@ binding = hashlib.sha256(
 assert reviewer["credential_identifier"] == "provider-binding:" + slot + ":" + binding
 assert reviewer["terminal_provider"] == slot
 assert reviewer["terminal_model"] == model
-assert reviewer["review_depth_passes"] == "1"
-assert reviewer["review_depth_mode"] == "single-pass-skeptical-rechallenge-v1"
-assert reviewer["reviewer_turn_count"] == "1"
+assert reviewer["review_depth_passes"] == "2"
+assert reviewer["review_depth_mode"] == "two-pass-independent-synthesis-v1"
+assert reviewer["reviewer_turn_count"] == "2"
 assert reviewer["evidence_policy"] == "conditional-v1"
 assert reviewer["evidence_mode"] == "identity-only-v1"
 assert "execution_proof" not in reviewer
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" "$case_dir/pi-home" "$slot" "$model" \
       || fail "$model review did not record its bound provider, terminal route, depth, and non-secret credential binding"
-    [ "$(wc -l < "$case_dir/pi.log")" -eq 1 ] \
-      || fail "$model did not execute exactly one substantive review pass"
-    assert_grep 'skeptical re-challenge happens in the same session' "$case_dir/prompt.log" \
-      "$model was not prompted for the in-session skeptical re-challenge"
+    [ "$(wc -l < "$case_dir/pi.log")" -eq 2 ] \
+      || fail "$model did not execute both substantive review stages"
+    assert_grep 'AUTHORITATIVE SYNTHESIS STAGE' "$case_dir/prompt.log" \
+      "$model was not prompted for the authoritative synthesis"
     assert_grep 'Reports are provisional' "$case_dir/prompt.log" \
       "$model was not told how to retract a disproved candidate"
     assert_no_grep 'review-execution.sh' "$case_dir/prompt.log" \
@@ -4944,7 +4948,7 @@ writeFileSync(schema, JSON.stringify({ properties: {
   summary: { type: "string" },
   citations: citation,
   new_findings: { items: { properties: {
-    severity: {}, title: {}, citations: citation, description: {},
+    severity: {}, merge_disposition: {}, title: {}, citations: citation, description: {},
   } } },
   suspicions: { items: { properties: { description: {}, citations: citation } } },
   finding_updates: { items: { properties: {
@@ -4991,9 +4995,23 @@ function validateLog(log, expectedResults) {
 }
 const citationValue = [{ path: "review.txt", line: 1 }];
 
+const batched = await session("batched");
+const searches = payload(await batched.tools.repo_search_batch.execute("searches", {
+  searches: [{ query: "review" }, { query: "missing" }],
+}));
+assert.equal(searches.results[0].matches[0].path, "review.txt");
+assert.equal(searches.results[1].matches.length, 0);
+const reads = payload(await batched.tools.repo_read_batch.execute("reads", {
+  reads: [{ path: "review.txt", start_line: 1, end_line: 1 }],
+}));
+assert.equal(reads.results[0].lines[0].text, "review line");
+payload(await batched.tools.finish_review.execute("finish", {
+  verdict: "CLEAR", summary: "batched inspection completed", citations: citationValue,
+}));
+
 const retracting = await session("retracting");
 const finding = payload(await retracting.tools.report_finding.execute("finding", {
-  severity: "blocking", title: "candidate", citations: citationValue,
+  severity: "medium", merge_disposition: "must-fix", title: "candidate", citations: citationValue,
   explanation: "candidate failure",
 }));
 assert.equal(finding.provisional_id, "provisional-finding-0001");
@@ -5024,7 +5042,7 @@ validateLog(retracting.log, [
 
 const advisory = await session("advisory");
 payload(await advisory.tools.report_finding.execute("finding", {
-  severity: "high", title: "advisory", citations: citationValue,
+  severity: "high", merge_disposition: "advisory", title: "advisory", citations: citationValue,
   explanation: "important but not merge blocking",
 }));
 payload(await advisory.tools.finish_review.execute("finish", {
@@ -5033,7 +5051,7 @@ payload(await advisory.tools.finish_review.execute("finish", {
 
 const blocking = await session("blocking");
 payload(await blocking.tools.report_finding.execute("finding", {
-  severity: "blocking", title: "blocker", citations: citationValue,
+  severity: "high", merge_disposition: "must-fix", title: "blocker", citations: citationValue,
   explanation: "release blocker",
 }));
 payload(await blocking.tools.finish_review.execute("finish", {
@@ -5081,16 +5099,20 @@ retracted = replay("retracting")["verdict"]
 assert retracted["new_findings"] == []
 assert retracted["suspicions"] == []
 
+batched = replay("batched")["verdict"]
+assert batched["summary"] == "batched inspection completed"
+
 advisory = replay("advisory")["verdict"]
 assert advisory["new_findings"] == [{
     "title": "advisory",
     "severity": "high",
+    "merge_disposition": "advisory",
     "description": "important but not merge blocking",
     "citations": [{"path": "review.txt", "line": 1}],
 }]
 
 blocking = replay("blocking")["verdict"]
-assert blocking["new_findings"][0]["severity"] == "blocking"
+assert blocking["new_findings"][0]["merge_disposition"] == "must-fix"
 
 prior_advisory = {
     "findings": [{
@@ -6123,7 +6145,7 @@ const tools = [];
 const extension = await import(pathToFileURL(process.argv[2]));
 extension.default({ registerTool(value) { tools.push(value); } });
 const expected = [
-  "repo_search", "repo_read", "report_finding",
+  "repo_search", "repo_search_batch", "repo_read", "repo_read_batch", "report_finding",
   "report_suspicion", "retract_review_item", "update_finding",
   "request_lookup", "finish_review",
 ];
@@ -6193,7 +6215,7 @@ test_telemetry_economics_and_exact_head_reuse() {
     run_case "$case_dir" "$base" "$head" clear run > "$case_dir/reuse.out" \
     || fail "the exact-head reuse failed"
   after=$(wc -l < "$case_dir/pi.log")
-  [ "$before" -eq 1 ] && [ "$after" -eq 1 ] \
+  [ "$before" -eq 2 ] && [ "$after" -eq 2 ] \
     || fail "exact-head reuse launched another paid reviewer"
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" \
     "$case_dir/data/task-x1/crosscheck-ledger.json" "$head" <<'PY' \
@@ -6208,13 +6230,16 @@ source, reused = ledger["runs"]
 assert source["state"] == reused["state"] == "clear"
 assert reused["telemetry"]["reuse"]["source_run_sha256"] == module.run_sha256(source)
 tokens = source["telemetry"]["tokens"]
-assert tokens == {"input": 100, "output": 20, "cache_read": 80,
+assert tokens == {"input": 200, "output": 40, "cache_read": 160,
                   "cache_write": 0, "source": "pi-turn-end-message-usage"}
 costs = source["telemetry"]["costs_usd"]
 assert costs["provider_reported"] is None
-assert costs["pi_calculated"] == 0.0002392
-assert costs["declared"] == 0.0002392
-assert source["telemetry"]["turns"] == 1
+assert costs["pi_calculated"] == 0.0004784
+assert costs["declared"] == 0.0004784
+assert source["telemetry"]["turns"] == 2
+assert source["telemetry"]["review_process"] == {
+    "mode": "two-stage-independent-synthesis-v1", "stages": 2,
+}
 assert source["telemetry"]["reviewer_latency_ms"] >= 0
 config = dict(source["reviewer"])
 snapshot = {"head_sha": head, "base_sha": source["base_sha"],
@@ -6240,9 +6265,9 @@ PY
   output=$(run_economics "$case_dir") || fail "the read-only economics report failed"
   assert_contains "$output" "provider-reported total: \$0.000000 across 0 run(s)." \
     "economics hid provider-cost provenance"
-  assert_contains "$output" "Pi-calculated total: \$0.000239 across 1 run(s)." \
+  assert_contains "$output" "Pi-calculated total: \$0.000478 across 1 run(s)." \
     "economics omitted Pi-calculated cost"
-  assert_contains "$output" "declared-rate total: \$0.000239 across 2 run(s)." \
+  assert_contains "$output" "declared-rate total: \$0.000478 across 2 run(s)." \
     "economics omitted declared regular-lane cost and zero-cost reuse"
   verified=$(run_case "$case_dir" "$base" "$head" clear verify) \
     || fail "verify did not follow the reused run to its source proof"

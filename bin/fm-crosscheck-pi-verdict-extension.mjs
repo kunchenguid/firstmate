@@ -4,7 +4,9 @@ import { posix as path } from "node:path";
 
 const TOOL_NAMES = [
 	"repo_search",
+	"repo_search_batch",
 	"repo_read",
+	"repo_read_batch",
 	"report_finding",
 	"report_suspicion",
 	"retract_review_item",
@@ -162,6 +164,51 @@ export default function registerCrosscheckTools(pi) {
 	const repositoryTextCache = new Map();
 	let searchScannedBytes = 0;
 
+	function performSearch(args) {
+		if (!exactObject(args, ["query"], ["paths", "max_results"])) throw new Error("repo_search arguments are malformed");
+		const query = nonempty(args.query, "query", 200);
+		if ([...query].some((character) => !character.match(/[\x20-\x7e]/))) throw new Error("query must contain printable ASCII only");
+		const filters = args.paths === undefined ? [] : args.paths.map(safeRelative);
+		for (const prefix of filters) {
+			if (![...included.keys()].some((relative) => relative === prefix || relative.startsWith(`${prefix}/`))) throw new Error(`repo_search path has no included snapshot member: ${prefix}`);
+		}
+		const limit = args.max_results === undefined ? MAX_SEARCH_RESULTS : integer(args.max_results, "max_results", 1, MAX_SEARCH_RESULTS);
+		const matches = [];
+		let truncated = false;
+		for (const relative of [...included.keys()].sort()) {
+			if (matches.length >= limit) { truncated = true; break; }
+			const record = included.get(relative);
+			if (!["file", "executable"].includes(record.kind)) continue;
+			if (filters.length && !filters.some((prefix) => relative === prefix || relative.startsWith(`${prefix}/`))) continue;
+			let text;
+			try { text = repositoryText(relative).text; } catch { continue; }
+			const scanned = textBytes(text);
+			if (searchScannedBytes + scanned > MAX_SEARCH_SCAN_BYTES) throw new Error("repo_search aggregate scan budget is exhausted");
+			searchScannedBytes += scanned;
+			const lines = splitLines(text);
+			for (let index = 0; index < lines.length && matches.length < limit; index += 1) {
+				if (!lines[index].includes(query)) continue;
+				const candidate = { path: relative, line: index + 1, text: [...lines[index]].slice(0, 1000).join("") };
+				const next = { matches: [...matches, candidate], truncated: false };
+				if (textBytes(canonical(next)) > MAX_SEARCH_BYTES) { truncated = true; break; }
+				matches.push(candidate);
+			}
+		}
+		return { matches, truncated: truncated || matches.length === limit };
+	}
+
+	function performRead(args) {
+		if (!exactObject(args, ["path"], ["start_line", "end_line"])) throw new Error("repo_read arguments are malformed");
+		const file = repositoryText(args.path);
+		const lines = splitLines(file.text);
+		const start = args.start_line === undefined ? 1 : integer(args.start_line, "start_line", 1, Math.max(1, lines.length));
+		const end = args.end_line === undefined ? Math.min(lines.length, start + MAX_READ_LINES - 1) : integer(args.end_line, "end_line", start, lines.length);
+		if (end - start + 1 > MAX_READ_LINES) throw new Error(`repo_read is capped at ${MAX_READ_LINES} lines`);
+		const result = { path: file.relative, start_line: start, end_line: end, lines: lines.slice(start - 1, end).map((text, index) => ({ line: start + index, text })) };
+		if (textBytes(canonical(result)) > MAX_READ_BYTES) throw new Error("repo_read response exceeds 48 KB; request a narrower range");
+		return result;
+	}
+
 	function record(name, args, result) {
 		if (finished) throw new FatalToolError("review is already finalized");
 		if (callCount >= MAX_CALLS) throw new FatalToolError("tool event limit reached");
@@ -236,37 +283,22 @@ export default function registerCrosscheckTools(pi) {
 			max_results: { type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS },
 		},
 	}, (args) => {
-		if (!exactObject(args, ["query"], ["paths", "max_results"])) throw new Error("repo_search arguments are malformed");
-		const query = nonempty(args.query, "query", 200);
-		if ([...query].some((character) => !character.match(/[\x20-\x7e]/))) throw new Error("query must contain printable ASCII only");
-		const filters = args.paths === undefined ? [] : args.paths.map(safeRelative);
-		for (const prefix of filters) {
-			if (![...included.keys()].some((relative) => relative === prefix || relative.startsWith(`${prefix}/`))) throw new Error(`repo_search path has no included snapshot member: ${prefix}`);
-		}
-		const limit = args.max_results === undefined ? MAX_SEARCH_RESULTS : integer(args.max_results, "max_results", 1, MAX_SEARCH_RESULTS);
-		const matches = [];
-		let truncated = false;
-		for (const relative of [...included.keys()].sort()) {
-			if (matches.length >= limit) { truncated = true; break; }
-			const record = included.get(relative);
-			if (!["file", "executable"].includes(record.kind)) continue;
-			if (filters.length && !filters.some((prefix) => relative === prefix || relative.startsWith(`${prefix}/`))) continue;
-			let text;
-			try { text = repositoryText(relative).text; } catch { continue; }
-			const scanned = textBytes(text);
-			if (searchScannedBytes + scanned > MAX_SEARCH_SCAN_BYTES) throw new Error("repo_search aggregate scan budget is exhausted");
-			searchScannedBytes += scanned;
-			const lines = splitLines(text);
-			for (let index = 0; index < lines.length && matches.length < limit; index += 1) {
-				if (!lines[index].includes(query)) continue;
-				const candidate = { path: relative, line: index + 1, text: [...lines[index]].slice(0, 1000).join("") };
-				const next = { matches: [...matches, candidate], truncated: false };
-				if (textBytes(canonical(next)) > MAX_SEARCH_BYTES) { truncated = true; break; }
-				matches.push(candidate);
-			}
-		}
-		const result = { matches, truncated: truncated || matches.length === limit };
-		return accepted("repo_search", args, result);
+		return accepted("repo_search", args, performSearch(args));
+	});
+
+	register(pi, "repo_search_batch", "Run 1 to 8 independent literal snapshot searches in one tool call.", {
+		type: "object", additionalProperties: false, required: ["searches"], properties: {
+			searches: { type: "array", minItems: 1, maxItems: 8, items: {
+				type: "object", additionalProperties: false, required: ["query"], properties: {
+					query: { type: "string", minLength: 1, maxLength: 200 },
+					paths: { type: "array", maxItems: 32, items: { type: "string", minLength: 1, maxLength: 512 } },
+					max_results: { type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS },
+				},
+			} },
+		},
+	}, (args) => {
+		if (!exactObject(args, ["searches"]) || !Array.isArray(args.searches) || args.searches.length < 1 || args.searches.length > 8) throw new Error("repo_search_batch arguments are malformed");
+		return accepted("repo_search_batch", args, { results: args.searches.map(performSearch) });
 	});
 
 	register(pi, "repo_read", "Read a bounded line range from the exact-head snapshot.", {
@@ -276,31 +308,42 @@ export default function registerCrosscheckTools(pi) {
 			end_line: { type: "integer", minimum: 1 },
 		},
 	}, (args) => {
-		if (!exactObject(args, ["path"], ["start_line", "end_line"])) throw new Error("repo_read arguments are malformed");
-		const file = repositoryText(args.path);
-		const lines = splitLines(file.text);
-		const start = args.start_line === undefined ? 1 : integer(args.start_line, "start_line", 1, Math.max(1, lines.length));
-		const end = args.end_line === undefined ? Math.min(lines.length, start + MAX_READ_LINES - 1) : integer(args.end_line, "end_line", start, lines.length);
-		if (end - start + 1 > MAX_READ_LINES) throw new Error(`repo_read is capped at ${MAX_READ_LINES} lines`);
-		const result = { path: file.relative, start_line: start, end_line: end, lines: lines.slice(start - 1, end).map((text, index) => ({ line: start + index, text })) };
-		if (textBytes(canonical(result)) > MAX_READ_BYTES) throw new Error("repo_read response exceeds 48 KB; request a narrower range");
-		return accepted("repo_read", args, result);
+		return accepted("repo_read", args, performRead(args));
+	});
+
+	register(pi, "repo_read_batch", "Read 1 to 8 bounded exact-head line ranges in one tool call.", {
+		type: "object", additionalProperties: false, required: ["reads"], properties: {
+			reads: { type: "array", minItems: 1, maxItems: 8, items: {
+				type: "object", additionalProperties: false, required: ["path"], properties: {
+					path: { type: "string", minLength: 1, maxLength: 512 },
+					start_line: { type: "integer", minimum: 1 },
+					end_line: { type: "integer", minimum: 1 },
+				},
+			} },
+		},
+	}, (args) => {
+		if (!exactObject(args, ["reads"]) || !Array.isArray(args.reads) || args.reads.length < 1 || args.reads.length > 8) throw new Error("repo_read_batch arguments are malformed");
+		const result = { results: args.reads.map(performRead) };
+		if (textBytes(canonical(result)) > 256 * 1024) throw new Error("repo_read_batch response exceeds 256 KB; request fewer or narrower ranges");
+		return accepted("repo_read_batch", args, result);
 	});
 
 	register(pi, "report_finding", "Report one provisional actionable finding with exact-head citations. The returned provisional_id can be retracted before finalization.", {
-		type: "object", additionalProperties: false, required: ["severity", "title", "citations", "explanation"], properties: {
+		type: "object", additionalProperties: false, required: ["severity", "merge_disposition", "title", "citations", "explanation"], properties: {
 			severity: finding.properties.severity, title: finding.properties.title, citations: finding.properties.citations,
+			merge_disposition: finding.properties.merge_disposition,
 			explanation: finding.properties.description,
 		},
 	}, (args) => {
-		if (!exactObject(args, ["severity", "title", "citations", "explanation"])) throw new Error("report_finding arguments are malformed");
+		if (!exactObject(args, ["severity", "merge_disposition", "title", "citations", "explanation"])) throw new Error("report_finding arguments are malformed");
 		if (findingCount >= 32) throw new Error("new finding limit reached");
-		if (!["blocking", "high", "medium", "low"].includes(args.severity)) throw new Error("severity is invalid");
+		if (!["high", "medium", "low"].includes(args.severity)) throw new Error("severity is invalid");
+		if (!["must-fix", "advisory"].includes(args.merge_disposition)) throw new Error("merge_disposition is invalid");
 		nonempty(args.title, "title", 1024); nonempty(args.explanation, "explanation", 8192); citations(args.citations);
 		const provisionalId = `provisional-finding-${String(findingCount + 1).padStart(4, "0")}`;
 		const response = accepted("report_finding", args, { admitted: true, provisional_id: provisionalId });
 		findingCount += 1;
-		provisionalFindings.set(provisionalId, args.severity);
+		provisionalFindings.set(provisionalId, args.merge_disposition);
 		return response;
 	});
 
@@ -388,10 +431,10 @@ export default function registerCrosscheckTools(pi) {
 		if (!["CLEAR", "BLOCKING"].includes(args.verdict)) throw new Error("verdict must be CLEAR or BLOCKING");
 		nonempty(args.summary, "summary", 16384); citations(args.citations);
 		const untouchedActive = [...activeFindingIds].some((identifier) => !updatedFindingIds.has(identifier));
-		const blockingEvents = [...provisionalFindings.values()].some((severity) => severity === "blocking") || provisionalSuspicions.size > 0 || blockingUpdateCount > 0 || untouchedActive;
+		const blockingEvents = [...provisionalFindings.values()].some((disposition) => disposition === "must-fix") || provisionalSuspicions.size > 0 || blockingUpdateCount > 0 || untouchedActive;
 		if ((args.verdict === "BLOCKING") !== blockingEvents) throw new Error("finish verdict contradicts accepted review items");
 		return accepted("finish_review", args, { finalized: true }, true);
 	});
 
-	if (TOOL_NAMES.length !== 8 || statSync(repository).isDirectory() !== true) throw new Error("Crosscheck tool registration invariant failed");
+	if (TOOL_NAMES.length !== 10 || statSync(repository).isDirectory() !== true) throw new Error("Crosscheck tool registration invariant failed");
 }

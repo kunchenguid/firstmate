@@ -83,7 +83,7 @@ if value.get("tool_protocol", {}).get("network_bytes") != 0:
     raise SystemExit("model guest: repository tool contract is not networkless")
 expected_tools = (
     [
-        "repo_search", "repo_read",
+        "repo_search", "repo_search_batch", "repo_read", "repo_read_batch",
         "report_finding", "report_suspicion", "retract_review_item",
         "update_finding",
         "request_lookup", "finish_review",
@@ -329,7 +329,8 @@ def safe_link(path, target):
 manifest_name = "repository/.crosscheck-snapshot/manifest.json"
 with tarfile.open(source, "r:gz") as archive:
     members = archive.getmembers()
-    if len(members) > 15001:
+    # 15,000 tracked files, one generated exact-diff member, and the manifest.
+    if len(members) > 15002:
         raise SystemExit("model guest: repository snapshot exceeds member bound")
     names = [member.name for member in members]
     if len(names) != len(set(names)) or manifest_name not in names:
@@ -360,7 +361,8 @@ with tarfile.open(source, "r:gz") as archive:
     if (
         len(included) != declared["file_count"]
         or len(exclusions) != declared["excluded_count"]
-        or manifest.get("tracked_file_count") != len(included) + len(exclusions)
+        or manifest.get("virtual_file_count") != 1
+        or manifest.get("tracked_file_count") != len(included) + len(exclusions) - 1
         or manifest["tracked_file_count"] > 15000
     ):
         raise SystemExit("model guest: repository snapshot manifest counts mismatch")
@@ -376,15 +378,19 @@ with tarfile.open(source, "r:gz") as archive:
         path = safe_path(record["path"])
         if path.parts[0] == ".crosscheck-snapshot":
             raise SystemExit("model guest: repository snapshot uses reserved metadata path")
-        if record["kind"] not in {"file", "executable", "symlink"}:
+        if record["kind"] not in {"file", "executable", "symlink", "metadata"}:
             raise SystemExit("model guest: repository snapshot file kind is invalid")
+        if record["kind"] == "metadata" and record["path"] != ".crosscheck-review/exact.diff":
+            raise SystemExit("model guest: repository snapshot metadata path is invalid")
+        if record["kind"] != "metadata" and path.parts[0] == ".crosscheck-review":
+            raise SystemExit("model guest: repository snapshot uses reserved review metadata")
         if not isinstance(record["size"], int) or record["size"] < 0:
             raise SystemExit("model guest: repository snapshot file size is invalid")
         if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(record["blob_id"])):
             raise SystemExit("model guest: repository snapshot blob identity is invalid")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(record["content_sha256"])):
             raise SystemExit("model guest: repository snapshot content digest is invalid")
-        limit = 8 * 1024 * 1024 if record["changed"] else 2 * 1024 * 1024
+        limit = 8 * 1024 * 1024 if record["changed"] or record["kind"] == "metadata" else 2 * 1024 * 1024
         if record["size"] > limit:
             raise SystemExit("model guest: repository snapshot file exceeds its bound")
         name = "repository/" + record["path"]
