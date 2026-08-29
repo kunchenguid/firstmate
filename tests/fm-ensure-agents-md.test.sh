@@ -19,6 +19,14 @@ assert_claude_pointer() {
 EOF
 }
 
+# Public contract: a committed correct CLAUDE.md -> AGENTS.md symlink survives
+# the utility untouched, so spawned worktrees never show a conversion diff.
+assert_claude_symlink_preserved() {
+  local path=$1
+  [ -L "$path" ] || fail "CLAUDE.md is no longer a symlink; the tracked symlink was converted to a regular file"
+  [ "$(readlink "$path")" = "AGENTS.md" ] || fail "CLAUDE.md symlink retargeted to $(readlink "$path")"
+}
+
 write_fixture_claude_pointer() {
   cat > "$1/CLAUDE.md" <<'EOF'
 <!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
@@ -111,46 +119,35 @@ test_existing_agents_md_with_symlink_gains_self_governance() {
   assert_grep "## Maintaining this file" "$agents" "existing AGENTS.md did not gain the self-governance section"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "injection wrote $count self-governance sections"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_claude_symlink_preserved "$repo/CLAUDE.md"
   # Re-run must be a byte-exact no-op reporting unchanged.
   cp "$agents" "$repo/.after-first"
-  cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed on idempotent re-run"
   assert_contains "$out" "unchanged:" "idempotent re-run did not report unchanged"
   diff "$repo/.after-first" "$agents" >/dev/null \
     || fail "idempotent re-run modified AGENTS.md"
-  cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
-    || fail "idempotent re-run modified CLAUDE.md"
+  assert_claude_symlink_preserved "$repo/CLAUDE.md"
   pass "fm-ensure-agents-md.sh: existing symlinked AGENTS.md gains the section idempotently"
 }
 
-test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
+test_correct_symlink_is_preserved_without_clobbering_agents() {
   local repo agents out
-  repo="$TMP_ROOT/symlink-migrate-project"
+  repo="$TMP_ROOT/symlink-preserve-project"
   mkdir -p "$repo"
   printf '# Unique agent memory\n\nDo not clobber this payload.\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
   ln -s AGENTS.md "$repo/CLAUDE.md"
   agents="$repo/AGENTS.md"
   cp "$agents" "$repo/.before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
-    || fail "fm-ensure-agents-md.sh failed migrating a correct CLAUDE.md symlink"
-  assert_contains "$out" "updated:" "symlink migration did not report an update"
-  assert_claude_pointer "$repo/CLAUDE.md"
+    || fail "fm-ensure-agents-md.sh failed on a correct CLAUDE.md symlink"
+  assert_contains "$out" "unchanged:" "preserved-symlink run did not report unchanged"
+  assert_claude_symlink_preserved "$repo/CLAUDE.md"
   cmp -s "$repo/.before" "$agents" \
-    || fail "symlink migration clobbered AGENTS.md"
+    || fail "preserved-symlink run clobbered AGENTS.md"
   assert_grep "Do not clobber this payload." "$agents" \
-    "symlink migration lost unique AGENTS.md content"
-  cp "$agents" "$repo/.after-first"
-  cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
-  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
-    || fail "fm-ensure-agents-md.sh failed on post-migration re-run"
-  assert_contains "$out" "unchanged:" "post-migration re-run did not report unchanged"
-  cmp -s "$repo/.after-first" "$agents" \
-    || fail "post-migration re-run modified AGENTS.md"
-  cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
-    || fail "post-migration re-run modified CLAUDE.md"
-  pass "fm-ensure-agents-md.sh: correct symlink migrates to pointer without clobbering AGENTS.md"
+    "preserved-symlink run lost unique AGENTS.md content"
+  pass "fm-ensure-agents-md.sh: correct symlink is preserved without touching AGENTS.md"
 }
 
 test_existing_agents_md_without_claude_gains_section_and_pointer() {
@@ -245,15 +242,13 @@ test_existing_crlf_agents_md_without_section_preserves_crlf() {
     'When updating this file, preserve this bar for all agents and keep entries concise.' > "$repo/.expected"
   cmp -s "$repo/.expected" "$agents" \
     || fail "CRLF AGENTS.md injection did not preserve CRLF line endings"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_claude_symlink_preserved "$repo/CLAUDE.md"
   cp "$agents" "$repo/.after-first"
-  cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
     || fail "fm-ensure-agents-md.sh failed on idempotent CRLF re-run"
   cmp -s "$repo/.after-first" "$agents" \
     || fail "idempotent CRLF re-run modified AGENTS.md"
-  cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
-    || fail "idempotent CRLF re-run modified CLAUDE.md"
+  assert_claude_symlink_preserved "$repo/CLAUDE.md"
   pass "fm-ensure-agents-md.sh: CRLF injection preserves line endings idempotently"
 }
 
@@ -353,12 +348,44 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+test_symlinked_claude_md_survives_worktree_creation_and_ensure_as_mode_120000() {
+  local repo wt out tracked_mode
+  repo="$TMP_ROOT/symlink-tracked-project"
+  wt="$TMP_ROOT/symlink-tracked-project.wt"
+  fm_git_init_commit "$repo"
+  printf '# Project agent memory\n' > "$repo/AGENTS.md"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  git -C "$repo" add AGENTS.md CLAUDE.md
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'track CLAUDE.md symlink'
+  tracked_mode=$(git -C "$repo" ls-files -s CLAUDE.md | awk '{print $1}')
+  [ "$tracked_mode" = "120000" ] || fail "fixture did not track CLAUDE.md as a 120000 symlink (got: $tracked_mode)"
+  # Spawn-path worktree creation: the derived worktree must materialize the
+  # committed symlink, not a regular file.
+  git -C "$repo" worktree add --quiet "$wt" 2>/dev/null \
+    || fail "git worktree add failed for the symlink fixture"
+  [ -L "$wt/CLAUDE.md" ] || fail "worktree creation converted the tracked CLAUDE.md symlink into a regular file"
+  tracked_mode=$(git -C "$wt" ls-files -s CLAUDE.md | awk '{print $1}')
+  [ "$tracked_mode" = "120000" ] || fail "spawned worktree's CLAUDE.md is not mode 120000 (got: $tracked_mode)"
+  # The conversion site: running the utility in a spawned worktree must leave
+  # the tracked symlink and leave nothing for a crew to accidentally commit.
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$wt" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed in a worktree with a tracked CLAUDE.md symlink"
+  assert_claude_symlink_preserved "$wt/CLAUDE.md"
+  tracked_mode=$(git -C "$wt" ls-files -s CLAUDE.md | awk '{print $1}')
+  [ "$tracked_mode" = "120000" ] || fail "post-ensure CLAUDE.md is not mode 120000 (got: $tracked_mode)"
+  [ -z "$(git -C "$wt" status --porcelain -- CLAUDE.md)" ] \
+    || fail "fm-ensure-agents-md.sh dirtied CLAUDE.md in the worktree; a crew would commit the conversion"
+  assert_grep "## Maintaining this file" "$wt/AGENTS.md" \
+    "worktree AGENTS.md did not gain the self-governance section"
+  pass "fm-ensure-agents-md.sh: tracked CLAUDE.md symlink survives worktree creation and ensure as mode 120000"
+}
+
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
 test_existing_agents_md_with_symlink_gains_self_governance
-test_correct_symlink_migrates_to_pointer_without_clobbering_agents
+test_correct_symlink_is_preserved_without_clobbering_agents
 test_existing_agents_md_without_claude_gains_section_and_pointer
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
@@ -369,3 +396,4 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+test_symlinked_claude_md_survives_worktree_creation_and_ensure_as_mode_120000
