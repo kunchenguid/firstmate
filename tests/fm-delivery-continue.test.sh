@@ -6,22 +6,26 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$ROOT/bin/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-delivery-continuation-lib.sh
+. "$ROOT/bin/fm-delivery-continuation-lib.sh"
 
 CONTINUE="$ROOT/bin/fm-delivery-continue.sh"
 TMP_ROOT=$(fm_test_tmproot fm-delivery-continue)
 
 make_fixture() {
-  local dir=$1 home wt
+  local dir=$1 home wt head
   home="$dir/home"
   wt="$home/projects/ship"
   mkdir -p "$home/state" "$home/data/ship" "$home/projects"
   fm_git_init_commit "$wt"
   git -C "$wt" checkout -qb fm/ship
+  head=$(git -C "$wt" rev-parse HEAD)
   fm_write_meta "$home/state/ship.meta" "window=fm:fm-ship" "worktree=$wt" "project=sample" "harness=codex" "kind=ship" "mode=no-mistakes" "spawn_gen=g1"
-  printf 'done: implementation committed and focused checks passed\n' > "$home/state/ship.status"
+  printf 'done: committed %s implementation committed and focused checks passed\n' "$head" > "$home/state/ship.status"
   cat > "$home/data/ship/brief.md" <<'EOF'
 Delivery contract: mode=no-mistakes
-When you believe it is complete, append `done: {summary}` to the status file and stop.
+Delivery receipt contract: committed-head-v1
+When you believe it is complete, append `done: committed $(git rev-parse HEAD) {summary}` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 EOF
   cat > "$home/data/backlog.md" <<'EOF'
@@ -66,6 +70,7 @@ test_exactly_once_delivery_and_replay() {
   dir="$TMP_ROOT/exactly-once"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
   send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  printf 'resolved [key=settled]: decision already answered\n' >> "$home/state/ship.status"
   first=$(run_continue "$home" "$send" "$state") || fail "initial continuation failed"
   make_state_stub "$state" unavailable
   second=$(run_continue "$home" "$send" "$state") || fail "replay continuation failed"
@@ -178,25 +183,54 @@ test_identity_and_committed_head_requirements() {
   [[ "$out" == *'reason=missing-task-incarnation'* ]] || fail "missing incarnation was not refused: $out"
   printf 'spawn_gen=g1\n' >> "$home/state/ship.meta"
   printf 'dirty\n' > "$home/projects/ship/uncommitted.txt"
-  out=$(run_continue "$home" "$send" "$state") || fail "dirty legacy receipt execution failed"
-  [[ "$out" == *'reason=uncommitted-worktree'* ]] || fail "legacy receipt did not independently require a clean committed head: $out"
+  out=$(run_continue "$home" "$send" "$state") || fail "dirty committed receipt execution failed"
+  [[ "$out" == *'reason=uncommitted-worktree'* ]] || fail "committed receipt did not require a clean worktree: $out"
   rm "$home/projects/ship/uncommitted.txt"
   head=$(git -C "$home/projects/ship" rev-parse HEAD)
   printf 'done: committed %s canonical receipt\n' "$head" > "$home/state/ship.status"
   out=$(run_continue "$home" "$send" "$state") || fail "canonical receipt execution failed"
   [ "$out" = 'result=sent task=ship' ] || fail "canonical committed receipt did not deliver: $out"
-  pass "continuation requires an incarnation and proves both legacy and canonical committed heads"
+  pass "continuation requires an incarnation and a clean canonical committed head"
+}
+
+test_historical_receipt_requires_exact_head_provenance() {
+  local dir home send state out head delivery message
+  dir="$TMP_ROOT/historical-head-provenance"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  cat > "$home/data/ship/brief.md" <<'EOF'
+Delivery contract: mode=no-mistakes
+When you believe it is complete, append `done: {summary}` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+EOF
+  printf 'done: implementation committed and focused checks passed\n' > "$home/state/ship.status"
+  out=$(run_continue "$home" "$send" "$state") || fail "unbound historical receipt execution failed"
+  [ "$out" = 'result=refused task=ship reason=unverifiable-historical-committed-head' ] \
+    || fail "historical receipt borrowed the current head: $out"
+  head=$(git -C "$home/projects/ship" rev-parse HEAD)
+  delivery=$(fm_delivery_continuation_id ship "$head" g1)
+  message=$(fm_delivery_continuation_message ship "$head" g1 "$delivery")
+  fm_task_inbox_write_idempotent "$home/state" ship "$message" >/dev/null
+  out=$(run_continue "$home" "$send" "$state") || fail "historical exact-record replay failed"
+  [ "$out" = 'result=already-delivered task=ship' ] \
+    || fail "historical replay did not converge on exact durable head evidence: $out"
+  git -C "$home/projects/ship" commit -q --allow-empty -m advance
+  out=$(run_continue "$home" "$send" "$state") || fail "historical advanced-head execution failed"
+  [ "$out" = 'result=refused task=ship reason=continuation-head-mismatch' ] \
+    || fail "historical receipt authorized a later clean head: $out"
+  pass "historical receipts require durable exact-head provenance"
 }
 
 test_terminal_receipt_and_existing_lease_retry() {
-  local dir home send state out
+  local dir home send state out head
   dir="$TMP_ROOT/terminal-and-lease"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
   send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
   printf 'done: PR https://example.invalid/pull/1 checks green\n' > "$home/state/ship.status"
   out=$(run_continue "$home" "$send" "$state") || fail "terminal receipt execution failed"
   [[ "$out" == *'reason=attributable-validation-terminal-receipt'* ]] || fail "terminal PR receipt was treated as committed-ready: $out"
-  printf 'done: implementation committed and focused checks passed\n' > "$home/state/ship.status"
+  head=$(git -C "$home/projects/ship" rev-parse HEAD)
+  printf 'done: committed %s implementation committed and focused checks passed\n' "$head" > "$home/state/ship.status"
   printf '%s\n' "$$" > "$home/state/.lock"
   PI_CODING_AGENT=true FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_LEASE_HOLDER_PID=$$ \
     "$ROOT/bin/fm-lease.sh" claim ship >/dev/null || fail "fixture main lease claim failed"
@@ -231,6 +265,7 @@ SH
     sleep 0.01
   done
   operation_pid=$(cut -f4 "$home/state/.lease-ship" 2>/dev/null)
+  operation_pid=${operation_pid%-*}
   operation_pid=${operation_pid##*-}
   helper_pid=$(cat "$marker" 2>/dev/null)
   case "$operation_pid:$helper_pid" in *[!0-9:]*|:|*:) fail "delivery fixture did not expose both operation pids" ;; esac
@@ -245,10 +280,42 @@ SH
   pass "a killed delivery operation cannot strand its live Pi session lease"
 }
 
+write_fake_delivery_proc() {
+  local proc_root=$1 pid=$2 starttime=$3
+  mkdir -p "$proc_root/$pid"
+  printf '%s\n' "$pid (delivery) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 $starttime 20 21 22" > "$proc_root/$pid/stat"
+  printf 'bash\0fm-delivery-continue.sh\0ship\0' > "$proc_root/$pid/cmdline"
+}
+
+test_reused_delivery_pid_does_not_preserve_lease() {
+  local dir home proc_root owner
+  dir="$TMP_ROOT/reused-delivery-pid"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  proc_root="$dir/proc"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  write_fake_delivery_proc "$proc_root" "$$" 111
+  owner=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$home/state" \
+    bash -c '. "$1"; fm_lease_delivery_owner reused "$2"' _ "$ROOT/bin/fm-lease-lib.sh" "$$") \
+    || fail "could not create delivery process identity owner"
+  PI_CODING_AGENT=true FM_PROC_ROOT_OVERRIDE="$proc_root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_LEASE_HOLDER_PID="$$" FM_LEASE_OWNER="$owner" "$ROOT/bin/fm-lease.sh" claim-new reused >/dev/null \
+    || fail "could not claim delivery identity lease"
+  write_fake_delivery_proc "$proc_root" "$$" 222
+  PI_CODING_AGENT=true FM_PROC_ROOT_OVERRIDE="$proc_root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_LEASE_HOLDER_PID="$$" FM_LEASE_OWNER=pi-main-replay "$ROOT/bin/fm-lease.sh" claim-new reused \
+    || fail "reused delivery pid stranded the lease"
+  [ "$(cut -f4 "$home/state/.lease-reused")" = pi-main-replay ] \
+    || fail "new process incarnation did not own the reclaimed delivery lease"
+  PI_CODING_AGENT=true FM_PROC_ROOT_OVERRIDE="$proc_root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_LEASE_OWNER=pi-main-replay "$ROOT/bin/fm-lease.sh" release reused >/dev/null
+  pass "delivery leases bind PID and process start identity"
+}
+
 test_pi_empty_drain_recovers_unqueued_durable_candidate() {
   local dir home stub log out
   dir="$TMP_ROOT/pi-empty-durable-preflight"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
+  printf 'resolved [key=settled]: decision already answered\n' >> "$home/state/ship.status"
   stub="$dir/continue"; log="$dir/delivery.log"
   printf '%s\n' "$$" > "$home/state/.lock"
   : > "$home/state/.wake-queue"
@@ -271,7 +338,7 @@ SH
 }
 
 test_fleet_and_bearings_project_pending_continuation() {
-  local dir home send state fakebin snapshot bearings head active_bearings monitoring_bearings terminal_bearings
+  local dir home send state fakebin snapshot bearings head active_snapshot active_bearings monitoring_bearings terminal_bearings
   dir="$TMP_ROOT/fleet-projection"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
   send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
@@ -296,6 +363,7 @@ SH
   bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bearings-snapshot.sh" --json)
   printf '%s' "$bearings" | jq -e '.in_flight[] | select(.id == "ship") | .state == "validation_pending" and (.doing | contains("source unverified"))' >/dev/null \
     || fail "Bearings hid pending continuation or unverified busy source: $bearings"
+  git -C "$home/projects/ship" commit -q --allow-empty -m validation-fix
   head=$(git -C "$home/projects/ship" rev-parse HEAD)
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
@@ -347,6 +415,10 @@ EOF
 esac
 SH
   chmod +x "$fakebin/no-mistakes"
+  active_snapshot=$(FM_FAKE_RUN_MODE=active FM_FAKE_RUN_HEAD="$head" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$active_snapshot" | jq -e '.tasks[] | select(.id == "ship") | .delivery_continuation.state == "pending" and .delivery_continuation.head != .delivery_continuation.current_head and .delivery_continuation.worker_run_attributed == true' >/dev/null \
+    || fail "fleet snapshot treated attributed run head advancement as a conflict: $active_snapshot"
   active_bearings=$(FM_FAKE_RUN_MODE=active FM_FAKE_RUN_HEAD="$head" PATH="$fakebin:$PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-bearings-snapshot.sh" --json)
   printf '%s' "$active_bearings" | jq -e '.in_flight[] | select(.id == "ship") | .state == "working" and (.doing | contains("validating (running)")) and (.doing | contains("validation instr"))' >/dev/null \
@@ -464,8 +536,10 @@ test_current_brief_requires_canonical_receipt
 test_inbox_failure_remains_retryable
 test_strict_run_attribution_distinguishes_absence_from_query_failure
 test_identity_and_committed_head_requirements
+test_historical_receipt_requires_exact_head_provenance
 test_terminal_receipt_and_existing_lease_retry
 test_killed_delivery_operation_does_not_strand_session_lease
+test_reused_delivery_pid_does_not_preserve_lease
 test_pi_empty_drain_recovers_unqueued_durable_candidate
 test_fleet_and_bearings_project_pending_continuation
 test_advanced_head_surfaces_continuation_conflict

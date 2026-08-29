@@ -11,6 +11,43 @@ fm_delivery_historical_receipt_contract() {
   printf '%s\n' 'When you believe it is complete, append `done: {summary}` to the status file and stop.'
 }
 
+fm_delivery_receipt_contract_kind() {  # <brief>
+  local brief=$1
+  if grep -Fqx "$(fm_delivery_committed_receipt_contract)" "$brief"; then
+    printf '%s\n' canonical
+  elif grep -Fqx "$(fm_delivery_historical_receipt_contract)" "$brief"; then
+    printf '%s\n' historical
+  else
+    return 1
+  fi
+}
+
+fm_delivery_receipt_state() {  # <status> <canonical|historical>
+  local status=$1 kind=$2 line parsed state= head=
+  case "$kind" in canonical|historical) ;; *) return 1 ;; esac
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'done: PR '*|'done: merged'*) state=terminal; head=; continue ;;
+    esac
+    if [ "$kind" = canonical ]; then
+      parsed=$(printf '%s\n' "$line" | sed -n 's/^done:[[:space:]]*committed[[:space:]]\([0-9A-Fa-f][0-9A-Fa-f]*\)\([[:space:]].*\)\{0,1\}$/\1/p')
+      if [ -n "$parsed" ]; then
+        state=committed
+        head=$parsed
+      fi
+    else
+      case "$line" in
+        'done: '*) state=historical; head= ;;
+      esac
+    fi
+  done < "$status"
+  case "$state" in
+    committed) printf 'committed\t%s\n' "$head" ;;
+    historical|terminal) printf '%s\n' "$state" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_delivery_continuation_id() {  # <task> <head> <spawn-gen>
   printf '%s' "$1:$2:$3:committed-to-validation" | shasum -a 256 | cut -c1-16
 }

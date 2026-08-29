@@ -5,7 +5,7 @@
 #
 # This is intentionally a narrow transition owner, not a scheduler. It sends
 # exactly one durable acknowledged inbox instruction only for a recorded
-# ship/no-mistakes task whose latest receipt establishes a committed head,
+# ship/no-mistakes task whose latest qualifying receipt establishes a head,
 # whose generated brief grants that validation handoff, and whose current
 # durable state leaves no decision, safety stop, or attributed pipeline run.
 #
@@ -25,16 +25,23 @@ CREW_STATE_BIN="${FM_DELIVERY_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 
 # shellcheck source=bin/fm-delivery-continuation-lib.sh
 . "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
-COMMITTED_RECEIPT_CONTRACT=$(fm_delivery_committed_receipt_contract)
-HISTORICAL_RECEIPT_CONTRACT=$(fm_delivery_historical_receipt_contract)
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 usage() { echo "usage: fm-delivery-continue.sh <task-id>" >&2; exit 2; }
 TASK=${1:-}
 [ "$#" -eq 1 ] || usage
 case "$TASK" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
 
+result() { printf 'result=%s task=%s%s\n' "$1" "$TASK" "${2:+ reason=$2}"; }
+refuse() { result refused "$1"; exit 0; }
+retry() { result retry "$1"; exit 0; }
+
 CLAIMED=0
-FM_LEASE_OWNER="delivery-$TASK-$$"
+FM_LEASE_OWNER=$(fm_lease_delivery_owner "$TASK" "$$") || retry lease-unavailable
 export FM_LEASE_OWNER
 cleanup() {
   [ "$CLAIMED" = 1 ] || return 0
@@ -44,10 +51,6 @@ trap cleanup EXIT HUP INT TERM
 trap 'cleanup; exit 129' HUP
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
-
-result() { printf 'result=%s task=%s%s\n' "$1" "$TASK" "${2:+ reason=$2}"; }
-refuse() { result refused "$1"; exit 0; }
-retry() { result retry "$1"; exit 0; }
 
 claim_out=$("$LEASE_BIN" claim-new "$TASK" 2>&1) || {
   claim_rc=$?
@@ -73,46 +76,42 @@ grep -Fqx 'Firstmate will then instruct you to run /no-mistakes to validate and 
 if grep -Eq 'DRAFT_FOR_FIRSTMATE_REVIEW|Execution-Authorized:[[:space:]]*false|RESEARCH_ONLY|NO_ORDER|NO_PROMOTION' "$BRIEF"; then
   refuse prohibited-research-or-promotion-scope
 fi
-LEGACY_RECEIPT=0
-if grep -Fqx "$COMMITTED_RECEIPT_CONTRACT" "$BRIEF"; then
-  :
-elif grep -Fqx "$HISTORICAL_RECEIPT_CONTRACT" "$BRIEF"; then
-  LEGACY_RECEIPT=1
-else
-  refuse delivery-contract-mismatch
-fi
+RECEIPT_KIND=$(fm_delivery_receipt_contract_kind "$BRIEF") || refuse delivery-contract-mismatch
 
 STATUS="$STATE/$TASK.status"
 [ -f "$STATUS" ] && [ ! -L "$STATUS" ] || refuse missing-committed-receipt
-LAST=$(grep -v '^[[:space:]]*$' "$STATUS" | tail -1)
-HEAD_SHORT=$(printf '%s\n' "$LAST" | sed -n 's/^done:[[:space:]]*committed[[:space:]]\([0-9A-Fa-f][0-9A-Fa-f]*\)\([[:space:]].*\)\{0,1\}$/\1/p')
+RECEIPT_STATE=$(fm_delivery_receipt_state "$STATUS" "$RECEIPT_KIND" 2>/dev/null || true)
+case "$RECEIPT_STATE" in
+  committed$'\t'*) HEAD_SHORT=${RECEIPT_STATE#*$'\t'} ;;
+  historical) HEAD_SHORT= ;;
+  terminal) refuse attributable-validation-terminal-receipt ;;
+  *) refuse missing-committed-receipt ;;
+esac
 
 WORKTREE=$(meta_get worktree)
 [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] || refuse missing-worktree
 CURRENT=$(git -C "$WORKTREE" rev-parse --verify HEAD 2>/dev/null) || refuse unreadable-worktree-head
 WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null) || refuse unreadable-worktree-status
 [ -z "$WORKTREE_STATUS" ] || refuse uncommitted-worktree
-if [ -n "$HEAD_SHORT" ]; then
-  case "$HEAD_SHORT" in ???????*) ;; *) refuse invalid-committed-head ;; esac
-  HEAD=$(git -C "$WORKTREE" rev-parse --verify "${HEAD_SHORT}^{commit}" 2>/dev/null) || refuse invalid-committed-head
-  [ "$HEAD" = "$CURRENT" ] || refuse committed-head-mismatch
-else
-  case "$LAST" in
-    'done: PR '*|'done: merged'*) refuse attributable-validation-terminal-receipt ;;
-  esac
-  [ "$LEGACY_RECEIPT" = 1 ] || refuse missing-committed-receipt
-  case "$LAST" in 'done: '*) ;; *) refuse missing-committed-receipt ;; esac
-  HEAD=$CURRENT
-fi
 
 # The status fold is the single owner of live keyed decisions and blockers.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 [ -z "$(status_open_decisions "$STATUS")" ] || refuse open-decision-or-blocker
 
-# shellcheck source=bin/fm-task-inbox-lib.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+if [ -n "$HEAD_SHORT" ]; then
+  case "$HEAD_SHORT" in ???????*) ;; *) refuse invalid-committed-head ;; esac
+  HEAD=$(git -C "$WORKTREE" rev-parse --verify "${HEAD_SHORT}^{commit}" 2>/dev/null) || refuse invalid-committed-head
+  [ "$HEAD" = "$CURRENT" ] || refuse committed-head-mismatch
+else
+  DELIVERY_STATE=$(fm_delivery_continuation_state "$STATE" "$TASK" "$SPAWN_GEN" "$CURRENT" 2>/dev/null || true)
+  case "$DELIVERY_STATE" in
+    pending$'\t'*|acknowledged$'\t'*) result already-delivered; exit 0 ;;
+    head-mismatch$'\t'*) refuse continuation-head-mismatch ;;
+    *) refuse unverifiable-historical-committed-head ;;
+  esac
+fi
+
 DELIVERY=$(fm_delivery_continuation_id "$TASK" "$HEAD" "$SPAWN_GEN")
 DELIVERY_STATE=$(fm_delivery_continuation_state "$STATE" "$TASK" "$SPAWN_GEN" "$HEAD" 2>/dev/null || true)
 case "$DELIVERY_STATE" in

@@ -16,6 +16,8 @@ SEQS_TMP=
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-delivery-continuation-lib.sh
+. "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 
 # shellcheck disable=SC2329
 cleanup() {
@@ -98,8 +100,14 @@ for meta in "$STATE"/*.meta; do
   [ "$kind" = ship ] && [ "$mode" = no-mistakes ] || continue
   status="$STATE/$task.status"
   [ -f "$status" ] && [ ! -L "$status" ] || continue
-  last=$(grep -v '^[[:space:]]*$' "$status" | tail -1)
-  case "$last" in 'done: '*) printf '%s\n' "$task" >> "$TASKS_TMP" || exit 1 ;; esac
+  brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$task/brief.md"
+  [ -f "$brief" ] && [ ! -L "$brief" ] || continue
+  receipt_kind=$(fm_delivery_receipt_contract_kind "$brief" 2>/dev/null || true)
+  [ -n "$receipt_kind" ] || continue
+  receipt_state=$(fm_delivery_receipt_state "$status" "$receipt_kind" 2>/dev/null || true)
+  case "$receipt_state" in
+    committed$'\t'*|historical) printf '%s\n' "$task" >> "$TASKS_TMP" || exit 1 ;;
+  esac
 done
 
 LC_ALL=C sort -nu "$SEQS_TMP" -o "$SEQS_TMP" || exit 1

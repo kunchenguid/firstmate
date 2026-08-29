@@ -510,13 +510,17 @@ task_json_lines() {
     continuation_record_state=
     continuation_unverified_busy=false
     continuation_run_attributed=false
+    continuation_expected_head=
     if [ "$current_source" = run-step ] || { [ "$current_source" = status-log ] && printf '%s\n' "$current_detail" | grep -Fq 'run still monitoring PR'; }; then
       continuation_run_attributed=true
     fi
     if [ -n "$worktree" ] && [ -d "$worktree" ]; then
       continuation_current_head=$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null || true)
     fi
-    continuation_tsv=$(fm_delivery_continuation_state "$STATE" "$id" "$spawn_gen" "$continuation_current_head" 2>/dev/null || true)
+    if [ "$continuation_run_attributed" != true ]; then
+      continuation_expected_head=$continuation_current_head
+    fi
+    continuation_tsv=$(fm_delivery_continuation_state "$STATE" "$id" "$spawn_gen" "$continuation_expected_head" 2>/dev/null || true)
     if [ -n "$continuation_tsv" ]; then
       IFS=$(printf '\t') read -r continuation_state continuation_record_state continuation_head continuation_delivery <<EOF
 $continuation_tsv

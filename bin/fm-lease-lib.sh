@@ -38,9 +38,10 @@
 #     the recorded pid must BE its current holder, so a lease left by an exited
 #     Pi session goes stale even if its pid was recycled by an unrelated
 #     process, and a non-Pi home never honors a leftover Pi lease. Delivery
-#     owners additionally encode their operation pid as delivery-<task>-<pid>;
-#     that operation must remain alive even while the supervising Pi process
-#     does. A lease held by the live current session but an abandoned branch
+#     owners additionally encode their operation identity as
+#     delivery-<task>-<pid>-<identity-token>; that exact process incarnation
+#     must remain alive even while the supervising Pi process does. A lease
+#     held by the live current session but an abandoned branch
 #     conversation is recovered by the branch extension's generation-activation
 #     cleanup.
 #
@@ -129,13 +130,35 @@ fm_lease_path() {
   printf '%s/.lease-%s\n' "$STATE" "$1"
 }
 
+fm_lease_process_token() {
+  local pid=$1 identity
+  fm_lease_lock_helpers
+  identity=$(fm_pid_identity "$pid") || return 1
+  printf '%s' "$identity" | shasum -a 256 | cut -c1-16
+}
+
+fm_lease_delivery_owner() {  # <task> <pid>
+  local task=$1 pid=$2 token
+  fm_lease_valid_id "$task" || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  token=$(fm_lease_process_token "$pid") || return 1
+  printf 'delivery-%s-%s-%s\n' "$task" "$pid" "$token"
+}
+
 fm_lease_operation_live() {
-  local operation_pid
+  local operation_pid operation_token owner_without_token current_token
   case "$FM_LEASE_RECORD_OWNER" in
     delivery-*-*)
-      operation_pid=${FM_LEASE_RECORD_OWNER##*-}
-      case "$operation_pid" in ''|*[!0-9]*) return 0 ;; esac
-      kill -0 "$operation_pid" 2>/dev/null
+      operation_token=${FM_LEASE_RECORD_OWNER##*-}
+      owner_without_token=${FM_LEASE_RECORD_OWNER%-*}
+      operation_pid=${owner_without_token##*-}
+      case "$operation_token" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+        *) return 1 ;;
+      esac
+      case "$operation_pid" in ''|*[!0-9]*) return 1 ;; esac
+      current_token=$(fm_lease_process_token "$operation_pid") || return 1
+      [ "$current_token" = "$operation_token" ]
       ;;
     *) return 0 ;;
   esac
