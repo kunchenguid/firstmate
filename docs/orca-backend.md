@@ -36,12 +36,15 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<orca pty id>::<absolute Orca worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+`orca_worktree_id=` is recorded verbatim from the `result.worktree.id` that Orca returns, and the live CLI returns the composite `<pty-id>::<absolute-worktree-path>` shown above.
+Endpoint validation checks each half for what it is, an ordinary atom and an absolute path with no traversal or control characters, and passes the value to `orca worktree show` and `orca worktree rm` whole.
+A bare atom id also validates so that the suite's simplified fixture ids keep working; no bare id has been observed from the live CLI.
 
 ## Current lifecycle and safety
 

@@ -1064,6 +1064,10 @@ test_ship_teardown_accepts_real_composite_orca_worktree_id() {
       fail "composite Orca worktree id was rejected as malformed: $out" ;;
   esac
   expect_code 0 "$rc" "Orca teardown should accept the real composite worktree id"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show'$'\x1f''--worktree'$'\x1f'"id:$wtid"$'\x1f''--json' \
+    "teardown did not resolve the whole composite Orca worktree id before removal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$wtid"$'\x1f''--force'$'\x1f''--json' \
+    "teardown did not remove the Orca worktree with the whole composite id"
   assert_absent "$state/$id.meta" "successful composite teardown should remove task metadata"
   pass "fm-teardown.sh backend=orca: accepts the real <pty-id>::<path> worktree id"
 }

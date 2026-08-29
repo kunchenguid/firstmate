@@ -712,7 +712,8 @@ result.runtime.state=ready
 
 `orca terminal create --json` returned `result.terminal.handle`.
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
-Speculative bare ids and nested terminal fields were deliberately rejected.
+The observed `result.worktree.id` is the composite `<pty-id>::<absolute-worktree-path>` rather than a bare id.
+Speculative bare ids and nested terminal fields were deliberately rejected in favor of that recorded shape.
 
 ```sh
 tests/fm-backend-orca.test.sh

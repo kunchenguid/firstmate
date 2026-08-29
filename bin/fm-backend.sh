@@ -391,7 +391,6 @@ fm_backend_orca_worktree_id_valid() {  # <value>
   # because rejecting either strands a real task with no way to tear it down.
   local id_part path_part
   case "$1" in
-    '''''') return 1 ;;
     *::*)
       id_part=${1%%::*}
       path_part=${1#*::}
