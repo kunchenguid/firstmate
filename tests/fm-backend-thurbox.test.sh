@@ -62,7 +62,7 @@ emit_row() {  # <uuid> <name> <pane> <btype> <hook>
 case "${1:-}" in
   version)
     printf '{"version":"%s","schema_version":40,"tmux_socket":"%s","data_dir":"/d"}\n' \
-      "${FM_TB_FAKE_VERSION:-2.9.2}" "${FM_TB_FAKE_SOCKET:-thurbox}"
+      "${FM_TB_FAKE_VERSION:-2.10.1}" "${FM_TB_FAKE_SOCKET:-thurbox}"
     exit "${FM_TB_FAKE_VERSION_EXIT:-0}"
     ;;
   config)
@@ -126,73 +126,61 @@ case "${2:-}" in
     ;;
   capture)
     want=${3:-}
-    grep -q "^$want	" "$ROWS" || { echo "session not found" >&2; exit 1; }
-    jq -Rs '{output: .}' < "${FM_TB_CAPTURE:-/dev/null}"
+    row=$(grep "^$want	" "$ROWS" | head -1)
+    [ -n "$row" ] || { echo "session not found" >&2; exit 1; }
+    # VERIFIED on the real CLI: capture exits 1 when the session's window is
+    # gone. $FM_TB_PANES is the fixture's list of live panes, so a row whose
+    # pane is not in it captures nothing - which is how a case says "the pane
+    # died" now that liveness is thurbox's answer rather than a tmux probe.
+    rowpane=$(printf '%s' "$row" | cut -f3)
+    case " ${FM_TB_PANES:-} " in
+      *" $rowpane "*) : ;;
+      *) echo "pane is gone" >&2; exit 1 ;;
+    esac
+    # 2.10 reports the pane's live state in the same response as the screen.
+    # --ansi selects the styled body, so the two capture files stand in for
+    # thurbox returning styled or plain text for the same pane.
+    ansi=false
+    for a in "$@"; do [ "$a" = --ansi ] && ansi=true; done
+    body="${FM_TB_CAPTURE:-/dev/null}"
+    [ "$ansi" = true ] && body="${FM_TB_SCREEN:-${FM_TB_CAPTURE:-/dev/null}}"
+    jq -Rs --argjson ansi "$ansi" \
+      --arg cy "${FM_TB_CURSOR_ROW:-0}" \
+      --arg fp "${FM_TB_FG_PROCESS:-}" \
+      --arg fc "${FM_TB_FG_COMMAND:-}" \
+      --arg fw "${FM_TB_FG_CWD:-/w}" '{
+        output: .,
+        ansi: $ansi,
+        cursor_row: ($cy | if . == "" then null else tonumber end),
+        cursor_col: 0,
+        foreground_process: (if $fp == "" then null else $fp end),
+        foreground_command: (if $fc == "" then null else $fc end),
+        foreground_cwd: (if $fw == "" then null else $fw end)
+      }' < "$body"
     ;;
   send)
-    exit 0
+    exit "${FM_TB_SEND_EXIT:-0}"
+    ;;
+  key)
+    exit "${FM_TB_KEY_EXIT:-0}"
     ;;
   *) exit 0 ;;
 esac
 SH
   chmod +x "$fb/thurbox-cli"
 
-  # The fake tmux answers ONLY for thurbox's socket (-L <sock>), which is also
-  # how a case proves the adapter never addressed the ambient default server.
+  # A tmux TRIPWIRE, not a working stub. This adapter drives thurbox-cli for
+  # every operation and must never shell out to tmux; an earlier revision did,
+  # so the migration deserves an assertion rather than a reading. Any
+  # invocation records itself and fails, so a regression that reintroduces a
+  # tmux call surfaces as a failing case instead of silently working here and
+  # then demanding a tmux client on an operator's machine.
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-LOG="${FM_TB_TMUXLOG:?}"
-{ printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$LOG"
-
-sock=''
-if [ "${1:-}" = -L ]; then sock=$2; shift 2; fi
-[ "$sock" = "${FM_TB_FAKE_SOCKET:-thurbox}" ] || { echo "no server on socket '$sock'" >&2; exit 1; }
-
-pane_live() {  # <pane-id>
-  case " ${FM_TB_PANES:-} " in *" $1 "*) return 0 ;; esac
-  return 1
-}
-
-case "${1:-}" in
-  display-message)
-    target=''; fmt=''
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) target=$2; shift 2 ;;
-        -p) shift ;;
-        display-message) shift ;;
-        *) fmt=$1; shift ;;
-      esac
-    done
-    pane_live "$target" || { echo "can't find pane" >&2; exit 1; }
-    case "$fmt" in
-      '#{pane_id}') printf '%s\n' "$target" ;;
-      '#{pane_current_path}') printf '%s\n' "${FM_TB_PANE_PATH:-/w}" ;;
-      '#{cursor_y}') printf '%s\n' "${FM_TB_CURSOR_Y:-0}" ;;
-      '#{pane_tty}') printf '%s\n' "${FM_TB_PANE_TTY:-}" ;;
-      *) printf '\n' ;;
-    esac
-    ;;
-  capture-pane)
-    target=''
-    while [ $# -gt 0 ]; do
-      case "$1" in -t) target=$2; shift 2 ;; *) shift ;; esac
-    done
-    pane_live "$target" || { echo "can't find pane" >&2; exit 1; }
-    cat "${FM_TB_SCREEN:-/dev/null}"
-    ;;
-  send-keys)
-    target=''
-    for a in "$@"; do :; done
-    while [ $# -gt 0 ]; do
-      case "$1" in -t) target=$2; shift 2 ;; *) shift ;; esac
-    done
-    pane_live "$target" || { echo "can't find pane" >&2; exit 1; }
-    exit "${FM_TB_SENDKEYS_EXIT:-0}"
-    ;;
-  *) exit 0 ;;
-esac
+{ printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TB_TMUXLOG:?}"
+echo "thurbox adapter invoked tmux, which it must never do" >&2
+exit 97
 SH
   chmod +x "$fb/tmux"
 
@@ -257,8 +245,10 @@ reset_world() {
   export FM_TB_CAPTURE="$TMP_ROOT/capture"
   export FM_TB_PANES="%20"
   unset FM_TB_FAKE_VERSION FM_TB_FAKE_SOCKET FM_TB_CREATE_UUID FM_TB_CREATE_PANE \
-        FM_TB_CREATE_EXIT FM_TB_AGENTS_TOML FM_TB_CURSOR_Y FM_TB_PANE_PATH \
-        FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT FM_TB_PS FM_TB_PANE_TTY \
+        FM_TB_CREATE_EXIT FM_TB_AGENTS_TOML FM_TB_CURSOR_ROW FM_TB_PANE_PATH \
+        FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT FM_TB_PS \
+        FM_TB_CURSOR_ROW FM_TB_FG_PROCESS FM_TB_FG_COMMAND FM_TB_FG_CWD \
+        FM_TB_SEND_EXIT FM_TB_KEY_EXIT \
         FM_TB_LIST_EXIT 2>/dev/null || true
   FM_BACKEND_THURBOX_SOCKET_CACHE=''
   # The adapter's own RESOLUTION output, not fixture state: target_ready and
@@ -334,13 +324,25 @@ test_socket_comes_from_thurbox_not_a_hardcoded_name() {
   pass "socket name comes from thurbox's version --json, never hardcoded"
 }
 
-test_pane_ops_address_thurbox_socket_only() {
+test_no_operation_shells_out_to_tmux() {
   reset_world
   add_row "$UUID" "$TITLE" "%20" local-tmux -
-  fm_backend_thurbox_current_path "$UUID:%20" >/dev/null
-  grep -q $'tmux\x1f-L\x1fthurbox' "$FM_TB_TMUXLOG" \
-    || fail "pane primitive did not pass -L thurbox"
-  pass "every pane primitive addresses thurbox's own tmux socket"
+  export FM_TB_FG_CWD=/w/deep FM_TB_CURSOR_ROW=3
+  printf 'screen\n' > "$FM_TB_CAPTURE"
+  # Drive every operation that used to run a tmux command. The tmux on PATH is
+  # a tripwire that fails and logs, so any surviving call shows up both as a
+  # wrong answer and as a line here.
+  [ "$(fm_backend_thurbox_current_path "$UUID:%20" fm-t1)" = /w/deep ] \
+    || fail "current_path did not read foreground_cwd"
+  fm_backend_thurbox_send_literal "$UUID:%20" 'hi' fm-t1 || fail "send_literal failed"
+  fm_backend_thurbox_send_key "$UUID:%20" Enter fm-t1 || fail "send_key failed"
+  fm_backend_thurbox_capture "$UUID:%20" 5 fm-t1 >/dev/null || fail "capture failed"
+  fm_backend_thurbox_composer_capture "$UUID:%20" fm-t1 >/dev/null || fail "composer_capture failed"
+  fm_backend_thurbox_composer_cursor_row "$UUID:%20" fm-t1 >/dev/null || fail "cursor_row failed"
+  fm_backend_thurbox_composer_state "$UUID:%20" fm-t1 >/dev/null
+  [ ! -s "$FM_TB_TMUXLOG" ] \
+    || fail "the adapter shelled out to tmux:"$'\n'"$(cat "$FM_TB_TMUXLOG")"
+  pass "no adapter operation shells out to tmux"
 }
 
 # ============================================================================
@@ -636,27 +638,35 @@ test_target_ready_refuses_when_pane_is_dead() {
 # input
 # ============================================================================
 
-test_send_literal_never_uses_thurbox_session_send() {
+test_send_literal_types_without_submitting() {
   reset_world
   add_row "$UUID" "$TITLE" "%20" local-tmux -
   fm_backend_thurbox_send_literal "$UUID:%20" 'hello world' fm-t1 \
     || fail "send_literal failed"
   # The trap this guards: `thurbox-cli session send` ALWAYS appends Enter, so
   # routing unsubmitted input through it would submit every steer on arrival.
-  assert_no_grep $'session\x1fsend' "$FM_TB_LOG" \
-    "send_literal used thurbox-cli session send, which auto-submits"
-  assert_grep $'send-keys' "$FM_TB_TMUXLOG" "send_literal did not use tmux send-keys"
-  assert_grep $'\x1f-l\x1f' "$FM_TB_TMUXLOG" "send_literal did not send literally"
-  pass "send_literal sends unsubmitted input via tmux, never session send"
+  # The trap this guards: plain `session send` ALWAYS appends Enter, so routing
+  # unsubmitted input through it would submit every steer on arrival. --no-enter
+  # is what makes the type-then-verify-then-submit loop expressible.
+  assert_grep $'session\x1fsend' "$FM_TB_LOG" "send_literal did not use session send"
+  assert_grep $'\x1f--no-enter\x1f' "$FM_TB_LOG" \
+    "send_literal omitted --no-enter, so the text would submit on arrival"
+  pass "send_literal types unsubmitted input via session send --no-enter"
 }
 
-test_send_key_normalizes_to_tmux_names() {
+test_send_key_normalizes_to_thurbox_names() {
   reset_world
-  [ "$(fm_backend_thurbox_normalize_key Escape)" = Escape ] || fail "Escape mis-normalized"
-  [ "$(fm_backend_thurbox_normalize_key ctrl-c)" = C-c ] || fail "ctrl-c mis-normalized"
-  [ "$(fm_backend_thurbox_normalize_key Ctrl+U)" = C-u ] || fail "Ctrl+U mis-normalized"
-  [ "$(fm_backend_thurbox_normalize_key enter)" = Enter ] || fail "enter mis-normalized"
-  pass "send_key normalizes firstmate's key vocabulary to tmux key names"
+  # thurbox's `session key` vocabulary, not tmux's: enter/escape/ctrl-<letter>.
+  [ "$(fm_backend_thurbox_normalize_key Escape)" = escape ] || fail "Escape mis-normalized"
+  [ "$(fm_backend_thurbox_normalize_key ctrl-c)" = ctrl-c ] || fail "ctrl-c mis-normalized"
+  [ "$(fm_backend_thurbox_normalize_key Ctrl+U)" = ctrl-u ] || fail "Ctrl+U mis-normalized"
+  [ "$(fm_backend_thurbox_normalize_key enter)" = enter ] || fail "enter mis-normalized"
+  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  printf 'screen\n' > "$FM_TB_CAPTURE"
+  fm_backend_thurbox_send_key "$UUID:%20" Escape fm-t1 || fail "send_key failed"
+  assert_grep $'session\x1fkey' "$FM_TB_LOG" "send_key did not use session key"
+  assert_grep $'\x1fescape' "$FM_TB_LOG" "send_key did not pass the canonical name"
+  pass "send_key normalizes to thurbox's key vocabulary and uses session key"
 }
 
 test_send_key_refuses_dead_target() {
@@ -692,7 +702,7 @@ test_capture_is_plain_text_composer_is_styled() {
     || fail "human-facing capture did not come from thurbox-cli"
   [ "$(fm_backend_thurbox_composer_capture "$UUID:%20" fm-t1)" = styled ] \
     || fail "composer capture did not come from tmux capture-pane"
-  assert_grep $'-e' "$FM_TB_TMUXLOG" "composer capture did not request ANSI styling"
+  assert_grep $'\x1f--ansi' "$FM_TB_LOG" "composer capture did not request ANSI styling"
   pass "plain capture goes through thurbox-cli, styled capture through tmux -e"
 }
 
@@ -726,13 +736,15 @@ tb_cursor_screen() {  # <composer-text> <ghost 0|1>
   if [ "$ghost" = 1 ]; then open=$(printf '\033[2m'); close=$(printf '\033[0m'); fi
   printf '\n  \xe2\x86\x92 %s%s%s\n\n  Cursor Grok 4.5 High                    Run Everything\n  /w \xc2\xb7 main\n\n' \
     "$open" "$text" "$close" > "$FM_TB_SCREEN"
-  export FM_TB_CURSOR_Y=6
-  export FM_TB_PANE_TTY=/dev/pts/9
+  export FM_TB_CURSOR_ROW=6
 }
 
 tb_pane_process() {  # <comm> <args>
-  printf 'pts/9\t4242\t4242\t4242\t%s\t%s\n' "$1" "$2" > "$TMP_ROOT/ps.tsv"
-  export FM_TB_PS="$TMP_ROOT/ps.tsv"
+  # thurbox reports the foreground process itself now, so a case states the
+  # pane's identity as the two fields `session capture` returns rather than as
+  # a process table. The real CLI resolves those from the tty's foreground
+  # process group; what matters to the adapter is only what it is handed.
+  export FM_TB_FG_PROCESS="$1" FM_TB_FG_COMMAND="$2"
 }
 
 test_composer_state_reclassifies_a_cursor_pane() {
@@ -747,15 +759,14 @@ test_composer_state_reclassifies_a_cursor_pane() {
   tb_pane_process cursor-agent /opt/cursor/cursor-agent
   [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = empty ] \
     || fail "an idle Cursor composer on thurbox must read empty; otherwise every steer to a Cursor task reports unverified forever"
-  # The pane tty MUST be read off thurbox's own socket, never the ambient
-  # default server, or the probe would answer about an unrelated pane.
-  grep -q $'tmux\x1f-L\x1fthurbox\x1fdisplay-message\x1f-p\x1f-t\x1f%40\x1f#{pane_tty}' "$FM_TB_TMUXLOG" \
-    || fail "the Cursor probe did not read #{pane_tty} for the re-resolved pane through thurbox's socket"
+  # The identity must come from the session the adapter RE-RESOLVED in this
+  # call, and without shelling out: the tmux on PATH is a tripwire.
+  [ ! -s "$FM_TB_TMUXLOG" ] || fail "the Cursor probe shelled out to tmux"
 
   tb_cursor_screen 'half typed captain text' 0
   [ "$(fm_backend_thurbox_composer_state "$UUID:%20" fm-t1)" = pending ] \
     || fail "real unsubmitted text in a Cursor composer must still read pending, never empty"
-  pass "composer_state reclassifies a Cursor pane cursorlessly, on thurbox's own socket"
+  pass "composer_state reclassifies a Cursor pane cursorlessly, from the capture's own foreground fields"
 }
 
 test_composer_state_does_not_reclassify_a_non_cursor_pane() {
@@ -785,7 +796,7 @@ test_composer_state_does_not_reclassify_a_non_cursor_pane() {
 # re-reads pending and the budget is spent - the mid-turn queued-Enter shape.
 tb_pending_composer() {  # <composer-text>
   printf '\n  \xe2\x86\x92 %s\n\n  Claude Sonnet 4.5                       Run Everything\n  /w \xc2\xb7 main\n\n' "$1" > "$FM_TB_SCREEN"
-  export FM_TB_CURSOR_Y=1
+  export FM_TB_CURSOR_ROW=1
 }
 
 test_send_text_submit_converts_a_queued_enter_on_native_busy() {
@@ -972,7 +983,12 @@ test_backend_is_known_and_spawn_capable() {
   fm_backend_is_known thurbox || fail "thurbox is not in the known backend set"
   fm_backend_validate_spawn thurbox || fail "thurbox is not spawn-capable"
   assert_contains "$(fm_backend_required_tools thurbox)" "thurbox-cli" "required tools omit thurbox-cli"
-  assert_contains "$(fm_backend_required_tools thurbox)" "tmux" "required tools omit tmux"
+  # tmux is deliberately NOT required: every operation goes through
+  # thurbox-cli, and demanding a tmux client an operator never uses would be a
+  # false dependency. test_no_operation_shells_out_to_tmux is what keeps that
+  # declaration honest.
+  assert_not_contains "$(fm_backend_required_tools thurbox)" "tmux" \
+    "thurbox must not require tmux now that no operation shells out to it"
   pass "thurbox is a known, spawn-capable backend with a declared toolchain"
 }
 
@@ -1096,7 +1112,7 @@ test_supervisor_backend_yields_to_tmux_for_a_nested_server() {
 test_version_check_accepts_verified_build
 test_version_check_refuses_older_than_minimum
 test_socket_comes_from_thurbox_not_a_hardcoded_name
-test_pane_ops_address_thurbox_socket_only
+test_no_operation_shells_out_to_tmux
 test_scoped_title_is_home_tagged
 test_scoped_title_refuses_over_length_name
 test_container_ensure_refuses_missing_shell_agent
@@ -1119,8 +1135,8 @@ test_target_ready_refuses_remote_session
 test_target_ready_recovers_by_label_when_uuid_is_gone
 test_target_ready_without_label_cannot_guess
 test_target_ready_refuses_when_pane_is_dead
-test_send_literal_never_uses_thurbox_session_send
-test_send_key_normalizes_to_tmux_names
+test_send_literal_types_without_submitting
+test_send_key_normalizes_to_thurbox_names
 test_send_key_refuses_dead_target
 test_capture_reads_output_field_and_trims_locally
 test_capture_is_plain_text_composer_is_styled

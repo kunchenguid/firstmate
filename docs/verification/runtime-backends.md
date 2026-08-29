@@ -797,9 +797,39 @@ The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
 ## thurbox
 
-The current compatibility floor is thurbox 2.9, and the active live evidence uses 2.9.2 (schema 40) on Linux x86_64, 2026-08-28.
+The current compatibility floor is thurbox 2.10, and the active live evidence uses 2.10.1 (schema 40) on Linux x86_64, 2026-08-29.
+The 2.9.2 evidence below is retained where it still describes current behaviour; the rows the 2.10 surface replaced are marked.
 The live pass ran against an instance isolated by `THURBOX_CONFIG_DIR` and `THURBOX_DATA_DIR`, and every session it created was deleted afterwards; the tmux server was diffed against a pre-run baseline to confirm it was left byte-identical.
 No automated test may repeat it: `tests/thurbox-test-safety.sh` fails closed unless the `thurbox-cli` in use lives inside the test's own fixture, because the socket is shared even when the database is not (see below).
+
+
+### 2.10 pane state and input surface
+
+Re-verified on 2.10.1, 2026-08-29, against a live session on the operator's own instance.
+These are read-only reads plus argument-parse probes against a deliberately nonexistent uuid; no session was created, mutated, or deleted, which is why this refresh needed no isolated instance.
+
+```sh
+thurbox-cli session capture "$U" --lines 3 --ansi --json | jq -c 'keys'
+```
+
+```text
+["ansi","cursor_col","cursor_row","foreground_command","foreground_cwd","foreground_process","lines","output","session_id","session_name"]
+```
+
+One call returns the screen and the pane's live state together.
+On a live `claude` session that read reported `cursor_row: 57`, `foreground_process: "claude"`, `foreground_cwd: "/home/…/.config/thurbox/ui"`, and a `foreground_command` carrying the process's **full argv** (`claude --resume <id> --settings <path>`), with the `--ansi` body containing real escape sequences.
+
+The full argv is the load-bearing part, and it is what retires this adapter's own socket-level Cursor probe: a multiplexer's command *name* reports a bare `node` for a bundled Node CLI, so the name alone cannot tell Cursor Agent CLI from any other node process, while the argv can.
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Unsubmitted input | `session send <uuid> --no-enter -- <text>` | Parsed and reached session lookup; `--` guards text beginning with `-`. Delivered as one bracketed paste, so no shell sees it. |
+| Named keys | `session key <uuid> <name>` | Accepts `enter`, `escape`, `tab`, arrows, `ctrl-<letter>`; case-insensitive, and `ctrl+c`/`c-c` spell the same key. An unknown name is REFUSED rather than typed into the pane as text. |
+| Styled capture | `session capture --ansi` | Styling preserved in `.output`; plain remains the default, so existing `--text | grep` callers are unaffected. |
+| Liveness | `session capture <uuid> --lines 1 --json` | Exit 1 for a missing or malformed uuid, so the exit status alone is a sound liveness answer. |
+
+Superseded by the above: the 2.9-era rows recording that `session send` could not express unsubmitted input, that no named-key command existed, and that capture returned plain text only.
+Those facts held on 2.9 and are why the adapter once drove tmux directly; they no longer describe a supported build.
 
 ```sh
 thurbox-cli version --json

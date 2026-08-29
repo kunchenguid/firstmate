@@ -364,11 +364,7 @@ fm_backend_required_tools() {  # <backend>
     herdr)  printf '%s' 'herdr jq treehouse' ;;
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
-    # thurbox needs tmux as well as thurbox-cli: its sessions are tmux windows
-    # on thurbox's own socket, and the adapter's pane primitives (literal
-    # input, named keys, styled capture, cursor row, live cwd) are tmux calls
-    # against that socket. See bin/backends/thurbox.sh's header.
-    thurbox) printf '%s' 'thurbox-cli tmux jq treehouse' ;;
+    thurbox) printf '%s' 'thurbox-cli jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
   esac

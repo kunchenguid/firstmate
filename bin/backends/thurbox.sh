@@ -14,22 +14,26 @@
 # Sourced only through bin/fm-backend.sh's fm_backend_source in normal
 # operation; the unit tests source it directly.
 #
-# THE DEFINING PROPERTY, and why this adapter is a two-CLI adapter: every
-# thurbox session is addressable BOTH ways.
-#   - `thurbox-cli session ...` owns SESSION-level identity and lifecycle
-#     (create, get, delete, the native hook_state). Its key is a UUID.
-#   - `tmux -L <thurbox-socket> ...` owns PANE-level primitives against the
-#     very same window (literal unsubmitted input, named special keys, an
-#     ANSI-preserving screen capture, the cursor row, the live cwd).
-# The thurbox CLI alone cannot satisfy firstmate's contract: `session send`
-# ALWAYS appends Enter (verified; its own --help says "followed by Enter"), so
-# it can never implement send_literal's unsubmitted-input requirement, and the
-# CLI exposes no named-key, styled-capture, or cursor primitive at all. Going
-# through thurbox's own tmux socket for those is not a layering violation - it
-# is addressing the same window thurbox itself created, with the primitives
-# thurbox is itself built on. It is also what makes thurbox the FIRST non-tmux
-# backend to reach tmux's own composer fidelity (styled=1 AND cursor=1), where
-# zellij manages styled=1/cursor=0 and cmux and orca only styled=0/cursor=0.
+# EVERY operation here goes through `thurbox-cli`, and nothing in this adapter
+# runs a tmux command. That is worth stating because it was not always true and
+# is the opposite of what a reader may expect from a tmux-backed session
+# manager: firstmate's contract needs unsubmitted input, named keys, an
+# ANSI-preserving capture and a cursor row, and thurbox 2.9 exposed none of
+# them, so an earlier revision of this file drove `tmux -L <thurbox-socket>`
+# directly for those. thurbox 2.10 supplies all of them
+# (`session send --no-enter`, `session key`, `session capture --ansi`, and the
+# cursor/foreground fields on that same capture), so the adapter now stays
+# entirely on thurbox's own supported surface. FM_BACKEND_THURBOX_MIN_MINOR is
+# what keeps that true; do not lower it without restoring a transport for the
+# primitives it buys.
+#
+# The one thing still read about tmux is the socket NAME, and only to tell a
+# thurbox pane from a nested tmux inside one during detection - see
+# fm_backend_thurbox_socket.
+#
+# thurbox is the only non-tmux backend at the default backend's own composer
+# fidelity (styled=1 AND cursor=1), where zellij manages styled=1/cursor=0 and
+# cmux and orca only styled=0/cursor=0.
 #
 # Target string shape: "<session-uuid>:<tmux-pane-id>" (e.g.
 # "0b797791-3590-41c5-9918-21e38d1a54d4:%20"). A UUID contains no colon, so
@@ -115,11 +119,14 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_BACKEND_THURBOX_ROOT/bin/fm-cursor-lib.sh"
 
 # Verified minimum: the version the live pass ran against
-# (docs/thurbox-backend.md). 2.9 is where `session capture --json`, the
-# `hook_state` round-trip, and `delete --force`'s killed_window report were all
-# confirmed together.
+# (docs/thurbox-backend.md). 2.10 is the floor because this adapter reads the
+# pane state `session capture` gained there - cursor_row, foreground_process,
+# foreground_command, foreground_cwd - and sends through `session send
+# --no-enter` and `session key`. On 2.9 those fields are absent and those flags
+# are rejected, so every composer read would answer `unknown` and every steer
+# would fail; refusing loudly at the floor beats degrading silently.
 FM_BACKEND_THURBOX_MIN_MAJOR=2
-FM_BACKEND_THURBOX_MIN_MINOR=9
+FM_BACKEND_THURBOX_MIN_MINOR=10
 
 # thurbox session names are 1-64 chars with no slashes and no leading '.'
 # (verified from `session create --name`'s own help text). The scoped title
@@ -142,7 +149,6 @@ fm_backend_thurbox_bin() {
 fm_backend_thurbox_tool_check() {
   fm_backend_thurbox_bin >/dev/null 2>&1 || { echo "error: backend=thurbox selected but the 'thurbox-cli' CLI was not found on PATH (https://github.com/Thurbeen/thurbox)" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "error: backend=thurbox selected but 'jq' is not installed (required to parse thurbox's JSON output)" >&2; return 1; }
-  command -v tmux >/dev/null 2>&1 || { echo "error: backend=thurbox selected but 'tmux' is not installed (thurbox sessions ARE tmux windows on thurbox's own socket; the pane primitives need the tmux client)" >&2; return 1; }
   return 0
 }
 
@@ -190,8 +196,14 @@ fm_backend_thurbox_version_check() {
 # fm_backend_thurbox_socket: the tmux socket name thurbox runs its sessions on,
 # read from `version --json`'s `tmux_socket` field ("thurbox" on the verified
 # build) and memoized per shell. Never hardcoded: it is thurbox's own reported
-# value, so a build that changes it does not silently strand every pane
-# primitive against a socket with no server.
+# value.
+#
+# This adapter drives NO tmux command, so the socket name is not a transport
+# detail here - it exists for exactly one purpose, and only that one:
+# fm_backend_detect's socket match (bin/fm-backend.sh), which compares the
+# socket path inside $TMUX against the socket thurbox reports to tell a thurbox
+# pane from a nested tmux running inside one. Reading a name needs no tmux
+# client, which is why tmux is not in this backend's required tools.
 fm_backend_thurbox_socket() {
   if [ -n "${FM_BACKEND_THURBOX_SOCKET_CACHE:-}" ]; then
     printf '%s' "$FM_BACKEND_THURBOX_SOCKET_CACHE"
@@ -204,13 +216,23 @@ fm_backend_thurbox_socket() {
   printf '%s' "$sock"
 }
 
-# fm_backend_thurbox_tmux: run a tmux command against THURBOX's socket, never
-# the ambient default one. Every pane-level primitive in this file goes through
-# here, so no call site can accidentally address the operator's own tmux server
-# (or firstmate's own "firstmate" session) instead of thurbox's.
-fm_backend_thurbox_tmux() {  # <tmux-args...>
-  fm_backend_thurbox_socket >/dev/null || return 1
-  tmux -L "$FM_BACKEND_THURBOX_SOCKET_CACHE" "$@"
+# fm_backend_thurbox_pane_state: one `session capture` read, returning the whole
+# JSON object - the screen plus the pane state beside it. <ansi> is the literal
+# string `true` to keep tmux's styling in `.output`, anything else for plain.
+#
+# This is the single primitive the composer path is built on, and reading it
+# once is the point. thurbox 2.10 reports cursor_row, cursor_col,
+# foreground_process, foreground_command and foreground_cwd in the SAME
+# response as the screen, so a composer verdict that used to cost two pane
+# reads plus a capture now costs one call whose fields are all consistent with
+# each other - they describe one instant, not three.
+fm_backend_thurbox_pane_state() {  # <lines> <ansi> -> capture JSON on stdout
+  local lines=${1:-200} ansi=${2:-false} args
+  case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
+  args="--lines $lines --json"
+  [ "$ansi" = true ] && args="$args --ansi"
+  # shellcheck disable=SC2086 # args is a controlled flag list, never user text.
+  fm_backend_thurbox_cli session capture "$FM_BACKEND_THURBOX_SESSION" $args 2>/dev/null
 }
 
 # fm_backend_thurbox_agent: the thurbox agent entry firstmate launches its
@@ -382,12 +404,17 @@ fm_backend_thurbox_session_id_for_label() {  # <label>
   printf '%s' "$ids" | head -1
 }
 
-# fm_backend_thurbox_pane_exists: does <pane-id> currently exist on thurbox's
-# tmux server? Structural existence check, never a content read - the analogue
-# of zellij's fm_backend_zellij_pane_exists and cmux's surface check.
-fm_backend_thurbox_pane_exists() {  # <pane-id>
-  local pane=$1
-  fm_backend_thurbox_tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1
+# fm_backend_thurbox_pane_live: does <session-uuid>'s pane currently exist?
+#
+# Asked of thurbox rather than of a tmux server: a capture that succeeds proves
+# the window is there to read, which is the same question the old
+# `display-message '#{pane_id}'` probe answered. One line is requested because
+# the verdict is the exit status, never the content. VERIFIED: `session
+# capture` exits 1 for a missing or malformed uuid and for a session whose
+# window is gone, so the exit status alone is a sound liveness answer with no
+# output-shape defence needed.
+fm_backend_thurbox_pane_live() {  # <session-uuid>
+  fm_backend_thurbox_cli session capture "$1" --lines 1 --json >/dev/null 2>&1
 }
 
 # fm_backend_thurbox_create_task: create the task's thurbox session, refusing an
@@ -517,7 +544,7 @@ EOF
     return 1
   fi
   [ -n "$pane" ] || return 1
-  fm_backend_thurbox_pane_exists "$pane" || return 1
+  fm_backend_thurbox_pane_live "$uuid" || return 1
   FM_BACKEND_THURBOX_SESSION=$uuid
   FM_BACKEND_THURBOX_PANE=$pane
   return 0
@@ -526,51 +553,53 @@ EOF
 # fm_backend_thurbox_current_path: the live pane's working directory, or empty
 # on any error.
 #
-# This is the one place where being tmux-backed pays off most. herdr needs a
-# `foreground_cwd` field, and zellij and cmux both had to fall back to an
-# ACTIVE probe (print a marked $PWD into the pane, capture it back) because
-# their passive cwd fields freeze at whatever directory the shell was in when
-# it launched `treehouse get` as a foreground command. tmux's own
-# `#{pane_current_path}` follows the pane's foreground process, which is
-# exactly why the default tmux backend has always read it directly - and
-# thurbox panes ARE tmux panes, so the same primitive is available with no
-# probe, no marker, and no injected keystrokes during worktree discovery.
+# `foreground_cwd` is the live cwd of the process holding the pane's tty, so
+# worktree discovery needs no probe here. zellij and cmux both had to inject a
+# marked `pwd` into the pane and capture it back, because their passive cwd
+# fields freeze at whatever directory the shell was in when it launched
+# `treehouse get` as a foreground command; thurbox reports the foreground
+# process's own cwd, so this stays a passive read with no injected keystrokes.
 #
-# thurbox's OWN `cwd` field is deliberately not used: it is the launch
-# directory recorded in the database at create time and does not track the
-# pane's later movement.
+# thurbox's OWN top-level `cwd` field is deliberately not used: it is the
+# launch directory recorded in the database at create time and does not track
+# the pane's later movement. Only `foreground_cwd` does.
 fm_backend_thurbox_current_path() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || return 0
-  fm_backend_thurbox_tmux display-message -p -t "$FM_BACKEND_THURBOX_PANE" '#{pane_current_path}' 2>/dev/null
+  fm_backend_thurbox_pane_state 1 false | jq -r '.foreground_cwd // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_send_literal: send TEXT as literal, UNSUBMITTED input - the
 # caller sends Enter separately.
 #
-# This CANNOT go through `thurbox-cli session send`: that subcommand always
-# appends Enter ("Type text into a session's terminal, followed by Enter"),
-# which would submit every steer the moment it was typed and make the shared
-# submit-verify loop meaningless. `tmux send-keys -l` against thurbox's own
-# socket is the correct primitive and the same one the default tmux backend
-# uses.
+# `--no-enter` is what makes this expressible at all: plain `session send`
+# appends Enter, which would submit every steer the moment it was typed and
+# make the shared type-then-verify-then-submit loop meaningless. thurbox
+# delivers the text as one bracketed paste, so it arrives literally - no shell
+# sees it, and a leading `-`, quotes and newlines survive intact - which is why
+# `--` guards the text argument here.
 fm_backend_thurbox_send_literal() {  # <target> <text> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${3:-}" || return 1
-  fm_backend_thurbox_tmux send-keys -t "$FM_BACKEND_THURBOX_PANE" -l -- "$2" 2>/dev/null
+  fm_backend_thurbox_cli session send "$FM_BACKEND_THURBOX_SESSION" --no-enter -- "$2" >/dev/null 2>&1
 }
 
-# fm_backend_thurbox_normalize_key: map firstmate's key vocabulary onto tmux's
-# key names. thurbox panes are tmux panes, so this is tmux's own vocabulary and
-# the identity mapping - kept as an explicit function anyway so the adapter's
-# key surface is stated in one place like every other backend's, rather than
-# being an implicit consequence of the transport.
+# fm_backend_thurbox_normalize_key: map firstmate's key vocabulary onto
+# thurbox's `session key` names (`enter`, `escape`, `ctrl-<letter>`).
+#
+# thurbox's own spelling is forgiving - case-insensitive, and `ctrl+c`/`c-c`
+# reach the same key - but the canonical name is emitted anyway so this
+# adapter's key surface is stated once here rather than relying on the
+# vendor's alias table. An unmapped name is passed through for thurbox to
+# judge: it REFUSES a key it does not know rather than typing the literal text
+# into the pane, so a bad name fails loudly instead of injecting garbage into a
+# live agent session.
 fm_backend_thurbox_normalize_key() {  # <key>
   case "$1" in
-    Enter|enter) printf 'Enter' ;;
-    Escape|escape|Esc|esc) printf 'Escape' ;;
-    C-c|c-c|ctrl+c|Ctrl+c|Ctrl+C|ctrl-c) printf 'C-c' ;;
-    # C-u clears a composer line. fm-send.sh's muse interrupt path needs it to
-    # drop the prompt muse restores into the composer after Escape.
-    C-u|c-u|ctrl+u|Ctrl+u|Ctrl+U|ctrl-u) printf 'C-u' ;;
+    Enter|enter) printf 'enter' ;;
+    Escape|escape|Esc|esc) printf 'escape' ;;
+    C-c|c-c|ctrl+c|Ctrl+c|Ctrl+C|ctrl-c) printf 'ctrl-c' ;;
+    # ctrl-u clears a composer line. fm-send.sh's muse interrupt path needs it
+    # to drop the prompt muse restores into the composer after Escape.
+    C-u|c-u|ctrl+u|Ctrl+u|Ctrl+U|ctrl-u) printf 'ctrl-u' ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -579,7 +608,7 @@ fm_backend_thurbox_send_key() {  # <target> <key> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${3:-}" || return 1
   local key
   key=$(fm_backend_thurbox_normalize_key "$2")
-  fm_backend_thurbox_tmux send-keys -t "$FM_BACKEND_THURBOX_PANE" "$key" 2>/dev/null
+  fm_backend_thurbox_cli session key "$FM_BACKEND_THURBOX_SESSION" "$key" >/dev/null 2>&1
 }
 
 # fm_backend_thurbox_send_text_line: send one line of TEXT then submit. Used for
@@ -595,79 +624,70 @@ fm_backend_thurbox_send_text_line() {  # <target> <text> [expected-label]
 # fm_backend_thurbox_capture: bounded PLAIN-text pane capture, for every
 # human/LLM-facing path (fm-peek, the watcher's pane tail).
 #
-# Routed through `thurbox-cli session capture` rather than tmux capture-pane,
-# even though both are available: the CLI is thurbox's own supported read
-# surface, it honours thurbox's configured scrollback, and it keeps the
-# session-level read addressed by the durable UUID. Verified `--lines` bounds
-# thurbox's scrollback fetch but the response is not itself trimmed to that
-# count, so the result is trimmed locally - the same "fetch generous, trim
-# locally" posture herdr and cmux already take for their own reasons.
+# Plain by construction: no `--ansi`, so this is the styled capture's
+# counterpart and the only one a human or an LLM ever sees.
+#
+# Verified `--lines` bounds thurbox's scrollback fetch but the response is not
+# itself trimmed to that count, so the result is trimmed locally - the same
+# "fetch generous, trim locally" posture herdr and cmux already take for their
+# own reasons.
 fm_backend_thurbox_capture() {  # <target> <lines> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${3:-}" || return 1
-  local lines=${2:-200} raw out
+  local lines=${2:-200} out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
-  raw=$(fm_backend_thurbox_cli session capture "$FM_BACKEND_THURBOX_SESSION" --lines "$lines" --json 2>/dev/null) || return 1
-  out=$(printf '%s' "$raw" | jq -r '.output // empty' 2>/dev/null) || return 1
+  out=$(fm_backend_thurbox_pane_state "$lines" false | jq -r '.output // empty' 2>/dev/null) || return 1
   printf '%s' "$out" | tail -n "$lines"
 }
 
-# fm_backend_thurbox_composer_capture: the composer screen WITH ANSI styling,
-# read straight off thurbox's tmux socket. thurbox's own `session capture`
-# returns plain text only, so the styled read - the thing that lets the shared
-# classifier tell a real unsent draft from a styled placeholder - comes from
-# tmux, exactly as bin/fm-tmux-lib.sh's fm_tmux_composer_capture does for the
-# default backend. Like that function, the styled capture is consumed only by
-# the classifier and is NEVER surfaced to a human or an LLM.
+# fm_backend_thurbox_composer_capture: the composer screen WITH ANSI styling.
+# `--ansi` keeps the styling the shared classifier needs to tell a real unsent
+# draft from a styled placeholder. Like bin/fm-tmux-lib.sh's equivalent, the
+# styled capture is consumed only by the classifier and is NEVER surfaced to a
+# human or an LLM.
 fm_backend_thurbox_composer_capture() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || return 1
-  fm_backend_thurbox_tmux capture-pane -e -p -t "$FM_BACKEND_THURBOX_PANE" -S 0 -E - 2>/dev/null
+  fm_backend_thurbox_pane_state "$FM_COMPOSER_CAPTURE_LINES" true | jq -r '.output // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_composer_cursor_row: the pane's zero-based cursor row.
-# tmux's genuine primitive, available here for the same reason the styled
-# capture is.
 fm_backend_thurbox_composer_cursor_row() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || return 1
-  fm_backend_thurbox_tmux display-message -p -t "$FM_BACKEND_THURBOX_PANE" '#{cursor_y}' 2>/dev/null
+  fm_backend_thurbox_pane_state 1 false | jq -r '.cursor_row // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_composer_caps: static capability facts, not logic (see the
 # capability model in bin/fm-composer-lib.sh).
 #
-# styled=1 and cursor=1 make thurbox the first non-tmux backend to reach the
-# default backend's own composer fidelity - both are real tmux primitives
-# against thurbox's socket, verified live.
+# styled=1 and cursor=1 make thurbox the only non-tmux backend at the default
+# backend's own composer fidelity, both reported by `session capture` itself.
 #
-# identity=0 deliberately: the pi identity probe in bin/fm-tmux-lib.sh
-# (fm_tmux_composer_identity) reads the pane tty's foreground process group via
-# the DEFAULT tmux socket, and a thurbox-socket equivalent has not been
-# empirically validated. Declaring identity=0 makes the classifier degrade a
-# need-identity verdict to `unknown` - the same safe degradation cmux takes -
-# rather than have this adapter assert a probe it has not proven.
+# identity=0 deliberately, and it is NOT the same gap as the Cursor probe
+# below. The pi identity probe (bin/fm-tmux-lib.sh's fm_tmux_composer_identity)
+# needs pi's busy-footer semantics as well as a process name, and that half has
+# had no thurbox pass; Cursor detection is pure foreground-process identity,
+# which `session capture` now answers directly. Declaring identity=0 makes the
+# classifier degrade a need-identity verdict to `unknown` - the same safe
+# degradation cmux takes - rather than assert a probe this adapter has not
+# proven.
 fm_backend_thurbox_composer_caps() {
   printf 'styled=1\ncursor=1\nidentity=0\nrows=0\n'
 }
 
-# fm_backend_thurbox_pane_is_cursor: the Cursor-pane probe of
-# bin/fm-tmux-lib.sh's fm_tmux_pane_is_cursor, against THURBOX's socket.
+# fm_backend_thurbox_pane_is_cursor: is the pane's foreground process a Cursor
+# Agent CLI? Takes the two values `session capture` already reported, so it
+# reads nothing itself and cannot be handed state some other call site left
+# behind.
 #
-# Takes a RESOLVED pane id, like fm_backend_thurbox_pane_exists above and
-# unlike the target-taking operations: the caller owns resolution, so this
-# reads no adapter global and cannot be handed a pane some other call site
-# happened to leave behind.
-#
-# Only the #{pane_tty} read is server-specific, and it is the one thing done
-# here; Cursor's process identity stays owned by bin/fm-cursor-lib.sh
-# (fm_cursor_tty_has_cursor), so this adapter re-derives none of it.
-#
-# This is deliberately treated differently from identity=0 above. The pi
-# identity probe additionally depends on pi's busy-footer semantics, which have
-# had no thurbox pass; Cursor detection is pure foreground-process identity,
-# and the only socket-dependent part is the tmux call itself.
-fm_backend_thurbox_pane_is_cursor() {  # <pane-id>
-  local tty
-  tty=$(fm_backend_thurbox_tmux display-message -p -t "$1" '#{pane_tty}' 2>/dev/null) || return 1
-  fm_cursor_tty_has_cursor "$tty"
+# `foreground_command` is what makes this answerable at all. thurbox resolves
+# the tty's foreground process group and reports that process's FULL argv, not
+# the multiplexer's command NAME - and the name is exactly what fails here,
+# because Cursor runs as a bundled node script and reports a bare `node`.
+# Cursor's identity stays owned by bin/fm-cursor-lib.sh, which already knows
+# how to read a bare `node` plus its argv; this adapter re-derives none of it.
+fm_backend_thurbox_pane_is_cursor() {  # <foreground_process> <foreground_command>
+  local comm=$1 args=$2
+  [ -n "$comm" ] || [ -n "$args" ] || return 1
+  fm_cursor_process_matches "$comm" "$args"
 }
 
 # fm_backend_thurbox_composer_state: thin adapter - capture plus cursor plus
@@ -675,36 +695,34 @@ fm_backend_thurbox_pane_is_cursor() {  # <pane-id>
 # lives in bin/fm-composer-lib.sh, so a new harness shape is taught there once
 # and never here.
 fm_backend_thurbox_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
-  local target=$1 expected_label=${2:-} cy pane verdict pane_id
-  cy=$(fm_backend_thurbox_composer_cursor_row "$target" "$expected_label") || { printf 'unknown'; return 0; }
+  local target=$1 expected_label=${2:-} raw caps verdict cy pane comm args
+  fm_backend_thurbox_target_ready "$target" "$expected_label" || { printf 'unknown'; return 0; }
+  # ONE read for the whole verdict. The screen, the cursor row that anchors it,
+  # and the foreground process that may disqualify that anchor all come from
+  # the same response, so they describe one instant. Reading them separately
+  # would let the pane move between them and classify a screen against a cursor
+  # row that no longer belongs to it.
+  raw=$(fm_backend_thurbox_pane_state "$FM_COMPOSER_CAPTURE_LINES" true) || { printf 'unknown'; return 0; }
+  [ -n "$raw" ] || { printf 'unknown'; return 0; }
+  IFS=$'\t' read -r cy comm args <<EOF
+$(printf '%s' "$raw" | jq -r '"\(.cursor_row // "")\t\(.foreground_process // "")\t\(.foreground_command // "")"' 2>/dev/null)
+EOF
+  pane=$(printf '%s' "$raw" | jq -r '.output // empty' 2>/dev/null)
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  pane=$(fm_backend_thurbox_composer_capture "$target" "$expected_label") || { printf 'unknown'; return 0; }
-  verdict=$(fm_composer_classify_screen "$(fm_backend_thurbox_composer_caps)" "$pane" "$cy")
+  caps=$(fm_backend_thurbox_composer_caps)
+  verdict=$(fm_composer_classify_screen "$caps" "$pane" "$cy")
   [ "$verdict" != need-identity ] || verdict=unknown
   # Cursor Agent CLI parks its terminal cursor OUTSIDE its composer, below the
   # footer, so on a Cursor pane the cursor row is not a composer locator and
   # the cursor-anchored read can only ever answer `unknown`. cursor=1 buys
-  # thurbox tmux's composer fidelity and therefore tmux's Cursor hazard, so it
-  # takes tmux's mitigation too (bin/fm-tmux-lib.sh): reclassify that pane the
-  # cursorless way, letting the bottom-most shape win, exactly as every
-  # cursorless backend already classifies it. Gated on Cursor's own structural
-  # process identity, never on the verdict alone, so the strict blank-row
-  # posture that owns `unknown` for every other harness is untouched.
-  #
-  # The pane is resolved HERE, by a direct call in this shell, and handed to
-  # the probe as an argument. The two reads above are command substitutions,
-  # so the pane target_ready resolved inside each of them died with its
-  # subshell; reading that global back here would probe whatever pane the
-  # CALLER's shell last resolved - or, in a process that never resolved one
-  # (every `set -u` command-substitution call site, which is how the watcher
-  # and the doorbell reach this), abort on an unbound variable and silently
-  # lose the reclassification entirely.
-  if [ "$verdict" = unknown ]; then
-    fm_backend_thurbox_target_ready "$target" "$expected_label" || { printf '%s' "$verdict"; return 0; }
-    pane_id=$FM_BACKEND_THURBOX_PANE
-    if fm_backend_thurbox_pane_is_cursor "$pane_id"; then
-      verdict=$(fm_composer_classify_screen "$(fm_backend_thurbox_composer_caps)" "$pane" '')
-    fi
+  # thurbox the default backend's composer fidelity and therefore its Cursor
+  # hazard, so it takes the same mitigation (bin/fm-tmux-lib.sh): reclassify
+  # that pane the cursorless way, letting the bottom-most shape win, exactly as
+  # every cursorless backend already classifies it. Gated on Cursor's own
+  # structural process identity, never on the verdict alone, so the strict
+  # blank-row posture that owns `unknown` for every other harness is untouched.
+  if [ "$verdict" = unknown ] && fm_backend_thurbox_pane_is_cursor "$comm" "$args"; then
+    verdict=$(fm_composer_classify_screen "$caps" "$pane" '')
   fi
   printf '%s' "$verdict"
 }

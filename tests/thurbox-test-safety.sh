@@ -32,13 +32,15 @@
 # of a false refusal (a skipped test) is trivially recoverable while the cost
 # of a false negative (mutating the operator's live sessions) is not.
 #
-# The rule covers BOTH CLIs the adapter drives, because it is a two-CLI
-# adapter: every destructive pane primitive (send-keys, capture-pane) runs the
-# ambient `tmux` from PATH against thurbox's REAL socket through
-# fm_backend_thurbox_tmux. Guarding only FM_THURBOX_BIN would leave half the
-# reachable surface unguarded - a case that narrowed or reset PATH could send
-# Enter to a live pane on the operator's thurbox server with the guard
-# reporting SAFE.
+# The rule covers the `tmux` on PATH as well as FM_THURBOX_BIN, and keeps doing
+# so even though the adapter no longer runs a single tmux command. That is
+# deliberate defence in depth, not a stale check: an earlier revision drove
+# `tmux -L <thurbox-socket>` for the pane primitives, and a regression that
+# reintroduced one would otherwise be free to send Enter to a live pane on the
+# operator's real thurbox server with this guard still reporting SAFE. The
+# tests keep a tmux tripwire inside the fixture, so both the guard and
+# tests/fm-backend-thurbox.test.sh's own no-tmux case have to be defeated
+# before that could happen.
 set -u
 
 # thurbox_safe_binary_or_refuse: 0 only when <path> resolves to an executable

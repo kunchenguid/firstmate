@@ -2,28 +2,45 @@
 
 [thurbox](https://github.com/Thurbeen/thurbox) is a session manager for coding agents: a ratatui TUI plus a `thurbox-cli`, over a SQLite session database whose sessions are real **tmux windows on a tmux server of its own**. `backend=thurbox` is an EXPERIMENTAL, spawn-capable session provider. Treehouse remains the worktree provider, exactly as for tmux, herdr, zellij, and cmux.
 
-Everything below was verified against the real **thurbox 2.9.2** (schema 40, Linux x86_64, 2026-08-28). `bin/backends/thurbox.sh` is the adapter; [`verification/runtime-backends.md`](verification/runtime-backends.md#thurbox) owns the source-and-evidence index.
+Everything below was verified against the real **thurbox 2.10.1** (schema 40, Linux x86_64, 2026-08-29).
+thurbox **2.10 is the floor**, and the adapter refuses an older build rather than degrading on it. `bin/backends/thurbox.sh` is the adapter; [`verification/runtime-backends.md`](verification/runtime-backends.md#thurbox) owns the source-and-evidence index.
 
 ## Why this backend is shaped differently
 
-Every thurbox session is addressable two ways, and the adapter deliberately uses both:
+Every operation goes through `thurbox-cli`, and the adapter runs **no tmux command at all**.
+That is worth stating because it was not always true, and because a tmux-backed session manager invites the opposite assumption.
 
-| Layer | Owns | Used for |
-| --- | --- | --- |
-| `thurbox-cli session ...` | session identity and lifecycle, keyed by a **UUID** | create, get, delete, plain capture, native `hook_state` |
-| `tmux -L <thurbox-socket> ...` | the pane of that same window | literal unsubmitted input, named keys, **styled** capture, cursor row, live cwd |
+firstmate's contract needs four things thurbox 2.9 did not expose: unsubmitted input, named keys, an ANSI-preserving capture, and a cursor row.
+An earlier revision of this adapter therefore drove `tmux -L <thurbox-socket>` directly for those, addressing the very window thurbox had created.
+thurbox 2.10 supplies all four itself - `session send --no-enter`, `session key`, `session capture --ansi`, and the pane-state fields on that same capture - so the adapter now stays entirely on thurbox's own supported surface, and `tmux` is not among its required tools.
 
-The thurbox CLI alone cannot satisfy firstmate's contract. `session send` **always appends Enter** (its own help: "Type text into a session's terminal, followed by Enter"), so it can never implement `send_literal`'s unsubmitted-input requirement, and the CLI exposes no named-key, ANSI-preserving-capture, or cursor primitive at all. Reaching for thurbox's own tmux socket is not a layering violation: it addresses the window thurbox itself created, with the primitives thurbox is itself built on.
+The one tmux fact still read is the socket **name**, and only so runtime detection can tell a thurbox pane from a nested tmux running inside one.
+Reading a name needs no tmux client.
 
-The payoff is real. thurbox is the **first non-tmux backend to reach the default backend's composer fidelity** - `styled=1` *and* `cursor=1`, where zellij manages styled-only and cmux and Orca have neither - and the second backend after herdr **wired to a native busy primitive** rather than a pane regex. That wiring is real but currently unfed: nothing in a default firstmate-spawned session writes `hook_state`, so the verdict is `unknown` until an operator supplies the signal. See "Active limits".
+`session capture --json` returns the pane's live state beside the screen:
 
-`cursor=1` also inherits tmux's **Cursor Agent CLI hazard**, so the adapter takes tmux's mitigation with it. Cursor parks its terminal cursor *outside* its composer, below the footer, so on a Cursor pane the cursor row is not a composer locator and the cursor-anchored read can only ever answer `unknown` - which would make every steer to a Cursor task read unverified, permanently. `fm_backend_thurbox_composer_state` therefore reclassifies a Cursor pane cursorlessly, letting the bottom-most shape win, exactly as `bin/fm-tmux-lib.sh` does. The only socket-specific part is reading `#{pane_tty}` through thurbox's own socket; Cursor's process identity stays owned by `bin/fm-cursor-lib.sh`, and the reclassification is gated on that structural identity rather than on the verdict, so the strict blank-row posture that owns `unknown` for every other harness is untouched.
+| Field | What the adapter uses it for |
+| --- | --- |
+| `cursor_row` | the composer's cursor anchor (`cursor=1`) |
+| `foreground_process` / `foreground_command` | Cursor-pane identity; the **full argv** is what tells `node …/cursor-agent/cli.js` from a bare `node` |
+| `foreground_cwd` | worktree discovery, following the foreground process rather than the launch directory |
 
-The pane the probe reads is re-resolved from the session UUID inside that same call and passed to the probe as an argument, per the identity model above. The two reads that precede it are command substitutions, so the pane each resolved dies with its subshell; a probe that read it back from the adapter's globals would query whichever pane the *caller* last resolved, and in the `set -u` command-substitution call sites the watcher and the steering-inbox doorbell use, would abort on an unbound variable and drop the reclassification silently.
+`fm_backend_thurbox_composer_state` reads all of that in **one** call.
+That is not only cheaper than the three it replaced: the screen, the cursor row that anchors it, and the process that may disqualify that anchor now describe a single instant, where separate reads could let the pane move between them.
+
+thurbox is the **only non-tmux backend at the default backend's composer fidelity** - `styled=1` *and* `cursor=1`, where zellij manages styled-only and cmux and Orca have neither - and the second backend after herdr **wired to a native busy primitive** rather than a pane regex.
+That wiring is real but currently unfed: nothing in a default firstmate-spawned session writes `hook_state`, so the verdict is `unknown` until an operator supplies the signal.
+See "Active limits".
+
+`cursor=1` also inherits the **Cursor Agent CLI hazard**, so the adapter takes the same mitigation the default backend uses.
+Cursor parks its terminal cursor *outside* its composer, below the footer, so on a Cursor pane the cursor row is not a composer locator and the cursor-anchored read can only ever answer `unknown` - which would make every steer to a Cursor task read unverified, permanently.
+`fm_backend_thurbox_composer_state` therefore reclassifies a Cursor pane cursorlessly, letting the bottom-most shape win, exactly as `bin/fm-tmux-lib.sh` does.
+Identity comes from the `foreground_process`/`foreground_command` pair in the capture the verdict was computed from, and `bin/fm-cursor-lib.sh` remains the single owner of what counts as Cursor.
+The reclassification is gated on that structural identity rather than on the verdict, so the strict blank-row posture that owns `unknown` for every other harness is untouched.
 
 ## Setup
 
-1. **Install thurbox** so `thurbox-cli` is on `PATH` (it self-updates with `thurbox-cli update`). `tmux` and `jq` are required too; `bin/fm-bootstrap.sh` checks all three when thurbox is the resolved backend.
+1. **Install thurbox 2.10 or newer** so `thurbox-cli` is on `PATH` (it self-updates with `thurbox-cli update`). `jq` is required too; `bin/fm-bootstrap.sh` checks both when thurbox is the resolved backend. `tmux` is **not** required - the adapter runs no tmux command - though thurbox itself of course needs it. An older thurbox is refused at spawn rather than degraded on, because 2.9 has neither the pane-state fields every composer read depends on nor the `--no-enter`/`key` surface every steer uses.
 
 2. **Add an interactive-shell agent to thurbox's `agents.toml`.** This is the one piece of thurbox-side configuration firstmate needs, and it exists because the two tools' default jobs are opposites: thurbox normally launches a coding agent for you, while firstmate needs a *bare interactive shell* so it can run `treehouse get` itself and then launch the selected harness with its own model, effort, and yolo flags.
 
@@ -103,10 +120,10 @@ Both were observed during verification and cleaned up by hand. This is why `test
 
 ## Active limits
 
-- **No recovery-grade agent-state classifier.** `fm_backend_agent_state` reports `unverified`, so the control plane refuses `exit` and `relaunch`, as it does for zellij, Orca, and cmux. This is want of an empirical pass, not a structural gap: thurbox panes are tmux panes, so the tmux classifier's process-attribution approach should port directly once run against thurbox's own socket.
-- **No composer identity probe.** Caps declare `identity=0`, so a `need-identity` verdict degrades to `unknown` rather than asserting an unproven probe. The pi identity probe additionally depends on pi's busy-footer semantics, which have had no thurbox pass. The Cursor probe below is deliberately *not* in this bucket: it is pure foreground-process identity, so the only socket-dependent part is the tmux call itself.
+- **No recovery-grade agent-state classifier.** `fm_backend_agent_state` reports `unverified`, so the control plane refuses `exit` and `relaunch`, as it does for zellij, Orca, and cmux. This is want of an empirical pass, not a structural gap: `session capture`'s `foreground_process`/`foreground_command` pair now answers the process-attribution question the tmux classifier asks, so the port has a primitive waiting for it.
+- **No composer identity probe.** Caps declare `identity=0`, so a `need-identity` verdict degrades to `unknown` rather than asserting an unproven probe. The pi identity probe additionally depends on pi's busy-footer semantics, which have had no thurbox pass. Cursor detection is deliberately *not* in this bucket: it is pure foreground-process identity, which `session capture` now answers directly.
 - **No native event push.** `fm_backend_has_push` is false, so the watcher uses its poll loop. thurbox's `hook_state` is a genuine push *source* (agents write it from their hooks), but no streaming reader has been verified, so it is consumed by polling for now.
-- **The away-mode supervisor daemon refuses thurbox**, alongside zellij, Orca, and cmux. thurbox is the near-miss: its panes *are* tmux panes, but on thurbox's own socket, so the daemon's bare `tmux` calls would address the wrong server entirely. A refusal, not a silent misread, is still correct until that daemon routes through the adapter. Making that refusal *reachable* is why `discover_supervisor_backend` (`bin/fm-supervisor-target-lib.sh`) carries a thurbox arm ahead of its `$TMUX_PANE` arm, for the same reason detection does: without it a thurbox-hosted captain answers `tmux`, and the daemon's supervisor injections go to whatever pane that id happens to name on the *default* server.
+- **The away-mode supervisor daemon refuses thurbox**, alongside zellij, Orca, and cmux. thurbox is the near-miss: its panes *are* tmux panes, but on thurbox's own socket, so the daemon's bare `tmux` calls would address the wrong server entirely - the one hazard the adapter itself no longer has, since it runs no tmux command. A refusal, not a silent misread, is still correct until that daemon routes through the adapter. Making that refusal *reachable* is why `discover_supervisor_backend` (`bin/fm-supervisor-target-lib.sh`) carries a thurbox arm ahead of its `$TMUX_PANE` arm, for the same reason detection does: without it a thurbox-hosted captain answers `tmux`, and the daemon's supervisor injections go to whatever pane that id happens to name on the *default* server.
 - **Nothing writes `hook_state` for a default firstmate session, so the native busy verdict is inert.** `hook_state` is written only by `thurbox-cli session signal`, invoked from lifecycle hooks thurbox wires when *it* launches an agent. firstmate's agent entry is a bare interactive shell (that is the whole point of it), so thurbox wires no hooks, and firstmate does not signal either. `fm_backend_thurbox_busy_state` therefore returns `unknown`, `bin/fm-busy-lib.sh`'s widened native-busy gate never fires for thurbox, and the queued-Enter conversion below never converts. All three fail safe - `unknown` is never mistaken for idle or for delivery - and all three go live unchanged the moment a signal source exists. Step 4 of "Setup" is how an operator supplies one today. The intended direction is upstream rather than local: work is in flight on the thurbox side to handle agent state generally, including for agents thurbox did not launch, so firstmate deliberately does not harden against today's shape by emitting signals itself.
 - **The queued-Enter conversion is reasoned, not observed.** thurbox is the only backend on the shared `fm_composer_submit_retry_core` loop that supplies a delivery-busy primitive, so a steer typed into a mid-turn harness converts a proven `pending` composer plus an affirmative native busy to a delivered verdict instead of exiting nonzero on a steer that will land when the turn ends. Only `hook_state: working` converts - a null `hook_state` reads `unknown` and idle/done/blocked read `idle`, and neither is accepted as proof of a queue. This has **never been observed against a real mid-turn thurbox steer**: it is an extension of the same native signal `bin/fm-busy-lib.sh` already trusts for thurbox, and the stubbed suite covers the conversion's inputs, not a live queue.
 - **thurbox is not the worktree provider.** See below.
