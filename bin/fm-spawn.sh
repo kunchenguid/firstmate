@@ -2415,7 +2415,7 @@ claude_capture_visible() {
 CLAUDE_TRUST_DIALOG_SEEN=0
 claude_launch_is_already_trusted() {  # <visible-pane>
   local pane=$1 busy composer
-  [ -n "$pane" ] || return 0
+  [ -n "$pane" ] || return 1
   busy=$(fm_rendered_busy_footer_state "$pane" claude)
   [ "$busy" != busy ] || return 0
   composer=$(fm_backend_composer_state "$BACKEND" "$T" "$W")
@@ -2423,37 +2423,64 @@ claude_launch_is_already_trusted() {  # <visible-pane>
 }
 
 claude_trust_dialog_clear() {
-  local pane state=unknown busy i=0 max=${FM_CLAUDE_TRUST_POLLS:-40} interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
-  while [ "$i" -lt "$max" ]; do
-    if pane=$(claude_capture_visible); then
+  local pane state=unknown busy detect_i=0 clear_i=0 verification_due=0
+  local detect_max=${FM_CLAUDE_TRUST_POLLS:-40}
+  local clear_max=${FM_CLAUDE_TRUST_CLEAR_POLLS:-$detect_max}
+  local interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
+  local accept_attempted=0 dialog_absent_seen=0
+  while [ "$detect_i" -lt "$detect_max" ]; do
+    if pane=$(claude_capture_visible) && [ -n "$pane" ]; then
       state=$(fm_composer_claude_trust_dialog_state "$pane")
       case "$state" in
-        trust-focused)
+        trust-focused|trust-unfocused)
           CLAUDE_TRUST_DIALOG_SEEN=1
-          spawn_send_key "$T" Enter
-          ;;
-        trust-unfocused)
-          CLAUDE_TRUST_DIALOG_SEEN=1
-          spawn_send_key "$T" Down
+          break
           ;;
         absent)
-          if [ "$CLAUDE_TRUST_DIALOG_SEEN" = 1 ]; then
-            busy=$(fm_rendered_busy_footer_state "$pane" claude)
-            [ "$busy" != busy ] || return 0
-          elif claude_launch_is_already_trusted "$pane"; then
+          if claude_launch_is_already_trusted "$pane"; then
             return 0
           fi
           ;;
       esac
     fi
-    sleep "$interval"
-    i=$((i + 1))
+    detect_i=$((detect_i + 1))
+    [ "$detect_i" -ge "$detect_max" ] || sleep "$interval"
   done
-  case "$state" in
-    trust-focused|trust-unfocused) return 1 ;;
-  esac
-  [ "$CLAUDE_TRUST_DIALOG_SEEN" = 1 ] && return 2
-  return 3
+  [ "$CLAUDE_TRUST_DIALOG_SEEN" = 1 ] || return 3
+
+  state=unknown
+  while [ "$clear_i" -lt "$clear_max" ] || [ "$verification_due" = 1 ]; do
+    verification_due=0
+    if pane=$(claude_capture_visible) && [ -n "$pane" ]; then
+      state=$(fm_composer_claude_trust_dialog_state "$pane")
+      case "$state" in
+        trust-focused)
+          [ "$clear_i" -lt "$clear_max" ] || return 1
+          spawn_send_key "$T" Enter || return 1
+          accept_attempted=1
+          verification_due=1
+          ;;
+        trust-unfocused)
+          [ "$clear_i" -lt "$clear_max" ] || return 1
+          spawn_send_key "$T" Down || return 1
+          verification_due=1
+          ;;
+        absent)
+          dialog_absent_seen=1
+          busy=$(fm_rendered_busy_footer_state "$pane" claude)
+          [ "$busy" != busy ] || return 0
+          ;;
+      esac
+    fi
+    clear_i=$((clear_i + 1))
+    if [ "$clear_i" -lt "$clear_max" ] || [ "$verification_due" = 1 ]; then
+      sleep "$interval"
+    fi
+  done
+  if [ "$accept_attempted" = 1 ] || [ "$dialog_absent_seen" = 1 ]; then
+    return 2
+  fi
+  return 1
 }
 
 claude_spawn_fail() {  # <detail>

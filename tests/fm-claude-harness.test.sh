@@ -59,6 +59,8 @@ fake_screen() {
     trusted-idle)
       printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\302\240\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n'
       ;;
+    blank-2)
+      ;;
     gone-stuck)
       printf '\xe2\x9d\xaf \n'
       ;;
@@ -114,6 +116,8 @@ case "${1:-}" in
               trusted) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               trusted-idle) printf 'trusted-idle\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               delayed-dialog) printf 'delayed-1\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              blank-delayed-dialog) printf 'blank-1\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              last-poll-dialog) printf 'last-1\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               stale-dialog) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               *) printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE" ;;
             esac
@@ -138,8 +142,12 @@ case "${1:-}" in
       exit 1
     fi
     case "$state" in
+      blank-1) state=blank-2; printf 'blank-2\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+      blank-2) state=trust-no; printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE" ;;
       delayed-1) state=delayed-2; printf 'delayed-2\n' > "$FM_FAKE_CLAUDE_STATE" ;;
       delayed-2) state=trust-no; printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+      last-1) state=last-2; printf 'last-2\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+      last-2) state=trust-no; printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE" ;;
     esac
     if [ "${FM_FAKE_CLAUDE_MODE:-trusted}" = stale-dialog ] && [[ " $* " = *' -S '* ]]; then
       printf ' Accessing workspace:\n\n /old/repo\n\n \xe2\x9d\xaf No, exit\n   Yes, I trust this folder\n\n Enter to confirm . Esc to cancel\nThinking... (esc to interrupt)\n'
@@ -191,7 +199,9 @@ run_spawn() {
     FM_FAKE_KEY_LOG="$case_dir/keys.log" \
     FM_FAKE_CLAUDE_STATE="$case_dir/claude.state" \
     FM_FAKE_CLAUDE_MODE="${FM_FAKE_CLAUDE_MODE:-trusted}" \
-    FM_CLAUDE_TRUST_POLLS=10 FM_CLAUDE_TRUST_POLL_INTERVAL=0 \
+    FM_CLAUDE_TRUST_POLLS="${FM_TEST_CLAUDE_TRUST_POLLS:-10}" \
+    FM_CLAUDE_TRUST_CLEAR_POLLS="${FM_TEST_CLAUDE_TRUST_CLEAR_POLLS:-10}" \
+    FM_CLAUDE_TRUST_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness claude --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -360,6 +370,37 @@ test_claude_unreadable_settle_window_fails_with_uncertainty() {
   pass "fm-spawn: an unreadable settle window fails loudly instead of assuming trust"
 }
 
+test_claude_blank_capture_remains_inconclusive() {
+  local id rec out rc
+  id="claude-blank-delayed-z11-$$"
+  rec=$(make_spawn_case blank-delayed "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=blank-delayed-dialog FM_TEST_CLAUDE_TRUST_POLLS=3 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a transient blank capture must remain inside the dialog detection window"
+  assert_contains "$(cat "$CASE_DIR/keys.log")" "Down" \
+    "a transient blank capture was mistaken for an already-trusted launch"
+  [ "$(cat "$CASE_DIR/claude.state")" = processing ] \
+    || fail "the dialog following a blank capture did not reach brief processing"
+  pass "fm-spawn: a blank capture remains inconclusive until the delayed dialog appears"
+}
+
+test_claude_final_detection_poll_gets_a_full_clear_budget() {
+  local id rec out rc
+  id="claude-final-detection-z12-$$"
+  rec=$(make_spawn_case final-detection "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=last-poll-dialog FM_TEST_CLAUDE_TRUST_POLLS=2 \
+    FM_TEST_CLAUDE_TRUST_CLEAR_POLLS=2 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a dialog first seen on the final detection poll must still clear and verify"
+  [ "$(cat "$CASE_DIR/claude.state")" = processing ] \
+    || fail "the final-poll dialog did not receive its independent clear and verification budget"
+  pass "fm-spawn: final-poll detection retains a full dialog-clearance budget"
+}
+
 test_claude_already_trusted_spawn_never_touches_the_dialog
 test_claude_trust_dialog_is_navigated_never_a_blind_enter
 test_claude_stuck_dialog_fails_loudly
@@ -370,3 +411,5 @@ test_claude_already_trusted_idle_spawn_has_no_processing_requirement
 test_claude_dialog_observation_replaces_a_failed_baseline
 test_claude_stale_dialog_scrollback_never_receives_keys
 test_claude_unreadable_settle_window_fails_with_uncertainty
+test_claude_blank_capture_remains_inconclusive
+test_claude_final_detection_poll_gets_a_full_clear_budget
