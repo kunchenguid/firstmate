@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "Firstmate will then instruct you to drive the no-mistakes pipeline yourself to validate and ship a PR." "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -321,6 +321,10 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
+# It must also never instruct the worker to invoke the /no-mistakes skill,
+# because a spawned worker's session inherits firstmate's CLAUDE_CONFIG_DIR
+# (bin/fm-spawn.sh, for shared credentials) and that store has no user-level
+# skills directory, so the skill name does not resolve there.
 test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
@@ -329,10 +333,17 @@ test_no_mistakes_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
+  assert_grep "does not resolve in a spawned worker's session" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
+  assert_no_grep "instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD must not instruct the worker to invoke the unreachable /no-mistakes skill"
+  assert_no_grep "invoke /no-mistakes" "$brief" \
+    "no-mistakes DOD must not tell the worker the mechanics load when it invokes the unreachable /no-mistakes skill"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`no-mistakes axi run --help`' "$brief" \
+  assert_grep '`no-mistakes axi run`' "$brief" \
+    "no-mistakes DOD must render literal backticks around the run command"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`no-mistakes axi --help`' "$brief" \
     "no-mistakes DOD must render literal backticks around the help command"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
