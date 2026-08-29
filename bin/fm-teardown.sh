@@ -2830,6 +2830,10 @@ META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
-"$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+# A secondmate retirement may remove the home containing an overridden control
+# state directory. Do not let the side-band refresh recreate that retired home.
+if [ -d "$STATE" ]; then
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder
