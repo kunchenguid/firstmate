@@ -703,6 +703,20 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_endpoint_abort_metadata_published() {
+  # A fresh endpoint can be rolled back only until this invocation has
+  # published its own complete task record. Check the unique spawn generation
+  # as well as the normal endpoint binding so a stale same-id record cannot
+  # protect a newly-created endpoint from rollback.
+  local meta=$1 generation
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  generation=$(fm_backend_meta_exact_value "$meta" spawn_gen) || return 1
+  [ "$generation" = "$SPAWN_GEN" ] || return 1
+  fm_backend_validate_task_endpoint "$meta" "$ID" >/dev/null 2>&1 || return 1
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$SPAWN_ENDPOINT_ABORT_BACKEND" ] \
+    && [ "$FM_BACKEND_VALIDATED_TARGET" = "$SPAWN_ENDPOINT_ABORT_TARGET" ]
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -749,7 +763,9 @@ spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
     SPAWN_ENDPOINT_ABORT_CLEANUP=0
-    fm_backend_kill "$SPAWN_ENDPOINT_ABORT_BACKEND" "$SPAWN_ENDPOINT_ABORT_TARGET" 2>/dev/null || true
+    if ! spawn_endpoint_abort_metadata_published "$STATE/$ID.meta"; then
+      fm_backend_kill "$SPAWN_ENDPOINT_ABORT_BACKEND" "$SPAWN_ENDPOINT_ABORT_TARGET" 2>/dev/null || true
+    fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
