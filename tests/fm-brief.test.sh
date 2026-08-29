@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "start the no-mistakes pipeline yourself immediately" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -352,6 +352,86 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+# Option (b): the worker starts its own no-mistakes run the moment
+# implementation is committed. The generated brief is the worker-facing
+# contract; this test pins both directions of that change through the
+# public scaffold, not by reading fm-brief.sh source.
+# RED if the old firstmate-triggered handoff returns (either the origin/main
+# "instruct you to run" form or the later "triggers validation" /
+# "not yet validated - no PR yet" form).
+# RED if the start-your-own-run instruction disappears.
+# A silent start plus a silent mid-pipeline death is worse than the
+# supervisor round trip this removes, so start and failure reporting are
+# part of the same contract.
+test_no_mistakes_worker_starts_own_validation() {
+  local home id brief
+  home="$TMP_ROOT/self-start-home"
+  mkdir -p "$home/data"
+  id="brief-self-start-b1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "no-mistakes self-start brief should scaffold"
+  brief="$home/data/$id/brief.md"
+
+  # Negative: the intermediate handoff must not come back.
+  assert_no_grep "Firstmate will then instruct you to run" "$brief" \
+    "no-mistakes DOD restored the origin/main firstmate-instructs-validation handoff"
+  assert_no_grep "Firstmate then triggers validation" "$brief" \
+    "no-mistakes DOD restored the firstmate-triggers-validation handoff"
+  assert_no_grep "not yet validated - no PR yet" "$brief" \
+    "no-mistakes DOD restored a done: line with no PR"
+  assert_no_grep "When you believe it is complete, append \`done:" "$brief" \
+    "no-mistakes DOD restored the pre-PR done: {summary} stop"
+
+  # Positive: the worker must start the run itself and tell firstmate.
+  assert_grep "start the no-mistakes pipeline yourself immediately" "$brief" \
+    "no-mistakes DOD lost the start-your-own-run instruction"
+  assert_grep "working: starting no-mistakes validation" "$brief" \
+    "no-mistakes DOD lost the nonterminal working: append that tells firstmate validation started"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'the `no-mistakes` CLI on your `PATH`' "$brief" \
+    "no-mistakes DOD did not name the CLI as the interface the worker actually has"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`no-mistakes axi run --intent "<...>"` to start' "$brief" \
+    "no-mistakes DOD did not give the concrete run command"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`no-mistakes axi respond` for each gate' "$brief" \
+    "no-mistakes DOD did not give the concrete gate-response command"
+  assert_grep "Do not append \`done:\` until there is a PR." "$brief" \
+    "no-mistakes DOD lost the rule that done: requires a PR"
+  assert_grep "This mode is complete only when the no-mistakes pipeline has shipped a PR whose checks are green." "$brief" \
+    "no-mistakes DOD did not bind completion to a green PR"
+  assert_grep "stop, never \`done:\`." "$brief" \
+    "no-mistakes DOD did not route an unstartable run to blocked: instead of done:"
+  assert_grep "If the run dies mid-pipeline, append \`failed:" "$brief" \
+    "no-mistakes DOD did not surface a mid-pipeline death"
+
+  # Skill form is absent in a crewmate worktree; no scaffold may instruct it.
+  for id_args in \
+    "brief-self-start-nomistakes:some-proj --mode no-mistakes" \
+    "brief-self-start-directpr:some-proj --mode direct-PR" \
+    "brief-self-start-localonly:some-proj --mode local-only" \
+    "brief-self-start-scout:some-proj --scout"; do
+    id=${id_args%%:*}
+    # shellcheck disable=SC2086  # the arg list is an intentional word split
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" ${id_args#*:} >/dev/null 2>&1 \
+      || fail "$id: scaffold exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "run /no-mistakes" "$brief" \
+      "$id: brief tells the worker to run a skill it cannot load"
+    assert_no_grep "invoke /no-mistakes" "$brief" \
+      "$id: brief tells the worker to invoke a skill it cannot load"
+  done
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" brief-self-start-secondmate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate charter scaffold exited non-zero"
+  assert_no_grep "run /no-mistakes" "$home/data/brief-self-start-secondmate/brief.md" \
+    "secondmate charter tells the worker to run a skill it cannot load"
+  assert_grep "Do NOT run the no-mistakes pipeline." "$home/data/brief-self-start-directpr/brief.md" \
+    "direct-PR brief lost its pipeline refusal"
+
+  pass "fm-brief.sh: no-mistakes DOD starts its own run and never emits a pre-PR done:"
 }
 
 test_ship_project_memory_wording() {
@@ -760,6 +840,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_worker_starts_own_validation
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
