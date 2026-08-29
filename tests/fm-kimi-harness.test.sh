@@ -33,7 +33,12 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+# Tolerate an unset call log: teardown invokes this stub without one, and under
+# set -u an unbound expansion would kill the stub, making list-windows FAIL
+# rather than report an empty inventory. Teardown's endpoint-confirmation gate
+# reads that result, so a stub that dies here reads as "cannot confirm" and
+# correctly refuses the release - a fixture artefact, not a teardown defect.
+printf '%s\n' "$*" >> "${FM_FAKE_TMUX_CALL_LOG:-/dev/null}"
 state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
 fake_screen() {
   case "$state" in
@@ -59,7 +64,7 @@ fake_cursor_y() {
   esac
 }
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
 esac
 case "${1:-}" in
