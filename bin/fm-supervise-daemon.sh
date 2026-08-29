@@ -1074,8 +1074,9 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+           stale_marker_remove "$win" "$state"
+         fi ;;
     esac
   done
 
@@ -1122,11 +1123,13 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
-          escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"
-          _now > "$marker"
+          if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
+            _now > "$marker"
+          fi
         elif [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
-          _now > "$marker"
+          if escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"; then
+            _now > "$marker"
+          fi
         else
           rm -f "$marker"
         fi
@@ -1153,8 +1156,9 @@ housekeeping() {  # <state>
         ident=$(status_observed_signature "$f")
         status_presentation_marker_reported_matches "$(_seen_status_path "$state" "$task")" "$ident" \
           && continue
-        escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
-        status_presentation_marker_report "$(_seen_status_path "$state" "$task")" "$ident" || true
+        if escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"; then
+          status_presentation_marker_report "$(_seen_status_path "$state" "$task")" "$ident" || true
+        fi
         continue
       fi
       [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
@@ -1162,8 +1166,9 @@ housekeeping() {  # <state>
       rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
       if [ "$rc" -eq 0 ]; then
         event=${rest#*$'\t'}
-        escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"
-        mark_status_seen "$state" "$task" "$endpoint" "$ident" || true
+        if escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"; then
+          mark_status_seen "$state" "$task" "$endpoint" "$ident" || true
+        fi
       elif ! mark_status_seen "$state" "$task" "$endpoint" "$ident"; then
         escalate_add "$state" "$(basename "$f"): status position commit failed (catch-all scan)"
       fi
@@ -1366,12 +1371,15 @@ handle_wake() {  # <reason> <state>
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"
-      escalate_add "$state" "$distilled"
-      # A terminal-stale escalate must not leave a persistence marker behind, or
-      # housekeeping re-escalates the same pane as a false wedge later.
-      [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-      mark_escalated_seen "$state" "$capture" || classification_failed=1
-      [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      if escalate_add "$state" "$distilled"; then
+        # A terminal-stale escalate must not leave a persistence marker behind, or
+        # housekeeping re-escalates the same pane as a false wedge later.
+        [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+        mark_escalated_seen "$state" "$capture" || classification_failed=1
+        [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      else
+        classification_failed=1
+      fi
       ;;
     pause)
       # Declared wait, an external-wait pause or a verified captain-held transfer:

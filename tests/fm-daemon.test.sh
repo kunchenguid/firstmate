@@ -311,6 +311,63 @@ test_catchall_advances_routine_then_surfaces_append() {
   pass "catch-all routine scans advance before later actionable appends"
 }
 
+test_escalation_buffer_failure_retains_wake_and_position() {
+  local dir state fakebin buffer out
+  dir=$(make_supercase escalation-write-failure); state="$dir/state"; fakebin="$dir/daemon-bin"
+  buffer="$state/.subsuper-escalations"
+  printf 'blocked: release approval required\nworking: preparing notes\n' > "$state/write-r1.status"
+  mkdir -p "$fakebin" "$buffer"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\twrite-r1.status\tsignal: $state/write-r1.status\n'
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+
+  ! FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" 2>/dev/null \
+    || fail "an unwritable escalation buffer acknowledged the wake"
+  [ ! -e "$dir/acked" ] || fail "a wake was acknowledged before its escalation was buffered"
+  [ "$(status_seen_offset "$state" write-r1)" = 0 ] \
+    || fail "a failed escalation append advanced the classification position"
+
+  rmdir "$buffer"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "the wake did not recover after the escalation buffer became writable"
+  out=$(cat "$buffer" 2>/dev/null || true)
+  case "$out" in *"blocked: release approval required"*) ;;
+    *) fail "the recovered wake did not buffer its actionable event: $out" ;;
+  esac
+  [ "$(status_seen_offset "$state" write-r1)" = "$(log_size "$state/write-r1.status")" ] \
+    || fail "successful buffering did not advance the classification position"
+  [ "$(wc -l < "$dir/acked" | tr -d ' ')" = 1 ] \
+    || fail "the recovered durable wake was not acknowledged exactly once"
+  pass "failed escalation writes retain durable wakes and classification positions"
+}
+
+test_catchall_buffer_failure_preserves_position() {
+  local dir state buffer out
+  dir=$(make_supercase catchall-write-failure); state="$dir/state"
+  buffer="$state/.subsuper-escalations"
+  printf 'failed: release verification broke\nworking: collecting logs\n' > "$state/catch-write-r2.status"
+  mkdir "$buffer"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state" 2>/dev/null || true
+  [ "$(status_seen_offset "$state" catch-write-r2)" = 0 ] \
+    || fail "a failed catch-all append advanced the classification position"
+
+  rmdir "$buffer"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  out=$(cat "$buffer" 2>/dev/null || true)
+  case "$out" in *"failed: release verification broke"*) ;;
+    *) fail "the catch-all did not retry its actionable event after recovery: $out" ;;
+  esac
+  [ "$(status_seen_offset "$state" catch-write-r2)" = "$(log_size "$state/catch-write-r2.status")" ] \
+    || fail "the recovered catch-all did not advance its classification position"
+  pass "catch-all markers advance only after escalation buffering succeeds"
+}
+
 test_durable_wake_failure_retains_entire_batch() {
   local dir state fakebin attempts
   dir=$(make_supercase durable-failure); state="$dir/state"; fakebin="$dir/daemon-bin"; attempts="$dir/attempts"
@@ -2555,6 +2612,8 @@ test_recreated_status_rejects_captured_identity
 test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
 test_catchall_advances_routine_then_surfaces_append
+test_escalation_buffer_failure_retains_wake_and_position
+test_catchall_buffer_failure_preserves_position
 test_durable_wake_failure_retains_entire_batch
 test_missing_status_stale_is_acknowledged_without_diagnostic
 test_transient_unreadable_signal_recovers_without_advancing
