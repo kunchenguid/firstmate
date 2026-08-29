@@ -244,6 +244,7 @@ EFFORT=$EFFORT_META
 SPAWNED=$(iso_from_epoch "$START_EPOCH" || true)
 COMPLETED=$(iso_from_epoch "$END_EPOCH" || true)
 
+mkdir -p -- "$DATA"
 jq -cn \
   --arg task "$ID" --arg harness "$HARNESS" \
   --arg model "$MODEL" --arg effort "$EFFORT" \
@@ -259,5 +260,4 @@ jq -cn \
     wall_secs:$wall, turns:$turns,
     input_tokens:$it, cached_input_tokens:$ct, output_tokens:$ot,
     reasoning_tokens:$rt, source:$source}' >> "$DATA/usage-ledger.jsonl.tmp.$$"
-mkdir -p -- "$DATA"
 cat "$DATA/usage-ledger.jsonl.tmp.$$" >> "$LEDGER" && rm -f -- "$DATA/usage-ledger.jsonl.tmp.$$"
