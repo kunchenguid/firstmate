@@ -2900,7 +2900,7 @@ fi
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (pane close, worktree return, record removal)
+# destructive sequence below (pane close, record removal, worktree return)
 # runs under the named-session presentation lock, acquired BEFORE anything is
 # returned or erased: a contended lock refuses here while the isolated copy,
 # every durable record, and the endpoint are all still intact for a plain
