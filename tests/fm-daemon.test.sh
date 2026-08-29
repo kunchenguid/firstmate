@@ -175,6 +175,36 @@ test_classification_commits_its_captured_endpoint() {
   pass "the daemon commits exactly the endpoint captured by classification"
 }
 
+test_stale_masked_event_escalates_at_captured_endpoint() {
+  local dir state key out
+  dir=$(make_supercase stale-masked); state="$dir/state"
+  printf 'blocked: release host unavailable\nworking: retrying upload\n' > "$state/stale-r2.status"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: sess:fm-stale-r2" "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: release host unavailable"*) ;; *) fail "a stale wake hid the blocker behind routine progress: $out" ;; esac
+  key=$(printf '%s' stale-r2 | tr ':/.' '___')
+  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$(log_size "$state/stale-r2.status")" ] \
+    || fail "the stale escalation did not commit its captured endpoint"
+  pass "a stale wake escalates a blocker hidden by later progress"
+}
+
+test_stale_read_failure_surfaces_without_advancing_seen() {
+  local dir state key out
+  dir=$(make_supercase stale-unreadable); state="$dir/state"
+  printf 'working: retrying upload\n' > "$state/stale-r3.status"
+  key=$(printf '%s' stale-r3 | tr ':/.' '___')
+  printf '3' > "$state/.subsuper-seen-status-$key"
+  (
+    _fm_status_read_span() { return 1; }
+    FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: sess:fm-stale-r3" "$state"
+  )
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;; *) fail "a stale span read failure was silently absorbed" ;; esac
+  [ "$(cat "$state/.subsuper-seen-status-$key")" = 3 ] \
+    || fail "a stale span read failure advanced the daemon seen marker"
+  pass "a stale span read failure surfaces without advancing its marker"
+}
+
 test_status_read_failure_surfaces_without_advancing_seen() {
   local dir state key out
   dir=$(make_supercase unreadable-span); state="$dir/state"
@@ -425,7 +455,7 @@ test_stale_paused_classifies_pause() {
   state="$dir/state"
   pause_reason='paused: waiting for upstream checks green, merged, and blocked state to clear'
   status_is_captain_relevant "$pause_reason" && fail "pause reason phrases made the status captain-relevant"
-  printf '%s\n' "$pause_reason" > "$state/held-w9.status"
+  printf 'blocked: older blocker\n%s\n' "$pause_reason" > "$state/held-w9.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
   pass "paused reasons with captain phrases remain pause-classified"
@@ -440,7 +470,7 @@ test_stale_captain_held_classifies_pause() {
   state="$dir/state"
   held_reason='captain-held [key=route]: tracked by task-decision-route'
   status_is_captain_relevant "$held_reason" && fail "a captain-held transfer line was treated as captain-relevant"
-  printf '%s\n' "$held_reason" > "$state/held-w9h.status"
+  printf 'needs-decision: older question\n%s\n' "$held_reason" > "$state/held-w9h.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9h" "$state")
   case "$out" in pause\|*) ;; *) fail "captain-held transfer did not classify as pause: $out" ;; esac
   pass "a captain-held transfer classifies as pause, not as a wedge candidate"
@@ -2285,6 +2315,8 @@ test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
 test_classify_signal_survives_a_later_routine_append
 test_classification_commits_its_captured_endpoint
+test_stale_masked_event_escalates_at_captured_endpoint
+test_stale_read_failure_surfaces_without_advancing_seen
 test_status_read_failure_surfaces_without_advancing_seen
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal

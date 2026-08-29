@@ -390,10 +390,19 @@ classify_signal() {  # <reason-after-colon> <state>
 # classify_stale decides the WAKE itself (one-shot per distinct hash). On a
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
-classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last
+classify_stale() {  # <window> <state> [<span-record> <span-status>]
+  local win=$1 state=$2 record=${3-} rc=${4-} task last event
   task=$(window_to_task "$win" "$state")
+  if [ -z "$rc" ]; then
+    record=$(status_span_first_actionable_record "$state/$task.status" \
+      "$(status_seen_offset "$state" "$task")")
+    rc=$?
+  fi
   last=$(last_status_line "$state/$task.status")
+  if [ "$rc" -eq 2 ]; then
+    printf 'escalate|unreadable status span for %s' "$task"
+    return
+  fi
   if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
     # A DECLARED external-wait pause or a verified captain-held transfer
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
@@ -402,6 +411,11 @@ classify_stale() {  # <window> <state>
     # reuses the status line already read, no fm-crew-state.sh call, mirroring the
     # daemon's existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
+  if [ "$rc" -eq 0 ]; then
+    event=${record#*$'\t'}
+    printf 'escalate|stale + actionable status: %s' "$event"
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -418,23 +432,7 @@ classify_stale() {  # <window> <state>
           ;;
       esac
     fi
-    # Dedupe against the signal path: when no captain-relevant event remains
-    # ahead of the recorded offset, this terminal was already escalated, so
-    # self-handle to avoid a duplicate in the digest.
-    status_span_has_actionable "$state/$task.status" \
-      "$(status_seen_offset "$state" "$task")"
-    case $? in
-      0) ;;
-      1)
-        printf 'self|stale + terminal (already escalated by signal): %s' "$last"
-        return
-        ;;
-      *)
-        printf 'escalate|unreadable status span for %s' "$task"
-        return
-        ;;
-    esac
-    printf 'escalate|stale + terminal status: %s' "$last"
+    printf 'self|stale + terminal (already escalated by signal): %s' "$last"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
@@ -1282,7 +1280,7 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
-  local capture="$state/.subsuper-classified-end.$$" span_record endpoint
+  local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint
   local kind="" arg=""
   : > "$capture" || return 1
   if should_force_self "$reason"; then
@@ -1299,12 +1297,16 @@ handle_wake() {  # <reason> <state>
               if [ -n "$task" ]; then
                 span_record=$(status_span_first_actionable_record "$state/$task.status" \
                   "$(status_seen_offset "$state" "$task")")
-                case $? in
+                span_rc=$?
+                case "$span_rc" in
                   0|1) endpoint=${span_record%%$'\t'*}; printf '%s\t%s\n' "$task" "$endpoint" > "$capture" ;;
                   *) printf 'ERROR\t%s\n' "$task" > "$capture" ;;
                 esac
+              else
+                span_rc=2
+                printf 'ERROR\t%s\n' "$arg" > "$capture"
               fi
-              decision=$(classify_stale "$arg" "$state")
+              decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")
               # An enriched wedge reason carries the watcher's own escalation count
               # and its "do not re-absorb on the run-step/pane state alone" demand,
               # so it outranks this daemon's cheaper status-log absorption - EXCEPT
