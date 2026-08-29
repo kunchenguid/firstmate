@@ -186,6 +186,72 @@ test_signal_reason_is_actionable_classifier() {
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
+# --- a captain-relevant event behind a later routine append -----------------
+# Regression for the silent stall: ONE wake covers every byte appended since the
+# previous one, so a crew that raises a decision (or reports review-ready PRs)
+# and then appends any routine line leaves the actionable event behind the newest
+# one. The triage read only the last line, called the whole batch benign, and the
+# absorb path swallowed the wake - after which nothing looked at that file again
+# and the work stalled with no supervisor turn at all.
+
+test_buried_captain_event_classifier() {
+  local dir state
+  dir=$(make_case classify-buried); state="$dir/state"
+  printf 'needs-decision [key=notebook]: two PRs review-ready; notebook run required\nworking: continuing on the follow-up\n' \
+    > "$state/a.status"
+  signal_reason_is_actionable "$state/a.status" \
+    || fail "a decision behind a later routine append classified benign"
+  printf 'done: PR https://example.test/pr/7 checks green\nworking: starting the follow-up\n' \
+    > "$state/b.status"
+  signal_reason_is_actionable "$state/b.status" \
+    || fail "a review-ready PR behind a later routine append classified benign"
+  # Firstmate's own answer writes the closing line, so the routine append that
+  # hides the next decision is regularly one of its own.
+  printf 'needs-decision [key=q2]: which base branch\nresolved [key=q1]: answered\n' > "$state/c.status"
+  signal_reason_is_actionable "$state/c.status" \
+    || fail "a decision behind an unrelated resolution classified benign"
+  printf 'working: step 1\nworking: step 2\n' > "$state/d.status"
+  signal_reason_is_actionable "$state/d.status" && fail "a purely routine batch classified actionable"
+  # A status path the cursor-backed readers refuse to trust must surface, never
+  # read as "nothing to report".
+  ln -s "$state/d.status" "$state/e.status" || fail "could not create the symlinked status fixture"
+  signal_reason_is_actionable "$state/e.status" || fail "a symlinked status path was absorbed as benign"
+  pass "signal_reason_is_actionable reads the whole unread batch, not just its last line"
+}
+
+test_presented_captain_event_is_not_reclassified_actionable() {
+  local dir state snapshot
+  dir=$(make_case classify-presented); state="$dir/state"
+  printf 'needs-decision [key=notebook]: two PRs review-ready; notebook run required\n' > "$state/a.status"
+  signal_reason_is_actionable "$state/a.status" || fail "an unread decision was not actionable"
+  # Advance the presentation cursor exactly the way a drain does.
+  snapshot=$(status_presentation_snapshot "$state") || fail "could not snapshot the presentation cursor"
+  status_commit_presentation_snapshot "$state" "$snapshot" || fail "could not commit the presented span"
+  signal_reason_is_actionable "$state/a.status" && fail "an already-presented decision re-fired the per-wake path"
+  printf 'working: continuing on the follow-up\n' >> "$state/a.status"
+  signal_reason_is_actionable "$state/a.status" \
+    && fail "a routine append after a presented decision surfaced the whole file again"
+  # Dedup is by position, never by content: the crew raising the SAME blocker a
+  # second time is a new, unread event.
+  printf 'needs-decision [key=notebook]: two PRs review-ready; notebook run required\n' >> "$state/a.status"
+  signal_reason_is_actionable "$state/a.status" \
+    || fail "a repeated identical decision line was suppressed as already presented"
+  pass "an unread captain event surfaces once, a later routine append does not, and a repeated line does"
+}
+
+test_scan_captain_relevant_statuses_reads_past_a_routine_append() {
+  local dir state out
+  dir=$(make_case classify-scan-buried); state="$dir/state"
+  printf 'blocked: needs a registry credential\nworking: parked on the other branch\n' > "$state/one.status"
+  out=$(scan_captain_relevant_statuses "$state")
+  printf '%s' "$out" | grep -F "blocked: needs a registry credential" >/dev/null \
+    || fail "the fleet backstop missed a blocker behind a later routine append"
+  printf 'working: a\nworking: b\n' > "$state/two.status"
+  out=$(scan_captain_relevant_statuses "$state")
+  printf '%s' "$out" | grep -F "two.status" >/dev/null && fail "the fleet backstop surfaced a purely routine status"
+  pass "scan_captain_relevant_statuses reports the captain-relevant event, not the newest line"
+}
+
 test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
@@ -744,6 +810,47 @@ test_actionable_signal_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+}
+
+test_broken_status_symlink_surfaced_despite_busy_crew() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case broken-status-symlink); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  ln -s "$state/missing-status-target" "$status_file" \
+    || fail "could not create broken status symlink"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a broken status symlink while crew appeared working"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "watcher did not surface the broken status symlink"
+  unset FM_FAKE_CREW_STATE
+  pass "watcher surfaces a broken status symlink as a trust refusal"
+}
+
+test_buried_captain_event_surfaced_despite_busy_crew() {
+  local dir state fakebin out drain_out status_file pid decision
+  dir=$(make_case buried-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  decision="needs-decision [key=notebook]: two PRs review-ready; notebook run required"
+  printf '%s\nworking: continuing on the follow-up\n' "$decision" > "$status_file"
+  # An actively-running pipeline is the positive evidence that made the absorb
+  # path swallow this whole batch: the crew looks busy, so a batch read as
+  # routine never reaches firstmate.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a decision hidden behind a later routine append"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the surfaced signal reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced signal failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
+    || fail "the surfaced signal was not queued"
+  [ "$(cat "$state/.hb-surfaced-task" 2>/dev/null || true)" = "$decision" ] \
+    || fail "the surfaced decision was not recorded, so the heartbeat backstop would report it again"
+  unset FM_FAKE_CREW_STATE
+  pass "a captain decision hidden behind a later routine append surfaces even while the crew is provably working"
 }
 
 test_terminal_stale_surfaced() {
@@ -2816,6 +2923,9 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 }
 
 test_signal_reason_is_actionable_classifier
+test_buried_captain_event_classifier
+test_presented_captain_event_is_not_reclassified_actionable
+test_scan_captain_relevant_statuses_reads_past_a_routine_append
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
@@ -2835,6 +2945,8 @@ test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
+test_broken_status_symlink_surfaced_despite_busy_crew
+test_buried_captain_event_surfaced_despite_busy_crew
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

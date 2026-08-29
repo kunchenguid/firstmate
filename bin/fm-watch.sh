@@ -803,8 +803,11 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 scan_signals() {
   local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
-    [ -e "$f" ] || continue
-    sig=$(fm_wake_signal_sig "$f") || continue
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    sig=$(fm_wake_signal_sig "$f") || {
+      [ -L "$f" ] || continue
+      sig=untrusted-symlink
+    }
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then

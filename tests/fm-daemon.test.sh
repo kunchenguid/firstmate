@@ -969,7 +969,7 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/sig-t8.status" "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not escalated"
   key=$(printf '%s' "sig-t8" | tr ':/.' '___')
-  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "done: PR https://x/y/pull/8" ] \
+  [ "$(tail -1 "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "done: PR https://x/y/pull/8" ] \
     || fail "captain signal escalate did not write the seen-status marker"
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-last-scan"
@@ -1239,7 +1239,7 @@ test_classify_signal_dedup_against_scan() {
   printf 'done: PR https://x/y/pull/9\n' > "$state/dup-s9.status"
   # Simulate the catch-all scan having already escalated this status.
   key=$(printf '%s' "dup-s9" | tr ':/.' '___')
-  printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
+  mark_escalated_seen signal "$state/dup-s9.status" "$state"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
   # Without the seen marker, it should escalate.
@@ -1247,6 +1247,82 @@ test_classify_signal_dedup_against_scan() {
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in escalate\|*) ;; *) fail "signal should escalate when not seen: $out" ;; esac
   pass "classify_signal dedupes against the catch-all scan seen marker"
+}
+
+test_classify_signal_skips_turn_markers_and_reports_all_statuses() {
+  local dir state out snapshot
+  dir=$(make_supercase classify-coalesced-paths)
+  state="$dir/state"
+  printf 'turn ended\n' > "$state/good.turn-ended"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/good.turn-ended" "$state")
+  case "$out" in self\|*) ;; *) fail "a bare turn-ended marker escalated: $out" ;; esac
+
+  printf 'needs-decision [key=good]: choose the release target\n' > "$state/good.status"
+  ln -s "$state/good.status" "$state/bad.status" || fail "could not create untrusted status fixture"
+  snapshot=$(status_presentation_snapshot "$state") || fail "could not snapshot status positions"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal \
+    "$state/bad.status $state/good.status $state/good.turn-ended" "$state" "$snapshot")
+  case "$out" in escalate\|*) ;; *) fail "mixed trusted and untrusted statuses did not escalate: $out" ;; esac
+  case "$out" in *"bad.status: unreadable or untrusted status path"*) ;; *) fail "untrusted status was absent from digest: $out" ;; esac
+  case "$out" in *"choose the release target"*) ;; *) fail "trusted sibling decision was absent from digest: $out" ;; esac
+  mark_escalated_seen signal "$state/bad.status $state/good.status $state/good.turn-ended" "$state" "$snapshot"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/good.status" "$state")
+  case "$out" in self\|*) ;; *) fail "reported trusted sibling was not position-deduped: $out" ;; esac
+  pass "classify_signal skips turn markers and reports every status sibling"
+}
+
+test_catchall_surfaces_untrusted_status_path() {
+  local dir state
+  dir=$(make_supercase catchall-untrusted-status)
+  state="$dir/state"
+  ln -s "$state/missing-status-target" "$state/untrusted.status" \
+    || fail "could not create broken status symlink"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  grep -F 'untrusted.status: unreadable or untrusted status path (catch-all scan)' \
+    "$state/.subsuper-escalations" >/dev/null \
+    || fail "catch-all silently omitted an untrusted status path"
+  pass "catch-all surfaces status paths excluded from trusted snapshots"
+}
+
+test_catchall_multiple_events_preserves_stale_dedupe() {
+  local dir state out
+  dir=$(make_supercase catchall-multiple-stale-dedupe)
+  state="$dir/state"
+  printf 'blocked [key=a]: first blocker\ndone: final result\n' > "$state/multi.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "catch-all did not escalate multiple relevant events"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-multi" "$state")
+  case "$out" in self\|*already\ escalated*) ;; *) fail "catch-all marker did not dedupe terminal stale: $out" ;; esac
+  pass "catch-all multi-event markers preserve terminal stale dedupe"
+}
+
+test_classify_signal_reads_the_whole_batch_not_the_last_line() {
+  # One wake covers every byte appended since the previous one. A crew that
+  # raised a decision and then appended any routine line used to be classified
+  # "routine signal" and self-handled in bash, so away mode answered nobody and
+  # the work stalled with no supervisor turn at all.
+  local dir state out decision
+  dir=$(make_supercase classify-buried)
+  state="$dir/state"
+  decision="needs-decision [key=notebook]: two PRs review-ready; notebook run required"
+  printf '%s\nworking: continuing on the follow-up\n' "$decision" > "$state/buried-s1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/buried-s1.status" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a decision behind a later routine append self-handled: $out" ;; esac
+  case "$out" in *"$decision"*) ;; *) fail "the escalated digest did not carry the decision line: $out" ;; esac
+  # And the escalation records that byte position, so the catch-all scan does not repeat it.
+  mark_escalated_seen signal "$state/buried-s1.status" "$state"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/buried-s1.status" "$state")
+  case "$out" in self\|*) ;; *) fail "an already-escalated buried decision escalated twice: $out" ;; esac
+
+  # Content equality cannot hide an earlier new event in a later unread span.
+  printf 'needs-decision [key=other]: choose the release target\n%s\nworking: routine tail\n' "$decision" \
+    >> "$state/buried-s1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/buried-s1.status" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a new decision before repeated seen content was dropped: $out" ;; esac
+  case "$out" in *"choose the release target"*) ;; *) fail "the earlier unseen decision was absent from the digest: $out" ;; esac
+  pass "classify_signal escalates every unseen event despite repeated seen content"
 }
 
 test_classify_stale_dedup_against_signal() {
@@ -2162,6 +2238,10 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
+test_classify_signal_skips_turn_markers_and_reports_all_statuses
+test_catchall_surfaces_untrusted_status_path
+test_catchall_multiple_events_preserves_stale_dedupe
+test_classify_signal_reads_the_whole_batch_not_the_last_line
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale

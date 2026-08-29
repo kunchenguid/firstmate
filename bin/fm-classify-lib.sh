@@ -135,6 +135,27 @@ status_is_captain_relevant() {
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
+# Print the most recent captain-relevant line in <status-file>, or nothing when
+# it has none. The status stream is an append-only EVENT log, so its newest line
+# is the newest EVENT, never a summary of what firstmate has still not seen: a
+# needs-decision, blocked, failed, or done event followed by any nonterminal
+# event (working:, resolved:, a declared pause) is still the captain-relevant
+# fact about that file. last_status_line answers "what is this crew's current
+# declaration"; this answers "what must firstmate be shown", and the two differ
+# exactly when a routine append lands behind an actionable one - which is one
+# ordinary wake window, because a wake covers every byte appended since the last
+# one. Consumers that must not re-report the same event layer their own dedup on
+# top, the same way they already do for last_status_line.
+last_captain_relevant_status_line() {  # <status-file>
+  local f=$1 line found=''
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    status_is_captain_relevant "$line" && found=$line
+  done < "$f"
+  printf '%s' "$found"
+}
+
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
 # read of the line itself, so the daemon's classify_stale can reuse the last line
 # it already read without a fm-crew-state.sh call. Matches only the verb before the
@@ -1082,13 +1103,17 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # changed status identity reads the current file from offset 0; malformed or
 # unreadable cursor state fails the scan. Symlinks and unreadable status files
 # print nothing.
-status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0
+status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>] [<handled-offset>]
+  local f=$1 captured_end=${2:-} handled_offset=${3:-} cf offset size actual_size chunk_file line rc=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   chunk_file="$cf.unread.$$"
   offset=$(status_presentation_cursor_offset "$f") || return 1
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -n "$handled_offset" ]; then
+    case "$handled_offset" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$handled_offset" -le "$offset" ] || offset=$handled_offset
+  fi
   actual_size=$(_fm_status_file_size "$f") || return 1
   actual_size=${actual_size//[[:space:]]/}
   case "$actual_size" in ''|*[!0-9]*) return 1 ;; esac
@@ -1244,19 +1269,48 @@ window_to_task() {
 }
 
 # 0 (actionable) if ANY status file listed in a "signal:" wake carries a
-# captain-relevant last line; 1 otherwise. Pass the space-separated file list that
-# follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,
-# which never carry a verb) are skipped. A 1 here is NOT "benign" on its own: a
-# no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
-# also provably working (signal_crew_provably_working below); otherwise it surfaces.
+# captain-relevant EVENT firstmate has not been shown yet; 1 otherwise. Pass the
+# space-separated file list that follows the "signal:" prefix. Non-.status
+# arguments (e.g. .turn-ended markers, which never carry a verb) are skipped. A 1
+# here is NOT "benign" on its own: a no-verb signal (a bare turn-end, a working:
+# note) is only benign when the crew is also provably working
+# (signal_crew_provably_working below); otherwise it surfaces.
+#
+# The span, not the last line, is the question. One wake covers every byte
+# appended since the previous one, so a crew that raises a decision and then
+# appends any routine line - and firstmate itself does this whenever a steer
+# closes one key while another event is still in flight - puts the actionable
+# event behind the newest one. Judging the file by its last line classified that
+# whole batch as routine, and because the wake was then absorbed nothing else
+# ever looked at it again: the crew stalled with no supervisor turn at all.
+# The span start is the presentation cursor (status_new_lines_since_cursor), the
+# one durable record of which status bytes firstmate has actually been shown, so
+# an already-presented captain-relevant event cannot re-fire this path and a
+# repeated identical line is still a new, unread event. When that cursor cannot
+# be read the fallback is the WHOLE file, not its last line: an unreadable cursor
+# may then cost a redundant wake for a file that really does carry a
+# captain-relevant event, but it can never hide one, and a file carrying nothing
+# actionable is still absorbed.
 signal_reason_is_actionable() {  # <file> ...
-  local f last
+  local f lines line
   for f in "$@"; do
-    [ -e "$f" ] || continue
+    [ -e "$f" ] || [ -L "$f" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
-    status_is_captain_relevant "$last" && return 0
+    # A status path that exists but is not a readable regular file is exactly
+    # what the cursor-backed readers refuse to trust, and a refusal must not
+    # read as "nothing to report": surface it rather than absorbing it blind.
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+    if ! lines=$(status_new_lines_since_cursor "$f"); then
+      [ -z "$(last_captain_relevant_status_line "$f")" ] || return 0
+      continue
+    fi
+    [ -n "$lines" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      status_is_captain_relevant "$line" && return 0
+    done <<EOF
+$lines
+EOF
   done
   return 1
 }
@@ -1446,17 +1500,20 @@ stale_is_terminal() {  # <window> <state>
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 
-# Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is
-# captain-relevant. This is the cheap fleet-scan both supervisors run as a
-# catch-all backstop for a captain-relevant status the per-wake path might miss.
+# Print "<file>\t<task>\t<captain-relevant-line>" for every state/*.status that
+# carries one. This is the cheap fleet-scan both supervisors run as a catch-all
+# backstop for a captain-relevant status the per-wake path might miss, so it reads
+# the file's most recent captain-relevant EVENT rather than its last line: a
+# backstop that goes blind the moment one routine line lands behind the event it
+# exists to catch is no backstop at all.
 # No dedup is applied here: each consumer dedupes against its own seen-state (the
-# daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
+# daemon against .subsuper-seen-status-*, the watcher against .hb-surfaced-*).
 scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    status_is_captain_relevant "$last" || continue
+    last=$(last_captain_relevant_status_line "$f")
+    [ -n "$last" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done

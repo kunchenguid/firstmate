@@ -113,12 +113,14 @@ _hb_surfaced_path() {
 }
 
 # Record a captain-relevant status after its durable wake has been enqueued.
+# Records the event the heartbeat backstop would report for this file - its most
+# recent captain-relevant line, not its last line - so the two stay the same
+# value and a surfaced event behind a routine append is not re-reported forever.
 mark_surfaced() {  # <status-file>
   local f=$1 task last
   task=$(basename "$f"); task="${task%.status}"
-  last=$(last_status_line "$f")
+  last=$(last_captain_relevant_status_line "$f")
   [ -n "$last" ] || return 0
-  status_is_captain_relevant "$last" || return 0
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
 }
 
