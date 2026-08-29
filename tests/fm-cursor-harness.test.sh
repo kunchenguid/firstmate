@@ -25,6 +25,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS ANTIGRAVITY_AGENT ANTIGRAVITY_LS_VERSION ANTIGRAVITY_SOURCE_METADATA
+
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$ROOT/bin/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -207,6 +209,9 @@ delete env.CURSOR_INVOKED_AS;
 delete env.CLAUDECODE;
 delete env.PI_CODING_AGENT;
 delete env.GROK_AGENT;
+delete env.ANTIGRAVITY_AGENT;
+delete env.ANTIGRAVITY_LS_VERSION;
+delete env.ANTIGRAVITY_SOURCE_METADATA;
 const result = spawnSync(process.argv[2], [], { encoding: 'utf8', env });
 process.stdout.write(result.stdout);
 process.stderr.write(result.stderr);

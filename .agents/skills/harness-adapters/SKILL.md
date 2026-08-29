@@ -133,6 +133,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| agy | `--model <model>` | `--effort <low\|medium\|high>` (gemini-* models only) | Verified 2026-08-29 on Antigravity CLI 1.1.22. Default model is `gemini-3.7-flash-high`. `--effort` is supported only for base `gemini-*` models; it is omitted for non-Gemini models and for models that already encode effort (such as `*-high`). Unsupported `xhigh` and `max` are capped to `high`. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -152,6 +153,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
+| agy | Run `agy models`, which lists available models and marks the default model (`gemini-3.7-flash-high`). |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -173,6 +175,7 @@ Natural language is acceptable if uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
 - cursor: `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills. Its slash popup swallows the first Enter, so a genuine second Enter submits; the shared submit retry handles it.
+- agy: `/<skill>`, for example `/no-mistakes`.
 
 ## Submission acknowledgement hazards
 
@@ -534,3 +537,22 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+
+## agy (VERIFIED CREWMATE/SCOUT 2026-08-29, Antigravity CLI 1.1.22)
+
+| Fact | Value |
+|---|---|
+| Binary | `/home/blake/.local/bin/agy` (ELF 64-bit LSB executable, x86-64, Go). |
+| Models | `--model <id>`, discovered through `agy models`; default is `gemini-3.7-flash-high`. |
+| Effort | `--effort low\|medium\|high` for base `gemini-*` models only; omitted for non-Gemini models and models that already encode effort (such as `*-high`). Unsupported `xhigh` and `max` are capped to `high`. |
+| Launch flags | `--dangerously-skip-permissions`, `--prompt-interactive="$(...)"` (attached with `=`), `--continue` / `-c`, `--conversation <id>`. |
+| Busy state | Per-task `PreInvocation` and `Stop` hooks in `$WT/.agents/hooks.json` touching `$TURNEND` and sending `busy` / `idle` events via `fm-busy-event.sh` with source `agy-hook`. |
+| Exit command | `/exit` (exits cleanly with status 0). |
+| Interrupt | `Escape` or `Ctrl+C` cancels turn; Firstmate uses `C-c` across all backends. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`. |
+| Trust dialog | `Do you trust the contents of this project?` with `Yes, I trust this folder` preselected; Enter accepts. Trusted paths are stored in `~/.gemini/antigravity-cli/settings.json` `trustedWorkspaces`. |
+| Environment marker | `ANTIGRAVITY_AGENT=1`, `ANTIGRAVITY_LS_VERSION`, `ANTIGRAVITY_SOURCE_METADATA`, `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_AGENTAPI_EXE`. Detection layers check markers before ancestry. |
+| Composer | Bordered horizontal rules (`────`) enclosing prompt glyph `>` (or `❯` in UTF-8). Delivery busy regex: `esc to cancel`. |
+| Secondmate | Refused (crewmate and scout launches only; no primary supervision protocol). |
+
+[`docs/verification/agy.md`](../../../docs/verification/agy.md) owns the dated empirical verification commands, transcripts, and proof.
