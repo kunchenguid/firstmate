@@ -109,6 +109,25 @@ seen_through() {  # <state> <task>
 # the captain must hear, then keeps appending routine progress. Classifying only
 # the last line self-handles the wake and the work stalls silently until the
 # captain returns.
+test_classify_signal_skips_turn_end_markers() {
+  local dir state reader turn status out
+  dir=$(make_supercase signal-turn-end); state="$dir/state"
+  reader="$dir/identity-reader"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"; chmod +x "$reader"
+  turn="$state/task.turn-ended"; : > "$turn"
+  out=$(FM_STATUS_IDENTITY_READER="$reader" classify_signal "$turn" "$state")
+  case "$out" in self\|routine\ signal:*) ;;
+    *) fail "an empty turn-end marker was not routine under unavailable identity: $out" ;;
+  esac
+  status="$state/task.status"
+  printf 'blocked: release approval required\nworking: preparing notes\n' > "$status"
+  out=$(classify_signal "$turn $status" "$state")
+  case "$out" in escalate\|*"blocked: release approval required"*) ;;
+    *) fail "a mixed turn-end and actionable status batch did not name the status event: $out" ;;
+  esac
+  pass "turn-end markers stay routine while mixed actionable status batches escalate"
+}
+
 test_classify_signal_survives_a_later_routine_append() {
   local dir state out
   dir=$(make_supercase classify-masked)
@@ -2366,6 +2385,7 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
+test_classify_signal_skips_turn_end_markers
 test_classify_signal_survives_a_later_routine_append
 test_classification_commits_its_captured_endpoint
 test_stale_masked_event_escalates_at_captured_endpoint

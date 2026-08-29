@@ -344,6 +344,7 @@ _collapse_newlines() {  # <text>
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last event record rest endpoint ident rc distilled="" rel="" seen_rel="" task
   for f in $reason; do
+    case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" \
