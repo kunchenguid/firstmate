@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "Firstmate then triggers validation on you." "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -352,6 +352,67 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+# A crewmate runs in a project worktree, not the firstmate home, so the
+# `no-mistakes` SKILL is not reachable to it while the `no-mistakes` CLI on PATH
+# always is. Briefs that told the worker to invoke the skill cost a supervisor
+# round trip at exactly the point the worker had just finished implementing, and
+# three workers instead reported `done:` for a commit with no PR. Every scaffold
+# must therefore name the CLI and no scaffold may instruct a skill invocation.
+test_no_scaffold_instructs_a_skill_invocation() {
+  local home id brief
+  home="$TMP_ROOT/cli-interface-home"
+  mkdir -p "$home/data"
+
+  for id_args in \
+    "brief-iface-nomistakes:some-proj --mode no-mistakes" \
+    "brief-iface-directpr:some-proj --mode direct-PR" \
+    "brief-iface-localonly:some-proj --mode local-only" \
+    "brief-iface-scout:some-proj --scout"; do
+    id=${id_args%%:*}
+    # shellcheck disable=SC2086  # the arg list is an intentional word split
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" ${id_args#*:} >/dev/null 2>&1 \
+      || fail "$id: scaffold exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "run /no-mistakes" "$brief" \
+      "$id: brief tells the worker to run a skill it cannot load"
+    assert_no_grep "invoke /no-mistakes" "$brief" \
+      "$id: brief tells the worker to invoke a skill it cannot load"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" brief-iface-secondmate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate charter scaffold exited non-zero"
+  brief="$home/data/brief-iface-secondmate/brief.md"
+  assert_no_grep "run /no-mistakes" "$brief" \
+    "secondmate charter tells the worker to run a skill it cannot load"
+  assert_no_grep "invoke /no-mistakes" "$brief" \
+    "secondmate charter tells the worker to invoke a skill it cannot load"
+
+  # The no-mistakes ship brief must positively name the working interface, and
+  # must keep the PR as the only thing `done:` can mean in that mode.
+  brief="$home/data/brief-iface-nomistakes/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'the `no-mistakes` CLI on your `PATH`' "$brief" \
+    "no-mistakes DOD did not name the CLI as the interface the worker actually has"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`no-mistakes axi run --intent "<...>"` to start' "$brief" \
+    "no-mistakes DOD did not give the concrete run command"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`no-mistakes axi respond` for each gate' "$brief" \
+    "no-mistakes DOD did not give the concrete gate-response command"
+  assert_grep "This mode is complete only when the no-mistakes pipeline has shipped a PR whose checks are green." "$brief" \
+    "no-mistakes DOD did not bind completion to a green PR"
+  assert_grep "not yet validated - no PR yet" "$brief" \
+    "no-mistakes DOD let the implementation handoff read as a shipped result"
+  assert_grep "stop, never \`done:\`." "$brief" \
+    "no-mistakes DOD did not route an unstartable run to blocked: instead of done:"
+
+  # The faster paths must refuse the pipeline without naming a skill for it.
+  assert_grep "Do NOT run the no-mistakes pipeline." "$home/data/brief-iface-directpr/brief.md" \
+    "direct-PR brief lost its pipeline refusal"
+  pass "fm-brief.sh: every scaffold names the no-mistakes CLI and none instructs a skill invocation"
 }
 
 test_ship_project_memory_wording() {
@@ -760,6 +821,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_scaffold_instructs_a_skill_invocation
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
