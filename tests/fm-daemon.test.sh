@@ -1793,6 +1793,80 @@ test_wedge_alarm_shutdown_stops_active_notifier_group() {
   pass "daemon shutdown stops and reaps the active notifier process group"
 }
 
+test_escalation_alert_library_mode_defaults_to_discard() {
+  local out
+  # shellcheck disable=SC2016  # $1/$FM_ESCALATION_ALERT_EXEC must expand in the child, not here
+  out=$(env -u FM_ESCALATION_ALERT_EXEC bash -c '. "$1"; printf "%s" "${FM_ESCALATION_ALERT_EXEC:-UNSET}"' _ "$DAEMON")
+  [ "$out" = discard ] \
+    || fail "sourcing the daemon did not default FM_ESCALATION_ALERT_EXEC to discard (got: $out)"
+  pass "library mode: sourcing the daemon defaults FM_ESCALATION_ALERT_EXEC to discard (no test can fire a real notification)"
+}
+
+test_escalation_alert_fires_on_successful_flush() {
+  local dir state fakebin sent log
+  dir=$(make_bordered_case escalation-alert-flush)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  log="$dir/escalation.log"
+  escalate_add "$state" "done: PR https://x/y/pull/3"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 FM_ESCALATION_ALERT_LOG="$log" FM_ESCALATION_ALERT_CHANNEL=osascript \
+    escalate_flush "$state" \
+    || fail "escalate_flush failed"
+  grep -F 'osascript' "$log" >/dev/null \
+    || fail "a successfully delivered escalation digest did not fire the escalation alert: $(cat "$log" 2>/dev/null)"
+  pass "a successfully flushed escalation digest fires the configured escalation alert"
+}
+
+test_escalation_alert_off_disables_alert() {
+  local dir state fakebin sent log
+  dir=$(make_bordered_case escalation-alert-off)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  log="$dir/escalation.log"
+  escalate_add "$state" "done: PR https://x/y/pull/4"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 FM_ESCALATION_ALERT_LOG="$log" FM_ESCALATION_ALERT_CHANNEL=off \
+    escalate_flush "$state" \
+    || fail "escalate_flush failed"
+  [ ! -s "$log" ] || fail "config/escalation-alert off still fired an alert: $(cat "$log")"
+  pass "escalation-alert off disables the alert while the pane digest still delivers"
+}
+
+test_escalation_alert_defaults_off_when_unconfigured() {
+  local dir out
+  dir=$(mktemp -d)
+  out=$(unset FM_ESCALATION_ALERT_CHANNEL; FM_HOME="$dir" escalation_alert_configured_channels)
+  [ "$out" = off ] \
+    || fail "an absent config/escalation-alert and unset FM_ESCALATION_ALERT_CHANNEL must default to off, not auto (got: $out)"
+  pass "escalation-alert defaults to off (opt-in) when neither the config file nor the env override is set"
+}
+
+test_escalation_alert_osascript_channel_selected() {
+  local dir log
+  dir=$(make_wedge_case escalation-alert-osascript); log="$dir/alert.log"
+  FM_ESCALATION_ALERT_LOG="$log" FM_ESCALATION_ALERT_CHANNEL=osascript \
+    escalation_alert_notify "Supervisor escalate (1 event(s)): done: PR https://x/y/pull/5"
+  grep -F 'osascript' "$log" >/dev/null || fail "osascript channel not routed through the escalation-alert seam: $(cat "$log")"
+  grep -F 'pull/5' "$log" >/dev/null || fail "osascript channel did not carry the summary"
+  grep -F 'herdr' "$log" >/dev/null && fail "osascript-only config also selected herdr"
+  pass "escalation-alert osascript channel routes through the notifier seam with the summary"
+}
+
+test_escalation_alert_command_channel_receives_summary() {
+  local dir out_argv chan
+  dir=$(make_wedge_case escalation-alert-command)
+  out_argv="$dir/argv.txt"
+  chan="command: printf '%s' \"\$1\" > '$out_argv'"
+  FM_ESCALATION_ALERT_EXEC='' FM_ESCALATION_ALERT_CHANNEL="$chan" \
+    escalation_alert_notify "Supervisor escalate (1 event(s)): done: PR https://x/y/pull/6"
+  grep -F 'pull/6' "$out_argv" >/dev/null 2>&1 \
+    || fail "command channel did not receive the escalation-alert summary on \$1"
+  pass "escalation-alert command channel runs the captain command with the summary"
+}
+
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   # The whole incident: a non-tmux (herdr) primary gets NO tmux status-line
   # flash, so inject_wedge_alarm must still emit the backend-independent alert
@@ -2193,6 +2267,12 @@ test_wedge_alarm_hung_channel_times_out_and_falls_through
 test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
 test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
+test_escalation_alert_library_mode_defaults_to_discard
+test_escalation_alert_fires_on_successful_flush
+test_escalation_alert_off_disables_alert
+test_escalation_alert_defaults_off_when_unconfigured
+test_escalation_alert_osascript_channel_selected
+test_escalation_alert_command_channel_receives_summary
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_reports_delivered_unconfirmed_submit

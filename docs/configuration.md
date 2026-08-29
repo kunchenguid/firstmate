@@ -170,6 +170,16 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Away-mode escalation alert channels (config/escalation-alert)
+
+The wedge alarm above fires only when injection itself cannot be confirmed - a rare failure mode.
+`config/escalation-alert` covers the far more common case: a real, captain-relevant escalation (a PR ready for review, an ask-user decision, a real blocker) is injected into the supervisor pane successfully, but the captain is away from that pane.
+`escalate_flush` fires this alert on every SUCCESSFUL delivery of a genuine escalation digest, using the same directive syntax, safety machinery, and best-effort channel dispatch as the wedge alarm above, configured independently.
+`config/escalation-alert` (local, gitignored) takes the same directives (`off`, `auto`/`default`, `osascript`, `herdr`, `command:<cmd>`); `FM_ESCALATION_ALERT_CHANNEL` overrides the file with a single directive.
+An absent file means `off`: this is a new captain-facing notification capability, so it is opt-in, unlike the wedge alarm's default-on `auto`.
+There is no additional rate limit beyond the natural escalation-batch window: each flushed digest already batches every wake that arrived within that window, so a distinct later escalation still pings.
+See [`wedge-alarm.md`](wedge-alarm.md#escalation-alert-fires-on-delivery-not-just-on-a-wedge) for the current reference.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
@@ -793,6 +803,8 @@ FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry pl
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
+FM_ESCALATION_ALERT_CHANNEL=      # override config/escalation-alert with one directive for the away-mode escalation alert; off|auto|osascript|herdr|command:<cmd>; absent = off (opt-in); fires on every SUCCESSFUL escalate_flush, distinct from the wedge alarm above (docs/wedge-alarm.md)
+FM_ESCALATION_ALERT_EXEC=         # notifier seam for the escalation alert, same contract as FM_WEDGE_ALARM_EXEC but independent so a test exercising one trigger never fires the other's real notifier
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks

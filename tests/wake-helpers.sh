@@ -42,6 +42,19 @@ REC
 chmod +x "$_fm_wedge_rec_dir/rec"
 export FM_WEDGE_ALARM_EXEC="$_fm_wedge_rec_dir/rec"
 
+# Escalation-alert notifier recorder (same safety contract as the wedge-alarm
+# recorder above, kept on its own seam/log/fail variables so a suite exercising
+# one trigger can never accidentally fire or assert on the other's channel).
+_fm_escalation_rec_dir=$(fm_test_tmproot fm-escalation-rec)
+cat > "$_fm_escalation_rec_dir/rec" <<'REC'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "${1:-}" "${2:-}" >> "${FM_ESCALATION_ALERT_LOG:-/dev/null}"
+case " ${FM_ESCALATION_ALERT_FAIL:-} " in *" ${1:-} "*) exit 1 ;; esac
+exit 0
+REC
+chmod +x "$_fm_escalation_rec_dir/rec"
+export FM_ESCALATION_ALERT_EXEC="$_fm_escalation_rec_dir/rec"
+
 # append_wake <state> <kind> <key> <payload>: append a wake record to the durable
 # queue in a subshell scoped to <state>, using the production wake library.
 append_wake() {

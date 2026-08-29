@@ -1,0 +1,28 @@
+# config/escalation-alert - active alert channels for real away-mode
+# escalations (bin/fm-supervise-daemon.sh's escalation_alert_notify). Copy this
+# into a local, gitignored config/escalation-alert and edit. Same directive
+# syntax as config/wedge-alarm, but this fires on every SUCCESSFUL delivery of
+# a genuine escalation digest (a PR ready for review, an ask-user decision, a
+# real blocker) rather than only when injection itself wedges - so an away
+# captain can be pinged the moment something actually needs them.
+#
+# Directives:
+#   off              disable this alert entirely (the pane digest still delivers)
+#   auto | default   platform default: macOS -> osascript; other platforms have
+#                    no built-in OS channel (configure a command: line instead)
+#   osascript        macOS Notification Center banner (backend-independent)
+#   herdr            herdr UI notification (herdr notification show)
+#   command:<cmd>    run <cmd> via `sh -c`; the escalation summary is passed as
+#                    $1 and on stdin, so it can reach a phone/pager while away
+#
+# An ABSENT config/escalation-alert behaves as `off`: this is a new
+# captain-facing notification capability, so it is opt-in, unlike
+# config/wedge-alarm's default-on `auto`.
+# Unlike config/wedge-alarm, there is no extra rate limit beyond the natural
+# escalation-batch window: each flushed digest already batches every wake that
+# arrived within that window, so a distinct later escalation still pings.
+#
+# Example: a macOS banner plus a push to a phone via ntfy.sh, so a real
+# escalation reaches you even away from the machine.
+osascript
+command: curl -fsS -H "Title: firstmate escalation" -d "$1" https://ntfy.sh/replace-with-your-topic

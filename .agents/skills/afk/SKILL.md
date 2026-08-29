@@ -112,6 +112,11 @@ an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
+
+**Escalation alert (delivery, not just failure).**
+A successfully injected escalation digest still only reaches a captain who is looking at the supervisor pane.
+On every successful `escalate_flush`, the daemon additionally attempts a configurable, opt-in `config/escalation-alert` channel (same directive syntax as the wedge alarm, off by default, and with no additional rate limiting beyond the natural `escalate_flush` batch window), so an away captain can be pinged off-pane the moment a real escalation lands, not only when injection itself wedges.
+`docs/wedge-alarm.md` "Escalation alert" owns this channel's setup and its relationship to the wedge alarm above.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
 ## Submit model

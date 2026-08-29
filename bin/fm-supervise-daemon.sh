@@ -130,6 +130,23 @@
 #                                   its watchdog terminates it and continues to the
 #                                   next channel (default 10; invalid/zero uses the
 #                                   default).
+#          FM_ESCALATION_ALERT_CHANNEL override config/escalation-alert with a
+#                                   single directive (off|auto|osascript|herdr|
+#                                   command:<cmd>). Fires on every SUCCESSFUL
+#                                   escalate_flush of a genuine escalation digest
+#                                   (distinct from the wedge alarm, which fires
+#                                   only when injection itself cannot be
+#                                   confirmed), so an away captain can be pinged
+#                                   off-pane the moment something real needs
+#                                   them. This is opt-in: an absent file/var
+#                                   means off, unlike the wedge alarm's
+#                                   default-on auto. See
+#                                   escalation_alert_notify above escalate_flush
+#                                   and docs/wedge-alarm.md.
+#          FM_ESCALATION_ALERT_EXEC notifier seam for escalation alerts, same
+#                                   contract as FM_WEDGE_ALARM_EXEC but kept
+#                                   independent so a test exercising one trigger
+#                                   never fires the other's real notifier.
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
 #                                   Enter is retried. Composer-empty detection is
@@ -662,8 +679,162 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    escalation_alert_notify "$msg"
+    : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    return 0
+  fi
   return 1
+}
+
+# --- backend-independent escalation alert ------------------------------------
+# The pane injection above lands a real, captain-relevant escalation (PR ready
+# for review, an ask-user decision, a real blocker) into the supervisor pane -
+# but only a captain who is actually looking at that pane sees it. Unlike
+# inject_wedge_alarm below, which only fires when injection itself cannot be
+# confirmed, this fires on every SUCCESSFUL delivery of a genuine escalation
+# digest, so an away captain can still be pinged on a phone or desktop the
+# moment something needs them, not only when the delivery mechanism breaks.
+#
+# Deliberately no rate limiting beyond the natural escalate_flush batch window
+# (FM_ESCALATE_BATCH_SECS): each flushed digest already batches every wake that
+# arrived within that window into one message, so a distinct later escalation
+# should still ping rather than being silently throttled the way the rarer
+# wedge alarm intentionally is.
+#
+# Config: config/escalation-alert (local, gitignored), same directive syntax as
+# config/wedge-alarm: off | auto | osascript | herdr | command:<cmd>.
+# FM_ESCALATION_ALERT_CHANNEL overrides the file with a single directive. This
+# is a new captain-facing notification capability, so an absent config means
+# off (opt-in only) - unlike the wedge alarm's default-on auto, which only
+# ever fires on a rare delivery failure rather than on every escalation.
+
+escalation_alert_configured_channels() {
+  local cfg line found=
+  if [ -n "${FM_ESCALATION_ALERT_CHANNEL:-}" ]; then
+    printf '%s\n' "$FM_ESCALATION_ALERT_CHANNEL"
+    return 0
+  fi
+  cfg="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/escalation-alert"
+  if [ -f "$cfg" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [ -n "$line" ] || continue
+      case "$line" in '#'*) continue ;; esac
+      printf '%s\n' "$line"
+      found=1
+    done < "$cfg"
+  fi
+  [ -n "$found" ] || printf 'off\n'
+}
+
+# The execution seam for escalation-alert channels, kept distinct from
+# FM_WEDGE_ALARM_EXEC so a test exercising one trigger can never accidentally
+# fire the other's real notifier.
+escalation_alert_os_notifier_override() {  # <channel> <summary>
+  local channel=$1 summary=$2 rc exec_override=${FM_ESCALATION_ALERT_EXEC:-}
+  case "$exec_override" in
+    '') return 2 ;;
+    discard) return 0 ;;
+    *)
+      wedge_alarm_run_bounded "$channel" "$exec_override" "$channel" "$summary" >/dev/null 2>&1
+      rc=$?
+      [ "$rc" -eq 0 ] && return 0
+      log "escalation alert: notifier override exited $rc for channel '$channel'"
+      return 1 ;;
+  esac
+}
+
+escalation_alert_via_osascript() {  # <summary>
+  local summary=$1 rc
+  escalation_alert_os_notifier_override osascript "$summary"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+  esac
+  command -v osascript >/dev/null 2>&1 || {
+    log "escalation alert: osascript not found; cannot post a macOS notification"; return 1; }
+  wedge_alarm_run_bounded osascript osascript -e 'on run argv' \
+    -e 'display notification (item 1 of argv) with title "firstmate: away-mode escalation"' \
+    -e 'end run' "$summary" >/dev/null 2>&1 && return 0
+  log "escalation alert: osascript notification failed"
+  return 1
+}
+
+escalation_alert_via_herdr() {  # <summary>
+  local summary=$1 rc
+  escalation_alert_os_notifier_override herdr "$summary"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+  esac
+  command -v herdr >/dev/null 2>&1 || {
+    log "escalation alert: herdr not found; cannot post a herdr notification"; return 1; }
+  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalation" \
+    --body "$summary" >/dev/null 2>&1 && return 0
+  log "escalation alert: herdr notification failed"
+  return 1
+}
+
+escalation_alert_via_command() {  # <cmd> <summary>
+  local cmd=$1 summary=$2 rc
+  if [ "${ESCALATION_ALERT_EMIT_ACTIVE:-}" != 1 ]; then
+    escalation_alert_emit command "$summary" "$cmd"
+    return $?
+  fi
+  [ -n "$cmd" ] || { log "escalation alert: empty command: channel; nothing to run"; return 1; }
+  wedge_alarm_run_bounded command sh -c "$cmd" fm-escalation-alert "$summary" \
+    <<< "$summary" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  log "escalation alert: command channel exited $rc (command redacted)"
+  return 1
+}
+
+escalation_alert_emit() {  # <channel> <summary> [cmd]
+  local channel=$1 summary=$2 cmd=${3:-} rc exec_override=${FM_ESCALATION_ALERT_EXEC:-} ESCALATION_ALERT_EMIT_ACTIVE=1
+  case "$exec_override" in
+    '') ;;
+    discard) return 0 ;;
+    *)
+      wedge_alarm_run_bounded "$channel" "$exec_override" "$channel" "$summary" >/dev/null 2>&1
+      rc=$?
+      [ "$rc" -eq 0 ] && return 0
+      log "escalation alert: notifier override exited $rc for channel '$channel'"
+      return 1 ;;
+  esac
+  case "$channel" in
+    osascript) escalation_alert_via_osascript "$summary" ;;
+    herdr) escalation_alert_via_herdr "$summary" ;;
+    command) escalation_alert_via_command "$cmd" "$summary" ;;
+  esac
+}
+
+# Fire every configured escalation-alert channel, best-effort. Always returns
+# 0: a channel failure can never abort escalate_flush or the daemon loop.
+escalation_alert_notify() {  # <summary>
+  local summary=$1 ch
+  local -a channels=()
+  while IFS= read -r ch; do
+    [ -n "$ch" ] || continue
+    channels+=("$ch")
+  done < <(escalation_alert_configured_channels)
+  for ch in "${channels[@]}"; do
+    [ "$ch" = off ] && return 0
+  done
+  for ch in "${channels[@]}"; do
+    case "$ch" in auto|default) ch=$(wedge_alarm_platform_default) ;; esac
+    case "$ch" in
+      '') log "escalation alert: no OS-level alert channel on $(uname); the pane digest is the only signal - set config/escalation-alert (e.g. a command: directive)" ;;
+      osascript|herdr) escalation_alert_emit "$ch" "$summary" || true ;;
+      command:*) escalation_alert_emit command "$summary" "${ch#command:}" || true ;;
+      *) log "escalation alert: unrecognized channel directive (redacted)" ;;
+    esac
+  done
+  return 0
 }
 
 # --- backend-independent active wedge alert ---------------------------------
@@ -1614,4 +1785,6 @@ else
   # The executed branch above never runs this, so production is untouched.
   : "${FM_WEDGE_ALARM_EXEC:=discard}"
   export FM_WEDGE_ALARM_EXEC
+  : "${FM_ESCALATION_ALERT_EXEC:=discard}"
+  export FM_ESCALATION_ALERT_EXEC
 fi

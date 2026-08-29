@@ -28,12 +28,29 @@ On timeout or daemon shutdown, the notifier process group is terminated and the 
 AppleScript receives the summary as an argv item rather than interpolated source, so summary text cannot alter the script.
 See [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Escalation alert (fires on delivery, not just on a wedge)
+
+The wedge alarm above only fires when injection itself cannot be confirmed - a rare failure mode.
+It says nothing about the far more common case: a genuine, captain-relevant escalation (a PR ready for review, an ask-user decision, a real blocker) is injected into the supervisor pane *successfully*, but the captain is away from that pane and never sees it.
+
+`escalate_flush` fires a second, independent alert - `escalation_alert_notify` - on every successful delivery of a real escalation digest, so an away captain can be pinged off-pane the moment something actually needs them, not only when delivery breaks.
+
+It shares the wedge alarm's channel syntax and safety machinery (best-effort, process-group bounded, argv-safe `command:` dispatch) but is configured independently and applies no additional rate limiting of its own:
+
+- `config/escalation-alert` (local, gitignored) takes the same directives as `config/wedge-alarm`: `off`, `auto`/`default`, `osascript`, `herdr`, `command:<cmd>`.
+- `FM_ESCALATION_ALERT_CHANNEL` overrides the file with one directive for focused testing.
+- An absent `config/escalation-alert` behaves as `off`: this is a new captain-facing notification capability, so it is opt-in, unlike the wedge alarm's default-on `auto`.
+- Unlike the wedge alarm, there is no additional rate limit beyond the natural `escalate_flush` batch window (`FM_ESCALATE_BATCH_SECS`): each flushed digest already batches every wake that arrived within that window into one message, and a distinct later escalation still pings rather than being throttled.
+
+Configure the two independently: a captain who wants a phone ping for every real escalation but not for the rarer wedge failure (or vice versa) can leave one on `off` and the other on a `command:` directive.
+See [`examples/escalation-alert`](examples/escalation-alert) for a copyable config.
+
 ## Test safety
 
-Every notifier routes through `FM_WEDGE_ALARM_EXEC` in `wedge_alarm_emit`.
-When the daemon is sourced as a library, that seam defaults to `discard`, so a test cannot accidentally post a real notification.
-`tests/wake-helpers.sh` replaces it with a recorder when a suite needs to assert channel selection and summary propagation.
-Production leaves the seam unset and uses the configured real channels.
+Every wedge-alarm notifier routes through `FM_WEDGE_ALARM_EXEC` in `wedge_alarm_emit`; every escalation-alert notifier routes through the independent `FM_ESCALATION_ALERT_EXEC` seam in `escalation_alert_emit`, so a suite exercising one trigger can never accidentally fire the other's real notifier.
+When the daemon is sourced as a library, both seams default to `discard`, so a test cannot accidentally post a real notification.
+`tests/wake-helpers.sh` replaces each with its own recorder when a suite needs to assert channel selection and summary propagation.
+Production leaves both seams unset and uses the configured real channels.
 
-`tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, and safe `command:` summary delivery.
+`tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, and safe `command:` summary delivery for the wedge alarm, and the equivalent channel selection, `off` handling, and successful-flush hookup for the escalation alert.
 [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) records the bounded manual macOS and Herdr channel proof.
