@@ -263,12 +263,37 @@ fm_backend_thurbox_agent_defined() {  # <agent-name>
   # prevent; and an agent name carrying a regex metacharacter (`fm.shell`)
   # would otherwise match a different entry (`fmXshell`). TOML accepts both
   # quote styles for a basic string, so both are matched.
+  #
+  # A trailing comment is stripped first, on the header line as well as the
+  # name line, because this gate exists to turn a late, mystifying agent-launch
+  # failure into an early actionable one - and a scan that reads an ordinary
+  # commented `name = "shell" # ...` as undefined would BE the mystifying
+  # failure, refusing every spawn while telling the operator to add an entry
+  # thurbox itself already accepts. The strip tracks quote state so a `#`
+  # inside the value is a literal, not a comment. Header matching likewise
+  # tolerates TOML's permitted inner whitespace (`[[ agents ]]`), since a
+  # header this scan fails to recognize silently skips that whole table.
   awk -v want="$agent" '
+    function uncomment(s,   i, c, q, n) {
+      q = ""
+      n = length(s)
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (q == "\"" && c == "\\") { i++; continue }
+        if (q != "") { if (c == q) q = ""; continue }
+        if (c == "#") return substr(s, 1, i - 1)
+        if (c == "\"" || c == "\047") q = c
+      }
+      return s
+    }
     {
-      line = $0
+      line = uncomment($0)
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
-      if (line ~ /^\[/) { in_agents = (line == "[[agents]]"); next }
+      if (line ~ /^\[/) {
+        in_agents = (line ~ /^\[\[[[:space:]]*agents[[:space:]]*\]\]$/)
+        next
+      }
       if (!in_agents) next
       if (line !~ /^name[[:space:]]*=[[:space:]]*/) next
       sub(/^name[[:space:]]*=[[:space:]]*/, "", line)
@@ -664,13 +689,29 @@ fm_backend_thurbox_composer_state() {  # <target> [expected-label] -> empty|pend
 # fm_backend_thurbox_send_text_submit: type <text> once (raw, unsubmitted), then
 # drive the shared verify-and-retry-Enter loop against the shared composer
 # verdict. Never retypes. Echoes empty|pending|unknown|send-failed.
+#
+# The busy-fn argument is what puts thurbox on the queued-Enter conversion tmux
+# and herdr have, and it is the only backend on this shared loop that supplies
+# one: a harness mid-turn QUEUES the Enter instead of consuming it, so the text
+# stays in the composer, every retry reads `pending`, and without the
+# conversion fm-send would report an unproven submit and exit nonzero for a
+# steer that will in fact land when the turn ends. The signal handed over is
+# fm_backend_thurbox_busy_state - thurbox's native hook_state, written by the
+# agent's own lifecycle hooks - so only an affirmative `busy` (hook_state
+# working) converts: a null hook_state reads unknown and an idle/done/blocked
+# reads idle, and neither is accepted as proof of a queue.
+#
+# NOT empirically verified: unlike everything in this file's findings list,
+# this conversion has never been observed against a real mid-turn thurbox
+# steer. It is a reasoned extension of the same native signal fm-busy-lib.sh
+# already trusts for thurbox, not an observation.
 fm_backend_thurbox_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
   fm_backend_thurbox_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_thurbox_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_thurbox_send_key fm_backend_thurbox_composer_state \
-    "$target" "$retries" "$sleep_s" "$expected_label"
+    "$target" "$retries" "$sleep_s" "$expected_label" fm_backend_thurbox_busy_state
 }
 
 # fm_backend_thurbox_busy_state: semantic busy/idle/unknown from thurbox's

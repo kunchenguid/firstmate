@@ -205,6 +205,25 @@ test_send_text_submit_retries_when_composer_stays_pending() {
   pass "fm_backend_orca_send_text_submit: retries Enter while composer remains pending"
 }
 
+test_send_text_submit_exhausted_pending_is_never_converted() {
+  local out
+  orca_case send-submit-exhausted-pending
+  # Orca supplies no delivery-busy primitive to the shared retry loop, so a
+  # composer that still holds the text once the budget is spent stays pending.
+  # The queued-Enter conversion tmux, herdr, and thurbox get must never reach
+  # this adapter: without a busy signal of its own, "still pending" here is
+  # indistinguishable from a genuinely swallowed Enter.
+  printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭─────────────────╮","│ > hello captain │","╰─────────────────╯"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭─────────────────╮","│ > hello captain │","╰─────────────────╯"]}}}\n' > "$RESP/5.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-123 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an exhausted pending composer on orca must stay pending, got '$out'"
+  pass "fm_backend_orca_send_text_submit: an exhausted pending composer is never converted to delivered"
+}
+
 test_composer_state_popup_placeholder_fill_is_pending() {
   local out
   orca_case composer-popup-placeholder
@@ -1313,6 +1332,7 @@ test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_borderless_claude_confirms
 test_composer_state_stale_banner_never_wins
 test_send_text_submit_retries_when_composer_stays_pending
+test_send_text_submit_exhausted_pending_is_never_converted
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_bare_shell_prompt_is_unknown
 test_send_text_submit_popup_autocomplete_requires_second_enter

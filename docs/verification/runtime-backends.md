@@ -844,6 +844,8 @@ Two consequences of `cursor=1` and of the row/window split are covered by the st
 | Cursor pane reclassification | `#{pane_tty}` read via `tmux -L thurbox`, foreground process identity via `bin/fm-cursor-lib.sh` | A Cursor pane's cursor row is parked outside its composer, so the cursor-anchored read answers `unknown`; the pane is reclassified cursorlessly, gated on Cursor's structural process identity, and an identical screen on a non-Cursor pane stays `unknown`. |
 | Teardown of a row with no window | `session delete <uuid> --force` after the pane is gone | The database row outlives its tmux window, so `kill` verifies identity from the row's name and deletes regardless of pane liveness; the name is then immediately reusable. |
 
+The queued-Enter conversion added on top of that native signal is **not** part of this live pass and is not claimed as verified: no real mid-turn thurbox steer has been observed. What the stubbed suite covers is the conversion's gate - a proven `pending` composer with `hook_state: working` reports delivered, while a null, idle, done, or blocked `hook_state` leaves it `pending`.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

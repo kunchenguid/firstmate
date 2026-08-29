@@ -426,6 +426,45 @@ test_container_ensure_matches_the_agent_name_literally() {
   pass "the configured agent name is matched literally, never as a regex"
 }
 
+test_container_ensure_accepts_a_commented_agents_toml() {
+  reset_world
+  # An ordinary operator agents.toml: a trailing comment on the entry, and one
+  # on the table header. thurbox's own `config validate` accepts both, so a
+  # gate that reads them as undefined refuses every spawn while telling the
+  # operator to add an entry that is already there.
+  printf 'config_version = 1\n[[agents]] # firstmate\nname = "shell" # firstmate'"'"'s interactive shell\ncommand = "bash"\nargs = ["-i"]\n' > "$TMP_ROOT/agents.toml"
+  export FM_TB_AGENTS_TOML="$TMP_ROOT/agents.toml"
+  fm_backend_thurbox_container_ensure \
+    || fail "container_ensure refused a commented agents.toml entry that thurbox itself accepts"
+  pass "container_ensure accepts an agents.toml carrying ordinary trailing comments"
+}
+
+test_container_ensure_reads_toml_shape_variants() {
+  reset_world
+  export FM_TB_AGENTS_TOML="$TMP_ROOT/agents.toml"
+  # TOML permits whitespace inside a table header and around the key/value
+  # separator; a header this scan fails to recognize silently skips its whole
+  # table, which is the same false refusal by another route.
+  printf 'config_version = 1\n[[ agents ]]\n  name="shell"\n  command = "bash"\n' > "$TMP_ROOT/agents.toml"
+  fm_backend_thurbox_container_ensure \
+    || fail "container_ensure refused a spaced [[ agents ]] header with an unspaced name assignment"
+
+  # A '#' INSIDE the quoted value is a literal, not a comment start.
+  printf 'fm#shell\n' > "$FM_CONFIG_OVERRIDE/thurbox-agent"
+  printf 'config_version = 1\n[[agents]]\nname = "fm#shell"\ncommand = "bash"\n' > "$TMP_ROOT/agents.toml"
+  fm_backend_thurbox_container_ensure \
+    || fail "container_ensure treated a '#' inside the quoted agent name as a comment"
+
+  # ...and a comment must still not smuggle in a name that is not defined.
+  printf 'shell\n' > "$FM_CONFIG_OVERRIDE/thurbox-agent"
+  printf 'config_version = 1\n[[agents]]\nname = "other" # shell\ncommand = "bash"\n' > "$TMP_ROOT/agents.toml"
+  local rc
+  fm_backend_thurbox_container_ensure >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "container_ensure matched an agent named only inside a comment"
+  rm -f "$FM_CONFIG_OVERRIDE/thurbox-agent"
+  pass "the agents.toml scan handles TOML whitespace, quoting, and comment boundaries"
+}
+
 test_configured_agent_name_is_honored() {
   reset_world
   printf 'fmshell\n' > "$FM_CONFIG_OVERRIDE/thurbox-agent"
@@ -696,6 +735,46 @@ test_composer_state_does_not_reclassify_a_non_cursor_pane() {
   pass "composer_state leaves a non-Cursor pane's verdict untouched"
 }
 
+# A composer that keeps the typed text on the row the cursor is on: the
+# cursor-anchored read proves PENDING, which is the only verdict the shared
+# queued-Enter policy will convert. The text never clears, so every retry
+# re-reads pending and the budget is spent - the mid-turn queued-Enter shape.
+tb_pending_composer() {  # <composer-text>
+  printf '\n  \xe2\x86\x92 %s\n\n  Claude Sonnet 4.5                       Run Everything\n  /w \xc2\xb7 main\n\n' "$1" > "$FM_TB_SCREEN"
+  export FM_TB_CURSOR_Y=1
+}
+
+test_send_text_submit_converts_a_queued_enter_on_native_busy() {
+  reset_world
+  add_row "$UUID" "$TITLE" "%40" local-tmux working
+  export FM_TB_PANES="%40"
+  # The composer keeps the text on every read - a mid-turn harness QUEUES the
+  # Enter rather than consuming it - so the retry budget is spent on a proven
+  # pending. thurbox's native hook_state says the agent is working, which is
+  # what converts that to a delivered verdict instead of reporting an unproven
+  # submit for a steer that will land when the turn ends.
+  tb_pending_composer 'hello captain'
+  [ "$(fm_backend_thurbox_send_text_submit "$UUID:%20" 'hello captain' 2 0.01 0.01 fm-t1)" = empty ] \
+    || fail "a proven pending composer plus hook_state=working must report delivered"
+  pass "send_text_submit converts a queued Enter when thurbox's native state says working"
+}
+
+test_send_text_submit_never_converts_without_affirmative_busy() {
+  local hook
+  # Only an affirmative busy may convert. A null hook_state (no agent has
+  # signalled yet) reads unknown, and idle/done/blocked read idle; none of
+  # them is proof that the Enter was queued rather than swallowed.
+  for hook in - idle 'done' blocked; do
+    reset_world
+    add_row "$UUID" "$TITLE" "%40" local-tmux "$hook"
+    export FM_TB_PANES="%40"
+    tb_pending_composer 'hello captain'
+    [ "$(fm_backend_thurbox_send_text_submit "$UUID:%20" 'hello captain' 2 0.01 0.01 fm-t1)" = pending ] \
+      || fail "hook_state '$hook' must not convert a pending composer to delivered"
+  done
+  pass "send_text_submit refuses to convert a pending composer without an affirmative native busy"
+}
+
 # ============================================================================
 # native busy state
 # ============================================================================
@@ -929,6 +1008,8 @@ test_container_ensure_accepts_defined_agent
 test_container_ensure_accepts_single_quoted_toml
 test_container_ensure_refuses_a_name_outside_an_agents_table
 test_container_ensure_matches_the_agent_name_literally
+test_container_ensure_accepts_a_commented_agents_toml
+test_container_ensure_reads_toml_shape_variants
 test_configured_agent_name_is_honored
 test_create_task_returns_uuid_and_polled_pane
 test_create_task_refuses_duplicate_name
@@ -949,6 +1030,8 @@ test_composer_caps_claim_styled_and_cursor
 test_composer_state_unknown_when_pane_unreadable
 test_composer_state_reclassifies_a_cursor_pane
 test_composer_state_does_not_reclassify_a_non_cursor_pane
+test_send_text_submit_converts_a_queued_enter_on_native_busy
+test_send_text_submit_never_converts_without_affirmative_busy
 test_busy_state_maps_thurbox_hook_state
 test_busy_state_unknown_before_first_signal
 test_kill_forces_window_reclaim

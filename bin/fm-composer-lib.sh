@@ -1293,8 +1293,9 @@ EOF
 }
 
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
-# for the cursor-less backends (cmux, orca, zellij), parameterised by the
-# adapter's send-key and composer-state functions. The caller has already
+# for the backends that do not keep a core of their own - the cursor-less
+# cmux, orca, and zellij, plus thurbox - parameterised by the adapter's
+# send-key and composer-state functions. The caller has already
 # typed the text ONCE (send_literal) and settled; this loop submits with
 # Enter, re-reading the composer verdict, and retries Enter ONLY - never
 # retypes, because a swallowed Enter leaves the text in the composer and
@@ -1303,8 +1304,19 @@ EOF
 # stays a loud refusal rather than a blind retry into an unreadable pane.
 # tmux and herdr keep richer cores that consume this same shared verdict plus
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
-fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
-  local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
+#
+# <busy-fn> is the OPTIONAL declared capability that decides whether this loop
+# also gets the queued-Enter conversion tmux and herdr have. An adapter that
+# supplies one is stating it has a delivery-busy primitive; once the retry
+# budget is spent on a structurally PROVEN pending composer, that primitive is
+# read and the shared fm_composer_queued_enter_verdict policy - never a copy of
+# it - decides. Only an affirmative `busy` converts, so an idle, an unknown, or
+# a backend that supplies no busy-fn at all is byte-identical to this loop's
+# pre-capability behaviour: cmux, orca, and zellij pass no busy-fn and keep the
+# cursor-less posture with no queued-Enter verdict.
+fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [busy-fn]
+  local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-}
+  local busy_fn=${7:-} i=0 state busy_state
   while :; do
     "$send_key_fn" "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
@@ -1314,8 +1326,14 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
       *) printf '%s' "$state"; return 0 ;;
     esac
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf '%s' "$state"; return 0; }
+    [ "$i" -lt "$retries" ] || break
   done
+  if [ -z "$busy_fn" ] || [ "$state" != pending ]; then
+    printf '%s' "$state"
+    return 0
+  fi
+  busy_state=$("$busy_fn" "$target" "$expected_label" 2>/dev/null) || busy_state=unknown
+  fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
 # fm_composer_queued_enter_verdict: the ONE busy-queued-Enter policy.
