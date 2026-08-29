@@ -37,9 +37,12 @@
 #     or sweep. Liveness requires a Pi calling context plus state/.lock, and
 #     the recorded pid must BE its current holder, so a lease left by an exited
 #     Pi session goes stale even if its pid was recycled by an unrelated
-#     process, and a non-Pi home never honors a leftover Pi lease. A lease held by the
-#     live current session but an abandoned branch conversation is recovered
-#     by the branch extension's generation-activation cleanup.
+#     process, and a non-Pi home never honors a leftover Pi lease. Delivery
+#     owners additionally encode their operation pid as delivery-<task>-<pid>;
+#     that operation must remain alive even while the supervising Pi process
+#     does. A lease held by the live current session but an abandoned branch
+#     conversation is recovered by the branch extension's generation-activation
+#     cleanup.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
 # CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents
@@ -126,6 +129,18 @@ fm_lease_path() {
   printf '%s/.lease-%s\n' "$STATE" "$1"
 }
 
+fm_lease_operation_live() {
+  local operation_pid
+  case "$FM_LEASE_RECORD_OWNER" in
+    delivery-*-*)
+      operation_pid=${FM_LEASE_RECORD_OWNER##*-}
+      case "$operation_pid" in ''|*[!0-9]*) return 0 ;; esac
+      kill -0 "$operation_pid" 2>/dev/null
+      ;;
+    *) return 0 ;;
+  esac
+}
+
 # fm_lease_read <task>: read the lease into FM_LEASE_ACTOR/FM_LEASE_PID/
 # FM_LEASE_EPOCH/FM_LEASE_RECORD_OWNER. Returns 1 when no lease file exists. A malformed lease
 # (unreadable actor or pid) reads as actor "" so callers treat it as stale
@@ -175,7 +190,8 @@ fm_lease_live() {
   kill -0 "$FM_LEASE_PID" 2>/dev/null || return 1
   lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
   case "$lock_pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
-  [ "$FM_LEASE_PID" = "$lock_pid" ]
+  [ "$FM_LEASE_PID" = "$lock_pid" ] || return 1
+  fm_lease_operation_live
 }
 
 # fm_lease_clear_stale <task>: remove the lease file when it exists but is not

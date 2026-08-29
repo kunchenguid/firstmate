@@ -11,6 +11,7 @@ ROWS_FILE=${FM_DELIVERY_PREFLIGHT_ROWS_FILE:-}
 LOCK_HELD=${FM_DELIVERY_PREFLIGHT_LOCK_HELD:-0}
 OWN_LOCK=0
 TASKS_TMP=
+WAKE_TASKS_TMP=
 SEQS_TMP=
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -20,6 +21,7 @@ SEQS_TMP=
 cleanup() {
   local status=$?
   [ -z "$TASKS_TMP" ] || rm -f -- "$TASKS_TMP" 2>/dev/null || true
+  [ -z "$WAKE_TASKS_TMP" ] || rm -f -- "$WAKE_TASKS_TMP" 2>/dev/null || true
   [ -z "$SEQS_TMP" ] || rm -f -- "$SEQS_TMP" 2>/dev/null || true
   [ "$OWN_LOCK" = 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   exit "$status"
@@ -41,6 +43,7 @@ if [ "$LOCK_HELD" = 0 ]; then
 fi
 
 TASKS_TMP=$(mktemp "$STATE/.delivery-preflight.tasks.XXXXXX") || exit 1
+WAKE_TASKS_TMP=$(mktemp "$STATE/.delivery-preflight.wake-tasks.XXXXXX") || exit 1
 SEQS_TMP=$(mktemp "$STATE/.delivery-preflight.seqs.XXXXXX") || exit 1
 
 task_for_stale_key() {
@@ -73,18 +76,35 @@ while IFS=$(printf '\t') read -r epoch seq kind key payload extra || [ -n "${epo
       task=${task%.turn-ended}
       case "$task" in ''|*[!A-Za-z0-9._-]*) exit 1 ;; esac
       printf '%s\n' "$task" >> "$TASKS_TMP" || exit 1
+      printf '%s\n' "$task" >> "$WAKE_TASKS_TMP" || exit 1
       ;;
     stale)
       task=$(task_for_stale_key "$key") || exit 1
       printf '%s\n' "$task" >> "$TASKS_TMP" || exit 1
+      printf '%s\n' "$task" >> "$WAKE_TASKS_TMP" || exit 1
       ;;
     check|heartbeat) ;;
     *) exit 1 ;;
   esac
 done < "$FM_WAKE_QUEUE"
 
+for meta in "$STATE"/*.meta; do
+  [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+  task=${meta##*/}
+  task=${task%.meta}
+  case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+  kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+  mode=$(sed -n 's/^mode=//p' "$meta" | tail -1)
+  [ "$kind" = ship ] && [ "$mode" = no-mistakes ] || continue
+  status="$STATE/$task.status"
+  [ -f "$status" ] && [ ! -L "$status" ] || continue
+  last=$(grep -v '^[[:space:]]*$' "$status" | tail -1)
+  case "$last" in 'done: '*) printf '%s\n' "$task" >> "$TASKS_TMP" || exit 1 ;; esac
+done
+
 LC_ALL=C sort -nu "$SEQS_TMP" -o "$SEQS_TMP" || exit 1
 LC_ALL=C sort -u "$TASKS_TMP" -o "$TASKS_TMP" || exit 1
+LC_ALL=C sort -u "$WAKE_TASKS_TMP" -o "$WAKE_TASKS_TMP" || exit 1
 while IFS= read -r seq; do
   [ -n "$seq" ] && printf 'sequence=%s\n' "$seq"
 done < "$SEQS_TMP"
@@ -99,5 +119,9 @@ while IFS= read -r task; do
     }
   printf '%s\n' "$out" | grep -Eq '^result=(sent|already-delivered|already-active|retry|refused) task=[A-Za-z0-9._-]+( reason=[A-Za-z0-9._-]+)?$' \
     || { printf '%s\n' "$out" >&2; exit 1; }
+  if ! grep -qxF "$task" "$WAKE_TASKS_TMP" \
+    && printf '%s\n' "$out" | grep -Eq '^result=(already-delivered|already-active|refused) '; then
+    continue
+  fi
   printf '%s\n' "$out"
 done < "$TASKS_TMP"

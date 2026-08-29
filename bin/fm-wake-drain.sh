@@ -493,6 +493,43 @@ if [ -n "$ACK_THROUGH" ]; then
   exit 0
 fi
 
+if [ "$ACTOR" = main ]; then
+  if [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ]; then
+    require_branch_eligible_rows || exit 1
+  fi
+  claim_main_rows_locked || exit 1
+  if [ "${FM_PI_DELIVERY_PREFLIGHT:-0}" = 1 ]; then
+    DELIVERY_PREFLIGHT_ROWS=
+    if [ -e "$MAIN_ROWS_FILE" ] || [ -L "$MAIN_ROWS_FILE" ]; then
+      DELIVERY_PREFLIGHT_ROWS=$MAIN_ROWS_FILE
+    fi
+    DELIVERY_PREFLIGHT_OUT=$(FM_DELIVERY_PREFLIGHT_ROWS_FILE="$DELIVERY_PREFLIGHT_ROWS" \
+      FM_DELIVERY_PREFLIGHT_LOCK_HELD=1 bash "$DELIVERY_PREFLIGHT_BIN" 2>&1) || {
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+        DRAIN_LOCK_HELD=false
+        printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_OUT" >&2
+        exit 1
+      }
+    if printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" | grep -q '^result=retry '; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      DRAIN_LOCK_HELD=false
+      printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_OUT" >&2
+      exit 1
+    fi
+    DELIVERY_PREFLIGHT_RESULTS=$(printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" | grep '^result=' || true)
+    if [ -n "$DELIVERY_PREFLIGHT_RESULTS" ]; then
+      printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_RESULTS"
+    fi
+  fi
+  if [ ! -s "$MAIN_ROWS_FILE" ] && [ -s "$FM_WAKE_QUEUE" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    DRAIN_LOCK_HELD=false
+    (print_status_presentation) || true
+    assert_watcher_liveness
+    exit 0
+  fi
+fi
+
 if [ ! -s "$FM_WAKE_QUEUE" ]; then
   : > "$FM_WAKE_QUEUE"
   fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
@@ -516,39 +553,6 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fi
   assert_watcher_liveness
   exit 0
-fi
-
-if [ "$ACTOR" = main ]; then
-  if [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ]; then
-    require_branch_eligible_rows || exit 1
-  fi
-  claim_main_rows_locked || exit 1
-  if [ ! -s "$MAIN_ROWS_FILE" ]; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-    DRAIN_LOCK_HELD=false
-    (print_status_presentation) || true
-    assert_watcher_liveness
-    exit 0
-  fi
-  if [ "${FM_PI_DELIVERY_PREFLIGHT:-0}" = 1 ]; then
-    DELIVERY_PREFLIGHT_OUT=$(FM_DELIVERY_PREFLIGHT_ROWS_FILE="$MAIN_ROWS_FILE" \
-      FM_DELIVERY_PREFLIGHT_LOCK_HELD=1 bash "$DELIVERY_PREFLIGHT_BIN" 2>&1) || {
-        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-        DRAIN_LOCK_HELD=false
-        printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_OUT" >&2
-        exit 1
-      }
-    if printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" | grep -q '^result=retry '; then
-      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-      DRAIN_LOCK_HELD=false
-      printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_OUT" >&2
-      exit 1
-    fi
-    DELIVERY_PREFLIGHT_RESULTS=$(printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" | grep '^result=' || true)
-    if [ -n "$DELIVERY_PREFLIGHT_RESULTS" ]; then
-      printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_RESULTS"
-    fi
-  fi
 fi
 
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true

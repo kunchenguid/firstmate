@@ -208,6 +208,68 @@ test_terminal_receipt_and_existing_lease_retry() {
   pass "terminal receipts stop and existing supervision custody remains a retry obligation"
 }
 
+test_killed_delivery_operation_does_not_strand_session_lease() {
+  local dir home send state marker pid operation_pid helper_pid out
+  dir="$TMP_ROOT/killed-delivery-operation"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; marker="$dir/operation.pid"
+  make_send_stub "$send"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  cat > "$state" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "${FM_OPERATION_MARKER:?}"
+trap 'exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$state"
+  PI_CODING_AGENT=true FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_TEST_ROOT="$ROOT" FM_OPERATION_MARKER="$marker" FM_DELIVERY_SEND_BIN="$send" \
+    FM_DELIVERY_CREW_STATE_BIN="$state" "$CONTINUE" ship > "$dir/first.out" 2> "$dir/first.err" &
+  pid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$marker" ] && [ -e "$home/state/.lease-ship" ] && break
+    sleep 0.01
+  done
+  operation_pid=$(cut -f4 "$home/state/.lease-ship" 2>/dev/null)
+  operation_pid=${operation_pid##*-}
+  helper_pid=$(cat "$marker" 2>/dev/null)
+  case "$operation_pid:$helper_pid" in *[!0-9:]*|:|*:) fail "delivery fixture did not expose both operation pids" ;; esac
+  kill -9 "$operation_pid" 2>/dev/null || fail "could not kill the delivery operation"
+  kill -9 "$helper_pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -e "$home/state/.lease-ship" ] || fail "killed delivery operation did not leave the crash-window lease"
+  make_state_stub "$state" absent
+  out=$(PI_CODING_AGENT=true run_continue "$home" "$send" "$state") || fail "delivery replay after killed owner failed"
+  [ "$out" = 'result=sent task=ship' ] || fail "dead delivery operation stranded the session lease: $out"
+  [ ! -e "$home/state/.lease-ship" ] || fail "replay left the recovered delivery lease"
+  pass "a killed delivery operation cannot strand its live Pi session lease"
+}
+
+test_pi_empty_drain_recovers_unqueued_durable_candidate() {
+  local dir home stub log out
+  dir="$TMP_ROOT/pi-empty-durable-preflight"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  stub="$dir/continue"; log="$dir/delivery.log"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  : > "$home/state/.wake-queue"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "${FM_PREFLIGHT_LOG:?}"
+printf 'result=sent task=%s\n' "$1"
+SH
+  chmod +x "$stub"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-wake-drain.sh") || fail "empty Pi drain durable preflight failed"
+  assert_contains "$out" "Deterministic delivery continuation preflight:" \
+    "empty Pi drain omitted its durable continuation result"
+  assert_contains "$out" "result=sent task=ship" \
+    "empty Pi drain did not recover the unqueued committed-ready task"
+  [ "$(cat "$log")" = ship ] || fail "empty Pi drain did not invoke exactly one durable candidate"
+  [ ! -s "$home/state/.wake-queue" ] || fail "durable inventory manufactured a wake row"
+  pass "Pi startup intake recovers committed-ready state without a wake row"
+}
+
 test_fleet_and_bearings_project_pending_continuation() {
   local dir home send state fakebin snapshot bearings head active_bearings monitoring_bearings terminal_bearings
   dir="$TMP_ROOT/fleet-projection"; mkdir -p "$dir"
@@ -403,6 +465,8 @@ test_inbox_failure_remains_retryable
 test_strict_run_attribution_distinguishes_absence_from_query_failure
 test_identity_and_committed_head_requirements
 test_terminal_receipt_and_existing_lease_retry
+test_killed_delivery_operation_does_not_strand_session_lease
+test_pi_empty_drain_recovers_unqueued_durable_candidate
 test_fleet_and_bearings_project_pending_continuation
 test_advanced_head_surfaces_continuation_conflict
 test_pi_drain_preflights_before_presenting_committed_ready_rows
