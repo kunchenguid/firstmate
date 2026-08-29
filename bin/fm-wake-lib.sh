@@ -13,11 +13,16 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
-if ! command -v _fm_open_decisions_file_ident >/dev/null 2>&1; then
+mkdir -p "$STATE"
+
+# Most wake-library consumers need only queue and lock primitives, including
+# deliberately minimal recovery fixtures and remote installations.
+# Load the classifier only when a status presentation helper is actually used.
+_fm_wake_require_classify() {
+  command -v status_observed_signature >/dev/null 2>&1 && return 0
   # shellcheck source=bin/fm-classify-lib.sh
   . "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
-fi
-mkdir -p "$STATE"
+}
 
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
@@ -1525,6 +1530,7 @@ fm_wake_print_deduped() {
 fm_wake_signal_sig() {  # <file> -> reported-state signature
   case "$1" in
     *.status)
+      _fm_wake_require_classify || return 1
       status_observed_signature "$1"
       ;;
     *)
@@ -1553,7 +1559,10 @@ fm_wake_signal_seen_size() {  # <state> <file>
   local marker sig size
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   case "$2" in
-    *.status) status_presentation_marker_offset "$marker" "$2" ;;
+    *.status)
+      _fm_wake_require_classify || { printf '0'; return 0; }
+      status_presentation_marker_offset "$marker" "$2"
+      ;;
     *)
       sig=$(cat "$marker" 2>/dev/null) || { printf '0'; return 0; }
       case "$sig" in *:*) size=${sig%%:*} ;; *) size=0 ;; esac
@@ -1574,17 +1583,32 @@ fm_wake_signal_seen_current() {  # <state> <file>
   [ -n "$sig" ] || return 1
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   case "$2" in
-    *.status) status_presentation_marker_reported_matches "$marker" "$sig" ;;
+    *.status)
+      _fm_wake_require_classify || return 1
+      status_presentation_marker_reported_matches "$marker" "$sig"
+      ;;
     *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;
   esac
 }
 
 fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>
+  _fm_wake_require_classify || return 1
   status_presentation_marker_report "$(fm_wake_signal_seen_path "$1" "$2")" "$3"
 }
 
 fm_wake_status_seen_commit() {  # <state> <status-file> <captured-end> <captured-identity>
+  _fm_wake_require_classify || return 1
   status_presentation_marker_commit "$(fm_wake_signal_seen_path "$1" "$2")" "$2" "$3" "$4"
+}
+
+# Mark the current complete status snapshot as both reported and classified.
+# This is the public setup primitive for consumers that adopt an existing log.
+fm_wake_status_mark_current() {  # <state> <status-file>
+  local size ident
+  _fm_wake_require_classify || return 1
+  size=$(_fm_status_file_size "$2") || return 1
+  ident=$(_fm_open_decisions_file_ident "$2") || return 1
+  fm_wake_status_seen_commit "$1" "$2" "$size" "$ident"
 }
 
 # Guarded self-announced status append - the one dedup primitive for a status
@@ -1608,6 +1632,7 @@ fm_wake_status_seen_commit() {  # <state> <status-file> <captured-end> <captured
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
   local state=$1 file=$2 line=$3 marker pre_sig='' pre_size='' pre_ident='' post_size post_ident
   local LC_ALL=C
+  _fm_wake_require_classify || return 1
   marker=$(fm_wake_signal_seen_path "$state" "$file")
   if [ -e "$file" ]; then
     pre_sig=$(fm_wake_signal_sig "$file") || pre_sig=''
