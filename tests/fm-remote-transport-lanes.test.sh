@@ -408,18 +408,24 @@ assert_grep 'stdin=payload byte two' "$TMP_ROOT/payload-out" "--stdin lost part 
 pass "--stdin still delivers a payload caller's bytes"
 
 # Stage litter: an abandoned .stage.* older than the reap age does not survive
-# a worker pass, while fresh staging is left alone.
+# a worker pass, while staging owned by this live process is left alone even if
+# CI scheduling pauses long enough for it to cross the age bound.
 OLD_STAGE="$STATE_ROOT/jobs/.stage.abandoned"
-FRESH_STAGE="$STATE_ROOT/jobs/.stage.fresh"
-mkdir -p "$OLD_STAGE" "$FRESH_STAGE"
-touch -t 200001010000 "$OLD_STAGE"
+LIVE_STAGE="$STATE_ROOT/jobs/.stage.live"
+LIVE_STAGE_BUILD="$STATE_ROOT/jobs/.stage-live-build"
+mkdir -p "$OLD_STAGE" "$LIVE_STAGE_BUILD"
+printf '%s\n' "$$" > "$LIVE_STAGE_BUILD/.owner-pid"
+fm_remote_job_process_start "$$" > "$LIVE_STAGE_BUILD/.owner-start" \
+  || fail "the live staging fixture could not record its owner identity"
+mv -- "$LIVE_STAGE_BUILD" "$LIVE_STAGE"
+touch -t 200001010000 "$OLD_STAGE" "$LIVE_STAGE"
 for _ in $(seq 1 100); do
   [ ! -d "$OLD_STAGE" ] && break
   sleep 0.05
 done
 [ ! -d "$OLD_STAGE" ] || fail "stage litter older than the reap age survived the worker pass"
-assert_present "$FRESH_STAGE" "the worker reaped fresh staging that is still in use"
-rmdir "$FRESH_STAGE"
-pass "abandoned stage litter is reaped by age while fresh staging survives"
+assert_present "$LIVE_STAGE" "the worker reaped staging owned by a live process"
+rm -rf -- "$LIVE_STAGE"
+pass "abandoned stage litter is reaped by age while live staging survives"
 
 echo "ALL TESTS PASSED"
