@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Opt-in real-Claude guard for the workspace-trust launch path.
-# It uses a fresh repository, two real git worktrees, a private tmux server,
+# It uses two fresh repositories, two worktrees of the first repository, a private tmux server,
 # an isolated Claude config directory, and the real fm-spawn.sh relaunch path.
 # The first launch must navigate the cancel-focused dialog without human input
-# and execute its brief; the second worktree must execute without another
-# trust navigation, proving that acceptance persists per repository.
+# and execute its brief; the second worktree must execute without another trust navigation.
+# An unrelated repository must show its own dialog, proving that acceptance persists per repository.
 set -u
 
 if [ "${FM_CLAUDE_TRUST_DIALOG_LIVE:-0}" != 1 ]; then
@@ -28,8 +28,10 @@ SOCKET="fm-claude-trust-$$"
 SESSION="claudetrust"
 LAB="$ROOT/.claude-trust-live-e2e.$$"
 PROJECT="$LAB/project"
+PROJECT_OTHER="$LAB/project-other"
 WT_ONE="$LAB/worktree-one"
 WT_TWO="$LAB/worktree-two"
+WT_OTHER="$LAB/worktree-other"
 FM_TEST_HOME="$LAB/fm-home"
 CLAUDE_TEST_CONFIG="$LAB/claude-config"
 SHIM="$LAB/shim"
@@ -51,6 +53,14 @@ git -C "$PROJECT" add README.md
 git -C "$PROJECT" commit -qm baseline
 git -C "$PROJECT" worktree add -q -b trust-one "$WT_ONE"
 git -C "$PROJECT" worktree add -q -b trust-two "$WT_TWO"
+mkdir -p "$PROJECT_OTHER"
+git -C "$PROJECT_OTHER" init -q --initial-branch=main
+git -C "$PROJECT_OTHER" config user.name fm-live-test
+git -C "$PROJECT_OTHER" config user.email fm-live-test@example.invalid
+printf 'unrelated fresh trust repository\n' > "$PROJECT_OTHER/README.md"
+git -C "$PROJECT_OTHER" add README.md
+git -C "$PROJECT_OTHER" commit -qm baseline
+git -C "$PROJECT_OTHER" worktree add -q -b trust-control "$WT_OTHER"
 
 cat > "$SHIM/tmux" <<SH
 #!/usr/bin/env bash
@@ -68,7 +78,7 @@ touch "$FM_TEST_HOME/state/.last-watcher-beat"
   || fail "could not create the private tmux server"
 
 write_task() {
-  local id=$1 wt=$2 marker=$3 target="$SESSION:fm-$1"
+  local id=$1 project=$2 wt=$3 marker=$4 target="$SESSION:fm-$1"
   mkdir -p "$FM_TEST_HOME/data/$id" "$LAB/tasktmp-$id"
   {
     printf '# Claude trust-dialog live brief\n\n'
@@ -79,7 +89,7 @@ write_task() {
     printf 'window=%s\n' "$target"
     printf 'endpoint_task_id=%s\n' "$id"
     printf 'worktree=%s\n' "$wt"
-    printf 'project=%s\n' "$PROJECT"
+    printf 'project=%s\n' "$project"
     printf 'harness=claude\n'
     printf 'kind=ship\n'
     printf 'mode=local-only\n'
@@ -112,21 +122,40 @@ wait_for_marker() {
 
 FIRST_ID="claude-trust-one-$$"
 FIRST_MARKER="$LAB/first-brief-processed"
-write_task "$FIRST_ID" "$WT_ONE" "$FIRST_MARKER"
+write_task "$FIRST_ID" "$PROJECT" "$WT_ONE" "$FIRST_MARKER"
 run_spawn "$FIRST_ID"
 wait_for_marker "$FIRST_MARKER" "$FIRST_ID"
-FIRST_DOWN_COUNT=$(grep -cE '(^|[[:space:]])Down($|[[:space:]])' "$KEY_LOG" || true)
+FIRST_KEY_END=$(wc -l < "$KEY_LOG" | tr -d ' ')
+FIRST_KEYS=$(sed -n "1,${FIRST_KEY_END}p" "$KEY_LOG")
+FIRST_DOWN_COUNT=$(printf '%s\n' "$FIRST_KEYS" | awk '$1 == "send-keys" && NF == 4 && $4 == "Down" { count++ } END { print count + 0 }')
+FIRST_ENTER_COUNT=$(printf '%s\n' "$FIRST_KEYS" | awk '$1 == "send-keys" && NF == 4 && $4 == "Enter" { count++ } END { print count + 0 }')
 [ "$FIRST_DOWN_COUNT" -ge 1 ] \
   || fail "first fresh-repository spawn never navigated the cancel-focused trust dialog"
 
 SECOND_ID="claude-trust-two-$$"
 SECOND_MARKER="$LAB/second-brief-processed"
-write_task "$SECOND_ID" "$WT_TWO" "$SECOND_MARKER"
+write_task "$SECOND_ID" "$PROJECT" "$WT_TWO" "$SECOND_MARKER"
 run_spawn "$SECOND_ID"
 wait_for_marker "$SECOND_MARKER" "$SECOND_ID"
-SECOND_DOWN_COUNT=$(grep -cE '(^|[[:space:]])Down($|[[:space:]])' "$KEY_LOG" || true)
-[ "$SECOND_DOWN_COUNT" -eq "$FIRST_DOWN_COUNT" ] \
-  || fail "the second worktree of one trusted repository showed another trust dialog"
+SECOND_KEY_END=$(wc -l < "$KEY_LOG" | tr -d ' ')
+SECOND_KEYS=$(sed -n "$((FIRST_KEY_END + 1)),${SECOND_KEY_END}p" "$KEY_LOG")
+SECOND_DOWN_COUNT=$(printf '%s\n' "$SECOND_KEYS" | awk '$1 == "send-keys" && NF == 4 && $4 == "Down" { count++ } END { print count + 0 }')
+SECOND_ENTER_COUNT=$(printf '%s\n' "$SECOND_KEYS" | awk '$1 == "send-keys" && NF == 4 && $4 == "Enter" { count++ } END { print count + 0 }')
+[ "$SECOND_DOWN_COUNT" -eq 0 ] \
+  || fail "the second worktree of one trusted repository received a dialog-navigation key"
+[ "$SECOND_ENTER_COUNT" -eq "$((FIRST_ENTER_COUNT - 1))" ] \
+  || fail "the second worktree received a dialog-accept key despite repository trust"
+
+CONTROL_ID="claude-trust-control-$$"
+CONTROL_MARKER="$LAB/control-brief-processed"
+write_task "$CONTROL_ID" "$PROJECT_OTHER" "$WT_OTHER" "$CONTROL_MARKER"
+run_spawn "$CONTROL_ID"
+wait_for_marker "$CONTROL_MARKER" "$CONTROL_ID"
+CONTROL_KEY_END=$(wc -l < "$KEY_LOG" | tr -d ' ')
+CONTROL_KEYS=$(sed -n "$((SECOND_KEY_END + 1)),${CONTROL_KEY_END}p" "$KEY_LOG")
+CONTROL_DOWN_COUNT=$(printf '%s\n' "$CONTROL_KEYS" | awk '$1 == "send-keys" && NF == 4 && $4 == "Down" { count++ } END { print count + 0 }')
+[ "$CONTROL_DOWN_COUNT" -ge 1 ] \
+  || fail "an unrelated fresh repository did not receive its own trust-dialog navigation"
 
 printf 'ok - Claude %s: fresh trust was accepted and both worktree briefs were processed without human input\n' "$CLAUDE_VERSION"
-printf 'ok - Claude %s: trust acceptance persisted once for the repository, not once per worktree\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s: the same repository skipped trust while an unrelated repository required it\n' "$CLAUDE_VERSION"

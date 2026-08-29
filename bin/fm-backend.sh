@@ -706,6 +706,20 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   esac
 }
 
+fm_backend_capture_visible() {  # <backend> <target> <lines> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_capture_visible "$@" ;;
+    herdr) fm_backend_herdr_capture_visible "$@" ;;
+    zellij) fm_backend_zellij_capture_visible "$@" ;;
+    orca) fm_backend_orca_capture_visible "$@" ;;
+    cmux) fm_backend_cmux_capture_visible "$@" ;;
+    *) echo "error: no visible capture implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 # fm_backend_send_key: one backend-supported named special key.
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   local backend=$1

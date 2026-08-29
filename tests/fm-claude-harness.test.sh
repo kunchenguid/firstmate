@@ -56,6 +56,9 @@ fake_screen() {
     processing)
       printf 'Thinking... (esc to interrupt)\n'
       ;;
+    trusted-idle)
+      printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\302\240\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n'
+      ;;
     gone-stuck)
       printf '\xe2\x9d\xaf \n'
       ;;
@@ -71,7 +74,14 @@ fake_screen() {
   esac
 }
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *'#{cursor_y}'*) [ "$state" = trusted-idle ] && printf '1\n' || printf '0\n' ;;
+      *'#{pane_id}'*) printf '%%1\n' ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
@@ -102,7 +112,9 @@ case "${1:-}" in
           command-typed)
             case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
               trusted) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              trusted-idle) printf 'trusted-idle\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               delayed-dialog) printf 'delayed-1\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              stale-dialog) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               *) printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE" ;;
             esac
             ;;
@@ -119,10 +131,20 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    if [ "${FM_FAKE_CLAUDE_MODE:-trusted}" = unreadable ]; then
+      exit 1
+    fi
+    if [ "${FM_FAKE_CLAUDE_MODE:-trusted}" = dialog-baseline-failed ] && [ -z "$state" ]; then
+      exit 1
+    fi
     case "$state" in
       delayed-1) state=delayed-2; printf 'delayed-2\n' > "$FM_FAKE_CLAUDE_STATE" ;;
       delayed-2) state=trust-no; printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE" ;;
     esac
+    if [ "${FM_FAKE_CLAUDE_MODE:-trusted}" = stale-dialog ] && [[ " $* " = *' -S '* ]]; then
+      printf ' Accessing workspace:\n\n /old/repo\n\n \xe2\x9d\xaf No, exit\n   Yes, I trust this folder\n\n Enter to confirm . Esc to cancel\nThinking... (esc to interrupt)\n'
+      exit 0
+    fi
     fake_screen
     exit 0
     ;;
@@ -278,9 +300,73 @@ test_claude_stale_busy_scrollback_cannot_confirm_processing() {
   pass "fm-spawn: stale busy scrollback cannot prove a replacement Claude launch started"
 }
 
+test_claude_already_trusted_idle_spawn_has_no_processing_requirement() {
+  local id rec out rc
+  id="claude-trusted-idle-z7-$$"
+  rec=$(make_spawn_case trusted-idle "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=trusted-idle run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "an already-trusted idle Claude launch should retain the existing spawn contract"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "an already-trusted idle spawn was incorrectly subjected to the post-accept processing requirement"
+  pass "fm-spawn: an already-trusted idle Claude launch keeps the common-path contract"
+}
+
+test_claude_dialog_observation_replaces_a_failed_baseline() {
+  local id rec out rc
+  id="claude-baseline-failed-z8-$$"
+  rec=$(make_spawn_case baseline-failed "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=dialog-baseline-failed run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "an observed dialog followed by active processing should survive an earlier unreadable pane"
+  [ "$(cat "$CASE_DIR/claude.state")" = processing ] \
+    || fail "the observed dialog did not transition to brief processing"
+  pass "fm-spawn: dialog-present to dialog-absent processing is sufficient transition proof"
+}
+
+test_claude_stale_dialog_scrollback_never_receives_keys() {
+  local id rec out rc bare_keys
+  id="claude-stale-dialog-z9-$$"
+  rec=$(make_spawn_case stale-dialog "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=stale-dialog run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "stale dialog scrollback should not affect an active already-trusted launch"
+  bare_keys=$(awk 'NF == 4 {print $4}' "$CASE_DIR/keys.log")
+  [ "$bare_keys" = Enter ] \
+    || fail "stale dialog scrollback caused dialog-accept keys to reach the active launch: $bare_keys"
+  pass "fm-spawn: stale dialog scrollback cannot trigger acceptance keys"
+}
+
+test_claude_unreadable_settle_window_fails_with_uncertainty() {
+  local id rec out rc
+  id="claude-unreadable-z10-$$"
+  rec=$(make_spawn_case unreadable "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=unreadable run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreadable launch settle window must fail closed"
+  assert_contains "$out" "claude's launch state could not be confirmed within the settle window - a trust dialog may still be pending" \
+    "the unreadable settle window lacked its distinct uncertainty diagnostic"
+  assert_grep "failed: claude's launch state could not be confirmed within the settle window - a trust dialog may still be pending" \
+    "$HOME_DIR/state/$id.status" \
+    "the unreadable settle window did not leave a supervisor-visible uncertainty failure"
+  pass "fm-spawn: an unreadable settle window fails loudly instead of assuming trust"
+}
+
 test_claude_already_trusted_spawn_never_touches_the_dialog
 test_claude_trust_dialog_is_navigated_never_a_blind_enter
 test_claude_stuck_dialog_fails_loudly
 test_claude_accept_without_processing_fails_loudly
 test_claude_delayed_trust_dialog_is_not_missed
 test_claude_stale_busy_scrollback_cannot_confirm_processing
+test_claude_already_trusted_idle_spawn_has_no_processing_requirement
+test_claude_dialog_observation_replaces_a_failed_baseline
+test_claude_stale_dialog_scrollback_never_receives_keys
+test_claude_unreadable_settle_window_fails_with_uncertainty

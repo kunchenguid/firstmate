@@ -203,6 +203,10 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
   fm_backend_orca_json_text "$out"
 }
 
+fm_backend_orca_capture_visible() {  # <terminal-id> <lines>
+  fm_backend_orca_capture "$@"
+}
+
 fm_backend_orca_json_text() {  # <json>
   printf '%s' "$1" | node -e '
 const fs = require("fs");

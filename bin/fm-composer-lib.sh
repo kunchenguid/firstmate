@@ -363,6 +363,17 @@ fm_rendered_busy_state() {  # <screen> [harness] -> busy|idle|unknown
   fi
 }
 
+fm_rendered_busy_footer_state() {  # <screen> [harness] -> busy|idle|unknown
+  local screen=$1 harness=${2:-} footer
+  footer=$(printf '%s' "$screen" | grep -v '^[[:space:]]*$' | tail -1)
+  [ -n "$footer" ] || { printf 'unknown'; return 0; }
+  if printf '%s' "$footer" | fm_busy_lines_match "$harness"; then
+    printf 'busy'
+  else
+    printf 'idle'
+  fi
+}
+
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
 # AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
 # SHELL glyphs are one only INSIDE a composer container; on a bare row they are
@@ -1345,12 +1356,13 @@ EOF
 # itself (it is claude's own managed trust store).
 #
 # Detection is anchored on the dialog's own literal, stable strings rather than
-# box-drawing geometry: nothing else in ordinary transcript output produces
-# "Accessing workspace:" paired with the "Yes, I trust this folder" option
-# label, so a plain substring scan is enough and needs no ANSI-aware ghost
-# handling (this dialog is never rendered with dim/placeholder text).
+# box-drawing geometry, and requires its title, trust option, and confirmation
+# footer in order with that footer as the current screen's last nonblank row.
+# ANSI styling is stripped before classification because focus is rendered on
+# the option row while the dialog is active.
 FM_COMPOSER_CLAUDE_TRUST_TITLE='Accessing workspace:'
 FM_COMPOSER_CLAUDE_TRUST_YES_LABEL='Yes, I trust this folder'
+FM_COMPOSER_CLAUDE_TRUST_CONFIRM_LABEL='Enter to confirm'
 
 # fm_composer_claude_trust_dialog_state: <screen> (plain or styled) ->
 #   absent          the screen does not show Claude's trust dialog.
@@ -1361,14 +1373,17 @@ FM_COMPOSER_CLAUDE_TRUST_YES_LABEL='Yes, I trust this folder'
 #                   and exit; the caller must move the highlight first.
 fm_composer_claude_trust_dialog_state() {  # <screen>
   local plain line trimmed content focus=0 yes_seen=0 yes_focused=0
+  local row=0 title_row=0 yes_row=0 confirm_row=0 last_nonblank_row=0
   plain=$(printf '%s\n' "$1" | fm_composer_strip_ansi)
-  case "$plain" in
-    *"$FM_COMPOSER_CLAUDE_TRUST_TITLE"*) ;;
-    *) printf 'absent'; return 0 ;;
-  esac
   while IFS= read -r line; do
+    row=$((row + 1))
     trimmed=$line
     fm_composer_normalize_trim_var trimmed
+    [ -z "$trimmed" ] || last_nonblank_row=$row
+    [ "$trimmed" != "$FM_COMPOSER_CLAUDE_TRUST_TITLE" ] || title_row=$row
+    case "$trimmed" in
+      "$FM_COMPOSER_CLAUDE_TRUST_CONFIRM_LABEL"*) confirm_row=$row ;;
+    esac
     focus=0
     content=$trimmed
     case "$content" in
@@ -1376,12 +1391,15 @@ fm_composer_claude_trust_dialog_state() {  # <screen>
     esac
     if [ "$content" = "$FM_COMPOSER_CLAUDE_TRUST_YES_LABEL" ]; then
       yes_seen=1
+      yes_row=$row
       [ "$focus" = 1 ] && yes_focused=1
     fi
   done <<EOF
 $plain
 EOF
-  if [ "$yes_seen" != 1 ]; then
+  if [ "$yes_seen" != 1 ] || [ "$title_row" -eq 0 ] \
+     || [ "$title_row" -ge "$yes_row" ] || [ "$yes_row" -ge "$confirm_row" ] \
+     || [ "$confirm_row" -ne "$last_nonblank_row" ]; then
     printf 'absent'
     return 0
   fi

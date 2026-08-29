@@ -2403,8 +2403,8 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-claude_capture() {
-  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+claude_capture_visible() {
+  fm_backend_capture_visible "$BACKEND" "$T" 120 "$W" 2>/dev/null
 }
 
 # Claude's own workspace-trust dialog (bin/fm-composer-lib.sh owns detection
@@ -2413,28 +2413,39 @@ claude_capture() {
 # repository is spawned into. CLAUDE_TRUST_DIALOG_SEEN is set only when the
 # dialog was actually observed.
 CLAUDE_TRUST_DIALOG_SEEN=0
-CLAUDE_LAUNCH_IDLE_SEEN=0
+claude_launch_is_already_trusted() {  # <visible-pane>
+  local pane=$1 busy composer
+  [ -n "$pane" ] || return 0
+  busy=$(fm_rendered_busy_footer_state "$pane" claude)
+  [ "$busy" != busy ] || return 0
+  composer=$(fm_backend_composer_state "$BACKEND" "$T" "$W")
+  [ "$composer" = empty ]
+}
+
 claude_trust_dialog_clear() {
-  local pane state busy i=0 max=${FM_CLAUDE_TRUST_POLLS:-40} interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
+  local pane state=unknown busy i=0 max=${FM_CLAUDE_TRUST_POLLS:-40} interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
-    pane=$(claude_capture)
-    state=$(fm_composer_claude_trust_dialog_state "$pane")
-    case "$state" in
-      absent)
-        busy=$(fm_rendered_busy_state "$pane" claude)
-        case "$busy" in
-          idle) CLAUDE_LAUNCH_IDLE_SEEN=1 ;;
-          busy)
-            [ "$CLAUDE_LAUNCH_IDLE_SEEN" = 1 ] && return 0
-            ;;
-        esac
-        ;;
-      trust-focused) spawn_send_key "$T" Enter ;;
-      trust-unfocused) spawn_send_key "$T" Down ;;
-    esac
-    case "$state" in
-      trust-focused|trust-unfocused) CLAUDE_TRUST_DIALOG_SEEN=1 ;;
-    esac
+    if pane=$(claude_capture_visible); then
+      state=$(fm_composer_claude_trust_dialog_state "$pane")
+      case "$state" in
+        trust-focused)
+          CLAUDE_TRUST_DIALOG_SEEN=1
+          spawn_send_key "$T" Enter
+          ;;
+        trust-unfocused)
+          CLAUDE_TRUST_DIALOG_SEEN=1
+          spawn_send_key "$T" Down
+          ;;
+        absent)
+          if [ "$CLAUDE_TRUST_DIALOG_SEEN" = 1 ]; then
+            busy=$(fm_rendered_busy_footer_state "$pane" claude)
+            [ "$busy" != busy ] || return 0
+          elif claude_launch_is_already_trusted "$pane"; then
+            return 0
+          fi
+          ;;
+      esac
+    fi
     sleep "$interval"
     i=$((i + 1))
   done
@@ -3103,12 +3114,6 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
-case "$HARNESS" in
-  claude*)
-    CLAUDE_LAUNCH_BASELINE=$(fm_rendered_busy_state "$(claude_capture)" claude)
-    [ "$CLAUDE_LAUNCH_BASELINE" = idle ] && CLAUDE_LAUNCH_IDLE_SEEN=1
-    ;;
-esac
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -3146,7 +3151,7 @@ case "$HARNESS" in
       case $? in
         1) claude_spawn_fail "claude's workspace-trust dialog could not be cleared" ;;
         2) claude_spawn_fail "claude accepted the workspace-trust dialog but never confirmed it started processing the launch brief" ;;
-        *) claude_spawn_fail "claude launch never confirmed it started processing the launch brief" ;;
+        *) claude_spawn_fail "claude's launch state could not be confirmed within the settle window - a trust dialog may still be pending" ;;
       esac
       exit 1
     }

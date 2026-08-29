@@ -183,6 +183,7 @@ The first worktree of a never-trusted repository rendered `Accessing workspace:`
 Moving Down before Enter accepted the dialog, removed it, and let Claude process the launch brief.
 A before-and-after diff of Claude's managed trust store recorded `hasTrustDialogAccepted` under the repository checkout path and no entry under the worktree path.
 A second worktree of the same repository then launched without a dialog or another trust-store entry, so acceptance is a one-time repository cost rather than a per-worktree cost.
+The opt-in guard also launches an unrelated repository and requires a fresh dialog there, ruling out global trust as the explanation.
 Firstmate never writes or pre-seeds Claude's trust store; the opt-in guard redirects Claude to an isolated config directory and drives the real launch path.
 
 Refresh the live proof with:
@@ -195,7 +196,7 @@ Bounded output from the verified behavior:
 
 ```text
 ok - Claude 2.1.251 (Claude Code): fresh trust was accepted and both worktree briefs were processed without human input
-ok - Claude 2.1.251 (Claude Code): trust acceptance persisted once for the repository, not once per worktree
+ok - Claude 2.1.251 (Claude Code): the same repository skipped trust while an unrelated repository required it
 ```
 
 ### Cleanup endpoint identity

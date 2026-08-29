@@ -529,6 +529,15 @@ fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
   printf '%s' "$out" | tail -n "$lines"
 }
 
+fm_backend_cmux_capture_visible() {  # <target> <lines> [expected-label]
+  fm_backend_cmux_target_ready "$1" "${3:-}" || return 1
+  local lines=${2:-40} raw out
+  case "$lines" in ''|*[!0-9]*) lines=40 ;; esac
+  raw=$(fm_backend_cmux_cli read-screen --workspace "$FM_BACKEND_CMUX_WORKSPACE" --surface "$FM_BACKEND_CMUX_SURFACE" --lines "$lines" --json 2>/dev/null) || return 1
+  out=$(printf '%s' "$raw" | jq -r '.text // empty' 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
+}
+
 # fm_backend_cmux_composer_capture: the cmux composer screen - a bounded
 # plain-text tail of the surface. cmux's `read-screen` is plain text by
 # construction (its --help: "Read terminal text from a surface as plain

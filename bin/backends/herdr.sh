@@ -2597,6 +2597,14 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+fm_backend_herdr_capture_visible() {  # <target> <lines>
+  fm_backend_herdr_target_ready "$1" || return 1
+  local lines=${2:-40} out
+  case "$lines" in ''|*[!0-9]*) lines=40 ;; esac
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible --lines 200 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
+}
+
 fm_backend_herdr_capture_ansi() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
   local lines=${2:-200} fetch out

@@ -493,6 +493,14 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
   printf '%s' "$out" | tail -n "$lines"
 }
 
+fm_backend_zellij_capture_visible() {  # <target> <lines> [expected-label]
+  fm_backend_zellij_target_ready "$1" "${3:-}" || return 1
+  local lines=${2:-40} out
+  case "$lines" in ''|*[!0-9]*) lines=40 ;; esac
+  out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action dump-screen --pane-id "$FM_BACKEND_ZELLIJ_PANE" 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
+}
+
 # --- zellij composer capture and capability primitives ----------------------
 #
 # `zellij action dump-screen --ansi` ("Preserve ANSI styling in the dump

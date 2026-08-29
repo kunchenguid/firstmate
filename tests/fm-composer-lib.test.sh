@@ -703,13 +703,27 @@ test_claude_trust_dialog_absent_on_ordinary_screens() {
   pass "fm_composer_claude_trust_dialog_state: absent on an ordinary composer and on the label alone without the title"
 }
 
+test_claude_trust_dialog_absent_when_only_in_scrollback() {
+  local screen out
+  screen="$CLAUDE_TRUST_CANCEL_FOCUSED
+
+current launch output
+────────────────────────
+❯${NBSP}
+────────────────────────"
+  out=$(fm_composer_claude_trust_dialog_state "$screen")
+  [ "$out" = absent ] || fail "a completed dialog retained above the active footer must be absent, got '$out'"
+  pass "fm_composer_claude_trust_dialog_state: a stale dialog above the active footer is absent"
+}
+
 test_claude_trust_dialog_state_survives_ansi_styling() {
   local esc styled out
   esc=$(printf '\033')
   styled="${esc}[1m Accessing workspace:${esc}[0m
  /repo/wt
  ${esc}[7m❯${esc}[0m No, exit
-   Yes, I trust this folder"
+   Yes, I trust this folder
+ Enter to confirm . Esc to cancel"
   out=$(fm_composer_claude_trust_dialog_state "$styled")
   [ "$out" = trust-unfocused ] || fail "ANSI-styled dialog text must still be detected, got '$out'"
   pass "fm_composer_claude_trust_dialog_state: detection survives ANSI styling"
@@ -719,6 +733,7 @@ test_claude_trust_dialog_defaults_to_cancel_focused
 test_claude_trust_dialog_yes_focused_after_navigation
 test_claude_trust_dialog_permissions_backstop_variant
 test_claude_trust_dialog_absent_on_ordinary_screens
+test_claude_trust_dialog_absent_when_only_in_scrollback
 test_claude_trust_dialog_state_survives_ansi_styling
 
 test_queued_enter_verdict_busy_pending_is_empty
