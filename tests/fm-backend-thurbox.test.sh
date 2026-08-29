@@ -856,6 +856,58 @@ test_kill_still_refuses_a_recycled_uuid_with_no_pane() {
   pass "kill verifies identity from the session row, so a recycled uuid is still refused"
 }
 
+test_forced_secondmate_teardown_kills_thurbox_child_with_child_home_tag() {
+  reset_world
+  # thurbox session names are home-scoped, and kill refuses a row whose name is
+  # not the expected task's scoped title. Forced secondmate cleanup runs in the
+  # PARENT's process, so without re-scoping to the child home every child name
+  # mismatches, kill returns success without acting, and the child's session row
+  # and its live window both survive the teardown with nothing printed.
+  local dir state data config home project child_uuid child_title out status
+  dir="$TMP_ROOT/teardown-secondmate-child-$RANDOM"
+  state="$dir/state"; data="$dir/data"; config="$dir/config"
+  home="$dir/secondmate-home"; project="$dir/project"
+  mkdir -p "$state" "$data" "$config" "$home/state" "$home/data" "$home/config" "$project"
+  printf 'smt\n' > "$home/.fm-secondmate-home"
+  child_uuid=99999999-9999-9999-9999-999999999999
+  child_title=$(FM_HOME=$home FM_ROOT=$home fm_backend_thurbox_scoped_title fm-childt)
+
+  fm_write_meta "$state/smt.meta" \
+    "window=$UUID:%50" \
+    "endpoint_task_id=smt" \
+    "backend=thurbox" \
+    "thurbox_session_id=$UUID" \
+    "thurbox_pane_id=%50" \
+    "worktree=$home" \
+    "project=$home" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home"
+  fm_write_meta "$home/state/childt.meta" \
+    "window=$child_uuid:%51" \
+    "endpoint_task_id=childt" \
+    "backend=thurbox" \
+    "thurbox_session_id=$child_uuid" \
+    "thurbox_pane_id=%51" \
+    "worktree=$dir/missing-child-worktree" \
+    "project=$project" \
+    "kind=scout"
+
+  add_row "$UUID" "$(FM_HOME=$ROOT FM_ROOT=$ROOT fm_backend_thurbox_scoped_title fm-smt)" "%50" local-tmux -
+  add_row "$child_uuid" "$child_title" "%51" local-tmux -
+  export FM_TB_PANES="%50 %51"
+
+  out=$( FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-teardown.sh" smt --force 2>&1 ); status=$?
+  expect_code 0 "$status" "fm-teardown should force-retire a secondmate with a thurbox child: $out"
+  assert_grep $'session\x1fdelete\x1f'"$child_uuid" "$FM_TB_LOG" \
+    "forced secondmate teardown left the child thurbox session row behind"
+  [ -z "$(fm_backend_thurbox_session_id_for_label "$child_title")" ] \
+    || fail "the child home's session name is still reserved after forced teardown"
+  pass "forced secondmate teardown reclaims a thurbox child session under the child home tag"
+}
+
 test_list_live_filters_and_skips_unaddressable() {
   reset_world
   add_row "$UUID" "$TITLE" "%20" local-tmux -
@@ -1038,6 +1090,7 @@ test_kill_forces_window_reclaim
 test_kill_refuses_recycled_uuid
 test_kill_reclaims_the_row_when_the_window_is_already_gone
 test_kill_still_refuses_a_recycled_uuid_with_no_pane
+test_forced_secondmate_teardown_kills_thurbox_child_with_child_home_tag
 test_list_live_filters_and_skips_unaddressable
 test_backend_is_known_and_spawn_capable
 test_endpoint_validation_accepts_consistent_meta

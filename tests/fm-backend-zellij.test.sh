@@ -968,6 +968,33 @@ test_send_text_submit_detects_swallowed_enter() {
   pass "fm_backend_zellij_send_text_submit: reports 'pending' when the composer still holds the text after retried Enters (swallowed)"
 }
 
+test_send_text_submit_exhausted_pending_is_never_converted() {
+  local dir fb out
+  # zellij supplies no delivery-busy primitive to the shared retry loop
+  # (fm_composer_submit_retry_core's optional busy-fn), so an exhausted-budget
+  # pending composer must never be converted to a delivered verdict the way
+  # tmux, herdr, and thurbox convert theirs - not even when the pane renders a
+  # busy footer, since a rendered footer is not a signal this adapter owns.
+  dir="$TMP_ROOT/submit-no-conversion"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'\u276f ' > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'\u276f hello captain\n\nThinking... (esc to interrupt)' > "$dir/responses/6.out"
+  zellij_pane_response "$dir" 7 7 3
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' $'\u276f hello captain\n\nThinking... (esc to interrupt)' > "$dir/responses/10.out"
+  zellij_pane_response "$dir" 11 7 3
+  zellij_pane_response "$dir" 13 7 3
+  printf '%s' $'\u276f hello captain\n\nThinking... (esc to interrupt)' > "$dir/responses/14.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an exhausted pending composer on zellij must stay pending even with a busy-looking pane, got '$out'"
+  pass "fm_backend_zellij_send_text_submit: an exhausted pending composer is never converted to delivered"
+}
+
 test_send_text_submit_unrelated_change_is_not_delivery() {
   # THE false-positive regression (audit fm-composer-consolidation-audit-s1,
   # section 3.5, verified live): a pane whose content changes for reasons
@@ -1342,6 +1369,7 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_exhausted_pending_is_never_converted
 test_send_text_submit_unrelated_change_is_not_delivery
 test_send_text_submit_rejects_unobserved_paste
 test_send_text_submit_rejects_transcript_echo_with_unrelated_draft

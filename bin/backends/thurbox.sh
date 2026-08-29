@@ -715,12 +715,29 @@ fm_backend_thurbox_send_text_submit() {  # <target> <text> <retries> <enter-slee
 }
 
 # fm_backend_thurbox_busy_state: semantic busy/idle/unknown from thurbox's
-# NATIVE `hook_state`, making thurbox the second backend after herdr with a
-# real agent-state primitive rather than a pane regex.
+# NATIVE `hook_state` - the second such reader after herdr, and a real
+# agent-state primitive rather than a pane regex.
+#
+# WHAT THIS ACTUALLY REPORTS TODAY: `unknown`, for a default firstmate-spawned
+# session. `hook_state` is written ONLY by `thurbox-cli session signal`, which
+# thurbox's own agents invoke from lifecycle hooks thurbox wires when IT
+# launches the agent. firstmate's required agents.toml entry is a bare
+# interactive shell precisely so firstmate can run treehouse and launch the
+# harness itself, so thurbox wires no hooks, and firstmate does not signal
+# either. Nothing therefore writes `hook_state` unless the OPERATOR wires
+# their harness's own hooks to `thurbox-cli session signal --state <s>` -
+# which works with no session argument from inside the pane, because thurbox
+# injects THURBOX_SESSION there and child processes inherit it.
+#
+# This reader is kept, not removed, because it is correct and fails safe: with
+# no signal source `hook_state` is null, this returns `unknown`, the widened
+# native-busy gate in bin/fm-busy-lib.sh does not fire, and the queued-Enter
+# conversion does not convert. It goes live the moment a signal source exists.
+# docs/thurbox-backend.md "Active limits" owns the operator-facing statement.
 #
 # thurbox's agents report their own lifecycle through `thurbox-cli session
-# signal --state <working|blocked|done|idle>` from their harness hooks, and the
-# state lands on the session row. That vocabulary is WORD-FOR-WORD herdr's
+# signal --state <working|blocked|done|idle>`, and the state lands on the
+# session row. That vocabulary is WORD-FOR-WORD herdr's
 # agent_status vocabulary, so the mapping below is herdr's
 # (fm_backend_herdr_classify_agent_status) applied unchanged, including
 # `blocked` mapping to idle: blocked means the agent is waiting on a human, not

@@ -2485,9 +2485,14 @@ cleanup_firstmate_home_children() {
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
-      elif [ "$child_backend" = zellij ]; then
-        # Zellij titles are scoped by the owning home tag, so forced secondmate
-        # cleanup must verify child tabs as that child home, not the parent.
+      elif [ "$child_backend" = zellij ] || [ "$child_backend" = thurbox ]; then
+        # Zellij tab titles and thurbox session names are both scoped by the
+        # owning home tag (bin/fm-backend-hometag-lib.sh), and both kills refuse
+        # a target whose title does not match the expected task's scoped name.
+        # This runs in the PARENT's process, so forced secondmate cleanup has to
+        # verify those children as the CHILD home - otherwise every scoped name
+        # mismatches, the kill returns success without acting, and the child's
+        # tab or session row plus its live window survive the teardown silently.
         ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
       else
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true

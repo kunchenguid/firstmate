@@ -892,6 +892,29 @@ test_send_text_submit_detects_swallowed_enter() {
   pass "fm_backend_cmux_send_text_submit: reports 'pending' when the composer never clears after retried Enters (swallowed)"
 }
 
+test_send_text_submit_exhausted_pending_is_never_converted() {
+  local dir fb out
+  # cmux supplies no delivery-busy primitive to the shared retry loop
+  # (fm_composer_submit_retry_core's optional busy-fn), so an exhausted-budget
+  # pending composer must never be converted to a delivered verdict the way
+  # tmux, herdr, and thurbox convert theirs. Without a busy signal of its own,
+  # "still pending" here is indistinguishable from a genuinely swallowed Enter,
+  # and reporting delivery would be reporting an unproven submit.
+  dir="$TMP_ROOT/submit-no-conversion"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 5 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 7 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 9 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 6 $'  \u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\n  \u2502 \u276f hello captain        \u2502\n  \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Composer \u2500\u2500\u2500\u2500\u2500\u2500\u256f\n\n  Thinking... (esc to interrupt)'
+  cmux_read_screen_response "$dir" 10 $'  \u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\n  \u2502 \u276f hello captain        \u2502\n  \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Composer \u2500\u2500\u2500\u2500\u2500\u2500\u256f\n\n  Thinking... (esc to interrupt)'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_text_submit "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an exhausted pending composer on cmux must stay pending even with a busy-looking pane, got '$out'"
+  pass "fm_backend_cmux_send_text_submit: an exhausted pending composer is never converted to delivered"
+}
+
 # The regression test for the popup-placeholder/second-Enter class (mirrors
 # herdr's 2026-07-03 incident test): Enter #1 closes the popup and fills an
 # argument-hint placeholder (still pending); Enter #2 actually submits. The
@@ -1154,6 +1177,7 @@ test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_exhausted_pending_is_never_converted
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_send_failed_when_target_absent
 test_window_of_workspace_finds_window_and_count
