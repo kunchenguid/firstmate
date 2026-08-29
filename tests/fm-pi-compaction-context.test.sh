@@ -420,17 +420,19 @@ wait_for_text byte BOUNDED_NEXT_OK || fail "byte: next prompt failed against UTF
 [ "$(last_normal_field over)" = false ] || fail "byte: refresh exceeded the UTF-8 byte hard limit"
 pass "real Pi next prompt survives a selected model enforcing one token per UTF-8 byte"
 
-# The first post-compaction request above took the unknown-usage branch
-# (no authoritative usage.tokens yet). A second request now has real
-# usage.tokens from that first response, so it exercises the authoritative
-# subtraction of the stored refresh byte count back out of provider usage -
-# the path where a mixed byte/token unit would understate base context.
+# The first post-compaction request above took the unknown-usage branch (no
+# authoritative usage.tokens yet). A second request now has real usage.tokens
+# from that first response available alongside it, exercising the path where
+# a naive subtraction of the stored refresh's byte count back out of that
+# authoritative total would understate base context under a byte-dense
+# tokenizer; the base-context estimate stays the clean rebuilt-message byte
+# sum regardless, so it is never contaminated by the prior refresh.
 send_line byte BOUNDED_NEXT2
 wait_for_text byte BOUNDED_NEXT2_OK || fail "byte: second prompt failed against UTF-8 byte hard limit"
 [ "$(last_normal_field byte_model)" = true ] || fail "byte: second prompt lost the adversarial model selection"
 [ "$(last_normal_field current_instructions)" = true ] || fail "byte: second prompt did not retain current instructions"
 [ "$(last_normal_field over)" = false ] || fail "byte: second prompt exceeded the UTF-8 byte hard limit"
-pass "real Pi second post-compaction prompt survives authoritative usage subtraction under a UTF-8 byte enforcing model"
+pass "real Pi second post-compaction prompt stays bounded under authoritative usage with a UTF-8 byte enforcing model"
 tmux -L "$SOCKET" kill-session -t byte >/dev/null 2>&1 || true
 
 # Over-hard-limit control: the same provider rejects an actually oversized

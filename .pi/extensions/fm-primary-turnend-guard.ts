@@ -33,9 +33,6 @@ type CompactRefreshBudget = {
 const compactRefreshStateType = "firstmate-post-compact-refresh";
 let compactSettings: { reserveTokens: number; keepRecentTokens: number } | undefined;
 let compactRefresh: CompactRefreshState | undefined;
-// UTF-8 BYTE count of the last delivered refresh (an upper bound on its token
-// count, since every token encodes at least one byte) - never a token count.
-let previousCompactRefreshBytes = 0;
 let compactRefreshNotice = "";
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -521,7 +518,6 @@ function activeToolTokens(pi: ExtensionAPI): number {
 
 function restoreCompactRefresh(ctx: SessionStartContext): void {
   compactRefresh = undefined;
-  previousCompactRefreshBytes = 0;
   compactRefreshNotice = "";
   const branch = ctx.sessionManager?.getBranch?.();
   if (!Array.isArray(branch)) return;
@@ -619,24 +615,22 @@ function compactRefreshBudget(
   if (!Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
   const reserveTokens = Math.max(0, Math.min(contextWindow, refresh.reserveTokens));
   const desiredSafetyTokens = Math.max(compactRefreshSafetyTokens, Math.ceil(contextWindow * 0.05));
-  let baseTokens: number;
-  if (usage?.tokens !== null && usage?.tokens !== undefined) {
-    // Subtracting the prior refresh out of authoritative provider usage needs
-    // a LOWER bound on its token count, so baseTokens stays an over-estimate
-    // and headroom stays an under-estimate. maxBytesPerToken is a deliberately
-    // conservative MAXIMUM (not the ~4 byte/token average for ordinary text,
-    // which individual tokens routinely exceed) so the quotient is a floor.
-    const maxBytesPerToken = 8;
-    const previousCompactRefreshTokensFloor = Math.floor(previousCompactRefreshBytes / maxBytesPerToken);
-    baseTokens = Math.max(0, usage.tokens - previousCompactRefreshTokensFloor);
-  } else {
-    // No authoritative usage available: sum UTF-8 byte estimates, which is an
-    // upper bound on base context and therefore already errs in the safe
-    // direction (do not "fix" this toward the byte/token average).
-    const messageTokens = serializedBytes(eventMessages);
-    const systemTokens = utf8Bytes(String(ctx.getSystemPrompt?.() ?? ""));
-    baseTokens = messageTokens + systemTokens + activeToolTokens(pi);
-  }
+  // event.messages is rebuilt from persisted session entries on every context
+  // event, and the refresh this function injects is deliberately ephemeral
+  // (never persisted - see the session_compact handler), so eventMessages
+  // never contains a prior turn's injected refresh to double-count. That
+  // makes a plain UTF-8 byte sum of the real messages a safe, uncontaminated
+  // upper bound on base context - unlike ctx.getContextUsage().tokens, which
+  // is the provider's billed total for the prior turn and DOES include
+  // whatever refresh was injected into that turn's request. Netting a prior
+  // refresh's cost back out of that billed total would need a sound LOWER
+  // bound on its token count, but no fixed bytes-per-token divisor is safe
+  // across tokenizers - a single token can encode arbitrarily many bytes. So
+  // base context is estimated from the clean message list instead of trying
+  // to un-contaminate the authoritative total.
+  const messageTokens = serializedBytes(eventMessages);
+  const systemTokens = utf8Bytes(String(ctx.getSystemPrompt?.() ?? ""));
+  const baseTokens = messageTokens + systemTokens + activeToolTokens(pi);
   const headroomTokens = Math.max(0, Math.floor(contextWindow - reserveTokens - baseTokens));
   // Preserve the normal safety margin without letting that margin itself crowd
   // out the concise current-instruction pointer it exists to protect.
@@ -781,7 +775,6 @@ export default function (pi: ExtensionAPI) {
       reserveTokens,
       keepRecentTokens,
     };
-    previousCompactRefreshBytes = 0;
     compactRefreshNotice = "";
     try {
       pi.appendEntry(compactRefreshStateType, compactRefresh);
@@ -805,7 +798,6 @@ export default function (pi: ExtensionAPI) {
       removeSessionstartExitListener();
       compactSettings = undefined;
       compactRefresh = undefined;
-      previousCompactRefreshBytes = 0;
       compactRefreshNotice = "";
     }
   });
@@ -816,7 +808,6 @@ export default function (pi: ExtensionAPI) {
     if (!budget) return;
     const bounded = compactRefreshContent(compactRefresh, budget.availableTokens);
     if (!bounded) {
-      previousCompactRefreshBytes = 0;
       const notice = "none";
       if (ctx.hasUI && compactRefreshNotice !== notice) {
         compactRefreshNotice = notice;
@@ -827,7 +818,6 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    previousCompactRefreshBytes = bounded.deliveredTokens;
     if (bounded.omitted) {
       const notice = "bounded";
       if (ctx.hasUI && compactRefreshNotice !== notice) {
@@ -855,7 +845,6 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("model_select", () => {
-    previousCompactRefreshBytes = 0;
     compactRefreshNotice = "";
   });
 
