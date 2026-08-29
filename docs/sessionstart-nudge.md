@@ -92,8 +92,21 @@ Compaction shares that same generation ownership and cancellation - a stale or s
 The extension captures the active compaction reserve from `session_before_compact`, runs the ordinary `compact` source through the same generation machinery, and stores its bounded output as a custom entry that does not participate in model context, never through an optionless `sendMessage`.
 Every later provider request receives that refresh ephemerally through Pi's `context` event, including an overflow retry, so delivery neither queues a continuation nor accumulates in session history.
 The selected model's context window and the active output reserve set the outer budget.
-The extension sizes each delivered refresh against a UTF-8 byte count, a valid upper bound on its token count since every token encodes at least one byte. Base context is always estimated the same way: a UTF-8 byte sum of the rebuilt messages, effective system prompt, and active tool definitions. Those messages are rebuilt from persisted session entries on every `context` event, and the refresh is deliberately never persisted, so this estimate never needs to net a prior delivery back out of authoritative provider usage - doing so would need a lower bound on that delivery's token count, and no fixed bytes-per-token divisor is safe across tokenizers, since a single token can encode arbitrarily many bytes.
+The extension sizes each delivered refresh against a UTF-8 byte count, a valid upper bound on its token count since every token encodes at least one byte.
+Base context is estimated the same way: a UTF-8 byte sum of the rebuilt messages, effective system prompt, and active tool definitions.
+Those messages are rebuilt from persisted session entries on every `context` event, and the refresh is deliberately never persisted, so this estimate never needs to net a prior delivery back out of provider usage.
+Netting one back out would need a lower bound on that delivery's token count, and no fixed bytes-per-token divisor is safe across tokenizers, since a single token can encode arbitrarily many bytes.
+
+This bound is a deliberate conservative over-reservation, not an authoritative measurement, because Pi does not expose the measurement it would need.
+Verified against Pi 0.84.3: there is no per-entry or per-content token count in the extension surface, the session format, or the documented API.
+The exported `estimateTokens` is a `chars / 4` heuristic rather than a tokenizer, and `ctx.getContextUsage()` is itself partly estimated, using the last assistant usage plus that same heuristic for trailing messages.
+Authoritative token figures exist only as per-request provider `Usage` totals, which cannot be attributed to one injected entry.
+Because base context is counted in bytes while the model's limit is counted in tokens, the reservation typically overshoots real token usage by several times, so the refresh is smaller than strictly necessary and can shrink as a session fills.
+That trade is accepted deliberately: over-reserving is safe, and under-reserving would put the session back over the model limit.
+
 A five-percent safety margin with a 2,048-token floor remains outside the refresh whenever headroom permits, but yields enough space for the concise current-instruction pointer rather than suppressing that pointer itself.
+Because that shrinkage is the accepted cost, it is never silent: every truncation or suppression of the refresh reports what was withheld and why, naming the delivered and available byte counts, the reserved base context, and where the omitted instructions remain readable.
+The report is keyed on those measured figures rather than on the kind of degradation, so a budget that keeps shrinking keeps reporting instead of falling silent after the first notice.
 If the digest does not fit, the retained prefix ends with model-readable omission accounting and directs the model to the current `AGENTS.md` plus the named durable sources instead of silently dropping current instructions.
 The same non-context custom entry restores this behavior after reload, resume, or fork without making the digest summarizable user content.
 

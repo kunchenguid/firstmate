@@ -740,9 +740,9 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_before_compact", (event) => {
     // keepRecentTokens is captured and persisted (see CompactRefreshState) but
     // deliberately not folded into compactRefreshBudget: retained messages
-    // already appear in event.messages and in usage.tokens on both budget
-    // branches, so adding it would double-count retained context and shrink
-    // the refresh with no safety benefit.
+    // already appear in the rebuilt event.messages that the single base-context
+    // estimate sums, so adding it would double-count retained context and
+    // shrink the refresh with no safety benefit.
     compactSettings = {
       reserveTokens: event.preparation.settings.reserveTokens,
       keepRecentTokens: event.preparation.settings.keepRecentTokens,
@@ -808,22 +808,31 @@ export default function (pi: ExtensionAPI) {
     if (!budget) return;
     const bounded = compactRefreshContent(compactRefresh, budget.availableTokens);
     if (!bounded) {
-      const notice = "none";
+      // Freshness degradation must never be silent. The notice key carries the
+      // measured figures, not just the kind, so a budget that keeps shrinking
+      // re-reports each distinct degradation instead of being deduped away
+      // after the first one.
+      const notice = `none:${budget.availableTokens}`;
       if (ctx.hasUI && compactRefreshNotice !== notice) {
         compactRefreshNotice = notice;
         ctx.ui.notify(
-          `Firstmate omitted its post-compaction refresh because no safe model context remained; read ${root}/AGENTS.md before continuing.`,
+          `Firstmate SUPPRESSED its entire post-compaction refresh: only ${budget.availableTokens} safe bytes remained ` +
+            `(base context conservatively over-reserved at ${budget.baseTokens} bytes, reserve ${budget.reserveTokens}, ` +
+            `safety ${budget.safetyTokens}, window ${budget.contextWindow}). Current Firstmate operating instructions are ` +
+            `NOT in model context; read ${root}/AGENTS.md before continuing.`,
           "warning",
         );
       }
       return;
     }
     if (bounded.omitted) {
-      const notice = "bounded";
+      const notice = `bounded:${bounded.deliveredTokens}/${budget.availableTokens}`;
       if (ctx.hasUI && compactRefreshNotice !== notice) {
         compactRefreshNotice = notice;
         ctx.ui.notify(
-          `Firstmate bounded its post-compaction refresh to ${bounded.deliveredTokens} of ${budget.availableTokens} safe tokens; omitted sources remain readable on disk.`,
+          `Firstmate TRUNCATED its post-compaction refresh to ${bounded.deliveredTokens} of ${budget.availableTokens} safe bytes ` +
+            `(base context conservatively over-reserved at ${budget.baseTokens} bytes, window ${budget.contextWindow}). ` +
+            `Omitted instructions remain readable at ${root}/AGENTS.md and the durable sources named in the retained index.`,
           "warning",
         );
       }
