@@ -25,8 +25,11 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  # comm validates its inputs' order in the CURRENT locale, and both lists were
+  # built with `LC_ALL=C sort`, so the comparison has to read them in that same
+  # collation - see test_coverage_guard_holds_under_a_non_c_collation below.
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -595,7 +598,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -620,6 +623,50 @@ test_portable_shard_union_and_coverage_guard() {
   [ "$first" = "tests/fm-x-mode.test.sh" ] \
     || fail "shard 1 must start with the longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
+}
+
+# The coverage guard builds every set with `LC_ALL=C sort` and then compares
+# those sets with comm. comm validates its inputs' order in the CURRENT locale,
+# so leaving the comparison in the ambient locale made the guard depend on the
+# collation of whoever ran it: a UTF-8 locale ignores the '-' and '.' that
+# separate these filenames, ranks `fm-backend-herdr-workspace-...` and
+# `fm-backend-herdr.test.sh` the other way round from C, and comm then rejects
+# a correctly C-sorted list. Under the guard's own `set -e` the unguarded
+# `comm -12` aborted the whole run with exit 1 and NO diagnostic, so the CI
+# coverage job and the pre-push gate both failed as if the lanes had diverged.
+# The guard has to answer the same way in every collation, since it is a
+# question about set membership and not about sort order.
+test_coverage_guard_holds_under_a_non_c_collation() {
+  local loc inventory chosen out
+  inventory=$("$RUNNER" --list --all)
+  [ -n "$inventory" ] || fail "--list --all printed nothing"
+  # Only a locale that actually REORDERS this repo's own inventory exercises
+  # the hazard; anything else re-runs the C path under a different name. The
+  # pair that disagrees is discovered from the real suite rather than hardcoded,
+  # so this stays true as test filenames come and go.
+  chosen=""
+  for loc in $(locale -a 2>/dev/null || true); do
+    case "$loc" in C|C.*|POSIX|POSIX.*) continue ;; esac
+    if [ "$(printf '%s\n' "$inventory" | LC_ALL=C sort)" \
+      != "$(printf '%s\n' "$inventory" | LC_ALL="$loc" sort 2>/dev/null)" ]; then
+      chosen=$loc
+      break
+    fi
+  done
+  if [ -z "$chosen" ]; then
+    # No installed locale collates these names differently from C, so the
+    # hazard cannot be staged here. Still assert the guard itself passes.
+    out=$("$RUNNER" --check-coverage) \
+      || fail "coverage guard failed in the ambient locale"
+    assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
+    pass "coverage guard holds (no installed locale reorders the suite inventory)"
+    return
+  fi
+  out=$(LC_ALL="$chosen" "$RUNNER" --check-coverage) \
+    || fail "coverage guard failed under LC_ALL=$chosen, a collation that reorders the suite inventory"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" \
+    "coverage guard success marker under LC_ALL=$chosen"
+  pass "coverage guard holds under a collation that differs from C ($chosen)"
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {
@@ -1140,6 +1187,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_holds_under_a_non_c_collation
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
