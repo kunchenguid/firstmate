@@ -15,8 +15,10 @@
 # A successful span classification reports every actionable event through its
 # captured endpoint, while a failed classification reports no committable endpoint.
 # An absent status file is a successful empty span, while an existing status object
-# that cannot be read or identified is a retryable classification failure.
-# Consumers may advance only after the actionable or routine success outcomes.
+# that cannot be read or identified is a classification failure.
+# One durable receipt per task suppresses repeats of the same failure fingerprint,
+# and a changed object or successful classification clears that suppression.
+# Consumers never advance a position for either a new or repeated failure.
 #
 # There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
@@ -888,15 +890,48 @@ status_daemon_seen_marker_path() {  # <state> <task-id>
   printf '%s/.subsuper-seen-status-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
 }
 
+status_classification_failure_receipt_path() {  # <state> <task-id>
+  printf '%s/.status-classify-failure-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
+}
+
+status_classification_failure_fingerprint() {  # <status-file> <failure-kind>
+  local f=$1 kind=$2 metadata target=''
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    metadata=absent
+  elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    metadata=$(LC_ALL=C stat -f '%HT:%d:%i:%z:%m:%c:%Sp' "$f" 2>/dev/null) || metadata=unstatable
+  else
+    metadata=$(LC_ALL=C stat -c '%F:%d:%i:%s:%Y:%Z:%A' "$f" 2>/dev/null) || metadata=unstatable
+  fi
+  [ -L "$f" ] && target=$(readlink "$f" 2>/dev/null || true)
+  printf '%s\t%s\t%s\n' "$kind" "$metadata" "$target" | cksum | awk '{print $1 ":" $2}'
+}
+
+status_classification_failure_record() {  # <state> <task-id> <status-file> <failure-kind>
+  local state=$1 task=$2 f=$3 kind=$4 receipt fingerprint current tmp
+  receipt=$(status_classification_failure_receipt_path "$state" "$task")
+  fingerprint=$(status_classification_failure_fingerprint "$f" "$kind") || return 2
+  current=$(cat "$receipt" 2>/dev/null || true)
+  [ "$current" != "$fingerprint" ] || return 1
+  tmp="$receipt.tmp.$$"
+  printf '%s' "$fingerprint" > "$tmp" && mv -f "$tmp" "$receipt" || { rm -f "$tmp"; return 2; }
+  return 0
+}
+
+status_classification_failure_clear() {  # <state> <task-id>
+  rm -f "$(status_classification_failure_receipt_path "$1" "$2")"
+}
+
 status_retire_presentation_task() {  # <state> <task-id>
   local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0 found=0
-  local signal_marker heartbeat_marker daemon_marker
+  local signal_marker heartbeat_marker daemon_marker failure_receipt
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
   signal_marker=$(status_signal_seen_marker_path "$state" "$task")
   heartbeat_marker=$(status_heartbeat_seen_marker_path "$state" "$task")
   daemon_marker=$(status_daemon_seen_marker_path "$state" "$task")
+  failure_receipt=$(status_classification_failure_receipt_path "$state" "$task")
 
   # A remote-home teardown can legitimately retire an endpoint ID that has no
   # status log in that home. Do not contend with that home's unrelated status
@@ -953,7 +988,7 @@ EOF
   fi
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
-      "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
+      "$signal_marker" "$heartbeat_marker" "$daemon_marker" "$failure_receipt" || rc=1
   fi
   fm_lock_release "$lock" || rc=1
   return "$rc"

@@ -957,21 +957,29 @@ run_check_capture() {
 # no verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal is
 # only benign when the crew is also provably working (signal_crew_provably_working).
 signal_files_actionable() {  # <status-file> ...
-  local f record rest endpoint ident rc found=1
+  local f task record rest endpoint ident rc receipt_rc found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
   FM_SIGNAL_CLASSIFY_ERROR=0
   for f in "$@"; do
     case "$f" in *.status) ;; *) continue ;; esac
-    [ -e "$f" ] || continue
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" \
       "$(fm_wake_signal_seen_size "$STATE" "$f")")
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      FM_SIGNAL_CLASSIFY_ERROR=1
-      found=0
+      if afk_present; then
+        FM_SIGNAL_CLASSIFY_ERROR=1
+        found=0
+      else
+        status_classification_failure_record "$STATE" "$task" "$f" span-read
+        receipt_rc=$?
+        if [ "$receipt_rc" -ne 1 ]; then FM_SIGNAL_CLASSIFY_ERROR=1; found=0; fi
+      fi
       continue
     fi
+    status_classification_failure_clear "$STATE" "$task"
     endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
     FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
     [ "$rc" -eq 0 ] && found=0
@@ -1007,20 +1015,22 @@ EOF
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task record rest endpoint ident rc found=1
+  local f task record rest endpoint ident rc receipt_rc found=1
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   FM_HEARTBEAT_SCAN_ERROR=0
   for f in "$STATE"/*.status; do
-    [ -e "$f" ] || continue
+    [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      FM_HEARTBEAT_SCAN_ERROR=1
-      found=0
+      status_classification_failure_record "$STATE" "$task" "$f" span-read
+      receipt_rc=$?
+      if [ "$receipt_rc" -ne 1 ]; then FM_HEARTBEAT_SCAN_ERROR=1; found=0; fi
       continue
     fi
+    status_classification_failure_clear "$STATE" "$task"
     endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
     FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
     [ "$rc" -eq 0 ] && found=0
