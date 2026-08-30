@@ -441,6 +441,52 @@ assert_absent "$(result_path "$H" periodic-duewrite 2)" \
   "reconcile does not restart a source that retired itself on a persistent write failure"
 pass "a check that ran but could not have its schedule recorded announces once and retires instead of hot-looping"
 
+# --- a failed schedule write whose self-retirement also fails is announced --
+# When write_due is persistently broken, cmd_run retires the source itself so
+# reconcile never restarts it against a stale, past-due schedule. If the
+# retirement's own `rm` of the registration file is ALSO persistently broken
+# (e.g. a read-only registry directory), the source stays registered and
+# past-due, so reconcile immediately restarts it - the exact repeat-wake loop
+# retirement exists to prevent. The refusal must say so honestly instead of
+# claiming "retired to stop a repeat-wake loop" while the loop is still live.
+H="$TMP_ROOT/h-duewrite-unregfail"; new_home "$H"
+per "$H" arm duewriteunregfail --interval 3600 --timeout 60 -- "$CLEAN" >/dev/null
+real_mv=$(command -v mv) || fail "could not locate mv for the unregister-failure fixture"
+real_rm=$(command -v rm) || fail "could not locate rm for the unregister-failure fixture"
+FAKEBIN3="$TMP_ROOT/duewrite-unregfail-fakebin"; mkdir -p "$FAKEBIN3"
+cat > "$FAKEBIN3/mv" <<SH
+#!/usr/bin/env bash
+last=\${!#}
+if [ "\$last" = "$H/state/periodic/periodic-duewriteunregfail.due" ]; then
+  exit 1
+fi
+exec "$real_mv" "\$@"
+SH
+chmod +x "$FAKEBIN3/mv"
+cat > "$FAKEBIN3/rm" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    "$H/state/procevent/periodic-duewriteunregfail.source") exit 1 ;;
+  esac
+done
+exec "$real_rm" "\$@"
+SH
+chmod +x "$FAKEBIN3/rm"
+PATH="$FAKEBIN3:$PATH" pe "$H" start periodic-duewriteunregfail >/dev/null
+wait_for_result "$H" periodic-duewriteunregfail 1 \
+  || fail "the failed-schedule-write-and-unregister run captured no result"
+RESULT=$(result_path "$H" periodic-duewriteunregfail 1)
+assert_grep 'status: rejected' "$RESULT" "a failed schedule write is still announced as a refusal"
+assert_grep 'retirement to stop a repeat-wake loop also failed' "$RESULT" \
+  "the refusal admits retirement itself failed instead of falsely claiming the source was retired"
+assert_present "$H/state/procevent/periodic-duewriteunregfail.source" \
+  "a failed unregister leaves the source registered, matching what the honest refusal says"
+PATH="$FAKEBIN3:$PATH" pe "$H" reconcile >/dev/null
+wait_for_result "$H" periodic-duewriteunregfail 2 \
+  || fail "a source whose retirement failed stays registered and past-due, so reconcile restarts it (the loop the honest message warns about)"
+pass "a failed schedule write whose self-retirement also fails admits the loop instead of claiming it was stopped"
+
 # --- a transient schedule-write failure self-heals within one run -----------
 # A persistent write failure (above) retires the source so it is announced
 # exactly once instead of looping. For a failure that clears after a couple

@@ -440,10 +440,15 @@ cmd_run() {
     ran_at=$(date +%s)
     next_due=$(( ran_at + SPEC_INTERVAL ))
     if ! write_due_retrying "$sid" "$next_due"; then
-      unregister_self "$sid"
-      emit_doc "$sid" rejected \
-        "refused without running the check: its bytes do not match the registered trust binding, and the next-due time could not be recorded; retired to stop a repeat-wake loop - re-arm to restore the cadence" \
-        '' "$ran_at" "$next_due" ''
+      if unregister_self "$sid"; then
+        emit_doc "$sid" rejected \
+          "refused without running the check: its bytes do not match the registered trust binding, and the next-due time could not be recorded; retired to stop a repeat-wake loop - re-arm to restore the cadence" \
+          '' "$ran_at" "$next_due" ''
+      else
+        emit_doc "$sid" rejected \
+          "refused without running the check: its bytes do not match the registered trust binding, and the next-due time could not be recorded; retirement to stop a repeat-wake loop also failed - remove state/periodic/$sid.* by hand" \
+          '' "$ran_at" "$next_due" ''
+      fi
       exit 0
     fi
     emit_doc "$sid" rejected \
@@ -472,10 +477,15 @@ cmd_run() {
   # persistent one reaches this refusal.
   next_due=$(( ran_at + SPEC_INTERVAL ))
   if ! write_due_retrying "$sid" "$next_due"; then
-    unregister_self "$sid"
-    emit_doc "$sid" rejected \
-      "the check ran but its next-due time could not be recorded; retired to stop a repeat-wake loop - re-arm to restore the cadence" \
-      "$rc" "$ran_at" "$next_due" "$out"
+    if unregister_self "$sid"; then
+      emit_doc "$sid" rejected \
+        "the check ran but its next-due time could not be recorded; retired to stop a repeat-wake loop - re-arm to restore the cadence" \
+        "$rc" "$ran_at" "$next_due" "$out"
+    else
+      emit_doc "$sid" rejected \
+        "the check ran but its next-due time could not be recorded; retirement to stop a repeat-wake loop also failed - remove state/periodic/$sid.* by hand" \
+        "$rc" "$ran_at" "$next_due" "$out"
+    fi
     exit 0
   fi
 
@@ -548,12 +558,16 @@ cmd_silent() {
 # up and emitting its own outcome. Dropping the registration directly is
 # enough: this process is already on its way to a normal exit, and the
 # runner that invoked it releases the claim itself once it does.
+# Returns 1 if the registration file could not be confirmed gone, so a caller
+# never claims "retired" while reconcile can still find and restart the
+# source: that would leave the wake loop it was meant to stop still running.
 unregister_self() {  # <source-id>
-  local sid=$1
+  local sid=$1 reg_file
   fm_procevent_source_lock_acquire "$sid" || return 1
-  rm -f -- "$(fm_procevent_registry_dir "$STATE")/$sid.source" \
-    "$(spec_file "$sid")" "$(trust_file "$sid")" "$(due_file "$sid")"
+  reg_file="$(fm_procevent_registry_dir "$STATE")/$sid.source"
+  rm -f -- "$reg_file" "$(spec_file "$sid")" "$(trust_file "$sid")" "$(due_file "$sid")"
   fm_procevent_source_lock_release "$sid"
+  [ ! -e "$reg_file" ]
 }
 
 cmd_retire() {
