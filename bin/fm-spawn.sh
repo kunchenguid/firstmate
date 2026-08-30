@@ -853,12 +853,16 @@ spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP" = 1 ]; then
     SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=0
+    # The four-argument kill every other endpoint-retiring call site uses: the
+    # recorded zellij tab id and the expected label keep the close on the TAB
+    # when a transient pane lookup comes up empty, instead of degrading to a
+    # close-pane that leaves the empty tab behind.
     # Every backend's kill is contractually best-effort (fm_backend_kill), so
     # its exit status alone never proves the endpoint is gone. Retryability is
     # what this cleanup owes the caller, and only a read-back of the name that
     # gates the next spawn can establish it; a survivor is named so it can be
     # retired by hand.
-    if ! fm_backend_kill "$BACKEND" "$T" \
+    if ! fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" \
        || fm_backend_endpoint_blocks_respawn "$BACKEND" "$T" "$W" 2>/dev/null; then
       echo "warning: the new $BACKEND endpoint $T named $W survived the refusal of claimed worktree '$WT'; retire it before retrying task $ID, or the next spawn will refuse the leftover $W" >&2
     fi

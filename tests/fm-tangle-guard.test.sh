@@ -422,10 +422,143 @@ test_spawn_tmux_window_construction() {
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
 
+# A recording fake `zellij` for a full spawn drive-through. It models the two
+# facts this guard depends on: `new-tab` registers a titled tab that
+# `list-tabs` keeps returning, and `close-pane` does NOT remove the now-empty
+# tab (verified real zellij behavior, recorded in bin/backends/zellij.sh's
+# header) while `close-tab-by-id` does. FM_FAKE_ZJ_PANES_FAIL_AFTER_DUMPS makes
+# `list-panes` start failing once worktree discovery has finished, reproducing
+# the transient CLI failure that leaves the kill with no resolvable owning tab.
+make_spawn_zellij_fakebin() {  # <dir> -> echoes fakebin path
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/zellij" <<SH
+#!/usr/bin/env bash
+set -u
+FM_FAKE_ZJ_STATE=\${FM_FAKE_ZJ_STATE:-"$dir/zjstate"}
+SH
+  cat >> "$fakebin/zellij" <<'SH'
+mkdir -p "$FM_FAKE_ZJ_STATE"
+tabs="$FM_FAKE_ZJ_STATE/tabs"
+dumps="$FM_FAKE_ZJ_STATE/dumps"
+: >> "$tabs"
+[ -f "$dumps" ] || echo 0 > "$dumps"
+[ -z "${FM_ZJ_REC:-}" ] || printf 'zellij %s\n' "$*" >> "$FM_ZJ_REC"
+
+zj_flag_value() {  # <flag> <args...>
+  local want=$1 prev= a
+  shift
+  for a in "$@"; do
+    [ "$prev" = "$want" ] && { printf '%s\n' "$a"; return 0; }
+    prev=$a
+  done
+  return 1
+}
+
+zj_tabs_json() {
+  local id name first=1
+  printf '['
+  while IFS=$'\t' read -r id name; do
+    [ -n "$id" ] || continue
+    [ "$first" = 1 ] || printf ','
+    printf '{"tab_id":%s,"name":"%s","active":false}' "$id" "$name"
+    first=0
+  done < "$tabs"
+  printf ']\n'
+}
+
+case "${1:-}" in
+  --version) printf 'zellij 0.44.0\n'; exit 0 ;;
+  list-sessions) printf '%s\n' "${FM_FAKE_ZJ_SESSION:-firstmate}"; exit 0 ;;
+  attach) exit 0 ;;
+esac
+
+case "${4:-}" in
+  list-tabs) zj_tabs_json; exit 0 ;;
+  new-tab)
+    name=$(zj_flag_value --name "$@") || name=
+    printf '4\t%s\n' "$name" >> "$tabs"
+    printf '4\n'
+    exit 0 ;;
+  list-panes)
+    [ "$(cat "$dumps")" -lt "${FM_FAKE_ZJ_PANES_FAIL_AFTER_DUMPS:-9999}" ] || exit 1
+    printf '[{"id":7,"tab_id":4,"is_plugin":false}]\n'
+    exit 0 ;;
+  dump-screen)
+    echo $(( $(cat "$dumps") + 1 )) > "$dumps"
+    printf '%s\n%s\n%s\n' '__FM_ZELLIJ_CWD_BEGIN__' "${FM_FAKE_PANE_PATH:-}" '__FM_ZELLIJ_CWD_END__'
+    exit 0 ;;
+  close-tab-by-id)
+    grep -v "^${5:-}$(printf '\t')" "$tabs" > "$tabs.next" || true
+    mv "$tabs.next" "$tabs"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/zellij"
+  fm_fake_exit0 "$fakebin" treehouse
+  printf '%s\n' "$fakebin"
+}
+
+# The claim refusal must retire the endpoint it just created even when the
+# backend's own pane->tab lookup transiently fails, because the leftover TAB -
+# not the pane - is what refuses the retry. The spawn is holding the tab id it
+# captured at create time, so the close has to carry it.
+test_spawn_claim_cleanup_retires_the_zellij_tab() {
+  local home proj claimed fakebin rec out status blocks
+  home="$TMP_ROOT/spawn-zj-home"
+  mkdir -p "$home/data" "$home/state"
+  proj=$(make_repo "$TMP_ROOT/spawn-zj-proj")
+  claimed="$TMP_ROOT/spawn-zj-wt"
+  git -C "$proj" worktree add -q --detach "$claimed" >/dev/null 2>&1
+  fakebin=$(make_spawn_zellij_fakebin "$TMP_ROOT/spawn-zj-fake")
+  rec="$TMP_ROOT/spawn-zj.log"
+  : > "$rec"
+  {
+    echo 'window=firstmate:9'
+    echo "worktree=$claimed"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+    echo 'backend=zellij'
+  } > "$home/state/zincumbent.meta"
+
+  fm_test_spawn_brief "$home" zj-collide-kk1 brief
+  out=$(FM_ZJ_REC="$rec" FM_FAKE_ZJ_PANES_FAIL_AFTER_DUMPS=2 \
+    fm_test_run_spawn "$home" "$claimed" "$fakebin" \
+      zj-collide-kk1 "$proj" codex --backend zellij --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 1 "$status" "a zellij spawn into a claimed worktree should refuse"
+  assert_contains "$out" "claimed by task zincumbent" \
+    "the zellij collision refusal did not name the owning record"
+  assert_grep 'close-tab-by-id 4' "$rec" \
+    "the claim cleanup must close the tab it created, using the tab id the spawn already holds"
+  assert_no_grep 'close-pane' "$rec" \
+    "closing only the pane leaves behind the empty tab that refuses the retry"
+  assert_not_contains "$out" "survived the refusal" \
+    "a fully retired zellij endpoint must not be reported as a survivor"
+
+  # The retryability claim, read from the backend's own tab inventory through
+  # the same predicate a fresh spawn is refused by.
+  blocks=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE='' \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zj-collide-kk1; then
+        echo blocks=yes
+      else
+        echo blocks=no
+      fi
+    ' "$ROOT")
+  assert_contains "$blocks" "blocks=no" \
+    "the refused allocation must be retryable without manual cleanup"
+  pass "fm-spawn: a claim refusal retires the zellij tab it created, even when the pane lookup fails"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_durable_worktree_claims
+test_spawn_claim_cleanup_retires_the_zellij_tab
 test_spawn_tmux_window_construction
