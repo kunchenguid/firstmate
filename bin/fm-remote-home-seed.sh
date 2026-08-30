@@ -147,11 +147,16 @@ REG_EXISTED=0
 [ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
 
 # Keep the parent charter as its durable source, but publish a remote copy whose
-# status path is the remote append-only relay log rather than a local Mac path.
+# status path and captain-preferences path resolve on the remote host rather than
+# retaining local paths that cannot exist there.
 PARENT_STATUS="$STATE/$ID.status"
 REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
+PARENT_CAPTAIN="$DATA/captain.md"
+REMOTE_CAPTAIN="$REMOTE_HOME/data/captain.md"
 while IFS= read -r line || [ -n "$line" ]; do
-  printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
+  line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
+  line=${line//"$PARENT_CAPTAIN"/"$REMOTE_CAPTAIN"}
+  printf '%s\n' "$line"
 done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=

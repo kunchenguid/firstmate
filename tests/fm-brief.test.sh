@@ -725,7 +725,7 @@ assert_off_limits_module_fence() {
   local brief=$1 label=$2 home=$3
   assert_grep "# Off-limits module prohibition - permanent safety boundary" "$brief" \
     "$label brief missing the off-limits module fence heading"
-  assert_grep "1. The rule. Honour every off-limits module prohibition recorded by this brief's operator. Never edit, and never make a read that leads to a write, anywhere in a fenced module. This is permanent until the operator personally lifts it." "$brief" \
+  assert_grep "1. The rule. Honour every off-limits module prohibition recorded by this brief's operator as an absolute boundary. Never edit, and never make a read that leads to a write, anywhere in a fenced module. This boundary remains absolute until the operator personally lifts it." "$brief" \
     "$label brief missing the permanent module rule"
   assert_grep "2. The operator's concrete prohibition. Read the operator's own private preferences file at $home/data/captain.md" "$brief" \
     "$label brief missing the private preferences pointer"
@@ -735,7 +735,7 @@ assert_off_limits_module_fence() {
     "$label brief missing the renders-this-file check"
   assert_grep 'Fenced modules can render shared components that live outside their own directories' "$brief" \
     "$label brief missing the shared-component warning"
-  assert_grep "4. The escape. If a task appears to REQUIRE touching a fenced module, that is NOT a green light - append \`blocked: {why}\` and return it to the operator." "$brief" \
+  assert_grep "4. The escape. If a task appears to REQUIRE touching a fenced module, that is NOT a green light - append \`blocked: {why}\`, stop, and return it to the operator without proceeding." "$brief" \
     "$label brief missing the blocked escape"
   assert_grep 'Never resolve it by editing, and never by inventing a fork on your own judgement.' "$brief" \
     "$label brief missing the no-fork escape"
@@ -785,6 +785,23 @@ test_off_limits_module_fence_uses_active_data_root() {
   assert_no_grep "$home/data/captain.md" "$brief" \
     "off-limits module fence retained the default data root"
   pass "fm-brief.sh: off-limits module fence uses the active data root"
+}
+
+test_existing_brief_is_not_overwritten() {
+  local home brief before after status
+  home="$TMP_ROOT/off-limits-existing-brief-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" existing-brief neutral-repository --mode no-mistakes >/dev/null 2>&1 \
+    || fail "initial brief scaffold exited non-zero"
+  brief="$home/data/existing-brief/brief.md"
+  before=$(cksum "$brief")
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" existing-brief neutral-repository --mode no-mistakes >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "existing brief scaffold unexpectedly exited zero"
+  after=$(cksum "$brief")
+  [ "$after" = "$before" ] || fail "existing generated brief was overwritten"
+  pass "fm-brief.sh: existing generated briefs remain untouched"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -849,5 +866,6 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_off_limits_module_fence_is_in_every_scaffold
 test_off_limits_module_fence_uses_active_data_root
+test_existing_brief_is_not_overwritten
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
