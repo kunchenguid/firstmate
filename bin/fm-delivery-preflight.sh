@@ -67,6 +67,32 @@ task_for_stale_key() {
   return 1
 }
 
+queue_has_task_row() {
+  local wanted=$1 epoch seq kind key payload extra task
+  while IFS=$(printf '\t') read -r epoch seq kind key payload extra \
+    || [ -n "${epoch}${seq}${kind}${key}${payload}${extra}" ]; do
+    case "$kind" in
+      signal)
+        task=${key%.status}
+        task=${task%.turn-ended}
+        ;;
+      stale) task=$(task_for_stale_key "$key" 2>/dev/null || true) ;;
+      *) task= ;;
+    esac
+    [ "$task" != "$wanted" ] || return 0
+  done < "$FM_WAKE_QUEUE"
+  return 1
+}
+
+requeue_durable_retry() {
+  local task=$1 key
+  FM_DELIVERY_RETRY_SEQ=
+  queue_has_task_row "$task" && return 0
+  key="$task.status"
+  fm_wake_append_locked signal "$key" "signal: $key" || return 1
+  FM_DELIVERY_RETRY_SEQ=$FM_WAKE_APPENDED_SEQ
+}
+
 while IFS=$(printf '\t') read -r epoch seq kind key payload extra || [ -n "${epoch}${seq}${kind}${key}${payload}${extra}" ]; do
   [ -n "${epoch}${seq}${kind}${key}${payload}${extra}" ] || continue
   case "$seq" in ''|*[!0-9]*) exit 1 ;; esac
@@ -125,6 +151,7 @@ done < "$SEQS_TMP"
 
 lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
 while IFS= read -r task; do
+  FM_DELIVERY_RETRY_SEQ=
   [ -n "$task" ] || continue
   out=$(FM_SUPERVISION_ACTOR=main FM_LEASE_HOLDER_PID="$lock_pid" \
     "$CONTINUE_BIN" "$task" 2>&1) || {
@@ -133,6 +160,11 @@ while IFS= read -r task; do
     }
   printf '%s\n' "$out" | grep -Eq '^result=(sent|already-delivered|already-active|retry|refused) task=[A-Za-z0-9._-]+( reason=[A-Za-z0-9._-]+)?$' \
     || { printf '%s\n' "$out" >&2; exit 1; }
+  if ! grep -qxF "$task" "$WAKE_TASKS_TMP" \
+    && printf '%s\n' "$out" | grep -q '^result=retry '; then
+    requeue_durable_retry "$task" || exit 1
+    [ -z "$FM_DELIVERY_RETRY_SEQ" ] || printf 'sequence=%s\n' "$FM_DELIVERY_RETRY_SEQ"
+  fi
   if ! grep -qxF "$task" "$WAKE_TASKS_TMP" \
     && printf '%s\n' "$out" | grep -Eq '^result=(already-delivered|already-active|refused) '; then
     case "$out" in
@@ -143,6 +175,10 @@ while IFS= read -r task; do
   printf '%s\n' "$out"
   if [ "${FM_DELIVERY_PREFLIGHT_INCLUDE_RETRY_SEQUENCES:-0}" = 1 ] \
     && printf '%s\n' "$out" | grep -q '^result=retry '; then
-    awk -F '\t' -v task="$task" '$2 == task { print "retry-sequence=" $1 }' "$WAKE_ROWS_TMP"
+    if [ -n "$FM_DELIVERY_RETRY_SEQ" ]; then
+      printf 'retry-sequence=%s\n' "$FM_DELIVERY_RETRY_SEQ"
+    else
+      awk -F '\t' -v task="$task" '$2 == task { print "retry-sequence=" $1 }' "$WAKE_ROWS_TMP"
+    fi
   fi
 done < "$TASKS_TMP"

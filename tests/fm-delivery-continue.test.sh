@@ -423,6 +423,35 @@ SH
   pass "Pi startup intake recovers committed-ready state without a wake row"
 }
 
+test_pi_empty_drain_requeues_unqueued_retry() {
+  local dir home stub out rows
+  dir="$TMP_ROOT/pi-empty-durable-retry"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  printf '%s\n' "$$" > "$home/state/.lock"
+  : > "$home/state/.wake-queue"
+  stub="$dir/continue"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf 'result=retry task=%s reason=validation-attribution-unavailable\n' "$1"
+SH
+  chmod +x "$stub"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" "$ROOT/bin/fm-wake-drain.sh" \
+    2> "$dir/first.err") || fail "empty Pi retry drain failed: $(cat "$dir/first.err")"
+  printf '%s\n' "$out" | grep -q '^result=retry task=ship reason=validation-attribution-unavailable$' \
+    || fail "empty Pi drain hid the durable-only retry: $out"
+  rows=$(awk -F '\t' '$3 == "signal" && $4 == "ship.status" { count++ } END { print count + 0 }' \
+    "$home/state/.wake-queue")
+  [ "$rows" -eq 1 ] || fail "empty Pi retry did not create exactly one durable task wake"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" "$ROOT/bin/fm-wake-drain.sh" \
+    2> "$dir/second.err") || fail "replayed Pi retry drain failed: $(cat "$dir/second.err")"
+  rows=$(awk -F '\t' '$3 == "signal" && $4 == "ship.status" { count++ } END { print count + 0 }' \
+    "$home/state/.wake-queue")
+  [ "$rows" -eq 1 ] || fail "replayed Pi retry duplicated its durable task wake"
+  pass "Pi empty drains persist durable-only continuation retries"
+}
+
 test_non_pi_empty_drain_initializes_missing_queue() {
   local dir home out
   dir="$TMP_ROOT/non-pi-empty-drain"; mkdir -p "$dir"
@@ -743,6 +772,7 @@ test_terminal_receipt_and_existing_lease_retry
 test_killed_delivery_operation_does_not_strand_session_lease
 test_reused_delivery_pid_does_not_preserve_lease
 test_pi_empty_drain_recovers_unqueued_durable_candidate
+test_pi_empty_drain_requeues_unqueued_retry
 test_non_pi_empty_drain_initializes_missing_queue
 test_transferred_captain_hold_stops_delivery
 test_origin_captain_hold_stops_delivery_without_decision_keys
