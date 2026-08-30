@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
-# Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# The default form prints two words to stdout: "<mode> <yolo>" where mode is one
+# of no-mistakes|direct-PR|local-only and yolo is on|off; the --unsynced and
+# --strip-unsynced forms below print their own thing instead.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
@@ -25,13 +26,11 @@
 # together in either order after the mode, e.g. "[direct-PR +yolo +unsynced]".
 #
 # +unsynced marks a clone the captain edits and pulls outside firstmate by
-# design: fleet sync (bin/fm-fleet-sync.sh) skips it exactly like a
-# local-only/no-origin clone, with no fetch, drift check, or report of any
-# kind, at every routine call site (the bootstrap sweep, the session-start
-# deferred network stage, and an ordinary single-project invocation). The one
-# exception is bin/fm-teardown.sh's post-landing refresh, which passes
-# `fm-fleet-sync.sh --force-unsynced <project>` so the clone firstmate just
-# landed a PR into is still refreshed; no other caller may use that flag.
+# design: fleet sync skips it exactly like a local-only/no-origin clone, with no
+# fetch, drift check, or report of any kind, at every routine call site. The one
+# exception is bin/fm-teardown.sh's post-landing refresh of a clone firstmate
+# just landed a PR into; bin/fm-fleet-sync.sh's header owns that call-site list
+# and its --force-unsynced override.
 # Query it with `--unsynced <project-name>`, which prints "yes" or "no" and
 # nothing else; it does not participate in the "<mode> <yolo>" output below.
 # +unsynced is a flag of THIS home only: seeding a secondmate home copies the
