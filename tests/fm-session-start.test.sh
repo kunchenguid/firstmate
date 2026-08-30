@@ -636,9 +636,7 @@ run_session_start_herdr_secondmate() {
 # which is exactly why the sweeps it used to run inline have to be re-asserted
 # here instead of straight off the digest's own output.
 wait_for_network_stage() {
-  # The executable stage owns a 120s aggregate deadline. A shorter default
-  # makes this behavior assertion race a still-healthy worker under CI load.
-  local home=$1 root=$2 limit=${3:-130}
+  local home=$1 root=$2 limit=${3:-30}
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$ROOT/bin/fm-startup-network.sh" wait "$limit"
 }

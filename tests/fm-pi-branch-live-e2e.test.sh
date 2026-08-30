@@ -459,31 +459,32 @@ fi
 pass "real Pi SDK $PI_VERSION reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level"
 
 # Fourth probe: the real SDK contract deterministic captain delivery rests on.
-# ExtensionAPI.appendEntry must persist a custom entry synchronously, that entry
-# must survive SessionManager reopen without entering model context, and Pi's
-# stock CustomEntryComponent must invoke the extension's registered renderer.
-# No model is selected or prompted.
+# ExtensionAPI.appendEntry must synchronously insert the registered custom entry
+# into an active InteractiveMode transcript, persist it across SessionManager
+# reopen, and keep it out of model context. No model is selected or prompted.
 PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" DELIVERY_DIR="$TMP_ROOT/delivery-sessions" \
-  PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  DELIVERY_AGENT_DIR="$TMP_ROOT/delivery-agent-dir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
   node --input-type=module > "$TMP_ROOT/delivery-output" 2>&1 <<'EOF'
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const pkg = resolve(process.env.PI_PACKAGE_DIR);
-const { initTheme, SessionManager } = await import(
+const {
+  DefaultResourceLoader,
+  InteractiveMode,
+  SessionManager,
+  SettingsManager,
+  createAgentSession,
+  initTheme,
+} = await import(
   pathToFileURL(`${pkg}/dist/index.js`).href
 );
-const { createExtensionRuntime, loadExtensionFromFactory } = await import(
-  pathToFileURL(`${pkg}/dist/core/extensions/index.js`).href
-);
-const { CustomEntryComponent } = await import(
-  pathToFileURL(`${pkg}/dist/modes/interactive/components/custom-entry.js`).href
-);
-const extensionFactory = (await import(pathToFileURL(process.env.PLUGIN).href)).default;
 initTheme("dark");
 const sessions = resolve(process.env.DELIVERY_DIR);
+const agentDir = resolve(process.env.DELIVERY_AGENT_DIR);
 mkdirSync(sessions, { recursive: true });
+mkdirSync(agentDir, { recursive: true });
 const manager = SessionManager.create(process.cwd(), sessions);
 manager.appendMessage({
   role: "assistant",
@@ -494,13 +495,35 @@ manager.appendMessage({
   usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
   stopReason: "stop",
 });
-const runtime = createExtensionRuntime();
-runtime.appendEntry = (customType, data) => manager.appendCustomEntry(customType, data);
-runtime.refreshTools = () => {};
-const bus = { on: () => () => {}, emit: () => {} };
-const extension = await loadExtensionFromFactory(extensionFactory, process.cwd(), bus, runtime, "<fm-branch-live>");
+const settings = SettingsManager.create(process.cwd(), agentDir);
 let capturedApi;
-await loadExtensionFromFactory((pi) => { capturedApi = pi; }, process.cwd(), bus, runtime, "<append-entry-probe>");
+const loader = new DefaultResourceLoader({
+  cwd: process.cwd(),
+  agentDir,
+  settingsManager: settings,
+  additionalExtensionPaths: [process.env.PLUGIN],
+  extensionFactories: [{ name: "append-entry-probe", factory: (pi) => { capturedApi = pi; } }],
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+});
+await loader.reload();
+const created = await createAgentSession({
+  cwd: process.cwd(),
+  sessionManager: manager,
+  settingsManager: settings,
+  resourceLoader: loader,
+  tools: [],
+});
+const runtimeHost = {
+  session: created.session,
+  setBeforeSessionInvalidate() {},
+  setRebindSession() {},
+};
+const interactive = new InteractiveMode(runtimeHost, { tuiMode: "alt-screen" });
+interactive.isInitialized = true;
+interactive.subscribeToAgent();
 const record = {
   version: 1,
   seq: 234,
@@ -511,6 +534,14 @@ const record = {
 };
 capturedApi.appendEntry("fm-branch-visible-outcome", record);
 
+const rendered = interactive.chatContainer.render(240).join("\n");
+if (!rendered.includes("⚓") || !rendered.includes(`[seq ${record.seq}]`) || !rendered.includes(record.task) || !rendered.includes(record.summary)) {
+  throw new Error(`active Pi transcript did not immediately render the exact outcome: ${rendered}`);
+}
+if (rendered.split(record.summary).length !== 2) {
+  throw new Error(`active Pi transcript rendered the outcome more than once: ${rendered}`);
+}
+
 const reopened = SessionManager.open(manager.getSessionFile(), sessions);
 const entries = reopened.getEntries();
 const entry = entries.find((candidate) => candidate.type === "custom" && candidate.customType === "fm-branch-visible-outcome");
@@ -520,13 +551,8 @@ if (!entry || JSON.stringify(entry.data) !== JSON.stringify(record)) {
 if (reopened.buildSessionContext().messages.some((message) => JSON.stringify(message).includes(record.summary))) {
   throw new Error("a custom session entry entered model context");
 }
-const renderer = extension.entryRenderers.get("fm-branch-visible-outcome");
-if (!renderer) throw new Error("the real extension did not register its visible-outcome renderer");
-const component = new CustomEntryComponent(entry, renderer);
-const rendered = component.render(240).join("\n");
-if (!rendered.includes("⚓") || !rendered.includes(`[seq ${record.seq}]`) || !rendered.includes(record.task) || !rendered.includes(record.summary)) {
-  throw new Error(`Pi's custom-entry component did not render the exact outcome: ${rendered}`);
-}
+interactive.unsubscribe();
+await created.session.dispose();
 console.log("DELIVERY_OK");
 process.exit(0);
 EOF
@@ -535,4 +561,4 @@ out=$(cat "$TMP_ROOT/delivery-output")
 if [ "$status" -ne 0 ] || [ "$out" != "DELIVERY_OK" ]; then
   fail "real-SDK visible outcome delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION persists appendEntry across reopen, excludes it from model context, and invokes its visible renderer"
+pass "real Pi SDK $PI_VERSION immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context"

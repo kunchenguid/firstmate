@@ -1035,10 +1035,10 @@ FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
 ok - captain outcomes are exact and exactly once across crash, reload, busy main, compaction, and an unrelated assistant response
 ok - startup replay cannot advance the cursor across an unrendered captain outcome
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.3
-ok - real Pi SDK 0.84.3 persists appendEntry across reopen, excludes it from model context, and invokes its visible renderer
+ok - real Pi SDK 0.84.3 immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context
 ```
 
-The live probe binds `ExtensionAPI.appendEntry` through Pi's real extension loader to `SessionManager.appendCustomEntry`, reopens the resulting session file, verifies exact structured data, verifies the entry is absent from `buildSessionContext().messages`, and renders it through Pi's stock `CustomEntryComponent` using the extension's registered renderer.
+The live probe loads the extension through Pi's real resource loader and AgentSession, subscribes a stock InteractiveMode, verifies `ExtensionAPI.appendEntry` synchronously inserts the exact registered custom row into its active chat once, reopens the resulting session file to verify exact structured data, and verifies the entry is absent from `buildSessionContext().messages`.
 The focused regression recreates the incident topology with stale compaction framing and an immediately preceding unrelated assistant response, then covers idle and busy delivery, cold startup with late fleet-lock acquisition, the crash boundary after entry persistence but before cursor advancement, and repeated reload without duplication.
 
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
