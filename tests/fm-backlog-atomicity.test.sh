@@ -181,6 +181,21 @@ SH
   chmod +x "$case_dir/fakebin/tmux"
 }
 
+track_teardown_resource_actions() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+: > "$case_dir/backend-resource-action"
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+: > "$case_dir/local-copy-resource-action"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+}
+
 interrupt_teardown_during_treehouse_return() {  # <case-dir>
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<SH
@@ -1757,6 +1772,62 @@ test_recovery_leaves_a_captain_held_item_alone() {
 
 # --- backend selection and secondmate scope ---------------------------------
 
+test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry() {
+  local case_dir home id target foreign_worktree out rc=0
+  id=atomic-no-backlog-symlink-meta-b12
+  case_dir=$(make_home no-backlog-symlink-meta)
+  home=$(home_of "$case_dir")
+  rm -f "$(backlog_of "$case_dir")"
+  foreign_worktree="$case_dir/foreign-worktree"
+  mkdir -p "$foreign_worktree"
+  target="$case_dir/foreign-task-record"
+  fm_write_meta "$target" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$foreign_worktree" "project=$case_dir/foreign-project" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off"
+  ln -s "$target" "$home/state/$id.meta"
+  track_teardown_resource_actions "$case_dir"
+
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "no-backlog teardown accepted a symlinked task record"
+  assert_contains "$out" "task record is not a regular non-symlink file" \
+    "teardown did not identify the unsafe task record"
+  [ -L "$home/state/$id.meta" ] || fail "teardown removed the symlinked task record"
+  assert_present "$foreign_worktree" "teardown removed a foreign local copy"
+  assert_absent "$case_dir/backend-resource-action" \
+    "teardown acted on the foreign endpoint"
+  assert_absent "$case_dir/local-copy-resource-action" \
+    "teardown acted on the foreign local copy"
+  pass "no-backlog teardown refuses symlinked records before resource actions"
+}
+
+test_teardown_refuses_a_symlinked_state_directory_at_entry() {
+  local case_dir home id external_state out rc=0
+  id=atomic-symlink-state-b12
+  case_dir=$(make_home symlink-state)
+  home=$(home_of "$case_dir")
+  external_state="$case_dir/external-state"
+  mv "$home/state" "$external_state"
+  fm_write_meta "$external_state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$case_dir/foreign-worktree" "project=$case_dir/foreign-project" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off"
+  ln -s "$external_state" "$home/state"
+  track_teardown_resource_actions "$case_dir"
+
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown accepted a symlinked state directory"
+  assert_contains "$out" "state directory is not a real directory" \
+    "teardown did not identify the unsafe state directory"
+  assert_present "$external_state/$id.meta" \
+    "teardown removed metadata through the symlinked state directory"
+  assert_absent "$case_dir/backend-resource-action" \
+    "teardown acted on an endpoint through symlinked state"
+  assert_absent "$case_dir/local-copy-resource-action" \
+    "teardown acted on a local copy through symlinked state"
+  pass "teardown refuses symlinked state before resource actions"
+}
+
 test_home_without_a_backlog_dispatches_and_completes() {
   local case_dir id out
   id=atomic-no-backlog-b12
@@ -1901,6 +1972,8 @@ test_recovery_rejects_a_legacy_close_without_an_incarnation
 test_bootstrap_stops_when_data_disappears_before_reconciliation
 test_bootstrap_addressing_exemptions_remain_nonfatal
 test_recovery_leaves_a_captain_held_item_alone
+test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry
+test_teardown_refuses_a_symlinked_state_directory_at_entry
 test_home_without_a_backlog_dispatches_and_completes
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
 test_a_secondmate_home_keeps_its_own_books

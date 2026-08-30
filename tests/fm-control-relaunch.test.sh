@@ -1320,6 +1320,33 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
+  local dir meta target out rc
+  dir=$(new_case symlink-meta rl37)
+  add_ship_task "$dir" rl37 claude
+  meta="$dir/home/state/rl37.meta"
+  target="$dir/foreign-task-record"
+  mv "$meta" "$target"
+  ln -s "$target" "$meta"
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+: > "$dir/relaunch-endpoint-inspected"
+exec "$dir/fakebin/tmux-real" "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  out=$(run_spawn "$dir" rl37 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunching from symlinked metadata should refuse"
+  assert_contains "$out" "task record is not a regular non-symlink file" \
+    "relaunch did not identify the unsafe task record"
+  [ -L "$meta" ] || fail "relaunch replaced or removed the symlinked record"
+  assert_present "$target" "relaunch removed the foreign record target"
+  assert_absent "$dir/relaunch-endpoint-inspected" \
+    "relaunch inspected or acted on an endpoint from unsafe metadata"
+  pass "fm-spawn --relaunch: symlinked records refuse before inspection"
+}
+
 test_spawn_relaunch_refuses_a_pending_authoritative_close() {
   local dir meta marker out rc
   dir=$(new_case pending-close rl36)
@@ -1463,6 +1490,7 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
+test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
