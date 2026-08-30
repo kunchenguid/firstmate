@@ -25,6 +25,15 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Curated context handoff (config/context-handoff.json)
+
+The optional local `config/context-handoff.json` configures the default-off curated handoff to one exact Claude/Obsidian consumer.
+Its four independent activation switches are `registration_enabled`, `sealing_enabled`, `delivery_enabled`, and `consumer_enabled`, and an absent file means all four are off.
+The configuration is local, gitignored, secret-free, and not inherited by secondmate homes because its canonical Vault object, Herdr endpoint, Claude session generation, and executable hashes are home-specific authority.
+The producer keeps candidates, sealed envelopes, receipts, delivery state, quarantine records, reviewed transaction bindings, staged bundles, and acknowledgements under private `state/context-handoff/`, outside the selected Vault.
+[`context-handoff.md`](context-handoff.md) owns supported behavior, activation, disable, rollback, and verification, while [`fm-context-handoff.py`](../bin/fm-context-handoff.py) owns exact fields and mutation mechanics.
+The tracked [`examples/context-handoff.json`](examples/context-handoff.json) keeps every switch off and must have every placeholder replaced before local use.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
