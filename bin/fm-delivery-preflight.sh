@@ -14,6 +14,7 @@ TASKS_TMP=
 WAKE_TASKS_TMP=
 WAKE_ROWS_TMP=
 SEQS_TMP=
+CAPTAIN_INBOX_PENDING=0
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -93,6 +94,15 @@ requeue_durable_retry() {
   FM_DELIVERY_RETRY_SEQ=$FM_WAKE_APPENDED_SEQ
 }
 
+captain_inbox_pending() {
+  local note
+  for note in "$STATE/inbox"/*.note; do
+    [ -e "$note" ] || [ -L "$note" ] || continue
+    return 0
+  done
+  return 1
+}
+
 while IFS=$(printf '\t') read -r epoch seq kind key payload extra || [ -n "${epoch}${seq}${kind}${key}${payload}${extra}" ]; do
   [ -n "${epoch}${seq}${kind}${key}${payload}${extra}" ] || continue
   case "$seq" in ''|*[!0-9]*) exit 1 ;; esac
@@ -116,10 +126,19 @@ while IFS=$(printf '\t') read -r epoch seq kind key payload extra || [ -n "${epo
       printf '%s\n' "$task" >> "$WAKE_TASKS_TMP" || exit 1
       printf '%s\t%s\n' "$seq" "$task" >> "$WAKE_ROWS_TMP" || exit 1
       ;;
-    check|heartbeat) ;;
+    check)
+      case "$key" in
+        inbox:*)
+          CAPTAIN_INBOX_PENDING=1
+          ;;
+      esac
+      ;;
+    heartbeat) ;;
     *) exit 1 ;;
   esac
 done < "$FM_WAKE_QUEUE"
+
+captain_inbox_pending && CAPTAIN_INBOX_PENDING=1
 
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] && [ ! -L "$meta" ] || continue
@@ -153,6 +172,15 @@ lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
 while IFS= read -r task; do
   FM_DELIVERY_RETRY_SEQ=
   [ -n "$task" ] || continue
+  if [ "$CAPTAIN_INBOX_PENDING" = 1 ]; then
+    if [ "${FM_DELIVERY_PREFLIGHT_INCLUDE_RETRY_SEQUENCES:-0}" = 1 ]; then
+      key="$task.status"
+      fm_wake_append_locked signal "$key" "signal: $key" || exit 1
+      FM_DELIVERY_RETRY_SEQ=$FM_WAKE_APPENDED_SEQ
+      printf 'sequence=%s\n' "$FM_DELIVERY_RETRY_SEQ"
+    fi
+    continue
+  fi
   out=$(FM_SUPERVISION_ACTOR=main FM_LEASE_HOLDER_PID="$lock_pid" \
     "$CONTINUE_BIN" "$task" 2>&1) || {
       printf '%s\n' "$out" >&2

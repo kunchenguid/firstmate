@@ -764,6 +764,68 @@ SH
   pass "Pi queue intake preflights committed-ready rows before presentation"
 }
 
+test_captain_inbox_ack_precedes_continuation() {
+  local dir home state stub log note_out note_id out ack_through recovery_generation status
+  dir="$TMP_ROOT/captain-inbox-order"
+  home=$(make_fixture "$dir")
+  state="$home/state"
+  stub="$dir/continue"
+  log="$dir/delivery.log"
+  printf '%s\n' "$$" > "$state/.lock"
+  printf '1\t1\tsignal\tship.status\tsignal: ship.status\n' > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "${FM_PREFLIGHT_LOG:?}"
+printf 'result=sent task=%s\n' "$1"
+SH
+  chmod +x "$stub"
+  note_out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-inbox.sh" note "pause validation until the captain reviews the route") \
+    || fail "captain note could not be queued"
+  note_id=$(printf '%s\n' "$note_out" | sed -n 's/^queued //p')
+  [ -n "$note_id" ] || fail "captain note did not return its durable id: $note_out"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-wake-drain.sh" 2> "$dir/first.err") \
+    || fail "captain-note drain failed: $(cat "$dir/first.err")"
+  [ ! -e "$log" ] || fail "continuation ran before the captain note was presented"
+  printf '%s\n' "$out" | grep -q "$(printf '\tcheck\tinbox:%s\t' "$note_id")" \
+    || fail "captain note was not presented before continuation: $out"
+  ack_through=$(sed -n 's/.*--ack-through \([0-9][0-9]*\) --recovery-generation.*/\1/p' "$dir/first.err")
+  recovery_generation=$(sed -n 's/.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
+  [ -n "$ack_through" ] && [ -n "$recovery_generation" ] \
+    || fail "captain-note drain omitted its acknowledgement receipt: $(cat "$dir/first.err")"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$ack_through" \
+      --recovery-generation "$recovery_generation" >/dev/null \
+    || fail "captain-note wake acknowledgement failed"
+  grep -q "$(printf '\tsignal\tship.status\t')" "$state/.wake-queue" \
+    || fail "captain-note acknowledgement consumed the deferred continuation wake"
+
+  status=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/unacked.out" 2> "$dir/unacked.err" || status=$?
+  [ "$status" -eq 0 ] || fail "unacknowledged captain note broke replay: $(cat "$dir/unacked.err")"
+  [ ! -e "$log" ] || fail "continuation ran after presentation but before captain-note acknowledgement"
+  grep -q "$(printf '\tsignal\tship.status\t')" "$state/.wake-queue" \
+    || fail "unacknowledged captain note lost the deferred continuation wake"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-inbox.sh" drain --ack "$note_id" >/dev/null \
+    || fail "captain note could not be acknowledged"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-wake-drain.sh" 2> "$dir/final.err") \
+    || fail "post-ack continuation replay failed: $(cat "$dir/final.err")"
+  printf '%s\n' "$out" | grep -q '^result=sent task=ship$' \
+    || fail "acknowledged captain note did not release continuation: $out"
+  [ "$(cat "$log")" = ship ] || fail "post-ack replay did not run exactly one continuation"
+  pass "captain inbox acknowledgement precedes durable continuation replay"
+}
+
 test_unmapped_stale_row_does_not_abort_preflight() {
   local dir home state out
   dir="$TMP_ROOT/unmapped-stale-row"
@@ -809,5 +871,6 @@ test_durable_only_producer_refusal_is_visible_once_per_preflight
 test_fleet_and_bearings_project_pending_continuation
 test_advanced_head_surfaces_continuation_conflict
 test_pi_drain_preflights_before_presenting_committed_ready_rows
+test_captain_inbox_ack_precedes_continuation
 test_unmapped_stale_row_does_not_abort_preflight
 echo "all fm-delivery-continue tests passed"

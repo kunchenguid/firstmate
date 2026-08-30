@@ -149,18 +149,26 @@ aws_call() {
 
 # ---------------------------------------------------------------- note
 
-# Append exactly one wake so firstmate picks the note up at its next drain.
-# Failure to wake is NOT allowed to lose the note: the record is already on
-# disk, so we report the wake failure and still exit non-zero loudly.
+# Publish the note and exactly one wake so firstmate picks it up at its next drain.
+# Failure to wake is NOT allowed to lose the note: the record remains on disk,
+# so we report the wake failure and still exit non-zero loudly.
 wake_for() {
-  local id=$1 summary=$2 lib="$FM_ROOT/bin/fm-wake-lib.sh"
+  local id=$1 summary=$2 tmp=$3 lib="$FM_ROOT/bin/fm-wake-lib.sh" status=0
   if [ ! -r "$lib" ]; then
+    mv "$tmp" "$INBOX/$id.note" || return 2
     printf 'fm-inbox: note saved but NOT announced (missing %s)\n' "$lib" >&2
     return 1
   fi
   # shellcheck source=/dev/null
   FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
-  fm_wake_append check "inbox:$id" "check: captain inbox note $id - $summary"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if ! mv "$tmp" "$INBOX/$id.note"; then
+    status=2
+  elif ! fm_wake_append_locked check "inbox:$id" "check: captain inbox note $id - $summary"; then
+    status=1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
 }
 
 queue_note() {
@@ -181,16 +189,17 @@ queue_note() {
     printf '%s\n' "$body"
   } >"$tmp"
 
-  # Publish the completed note atomically.
-  mv "$tmp" "$INBOX/$id.note"
-
   # One-line summary for the wake payload; the full body stays in the file.
   summary=$(printf '%s' "$body" | tr '\n\t' '  ' | cut -c1-100)
-  printf 'queued %s\n' "$id"
-  printf '  %s\n' "$summary"
-  if wake_for "$id" "$summary"; then
+  if wake_for "$id" "$summary" "$tmp"; then
+    printf 'queued %s\n' "$id"
+    printf '  %s\n' "$summary"
     printf '  firstmate will pick this up at its next check.\n'
   else
+    local wake_status=$?
+    [ "$wake_status" -ne 2 ] || die "note $id could not be saved"
+    printf 'queued %s\n' "$id"
+    printf '  %s\n' "$summary"
     die "note $id is saved at $INBOX/$id.note but firstmate was NOT woken"
   fi
 }
