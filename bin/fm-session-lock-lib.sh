@@ -198,8 +198,8 @@ FM_CODEX_HOST_OWNER_CANONICAL_COUNT=0
 FM_CODEX_HOST_OWNER_REASON=
 FM_CODEX_HOST_OWNER_EVIDENCE=
 fm_codex_host_agent_owner_for_pids() { # <pid>...
-  local pid session kind structural identity records= seen=' ' first_session=
-  local executable_pid= executable_count=0 script_count=0 reported=0
+  local pid session kind structural identity records='' seen=' ' first_session=''
+  local executable_pid='' executable_count=0 script_count=0 reported=0
   FM_CODEX_HOST_OWNER_PID=
   FM_CODEX_HOST_OWNER_SESSION=
   FM_CODEX_HOST_OWNER_VERIFIED_COUNT=0
@@ -262,13 +262,17 @@ EOF
     done <<EOF
 $records
 EOF
+    # shellcheck disable=SC2034 # Output consumed by callers that source this library.
     FM_CODEX_HOST_OWNER_PID=$executable_pid
   else
     FM_CODEX_HOST_OWNER_REASON='reject:ambiguous-codex-processes'
     return 1
   fi
+  # shellcheck disable=SC2034 # Outputs consumed by callers that source this library.
   FM_CODEX_HOST_OWNER_SESSION=$first_session
+  # shellcheck disable=SC2034 # Outputs consumed by callers that source this library.
   FM_CODEX_HOST_OWNER_CANONICAL_COUNT=1
+  # shellcheck disable=SC2034 # Output consumed by callers that source this library.
   FM_CODEX_HOST_OWNER_REASON='accept:canonical-codex-process-owner'
 }
 
@@ -351,11 +355,14 @@ fm_codex_home_binding_pid() { # <state-dir>; prints host agent pid when this too
   case "$FM_CODEX_BINDING_PID" in
     *[!0-9]*|''|0|1) FM_CODEX_BINDING_REASON='reject:codex-home-binding-mismatch'; return 1 ;;
   esac
-  [ "$FM_CODEX_BINDING_HARNESS" = codex ] && [ "$FM_CODEX_BINDING_HOME" = "${FM_HOME:-}" ] \
-    && [ "$FM_CODEX_BINDING_SPAWN_GEN" = "$FM_CODEX_REQUIREMENT_SPAWN_GEN" ] \
-    && [ "$FM_CODEX_BINDING_SESSION" = "$session" ] \
-    && fm_codex_session_id_valid "$FM_CODEX_BINDING_SESSION" || {
-      FM_CODEX_BINDING_REASON='reject:codex-home-binding-mismatch'; return 1; }
+  if [ "$FM_CODEX_BINDING_HARNESS" != codex ] \
+    || [ "$FM_CODEX_BINDING_HOME" != "${FM_HOME:-}" ] \
+    || [ "$FM_CODEX_BINDING_SPAWN_GEN" != "$FM_CODEX_REQUIREMENT_SPAWN_GEN" ] \
+    || [ "$FM_CODEX_BINDING_SESSION" != "$session" ] \
+    || ! fm_codex_session_id_valid "$FM_CODEX_BINDING_SESSION"; then
+    FM_CODEX_BINDING_REASON='reject:codex-home-binding-mismatch'
+    return 1
+  fi
   # shellcheck disable=SC2034 # Read by lock callers that need the refusal evidence.
   FM_CODEX_BINDING_REASON='accept:codex-session-home-binding'
   printf '%s\n' "$FM_CODEX_BINDING_PID"

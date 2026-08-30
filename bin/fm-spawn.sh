@@ -2129,7 +2129,7 @@ case "$BACKEND" in
     # it stands up a DIFFERENT home's own workspace by design - so it asks for
     # the per-home container instead of inheriting this launcher's.
     HERDR_LABEL_HOME=$FM_HOME
-    HERDR_LAUNCHER_RELATIONSHIP=launcher-home
+    HERDR_LAUNCHER_RELATIONSHIP='launcher-home'
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
       HERDR_LAUNCHER_RELATIONSHIP=other-home
@@ -2436,7 +2436,7 @@ EOF
     fi
     if fm_backend_herdr_pane_process_info_envelope_valid "$info" "$HERDR_PANE_ID"; then
       envelope=valid
-      pid_evidence=trusted-inspected
+      pid_evidence='trusted-inspected'
       observed_count=0
       reported_count=0
       pid_preview=
