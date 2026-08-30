@@ -38,12 +38,14 @@ function runHandoff(
     let stdout = "";
     let outputExceeded = false;
     let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let child: ReturnType<typeof spawn> | undefined;
     const finish = (result: HandoffResult): void => {
       if (settled) return;
       settled = true;
+      if (timeout) clearTimeout(timeout);
       resolve(result);
     };
-    let child;
     try {
       child = spawn(`${root}/bin/fm-context-handoff.py`, args, {
         env: { ...process.env, FM_HOME: fmHome },
@@ -53,16 +55,42 @@ function runHandoff(
       finish({ status: "adapter-failed" });
       return;
     }
-    child.stdout.on("data", (chunk: Buffer) => {
+    if (!child) {
+      finish({ status: "adapter-failed" });
+      return;
+    }
+    const runningChild = child;
+    if (!runningChild.stdout || !runningChild.stdin) {
+      runningChild.kill("SIGKILL");
+      finish({ status: "adapter-failed" });
+      return;
+    }
+    const childStdout = runningChild.stdout;
+    const childStdin = runningChild.stdin;
+    const testTimeout = Number(process.env.FM_HANDOFF_TEST_ADAPTER_TIMEOUT_MS);
+    const adapterTimeoutMs = process.env.FM_HANDOFF_TESTING === "1" && Number.isFinite(testTimeout) && testTimeout >= 50 && testTimeout <= 5000
+      ? testTimeout
+      : 10_000;
+    timeout = setTimeout(() => {
+      runningChild.kill("SIGKILL");
+      finish({ status: "adapter-failed" });
+    }, adapterTimeoutMs);
+    childStdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       if (stdout.length + text.length > 64 * 1024) {
         outputExceeded = true;
+        runningChild.kill("SIGKILL");
+        finish({ status: "adapter-failed" });
         return;
       }
       stdout += text;
     });
-    child.on("error", () => finish({ status: "adapter-failed" }));
-    child.on("close", (code) => {
+    childStdin.on("error", () => {
+      runningChild.kill("SIGKILL");
+      finish({ status: "adapter-failed" });
+    });
+    runningChild.on("error", () => finish({ status: "adapter-failed" }));
+    runningChild.on("close", (code) => {
       if (code !== 0 || outputExceeded) {
         finish({ status: "adapter-failed" });
         return;
@@ -78,7 +106,7 @@ function runHandoff(
         finish({ status: "adapter-failed" });
       }
     });
-    child.stdin.end(JSON.stringify(input));
+    childStdin.end(JSON.stringify(input));
   });
 }
 

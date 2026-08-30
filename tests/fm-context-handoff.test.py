@@ -17,8 +17,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "fm-context-handoff.py"
 PLUGIN = ROOT / "integrations" / "claude-context-handoff"
-FIXTURE_CORE = ROOT / "test-support" / "fixtures" / "context-handoff-transaction-core.py"
+FIXTURE_CORE = ROOT / "tests" / "fixtures" / "context-handoff-transaction-core.py"
 FIXED_NOW = "2026-08-30T20:00:00Z"
+EXACT_CORE_EVIDENCE: tuple[str, str] | None = None
 
 
 class Failure(RuntimeError):
@@ -294,8 +295,11 @@ else:
         check(completed.returncode == 0, f"Claude hook failed: {completed.stderr}")
         return json.loads(completed.stdout) if completed.stdout.strip() else None
 
-    def mcp(self, name: str, arguments: dict):
+    def mcp(self, name: str, arguments: dict, *, extra_env=None, expect_process: int = 0):
         request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+        process_env = self.base_env()
+        if extra_env:
+            process_env.update(extra_env)
         completed = subprocess.run(
             [str(CLI), "mcp-server"],
             input=json.dumps(request, separators=(",", ":")) + "\n",
@@ -303,11 +307,13 @@ else:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=self.vault,
-            env=self.base_env(),
+            env=process_env,
             check=False,
             timeout=45,
         )
-        check(completed.returncode == 0, f"MCP server failed: {completed.stderr}")
+        check(completed.returncode == expect_process, f"MCP server returned {completed.returncode}, expected {expect_process}: {completed.stderr}")
+        if expect_process != 0:
+            return None, True
         response = json.loads(completed.stdout)
         content = json.loads(response["result"]["content"][0]["text"])
         return content, response["result"].get("isError", False)
@@ -402,6 +408,9 @@ def test_registration_sealing_and_rejections(tmp: Path) -> None:
     queue_path.unlink()
     recovered_after_publication = env.seal_pi()
     check(recovered_after_publication["record_id"] == seal["record_id"] and claim_path.exists() and queue_path.exists(), "crash after envelope publication did not recover claims and queue")
+    queue_path.unlink()
+    recovered_after_final_claim = env.seal_pi()
+    check(recovered_after_final_claim["record_id"] == seal["record_id"] and queue_path.exists(), "fully claimed orphan record did not recover its missing queue")
     check(env.seal_pi("another-pi-session")["status"] == "empty", "empty unrelated register was not a no-op")
     failed = env.run("compaction-outcome", "failure", input_value={"record_id": seal["record_id"], "envelope_sha256": seal["envelope_sha256"], "trigger": "threshold", "reason": "provider-failure"})
     check(failed["status"] == "compaction-failed", "compaction failure did not remain durable")
@@ -445,6 +454,15 @@ def test_caps_atomicity_and_failure_receipts(tmp: Path) -> None:
     stale_source_env.source_file.write_text("Changed before seal.\n", encoding="utf-8")
     stale_source = stale_source_env.seal_pi()
     check(stale_source["status"] == "seal-failed" and stale_source["had_candidates"], "non-empty candidate with a changed source hash did not fail sealing")
+    directory_fsync_env = Environment(tmp, "directory-fsync-failure")
+    directory_fsync_env.register("A published envelope remains pending until its directory is durable.")
+    directory_failure = directory_fsync_env.seal_pi(extra_env={"FM_HANDOFF_TEST_FAILPOINT": "before-directory-fsync"})
+    check(directory_failure["status"] == "seal-failed", "directory fsync failure did not fail sealing")
+    directory_records = list((directory_fsync_env.home / "state" / "context-handoff" / "records").glob("*.json"))
+    check(len(directory_records) == 1, "directory fsync failure did not preserve the create-only envelope for recovery")
+    directory_retry = directory_fsync_env.seal_pi()
+    directory_queue = directory_fsync_env.home / "state" / "context-handoff" / "queue" / f"{directory_retry['record_id']}.json"
+    check(directory_retry["status"] == "already-sealed" and directory_queue.exists(), "directory fsync retry did not durably recover the existing envelope")
     fsync_env = Environment(tmp, "fsync-failure")
     fsync_env.register("A durable fsync failure probe remains current.")
     result = fsync_env.seal_pi(extra_env={"FM_HANDOFF_TEST_FAILPOINT": "before-file-fsync"})
@@ -577,9 +595,28 @@ def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
     )
     check(blocked["decision"] == "block", "Claude non-empty seal failure did not block compaction")
 
+    source_failure_env = Environment(tmp, "claude-source-validation-failure")
+    source_failure_env.enable(consumer_enabled=True)
+    source_failure_env.bind_claude()
+    source_failure_env.register("Record a receipt when Claude candidate validation stops compaction.", harness="claude")
+    source_failure_env.source_file.write_text("Changed before Claude compaction.\n", encoding="utf-8")
+    source_blocked = source_failure_env.run(
+        "claude-hook",
+        input_value={"hook_event_name": "PreCompact", "session_id": source_failure_env.claude_session, "trigger": "manual", "custom_instructions": None},
+        cwd=source_failure_env.vault,
+    )
+    check(source_blocked["decision"] == "block", "Claude source validation failure did not block compaction")
+    source_receipts = [json.loads(path.read_text()) for path in (source_failure_env.home / "state" / "context-handoff" / "receipts").glob("*.json")]
+    check(any(item.get("reason") == "registered-candidate-validation-failed" and item.get("failure_code") == "SOURCE_HASH_MISMATCH" for item in source_receipts), "Claude candidate validation failure left no durable receipt")
+
 
 def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
+    global EXACT_CORE_EVIDENCE
     env = Environment(tmp, "transaction", exact_core=True)
+    if os.environ.get("FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE") == "1":
+        check(env.exact_core, "required installed claude-obsidian transaction core is unavailable")
+    if env.exact_core:
+        EXACT_CORE_EVIDENCE = (digest(env.core), digest(env.module))
     env.enable(consumer_enabled=True)
     seal = env.make_ready_record()
     env.bind_claude()
@@ -629,8 +666,14 @@ def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
     check(not ack_path.exists(), "source was acknowledged before apply completed")
     bundle_path = env.home / "state" / "context-handoff" / "bundles" / seal["record_id"] / f"{prepared['bundle_sha256']}.json"
     exact_command = f"{env.python} {env.core} transaction apply {bundle_path} --vault {env.vault} --approved-plan-sha256 {prepared['approval_sha256']}"
+    wrong_session_allow = env.hook({"hook_event_name": "PreToolUse", "session_id": "replacement-claude-session", "tool_name": "Bash", "tool_input": {"command": exact_command}})
+    check(wrong_session_allow["hookSpecificOutput"]["permissionDecision"] == "deny", "replacement Claude session inherited stale Save authority")
+    env.herdr_mode.write_text("mismatch\n")
+    stale_recipient_allow = env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": exact_command}})
+    check(stale_recipient_allow["hookSpecificOutput"]["permissionDecision"] == "deny", "stale live recipient inherited Save authority")
+    env.herdr_mode.write_text("ready\n")
     allow = env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": exact_command}})
-    check(allow["hookSpecificOutput"]["permissionDecision"] == "allow", "exact reviewed transaction command was not allowed")
+    check(allow["hookSpecificOutput"]["permissionDecision"] == "allow", "exact reviewed live transaction command was not allowed")
     committed, error = env.commit(seal["record_id"], prepared["approval_sha256"])
     check(not error and committed["status"] == "acknowledged" and ack_path.is_file(), "transaction did not verify and acknowledge")
     check(not (env.vault / ".vault-meta" / "mutation.lock").exists(), "transaction lock remained after acknowledgement")
@@ -642,6 +685,32 @@ def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
     result = json.loads(result_path.read_text())
     for relative, expected in result["hashes"].items():
         check(digest(env.vault / relative) == expected, f"changed path hash did not verify: {relative}")
+
+    source_guard_env = Environment(tmp, "guard-source-changed")
+    source_guard_env.enable(consumer_enabled=True)
+    source_guard_seal = source_guard_env.make_ready_record("Revalidate source bytes before guard authorization.")
+    source_guard_env.bind_claude()
+    source_guard_prepared = source_guard_env.prepare(source_guard_seal["record_id"])
+    source_guard_bundle = source_guard_env.home / "state" / "context-handoff" / "bundles" / source_guard_seal["record_id"] / f"{source_guard_prepared['bundle_sha256']}.json"
+    source_guard_command = f"{source_guard_env.python} {source_guard_env.core} transaction apply {source_guard_bundle} --vault {source_guard_env.vault} --approved-plan-sha256 {source_guard_prepared['approval_sha256']}"
+    source_guard_env.source_file.write_text("Changed after review.\n", encoding="utf-8")
+    source_guard_denied = source_guard_env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": source_guard_command}})
+    check(source_guard_denied["hookSpecificOutput"]["permissionDecision"] == "deny", "guard allowed Save after source bytes changed")
+    check(not (source_guard_env.vault / "wiki" / "concepts" / "Bounded retry.md").exists(), "source mismatch guard test mutated the Vault")
+
+    terminal_env = Environment(tmp, "terminal-save-authority")
+    terminal_env.enable(consumer_enabled=True)
+    terminal_seal = terminal_env.make_ready_record("Terminal disposition revokes prepared Save authority.")
+    terminal_env.bind_claude()
+    terminal_prepared = terminal_env.prepare(terminal_seal["record_id"])
+    terminal_bundle = terminal_env.home / "state" / "context-handoff" / "bundles" / terminal_seal["record_id"] / f"{terminal_prepared['bundle_sha256']}.json"
+    terminal_command = f"{terminal_env.python} {terminal_env.core} transaction apply {terminal_bundle} --vault {terminal_env.vault} --approved-plan-sha256 {terminal_prepared['approval_sha256']}"
+    terminal_env.mcp("record_curation_disposition", {"record_id": terminal_seal["record_id"], "disposition": "duplicate", "rationale": "The durable fact already exists."})
+    terminal_guard = terminal_env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": terminal_command}})
+    check(terminal_guard["hookSpecificOutput"]["permissionDecision"] == "deny", "terminal disposition left guard Save authority active")
+    terminal_commit, terminal_error = terminal_env.commit(terminal_seal["record_id"], terminal_prepared["approval_sha256"])
+    check(terminal_error and terminal_commit["code"] == "SAVE_AUTHORITY_REVOKED", "terminal disposition remained commit-capable")
+    check(not (terminal_env.vault / "wiki" / "concepts" / "Bounded retry.md").exists(), "terminal Save authority test mutated the Vault")
 
     crash_env = Environment(tmp, "apply-before-ack")
     crash_env.enable(consumer_enabled=True)
@@ -663,6 +732,23 @@ def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
     check(not crash_ack.exists(), "direct apply unexpectedly wrote the source acknowledgement")
     healed, error = crash_env.commit(crash_seal["record_id"], crash_prepared["approval_sha256"])
     check(not error and healed["status"] == "acknowledged" and crash_ack.exists(), "apply-complete-before-ack did not heal")
+
+    ack_crash_env = Environment(tmp, "ack-before-queue-crash")
+    ack_crash_env.enable(consumer_enabled=True)
+    ack_crash_seal = ack_crash_env.make_ready_record("Recover a durable Save acknowledgement after queue-update crash.")
+    ack_crash_env.bind_claude()
+    ack_crash_prepared = ack_crash_env.prepare(ack_crash_seal["record_id"])
+    ack_crash_env.mcp(
+        "commit_handoff_save",
+        {"record_id": ack_crash_seal["record_id"], "approval_sha256": ack_crash_prepared["approval_sha256"]},
+        extra_env={"FM_HANDOFF_TEST_FAILPOINT": "after-ack-before-queue"},
+        expect_process=1,
+    )
+    ack_crash_path = ack_crash_env.home / "state" / "context-handoff" / "acks" / f"{ack_crash_seal['record_id']}.json"
+    ack_crash_queue_path = ack_crash_env.home / "state" / "context-handoff" / "queue" / f"{ack_crash_seal['record_id']}.json"
+    check(ack_crash_path.exists() and json.loads(ack_crash_queue_path.read_text())["status"] != "acknowledged", "Save acknowledgement crash fixture did not stop between durable ack and queue update")
+    ack_recovered, error = ack_crash_env.mcp("next_curated_handoff", {})
+    check(not error and ack_recovered["status"] == "empty" and json.loads(ack_crash_queue_path.read_text())["status"] == "acknowledged", "durable Save acknowledgement did not recover its queue transition")
 
     stale_env = Environment(tmp, "apply-before-ack-stale-approval")
     stale_env.enable(consumer_enabled=True)
@@ -717,6 +803,12 @@ def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
     rebuilt = conflict_env.bundle(conflict_seal["record_id"], suffix=" Updated")
     rebuilt["expected_hashes"]["wiki/index.md"] = digest(conflict_env.vault / "wiki" / "index.md")
     conflict_prepared_2 = conflict_env.prepare(conflict_seal["record_id"], rebuilt)
+    stale_bundle_path = conflict_env.home / "state" / "context-handoff" / "bundles" / conflict_seal["record_id"] / f"{conflict_prepared['bundle_sha256']}.json"
+    stale_command = f"{conflict_env.python} {conflict_env.core} transaction apply {stale_bundle_path} --vault {conflict_env.vault} --approved-plan-sha256 {conflict_prepared['approval_sha256']}"
+    stale_guard = conflict_env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": stale_command}})
+    check(stale_guard["hookSpecificOutput"]["permissionDecision"] == "deny", "superseded approval remained guard-authorized")
+    stale_commit, stale_error = conflict_env.commit(conflict_seal["record_id"], conflict_prepared["approval_sha256"])
+    check(stale_error and stale_commit["code"] == "SAVE_AUTHORITY_REVOKED", "superseded approval remained commit-authorized")
     recovered, error = conflict_env.commit(conflict_seal["record_id"], conflict_prepared_2["approval_sha256"])
     check(not error and recovered["status"] == "acknowledged", "fresh inspect after expected-hash conflict did not recover")
 
@@ -808,15 +900,33 @@ def test_payload_mismatch_disable_and_dispositions(tmp: Path) -> None:
     disposed, error = disabled.mcp("record_curation_disposition", {"record_id": pending["record_id"], "disposition": "duplicate", "rationale": "The durable fact already exists in an authoritative note."})
     check(not error and disposed["status"] == "acknowledged", "duplicate disposition was not durably acknowledged")
 
+    disposition_crash = Environment(tmp, "disposition-ack-before-queue-crash")
+    disposition_crash.enable(consumer_enabled=True)
+    disposition_seal = disposition_crash.make_ready_record("Recover a durable disposition acknowledgement after a crash.")
+    disposition_crash.bind_claude()
+    disposition_crash.mcp(
+        "record_curation_disposition",
+        {"record_id": disposition_seal["record_id"], "disposition": "duplicate", "rationale": "The durable fact already exists."},
+        extra_env={"FM_HANDOFF_TEST_FAILPOINT": "after-ack-before-queue"},
+        expect_process=1,
+    )
+    disposition_ack = disposition_crash.home / "state" / "context-handoff" / "acks" / f"{disposition_seal['record_id']}.json"
+    disposition_queue = disposition_crash.home / "state" / "context-handoff" / "queue" / f"{disposition_seal['record_id']}.json"
+    check(disposition_ack.exists() and json.loads(disposition_queue.read_text())["status"] != "acknowledged", "disposition crash fixture did not stop between durable ack and queue update")
+    disposition_recovered, error = disposition_crash.mcp("next_curated_handoff", {})
+    check(not error and disposition_recovered["status"] == "empty" and json.loads(disposition_queue.read_text())["status"] == "acknowledged", "durable disposition acknowledgement did not recover its queue transition")
+
 
 def test_pi_extension_handlers_and_model_free_discovery(tmp: Path) -> None:
     env = Environment(tmp, "pi-extension")
     env.register("Cancel compaction only when this non-empty register cannot seal.")
     exit_root = env.root / "adapter-exit"
     malformed_root = env.root / "adapter-malformed"
+    hanging_root = env.root / "adapter-hanging"
     for adapter_root, body in (
         (exit_root, "#!/usr/bin/env bash\nexit 7\n"),
         (malformed_root, "#!/usr/bin/env bash\nprintf '{}\\n'\n"),
+        (hanging_root, "#!/usr/bin/env bash\nexec sleep 10\n"),
     ):
         adapter_root.joinpath("bin").mkdir(parents=True)
         adapter = adapter_root / "bin" / "fm-context-handoff.py"
@@ -850,6 +960,12 @@ for (const badRoot of [process.env.MISSING_ROOT, process.env.EXIT_ROOT, process.
   const failed = await badHandlers.get("session_before_compact")({ reason:"threshold" }, ctx);
   if (!failed?.cancel) throw new Error(`adapter failure did not cancel compaction: ${badRoot}`);
 }
+process.env.FM_HANDOFF_TEST_ADAPTER_TIMEOUT_MS = "100";
+const hangingHandlers = new Map();
+mod.registerContextHandoff({ on(name, handler) { hangingHandlers.set(name, handler); } }, process.env.HANGING_ROOT, process.env.FM_HOME);
+const started = Date.now();
+const timedOut = await hangingHandlers.get("session_before_compact")({ reason:"threshold" }, ctx);
+if (!timedOut?.cancel || Date.now() - started > 2000) throw new Error("hanging adapter did not cancel compaction within its bound");
 '''
     node_env = env.base_env()
     node_env.update({
@@ -859,6 +975,7 @@ for (const badRoot of [process.env.MISSING_ROOT, process.env.EXIT_ROOT, process.
         "MISSING_ROOT": str(env.root / "adapter-missing"),
         "EXIT_ROOT": str(exit_root),
         "MALFORMED_ROOT": str(malformed_root),
+        "HANGING_ROOT": str(hanging_root),
     })
     completed = subprocess.run(["node", "--input-type=module"], input=script, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env=node_env, check=False, timeout=45)
     check(completed.returncode == 0, f"Pi extension model-free lifecycle smoke failed: {completed.stderr}")
@@ -928,6 +1045,9 @@ def main() -> int:
                 print(f"not ok - {test.__name__}: {exc}", file=sys.stderr)
                 return 1
             print(f"ok - {test.__name__}")
+    if os.environ.get("FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE") == "1":
+        check(EXACT_CORE_EVIDENCE is not None, "installed transaction core evidence was not captured")
+        print(f"ok - exact-installed-transaction-core core={EXACT_CORE_EVIDENCE[0]} module={EXACT_CORE_EVIDENCE[1]}")
     return 0
 
 
