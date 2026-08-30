@@ -334,14 +334,17 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
     *node*|*python*)
       if [ -n "$args" ]; then
         read -r -a words <<< "$args"
-        for token in "${words[@]}"; do
-          if name=$(fm_harness_path_name "$token"); then
-            [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
-            FM_HARNESS_MATCH_NAME=$name
-            FM_HARNESS_MATCH_REASON="accept:interpreter-path-component=$name"
-            return 0
-          fi
-        done
+        token=${words[1]:-}
+        case "$token" in ''|-*) ;;
+          *)
+            if name=$(fm_harness_path_name "$token"); then
+              [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+              FM_HARNESS_MATCH_NAME=$name
+              FM_HARNESS_MATCH_REASON="accept:interpreter-script-component=$name"
+              return 0
+            fi
+            ;;
+        esac
       fi
       ;;
   esac
@@ -364,10 +367,11 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
 # A successful diagnostic means the inspection completed; result=none remains
 # a fail-closed absence of verified harness evidence.
 fm_harness_ancestry_diagnostic() {  # [pid]
-  local pid=${1:-$$} comm args ppid hop=0 matched=0 extending=0 argv0 state
+  local explicit_pid=${1:-} pid=${1:-$$} comm args ppid hop=0 matched=0 extending=0 argv0 state
   case "$pid" in ''|*[!0-9]*|0|1) printf 'result=invalid-start-pid pid=%q\n' "$pid"; return 1 ;; esac
   state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
-  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_requirement_present "$state"; then
+  if [ -z "$explicit_pid" ] && [ -n "${FM_HOME:-}" ] \
+    && fm_codex_home_binding_requirement_present "$state"; then
     if ! fm_codex_home_binding_pid "$state" >/dev/null; then
       printf 'schema=fm-harness-ancestry-diagnostic.v1 start_pid=%s max_hops=0\n' "$pid"
       printf 'result=required-codex-binding-rejected reason=%q\n' "${FM_CODEX_BINDING_REASON:-reject:unknown-codex-binding}"

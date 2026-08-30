@@ -60,6 +60,11 @@ case "$pid:$field" in
 esac
 SH
   chmod +x "$fakebin/herdr" "$fakebin/ps"
+  cat > "$home/state/.fm-codex-session-binding-required" <<EOF
+harness=codex
+home=$home
+spawn_gen=s1.2.3
+EOF
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-remote-harness-diagnostic.sh" alienware-ml) \
@@ -72,8 +77,10 @@ SH
     "diagnostic inspects the live foreground candidate rather than its own worker process"
   assert_contains "$out" 'comm=node' \
     "diagnostic retains the observed kernel command name"
-  assert_contains "$out" 'args=node\ /opt/openai/codex/bin/agent.js' \
-    "diagnostic retains the observed process arguments"
+  assert_contains "$out" 'args=redacted' \
+    "diagnostic redacts the observed process arguments"
+  assert_not_contains "$out" 'node\ /opt/openai/codex/bin/agent.js' \
+    "diagnostic does not expose the fixture command line"
   assert_contains "$out" 'result=verified-harness-found' \
     "diagnostic delegates classification to the shared matcher"
   pass "remote harness diagnostic: Herdr foreground process ancestry is inspected without a remote write"

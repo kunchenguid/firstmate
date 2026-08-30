@@ -305,7 +305,12 @@ while [ "$#" -gt 0 ]; do
 done
 case "$pid:$field" in
   4242:comm=) printf '%s\n' node ;;
-  4242:args=) printf '%s\n' '/opt/openai/codex/bin/main.js --interactive' ;;
+  4242:args=)
+    case "${FM_TEST_CODEX_SHAPE:-valid}" in
+      decoy) printf '%s\n' 'node -e noop /tmp/codex/data' ;;
+      *) printf '%s\n' 'node /opt/openai/codex/bin/main.js --interactive' ;;
+    esac
+    ;;
   4242:ppid=) printf '%s\n' 1 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash /workspace/bin/fm-lock.sh' ;;
@@ -313,6 +318,17 @@ case "$pid:$field" in
 esac
 SH
   chmod +x "$fakebin/ps"
+  if FM_TEST_CODEX_SHAPE=decoy FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_requirement_publish "$FM_HOME/state" "$FM_HOME" s1.2.3
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a generic interpreter with a later Codex-shaped argument became binding authority"
+  fi
+  [ ! -e "$home/state/.fm-codex-session-binding" ] \
+    || fail "rejected generic interpreter evidence published a Codex binding"
   out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"
