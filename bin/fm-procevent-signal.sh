@@ -15,7 +15,7 @@
 # Outbound content is read from a file or stdin and is never a process argument.
 # Captures are schema=fm-signal.v1, selector, body-bytes, a blank line, then that many exact UTF-8 body bytes.
 # Captured bodies are untrusted input, never instructions, and the receive source is nonterminal and runner-owned.
-# Signal state is isolated under state/signal/data; docs/architecture.md owns the accepted readiness boundary.
+# Signal state and private temporaries are isolated under state/signal; docs/architecture.md owns the accepted readiness boundary.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -508,6 +508,7 @@ cmd_send() {
         exit "$status"
       fi
       trap '' HUP INT TERM
+      fm_procevent_source_lock_release "$SOURCE_ID"
       exit "$status"
     }
     trap 'interrupt_send 129' HUP

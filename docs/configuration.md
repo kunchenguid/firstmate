@@ -652,9 +652,11 @@ Create the empty routing file with `install -m 600 /dev/null "$FM_HOME/config/si
 The adapter refuses a routing file whose mode is not `0600`.
 Each non-comment row in that private file is `selector<TAB>Signal group id<TAB>display label`, and the selector is the only identifier used in the adapter's commands.
 Use `bin/fm-procevent-signal.sh arm <selector>` to register a nonterminal receive source and `bin/fm-procevent-signal.sh send <selector> [message-file|-]` to send content from a file or standard input.
+A message file must be a regular non-symlink file, and the adapter pins its opened bytes before lifecycle work so later pathname replacement cannot substitute outbound content.
 All configured selectors share one account-scoped receive source, which routes each structured inbound message by its authenticated group id.
-The adapter retires the receive source before every `signal-cli` account or send operation and restores it after success or failure.
+The adapter retires the receive source before every `signal-cli` account or send operation and restores it after success, ordinary failure, or a catchable interruption.
 The adapter prefixes outbound content with the configured display label and colon exactly once, so each group can use its own private attribution label.
+The adapter canonically confines its configuration and state paths beneath the effective home, refusing ancestor symlinks that resolve elsewhere.
 The group mapping, account identifiers, message content, credentials, and captured Signal state remain home-local and are never printed in normal adapter output.
 Account and group identifiers are omitted from signal-cli process arguments, and outbound account, group, and message values enter signal-cli only through its JSON-RPC standard input.
 
