@@ -107,12 +107,19 @@ state_value() { # <id>; prints recovery-grade state
     printf 'unverified\n'
     return 0
   fi
+  if ! remote_endpoint_launch_complete; then
+    printf 'error: remote Codex endpoint lacks a matching launch-complete receipt\n' >&2
+    printf 'unverified\n'
+    return 0
+  fi
   fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
 }
 
 print_route() { # <id>
   local id=$1 harness traceparent
   remote_endpoint_require "$id"
+  remote_endpoint_launch_complete \
+    || die "remote Codex endpoint lacks a matching launch-complete receipt"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'

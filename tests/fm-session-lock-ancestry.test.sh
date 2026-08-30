@@ -304,11 +304,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$pid:$field" in
-  4242:comm=) printf '%s\n' node ;;
+  4242:comm=)
+    case "${FM_TEST_CODEX_SHAPE:-exact}" in
+      decoy) printf '%s\n' node ;;
+      helper) printf '%s\n' codex-helper ;;
+      *) printf '%s\n' codex ;;
+    esac
+    ;;
   4242:args=)
-    case "${FM_TEST_CODEX_SHAPE:-valid}" in
+    case "${FM_TEST_CODEX_SHAPE:-exact}" in
       decoy) printf '%s\n' 'node -e noop /tmp/codex/data' ;;
-      *) printf '%s\n' 'node /opt/openai/codex/bin/main.js --interactive' ;;
+      helper) printf '%s\n' 'codex-helper --serve' ;;
+      *) printf '%s\n' 'codex --interactive' ;;
     esac
     ;;
   4242:ppid=) printf '%s\n' 1 ;;
@@ -329,6 +336,16 @@ SH
   fi
   [ ! -e "$home/state/.fm-codex-session-binding" ] \
     || fail "rejected generic interpreter evidence published a Codex binding"
+  if FM_TEST_CODEX_SHAPE=helper FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a Codex-named helper process became binding authority"
+  fi
+  [ ! -e "$home/state/.fm-codex-session-binding" ] \
+    || fail "rejected Codex helper evidence published a binding"
   out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"

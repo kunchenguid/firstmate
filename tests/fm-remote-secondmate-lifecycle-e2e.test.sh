@@ -761,6 +761,18 @@ assert_grep 'structural=reject:basename,path-component,interpreter-args,cursor-s
   "remote Codex refusal omitted the shared matcher rejection"
 assert_no_grep '^launch_complete_spawn_gen=' "$REMOTE_HOME/state/parent-route/ios.meta" \
   "failed remote Codex launch published a completion receipt"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>"$TMP_ROOT/incomplete-state.err")" = unverified ] \
+  || fail "incomplete remote Codex endpoint was reported healthy"
+assert_grep 'lacks a matching launch-complete receipt' "$TMP_ROOT/incomplete-state.err" \
+  "incomplete remote Codex state did not name its missing completion evidence"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios \
+  > "$TMP_ROOT/incomplete-route.out" 2>&1; then
+  fail "incomplete remote Codex endpoint exposed an accepted route"
+fi
+assert_grep 'lacks a matching launch-complete receipt' "$TMP_ROOT/incomplete-route.out" \
+  "incomplete remote Codex route refusal did not name its missing completion evidence"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh capture ios 1 >/dev/null \
+  || fail "incomplete remote Codex endpoint lost bounded diagnostic access"
 
 set +e
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \

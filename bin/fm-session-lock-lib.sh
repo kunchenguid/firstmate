@@ -308,8 +308,9 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in
+      codex) name=codex ;;
+      *codex*) FM_HARNESS_MATCH_REASON="reject:non-exact-codex-basename=$base"; return 1 ;;
       *claude*) name=claude ;;
-      *codex*) name=codex ;;
       *opencode*) name=opencode ;;
       *grok*) name=grok ;;
       *kimi*) name=kimi ;;
