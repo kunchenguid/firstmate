@@ -25,6 +25,18 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
+# Print the process argv[0] when Linux exposes it, otherwise use the first
+# token from ps args.  The fallback intentionally differs from Cursor's
+# argv0 helper: a session-lock matcher has ps args in hand and must preserve
+# that platform evidence when a portable test fixture has no /proc entry.
+fm_harness_argv0_for_pid() {  # <pid> <args>
+  local pid=$1 args=$2 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} argv0=
+  if [ -r "$proc_root/$pid/cmdline" ]; then
+    IFS= read -r -d '' argv0 < "$proc_root/$pid/cmdline" || true
+  fi
+  printf '%s' "${argv0:-${args%% *}}"
+}
+
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
 #
@@ -58,17 +70,23 @@ fm_harness_path_name() {  # <path>
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
+# The last accepted or rejected structural check.  Callers use this only for
+# a refusal diagnostic; it is deliberately not lock or dispatch authority.
+FM_HARNESS_MATCH_REASON=
+fm_harness_process_matches() {  # <comm> <args> [argv0]
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  FM_HARNESS_MATCH_REASON=
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    FM_HARNESS_MATCH_REASON="accept:basename=$base"
     return 0
   fi
-  argv0=${args%% *}
+  argv0=${3:-${args%% *}}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    FM_HARNESS_MATCH_REASON="accept:path-component=$name"
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
@@ -76,6 +94,7 @@ fm_harness_process_matches() {  # <comm> <args>
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        FM_HARNESS_MATCH_REASON="accept:interpreter-args"
         return 0
       fi
       ;;
@@ -84,8 +103,50 @@ fm_harness_process_matches() {  # <comm> <args>
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
-  fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
+  if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+    FM_HARNESS_MATCH_REASON="accept:cursor-structural"
+    return 0
+  fi
+  FM_HARNESS_MATCH_REASON="reject:basename,path-component,interpreter-args,cursor-structural"
   return 1
+}
+
+# Print a read-only, shell-escaped account of the ancestry inspection for PID
+# $1 (or this shell).  This is the diagnostic owner for both the lock refusal
+# and fm-harness's unknown result, so the evidence and matcher cannot drift.
+# A successful diagnostic means the inspection completed; result=none remains
+# a fail-closed absence of verified harness evidence.
+fm_harness_ancestry_diagnostic() {  # [pid]
+  local pid=${1:-$$} comm args ppid hop=0 matched=0 argv0
+  case "$pid" in ''|*[!0-9]*|0|1) printf 'result=invalid-start-pid pid=%q\n' "$pid"; return 1 ;; esac
+  printf 'schema=fm-harness-ancestry-diagnostic.v1 start_pid=%s max_hops=16\n' "$pid"
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    hop=$((hop + 1))
+    if ! comm=$(ps -o comm= -p "$pid" 2>/dev/null); then
+      printf 'hop=%s pid=%s result=unreadable-process\n' "$hop" "$pid"
+      break
+    fi
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    if fm_harness_process_matches "$comm" "$args" "$argv0"; then
+      printf 'hop=%s pid=%s ppid=%q comm=%q argv0=%q args=%q match=%q\n' \
+        "$hop" "$pid" "$ppid" "$comm" "$argv0" "$args" "$FM_HARNESS_MATCH_REASON"
+      matched=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+    else
+      printf 'hop=%s pid=%s ppid=%q comm=%q argv0=%q args=%q match=%q\n' \
+        "$hop" "$pid" "$ppid" "$comm" "$argv0" "$args" "$FM_HARNESS_MATCH_REASON"
+    fi
+    case "$ppid" in ''|*[!0-9]*|0|1) break ;; esac
+    pid=$ppid
+  done
+  if [ "$matched" -eq 1 ]; then
+    printf 'result=verified-harness-found\n'
+  else
+    printf 'result=no-verified-harness\n'
+  fi
+  return 0
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -107,11 +168,12 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ comm args argv0 extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
+    if fm_harness_process_matches "$comm" "$args" "$argv0"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -145,11 +207,12 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=$1 comm args argv0
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
+  fm_harness_process_matches "$comm" "$args" "$argv0"
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
