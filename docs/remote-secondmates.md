@@ -162,6 +162,27 @@ A launch after a host has drifted out of readiness fails with the doctor's own g
 Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
 
+### Migrating a live pre-receipt Codex endpoint
+
+After upgrading to session-bound remote Codex, a secondmate that was already
+alive before the receipt protocol has no trustworthy completion receipt. Normal
+`fm-spawn.sh <id> --secondmate` deliberately refuses to reuse it. After the
+operator has decided that replacing that legacy agent is safe, run the explicit
+transition from the primary home:
+
+```sh
+bin/fm-spawn.sh <id> --secondmate --migrate-legacy
+```
+
+The remote controller accepts this only for an alive Codex endpoint whose
+metadata predates both `spawn_gen` and `launch_complete_spawn_gen`; it refuses a
+malformed or post-protocol partial launch. It retires the old endpoint through
+the Herdr backend, proves that it is gone, then starts a fresh agent, publishes
+its session binding, and records its receipt before delivering the startup
+brief. It is not raw pane surgery and never silently reuses the legacy occupant.
+Do not use `--force`: if work must be preserved, checkpoint or hand it off
+before this explicit replacement.
+
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
 A persistent remote route's parent metadata intentionally has no local spawn-generation marker and identifies the route by its recorded host instead.

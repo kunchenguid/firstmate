@@ -806,6 +806,15 @@ set -e
 [ "$incomplete_codex_retry_rc" -ne 0 ] || fail "remote spawn reused an incomplete alive Codex endpoint"
 assert_grep 'alive without a matching launch-complete receipt' "$TMP_ROOT/spawn-incomplete-codex-retry.out" \
   "remote Codex retry did not name the missing completion receipt"
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --migrate-legacy \
+  > "$TMP_ROOT/migrate-incomplete-codex.out" 2>&1
+migrate_incomplete_rc=$?
+set -e
+[ "$migrate_incomplete_rc" -ne 0 ] \
+  || fail "legacy migration replaced a post-protocol incomplete Codex endpoint"
+assert_grep 'not an eligible pre-receipt legacy record' "$TMP_ROOT/migrate-incomplete-codex.out" \
+  "legacy migration did not distinguish a post-protocol incomplete endpoint"
 remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null \
   || fail "incomplete remote Codex endpoint could not be retired for recovery"
 
@@ -821,6 +830,27 @@ remote_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$REMOTE_HOME/state/parent-route/io
 remote_complete_gen=$(sed -n 's/^launch_complete_spawn_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
 [ -n "$remote_spawn_gen" ] && [ "$remote_complete_gen" = "$remote_spawn_gen" ] \
   || fail "successful remote Codex launch did not bind completion to its spawn generation"
+
+# A live endpoint from before receipt publication must not remain permanently
+# stranded: ordinary launch still refuses it, while the explicit migration path
+# retires only this legacy shape and proves a fresh receipt on its replacement.
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+awk '!/^spawn_gen=/ && !/^launch_complete_spawn_gen=/' "$remote_route_meta" > "$TMP_ROOT/remote-ios-legacy.meta"
+mv "$TMP_ROOT/remote-ios-legacy.meta" "$remote_route_meta"
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$TMP_ROOT/spawn-legacy-codex-retry.out" 2>&1
+legacy_retry_rc=$?
+set -e
+[ "$legacy_retry_rc" -ne 0 ] || fail "ordinary remote spawn reused an alive pre-receipt Codex endpoint"
+assert_grep 'alive without a matching launch-complete receipt' "$TMP_ROOT/spawn-legacy-codex-retry.out" \
+  "ordinary legacy retry did not preserve the receipt guard"
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --migrate-legacy)
+assert_contains "$out" 'remote=remote-mac backend=herdr' "legacy migration did not return the fresh remote route"
+remote_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$remote_route_meta")
+remote_complete_gen=$(sed -n 's/^launch_complete_spawn_gen=//p' "$remote_route_meta")
+[ -n "$remote_spawn_gen" ] && [ "$remote_complete_gen" = "$remote_spawn_gen" ] \
+  || fail "legacy migration did not record a fresh matching receipt"
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-complete.meta"
 for duplicate_field in harness spawn_gen launch_complete_spawn_gen; do

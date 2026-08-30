@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh migrate <id> codex <model|-> <effort|-> herdr [traceparent]
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
@@ -156,6 +157,17 @@ remote_endpoint_launch_complete() {
     && [ "$complete_gen" = "$spawn_gen" ]
 }
 
+remote_endpoint_is_legacy_codex() {
+  local harness
+  harness=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" harness 2>/dev/null) || return 1
+  [ "$harness" = codex ] || return 1
+  # A post-protocol launch always publishes spawn_gen before it starts Codex.
+  # Do not let an explicit migration turn a contemporary partial launch into a
+  # replacement: only records that predate both receipt fields are eligible.
+  ! grep -q '^spawn_gen=' "$REMOTE_ENDPOINT_META" \
+    && ! grep -q '^launch_complete_spawn_gen=' "$REMOTE_ENDPOINT_META"
+}
+
 cmd_route() {
   local id=$1 meta
   validate_id "$id"
@@ -221,6 +233,32 @@ cmd_launch() {
   [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
     || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
   print_route "$id"
+}
+
+cmd_migrate() {
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
+  local current after
+
+  validate_id "$id"
+  validate_home "$id"
+  [ "$harness" = codex ] || die "legacy migration only supports the remote Codex receipt transition"
+  remote_endpoint_require "$id"
+  remote_endpoint_is_legacy_codex || die "remote Codex endpoint is not an eligible pre-receipt legacy record; refusing to replace a post-protocol or malformed launch"
+  current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
+  [ "$current" = alive ] || die "remote Codex legacy migration requires an alive endpoint, found '$current'"
+
+  # This is intentionally explicit at the primary's --migrate-legacy command:
+  # it uses the same backend owner as ordinary dead-endpoint cleanup, never raw
+  # pane input, and it must prove the old occupant is gone before re-launching.
+  fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
+    || die "could not stop the eligible pre-receipt Codex endpoint through the remote backend"
+  after=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
+  case "$after" in
+    dead|missing) ;;
+    *) die "legacy Codex migration did not prove the old endpoint gone (state=$after); refusing replacement" ;;
+  esac
+  printf 'migrated-legacy: retired pre-receipt Codex endpoint; launching a fresh bound replacement\n' >&2
+  cmd_launch "$id" "$harness" "$model" "$effort" "$selected_backend" "$traceparent"
 }
 
 cmd_send() {
@@ -397,6 +435,7 @@ cmd_retire() {
 
 case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  migrate) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_migrate "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;

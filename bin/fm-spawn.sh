@@ -3,7 +3,7 @@
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--migrate-legacy] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -16,6 +16,12 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   --migrate-legacy is an explicit, one-time remote-secondmate transition for
+#   a live pre-session-binding Codex endpoint. It never reuses that endpoint:
+#   the remote controller verifies that its metadata predates the receipt
+#   protocol, stops it through the backend, proves it is gone, then launches a
+#   fresh bound agent before the startup brief is delivered. It is refused for
+#   incomplete post-protocol launches and every non-secondmate/non-Codex path.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -328,6 +334,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+MIGRATE_LEGACY=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -352,6 +359,7 @@ for a in "$@"; do
     --scout) KIND=scout; KIND_SET=1 ;;
     --secondmate) KIND=secondmate; KIND_SET=1 ;;
     --relaunch) RELAUNCH=1 ;;
+    --migrate-legacy) MIGRATE_LEGACY=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -404,6 +412,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$MIGRATE_LEGACY" -eq 0 ] || { echo "error: --migrate-legacy starts a fresh remote secondmate replacement; it cannot be combined with --relaunch" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -440,9 +449,13 @@ else
     }
   fi
 fi
+[ "$MIGRATE_LEGACY" -eq 0 ] || [ "$KIND" = secondmate ] || {
+  echo "error: --migrate-legacy applies only to remote --secondmate spawns" >&2
+  exit 1
+}
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home harness positional model effort backend out rc meta tmp remote_action
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -462,6 +475,12 @@ spawn_remote_secondmate() {
   fi
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
   if [ "$remote" != 1 ]; then
+    if [ "$MIGRATE_LEGACY" -eq 1 ]; then
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: --migrate-legacy only applies to a remotely placed Codex secondmate" >&2
+      return 1
+    fi
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
@@ -492,6 +511,12 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  if [ "$MIGRATE_LEGACY" -eq 1 ] && [ "$harness" != codex ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: --migrate-legacy only applies to a remote Codex secondmate" >&2
+    return 1
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
@@ -602,7 +627,9 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
-  if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
+  remote_action=launch
+  [ "$MIGRATE_LEGACY" -eq 0 ] || remote_action=migrate
+  if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh "$remote_action" \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
   else
