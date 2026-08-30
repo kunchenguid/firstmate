@@ -253,6 +253,15 @@ INBOX_TASK_ID=
 
 fm_task_inbox_publish_guard() {
   local current current_keys status_file
+  if [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ]; then
+    [ -n "${CURRENT_INBOX_WORKTREE:-}" ] || return 1
+    current=$(git -C "$CURRENT_INBOX_WORKTREE" rev-parse --verify HEAD 2>/dev/null) \
+      || return 1
+    [ "$current" = "$FM_SEND_EXPECTED_WORKTREE_HEAD" ] || return 1
+    current=$(git -C "$CURRENT_INBOX_WORKTREE" status --porcelain 2>/dev/null) \
+      || return 1
+    [ -z "$current" ] || return 1
+  fi
   if [ -n "${FM_SEND_EXPECTED_STATUS_SIGNATURE:-}" ]; then
     [ -n "$INBOX_TASK_ID" ] || return 1
     status_file="$STATE/$INBOX_TASK_ID.status"

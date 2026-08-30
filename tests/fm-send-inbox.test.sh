@@ -26,6 +26,8 @@
 #      validation and record publication, so a concurrent commit cannot race
 #      a stale head-bound instruction into the durable inbox, and an exact
 #      replay remains one durable record without retaining the transaction.
+#  11. A worktree write that lands while the durable record is staged is
+#      observed by the publication guard and leaves no authoritative record.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -433,6 +435,40 @@ SH
   pass "fm-send inbox: expected-head publication excludes commits and replay stays idempotent"
 }
 
+test_expected_head_enqueue_refuses_concurrent_dirty_worktree() {
+  local dir err wt expected real_mktemp rc records
+  dir=$(setup_case expected-head-dirty-race); err="$dir/send.err"
+  wt="$dir/worktree"
+  fm_git_init_commit "$wt"
+  expected=$(git -C "$wt" rev-parse HEAD)
+  printf 'worktree=%s\n' "$wt" >> "$dir/home/state/t1.meta"
+  real_mktemp=$(command -v mktemp)
+  cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$*" in
+  *'/t1.inbox/.staging.'*)
+    printf 'concurrent write\n' > "${FM_EXPECTED_DIRTY_RACE_WORKTREE:?}/uncommitted.txt"
+    ;;
+esac
+exec "${FM_REAL_MKTEMP:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mktemp"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_WORKTREE_HEAD="$expected" \
+    FM_REAL_MKTEMP="$real_mktemp" \
+    FM_EXPECTED_DIRTY_RACE_WORKTREE="$wt" \
+    -- t1 "validate exact clean head $expected"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a worktree dirtied during publication received validation authority"
+  records=("$dir/home/state/t1.inbox"/*.msg)
+  [ ! -e "${records[0]}" ] || fail "the dirty-race send published ${records[0]}"
+  assert_contains "$(cat "$err")" "inbox record could not be written" \
+    "the dirty-race refusal should report the failed durable publication"
+  pass "fm-send inbox: publication refuses a concurrent dirty worktree"
+}
+
 test_expected_status_signature_is_revalidated_at_publication() {
   local dir err expected real_mktemp rc
   dir=$(setup_case expected-status-race); err="$dir/send.err"
@@ -727,6 +763,7 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_expected_worktree_head_is_revalidated_before_enqueue
 test_expected_head_enqueue_excludes_concurrent_commit
+test_expected_head_enqueue_refuses_concurrent_dirty_worktree
 test_expected_status_signature_is_revalidated_at_publication
 test_status_append_is_linearized_with_publication
 test_captain_hold_is_linearized_with_publication

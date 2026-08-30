@@ -76,7 +76,7 @@ run_continue() {
 }
 
 test_exactly_once_delivery_and_replay() {
-  local dir home send state first second third count due record
+  local dir home send state first second third count due record head body
   dir="$TMP_ROOT/exactly-once"; mkdir -p "$dir"
   home=$(make_fixture "$dir")
   send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
@@ -86,6 +86,14 @@ test_exactly_once_delivery_and_replay() {
   second=$(run_continue "$home" "$send" "$state") || fail "replay continuation failed"
   due=$(FM_TASK_INBOX_GRACE_SECS=0 fm_task_inbox_due_action "$home/state" ship)
   record=$(find "$home/state/ship.inbox" -maxdepth 1 -name '*.msg' -print -quit)
+  head=$(git -C "$home/projects/ship" rev-parse HEAD)
+  # The inbox body is the generated prompt/protocol delivered to the worker,
+  # so its explicit authority preconditions are an owned public output.
+  body=$(fm_task_inbox_body "$record") || fail "continuation record body was unreadable"
+  case "$body" in
+    "FIRSTMATE_DELIVERY schema=fm-delivery-continuation.v2 task=ship spawn_gen=g1 head=$head delivery="*" require_head=$head require_clean=1"$'\n'"Run /no-mistakes only while HEAD is exactly $head and git status --porcelain is empty; otherwise do not begin validation and report the mismatch. Do not merge.") ;;
+    *) fail "the emitted continuation did not keep authority bound to its exact clean head: $body" ;;
+  esac
   mkdir -p "$home/state/ship.inbox/handled"
   mv "$record" "$home/state/ship.inbox/handled/"
   third=$(run_continue "$home" "$send" "$state") || fail "handled replay continuation failed"

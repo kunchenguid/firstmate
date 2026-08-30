@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-delivery-continuation-lib.sh - validation-continuation message contract.
 
-FM_DELIVERY_CONTINUATION_SCHEMA='fm-delivery-continuation.v1'
+FM_DELIVERY_CONTINUATION_SCHEMA='fm-delivery-continuation.v2'
 
 fm_delivery_committed_receipt_contract() {
   printf '%s\n' 'Delivery receipt contract: committed-head-v1'
@@ -83,20 +83,19 @@ fm_delivery_continuation_id() {  # <task> <head> <spawn-gen>
 }
 
 fm_delivery_continuation_message() {  # <task> <head> <spawn-gen> <delivery-id>
-  printf 'FIRSTMATE_DELIVERY schema=%s task=%s spawn_gen=%s head=%s delivery=%s\n' \
-    "$FM_DELIVERY_CONTINUATION_SCHEMA" "$1" "$3" "$2" "$4"
-  printf 'Begin the already-authorized /no-mistakes validation flow now. Do not merge.'
+  printf 'FIRSTMATE_DELIVERY schema=%s task=%s spawn_gen=%s head=%s delivery=%s require_head=%s require_clean=1\n' \
+    "$FM_DELIVERY_CONTINUATION_SCHEMA" "$1" "$3" "$2" "$4" "$2"
+  printf 'Run /no-mistakes only while HEAD is exactly %s and git status --porcelain is empty; otherwise do not begin validation and report the mismatch. Do not merge.' "$2"
 }
 
 fm_delivery_continuation_record_identity() {  # <record>
-  local rec=$1 body first rest schema_field task_field spawn_field head_field delivery_field extra task spawn_gen
+  local rec=$1 body first rest schema_field task_field spawn_field head_field delivery_field require_head_field require_clean_field extra task spawn_gen
   body=$(fm_task_inbox_body "$rec" 2>/dev/null) || return 1
   case "$body" in
     *$'\n'*) first=${body%%$'\n'*}; rest=${body#*$'\n'} ;;
     *) return 1 ;;
   esac
-  [ "$rest" = 'Begin the already-authorized /no-mistakes validation flow now. Do not merge.' ] || return 1
-  IFS=' ' read -r first schema_field task_field spawn_field head_field delivery_field extra <<EOF
+  IFS=' ' read -r first schema_field task_field spawn_field head_field delivery_field require_head_field require_clean_field extra <<EOF
 $first
 EOF
   [ "$first" = FIRSTMATE_DELIVERY ] || return 1
@@ -108,13 +107,17 @@ EOF
   [ -z "$extra" ] || return 1
   case "$head_field" in head=*) head_field=${head_field#head=} ;; *) return 1 ;; esac
   case "$delivery_field" in delivery=*) delivery_field=${delivery_field#delivery=} ;; *) return 1 ;; esac
+  case "$require_head_field" in require_head=*) require_head_field=${require_head_field#require_head=} ;; *) return 1 ;; esac
+  [ "$require_clean_field" = require_clean=1 ] || return 1
   case "$head_field" in ''|*[!0-9A-Fa-f]*) return 1 ;; esac
   case "${#head_field}" in 40|64) ;; *) return 1 ;; esac
   case "$delivery_field" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
     *) return 1 ;;
   esac
+  [ "$require_head_field" = "$head_field" ] || return 1
   [ "$delivery_field" = "$(fm_delivery_continuation_id "$task" "$head_field" "$spawn_gen")" ] || return 1
+  [ "$rest" = "Run /no-mistakes only while HEAD is exactly $head_field and git status --porcelain is empty; otherwise do not begin validation and report the mismatch. Do not merge." ] || return 1
   printf '%s\t%s\t%s\t%s\n' "$task" "$spawn_gen" "$head_field" "$delivery_field"
 }
 
