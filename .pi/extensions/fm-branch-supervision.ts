@@ -1563,7 +1563,7 @@ ${context.command}
     const record = parseVisibleOutcomeRecord(entry.data);
     if (!record || record.verdict !== "captain") return undefined;
     return new Text(
-      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` ${record.task}: ${record.summary}`)}`,
+      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
       1,
       0,
     );

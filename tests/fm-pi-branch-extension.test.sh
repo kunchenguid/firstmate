@@ -792,7 +792,7 @@ const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
   { expanded: false },
   renderTheme,
 );
-if (captainRendered.text !== "⚓ task-9: PR https://example.com/pr/9 checks green, ready for review") {
+if (captainRendered.text !== "⚓ [seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review") {
   throw new Error(`captain renderer changed the exact visible outcome: ${captainRendered.text}`);
 }
 process.exit(0);
@@ -1067,7 +1067,7 @@ const rendered = entryRenderers.get("fm-branch-visible-outcome")(
   { expanded: false },
   { fg: (_color, text) => text },
 );
-if (rendered.text !== `⚓ email-intake: ${summary1}`) {
+if (rendered.text !== `⚓ [seq ${seq1}] email-intake: ${summary1}`) {
   throw new Error(`renderer did not preserve exact outcome text: ${rendered.text}`);
 }
 

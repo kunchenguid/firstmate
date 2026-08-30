@@ -524,7 +524,7 @@ const renderer = extension.entryRenderers.get("fm-branch-visible-outcome");
 if (!renderer) throw new Error("the real extension did not register its visible-outcome renderer");
 const component = new CustomEntryComponent(entry, renderer);
 const rendered = component.render(240).join("\n");
-if (!rendered.includes("⚓") || !rendered.includes(record.task) || !rendered.includes(record.summary)) {
+if (!rendered.includes("⚓") || !rendered.includes(`[seq ${record.seq}]`) || !rendered.includes(record.task) || !rendered.includes(record.summary)) {
   throw new Error(`Pi's custom-entry component did not render the exact outcome: ${rendered}`);
 }
 console.log("DELIVERY_OK");
