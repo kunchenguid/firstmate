@@ -587,6 +587,21 @@ test_ci_monitoring_still_waiting_parks() {
   pass "ci-monitoring run with checks not yet green parks"
 }
 
+test_ci_monitoring_pending_issues_parks() {
+  reset_fakes
+  local d; d=$(new_case ci-pending-issues)
+  make_repo_on_branch "$d/wt" fm/feat-cipendingissues
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cipendingissues.meta" "window=fm:fm-feat-cipendingissues" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cipendingissues)"
+  FM_FAKE_CI_LOGS="issues detected but checks still pending, waiting for all checks to complete..."
+  local out; out=$(run_crew_state "$d" feat-cipendingissues)
+  assert_contains "$out" "state: parked" "pending-check issues marker -> parked"
+  assert_contains "$out" "waiting for CI checks" "pending-check issues marker names the wait"
+  assert_not_contains "$out" "state: working" "pending-check issues must not appear as remediation"
+  pass "pending-check issues marker parks"
+}
+
 # A later merge-conflict auto-fix round after an earlier green reading must
 # not be masked: the MOST RECENT marker in the log tail wins.
 test_ci_monitoring_green_then_new_issue_stays_working() {
@@ -716,7 +731,7 @@ test_terminal_failed() {
 # (verified against the installed v1.32.2 - the `axi` surface has no
 # runs-listing subcommand at all), so attribution silently failed every time
 # the repo-wide answer was not this crew's own branch.
-test_cross_branch_attribution_via_runs_list() {
+test_cross_branch_coarse_running_phase_is_unknown() {
   reset_fakes
   local d short; d=$(new_case crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-f
@@ -725,6 +740,20 @@ test_cross_branch_attribution_via_runs_list() {
   fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
   # The repo-wide active/most-recent run belongs to a different crew's branch.
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_AXI_HOME="$(cat <<'EOF'
+runs[10]{id,branch,status,head,pr}:
+  01OTHER01,fm/newer-01,running,aaaaaaa,
+  01OTHER02,fm/newer-02,running,aaaaaaa,
+  01OTHER03,fm/newer-03,running,aaaaaaa,
+  01OTHER04,fm/newer-04,running,aaaaaaa,
+  01OTHER05,fm/newer-05,running,aaaaaaa,
+  01OTHER06,fm/newer-06,running,aaaaaaa,
+  01OTHER07,fm/newer-07,running,aaaaaaa,
+  01OTHER08,fm/newer-08,running,aaaaaaa,
+  01OTHER09,fm/newer-09,running,aaaaaaa,
+  01OTHER10,fm/newer-10,running,aaaaaaa,
+EOF
+)"
   # Real `no-mistakes runs` shape: plain text, newest-first, no run id, no
   # quoting - "<status> <branch> <short-sha> <date> [<pr-url>]".
   FM_FAKE_RUNS_LIST="$(cat <<EOF
@@ -733,9 +762,12 @@ test_cross_branch_attribution_via_runs_list() {
 EOF
 )"
   local out; out=$(run_crew_state "$d" feat-f)
-  assert_contains "$out" "state: working" "this branch's own run attributed via the runs list"
-  assert_contains "$out" "source: run-step" "runs-list-resolved run -> run-step source"
-  pass "cross-branch run is attributed via the real runs list"
+  assert_contains "$out" "state: unknown" "coarse running row without exact phase -> unknown"
+  assert_contains "$out" "source: run-step" "coarse running row remains run-step sourced"
+  assert_contains "$out" "exact phase unavailable" "coarse running detail names the missing phase"
+  assert_not_contains "$out" "state: working" "displaced passive monitor must not appear active"
+  assert_not_contains "$out" "state: parked" "unknown coarse phase must not be guessed passive"
+  pass "cross-branch run beyond AXI home cap reports unknown phase"
 }
 
 test_cross_branch_passive_ci_monitor_parks() {
@@ -776,7 +808,7 @@ runs[2]{id,branch,status,head,pr}:
 EOF
 )"
   FM_FAKE_AXI_STATUS_RUN="$(run_ci_monitoring fm/feat-cross-ci-fixing | sed 's/01RUN/01TARGET/')"
-  FM_FAKE_CI_LOGS="issues detected: ci failure - auto-fix enabled"
+  FM_FAKE_CI_LOGS="issues detected: ci failure - auto-fixing (attempt 1/3)..."
   local out; out=$(run_crew_state "$d" feat-cross-ci-fixing)
   assert_contains "$out" "state: working" "cross-branch CI remediation -> working"
   assert_contains "$out" "ci remediation active" "cross-branch CI remediation names active work"
@@ -801,7 +833,7 @@ test_cross_branch_attribution_picks_most_recent_row() {
 EOF
 )"
   local out; out=$(run_crew_state "$d" feat-fq)
-  assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
+  assert_contains "$out" "state: unknown" "most recent running row has unknown exact phase"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
 }
@@ -1332,11 +1364,10 @@ test_missing_meta() {
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
-# incident: a validating crew whose bare `axi status` answer belongs to
-# another branch must still be absorbed by the watcher via the runs-list
-# fallback (working), while a crew with genuinely no run anywhere and an idle
-# pane must still surface (the safety property the fix must never widen away).
-test_provably_working_via_runs_list_fallback() {
+# incident: a validating crew whose exact phase is unavailable must not be
+# absorbed as provably working, and a crew with genuinely no run anywhere and
+# an idle pane must still surface.
+test_coarse_running_is_not_provably_working() {
   reset_fakes
   local d short; d=$(new_case provably-working-crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-provable
@@ -1349,9 +1380,10 @@ test_provably_working_via_runs_list_fallback() {
   running    fm/feat-provable ${short}  2026-07-02 22:05
 EOF
 )"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
-    || fail "cross-branch attribution via the runs list was not treated as provably working"
-  pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
+  if PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable; then
+    fail "a coarse running row with unknown phase was treated as provably working"
+  fi
+  pass "crew_is_provably_working rejects a coarse run with unknown phase"
 }
 
 test_not_provably_working_when_stopped() {
@@ -1630,6 +1662,7 @@ test_ci_monitoring_trusted_no_ci_surfaces_done
 test_ci_monitoring_green_then_rearm_parks
 test_ci_monitoring_no_checks_yet_parks
 test_ci_monitoring_still_waiting_parks
+test_ci_monitoring_pending_issues_parks
 test_ci_monitoring_green_then_new_issue_stays_working
 test_ci_ready_done_log_relapse_parks
 test_ci_fixing_after_green_stays_working
@@ -1637,7 +1670,7 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
-test_cross_branch_attribution_via_runs_list
+test_cross_branch_coarse_running_phase_is_unknown
 test_cross_branch_passive_ci_monitor_parks
 test_cross_branch_ci_remediation_stays_working
 test_cross_branch_attribution_picks_most_recent_row
@@ -1665,7 +1698,7 @@ test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
-test_provably_working_via_runs_list_fallback
+test_coarse_running_is_not_provably_working
 test_not_provably_working_when_stopped
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current

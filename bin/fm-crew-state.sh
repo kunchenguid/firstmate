@@ -339,12 +339,12 @@ nm_ci_checks_state() {
   log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|repository declares no CI .*treating as all checks passed.*still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
+    | grep -E 'CI checks passed|no CI checks reported - still monitoring|repository declares no CI .*treating as all checks passed.*still monitoring|no CI checks reported yet|checks failed|issues detected but checks still pending|manual fix requested|auto-fixing|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
     *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"issues detected"*) printf 'fixing' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *"manual fix requested"*|*"auto-fixing"*) printf 'fixing' ;;
+    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected but checks still pending"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -525,7 +525,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     # status_span_first_actionable) regardless of this coarse-vs-full
     # distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      running)   RUN_STATE=unknown; RUN_DETAIL="background run active; exact phase unavailable" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
@@ -601,7 +601,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if { [ "$RUN_STATE" = working ] || { [ "$RUN_STATE" = parked ] && [ "$RUN_IS_GATE_PARKED" != 1 ]; }; } \
+  if { [ "$RUN_SOURCE" = coarse ] || [ "$RUN_STATE" = working ] || { [ "$RUN_STATE" = parked ] && [ "$RUN_IS_GATE_PARKED" != 1 ]; }; } \
     && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
@@ -624,7 +624,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   # stale: the gate resolved and the run resumed or finished.
   case "$LOG_VERB" in
     needs-decision|blocked)
-      if [ "$RUN_IS_GATE_PARKED" != 1 ]; then
+      if [ "$RUN_SOURCE" != coarse ] && [ "$RUN_IS_GATE_PARKED" != 1 ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else
