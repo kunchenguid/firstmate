@@ -38,9 +38,11 @@ ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
+HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
+HOME_SUMMARY_FAILURE_STAMP=
 HOME_SUMMARY_TMP=
 HOME_SUMMARY_ERR_TMP=
 HOME_SUMMARY_LOCK_HELD=0
@@ -69,6 +71,10 @@ case "$ERROR_LOG_MAX_BYTES" in
 esac
 case "$HOME_SUMMARY_TIMEOUT" in
   ''|*[!0-9]*|0) HOME_SUMMARY_TIMEOUT=60 ;;
+esac
+case "$HOME_SUMMARY_IF_IDLE" in
+  0|1) ;;
+  *) HOME_SUMMARY_IF_IDLE=0 ;;
 esac
 
 if [ "$HOME_SUMMARY_MODE" != parent ]; then
@@ -102,7 +108,11 @@ home_summary_refresh_once() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  fm_lock_acquire_wait "$REFRESH_LOCK"
+  if [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ]; then
+    fm_lock_try_acquire "$REFRESH_LOCK" || return 0
+  else
+    fm_lock_acquire_wait "$REFRESH_LOCK"
+  fi
   HOME_SUMMARY_LOCK_HELD=1
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
@@ -177,8 +187,10 @@ home_summary_refresh_once() {
 }
 
 home_summary_log_failure() {
-  local size tmp
-  if ! printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOME_SUMMARY_ERROR" >> "$ERROR_LOG" 2>/dev/null; then
+  local size stamp tmp
+  stamp=$HOME_SUMMARY_FAILURE_STAMP
+  [ -n "$stamp" ] || stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! printf '[%s] %s\n' "$stamp" "$HOME_SUMMARY_ERROR" >> "$ERROR_LOG" 2>/dev/null; then
     printf 'fm-home-summary-refresh: %s\n' "$HOME_SUMMARY_ERROR" >&2
     return 0
   fi
@@ -196,13 +208,16 @@ home_summary_log_failure() {
 
 if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
   HOME_SUMMARY_ERROR=${FM_HOME_SUMMARY_PARENT_ERROR:-"refresh worker failed"}
+  HOME_SUMMARY_FAILURE_STAMP=${FM_HOME_SUMMARY_PARENT_STAMP:-}
   home_summary_log_failure
   exit 0
 fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
+  attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
+    FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_worker; then
     exit 0
   else
@@ -216,6 +231,7 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
     fi
     fm_run_timed 2 env \
       FM_HOME_SUMMARY_PARENT_ERROR="$parent_error" \
+      FM_HOME_SUMMARY_PARENT_STAMP="$attempt_stamp" \
       "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_log-failure >/dev/null || true
     exit 0
   fi

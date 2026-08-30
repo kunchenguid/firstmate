@@ -44,7 +44,8 @@ On the local steering-inbox plane that close is deferred rather than immediate: 
 `bin/fm-task-inbox-lib.sh` is that deferred channel and owns its contract, feeding the intake from `bin/fm-watch.sh` and from `bin/fm-teardown.sh` at the moment of acknowledgement.
 Teardown runs that commit as its last chance, while the task's status log is still live, and prints each status-key closure it lands so the backlog Done note keeps the one record that outlives cleanup; a captain-held closure already survives in the backlog itself.
 A closure the worker never acknowledged is not fed at all: teardown names it as undelivered at cleanup and its call stays open, which is the truthful reading of an answer that was stored but never seen.
-`bin/fm-procevent.sh` is the captured-result channel: after capture, a bound source has its result passed to `bin/fm-procevent-<adapter>.sh answers <result-file>` and whatever that prints is piped into the intake, so any adapter with an `answers` command works and the runner names no adapter, parses no result, and carries no decision rule.
+`bin/fm-procevent.sh` is the captured-result channel: after capture, a bound built-in source has its result passed to `bin/fm-procevent-<adapter>.sh answers <result-file>` and whatever that prints is piped into the intake, so any built-in adapter with an `answers` command works and the runner names no adapter, parses no result, and carries no decision rule.
+Trusted external process-event adapters intentionally expose no answer operation and cannot feed this authority-bearing intake; [`extension-bindings.md`](extension-bindings.md#trust-boundary) owns that boundary.
 `bin/fm-procevent-lavish.sh answers` is one such adapter command; it reads only rows tagged `choice`, relays a card's declared close mode, and can never let freeform captain prose forge a task id or a mode.
 
 ## Structured read surfaces
