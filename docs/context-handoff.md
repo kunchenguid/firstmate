@@ -20,8 +20,9 @@ The supported Bash entrypoint [`bin/fm-context-handoff.py`](../bin/fm-context-ha
 
 A Pi `session_before_compact` handler seals only candidates already in the register for the current Pi session.
 The handler never reads or serializes Pi branch entries, messages, summaries, reasoning, or tool output and never calls a model.
-A non-empty register that cannot be sealed durably stops compaction and leaves a failure receipt.
-Empty and disabled registers do not stop compaction.
+A producer response that identifies a non-empty register that could not be sealed durably stops compaction and leaves a failure receipt.
+A Pi adapter launch, nonzero-exit, malformed-output, or output-cap failure also stops compaction even when no receipt can be written.
+Empty and disabled registers do not stop compaction when the adapter completes successfully.
 The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the exact sealed record and never infer success from the success event alone.
 
 The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, directory fsync, a 32-item cap, and a 32-KiB envelope cap.
