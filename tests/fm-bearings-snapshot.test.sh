@@ -49,6 +49,19 @@ SH
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
+if [ -n "${FAKE_GH_WIDE:-}" ]; then
+  pad=$(printf '%0400d' 0 | tr '0' 'w')
+  i=1
+  printf '['
+  while [ "$i" -le "$FAKE_GH_WIDE" ]; do
+    [ "$i" -gt 1 ] && printf ','
+    printf '{"number":%d,"title":"Wide %d","url":"https://github.com/acme/wide/pull/%d","headRefName":"fm/wide-%d-%s","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}' \
+      "$i" "$i" "$i" "$i" "$pad"
+    i=$((i + 1))
+  done
+  printf ']\n'
+  exit 0
+fi
 if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
   cat <<'JSON'
 [{"number":1,"title":"One","url":"https://github.com/acme/repo/pull/1","headRefName":"fm/one","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":2,"title":"Two","url":"https://github.com/acme/repo/pull/2","headRefName":"fm/two","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":3,"title":"Three","url":"https://github.com/acme/repo/pull/3","headRefName":"fm/three","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}]
@@ -910,6 +923,100 @@ test_default_is_bounded_and_local_only() {
   pass "default output is bounded, local-only, and marks omitted surfaces"
 }
 
+# Bearings is what the captain actually asks for, and it dies with the canonical
+# snapshot underneath it. A parsed backlog past the kernel's per-argv-string ceiling
+# used to take out the whole chart, so pin the chain end to end here as well.
+# tests/lib.sh owns the ceiling and the fixture.
+test_oversized_backlog_still_charts_bearings() {
+  local home fakebin toon json canon backlog_bytes
+  home=$(make_home oversized-bearings)
+  fm_write_oversized_backlog "$home"
+  mkdir -p "$home/projects/filler-001"
+  fm_write_meta "$home/state/filler-001.meta" \
+    "window=firstmate:fm-filler-001" \
+    "worktree=$home/projects/filler-001" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  record_claude_state "$home/state" filler-001 busy
+  printf 'working: widening the backlog\n' > "$home/state/filler-001.status"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "the canonical snapshot must survive a backlog wider than one argv string"
+  # Assert the size the fixture actually reached, so a narrower parser output cannot
+  # let this case pass without ever crossing the ceiling.
+  backlog_bytes=$(printf '%s' "$canon" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$backlog_bytes" -gt "$FM_ARGV_STRING_CEILING" ] \
+    || fail "fixture never crossed the ceiling: parsed backlog is only $backlog_bytes bytes"
+
+  toon=$(run "$home" "$fakebin") \
+    || fail "bearings TOON must survive a backlog wider than one argv string"
+  assert_contains "$toon" 'schema: fm-bearings.v1' "oversized-backlog TOON must still carry its schema"
+  assert_contains "$toon" 'filler-001' "oversized-backlog TOON must still chart the live task"
+  json=$(run "$home" "$fakebin" --json) \
+    || fail "bearings JSON must survive a backlog wider than one argv string"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+    and ([.in_flight[] | select(.id == "filler-001")] | length) == 1
+  ' >/dev/null || fail "oversized-backlog bearings JSON is malformed: $json"
+  pass "bearings still charts a backlog wider than one argv string ($backlog_bytes parsed bytes)"
+}
+
+# The other unbounded value on this path is the child home summary's own reason, which
+# the parent splices into the record it builds for that child. It carries one id per
+# offending child, so it crosses the same per-argv-string ceiling a wide backlog does.
+# In-flight child rows with long ids and no child metadata make orphan_in_flight the
+# summary's first strict invalidity, and its reason is what the parent then has to
+# carry. tests/lib.sh owns the ceiling.
+test_oversized_child_summary_reason_survives_the_ceiling() {
+  local home mate fakebin canon record pad last_id reason_len count=300 i=1
+  home=$(make_home oversized-child-reason)
+  mate="$TMP_ROOT/oversized-child-reason-home"
+  make_valid_secondmate_home orphaned "$mate"
+  append_secondmate_registry "$home" orphaned "$mate"
+  write_parent_secondmate_event "$home" orphaned "$mate" "old orphan work"
+  pad=$(printf '%0489d' 0 | tr '0' 'x')
+  last_id=$(printf 'orphan-%03d-%s' "$count" "$pad")
+  {
+    printf '## In flight\n'
+    while [ "$i" -le "$count" ]; do
+      printf -- '- [ ] orphan-%03d-%s - Orphaned child %03d (repo: sample) (kind: ship) (since 2026-07-13)\n' \
+        "$i" "$pad" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_SECONDMATE_MAX_BYTES=1048576 FM_SNAPSHOT_SECONDMATE_TIMEOUT=60 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "the canonical snapshot must survive a child summary reason wider than one argv string"
+  # Project the one record down first, so a failure reports the mismatch instead of a
+  # third of a megabyte of snapshot.
+  record=$(printf '%s' "$canon" | jq -c --arg last "$last_id" '
+    [ .secondmate_current.records[] | select(.id == "orphaned")
+      | {state:.current.state,provenance:.provenance.selected,trust:.provenance.trust,
+         reason_prefixed:((.current.reason // "")
+           | startswith("structured home state invalid: in-flight backlog item has no child metadata: ")),
+         reason_carries_last_id:((.current.reason // "") | contains($last)),
+         reason_length:((.current.reason // "") | length)} ]')
+  printf '%s' "$record" | jq -e '
+    length == 1
+    and (.[0] | .state == "no_active_work" and .provenance == "structured-home"
+      and .trust == "partial-structured"
+      and .reason_prefixed and .reason_carries_last_id)
+  ' >/dev/null || fail "the parent lost an oversized child summary reason: $record"
+  # Assert the length the fixture actually reached, so a shorter reason cannot let this
+  # case pass without ever crossing the ceiling.
+  reason_len=$(printf '%s' "$record" | jq '.[0].reason_length')
+  [ "$reason_len" -gt "$FM_ARGV_STRING_CEILING" ] \
+    || fail "fixture never crossed the ceiling: child summary reason is only $reason_len bytes"
+  pass "a child summary reason wider than one argv string still reaches its record ($reason_len bytes)"
+}
+
 test_toon_json_parity() {
   local home fakebin toon json keys k
   home=$(make_home parity); write_fixture "$home"
@@ -1062,7 +1169,11 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+  # A deliberately minimal toolset: `timeout` is absent, which is the whole point.
+  # `mktemp` and `rm` are present because the canonical snapshot creates and removes a
+  # private directory for its jq input, the same coreutils baseline the session lock
+  # already requires.
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
@@ -1157,6 +1268,37 @@ test_per_repository_pr_cap_is_disclosed() {
   ' >/dev/null || fail "per-repository PR truncation was not disclosed: $json"
   assert_contains "$toon" 'candidate_prs showing 2 of at least 3' "TOON did not preserve PR truncation disclosure"
   pass "per-repository open-PR caps are disclosed with an expansion knob"
+}
+
+# Live PR enrichment accumulates one row per open PR across every candidate
+# repository, and --all-pr-repos removes the repository cap outright, so those rows
+# cross the same per-argv-string ceiling the parsed backlog does. Two repositories at
+# a raised per-repository limit put each half over the ceiling on its own, so both the
+# per-repository page and the accumulated set are covered. tests/lib.sh owns the
+# ceiling.
+test_wide_live_pr_rows_survive_the_argv_string_ceiling() {
+  local home fakebin json prs_bytes
+  home=$(make_home wide-prs); write_large_fixture "$home" 2
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  json=$(FM_BEARINGS_PR_LIMIT=300 FAKE_GH_WIDE=300 \
+    run "$home" "$fakebin" --include-prs --all-pr-repos --json) \
+    || fail "bearings must survive live PR rows wider than one argv string"
+  [ "$(grep -c '^gh pr list ' "$home/net.log")" = 2 ] \
+    || fail "the wide-PR fixture did not enrich both candidate repositories"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+    and (.candidate_prs | length) == 600
+    and (.prs | startswith("checked (2 repos, 600 open"))
+    and ([.omitted[] | select(.surface | startswith("candidate_prs showing"))] | length) == 0
+  ' >/dev/null || fail "wide live PR enrichment lost rows or disclosure: $(printf '%s' "$json" | jq -c '{prs,n:(.candidate_prs|length)}')"
+  # Assert the size the fixture actually reached. Twice the ceiling means each
+  # single-repository page and the mid-loop accumulator both crossed it on their own,
+  # so neither conversion can pass vacuously.
+  prs_bytes=$(printf '%s' "$json" | jq -c '.candidate_prs' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$prs_bytes" -gt $((FM_ARGV_STRING_CEILING * 2)) ] \
+    || fail "fixture never crossed the ceiling twice over: live PR rows are only $prs_bytes bytes"
+  pass "live PR rows wider than one argv string still reach the bearings model ($prs_bytes bytes)"
 }
 
 install_failing_jq() {  # <fakebin> <model|toon>
@@ -1988,3 +2130,6 @@ test_collapsed_captain_call_deferral_and_landed
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+test_oversized_backlog_still_charts_bearings
+test_oversized_child_summary_reason_survives_the_ceiling
+test_wide_live_pr_rows_survive_the_argv_string_ceiling

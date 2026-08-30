@@ -235,6 +235,36 @@ fm_git_worktree() {
   git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 
+# --- oversized-backlog fixture ----------------------------------------------
+#
+# Linux caps a SINGLE argv string at MAX_ARG_STRLEN, 131072 bytes, independently of
+# the much larger total ARG_MAX. Anything that hands a whole parsed backlog to a
+# child process as a command-line value therefore breaks outright once a real
+# captain backlog grows past that size, so the suites that read the backlog pin the
+# behavior with a fixture whose PARSED form clears the ceiling with margin.
+#
+# FM_ARGV_STRING_CEILING is the ceiling, and fm_write_oversized_backlog writes the
+# fixture. The items are ordinary in-flight rows plus the retained note line each one
+# carries: wide, not unusual. A consuming test asserts the parsed size it actually
+# reached, so a narrower parser output cannot make the case vacuous.
+# shellcheck disable=SC2034 # Read by the suites that source this lib, not by the lib.
+FM_ARGV_STRING_CEILING=131072
+FM_OVERSIZED_BACKLOG_ITEMS=240
+
+# fm_write_oversized_backlog <home> [count]: write <home>/data/backlog.md with
+# <count> in-flight items (default FM_OVERSIZED_BACKLOG_ITEMS).
+fm_write_oversized_backlog() {
+  local home=$1 count=${2:-$FM_OVERSIZED_BACKLOG_ITEMS} i=1
+  {
+    printf '## In flight\n'
+    while [ "$i" -le "$count" ]; do
+      printf -- '- [ ] filler-%03d - Synthetic entry %03d widening the parsed backlog past the single-argument ceiling (repo: alpha) (kind: ship) (priority: 2) (since 2026-08-01)\n' "$i" "$i"
+      printf '  Retained note %03d, kept wide so each parsed record carries real body text.\n' "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+}
+
 # --- state/<id>.meta writers ------------------------------------------------
 
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta
