@@ -43,7 +43,7 @@ Unmeasurable readings carry it too, because a reading that measured nothing is e
 READ means the row's value reached the output, not that it was looked up: booking an exhaustion row when its runway was fetched let a later guard discard that runway between the fetch and the printing, with the ledger still asserting nothing had been dropped.
 Rows the sweep cannot reach at all are additionally reported as a single `unattributable-row` line, because a row nobody can attribute is unmeasured data rather than a deliberate exclusion.
 A filter cannot drop a row without naming what it dropped, so a filter added later is accounted for by construction rather than by someone remembering - which is the property a guard per table never had, each round closing the table in front of it and leaving the next one open.
-That is what lets `unknown=0` mean everything the gauge reported was actually read, and it is checkable by hand against the report the reading came from.
+The ledger rather than the summary is what carries that guarantee: `unknown` counts providers the reading could not measure, so `unknown=0` is compatible with a row the scope filter declined, while `read + declined = emitted` with every declined row's reason named is checkable by hand against the report the reading came from.
 Every unknown also carries a reason that is true of the provider it names: a provider known only through `exhaustion[]` is missing a quota row, not a measurable window, and saying otherwise would contradict the detail printed beside it.
 A provider that quietly disappears is worse than one reported unknown, because the summary above it then reads as if everything measurable had been measured.
 

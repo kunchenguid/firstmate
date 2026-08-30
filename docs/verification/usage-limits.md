@@ -19,7 +19,8 @@ The FLOOR path is verified LIVE, by executing `bin/fm-usage-wall.sh headroom` ag
 The BELOW-FLOOR path is covered by a STUB, in `tests/fm-usage-wall.test.sh`, because no real below-floor build remains reachable here to execute against.
 Neither is described as the other anywhere on this page.
 
-Two samples below are constructed rather than observed, and each says so on the spot: they take this host's real report and drive a single field, because the conditions they show (an exhausted account, two windows disagreeing) are not on demand.
+A sample that is constructed rather than observed says so on the spot, every time - deliberately not counted here, because the set has grown in every round and a number written down once goes stale silently.
+Some of them take this host's real report and drive a single field, because the conditions they show - an exhausted account, two windows disagreeing - do not arrive on demand; the rest are stubs, because the condition they reproduce has never appeared on this host at all.
 
 ## The gauge reads, and an unread gauge is distinguishable from a healthy one
 
@@ -119,7 +120,8 @@ The distinction holds in both directions: the unmodified live report on the same
 
 ## An unmeasured provider never reads as healthy
 
-Twelve ways a reading can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
+Below are the ways a reading can go unmeasured, or be misread, without the gauge noticing, each one reproduced against a stub report and each now pinned in `tests/fm-usage-wall.test.sh`.
+Deliberately not counted: the list grew in every round of this change, and a number restated in the sentence above it is stale the moment the next entry is added.
 
 A percentage that is not a number.
 `toon_block` resolves fields by name and yields `-` for one the header never declared, so an upstream rename of `effectivePercentRemaining` leaves every row unreadable at once.
@@ -143,7 +145,7 @@ HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=1 source=quo
 
 A provider whose only `quota[]` row is model-scoped and which `attention[]` never names at all.
 It fell through both loops the same way, and the dedupe fix above did not reach it because there was no `attention[]` row to read: `verdict=ok measured=1 unknown=0` with a provider at 3 percent invisible to the dispatch decision.
-Enumerating the ways a provider can be missed is what kept reopening this, so the reading now sweeps every name the report mentions anywhere - `quota[]` at any scope, `exhaustion[]`, `attention[]` - and `tests/fm-usage-wall.test.sh` asserts that invariant directly over six fixtures rather than adding a case per shape:
+Enumerating the ways a provider can be missed is what kept reopening this, so the reading now sweeps every name the report mentions anywhere - `quota[]` at any scope, `exhaustion[]`, `attention[]` - and `tests/fm-usage-wall.test.sh` asserts that invariant directly, from one assertion body driven over a list of gauge fixtures, rather than adding a case per shape:
 
 ```
 HEADROOM: cursor ok pct=77 bound=seven_day resets=2026-09-02T07:59:59Z runway=4h0m confidence=early

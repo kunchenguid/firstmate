@@ -153,9 +153,9 @@
 # same false precision as labelling a percentage with a window it did not come
 # from. The absence is still stated, as a trailing reason without the token.
 # The three states are kept apart by endpoint_evidence's own status.
-# Diagnose
-# always attempts at least one log, so budget truncation reaches a reader here as
-# `unscanned=` rather than as a reason slug of its own; the reason
+#
+# Diagnose always attempts at least one log, so budget truncation reaches a
+# reader here as `unscanned=` rather than as a reason slug of its own; the reason
 # `scan-budget-exhausted` belongs to the digest's fleet-wide scan
 # (bin/fm-session-start.sh), where a task genuinely can go unreached entirely.
 # A negative therefore never hardens into "it really failed", which matters
