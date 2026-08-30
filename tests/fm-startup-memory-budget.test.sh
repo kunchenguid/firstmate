@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Behavioral coverage for the visible startup-memory budget, its safe parser,
 # accounting command, primary-to-secondmate convergence, and exact reread bytes.
+# Accounting cases cover valid external symlink targets, each unsafe-target
+# rejection class, and a target replaced between inspection and read, which
+# the proof-gated interposer in tests/fixtures/fm-startup-memory-budget/
+# reproduces deterministically.
 set -u
 
 # shellcheck source=tests/lib.sh

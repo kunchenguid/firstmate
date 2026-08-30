@@ -219,6 +219,9 @@ if (!S_ISREG($target_stat[2])) {
   fail("memory file target is " . kind_for_mode($target_stat[2]) . ", not an ordinary readable regular file: $path");
 }
 
+# The target can be replaced between the stat above and the open, so open
+# without blocking (a swapped-in FIFO must not hang the measurement), then
+# re-check type and dev/ino on the open descriptor before any byte is read.
 sysopen(my $fh, $resolved, O_RDONLY | O_NONBLOCK)
   or fail("memory file target could not be read: $path");
 my @fh_stat = stat($fh);
