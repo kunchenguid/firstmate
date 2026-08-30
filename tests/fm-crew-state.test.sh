@@ -1666,6 +1666,27 @@ test_recycled_slot_custody_lost_for_stale_task() {
   pass "recycled pooled slot custody blocks stale metadata from reading another task's worktree"
 }
 
+test_duplicate_metadata_without_treehouse_holder_selects_latest_lease() {
+  reset_fakes
+  local d wt canonical
+  d=$(new_case duplicate-metadata-no-holder)
+  wt="$d/wt"
+  mkdir -p "$wt" "$d/project"
+  fm_write_meta "$d/state/old-task.meta" \
+    "worktree=$wt" \
+    "project=$d/project" \
+    "treehouse_lease=lease-a"
+  fm_write_meta "$d/state/new-task.meta" \
+    "worktree=$wt" \
+    "project=$d/project" \
+    "treehouse_lease=lease-b"
+  canonical=$(FM_CLASSIFY_TREEHOUSE_STATUS_JSON='[]' crew_worktree_custody_canonical_id "$d/state" "$wt") \
+    || fail "duplicate metadata without a treehouse holder must not abort custody arbitration"
+  [ "$canonical" = new-task ] \
+    || fail "custody arbitration selected '$canonical' instead of the latest lease holder"
+  pass "duplicate metadata without a treehouse holder selects the latest lease"
+}
+
 test_recycled_slot_worker_liveness_reports_absent_endpoint() {
   reset_fakes
   local d fb wt json out repo
@@ -1821,6 +1842,7 @@ test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_non_pipeline_owned_unresolvable_head_not_attributed
 test_pipeline_owned_terminal_run_not_exempt
 test_recycled_slot_custody_lost_for_stale_task
+test_duplicate_metadata_without_treehouse_holder_selects_latest_lease
 test_recycled_slot_worker_liveness_reports_absent_endpoint
 test_recycled_slot_worker_liveness_reports_live_endpoint
 test_missing_run_head_falls_back_to_current_state

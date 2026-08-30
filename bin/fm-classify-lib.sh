@@ -1449,7 +1449,7 @@ crew_treehouse_holder_for_worktree() {  # <project> <abs> <raw-wt>
 }
 
 crew_worktree_custody_canonical_id() {  # <state> <abs>
-  local state=$1 abs=$2 id holder best_id best_lease lease proj wt
+  local state=$1 abs=$2 id holder best_id='' best_lease='' lease proj wt
   holder=
   for id in $(crew_worktree_claimants "$state" "$abs"); do
     wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
