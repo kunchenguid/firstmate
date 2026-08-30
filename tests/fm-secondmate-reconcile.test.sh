@@ -159,7 +159,18 @@ run_remote_notify() {  # <home> <fakebin> <snapshot>
 
 # Age the home's cooldown record so the next run sees the window as elapsed.
 age_cooldown() {  # <state-dir> <mate-id> <seconds-ago>
-  printf '%s\n' "$(( $(date +%s) - $3 ))" > "$1/$2.reconcile-nudged"
+  local now=${4:-}
+  [ -n "$now" ] || now=$(date +%s)
+  printf '%s\n' "$(( now - $3 ))" > "$1/$2.reconcile-nudged"
+}
+
+install_fixed_epoch() {  # <fakebin>
+  cat > "$1/date" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 1 ] && [ "$1" = +%s ] && [ -n "${FM_TEST_NOW:-}" ] || exit 2
+printf '%s\n' "$FM_TEST_NOW"
+SH
+  chmod +x "$1/date"
 }
 
 run_notify() {  # <home> <fakebin> <name> <snapshot> [extra args...]
@@ -279,27 +290,19 @@ SH
 }
 
 test_the_window_is_four_hours() {
-  local home mate fakebin snap out now
+  local home mate fakebin snap out now=2000000000
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home fourhours mate)
+  install_fixed_epoch "$fakebin"
   snap="$home/snapshot.json"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
-  run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null || fail "the first ask failed"
-  now=$(date +%s)
-  cat > "$fakebin/date" <<'SH'
-#!/usr/bin/env bash
-if [ -n "${FM_TEST_DATE_NOW:-}" ] && [ "${1:-}" = +%s ]; then
-  printf '%s\n' "$FM_TEST_DATE_NOW"
-  exit 0
-fi
-exec /bin/date "$@"
-SH
-  chmod +x "$fakebin/date"
+  FM_TEST_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null \
+    || fail "the first ask failed"
   # One second short of four hours is still inside; one second past is not.
-  printf '%s\n' "$((now - 14399))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  age_cooldown "$home/state" mate 14399 "$now"
+  out=$(FM_TEST_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "cooldown: mate" "the window was shorter than four hours: $out"
-  printf '%s\n' "$((now - 14401))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  age_cooldown "$home/state" mate 14401 "$now"
+  out=$(FM_TEST_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "sent: mate" "the window was longer than four hours: $out"
   pass "the cooldown window is four hours"
 }

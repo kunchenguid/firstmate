@@ -422,6 +422,16 @@ SH
 printf '%s\n' "${FM_TEST_PLATFORM:-Linux}"
 SH
   chmod +x "$fakebin/uname"
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+case "$1:${FM_TEST_PLATFORM:-Linux}" in
+  -f:Darwin) printf '%s\n' 600 ;;
+  -f:*) printf '%s\n' 'gnu-filesystem-format' ;;
+  -c:*) printf '%s\n' 600 ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fakebin/stat"
   if FM_TEST_CODEX_SHAPE=decoy FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"
@@ -623,7 +633,11 @@ SH
     ' _ "$LIB" "$session") || fail "namespace-local Codex session did not consume its session binding"
   [ "$out" = 4242 ] || fail "remote Codex binding resolved '$out', expected host agent pid 4242"
   [ -f "$binding" ] && [ ! -L "$binding" ] || fail "remote Codex binding record was not published"
-  mode=$(stat -f '%Lp' "$binding" 2>/dev/null || stat -c '%a' "$binding")
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    mode=$(stat -f '%Lp' "$binding" 2>/dev/null)
+  else
+    mode=$(stat -c '%a' "$binding" 2>/dev/null)
+  fi
   [ "$mode" = 600 ] || fail "remote Codex binding record mode was $mode, not 600"
   out=$(FM_TEST_NAMESPACE_TERMINATED=1 FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" \
     FM_HOME="$home" CODEX_SESSION_ID="$session" "$ROOT/bin/fm-harness.sh" 2>"$dir/harness.err") \

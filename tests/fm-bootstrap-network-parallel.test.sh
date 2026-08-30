@@ -73,6 +73,14 @@ case "$command_name" in
 esac
 if [ "$slow" -eq 1 ]; then
   printf 'START %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
+  if [ "${FM_FAKE_SSH_WAIT_FOR_FETCH:-0}" = 1 ]; then
+    barrier_tries=0
+    while ! grep -q '^START fleet-fetch ' "$log"; do
+      barrier_tries=$((barrier_tries + 1))
+      [ "$barrier_tries" -lt 100 ] || break
+      sleep 0.05
+    done
+  fi
   sleep "$sleep_s"
   printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
 else
@@ -216,6 +224,7 @@ SH
     FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_FAKE_SSH_LOG="$log" \
     FM_FAKE_SSH_SLEEP=0.4 \
+    FM_FAKE_SSH_WAIT_FOR_FETCH=1 \
     FM_FAKE_SSH_UNREACHABLE_HOST=host-bravo \
     FM_FAKE_SSH_FAIL_HOST=host-alpha \
     FM_FAKE_SSH_DIRTY_HOST=host-charlie \

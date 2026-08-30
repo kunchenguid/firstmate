@@ -45,7 +45,11 @@ fm_codex_private_record_replace() { # <temporary-file> <destination>
 
 fm_codex_private_record_mode_valid() { # <file>
   local mode
-  mode=$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null) || return 1
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    mode=$(stat -f '%Lp' "$1" 2>/dev/null) || return 1
+  else
+    mode=$(stat -c '%a' "$1" 2>/dev/null) || return 1
+  fi
   [ "$mode" = 600 ]
 }
 
