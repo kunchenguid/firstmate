@@ -42,6 +42,10 @@ worktree=<absolute Orca worktree path>
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+Orca 1.4.192 issues worktree ids in the form `<repo UUID>::<absolute worktree path>`.
+Firstmate also accepts the earlier single-atom worktree ids.
+A composite id is valid only when it has one UUID-shaped repository prefix, one `::` separator, and an unambiguous absolute path that exactly matches the separately recorded `worktree=` value.
+Terminal handles remain single atoms and do not inherit the composite worktree-id syntax.
 
 ## Current lifecycle and safety
 
@@ -59,8 +63,9 @@ Grok alone retains its isolated rendered-tail fallback.
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
-Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
-A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
+Before release, cleanup passes the exact recorded Orca worktree id to `orca worktree show` and verifies the resolved path matches the recorded worktree path.
+That live id-to-path check remains independent of the metadata-only composite-id consistency check.
+A missing, unreadable, malformed, ambiguous, duplicated, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
 
@@ -77,6 +82,8 @@ It never raw-deletes an Orca worktree.
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-control.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```

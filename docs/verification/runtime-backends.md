@@ -178,7 +178,7 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The cleanup identity boundary was refreshed on 2026-08-30 with metadata fixtures for every supported backend and the current composite Orca worktree-id shape.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -193,7 +193,8 @@ Bounded output from the incident regression:
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - fm-teardown: malformed, ambiguous, duplicated, control-bearing, and inconsistent Orca composite ids refuse before runtime calls
+ok - cleanup identity: valid tmux, Herdr, Zellij, composite/simple Orca, and cmux records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
@@ -202,6 +203,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+Only Orca worktree ids use the composite contract; tmux endpoint parsing and the generic single-atom checks for Herdr, Zellij, cmux, and Orca terminal handles remain unchanged.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix
@@ -697,10 +699,12 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
+Real compatibility evidence was refreshed on 2026-08-30 against the Orca app/runtime version 1.4.192.
 
 ```sh
 orca status --json
+recorded_id=$(sed -n 's/^orca_worktree_id=//p' state/<id>.meta)
+orca worktree show --worktree "id:$recorded_id" --json
 ```
 
 Observed fields:
@@ -712,15 +716,20 @@ result.runtime.state=ready
 
 `orca terminal create --json` returned `result.terminal.handle`.
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
-Speculative bare ids and nested terminal fields were deliberately rejected.
+The current `result.worktree.id` shape was `<repo UUID>::<absolute worktree path>`, and the matching live `orca worktree show` returned that exact recorded path.
+The live terminal record reported the same worktree id and path.
+The earlier single-atom worktree id remains covered as a compatibility form.
+Speculative terminal-id fields remain rejected.
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-control.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+The fake-Orca and endpoint-safety suites cover readiness, registration, composite and simple create response parsing, exact composite-id helper arguments, metadata routing, popup-safe submit, strict composite metadata refusal, and path-matched release refusal.
 
 ## cmux
 
