@@ -403,7 +403,7 @@ captain_hold_origin_state() {  # <origin-id>
   state=$(show_field "$show" state)
   [ -n "$state" ] || fail "origin task $origin has unreadable state"
   hold_kind=$(show_field_value "$show" hold_kind)
-  if [ "$state" != done ] && [ "$hold_kind" = captain ]; then
+  if [ "$state" != "done" ] && [ "$hold_kind" = "captain" ]; then
     printf 'open\n'
     return 0
   fi
@@ -459,7 +459,7 @@ reconcile_failed_captain_hold_link() {  # <origin-id> <task-id>
   show=$(task_show "$id") || fail "could not verify failed captain hold for task $id"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
-  if [ "$state" != done ] && [ "$hold_kind" = captain ]; then
+  if [ "$state" != "done" ] && [ "$hold_kind" = "captain" ]; then
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
     return 0

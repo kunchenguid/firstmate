@@ -1394,6 +1394,7 @@ fm_wake_append_locked() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
+  # shellcheck disable=SC2034 # Result is read by callers that source this library.
   [ "$status" -ne 0 ] || FM_WAKE_APPENDED_SEQ=$seq
   return "$status"
 }
