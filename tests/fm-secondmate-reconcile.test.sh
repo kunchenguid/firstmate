@@ -405,7 +405,7 @@ test_a_failed_send_is_retried_on_the_next_run() {
 }
 
 test_busy_lifecycle_locks_never_hold_up_the_digest() {
-  local label home mate fakebin snap lock ready release holder notify out
+  local label home mate fakebin snap lock ready release holder notify completion rc out i
   for label in reconcile control meta; do
     { read -r home; read -r mate; read -r fakebin; } < <(make_main_home "busy-$label" mate)
     snap="$home/snapshot.json"
@@ -420,16 +420,30 @@ test_busy_lifecycle_locks_never_hold_up_the_digest() {
     hold_lock_until_released "$lock" "$ready" "$release"
     holder=$!
     while [ ! -f "$ready" ]; do sleep 0.01; done
-    run_notify "$home" "$fakebin" "busy-$label" "$snap" > "$home/notify.out" 2>&1 &
+    completion="$home/notify.done"
+    (
+      rc=0
+      run_notify "$home" "$fakebin" "busy-$label" "$snap" > "$home/notify.out" 2>&1 || rc=$?
+      printf '%s\n' "$rc" > "$completion"
+    ) &
     notify=$!
-    sleep 0.2
-    if kill -0 "$notify" 2>/dev/null; then
+    # Completion while the holder still owns the lock proves the path is nonblocking.
+    # A fixed subsecond sleep makes scheduler speed part of the assertion under CI load.
+    i=0
+    while [ ! -f "$completion" ] && [ "$i" -lt 100 ]; do
+      kill -0 "$holder" 2>/dev/null || fail "the $label lock holder exited before notify completed"
+      sleep 0.05
+      i=$((i + 1))
+    done
+    if [ ! -f "$completion" ]; then
       : > "$release"
       wait "$notify" 2>/dev/null || true
       wait "$holder" 2>/dev/null || true
       fail "a busy $label lock blocked the reconcile path"
     fi
-    wait "$notify" || fail "a busy $label lock made notify fail"
+    wait "$notify" || fail "the busy $label lock completion wrapper failed"
+    rc=$(cat "$completion")
+    [ "$rc" -eq 0 ] || fail "a busy $label lock made notify fail"
     : > "$release"
     wait "$holder" || fail "the $label lock holder failed"
     out=$(cat "$home/notify.out")
