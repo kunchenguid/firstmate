@@ -215,7 +215,13 @@ test_spawn_durable_worktree_claims() {
     echo 'kind=ship'
   } > "$home/state/incumbent.meta"
 
-  out=$(FM_TMUX_REC="$rec" run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
+  # fm-collision-gg7-fix is an unrelated live task whose window name EXTENDS the
+  # contender's. It is what tmux's fnmatch/prefix resolution (and its fallback to
+  # the current window) would wrongly report as the contender's own surviving
+  # endpoint, and it is also the window an operator would kill if the refusal
+  # named a target that resolves by prefix.
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_WINDOWS='fm-collision-gg7-fix' \
+    run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
   status=$?
   expect_code 1 "$status" "spawn into another live task's worktree should refuse"
   assert_contains "$out" "already claimed by live task incumbent" \
@@ -226,7 +232,7 @@ test_spawn_durable_worktree_claims() {
   assert_no_grep 'send-keys -t firstmate:fm-collision-gg7 -l' "$rec" \
     "a collision refusal must not type an agent launch command"
   assert_not_contains "$out" "survived the refusal" \
-    "a retired endpoint must not be reported as a survivor"
+    "a retired endpoint must not be reported as a survivor, even beside a prefix-sharing sibling window"
 
   # A close that reports success while the window survives is not a retirement:
   # the leftover endpoint is exactly what refuses the next attempt, so it has to
@@ -246,7 +252,8 @@ test_spawn_durable_worktree_claims() {
 
   rm "$home/state/incumbent.meta"
   : > "$rec"
-  out=$(FM_TMUX_REC="$rec" run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_WINDOWS='fm-collision-gg7-fix' \
+    run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
   status=$?
   expect_code 0 "$status" "the same spawn should be retryable after the durable claim retires"
   assert_contains "$out" 'spawned collision-gg7' "the retry did not launch after the claim retired"
@@ -297,11 +304,17 @@ test_spawn_durable_worktree_claims() {
 #     OWN pane as the worktree, tangling a hook into the primary checkout.
 # The fake also models WINDOW LIVENESS, because retryability after a refused
 # spawn is a real tmux state question: `new-window` records the created name,
-# `kill-window` retires it, and `list-windows`/`display-message -t` answer from
-# that set - so a spawn that leaves its window behind is refused by the same
+# `kill-window` retires it, and `list-windows` answers from that set - so a
+# spawn that leaves its window behind is refused by the same exact
 # duplicate-name check real tmux enforces. FM_FAKE_TMUX_KILL_NOOP=1 makes
 # kill-window a no-op, reproducing the best-effort close that reports success
 # while the window survives.
+# `display-message` deliberately succeeds for EVERY target, matching tmux 3.7b
+# measured behavior: an absent window resolves by fnmatch, then by prefix, and
+# otherwise falls back to the client's current window, exiting 0 either way -
+# even for `=session:=window` or a session that does not exist. Any endpoint
+# check that trusts it therefore reports a live sibling, so this fake makes
+# that unsoundness observable instead of hiding it behind exact matching.
 make_spawn_record_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -320,10 +333,6 @@ live_names() {
   cat "$FM_FAKE_TMUX_LIVE"
 }
 
-window_live() {  # <window-name>
-  live_names | grep -qx "$1"
-}
-
 flag_value() {  # <flag> <args...>
   local want=$1 prev=
   shift
@@ -339,13 +348,7 @@ case "$*" in
   *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-zsh}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message)
-    target=$(flag_value -t "$@") || target=
-    case "$target" in
-      ''|@*) ;;
-      *:*) window_live "${target#*:}" || exit 1 ;;
-    esac
-    printf 'firstmate\n'; exit 0 ;;
+  display-message) printf 'firstmate\n'; exit 0 ;;
   new-window)
     name=$(flag_value -n "$@") || name=
     [ -z "$name" ] || printf '%s\n' "$name" >> "$FM_FAKE_TMUX_LIVE"
