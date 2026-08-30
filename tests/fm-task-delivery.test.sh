@@ -304,8 +304,8 @@ STUB
       "$mode: promoted worker was not told to verify its physical worktree"
     assert_grep "git rev-parse --show-toplevel" "$payload" \
       "$mode: promoted worker was not told to verify its repository root"
-    assert_grep "If either resolves to the primary checkout, stop and escalate to firstmate" "$payload" \
-      "$mode: promoted worker was not told to stop when isolation fails"
+    assert_grep "If either does not resolve to the worktree you were launched in, stop and escalate to firstmate" "$payload" \
+      "$mode: promoted worker was not told to stop for any wrong worktree"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
 
