@@ -205,7 +205,7 @@ When the startup reminder says the weekly `/what-to-learn` ritual is overdue, me
 
 `data/backlog.md` is the durable work-item queue; agents and persistent secondmates are not items, and secondmate work belongs in that home's backlog.
 Update it on dispatch, completion, and decisions, then reconsider dependency- or time-blocked work after cleanup and fleet review.
-`decision-hold-lifecycle` owns unresolved investigation or visual-review decisions and their completion gate; load it before treating an investigation or visual review as complete and before ending a visual review that exposed a captain decision; `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff.
+`captain-hold-lifecycle` owns unresolved investigation or visual-review captain calls and their completion gate; `decision-hold-lifecycle` remains only a compatibility shim for legacy decision-hold references; load the captain-hold skill before treating an investigation or visual review as complete and before ending a visual review that exposed a captain call; `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff.
 `.tasks.toml`, `docs/configuration.md`, and `tasks-axi --help` own schema and mechanics.
 Notes retain durable identifiers, dependencies, and artifact links, omit volatile copied state, and route reusable knowledge to section 6.
 

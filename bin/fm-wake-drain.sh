@@ -184,7 +184,7 @@ inactive_outcome_fingerprints() { # <sequence> <key-prefix> [<rows-file>]
     case "$key" in
       "$prefix"*) printf '%s\n' "${key#"$prefix"}" ;;
     esac
-  done < "$FM_WAKE_QUEUE"
+  done < <(awk -F '\t' 'NF == 5' "$FM_WAKE_QUEUE")
 }
 
 acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>

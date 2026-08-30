@@ -256,12 +256,11 @@ cmd_notify() {
       end;
     def valid_fleet_record:
       if type != "object" then false
-      elif .reconcile_inventory == null then true
       else
         (.id | valid_id)
         and (.spawn_gen | valid_optional_text("^[A-Za-z0-9._-]*$"))
         and (.host | valid_host)
-        and (.reconcile_inventory | valid_inventory)
+        and (if .reconcile_inventory == null then true else (.reconcile_inventory | valid_inventory) end)
       end;
     (if .schema == "fm-bearings.v1" then
        .secondmate_reconcile as $members

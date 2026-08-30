@@ -515,6 +515,13 @@ worker_read_text() { # <job-dir> <field> <max>
   printf '%s\n' "$value"
 }
 
+worker_valid_home() { # <home>
+  local home=$1 canonical
+  [ -n "$home" ] || return 1
+  canonical=$(fm_remote_job_canonical_home "$home" 2>/dev/null) || return 1
+  [ "$canonical" = "$home" ]
+}
+
 worker_publish_result() { # <job-dir> <exit>
   local job=$1 exit_status=$2 tmp account_home
   case "$exit_status" in ''|*[!0-9]*) exit_status=125 ;; esac
@@ -930,7 +937,7 @@ worker_lane_main() { # <job-id>
 }
 
 worker_process_once() { # <account-home>
-  local account_home=$1 job id state queue_deadline home seq candidates=''
+  local account_home=$1 job id state queue_deadline home seq candidates='' scheduling_blocked=0
   local reserved_index reserved_count home_reserved
   local reserved_homes=()
   worker_reap_finished_lanes
@@ -972,13 +979,18 @@ worker_process_once() { # <account-home>
       running)
         if ! worker_lane_owns_job "$job" && ! worker_reclaim_running_job "$job"; then
           home=$(worker_read_text "$job" home 8192 2>/dev/null || true)
-          [ -n "$home" ] && reserved_homes+=("$home")
+          if worker_valid_home "$home"; then
+            reserved_homes+=("$home")
+          else
+            scheduling_blocked=1
+          fi
         fi
         continue
         ;;
       *) continue ;;
     esac
   done
+  [ "$scheduling_blocked" -eq 0 ] || return 0
   [ -n "$candidates" ] || return 0
   while IFS=$'\t' read -r seq id home; do
     [ -n "$id" ] || continue

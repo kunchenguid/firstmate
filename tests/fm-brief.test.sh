@@ -1504,7 +1504,7 @@ test_scout_access_reader_scaffold_contract() {
     "reader brief did not state the violation consequence"
   assert_grep "$home/data/access-reader-r1/report.md" "$brief" \
     "reader brief lost the scout report deliverable"
-  assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$brief" \
+  assert_grep "$ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md" "$brief" \
     "reader brief lost the unresolved-decision completion gate"
   assert_no_grep "firstmate may promote this task in place" "$brief" \
     "reader brief still promises in-place promotion, which reader tasks refuse"

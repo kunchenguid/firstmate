@@ -760,6 +760,33 @@ test_extra_field_row_cannot_be_granted_or_consumed() {
   pass "extra-field wake rows stay ungranted and unconsumed"
 }
 
+test_extra_field_inactive_outcome_cannot_be_acknowledged() {
+  local dir state out err sequence generation fingerprint
+  dir=$(make_case extra-field-inactive-outcome)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  fingerprint=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+  mkdir -p "$state/terminal-outcomes"
+  printf '%s\n' 'schema=fm-terminal-outcome.v1' 'phase=presentation' > "$state/terminal-outcomes/$fingerprint.pending"
+  printf '1700000000\t1\tsignal\ttask-a.status\tsignal: task-a.status\n1700000001\t1\tcheck\tinactive-outcome:%s\tterminal outcome\textra\n' \
+    "$fingerprint" > "$state/.wake-queue"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
+    || fail "drain rejected the mixed valid and malformed queue fixture"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ "$sequence" = 1 ] && [ -n "$generation" ] || fail "mixed queue fixture omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "mixed queue acknowledgement failed"
+  [ -f "$state/terminal-outcomes/$fingerprint.pending" ] \
+    || fail "an extra-field inactive outcome was acknowledged before queue consumption"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "an extra-field inactive outcome created a presented receipt"
+  grep -Fq $'\tcheck\tinactive-outcome:' "$state/.wake-queue" \
+    || fail "the malformed inactive outcome row was not retained"
+  pass "extra-field inactive outcome rows cannot trigger acknowledgement"
+}
+
 test_actor_filter_precedes_same_key_deduplication() {
   local dir state main_sequence main_generation branch_sequence branch_generation
   dir=$(make_case actor-dedup-order)
@@ -1253,6 +1280,7 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
 test_branch_grant_refuses_rows_already_claimed_by_main
 test_extra_field_row_cannot_be_granted_or_consumed
+test_extra_field_inactive_outcome_cannot_be_acknowledged
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses

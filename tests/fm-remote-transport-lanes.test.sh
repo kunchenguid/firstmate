@@ -492,6 +492,35 @@ test_failed_reclamation_reserves_home() {
 
 test_failed_reclamation_reserves_home
 
+test_failed_reclamation_with_unknown_home_blocks_all_lanes() {
+  local running="$STATE_ROOT/jobs/job-unknown-home-running"
+  local queued="$STATE_ROOT/jobs/job-unknown-home-queued"
+  local effect="$TMP_ROOT/unknown-home-effect"
+  local deadline
+  mkdir -p "$running/.claim" "$queued"
+  chmod 700 "$running" "$running/.claim" "$queued"
+  deadline=$(( $(date +%s) + 60 ))
+  printf 'running\n' > "$running/state"
+  ln -s "$TMP_ROOT/missing-supervisor" "$running/.claim/supervisor"
+  printf 'queued\n' > "$queued/state"
+  printf '%s\n' "$REMOTE_ROOT" > "$queued/root"
+  printf '%s\n' "$HOME_B" > "$queued/home"
+  printf '%s\n' "$deadline" > "$queued/queue_deadline"
+  printf '5\n' > "$queued/timeout"
+  printf '%s\0%s\0' fm-touch-job.sh "$effect" > "$queued/argv"
+  : > "$queued/stdin"
+  : > "$queued/stdout"
+  : > "$queued/stderr"
+  chmod 600 "$running/state" "$queued"/*
+  sleep 1
+  [ ! -e "$effect" ] || fail "a queued job ran while running-job custody had no valid home"
+  [ "$(job_state "${queued##*/}")" = queued ] \
+    || fail "unknown running-job home did not block scheduling globally"
+  pass "failed reclamation with unknown home blocks every new lane"
+}
+
+test_failed_reclamation_with_unknown_home_blocks_all_lanes
+
 test_pid_reuse_keeps_live_group_lane_reserved() {
   local home="$TMP_ROOT/home-pid-reuse"
   local running="$STATE_ROOT/jobs/job-pid-reuse-running"
