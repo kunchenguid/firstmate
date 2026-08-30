@@ -184,6 +184,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-wake-delivery-lock-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-wake-delivery-lock-lib.sh"
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -1461,18 +1463,30 @@ detect_local_config() {
 # fm-wake-delivery-alarm.sh owns the record format and the notification
 # cooldown. A read-only session prints the line but leaves the record for the
 # session holding the fleet lock to archive.
+#
+# The read (count/newest) and the archiving mv share fm-wake-delivery-alarm.sh's
+# own .wake-delivery-failures.lock (bin/fm-wake-delivery-lock-lib.sh): without
+# it, a detached alarm invocation could append between this read and the mv,
+# and that line would move into .surfaced unseen by this or any later
+# diagnostic. If the lock cannot be acquired within its bound, this session
+# skips the diagnostic entirely rather than risk that race - the record is
+# untouched, so the next session start still surfaces it.
 detect_wake_delivery_failures() {
-  local record="$STATE/.wake-delivery-failures" count newest
+  local record="$STATE/.wake-delivery-failures" lock count newest
   [ -f "$record" ] && [ -r "$record" ] && [ ! -L "$record" ] || return 0
   [ -s "$record" ] || return 0
-  count=$(wc -l < "$record" 2>/dev/null | tr -d '[:space:]') || return 0
-  case "$count" in ''|*[!0-9]*) return 0 ;; esac
+  lock="$STATE/.wake-delivery-failures.lock"
+  fm_wake_delivery_acquire_lock "$lock" 40 0.05 30 || return 0
+  count=$(wc -l < "$record" 2>/dev/null | tr -d '[:space:]')
+  case "$count" in ''|*[!0-9]*) fm_wake_delivery_release_lock "$lock"; return 0 ;; esac
   newest=$(tail -n 1 "$record" 2>/dev/null | LC_ALL=C cut -f2- | cut -c1-200)
   echo "WAKE_DELIVERY: $count wake-delivery failure(s) recorded in state/.wake-delivery-failures (newest: $newest); OpenCode wake injection is failing in the running build - restart the stale OpenCode TUI, then rerun bin/fm-session-start.sh"
   if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && [ "${FM_BOOTSTRAP_LOCKED:-0}" != 1 ]; then
+    fm_wake_delivery_release_lock "$lock"
     return 0
   fi
   mv -f "$record" "$record.surfaced" 2>/dev/null || true
+  fm_wake_delivery_release_lock "$lock"
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle

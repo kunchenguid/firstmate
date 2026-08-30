@@ -38,6 +38,7 @@ make_delivery_case() {  # <name> -> echoes dir; sets nothing
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/repo/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-wake-delivery-alarm.sh" "$dir/repo/bin/fm-wake-delivery-alarm.sh"
   cp "$ROOT/bin/fm-wedge-alarm-lib.sh" "$dir/repo/bin/fm-wedge-alarm-lib.sh"
+  cp "$ROOT/bin/fm-wake-delivery-lock-lib.sh" "$dir/repo/bin/fm-wake-delivery-lock-lib.sh"
   cp "$ROOT/.opencode/plugins/package.json" "$dir/repo/.opencode/plugins/package.json"
   cp "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" "$dir/repo/.opencode/plugins/fm-primary-turnend-guard.js"
   cp "$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" "$dir/repo/.opencode/plugins/fm-primary-sessionstart-nudge.js"

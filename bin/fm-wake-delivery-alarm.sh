@@ -12,17 +12,20 @@
 #    line per declared failure, `<iso8601-stamp>\t<single-line summary>`,
 #    trimmed to the last FM_WAKE_DELIVERY_KEEP_LINES lines (default 200) once
 #    the file passes FM_WAKE_DELIVERY_MAX_BYTES (default 131072). The append
-#    and any resulting trim share the sibling .lock mkdir lock (bounded, not
-#    indefinite) so a concurrent invocation's append can never be excluded
-#    from a trim's replacement snapshot; a caller that cannot get the lock
-#    within the bound still appends unlocked rather than drop the failure.
-#    bin/fm-bootstrap.sh surfaces the record as one actionable WAKE_DELIVERY
-#    diagnostic at the next session start and then archives it to
-#    .wake-delivery-failures.surfaced.
+#    and any resulting trim share the sibling .lock mkdir lock (bin/
+#    fm-wake-delivery-lock-lib.sh; bounded, not indefinite, and self-healing -
+#    an abandoned lock is reaped once its stamped pid is dead and it has aged
+#    past the stale threshold) so a concurrent invocation's append can never be
+#    excluded from a trim's replacement snapshot; a caller that cannot get the
+#    lock within the bound still appends unlocked rather than drop the
+#    failure. bin/fm-bootstrap.sh surfaces the record as one actionable
+#    WAKE_DELIVERY diagnostic at the next session start and archives it to
+#    .wake-delivery-failures.surfaced under the SAME lock, so a concurrent
+#    append can never be silently swallowed by the archive.
 # 2. The active-notification cooldown marker $STATE/.wake-delivery-alarm: the
-#    epoch second of the last fired active alert, gated by its own bounded
-#    mkdir lock so concurrent invocations racing an expired cooldown cannot
-#    all decide to fire. At most one active alert per
+#    epoch second of the last fired active alert, gated by its own bounded,
+#    self-healing mkdir lock so concurrent invocations racing an expired
+#    cooldown cannot all decide to fire. At most one active alert per
 #    FM_WAKE_DELIVERY_ALARM_COOLDOWN_SECS (default 600) fires so a persistently
 #    broken build records every failure without spamming the captain; the
 #    durable record above is always written. 0 disables the cooldown.
@@ -46,26 +49,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-wedge-alarm-lib.sh
 . "$SCRIPT_DIR/fm-wedge-alarm-lib.sh"
+# shellcheck source=bin/fm-wake-delivery-lock-lib.sh
+. "$SCRIPT_DIR/fm-wake-delivery-lock-lib.sh"
 
 usage() {
   printf 'usage: %s --summary <one-line summary>\n' "${0##*/}" >&2
 }
 
-# A bounded mkdir-lock acquire: mkdir is atomic on every POSIX filesystem, so
-# whichever caller creates the directory first holds exclusive access. Bounded
-# (not indefinite) so a crashed holder can never wedge a later caller forever;
-# real critical sections here are microseconds of file I/O, so the bound only
-# ever bites a genuinely stuck holder, and the caller falls back to unlocked
-# work rather than dropping a failure on the floor.
-acquire_lock() {  # <lock-dir> <max-attempts> <sleep-seconds>
-  local dir=$1 attempts=$2 delay=$3 i=0
-  while [ "$i" -lt "$attempts" ]; do
-    mkdir "$dir" 2>/dev/null && return 0
-    i=$((i + 1))
-    sleep "$delay" 2>/dev/null || true
-  done
-  return 1
-}
+LOCK_STALE_SECS=30
 
 summary=""
 while [ $# -gt 0 ]; do
@@ -109,11 +100,11 @@ case "$max_bytes" in ''|*[!0-9]*|0) max_bytes=131072 ;; esac
 # append, and in that case the trim is skipped for this call - the next
 # failure's lock holder retries it.
 line=$(printf '%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$summary")
-if acquire_lock "$lock" 40 0.05; then
-  printf '%s\n' "$line" >> "$record" 2>/dev/null || { rmdir "$lock" 2>/dev/null || true; exit 0; }
+if fm_wake_delivery_acquire_lock "$lock" 40 0.05 "$LOCK_STALE_SECS"; then
+  printf '%s\n' "$line" >> "$record" 2>/dev/null || { fm_wake_delivery_release_lock "$lock"; exit 0; }
   size=$(wc -c < "$record" 2>/dev/null | tr -d '[:space:]')
   case "$size" in
-    ''|*[!0-9]*) rmdir "$lock" 2>/dev/null || true; exit 0 ;;
+    ''|*[!0-9]*) fm_wake_delivery_release_lock "$lock"; exit 0 ;;
   esac
   if [ "$size" -gt "$max_bytes" ]; then
     if tail -n "$keep_lines" "$record" > "$record.tmp" 2>/dev/null && [ -s "$record.tmp" ]; then
@@ -121,7 +112,7 @@ if acquire_lock "$lock" 40 0.05; then
     fi
     rm -f "$record.tmp" 2>/dev/null || true
   fi
-  rmdir "$lock" 2>/dev/null || true
+  fm_wake_delivery_release_lock "$lock"
 else
   printf '%s\n' "$line" >> "$record" 2>/dev/null || exit 0
 fi
@@ -141,7 +132,7 @@ now=$(date +%s)
 # cannot acquire it within the bound treats the window as already claimed and
 # stays quiet rather than risk a duplicate captain notification.
 should_notify=0
-if acquire_lock "$marker_lock" 40 0.05; then
+if fm_wake_delivery_acquire_lock "$marker_lock" 40 0.05 "$LOCK_STALE_SECS"; then
   last=0
   [ -r "$marker" ] && read -r last < "$marker" 2>/dev/null || true
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
@@ -149,7 +140,7 @@ if acquire_lock "$marker_lock" 40 0.05; then
     printf '%s\n' "$now" > "$marker" 2>/dev/null || true
     should_notify=1
   fi
-  rmdir "$marker_lock" 2>/dev/null || true
+  fm_wake_delivery_release_lock "$marker_lock"
 fi
 [ "$should_notify" -eq 1 ] || exit 0
 
