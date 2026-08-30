@@ -41,7 +41,7 @@ The installed clean `claude-obsidian` transaction entrypoint SHA-256 was `34f303
 The installed clean transaction module SHA-256 was `e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2`.
 The cache and clean checkout had the same two hashes.
 The exact module was used against synthetic Vaults for inspect, apply, conflict, result, journal, hash, mode, lock-removal, idempotent replay, and apply-complete-before-ack evidence.
-The byte-identified fallback fixture is [`context-handoff-transaction-core.py`](../../tests/fixtures/context-handoff-transaction-core.py) and covers the same public CLI shape when the installed product is unavailable in portable CI.
+The byte-identified fallback fixture is [`context-handoff-transaction-core.py`](../../test-support/fixtures/context-handoff-transaction-core.py) and covers the same public CLI shape when the installed product is unavailable in portable CI.
 
 ## Deterministic focused suite
 
@@ -64,19 +64,36 @@ ok - test_pi_extension_handlers_and_model_free_discovery
 ```
 
 The suite uses isolated temporary Firstmate homes, source roots, Vaults, Herdr adapters, Pi extension APIs, Claude hook payloads, MCP requests, and transaction state.
-It covers positive and negative registration, raw-content and sensitive rejection, provider refusal, exact source hashes, source path and symlink refusal, state/Vault overlap refusal, item and byte caps, mode 0600, canonical IDs and hashes, empty registers, fsync failure, durable failure receipts, crash after envelope publication, manual and automatic Claude compaction, Pi threshold and overflow outcomes, compaction failure and retry, exact-recipient identity, busy and unavailable delivery, constant-content notification, no launch or restart, replay, payload mismatch quarantine, traversal and symlink refusal, exact guard denial and allow, duplicate disposition, expected-hash conflict, held lock, rolled-back transaction retry, apply-complete-before-ack healing, disable, and re-enable.
+It covers positive registration, closed exact eligibility contracts, raw-content and sensitive rejection, provider refusal, exact source hashes, source path and symlink refusal, registration-only state/Vault overlap refusal, item and byte caps, mode 0600, canonical IDs and hashes, empty registers, fsync failure, durable failure receipts, crash after envelope publication, manual and automatic Claude compaction, fail-closed Pi adapter errors, threshold and overflow outcomes, compaction failure and retry, exact-recipient identity, busy and unavailable delivery, one-record constant-content notifications, no launch or restart, replay, payload mismatch quarantine, traversal and symlink refusal, Claude exit-2 empty-stdout guard denial and exact allow, duplicate disposition, expected-hash conflict, held lock, rolled-back transaction retry, result-selected apply-complete-before-ack healing, disable, and re-enable.
 No test reads or mutates the real Vault, a live Claude session, a live Herdr process, credentials, auth state, transcripts, or provider data.
 No test invokes a model.
 
 ## Fresh-process model-free smokes
 
-The Pi discovery command was run with an isolated HOME and FM_HOME, offline mode, no session, no context files, no skills, no prompt templates, no discovered extensions, and only the tracked primary extension passed with `-e`.
-The command exited 0, printed three model-catalog header lines, printed no stderr, and made no provider request.
+The Pi discovery command was:
+
+```sh
+evidence_root=$(mktemp -d)
+mkdir -p "$evidence_root/home" "$evidence_root/fm-home" "$evidence_root/pi"
+HOME="$evidence_root/home" FM_HOME="$evidence_root/fm-home" PI_CODING_AGENT_DIR="$evidence_root/pi" PI_OFFLINE=1 pi --offline --no-session --no-context-files --no-skills --no-prompt-templates --no-extensions -e "$PWD/.pi/extensions/fm-primary-turnend-guard.ts" --list-models >"$evidence_root/pi.stdout" 2>"$evidence_root/pi.stderr"
+printf 'exit=%s\nstdout-lines=%s\nstdout-sha256=%s\nstderr-bytes=%s\n' "$?" "$(wc -l <"$evidence_root/pi.stdout" | tr -d ' ')" "$(sha256sum "$evidence_root/pi.stdout" | cut -d' ' -f1)" "$(wc -c <"$evidence_root/pi.stderr" | tr -d ' ')"
+```
+
+It produced this bounded exact result:
+
+```text
+exit=0
+stdout-lines=3
+stdout-sha256=8cda3d37a2a0d31ff1755f3ee4361ed9ea808cc7193ec88c89d170dd2339225f
+stderr-bytes=0
+```
 
 The Claude plugin validation command was:
 
 ```sh
-HOME=<isolated-home> claude plugin validate integrations/claude-context-handoff
+evidence_root=$(mktemp -d)
+mkdir -p "$evidence_root/home"
+HOME="$evidence_root/home" claude plugin validate --strict "$PWD/integrations/claude-context-handoff" 2>&1 | sed "s|$PWD|<worktree>|g"
 ```
 
 It exited 0 with:
@@ -87,8 +104,24 @@ Validating plugin manifest: <worktree>/integrations/claude-context-handoff/.clau
 ✔ Validation passed
 ```
 
-The Claude lifecycle discovery command used an isolated HOME, FM_HOME, empty synthetic Vault, empty settings file, disabled nonessential traffic, `--plugin-dir integrations/claude-context-handoff`, and `--init-only`.
-It exited 0 with zero stdout bytes and zero stderr bytes.
+The Claude lifecycle discovery command was:
+
+```sh
+repo=$PWD
+evidence_root=$(mktemp -d)
+mkdir -p "$evidence_root/home" "$evidence_root/fm-home" "$evidence_root/vault"
+printf '{}\n' >"$evidence_root/settings.json"
+(cd "$evidence_root/vault" && HOME="$evidence_root/home" FM_HOME="$evidence_root/fm-home" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --setting-sources '' --settings "$evidence_root/settings.json" --strict-mcp-config --plugin-dir "$repo/integrations/claude-context-handoff" --init-only >"$evidence_root/claude.stdout" 2>"$evidence_root/claude.stderr")
+printf 'exit=%s\nstdout-bytes=%s\nstderr-bytes=%s\n' "$?" "$(wc -c <"$evidence_root/claude.stdout" | tr -d ' ')" "$(wc -c <"$evidence_root/claude.stderr" | tr -d ' ')"
+```
+
+It produced:
+
+```text
+exit=0
+stdout-bytes=0
+stderr-bytes=0
+```
 It loaded the real plugin lifecycle without a prompt, model, provider call, global configuration write, or real Vault access.
 
 ## Residual limits
