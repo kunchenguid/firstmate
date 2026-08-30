@@ -164,24 +164,20 @@ Backends that already refuse secondmate launch, currently Orca and cmux, remain 
 
 ### Migrating a live pre-receipt Codex endpoint
 
-After upgrading to session-bound remote Codex, a secondmate that was already
-alive before the receipt protocol has no trustworthy completion receipt. Normal
-`fm-spawn.sh <id> --secondmate` deliberately refuses to reuse it. After the
-operator has decided that replacing that legacy agent is safe, run the explicit
-transition from the primary home:
+After upgrading to session-bound remote Codex, a secondmate that was already alive before the receipt protocol has no trustworthy completion receipt.
+Normal `fm-spawn.sh <id> --secondmate` deliberately refuses to reuse it.
+After the operator has decided that replacing that legacy agent is safe, run the explicit transition from the primary home:
 
 ```sh
 bin/fm-spawn.sh <id> --secondmate --migrate-legacy
 ```
 
-The remote controller accepts this only for an alive Codex endpoint whose
-metadata predates both `spawn_gen` and `launch_complete_spawn_gen`; it refuses a
-malformed or post-protocol partial launch. It retires the old endpoint through
-the Herdr backend, proves that it is gone, then starts a fresh agent, publishes
-its session binding, and records its receipt before delivering the startup
-brief. It is not raw pane surgery and never silently reuses the legacy occupant.
-Do not use `--force`: if work must be preserved, checkpoint or hand it off
-before this explicit replacement.
+The remote controller accepts this only for an alive Codex endpoint whose metadata predates both `spawn_gen` and `launch_complete_spawn_gen`; it refuses a malformed or post-protocol partial launch.
+The recorded endpoint may be in an older Herdr session, but its task binding, session, workspace, tab, pane, and exact target must remain structurally consistent.
+The controller retires that exact endpoint through its recorded Herdr session, proves that it is gone, removes its retired record, and launches the replacement in `fm-remote`.
+The replacement publishes its session binding and launch-completion receipt before delivering the startup brief, then publishes a separate delivery receipt before the route becomes reusable.
+It is not raw pane surgery and never silently reuses the legacy occupant.
+Do not use `--force`: if work must be preserved, checkpoint or hand it off before this explicit replacement.
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
@@ -203,7 +199,8 @@ When deduplication finds that the worker already moved the matching record into 
 The remote host runs no doorbell re-ring ladder of its own; a swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation, whose recovery request rings the doorbell again when it is enqueued.
 `fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
-For a remote Codex secondmate, launch starts the agent without a startup brief, identifies its one host-side process through Herdr, and atomically publishes a mode-0600 binding to its exported `CODEX_SESSION_ID` before delivering that brief.
+For a remote Codex secondmate, launch starts the agent without a startup brief, identifies its one host-side process through Herdr, atomically publishes a mode-0600 binding to its exported `CODEX_SESSION_ID`, and records launch completion before delivering that brief.
+The route becomes reusable only after a matching startup-brief delivery receipt is also durable.
 The session lock accepts that binding only when the caller and the still-live host process export the recorded session id, while a missing, malformed, stale, or ambiguous binding still refuses.
 The remote harness diagnostic remains the read-only instrument for inspecting the recorded Herdr pane's process ancestry and preserves fail-closed behavior.
 It becomes remotely invocable only after merge and the ordinary remote code-root update deploys the merged code to that host.

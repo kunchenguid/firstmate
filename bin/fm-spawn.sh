@@ -2996,7 +2996,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen startup_brief_required_spawn_gen launch_complete_spawn_gen startup_brief_delivered_spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3219,6 +3219,14 @@ spawn_record_launch_complete() {
   spawn_record_meta_field launch_complete_spawn_gen "$SPAWN_GEN" launch-complete
 }
 
+spawn_record_startup_brief_required() {
+  spawn_record_meta_field startup_brief_required_spawn_gen "$SPAWN_GEN" brief-required
+}
+
+spawn_record_startup_brief_delivered() {
+  spawn_record_meta_field startup_brief_delivered_spawn_gen "$SPAWN_GEN" brief-delivered
+}
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -3252,12 +3260,20 @@ if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
   if ! spawn_bind_remote_codex_session; then
     exit 1
   fi
-  if ! spawn_send_literal "$T" "$CODEX_INITIAL_PROMPT" || ! spawn_send_key "$T" Enter; then
-    echo "error: remote Codex session binding was published, but its startup brief could not be delivered" >&2
+  if ! spawn_record_startup_brief_required; then
+    echo "error: remote Codex session binding was published, but its startup-brief delivery requirement could not be recorded" >&2
     exit 1
   fi
   if ! spawn_record_launch_complete; then
-    echo "error: remote Codex startup brief was delivered, but launch completion could not be recorded" >&2
+    echo "error: remote Codex session binding was published, but launch completion could not be recorded before startup-brief delivery" >&2
+    exit 1
+  fi
+  if ! spawn_send_literal "$T" "$CODEX_INITIAL_PROMPT" || ! spawn_send_key "$T" Enter; then
+    echo "error: remote Codex launch completion was recorded, but its startup brief could not be delivered" >&2
+    exit 1
+  fi
+  if ! spawn_record_startup_brief_delivered; then
+    echo "error: remote Codex startup brief was delivered, but its delivery receipt could not be recorded" >&2
     exit 1
   fi
 fi

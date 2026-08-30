@@ -116,10 +116,20 @@ case "${1:-} ${2:-}" in
        | .typed |= with_entries(select(.key != $p))
        | .working |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
-    [ ! -f "$SEND_FAIL" ] || exit 1
+    if [ -f "$SEND_FAIL" ]; then
+      send_fail_mode=$(cat "$SEND_FAIL" 2>/dev/null || true)
+      case "$send_fail_mode" in
+        startup-brief)
+          [ "$(jq_state -r --arg p "${3:-}" '.typed[$p] // false')" != true ] || exit 1
+          ;;
+        *) exit 1 ;;
+      esac
+    fi
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
   "pane send-keys")
-    [ ! -f "$SEND_FAIL" ] || exit 1
+    if [ -f "$SEND_FAIL" ] && [ "$(cat "$SEND_FAIL" 2>/dev/null || true)" != startup-brief ]; then
+      exit 1
+    fi
     process_mode=$(cat "$PROCESS_MODE_FILE" 2>/dev/null || true)
     agent_pid_file="$STATE.agent-pid"
     agent_pid=$(cat "$agent_pid_file" 2>/dev/null || true)

@@ -67,7 +67,7 @@ validate_home() { # <id> [allow-absent]
 
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
 
-remote_endpoint_load() {
+remote_endpoint_record_load() {
   local id=$1 herdr_session
   REMOTE_ENDPOINT_ERROR=
   REMOTE_ENDPOINT_META=$(meta_path "$id")
@@ -82,17 +82,23 @@ remote_endpoint_load() {
     return 1
   fi
   herdr_session=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" herdr_session 2>/dev/null || true)
-  if [ "$herdr_session" != "$REMOTE_HERDR_SESSION" ]; then
-    REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded in Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
-    return 1
-  fi
   case "$REMOTE_ENDPOINT_TARGET" in
-    "$REMOTE_HERDR_SESSION":?*) ;;
+    "$herdr_session":?*) ;;
     *)
-      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint target '$REMOTE_ENDPOINT_TARGET' is outside Herdr session '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint target '$REMOTE_ENDPOINT_TARGET' is inconsistent with its recorded Herdr session '${herdr_session:-missing}'; refusing access until it is explicitly migrated"
       return 1
       ;;
   esac
+  REMOTE_ENDPOINT_HERDR_SESSION=$herdr_session
+}
+
+remote_endpoint_load() {
+  local id=$1
+  remote_endpoint_record_load "$id" || return 1
+  if [ "$REMOTE_ENDPOINT_HERDR_SESSION" != "$REMOTE_HERDR_SESSION" ]; then
+    REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded in Herdr session '${REMOTE_ENDPOINT_HERDR_SESSION:-missing}', expected '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
+    return 1
+  fi
 }
 
 remote_endpoint_require() {
@@ -109,7 +115,7 @@ state_value() { # <id>; prints recovery-grade state
     return 0
   fi
   if ! remote_endpoint_launch_complete; then
-    printf 'error: remote Codex endpoint lacks a matching launch-complete receipt\n' >&2
+    printf 'error: remote Codex endpoint lacks matching launch-complete and startup-brief receipts\n' >&2
     printf 'unverified\n'
     return 0
   fi
@@ -120,7 +126,7 @@ print_route() { # <id>
   local id=$1 harness traceparent
   remote_endpoint_require "$id"
   remote_endpoint_launch_complete \
-    || die "remote Codex endpoint lacks a matching launch-complete receipt"
+    || die "remote Codex endpoint lacks matching launch-complete and startup-brief receipts"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
@@ -146,7 +152,7 @@ remote_spawn_generation_valid() {
 }
 
 remote_endpoint_launch_complete() {
-  local harness spawn_gen complete_gen
+  local harness spawn_gen complete_gen required_count delivered_count required_gen delivered_gen
   harness=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" harness 2>/dev/null) || return 1
   case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;; *) return 1 ;; esac
   [ "$harness" = codex ] || return 0
@@ -154,7 +160,21 @@ remote_endpoint_launch_complete() {
   complete_gen=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" launch_complete_spawn_gen 2>/dev/null) || return 1
   remote_spawn_generation_valid "$spawn_gen" \
     && remote_spawn_generation_valid "$complete_gen" \
-    && [ "$complete_gen" = "$spawn_gen" ]
+    && [ "$complete_gen" = "$spawn_gen" ] \
+    || return 1
+  required_count=$(grep -c '^startup_brief_required_spawn_gen=' "$REMOTE_ENDPOINT_META" 2>/dev/null || true)
+  delivered_count=$(grep -c '^startup_brief_delivered_spawn_gen=' "$REMOTE_ENDPOINT_META" 2>/dev/null || true)
+  case "$required_count:$delivered_count" in
+    0:0) return 0 ;;
+    1:1) ;;
+    *) return 1 ;;
+  esac
+  required_gen=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" startup_brief_required_spawn_gen 2>/dev/null) || return 1
+  delivered_gen=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" startup_brief_delivered_spawn_gen 2>/dev/null) || return 1
+  remote_spawn_generation_valid "$required_gen" \
+    && remote_spawn_generation_valid "$delivered_gen" \
+    && [ "$required_gen" = "$spawn_gen" ] \
+    && [ "$delivered_gen" = "$spawn_gen" ]
 }
 
 remote_endpoint_is_legacy_codex() {
@@ -202,7 +222,7 @@ cmd_launch() {
     case "$current" in
       alive)
         remote_endpoint_launch_complete \
-          || die "remote Codex endpoint is alive without a matching launch-complete receipt; refusing reuse"
+          || die "remote Codex endpoint is alive without matching launch-complete and startup-brief receipts; refusing reuse"
         print_route "$id"
         return 0
         ;;
@@ -228,7 +248,7 @@ cmd_launch() {
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
   remote_endpoint_require "$id"
   remote_endpoint_launch_complete \
-    || die "remote Codex launch returned without a matching launch-complete receipt"
+    || die "remote Codex launch returned without matching launch-complete and startup-brief receipts"
   herdr_session=$(fm_meta_get "$meta" herdr_session)
   [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
     || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
@@ -242,7 +262,7 @@ cmd_migrate() {
   validate_id "$id"
   validate_home "$id"
   [ "$harness" = codex ] || die "legacy migration only supports the remote Codex receipt transition"
-  remote_endpoint_require "$id"
+  remote_endpoint_record_load "$id" || die "$REMOTE_ENDPOINT_ERROR"
   remote_endpoint_is_legacy_codex || die "remote Codex endpoint is not an eligible pre-receipt legacy record; refusing to replace a post-protocol or malformed launch"
   current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
   [ "$current" = alive ] || die "remote Codex legacy migration requires an alive endpoint, found '$current'"
@@ -257,6 +277,8 @@ cmd_migrate() {
     dead|missing) ;;
     *) die "legacy Codex migration did not prove the old endpoint gone (state=$after); refusing replacement" ;;
   esac
+  rm -f -- "$REMOTE_ENDPOINT_META" \
+    || die "legacy Codex migration proved the old endpoint gone but could not retire its endpoint record"
   printf 'migrated-legacy: retired pre-receipt Codex endpoint; launching a fresh bound replacement\n' >&2
   cmd_launch "$id" "$harness" "$model" "$effort" "$selected_backend" "$traceparent"
 }
@@ -276,7 +298,7 @@ cmd_send() {
   fi
   if ! remote_endpoint_launch_complete; then
     fm_lock_release "$meta_lock"
-    die "remote Codex endpoint lacks a matching launch-complete receipt"
+    die "remote Codex endpoint lacks matching launch-complete and startup-brief receipts"
   fi
   # A remote steer is delivered by durable record, never by typing its payload
   # into the pane: write it into this secondmate's host-local steering inbox,
@@ -321,7 +343,7 @@ cmd_key() {
   fi
   if ! remote_endpoint_launch_complete; then
     fm_lock_release "$meta_lock"
-    die "remote Codex endpoint lacks a matching launch-complete receipt"
+    die "remote Codex endpoint lacks matching launch-complete and startup-brief receipts"
   fi
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" --key "$key" || status=$?
@@ -353,7 +375,7 @@ cmd_observe() {
   fi
   if ! remote_endpoint_launch_complete; then
     fm_lock_release "$meta_lock"
-    printf 'error: remote Codex endpoint lacks a matching launch-complete receipt\n' >&2
+    printf 'error: remote Codex endpoint lacks matching launch-complete and startup-brief receipts\n' >&2
     printf 'unknown\n'
     return 0
   fi
