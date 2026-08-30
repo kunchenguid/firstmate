@@ -173,6 +173,27 @@ test_outcome_startup_replay_stops_at_captain_barrier() {
   pass "startup replay cannot advance the cursor across an unrendered captain outcome"
 }
 
+test_outcome_cursor_corruption_fails_closed() {
+  local home store snapshot out status
+  home="$TMP_ROOT/store-corrupt-cursor-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict captain --summary 'captain outcome must remain unread' >/dev/null \
+    || fail "captain outcome append failed"
+  snapshot=$(cat "$store")
+  printf '1x2\n' > "$home/state/.branch-outcomes-cursor"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted a malformed cursor and skipped an outcome"
+  assert_contains "$out" "outcome cursor is malformed" "malformed cursor refusal lost its diagnostic"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1x2 ] || fail "failed unread rewrote the malformed cursor"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "failed unread changed the append-only outcome store"
+  pass "malformed cursor state fails closed before any outcome can be skipped"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -569,6 +590,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
+test_outcome_cursor_corruption_fails_closed
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

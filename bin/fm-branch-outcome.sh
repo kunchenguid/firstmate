@@ -75,8 +75,18 @@ json_escape() { # <text> -> escaped JSON string content on stdout
 
 read_cursor() {
   local value
-  value=$(head -n 1 "$CURSOR" 2>/dev/null | tr -cd '0-9' || true)
-  printf '%s\n' "${value:-0}"
+  [ -e "$CURSOR" ] || { printf '0\n'; return 0; }
+  if ! value=$(cat "$CURSOR" 2>/dev/null); then
+    echo "error: refusing operation because the outcome cursor is unreadable" >&2
+    return 1
+  fi
+  case "$value" in
+    ''|*[!0-9]*|0[0-9]*)
+      echo "error: refusing operation because the outcome cursor is malformed" >&2
+      return 1
+      ;;
+    *) printf '%s\n' "$value" ;;
+  esac
 }
 
 last_seq() {
