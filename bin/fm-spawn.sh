@@ -136,6 +136,9 @@
 #   git worktree root distinct from the primary project checkout.
 #   They also refuse when another task's durable metadata already claims that
 #   resolved worktree, without consulting process or treehouse occupancy state.
+#   That refusal retires the endpoint it just created and then PROVES it is
+#   gone, because every backend close is best-effort; a survivor is named so
+#   the operator can retire the one thing that would refuse the retry.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -843,8 +846,13 @@ spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP" = 1 ]; then
     SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=0
-    if ! fm_backend_kill "$BACKEND" "$T"; then
-      echo "warning: could not retire the new endpoint after refusing claimed worktree '$WT'" >&2
+    # Every backend's kill is contractually best-effort (fm_backend_kill), so
+    # its exit status alone never proves the endpoint is gone. Retryability is
+    # what this cleanup owes the caller, and only the read-only existence probe
+    # can establish it; a survivor is named so it can be retired by hand.
+    if ! fm_backend_kill "$BACKEND" "$T" \
+       || fm_backend_target_exists "$BACKEND" "$T" 2>/dev/null; then
+      echo "warning: the new $BACKEND endpoint $T survived the refusal of claimed worktree '$WT'; retire it before retrying task $ID, or the next spawn will refuse the leftover endpoint" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then

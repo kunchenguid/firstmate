@@ -225,6 +225,24 @@ test_spawn_durable_worktree_claims() {
     "a collision refusal must retire the new endpoint so treehouse can reallocate the slot"
   assert_no_grep 'send-keys -t firstmate:fm-collision-gg7 -l' "$rec" \
     "a collision refusal must not type an agent launch command"
+  assert_not_contains "$out" "survived the refusal" \
+    "a retired endpoint must not be reported as a survivor"
+
+  # A close that reports success while the window survives is not a retirement:
+  # the leftover endpoint is exactly what refuses the next attempt, so it has to
+  # be named rather than swallowed behind the best-effort kill's exit status.
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_TMUX_KILL_NOOP=1 \
+    run_spawn "$home" stuck-jj0 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "spawn into another live task's worktree should refuse"
+  assert_contains "$out" "endpoint firstmate:fm-stuck-jj0 survived" \
+    "a surviving endpoint must be named so the operator can retire it"
+  out=$(FM_TMUX_REC="$rec" run_spawn "$home" stuck-jj0 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "the leftover endpoint should block the next attempt"
+  assert_contains "$out" "window firstmate:fm-stuck-jj0 already exists" \
+    "the endpoint the warning named is what refuses the retry"
 
   rm "$home/state/incumbent.meta"
   : > "$rec"
@@ -277,21 +295,71 @@ test_spawn_durable_worktree_claims() {
 #     window id, never the (possibly-renamed) name - a lost name would let
 #     display-message fall back to the active client's window and misread firstmate's
 #     OWN pane as the worktree, tangling a hook into the primary checkout.
+# The fake also models WINDOW LIVENESS, because retryability after a refused
+# spawn is a real tmux state question: `new-window` records the created name,
+# `kill-window` retires it, and `list-windows`/`display-message -t` answer from
+# that set - so a spawn that leaves its window behind is refused by the same
+# duplicate-name check real tmux enforces. FM_FAKE_TMUX_KILL_NOOP=1 makes
+# kill-window a no-op, reproducing the best-effort close that reports success
+# while the window survives.
 make_spawn_record_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+FM_FAKE_TMUX_LIVE=\${FM_FAKE_TMUX_LIVE:-"$dir/live-windows"}
+SH
+  cat >> "$fakebin/tmux" <<'SH'
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+: >> "$FM_FAKE_TMUX_LIVE"
+
+live_names() {
+  local n
+  for n in ${FM_FAKE_WINDOWS:-}; do printf '%s\n' "$n"; done
+  cat "$FM_FAKE_TMUX_LIVE"
+}
+
+window_live() {  # <window-name>
+  live_names | grep -qx "$1"
+}
+
+flag_value() {  # <flag> <args...>
+  local want=$1 prev=
+  shift
+  for a in "$@"; do
+    [ "$prev" = "$want" ] && { printf '%s\n' "$a"; return 0; }
+    prev=$a
+  done
+  return 1
+}
+
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-zsh}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
-  list-windows) [ -z "${FM_FAKE_WINDOWS:-}" ] || printf '%s\n' "$FM_FAKE_WINDOWS"; exit 0 ;;
+  display-message)
+    target=$(flag_value -t "$@") || target=
+    case "$target" in
+      ''|@*) ;;
+      *:*) window_live "${target#*:}" || exit 1 ;;
+    esac
+    printf 'firstmate\n'; exit 0 ;;
+  new-window)
+    name=$(flag_value -n "$@") || name=
+    [ -z "$name" ] || printf '%s\n' "$name" >> "$FM_FAKE_TMUX_LIVE"
+    printf '%s\n' "@spawnwid"; exit 0 ;;
+  kill-window)
+    if [ "${FM_FAKE_TMUX_KILL_NOOP:-0}" != 1 ]; then
+      target=$(flag_value -t "$@") || target=
+      name=${target#*:}
+      name=${name#=}
+      grep -vx "$name" "$FM_FAKE_TMUX_LIVE" > "$FM_FAKE_TMUX_LIVE.next" || true
+      mv "$FM_FAKE_TMUX_LIVE.next" "$FM_FAKE_TMUX_LIVE"
+    fi
+    exit 0 ;;
+  list-windows) live_names; exit 0 ;;
   has-session|new-session|send-keys|set-window-option) exit 0 ;;
 esac
 exit 0
