@@ -103,6 +103,10 @@
       "target": "docs/verification/runtime-backends.md"
     },
     {
+      "source": "docs/context-handoff.md",
+      "target": "docs/verification/context-handoff.md"
+    },
+    {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
     }
@@ -257,6 +261,10 @@
       "audience": "public-product"
     },
     {
+      "path": "integrations/claude-context-handoff/skills/consume/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "README.md",
       "audience": "public-product"
     },
@@ -301,6 +309,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/context-handoff.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
@@ -311,6 +323,10 @@
     {
       "path": "docs/extension-bindings.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/examples/context-handoff.json",
+      "audience": "operator-example"
     },
     {
       "path": "docs/examples/crew-dispatch.json",
@@ -411,6 +427,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/context-handoff.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

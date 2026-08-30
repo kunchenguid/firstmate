@@ -1,0 +1,52 @@
+{
+  "schema": "firstmate.context-handoff.config.v1",
+  "registration_enabled": false,
+  "sealing_enabled": false,
+  "delivery_enabled": false,
+  "consumer_enabled": false,
+  "approved_source_roots": [
+    "/absolute/approved/firstmate/data/root"
+  ],
+  "allowed_provider_classes": [
+    "anthropic-claude-obsidian"
+  ],
+  "vault": {
+    "path": "/absolute/canonical/vault",
+    "device": 0,
+    "inode": 0
+  },
+  "recipient": {
+    "herdr_cli_path": "/absolute/path/to/herdr",
+    "herdr_cli_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "session": "reviewed-session-name",
+    "workspace_id": "reviewed-workspace-id",
+    "tab_id": "reviewed-tab-id",
+    "pane_id": "reviewed-pane-id",
+    "agent": "claude",
+    "agent_session_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "transaction": {
+    "python_path": "/absolute/canonical/python3",
+    "core_path": "/absolute/installed/claude-obsidian/scripts/claude-obsidian.py",
+    "core_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "module_path": "/absolute/installed/claude-obsidian/claude_obsidian/transaction.py",
+    "module_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "consumer": {
+    "create_prefix_allowlist": [
+      "wiki/concepts/",
+      "wiki/decisions/",
+      "wiki/projects/"
+    ],
+    "replace_path_allowlist": [
+      "wiki/hot.md",
+      "wiki/index.md",
+      "wiki/log.md"
+    ],
+    "required_coupled_paths": [
+      "wiki/hot.md",
+      "wiki/index.md",
+      "wiki/log.md"
+    ]
+  }
+}
