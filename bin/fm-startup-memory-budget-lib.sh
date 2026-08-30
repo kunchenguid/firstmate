@@ -164,10 +164,7 @@ fm_startup_memory_estimated_tokens_for_bytes() {
 # Prints "<bytes> <estimated-tokens> <present|absent>".  Memory files must
 # resolve to ordinary readable regular files when present, so an intentional
 # symlink is measured from its resolved target while every special target type
-# is rejected before content is read.  Tests may set
-# FM_STARTUP_MEMORY_MEASURE_TEST_SWAP=<path> to rename <path> over the resolved
-# target between inspection and open, exercising the identity re-check without
-# a timing race.
+# is rejected before content is read.
 fm_startup_memory_measure_file() {
   local path=$1 bytes tokens
   FM_STARTUP_MEMORY_MEASURE_BYTES=""
@@ -220,12 +217,6 @@ if (!@target_stat) {
 }
 if (!S_ISREG($target_stat[2])) {
   fail("memory file target is " . kind_for_mode($target_stat[2]) . ", not an ordinary readable regular file: $path");
-}
-
-my $swap = $ENV{FM_STARTUP_MEMORY_MEASURE_TEST_SWAP};
-if (defined $swap && length $swap) {
-  rename($swap, $resolved)
-    or fail("memory file test swap could not replace the target: $path");
 }
 
 sysopen(my $fh, $resolved, O_RDONLY | O_NONBLOCK)

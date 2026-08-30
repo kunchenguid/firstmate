@@ -130,10 +130,11 @@ expect_rejected_read() {
   assert_contains "$out" "$expected" "unsafe budget rejection was not specific"
 }
 
-expect_rejected_report() {  # <home> <expected> [mid-measurement swap path]
-  local home=$1 expected=$2 swap=${3:-} out rc
+expect_rejected_report() {  # <home> <expected> [VAR=value ...]
+  local home=$1 expected=$2 out rc
+  shift 2
   set +e
-  out=$(FM_HOME="$home" FM_STARTUP_MEMORY_MEASURE_TEST_SWAP="$swap" "$BUDGET" report 2>&1)
+  out=$(env "$@" FM_HOME="$home" "$BUDGET" report 2>&1)
   rc=$?
   set -e
   expect_code 2 "$rc" "unsafe memory input should fail the accounting command"
@@ -214,10 +215,11 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
 
 make_unix_socket() {
   local path=$1 ready=$2
-  perl -MSocket=PF_UNIX,SOCK_STREAM,sockaddr_un -e '
+  perl -MSocket=PF_UNIX,SOCK_STREAM,sockaddr_un -MFile::Basename=basename,dirname -e '
     my ($path, $ready) = @ARGV;
+    chdir(dirname($path)) or die "chdir: $!";
     socket(my $sock, PF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
-    bind($sock, sockaddr_un($path)) or die "bind: $!";
+    bind($sock, sockaddr_un(basename($path))) or die "bind: $!";
     open(my $fh, ">", $ready) or die "ready: $!";
     close($fh) or die "ready close: $!";
     sleep 30;
@@ -289,28 +291,45 @@ test_budget_accounting_rejects_unsafe_memory_targets() {
 }
 
 test_budget_accounting_rejects_targets_replaced_mid_measurement() {
-  local home outside swap out
+  local home race_root outside replacement interpose out
   home="$TMP_ROOT/accounting-race-home"
   mkdir -p "$home/config" "$home/data"
   printf '10\n' > "$home/config/startup-memory-budget"
-  outside="$TMP_ROOT/accounting-race-outside"
-  swap="$TMP_ROOT/accounting-race-swap"
+  race_root=$(fm_test_tmproot fm-startup-memory-budget-race)
+  outside="$race_root/outside"
+  replacement="$race_root/replacement"
+  interpose="PERL5OPT=-I$ROOT/tests/fixtures/fm-startup-memory-budget -MFmStartupMemoryMeasureRace=$race_root,$replacement"
   printf 'outside\n' > "$outside"
   ln -s "$outside" "$home/data/captain.md"
 
-  printf 'replaced\n' > "$swap"
-  expect_rejected_report "$home" 'memory file target changed while being measured' "$swap"
-  [ "$(<"$outside")" = replaced ] || fail "mid-measurement swap did not replace the resolved target"
+  printf 'replaced\n' > "$replacement"
+  expect_rejected_report "$home" 'memory file target changed while being measured' "$interpose"
+  [ "$(<"$outside")" = replaced ] || fail "mid-measurement replacement did not reach the resolved target"
 
-  mkfifo "$swap"
-  expect_rejected_report "$home" 'memory file target changed to a FIFO while being measured' "$swap"
-  [ -p "$outside" ] || fail "mid-measurement swap did not retype the resolved target"
+  mkfifo "$replacement"
+  expect_rejected_report "$home" 'memory file target changed to a FIFO while being measured' "$interpose"
+  [ -p "$outside" ] || fail "mid-measurement replacement did not retype the resolved target"
 
   rm -f "$outside"
   printf 'outside\n' > "$outside"
   out=$(FM_HOME="$home" "$BUDGET" report)
   assert_contains "$out" 'file=data/captain.md bytes=8 estimated_tokens=3 status=present' \
-    "a stable symlink target was not measured once no swap was requested"
+    "a stable symlink target was not measured once nothing interposed"
+
+  printf 'replaced\n' > "$replacement"
+  printf 'unproven\n' > "$TMP_ROOT/accounting-race-unproven"
+  rm -f "$home/data/captain.md"
+  ln -s "$TMP_ROOT/accounting-race-unproven" "$home/data/captain.md"
+  expect_rejected_report "$home" "memory file could not be measured: $home/data/captain.md" "$interpose"
+  [ "$(<"$TMP_ROOT/accounting-race-unproven")" = unproven ] \
+    || fail "interposer replaced a target outside its proven fixture root"
+  [ -f "$replacement" ] || fail "interposer consumed the replacement while refusing"
+
+  rm -f "$home/data/captain.md"
+  ln -s "$outside" "$home/data/captain.md"
+  expect_rejected_report "$home" "memory file could not be measured: $home/data/captain.md" \
+    "PERL5OPT=-I$ROOT/tests/fixtures/fm-startup-memory-budget -MFmStartupMemoryMeasureRace=$home,$replacement"
+  [ "$(<"$outside")" = outside ] || fail "interposer accepted a root without the test-only fixture marker"
   pass "budget accounting rejects targets replaced or retyped between inspection and read"
 }
 
