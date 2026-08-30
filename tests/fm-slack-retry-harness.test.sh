@@ -96,6 +96,35 @@ test_public_board_does_not_orphan_state() {
   pass 'public board posting records no orphan after ambiguous success'
 }
 
+test_board_rollover_snapshot_does_not_orphan_state() {
+  setup_env
+  local home="$TMP_ROOT/rollover-home" meta_before state_before
+  mkdir -p "$home/config" "$home/state/slack-board.meta"
+  chmod 700 "$home/state" "$home/state/slack-board.meta"
+  export FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$home/state"
+  printf '%s\n' C0123456789 > "$home/config/slack-captain-channel"
+  export FM_SLACK_BOT_TOKEN=xoxb-test-token
+  printf 'channel=C0123456789\nts=999.111\n' > "$home/state/slack-board.meta/slack-board.meta"
+  chmod 600 "$home/state/slack-board.meta/slack-board.meta"
+  printf '{"date":"2026-08-01","body":"prior body"}' > "$home/state/slack-board.meta/slack-board.state"
+  chmod 600 "$home/state/slack-board.meta/slack-board.state"
+  meta_before=$(cat "$home/state/slack-board.meta/slack-board.meta")
+  state_before=$(cat "$home/state/slack-board.meta/slack-board.state")
+  export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-02
+  if "$ROOT/bin/fm-slack-post.sh" board 'today text' >/dev/null 2>&1; then
+    unset FM_SLACK_BOARD_TODAY_OVERRIDE
+    fail 'ambiguous rollover snapshot post should report the lost response'
+  fi
+  unset FM_SLACK_BOARD_TODAY_OVERRIDE
+  [ "$(wc -l < "$FM_SLACK_REMOTE_MUTATIONS" | tr -d ' ')" -eq 1 ] || fail 'rollover snapshot path duplicated the post'
+  [ ! -e "$home/state/slack-board-snapshots/2026-08-01" ] || fail 'snapshot once-file was recorded despite an ambiguous post'
+  [ "$(cat "$home/state/slack-board.meta/slack-board.meta")" = "$meta_before" ] \
+    || fail 'live board meta was mutated by an ambiguous snapshot'
+  [ "$(cat "$home/state/slack-board.meta/slack-board.state")" = "$state_before" ] \
+    || fail 'board state advanced despite an ambiguous snapshot'
+  pass 'rollover snapshot posting records no orphan after ambiguous success'
+}
+
 test_safe_mutation_retries() {
   setup_env
   local body="$TMP_ROOT/update.body"
@@ -139,6 +168,7 @@ SH
 make_fake_curl
 test_ambiguous_post_is_not_repeated
 test_public_board_does_not_orphan_state
+test_board_rollover_snapshot_does_not_orphan_state
 test_safe_mutation_retries
 test_retry_bound_and_timeout_are_behavioral
 test_locale_and_control_behavior

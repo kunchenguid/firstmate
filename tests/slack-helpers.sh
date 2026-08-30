@@ -15,6 +15,7 @@
 
 # Real jq stays on PATH; everything else is the fixed system set so a developer's
 # shell cannot leak tools into a hermetic run.
+export LC_ALL=C LANG=C
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 [ -n "$JQ_DIR" ] && BASE_PATH="$JQ_DIR:$BASE_PATH"
@@ -66,6 +67,9 @@ case "$url" in
     body="${FAKE_SLACK_REPLIES:-{\"ok\":true,\"messages\":[]}}"
     ;;
   */chat.postMessage)
+    if [ -n "${FAKE_SLACK_POST_DELAY:-}" ]; then
+      sleep "$FAKE_SLACK_POST_DELAY"
+    fi
     if [ -n "${FAKE_SLACK_JOIN_TS:-}" ] && [ "$thread_ts" = "$FAKE_SLACK_JOIN_TS" ]; then
       body='{"ok":false,"error":"cannot_reply_to_message"}'
     elif [ -n "${FAKE_SLACK_POST:-}" ]; then

@@ -95,6 +95,67 @@ fi
 grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the captain-held absorb should be logged to the triage log"
 pass "handle_push_transition: a captain-held crew is absorbed (no fast wake), left to the poll loop's long cadence"
 
+# --- handle_push_transition: absorb when no-mistakes validation is still running -
+
+reset_state
+FAKEBIN="$TMP/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working · source: run-step · validating (running)\n'
+exit 0
+SH
+chmod +x "$FAKEBIN/fm-crew-state.sh"
+fm_write_meta "$STATE_DIR/tk2v.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+printf 'done: implementation complete, ready to validate\n' > "$STATE_DIR/tk2v.status"
+PATH="$FAKEBIN:$PATH" FM_CREW_STATE_BIN="$FAKEBIN/fm-crew-state.sh" \
+  handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; then
+  fail "a validating crew must NOT be fast-escalated on a blocked edge: $(cat "$STATE_DIR/.wake-queue")"
+fi
+[ ! -s "$WAKE_LOG" ] || fail "a validating crew must not wake the supervisor from the event fast-path"
+grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null \
+  || fail "the provably-working absorb should be logged to the triage log"
+[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
+  || fail "a provably-working absorb must still commit the herdr dedupe marker"
+pass "handle_push_transition: a validating crew is absorbed (no fast wake) while no-mistakes validation runs"
+
+# --- handle_push_transition: absorb when the worktree was written since status -
+
+reset_state
+FAKEBIN="$TMP/fakebin-writing"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: unknown · source: none · inconclusive pane\n'
+exit 0
+SH
+chmod +x "$FAKEBIN/fm-crew-state.sh"
+WT="$TMP/writing-wt"
+mkdir -p "$WT/src"
+back=$(( $(date +%s) - 500 ))
+status_file="$STATE_DIR/tk2w.status"
+printf 'done: implementation complete, ready to validate\n' > "$status_file"
+if [ "$(uname)" = Darwin ]; then
+  stamp=$(date -r "$back" +%Y%m%d%H%M.%S)
+else
+  stamp=$(date -d "@$back" +%Y%m%d%H%M.%S)
+fi
+touch -t "$stamp" "$status_file"
+printf 'int main(void) { return 0; }\n' > "$WT/src/main.c"
+fm_write_meta "$STATE_DIR/tk2w.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "worktree=$WT"
+PATH="$FAKEBIN:$PATH" FM_CREW_STATE_BIN="$FAKEBIN/fm-crew-state.sh" \
+  handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; then
+  fail "a writing crew must NOT be fast-escalated on a blocked edge: $(cat "$STATE_DIR/.wake-queue")"
+fi
+[ ! -s "$WAKE_LOG" ] || fail "a writing crew must not wake the supervisor from the event fast-path"
+grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null \
+  || fail "the worktree-write absorb should be logged to the triage log"
+[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
+  || fail "a worktree-write absorb must still commit the herdr dedupe marker"
+pass "handle_push_transition: a writing crew is absorbed (no fast wake) when the worktree was written since the status file"
+
 # --- event_wait_or_sleep: secondmate windows are excluded from the pane list --
 
 reset_state

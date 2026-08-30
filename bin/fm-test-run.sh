@@ -181,11 +181,11 @@ family_for_basename() {
     fm-quota-utilization.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
-    fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
+    fm-supervision-fault.test.sh|fm-supervision-instructions.test.sh|fm-supervision-oracle.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|fm-unadvanceable-work.test.sh|\
     fm-record-contradictions-lib.test.sh|fm-worktree-unique-content.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|test-changed.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-heavy-suite.test.sh|fm-pi-watch-extension.test.sh|\
@@ -1123,6 +1123,9 @@ families_for_changed_path() {
     bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
       printf '%s\n' pure-contract-unit
       ;;
+    scripts/test-changed.sh)
+      printf '%s\n' __script__:test-changed.test.sh
+      ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
@@ -1371,9 +1374,9 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore|gnhf-score.txt)
-      # gnhf-score.txt is an autonomous-run score artifact, not a source path;
-      # like .gitignore it selects no test family.
+    README.md|LICENSE|assets/*|docs/*|.gitignore|gnhf-score.txt|gnhf-night-report.md|rejected/*)
+      # gnhf-score.txt, gnhf-night-report.md, and rejected/* are autonomous-run
+      # artifacts, not source paths; like .gitignore they select no test family.
       ;;
     *)
       families_for_test_reference "$path" \

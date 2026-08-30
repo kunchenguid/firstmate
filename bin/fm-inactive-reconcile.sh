@@ -333,7 +333,7 @@ report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line liveness_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -346,9 +346,32 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
+  state=
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
+    *)
+      # Custody loss blocks run-step/status-log attribution, but an aged terminal
+      # status line plus a structurally absent endpoint is still reconcilable.
+      case "$state_line" in
+        *'worktree custody lost'*)
+          case "$(status_line_verb "$last")" in
+            done|failed) state=$(status_line_verb "$last") ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+  [ -n "$state" ] || return 0
+  # fm-crew-state.sh treats every liveness verdict except structural absence as
+  # live until proven otherwise. Inactive terminal reconciliation must honor that
+  # contract so a stale failed/done status log cannot surface while the endpoint
+  # is still alive or unreadable - the 2026-08-28 false-failed incident.
+  liveness_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$CREW_STATE_BIN" --worker-liveness "$id" 2>/dev/null) \
+    || liveness_line='liveness: unknown · source: none'
+  case "$liveness_line" in
+    "liveness: absent"*) ;;
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta" "$status")

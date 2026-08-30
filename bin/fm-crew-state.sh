@@ -94,6 +94,12 @@ META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+# A timed-out review gate agent can leave axi status showing top-level running
+# while the review step row reads review,running,0,<duration_ms>. Treating that
+# span as working made crew_is_provably_working absorb stale captain-relevant
+# status and mask completed work (2026-08-29 incident).
+FM_GATE_ZERO_FINDING_STALL_MS=${FM_GATE_ZERO_FINDING_STALL_MS:-1800000}
+case "$FM_GATE_ZERO_FINDING_STALL_MS" in ''|*[!0-9]*) FM_GATE_ZERO_FINDING_STALL_MS=1800000 ;; esac
 # How many of the most recent `no-mistakes runs` rows the cross-branch fallback
 # (nm_runs_status_for_branch, below) scans. Generous enough to still find a
 # branch's own run on a busy multi-crew fleet without listing the entire
@@ -160,6 +166,37 @@ export NM_HOME
 # probe proves nothing for it - the remote arm below reads the true source.
 if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit_structural_absence "worktree gone (torn down?)"
+fi
+
+# A recycled pooled slot can leave stale metadata pointing at a worktree another
+# task now leases. Never attribute run-step, pane, or status-log state from that
+# path until treehouse occupancy or duplicate-meta arbitration names this task.
+if [ -z "$REMOTE_HOST" ] && crew_worktree_custody_lost "$ID" "$STATE"; then
+  # Worker-liveness is about the endpoint mechanism, not worktree custody. A
+  # displaced task must still report live when its pane is readable and absent
+  # when the endpoint is gone; unknown would mask both and strand recovery.
+  if [ "$LIVENESS_MODE" -eq 1 ]; then
+    CUSTODY_BACKEND=$(fm_backend_of_meta "$META")
+    CUSTODY_TARGET=$(fm_backend_target_of_meta "$META")
+    CUSTODY_LABEL="fm-$ID"
+    if [ -z "$CUSTODY_TARGET" ]; then
+      emit_structural_absence "worktree custody lost (no backend target recorded)"
+    fi
+    case "$CUSTODY_BACKEND" in
+      tmux)
+        tmux display-message -p -t "$CUSTODY_TARGET" '#{pane_id}' >/dev/null 2>&1 \
+          || emit_structural_absence "worktree custody lost (endpoint absent)"
+        ;;
+      *)
+        fm_backend_capture "$CUSTODY_BACKEND" "$CUSTODY_TARGET" 1 "$CUSTODY_LABEL" >/dev/null 2>&1 \
+          || emit_structural_absence "worktree custody lost (endpoint absent)"
+        ;;
+    esac
+    printf 'liveness: live%ssource: metadata%sworktree custody lost (endpoint still live)\n' \
+      "$SEP" "$SEP"
+    exit 0
+  fi
+  emit unknown metadata "worktree custody lost (recorded path is held by another task)"
 fi
 
 # --- status log ------------------------------------------------------------
@@ -338,6 +375,37 @@ nm_gate_findings_count() {
   rest=${rest%%|*}
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
+}
+# 0 when the review gate step has been running or fixing with zero findings for
+# at least FM_GATE_ZERO_FINDING_STALL_MS. Autonomous steps (ci, push, test) are
+# intentionally excluded: only the agent gate can stall this way.
+nm_review_gate_zero_findings_stalled() {
+  local threshold=$FM_GATE_ZERO_FINDING_STALL_MS row rest status findings duration_ms
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    case "$row" in
+      review,*)
+        rest=${row#review,}
+        status=$(strip_quotes "$(trim "${rest%%,*}")")
+        case "$status" in
+          running|fixing) ;;
+          *) continue ;;
+        esac
+        rest=${rest#*,}
+        findings=$(trim "${rest%%,*}")
+        [ "$findings" = 0 ] || continue
+        rest=${rest#*,}
+        duration_ms=$(trim "${rest%%,*}")
+        case "$duration_ms" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        [ "$duration_ms" -ge "$threshold" ] || continue
+        return 0
+        ;;
+    esac
+  done < <(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*review,[[:space:]]*')
+  return 1
 }
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
@@ -600,6 +668,11 @@ if [ "$HAVE_RUN" = 1 ]; then
             ;;
         esac
       fi
+    fi
+    if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ] \
+       && nm_review_gate_zero_findings_stalled; then
+      RUN_STATE=unknown
+      RUN_DETAIL="review gate stalled with zero findings"
     fi
   fi
 

@@ -244,6 +244,106 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "rejected/2-gh-axi-instead.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "rejected/4-repo-boot-order.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/acme-widgets/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/cedar-analytics/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/harbor-sync/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/nimbus-platform/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/orion-labs/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/quartz-metrics/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/maple-ledger/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/pine-forge/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/willow-ops/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/ember-kit/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/frost-board/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/granite-cli/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/fixtures/tiny-repo/RULES.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-body-long/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-description/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-dollar/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-external-ref/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-frontmatter/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-harness/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-home/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-role/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/bad-slash/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-skill-bench/skills/clean/SKILL.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "README.md",
       "audience": "public-product"
     },

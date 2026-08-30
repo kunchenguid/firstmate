@@ -497,6 +497,29 @@ test_watcher_escalates_once_after_budget() {
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
 
+test_watcher_escalates_busy_deferred_steer_after_turn_bound() {
+  local dir state out log pid rec rings
+  dir=$(setup_watch_case busy-steer-bound)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  age_path "$state/t1.turn-ended" "$state/t1.meta"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
+    FM_BUSY_REGEX=BUSYTOKEN FM_BUSY_TURN_MAX_SECS=1 FM_TASK_INBOX_RING_MAX=1
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never escalated a steer deferred on a busy pane past the turn bound"; }
+  rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
+  [ "$rings" = 1 ] || fail "expected exactly one doorbell after the busy bound, got $rings:"$'\n'"$(cat "$log")"
+  grep -qF 'unread firstmate instruction' "$state/.wake-queue" \
+    || fail "the busy-deferred steer should escalate once its turn bound crosses:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF "$rec" "$state/.wake-queue" \
+    || fail "the stale wake should name the unread record:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a busy pane past BUSY_TURN_MAX_SECS still rings and escalates an unread steer"
+}
+
 test_write_is_durable_and_exact
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
@@ -511,3 +534,4 @@ test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
+test_watcher_escalates_busy_deferred_steer_after_turn_bound

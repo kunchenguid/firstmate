@@ -1,0 +1,7 @@
+TASK="List open pull requests for this repository."
+ALWAYS_ON_FILE="RULES.md"
+ALWAYS_ON_RULE=""
+TOOLS="gh gh-axi"
+EXPECT_SKILL="clean-gh-axi"
+CHECK="$ROOT/tests/fixtures/fm-skill-bench/checks/expect-gh-axi.sh"
+FIXTURE="$ROOT/tests/fixtures/fm-skill-bench/fixtures/tiny-repo"

@@ -32,7 +32,21 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+set -u
+mode=${1:-}
+id=${2:-}
+state=${FM_FAKE_CREW_STATE:-unknown}
+case "$mode" in
+  --worker-liveness)
+    case "$state" in
+      done|failed) printf 'liveness: absent · source: fake\n' ;;
+      *) printf 'liveness: unknown · source: fake\n' ;;
+    esac
+    ;;
+  *)
+    printf 'state: %s · source: fake\n' "$state"
+    ;;
+esac
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -255,9 +269,17 @@ test_relaunch_cannot_replace_metadata_during_state_snapshot() {
   write_child "$MATE" child 'failed: terminal' spawn-old
   cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-: > "${FM_RACE_WORLD:?}/state-started"
-while [ ! -e "$FM_RACE_WORLD/state-release" ]; do sleep 0.05; done
-printf 'state: failed · source: fake\n'
+set -u
+case "${1:-}" in
+  --worker-liveness)
+    printf 'liveness: absent · source: fake\n'
+    ;;
+  *)
+    : > "${FM_RACE_WORLD:?}/state-started"
+    while [ ! -e "$FM_RACE_WORLD/state-release" ]; do sleep 0.05; done
+    printf 'state: failed · source: fake\n'
+    ;;
+esac
 SH
   chmod +x "$WORLD/fakebin/fm-crew-state.sh"
 
@@ -366,11 +388,18 @@ test_stalled_state_read_is_bounded_and_scan_progresses() {
   write_child "$MAIN" a 'working: state read will stall'
   cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-if [ "$1" = a ]; then
-  sleep 30
-else
-  printf 'state: done · source: fake\n'
-fi
+set -u
+case "${1:-}" in
+  --worker-liveness)
+    printf 'liveness: absent · source: fake\n'
+    ;;
+  a)
+    sleep 30
+    ;;
+  *)
+    printf 'state: done · source: fake\n'
+    ;;
+esac
 SH
   chmod +x "$WORLD/fakebin/fm-crew-state.sh"
 

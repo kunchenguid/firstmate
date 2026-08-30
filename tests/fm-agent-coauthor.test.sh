@@ -36,10 +36,21 @@ case "$*" in
 esac
 
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{cursor_y}"*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}" ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
   capture-pane)
-    if [ "${FM_FAKE_KIMI_SCREEN:-0}" = 1 ]; then
+    if [ "${FM_FAKE_CURSOR_SCREEN:-0}" = 1 ]; then
+      [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' composer-empty >> "$FM_FAKE_EVENT_LOG"
+      printf '→\n'
+    elif [ "${FM_FAKE_KIMI_SCREEN:-0}" = 1 ]; then
       printf 'context: 1%%\n│ > │\n'
+    else
+      [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' composer-not-empty >> "$FM_FAKE_EVENT_LOG"
     fi
     exit 0
     ;;
@@ -57,13 +68,25 @@ case "${1:-}" in
     if [ -n "$literal" ]; then
       case "$literal" in
         export\ *) : ;;
-        *) printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_FILE" ;;
+        *)
+          printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_FILE"
+          ;;
       esac
       exit 0
     fi
     case " $* " in
       *' Enter '*)
+        typed=$(tail -n 1 "$FM_FAKE_LAUNCH_FILE")
+        case "$typed" in
+          *"FIRSTMATE_OP: v1 launch-brief:"*)
+            [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' brief-delivery:pointer >> "$FM_FAKE_EVENT_LOG"
+            ;;
+          *'encode launch-brief'*)
+            [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' brief-delivery:positional >> "$FM_FAKE_EVENT_LOG"
+            ;;
+        esac
         [ "${FM_FAKE_KIMI_SCREEN:-0}" = 1 ] && exit 0
+        [ "${FM_FAKE_CURSOR_SCREEN:-0}" = 1 ] && exit 0
         if [ -s "$FM_FAKE_LAUNCH_FILE" ]; then
           (cd "$FM_FAKE_PANE_PATH" && bash -c "$(cat "$FM_FAKE_LAUNCH_FILE")")
         fi
@@ -316,7 +339,8 @@ SH
 }
 
 test_every_verified_harness_reaches_task_local_sanitizer() {
-  local case_dir="$TMP_ROOT/harness-reach" home proj wt fakebin harness id out status launch hook
+  local case_dir="$TMP_ROOT/harness-reach" home proj wt fakebin harness id out status launch hook \
+    cursor_screen first_launch events
   case_dir="$TMP_ROOT/harness-reach"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -336,10 +360,15 @@ test_every_verified_harness_reaches_task_local_sanitizer() {
     printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
     printf '%s\n' "$harness" > "$home/config/crew-harness"
     : > "$case_dir/launch"
+    : > "$case_dir/events"
+    cursor_screen=0
+    [ "$harness" = cursor-agent ] && cursor_screen=1
     out=$(HOME="$case_dir/agent-home" FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
       FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
       FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_FILE="$case_dir/launch" FM_FAKE_KIMI_SCREEN=1 \
+      FM_FAKE_CURSOR_SCREEN="$cursor_screen" FM_FAKE_TMUX_CURSOR_Y=0 \
+      FM_FAKE_EVENT_LOG="$case_dir/events" \
       FM_KIMI_READY_POLLS=1 FM_KIMI_DELIVERY_POLLS=1 FM_KIMI_POLL_INTERVAL=0 PATH="$fakebin:$PATH" \
       "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off 2>&1)
     status=$?
@@ -348,9 +377,68 @@ test_every_verified_harness_reaches_task_local_sanitizer() {
     assert_present "$hook" "$harness did not receive a task-local commit-msg sanitizer"
     launch=$(cat "$case_dir/launch")
     assert_contains "$launch" 'core.hooksPath' "$harness launch did not select the sanitizer relay"
+    if [ "$harness" = cursor-agent ]; then
+      first_launch=$(sed -n '1p' "$case_dir/launch")
+      assert_contains "$first_launch" 'cursor-agent --trust --force' \
+        "cursor-agent launch lost its persistent interactive command"
+      assert_not_contains "$first_launch" 'encode launch-brief' \
+        "cursor-agent launch must not pass the brief as a positional argument"
+      assert_not_contains "$first_launch" '--print' \
+        "cursor-agent launch must remain interactive"
+      assert_contains "$launch" 'FIRSTMATE_OP: v1 launch-brief: Read the launch brief at' \
+        "cursor-agent did not submit the encoded brief pointer after readiness"
+      events=$(cat "$case_dir/events")
+      assert_contains "$events" composer-empty \
+        "cursor-agent fake did not record its verified empty-composer observation"
+      assert_contains "$events" brief-delivery:pointer \
+        "cursor-agent fake did not record pointer submission"
+      if ! awk '/composer-empty/ { ready=1 } /brief-delivery:/ && !ready { violation=1 } END { exit violation }' \
+        "$case_dir/events"; then
+        fail "cursor-agent brief delivery preceded its verified empty-composer observation"
+      fi
+    fi
     rm -rf "/tmp/fm-$id"
   done
   pass "every verified worker harness receives the same task-local sanitizer path"
+}
+
+test_cursor_agent_refuses_brief_before_verified_empty_composer() {
+  local case_dir="$TMP_ROOT/cursor-unready" home proj wt fakebin id out status events
+  id="agent-coauthor-cursor-unready"
+  TASK_TMP_ROOTS+=("/tmp/fm-$id")
+  rm -rf "/tmp/fm-$id"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/worktree"
+  fakebin=$(make_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  printf 'cursor-agent\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  fm_git_worktree "$proj" "$wt" 'fm/agent-coauthor-cursor-unready'
+  : > "$case_dir/launch"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_FILE="$case_dir/launch" \
+    FM_FAKE_EVENT_LOG="$case_dir/events" FM_FAKE_TMUX_CURSOR_Y=0 \
+    FM_CURSOR_READY_POLLS=1 FM_CURSOR_POLL_INTERVAL=0 PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "unready cursor composer must refuse worker launch: $out"
+  assert_contains "$out" 'cursor-agent did not show a verified empty composer before brief delivery' \
+    "unready cursor composer refusal lacked its diagnostic"
+  events=$(cat "$case_dir/events")
+  assert_contains "$events" composer-not-empty \
+    "cursor-agent fake did not record the unready-composer observation"
+  assert_not_contains "$events" 'brief-delivery:' \
+    "cursor-agent delivered a brief before the composer was verified empty"
+  if ! awk '/composer-empty/ { ready=1 } /brief-delivery:/ && !ready { violation=1 } END { exit violation }' \
+    "$case_dir/events"; then
+    fail "cursor-agent brief delivery preceded its verified empty-composer observation"
+  fi
+  rm -rf "/tmp/fm-$id"
+  pass "cursor-agent refuses brief delivery before a verified empty composer"
 }
 
 test_sanitizer_catalog_removes_all_documented_agent_coauthors() {
@@ -400,5 +488,6 @@ test_commit_msg_composition_without_precommit_relay
 test_worker_amend_removes_only_agent_coauthors
 test_sanitizer_catalog_removes_all_documented_agent_coauthors
 test_every_verified_harness_reaches_task_local_sanitizer
+test_cursor_agent_refuses_brief_before_verified_empty_composer
 
 echo "# all fm-agent-coauthor tests passed"
