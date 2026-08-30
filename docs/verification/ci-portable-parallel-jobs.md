@@ -1,14 +1,42 @@
-# Superseded Water 7 portable-parallel `--jobs 2` verification
+# Water 7 portable-parallel `--jobs 2` verification
 
 Audience: maintainer verification.
 
-This historical record is superseded for the current exact HEAD because the proven candidate set now uses `tests/fm-captain-hold-lifecycle.test.sh`.
-The current lane lists are intentionally not byte-identical to this record, so its old `N=2` result is not evidence for the current composition.
 The active candidate-set evidence is [fm-test-isolation-proof.md](../fm-test-isolation-proof.md), and the current lane composition and timing inputs are [fm-test-portable-shards.md](../fm-test-portable-shards.md).
 Task chronology and delivery evidence beyond the measured runs stay in the PR.
 The Water 7 timing-summary regression behavior is covered by `tests/fm-ci-water7.test.sh`.
 
-## Acceptance oracle
+## 2026-08-30 current-candidate equivalence refresh
+
+The lane-1 serial-versus-parallel oracle was rerun at commit `5a3a56f2` after replacing the obsolete decision-hold candidate with `tests/fm-captain-hold-lifecycle.test.sh` and rebalancing the lane order.
+Both commands selected the same 12 scripts, and every script produced the same `{exit=0, gate_skip=false}` result in serial and under `--jobs 2`.
+The serial run completed in 291596 ms with load averages `{ 2.56 3.64 3.45 }` before and `{ 3.97 3.25 3.26 }` after.
+The parallel run completed in 163757 ms with load averages `{ 3.89 3.24 3.26 }` before and `{ 6.83 5.13 4.05 }` after.
+This current exact-candidate result supersedes the historical `f2fc52e` oracle below for CI admission; the older repeated-run record remains as provenance for the original policy.
+
+```sh
+bin/fm-test-run.sh --lane portable-parallel-1 --json /tmp/portable-parallel-1-serial.json
+bin/fm-test-run.sh --lane portable-parallel-1 --jobs 2 --json /tmp/portable-parallel-1-jobs2.json
+```
+
+The compared result set is:
+
+```text
+tests/fm-brief.test.sh exit=0 gate_skip=false
+tests/fm-captain-hold-lifecycle.test.sh exit=0 gate_skip=false
+tests/fm-cd-pretool-check.test.sh exit=0 gate_skip=false
+tests/fm-composer-ghost.test.sh exit=0 gate_skip=false
+tests/fm-grok-harness.test.sh exit=0 gate_skip=false
+tests/fm-lint.test.sh exit=0 gate_skip=false
+tests/fm-pi-primary-types.test.sh exit=0 gate_skip=false
+tests/fm-review-diff.test.sh exit=0 gate_skip=false
+tests/fm-slack-captain-channel.test.sh exit=0 gate_skip=false
+tests/fm-test-run.test.sh exit=0 gate_skip=false
+tests/fm-transition-lib.test.sh exit=0 gate_skip=false
+tests/fm-x-mode.test.sh exit=0 gate_skip=false
+```
+
+## Historical acceptance oracle
 
 Verified 2026-08-20 on GNU bash 5.x under Linux.
 Every five-serial/five-parallel measurement in this record was taken at the single commit `f2fc52e`.
@@ -85,7 +113,7 @@ bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1
 bin/fm-test-run.sh --lane portable-parallel-2
 ```
 
-The current Water 7 policy still invokes `portable-parallel-1` with `--jobs 2`, but this historical record does not re-prove that command after the candidate replacement and reorder.
+The current Water 7 policy still invokes `portable-parallel-1` with `--jobs 2`; the 2026-08-30 refresh above re-proves that command after the candidate replacement and reorder.
 
 Measured opportunity on this host at acceptance time:
 
