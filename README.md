@@ -181,6 +181,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 
 For the best quality-to-cost tradeoff, keep one coherent objective in the primary session, use `/stow` before starting an unrelated objective, and then start a fresh session.
 For continuing work, compact after a major milestone once `/stow` has made the handoff durable, especially as visible context approaches 100,000 tokens; use `/afk` for unattended waits.
+When the captain explicitly approves a temporary higher limit, scope it to the single spawn command, such as `FM_CREW_CONCURRENCY_LIMIT=3 bin/fm-spawn.sh ...`, rather than exporting it for later dispatches.
 Activation does not require restarting the Mac.
 After this change is merged and Firstmate is updated, invoke `/stow` and start a fresh primary agent session so it loads the new policy.
 Existing secondmates do not need to be killed, and new ship and scout dispatches use the enforced capacity automatically.
