@@ -185,6 +185,8 @@ resetState("not-a-recovery-marker\n");
 await expectDelivered("malformed recovery marker");
 resetState("acked:handling:generation-4\nextra\n");
 await expectDelivered("multi-line recovery marker");
+resetState("acked:handling:generation-4:extra\n");
+await expectDelivered("extra-colon recovery marker");
 resetState("acked:handling:generation-4\n", "1\t1\tcheck\tconcurrent\tcheck: concurrent work\n");
 await expectDelivered("nonempty wake queue");
 

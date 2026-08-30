@@ -489,7 +489,7 @@ FM_RECOVERY_MARKER_ACTION='none'
 # docs/watcher-continuity.md owns the recovery-episode contract, including the
 # once-per-generation announcement rule for unacknowledged downtime.
 fm_recovery_marker_read() {
-  local marker=$1 line count
+  local marker=$1 line count generation
   FM_RECOVERY_MARKER_TOKEN=
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   count=$(wc -l < "$marker" 2>/dev/null | tr -d '[:space:]') || return 1
@@ -499,8 +499,10 @@ fm_recovery_marker_read() {
     pending:handling:*|pending:downtime:*|announced:handling:*|announced:downtime:*|acked:handling:*|acked:downtime:*) ;;
     *) return 1 ;;
   esac
-  case "${line##*:}" in
-    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  generation=${line#*:}
+  generation=${generation#*:}
+  case "$generation" in
+    ''|*:*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
   FM_RECOVERY_MARKER_TOKEN=$line
 }
