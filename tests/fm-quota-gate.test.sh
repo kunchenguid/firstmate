@@ -182,10 +182,15 @@ test_fail_open_bad_threshold_env() {
 
 # --- bin/fm-spawn.sh wiring --------------------------------------------------
 
+# A fresh ship or scout worktree fetches origin and resets to the remote default
+# branch's tip before the worker starts (bin/fm-spawn.sh), so a project fixture
+# used as a spawn target needs a reachable origin, not just a local history.
 make_normal_repo() {
-  local dir=$1
+  local dir=$1 origin="$1.origin"
   git init -q -b main "$dir"
   git -C "$dir" commit -q --allow-empty -m init
+  git clone -q --bare "$dir" "$origin"
+  git -C "$dir" remote add origin "file://$origin"
   printf '%s\n' "$dir"
 }
 
@@ -230,7 +235,14 @@ run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 model=$6 kindflag=$7; shift 7
   local extra=(codex)
   [ -z "$model" ] || extra+=(--model "$model")
-  [ -z "$kindflag" ] || extra+=("$kindflag")
+  if [ -z "$kindflag" ]; then
+    # A ship spawn must carry an explicit delivery mode and merge authority
+    # (bin/fm-spawn.sh refuses without them); the quota gate under test is
+    # independent of both, so pin the least-privileged pair.
+    extra+=(--mode local-only --yolo off)
+  else
+    extra+=("$kindflag")
+  fi
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   ( cd "$NORMAL_CWD" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
