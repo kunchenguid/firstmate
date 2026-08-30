@@ -466,7 +466,11 @@ jobs:
       - name: Compatibility pointers must stay intact
         run: |
           set -eu
-          [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+          [ -f CLAUDE.md ] && [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a regular @AGENTS.md pointer"; exit 1; }
+          cmp -s CLAUDE.md - <<'EOF' || { echo "::error::CLAUDE.md must contain the canonical @AGENTS.md pointer"; exit 1; }
+          <!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
+          @AGENTS.md
+          EOF
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |

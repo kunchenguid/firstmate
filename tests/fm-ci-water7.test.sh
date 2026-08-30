@@ -438,7 +438,9 @@ make_policy_fixture() {
   cp "$ROOT/bin/fm-composer-lib.sh" "$repo/bin/fm-composer-lib.sh"
   cp "$ROOT/bin/fm-transition-lib.sh" "$repo/bin/fm-transition-lib.sh"
   chmod +x "$repo/bin/fm-ci.sh"
-  ln -s AGENTS.md "$repo/CLAUDE.md"
+  printf '%s\n' \
+    '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
+    '@AGENTS.md' > "$repo/CLAUDE.md"
   ln -s ../.agents/skills "$repo/.claude/skills"
   : > "$repo/AGENTS.md"
 
@@ -688,6 +690,74 @@ EOF
   [ "$(cat "$calls")" = "$expected" ] \
     || fail "Water 7 command policy changed its complete serial order: $(cat "$calls")"
   pass "the command owner runs lint, coverage, portable-parallel-1 with --jobs 2, serial remainder lanes, then real Herdr"
+}
+
+test_policy_requires_a_regular_claude_pointer() {
+  local tmp repo fakebin calls out rc
+  tmp=$(fm_test_tmproot fm-ci-water7-pointer)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  rm "$repo/CLAUDE.md"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  rc=0
+  out=$(run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Water 7 command policy accepted a CLAUDE.md symlink"
+  assert_contains "$out" 'CLAUDE.md must be a regular @AGENTS.md pointer' \
+    "symlink refusal did not name the regular pointer contract"
+  [ ! -e "$calls" ] || fail "an invalid CLAUDE.md pointer reached the test suite"
+
+  rm "$repo/CLAUDE.md"
+  printf '%s\n' '@OTHER.md' > "$repo/CLAUDE.md"
+  rc=0
+  out=$(run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Water 7 command policy accepted a non-canonical pointer"
+  assert_contains "$out" 'CLAUDE.md must contain the canonical @AGENTS.md pointer' \
+    "non-canonical pointer refusal did not name the exact pointer contract"
+  pass "the command owner requires CLAUDE.md to be a regular canonical pointer"
+}
+
+test_workflow_invariant_step_executes_the_regular_claude_pointer_contract() {
+  local tmp repo command out rc
+  tmp=$(fm_test_tmproot fm-ci-workflow-pointer)
+  repo="$tmp/repo"
+  mkdir -p "$repo/.claude" "$repo/.agents/skills"
+  printf '%s\n' 'Project memory.' > "$repo/AGENTS.md"
+  printf '%s\n' \
+    '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
+    '@AGENTS.md' > "$repo/CLAUDE.md"
+  ln -s ../.agents/skills "$repo/.claude/skills"
+  git -C "$repo" init -q
+  command=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import sys
+import yaml
+
+workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+steps = workflow["jobs"]["invariants"]["steps"]
+print(next(step["run"] for step in steps if step.get("name") == "Compatibility pointers must stay intact"), end="")
+PY
+  ) || fail "could not extract the hosted invariant step"
+  out=$(cd "$repo" && bash -c "$command" 2>&1) || rc=$?
+  rc=${rc:-0}
+  [ "$rc" -eq 0 ] || fail "hosted invariant step rejected the canonical pointer: rc=$rc out=$out"
+
+  rm "$repo/CLAUDE.md"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  rc=0
+  out=$(cd "$repo" && bash -c "$command" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "hosted invariant step accepted a CLAUDE.md symlink"
+  assert_contains "$out" 'CLAUDE.md must be a regular @AGENTS.md pointer' \
+    "hosted symlink refusal did not name the regular pointer contract"
+
+  rm "$repo/CLAUDE.md"
+  printf '%s\n' '@OTHER.md' > "$repo/CLAUDE.md"
+  rc=0
+  out=$(cd "$repo" && bash -c "$command" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "hosted invariant step accepted a non-canonical pointer"
+  assert_contains "$out" 'CLAUDE.md must contain the canonical @AGENTS.md pointer' \
+    "hosted non-canonical pointer refusal did not name the exact pointer contract"
+  pass "the hosted invariant step executes the regular canonical CLAUDE.md pointer contract"
 }
 
 test_policy_publishes_nonblocking_timing_summary() {
@@ -1020,7 +1090,9 @@ test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback
 test_herdr_installer_matches_the_presentation_floor
 test_body_compliance_command_distinguishes_signed_from_unsigned_bodies
 test_body_compliance_polls_live_pr_body_when_opened_payload_is_stale
+test_workflow_invariant_step_executes_the_regular_claude_pointer_contract
 test_policy_runs_every_family_serially
+test_policy_requires_a_regular_claude_pointer
 test_policy_runs_lint_serially
 test_policy_runs_pr_fast_lane_before_complete_suite
 test_policy_publishes_nonblocking_timing_summary
