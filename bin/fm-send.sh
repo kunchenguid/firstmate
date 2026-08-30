@@ -143,8 +143,9 @@
 # FM_SEND_EXPECTED_REMOTE_HOST, or FM_SEND_EXPECTED_WORKTREE_HEAD to require
 # sampled identity and local worktree state to still match during final locked
 # target validation. FM_SEND_EXPECTED_STATUS_SIGNATURE and
-# FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE guard a caller's sampled decision state at
-# the inbox record's atomic publication boundary.
+# FM_SEND_EXPECTED_ORIGIN_CAPTAIN_HOLD_STATE and
+# FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE guard a caller's sampled decision state
+# at the inbox record's atomic publication boundary.
 # The worktree-head guard holds Git's own HEAD transaction
 # across the clean-state check and durable inbox publication, so a direct
 # concurrent commit cannot advance the ref in that interval. Unset or empty
@@ -260,6 +261,9 @@ fm_task_inbox_publish_guard() {
   fi
   if [ "${FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE:-0}" = 1 ]; then
     [ -n "$INBOX_TASK_ID" ] || return 1
+    current=$("$SCRIPT_DIR/fm-captain-hold.sh" origin-state "$INBOX_TASK_ID" 2>/dev/null) \
+      || return 1
+    [ "$current" = "${FM_SEND_EXPECTED_ORIGIN_CAPTAIN_HOLD_STATE:-}" ] || return 1
     current_keys=$(sed -n 's/^decision_keys=//p' "$STATE/$INBOX_TASK_ID.meta" 2>/dev/null | tail -1) \
       || return 1
     [ "$current_keys" = "${FM_SEND_EXPECTED_DECISION_KEYS:-}" ] || return 1

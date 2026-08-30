@@ -108,13 +108,26 @@ WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null) || refuse u
 [ -z "$(status_open_decisions "$STATUS")" ] || refuse open-decision-or-blocker
 DECISION_KEYS=$(meta_get decision_keys)
 CAPTAIN_HOLD_STATE=
-if [ -n "$DECISION_KEYS" ]; then
-  CAPTAIN_HOLD_STATE=$("$CAPTAIN_HOLD_BIN" inventory-state "$TASK" 2>/dev/null) \
-    || retry captain-hold-state-unavailable
-  if printf '%s\n' "$CAPTAIN_HOLD_STATE" | grep -q "^open$(printf '\t')"; then
-    refuse open-decision-or-blocker
+ORIGIN_CAPTAIN_HOLD_STATE=
+refresh_captain_hold_state() {
+  ORIGIN_CAPTAIN_HOLD_STATE=$("$CAPTAIN_HOLD_BIN" origin-state "$TASK" 2>/dev/null) || return 1
+  [ "$ORIGIN_CAPTAIN_HOLD_STATE" != open ] || return 2
+  CAPTAIN_HOLD_STATE=
+  if [ -n "$DECISION_KEYS" ]; then
+    CAPTAIN_HOLD_STATE=$("$CAPTAIN_HOLD_BIN" inventory-state "$TASK" 2>/dev/null) || return 1
+    if printf '%s\n' "$CAPTAIN_HOLD_STATE" | grep -q "^open$(printf '\t')"; then
+      return 2
+    fi
   fi
-fi
+}
+refresh_captain_hold_state
+captain_state_rc=$?
+case "$captain_state_rc" in
+  0) ;;
+  1) retry captain-hold-state-unavailable ;;
+  2) refuse open-decision-or-blocker ;;
+  *) retry captain-hold-state-unavailable ;;
+esac
 
 if [ -n "$HEAD_SHORT" ]; then
   case "$HEAD_SHORT" in ???????*) ;; *) refuse invalid-committed-head ;; esac
@@ -157,13 +170,14 @@ WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null) || refuse u
 [ -z "$WORKTREE_STATUS" ] || refuse uncommitted-worktree
 [ "$CURRENT" = "$HEAD" ] || refuse committed-head-mismatch
 [ -z "$(status_open_decisions "$STATUS")" ] || refuse open-decision-or-blocker
-if [ -n "$DECISION_KEYS" ]; then
-  CAPTAIN_HOLD_STATE=$("$CAPTAIN_HOLD_BIN" inventory-state "$TASK" 2>/dev/null) \
-    || retry captain-hold-state-unavailable
-  if printf '%s\n' "$CAPTAIN_HOLD_STATE" | grep -q "^open$(printf '\t')"; then
-    refuse open-decision-or-blocker
-  fi
-fi
+refresh_captain_hold_state
+captain_state_rc=$?
+case "$captain_state_rc" in
+  0) ;;
+  1) retry captain-hold-state-unavailable ;;
+  2) refuse open-decision-or-blocker ;;
+  *) retry captain-hold-state-unavailable ;;
+esac
 STATUS_SIGNATURE=$(status_observed_signature "$STATUS") || retry decision-state-unavailable
 
 MESSAGE=$(fm_delivery_continuation_message "$TASK" "$HEAD" "$SPAWN_GEN" "$DELIVERY")
@@ -171,6 +185,7 @@ FM_SEND_IDEMPOTENT=1 FM_SEND_EXPECTED_SPAWN_GEN="$SPAWN_GEN" \
   FM_SEND_EXPECTED_WORKTREE_HEAD="$HEAD" \
   FM_SEND_EXPECTED_STATUS_SIGNATURE="$STATUS_SIGNATURE" \
   FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE=1 \
+  FM_SEND_EXPECTED_ORIGIN_CAPTAIN_HOLD_STATE="$ORIGIN_CAPTAIN_HOLD_STATE" \
   FM_SEND_EXPECTED_DECISION_KEYS="$DECISION_KEYS" \
   FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE="$CAPTAIN_HOLD_STATE" \
   "$SEND_BIN" "$TASK" "$MESSAGE" >/dev/null || retry inbox-delivery-failed

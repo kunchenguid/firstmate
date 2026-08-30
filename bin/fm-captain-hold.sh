@@ -28,6 +28,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh origin-state <origin-id>
 #   fm-captain-hold.sh inventory-state <origin-id>
 #   fm-captain-hold.sh diverged
 #
@@ -379,6 +380,21 @@ hold_durable_state() {  # <task-id>
 
 verify_hold_durable() {  # <task-id>
   hold_durable_state "$1" >/dev/null
+}
+
+captain_hold_origin_state() {  # <origin-id>
+  local origin=$1 show state hold_kind
+  validate_slug origin-id "$origin"
+  require_tasks_axi
+  show=$(task_show "$origin") || fail "origin task $origin is absent from $FM_HOME/data/backlog.md"
+  state=$(show_field "$show" state)
+  [ -n "$state" ] || fail "origin task $origin has unreadable state"
+  hold_kind=$(show_field_value "$show" hold_kind)
+  if [ "$state" != done ] && [ "$hold_kind" = captain ]; then
+    printf 'open\n'
+  else
+    printf 'clear\n'
+  fi
 }
 
 # Resolve one inventory entry or channel key to the task that carries it: the
@@ -904,6 +920,12 @@ command_inventory_state() {
   captain_hold_inventory_states "$origin"
 }
 
+command_origin_state() {
+  local origin=${1:-}
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  captain_hold_origin_state "$origin"
+}
+
 # --- record divergence ------------------------------------------------------
 #
 # A captain call can be written down twice, and until now nothing said when
@@ -1032,6 +1054,7 @@ case "${1:-}" in
   binding) shift; command_binding "$@" ;;
   complete) shift; captain_hold_publication_lock_acquire; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  origin-state) shift; command_origin_state "$@" ;;
   inventory-state) shift; command_inventory_state "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   -h|--help) usage ;;

@@ -135,7 +135,10 @@ while IFS= read -r task; do
     || { printf '%s\n' "$out" >&2; exit 1; }
   if ! grep -qxF "$task" "$WAKE_TASKS_TMP" \
     && printf '%s\n' "$out" | grep -Eq '^result=(already-delivered|already-active|refused) '; then
-    continue
+    case "$out" in
+      'result=refused task='*' reason=unverifiable-status-producer') ;;
+      *) continue ;;
+    esac
   fi
   printf '%s\n' "$out"
   if [ "${FM_DELIVERY_PREFLIGHT_INCLUDE_RETRY_SEQUENCES:-0}" = 1 ] \

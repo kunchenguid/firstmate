@@ -17,6 +17,7 @@ make_fixture() {
   home="$dir/home"
   wt="$home/projects/ship"
   mkdir -p "$home/state" "$home/data/ship" "$home/projects"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
   fm_git_init_commit "$wt"
   git -C "$wt" config user.name 'Firstmate Test'
   git -C "$wt" config user.email 'firstmate-test@example.invalid'
@@ -457,6 +458,44 @@ test_transferred_captain_hold_stops_delivery() {
   pass "transferred captain holds remain validation blockers"
 }
 
+test_origin_captain_hold_stops_delivery_without_decision_keys() {
+  local dir home send state out
+  dir="$TMP_ROOT/origin-captain-hold"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" hold ship --reason "captain owns validation timing" >/dev/null \
+    || fail "could not hold the origin delivery task"
+  out=$(run_continue "$home" "$send" "$state") || fail "origin-held continuation execution failed"
+  [ "$out" = 'result=refused task=ship reason=open-decision-or-blocker' ] \
+    || fail "origin captain hold did not stop validation delivery: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "origin-held task received validation delivery"
+  pass "origin captain holds block delivery without transferred decision keys"
+}
+
+test_durable_only_producer_refusal_is_visible_once_per_preflight() {
+  local dir home stub log out count
+  dir="$TMP_ROOT/durable-producer-refusal"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  : > "$home/state/.wake-queue"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  stub="$dir/continue"; log="$dir/delivery.log"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "${FM_PREFLIGHT_LOG:?}"
+printf 'result=refused task=%s reason=unverifiable-status-producer\n' "$1"
+SH
+  chmod +x "$stub"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_LOG="$log" \
+    "$ROOT/bin/fm-delivery-preflight.sh") || fail "durable producer refusal preflight failed"
+  count=$(printf '%s\n' "$out" \
+    | grep -c '^result=refused task=ship reason=unverifiable-status-producer$')
+  [ "$count" -eq 1 ] || fail "durable producer refusal was hidden or duplicated: $out"
+  [ "$(cat "$log")" = ship ] || fail "durable producer candidate was not deduplicated"
+  pass "durable-only producer refusals remain visible and deduplicated"
+}
+
 test_fleet_and_bearings_project_pending_continuation() {
   local dir home send state fakebin snapshot bearings head active_snapshot active_bearings monitoring_bearings terminal_bearings
   dir="$TMP_ROOT/fleet-projection"; mkdir -p "$dir"
@@ -689,6 +728,8 @@ test_reused_delivery_pid_does_not_preserve_lease
 test_pi_empty_drain_recovers_unqueued_durable_candidate
 test_non_pi_empty_drain_initializes_missing_queue
 test_transferred_captain_hold_stops_delivery
+test_origin_captain_hold_stops_delivery_without_decision_keys
+test_durable_only_producer_refusal_is_visible_once_per_preflight
 test_fleet_and_bearings_project_pending_continuation
 test_advanced_head_surfaces_continuation_conflict
 test_pi_drain_preflights_before_presenting_committed_ready_rows
