@@ -1,0 +1,8 @@
+{
+  "name": "firstmate-context-handoff",
+  "version": "1.0.0",
+  "description": "Default-off Vault-scoped consumer for bounded curated Firstmate context handoffs",
+  "author": {
+    "name": "Firstmate maintainers"
+  }
+}
