@@ -23,9 +23,9 @@ The handler never reads or serializes Pi branch entries, messages, summaries, re
 A producer response that identifies a non-empty register that could not be sealed durably stops compaction and leaves a failure receipt.
 A Pi adapter launch, nonzero-exit, malformed-output, output-cap, or ten-second timeout failure also terminates the child and stops compaction even when no receipt can be written.
 Empty and disabled registers do not stop compaction when the adapter completes successfully.
-The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the exact sealed record and never infer success from the success event alone.
+The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the complete bounded set of retryable and newly sealed records in that attempt and never infer success from the success event alone.
 
-The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, durable creation and fsync of every new state-directory entry, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
+The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, durable creation and fsync of every new state-directory entry, durable repair of non-private directory modes without repeatedly syncing unchanged directories, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
 A retry recovers valid orphan envelopes, missing queues for claimed records, and incomplete claim sets without resealing different bytes.
 Sealed envelopes, queue state, receipts, approval records, transaction bundle staging, quarantine records, and acknowledgements remain below `state/context-handoff/` in the effective Firstmate home and never enter the Vault.
 Disabling the feature leaves every one of those records intact.
@@ -42,7 +42,7 @@ When the installed Herdr protocol exposes no such precondition, delivery retains
 ## Claude consumer
 
 [`integrations/claude-context-handoff`](../integrations/claude-context-handoff/) is the versioned Claude plugin artifact.
-It supplies `PreCompact`, `PostCompact`, `SessionStart`, `StopFailure`, `PreToolUse`, and exact-apply `PostToolUse` handlers, one disabled-by-default consume skill, and one local stdio MCP server.
+It supplies `PreCompact`, `PostCompact`, `SessionStart`, `StopFailure`, and `PreToolUse` handlers, one disabled-by-default consume skill, and one local stdio MCP server.
 The lifecycle adapter ignores `transcript_path` and `compact_summary`.
 Claude `PreCompact` seals only the separately registered Claude candidates for the configured session generation, durably binds that exact attempt across hook processes and retries, and calls no model.
 Post-compact and session-start reporting exposes only bounded counts and generic next action, not record contents.
@@ -59,7 +59,7 @@ An identical retry is idempotent, changed handoff payload bytes quarantine, term
 Exit 75 leaves the record pending for a fresh read, rebuild, and inspect.
 
 The `PreToolUse` guard denies direct Write, Edit, NotebookEdit, shell mutation, unrelated MCP mutation, delete, move, Git, GitHub, installation, and credential tools in the curator session.
-Its only Bash mutation exception is the exact configured transaction core apply command with the canonical Vault, the current hook session's process capability, the exact live Herdr generation, revalidated source bytes, a pending or notified queue record, no terminal acknowledgement or disposition, the active privately staged bundle, and its matching approval record.
+Save mutation is available only through the serialized MCP commit path, which holds the consumer state lock while revalidating the current hook session's process capability, exact live Herdr generation, source bytes, queue state, active private bundle, approval, and terminal state.
 The installed transaction core remains the primary confinement and recovery boundary because Claude command hooks cannot make their own startup or timeout infallible.
 
 ## Default-off configuration
@@ -81,7 +81,7 @@ A later local activation must complete this checklist in order:
 6. Run the focused synthetic suite and the model-free Pi and Claude hook smokes on the landed bytes.
 7. Load the plugin explicitly from its landed directory with a Vault-scoped Claude configuration.
 8. Record reviewed exact eligibility contracts, start with registration only, then sealing, then the consumer guard, and enable delivery last.
-9. Re-run hook discovery, exact endpoint probing, guard deny/allow checks, and a synthetic transaction readback before any real record is admitted.
+9. Re-run hook discovery, exact endpoint probing, guard denial checks, serialized MCP commit checks, and a synthetic transaction readback before any real record is admitted.
 10. Keep the first real record pending for manual inspection before granting the approved standing Save authority.
 
 ## Disable and rollback
