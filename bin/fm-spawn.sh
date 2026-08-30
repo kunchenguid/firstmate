@@ -195,8 +195,9 @@
 # backlog does not own. A relaunch re-reads the row instead of re-running the
 # transition, so an already In-flight item is left untouched. The transition is
 # skipped entirely for --secondmate spawns (persistent agents are not work
-# items), on a config/backlog-backend=manual home, without a compatible
-# tasks-axi, and in a home that keeps no data/backlog.md.
+# items), on a config/backlog-backend=manual home, and in a home that keeps no
+# data/backlog.md. An automatic-backend home with a backlog but no compatible
+# tasks-axi refuses before creating any lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the

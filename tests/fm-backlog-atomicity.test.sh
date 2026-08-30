@@ -577,7 +577,7 @@ test_dispatch_refuses_a_symlinked_backlog_without_crossing_homes() {
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted a symlinked backlog"
-  assert_contains "$out" "backlog file is not a regular non-symlink file" \
+  assert_contains "$out" "backlog file resolves outside its authorized directory" \
     "spawn did not identify the unsafe backlog boundary"
   [ -L "$local_backlog" ] || fail "spawn replaced the local backlog symlink"
   [ "$(row_state "$foreign_case" "$id")" = queued ] \
@@ -1184,7 +1184,7 @@ test_completion_refuses_a_close_target_symlinked_to_a_directory() {
 
   out=$(run_teardown "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "teardown published through a directory symlink"
-  assert_contains "$out" "pending-close record target is not a regular non-symlink file" \
+  assert_contains "$out" "pending-close record target resolves outside its authorized directory" \
     "teardown did not report the unsafe publication target"
   [ -L "$marker" ] || fail "teardown replaced the unsafe close target"
   [ -z "$(find "$external" -mindepth 1 -maxdepth 1 -print -quit)" ] \
@@ -1797,6 +1797,69 @@ SH
   pass "bootstrap rechecks worker-record containment after locking"
 }
 
+test_lifecycle_refuses_ancestor_symlinks_outside_home_roots() {
+  local backlog_case worker_case close_case home foreign id marker out rc=0
+  id=atomic-ancestor-symlink-b14
+
+  backlog_case=$(make_home ancestor-symlink-backlog "$id")
+  home=$(home_of "$backlog_case")
+  foreign="$backlog_case/foreign-home"
+  mkdir -p "$foreign/data"
+  cp "$(backlog_of "$backlog_case")" "$foreign/data/backlog.md"
+  ln -s "$foreign" "$home/foreign-link"
+  out=$(FM_DATA_OVERRIDE="$home/foreign-link/data" run_ship_spawn "$backlog_case" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "dispatch accepted a backlog through an ancestor symlink"
+  assert_absent "$home/state/$id.meta" "dispatch published through a foreign backlog root"
+
+  worker_case=$(make_home ancestor-symlink-worker)
+  home=$(home_of "$worker_case")
+  foreign="$worker_case/foreign-home"
+  mkdir -p "$foreign/state"
+  add_item "$worker_case" "$id"
+  fm_write_meta "$foreign/state/$id.meta" "kind=ship" "spawn_gen=foreign-worker"
+  ln -s "$foreign" "$home/foreign-link"
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$home/foreign-link/state" run_bootstrap "$worker_case") || rc=$?
+  [ "$rc" -ne 0 ] || fail "bootstrap accepted a worker record through an ancestor symlink"
+  [ "$(row_state "$worker_case" "$id")" = queued ] \
+    || fail "bootstrap paired a foreign worker with the local backlog"
+
+  close_case=$(make_home ancestor-symlink-close)
+  home=$(home_of "$close_case")
+  foreign="$close_case/foreign-home"
+  mkdir -p "$foreign/state"
+  add_item "$close_case" "$id"
+  start_item "$close_case" "$id"
+  marker="$foreign/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=foreign-close\narg=--note\narg=local%%20main\n' \
+    "$id" "$home/data" > "$marker"
+  ln -s "$foreign" "$home/foreign-link"
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$home/foreign-link/state" run_bootstrap "$close_case") || rc=$?
+  [ "$rc" -ne 0 ] || fail "bootstrap accepted a close record through an ancestor symlink"
+  assert_present "$marker" "bootstrap discarded a foreign authoritative close"
+  [ "$(row_state "$close_case" "$id")" = in_flight ] \
+    || fail "bootstrap applied a foreign close to the local backlog"
+  pass "lifecycle files reject ancestor symlinks outside home roots"
+}
+
+test_same_home_state_override_remains_supported() {
+  local case_dir home state id out
+  id=atomic-same-home-state-override-b14
+  case_dir=$(make_home same-home-state-override)
+  home=$(home_of "$case_dir")
+  state="$home/runtime-state"
+  add_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=same-home-override"
+  mv "$home/state" "$state"
+
+  out=$(FM_STATE_OVERRIDE="$state" run_bootstrap "$case_dir") \
+    || fail "same-home state override was refused: $out"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "same-home state override did not reconcile its worker"
+  pass "same-home state overrides remain supported"
+}
+
 test_bootstrap_refuses_a_symlinked_state_directory_before_reconciliation() {
   local case_dir foreign_case home foreign_state id out rc=0
   id=atomic-bootstrap-symlink-state-b11
@@ -1882,14 +1945,16 @@ test_recovery_leaves_a_captain_held_item_alone() {
 # --- backend selection and secondmate scope ---------------------------------
 
 test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry() {
-  local case_dir home id target foreign_worktree out rc=0
+  local case_dir home id target target_dir foreign_worktree out rc=0
   id=atomic-no-backlog-symlink-meta-b12
   case_dir=$(make_home no-backlog-symlink-meta)
   home=$(home_of "$case_dir")
   rm -f "$(backlog_of "$case_dir")"
   foreign_worktree="$case_dir/foreign-worktree"
   mkdir -p "$foreign_worktree"
-  target="$case_dir/foreign-task-record"
+  target_dir="$home/state-foreign"
+  target="$target_dir/$id.meta"
+  mkdir -p "$target_dir"
   fm_write_meta "$target" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$foreign_worktree" "project=$case_dir/foreign-project" \
@@ -1899,7 +1964,7 @@ test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry() {
 
   out=$(run_teardown "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "no-backlog teardown accepted a symlinked task record"
-  assert_contains "$out" "task record is not a regular non-symlink file" \
+  assert_contains "$out" "task record resolves outside its authorized directory" \
     "teardown did not identify the unsafe task record"
   [ -L "$home/state/$id.meta" ] || fail "teardown removed the symlinked task record"
   assert_present "$foreign_worktree" "teardown removed a foreign local copy"
@@ -1943,7 +2008,7 @@ SH
 
   out=$(run_teardown "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "teardown trusted a record after its parent was swapped"
-  assert_contains "$out" "task record authorized directory is not a real directory" \
+  assert_contains "$out" "task record authorized directory resolves outside this home" \
     "post-lock record check did not report the swapped parent"
   assert_present "$foreign_state/$id.meta" "teardown removed the foreign record"
   assert_present "$foreign_worktree" "teardown removed the foreign local copy"
@@ -2126,6 +2191,8 @@ test_recovery_rejects_a_symlinked_close_marker
 test_recovery_drops_a_close_for_a_newer_meta_incarnation
 test_recovery_rejects_a_legacy_close_without_an_incarnation
 test_bootstrap_rechecks_worker_record_boundary_after_locking
+test_lifecycle_refuses_ancestor_symlinks_outside_home_roots
+test_same_home_state_override_remains_supported
 test_bootstrap_refuses_a_symlinked_state_directory_before_reconciliation
 test_bootstrap_stops_when_data_disappears_before_reconciliation
 test_bootstrap_addressing_exemptions_remain_nonfatal

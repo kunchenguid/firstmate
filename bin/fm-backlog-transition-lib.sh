@@ -75,13 +75,20 @@ fm_backlog_directory_present() {
 }
 
 fm_backlog_data_absolute() {
-  local data=$1 raw_bytes
+  local data=$1 raw_bytes check
   raw_bytes=$(printf '%s' "$data" | LC_ALL=C od -An -t u1) || return 1
   if ! fm_backlog_control_bytes_valid 0 "$raw_bytes"; then
     printf 'error: data directory contains an invalid control byte\n' >&2
     return 2
   fi
-  fm_backlog_directory_present "$data" "data directory" || return 1
+  check=$data
+  while [ "$check" != / ] && [ "${check%/}" != "$check" ]; do
+    check=${check%/}
+  done
+  if [ ! -d "$check" ]; then
+    FM_BACKLOG_TRANSITION_ERROR="data directory is not a directory at $data"
+    return 1
+  fi
   if ! data=$(CDPATH='' cd -- "$data" 2>/dev/null && pwd -P); then
     return 1
   fi
@@ -140,7 +147,7 @@ fm_backlog_data_relative() {  # <data-dir>
 }
 
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
-  local config=$1 data kind=$3 file
+  local config=$1 data authorized_data=$2 kind=$3 file
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
     FM_BACKLOG_TRANSITION_SKIP="secondmates are not backlog items"
@@ -159,7 +166,7 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     FM_BACKLOG_TRANSITION_SKIP="this home keeps no backlog at $file"
     return 1
   fi
-  if ! fm_backlog_record_present "$file" "backlog file" "$data"; then
+  if ! fm_backlog_record_present "$file" "backlog file" "$authorized_data"; then
     return 2
   fi
   if ! fm_tasks_axi_compatible; then
@@ -170,7 +177,7 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data file id=$2 out state held command_status
+  local data authorized_data=$1 file id=$2 out state held command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -184,7 +191,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   }
-  if ! fm_backlog_record_present "$file" "backlog file" "$data"; then
+  if ! fm_backlog_record_present "$file" "backlog file" "$authorized_data"; then
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   fi
@@ -222,7 +229,7 @@ fm_backlog_row_state() {  # <data-dir> <id>
 # Run one tasks-axi mutation against <home>'s backlog, capturing its first
 # output line in FM_BACKLOG_TRANSITION_ERROR on failure.
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
-  local data file verb=$2 id=$3 out command_status
+  local data authorized_data=$1 file verb=$2 id=$3 out command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -230,7 +237,7 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   shift 3
   FM_BACKLOG_TRANSITION_ERROR=
   file=$(fm_backlog_file "$data") || return 1
-  fm_backlog_record_present "$file" "backlog file" "$data" || return 1
+  fm_backlog_record_present "$file" "backlog file" "$authorized_data" || return 1
   out=$(cd "$(fm_backlog_root "$data")" 2>/dev/null && tasks-axi "$verb" "$id" \
       --file "$file" "$@" 2>&1)
   command_status=$?
@@ -251,25 +258,70 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
+fm_backlog_canonical_existing() {
+  LC_ALL=C perl -MCwd=realpath -e '
+    my $resolved = realpath($ARGV[0]);
+    exit 1 unless defined $resolved;
+    print $resolved;
+  ' "$1" 2>/dev/null
+}
+
 fm_backlog_record_parent_authorized() {
-  local path=$1 label=$2 root=$3 parent parent_resolved root_resolved
+  local path=$1 label=$2 root=$3 parent base path_resolved root_resolved home_resolved
   parent=${path%/*}
   [ "$parent" != "$path" ] || parent=.
-  fm_backlog_directory_present "$root" "$label authorized directory" || return 1
-  fm_backlog_directory_present "$parent" "$label parent directory" || return 1
-  parent_resolved=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
-  root_resolved=$(CDPATH='' cd -- "$root" 2>/dev/null && pwd -P) || return 1
-  if [ "$parent_resolved" != "$root_resolved" ]; then
-    FM_BACKLOG_TRANSITION_ERROR="$label is outside its authorized directory at $path"
+  base=${path##*/}
+  root_resolved=$(fm_backlog_canonical_existing "$root") || {
+    FM_BACKLOG_TRANSITION_ERROR="$label authorized directory cannot be resolved at $root"
     return 1
+  }
+  [ -d "$root_resolved" ] || {
+    FM_BACKLOG_TRANSITION_ERROR="$label authorized directory is not a directory at $root"
+    return 1
+  }
+  if [ -n "${FM_HOME:-}" ]; then
+    case "$root" in
+      "$FM_HOME"|"$FM_HOME"/*)
+        home_resolved=$(fm_backlog_canonical_existing "$FM_HOME") || {
+          FM_BACKLOG_TRANSITION_ERROR="$label home directory cannot be resolved at $FM_HOME"
+          return 1
+        }
+        case "$root_resolved" in
+          "$home_resolved"|"$home_resolved"/*) ;;
+          *)
+            FM_BACKLOG_TRANSITION_ERROR="$label authorized directory resolves outside this home at $root"
+            return 1
+            ;;
+        esac
+        ;;
+    esac
   fi
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    path_resolved=$(fm_backlog_canonical_existing "$path") || {
+      FM_BACKLOG_TRANSITION_ERROR="$label cannot be resolved at $path"
+      return 1
+    }
+  else
+    parent=$(fm_backlog_canonical_existing "$parent") || {
+      FM_BACKLOG_TRANSITION_ERROR="$label parent directory cannot be resolved at $path"
+      return 1
+    }
+    path_resolved=${parent%/}/$base
+  fi
+  case "$path_resolved" in
+    "$root_resolved"/*) ;;
+    *)
+      FM_BACKLOG_TRANSITION_ERROR="$label resolves outside its authorized directory at $path"
+      return 1
+      ;;
+  esac
 }
 
 fm_backlog_record_present() {
   local path=$1 label=${2:-record} root=$3
   fm_backlog_record_parent_authorized "$path" "$label" "$root" || return 1
-  if [ ! -f "$path" ] || [ -L "$path" ]; then
-    FM_BACKLOG_TRANSITION_ERROR="$label is not a regular non-symlink file at $path"
+  if [ ! -f "$path" ]; then
+    FM_BACKLOG_TRANSITION_ERROR="$label is not a regular file at $path"
     return 1
   fi
   return 0
@@ -289,13 +341,7 @@ fm_backlog_record_remove() {
 }
 
 fm_backlog_record_publish() {
-  local source=$1 target=$2 label=$3 root=$4 source_parent target_parent
-  source_parent=${source%/*}
-  [ "$source_parent" != "$source" ] || source_parent=.
-  target_parent=${target%/*}
-  [ "$target_parent" != "$target" ] || target_parent=.
-  fm_backlog_directory_present "$source_parent" "$label source directory" || return 1
-  fm_backlog_directory_present "$target_parent" "$label target directory" || return 1
+  local source=$1 target=$2 label=$3 root=$4
   fm_backlog_record_present "$source" "$label staged record" "$root" || return 1
   fm_backlog_record_parent_authorized "$target" "$label target" "$root" || return 1
   if [ -e "$target" ] || [ -L "$target" ]; then

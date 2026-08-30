@@ -1338,7 +1338,7 @@ SH
 
   out=$(run_spawn "$dir" rl37 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "relaunching from symlinked metadata should refuse"
-  assert_contains "$out" "task record is not a regular non-symlink file" \
+  assert_contains "$out" "task record resolves outside its authorized directory" \
     "relaunch did not identify the unsafe task record"
   [ -L "$meta" ] || fail "relaunch replaced or removed the symlinked record"
   assert_present "$target" "relaunch removed the foreign record target"
