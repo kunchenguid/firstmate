@@ -73,7 +73,7 @@ fm_git_identity
 # carrying `spendPriority`, an `exhaustion[N]` block, and a sparse `attention[N]`
 # block - so the parser is pinned against the emitted shape rather than a tidied
 # one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider|unattributable-row|exhaustion-only>
   # The FLOOR-COMPLIANT layout, as quota-axi 0.1.29 and newer emit it and as
   # verified live against 0.1.34 on this host: quota[], exhaustion[] and
   # attention[]. The pre-floor effective[]/providers[]/windows[] shape is not
@@ -218,6 +218,30 @@ quota[3]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidenc
 EOF
       return 0
       ;;
+    unattributable-row)
+      # Named rows beside one whose `provider` cell is declared but EMPTY. The
+      # gauge emitted that row; nothing downstream can attribute it, and a rule
+      # phrased in terms of provider names cannot sweep a row that carries none.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,84,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+  ,all_models,3,1.0,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+EOF
+      return 0
+      ;;
+    exhaustion-only)
+      # A provider the gauge reports a limiting window and a usable runway for,
+      # with no quota row of any scope and nothing in attention.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,84,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  cursor,all_models,2400,five_hour
+EOF
+      return 0
+      ;;
     unnamed-provider)
       # An upstream rename of `provider` leaves every row unattributable at once.
       # `- ok pct=84` would be a healthy dispatch gauge nobody can act on.
@@ -342,7 +366,7 @@ pass 'headroom reports a measurable provider with window, reset and runway'
 
 # --- headroom: each number carries the window that actually bounds IT --------
 #
-# Two windows answer two different questions. `limitingWindowIds` bounds the
+# Two windows answer two different questions. `limitedBy` bounds the
 # PERCENTAGE; `limitingWindowId` bounds the RUNWAY. Labelling the percentage
 # with the runway's window read as "the five-hour window is at 35%" while that
 # window was at 85%, and - the half that actually bites - paired the seven-day
@@ -577,7 +601,7 @@ pass 'headroom reads a repeated block through its own header even across a spars
 # deduping against emitted rows still missed one whose only quota row is
 # model-scoped and which attention never names - it vanished while the summary
 # read `verdict=ok measured=1 unknown=0` with a provider at 3% invisible.
-for FIXTURE in healthy auth model-scoped-attention model-scoped-orphan sparse-repeated-block divergent; do
+for FIXTURE in healthy auth model-scoped-attention model-scoped-orphan sparse-repeated-block divergent exhaustion-only unattributable-row; do
   CASE="$TMP_ROOT/hr-invariant-$FIXTURE"; mkdir -p "$CASE"
   fake_quota "$CASE/fakebin" "$FIXTURE"
   OUT=$(run_headroom "$CASE/fakebin")
@@ -650,6 +674,51 @@ assert_contains "$OUT" 'verdict=tight measured=3 tight=2 wall=0 unknown=0' \
 # the line with the report it came from.
 assert_not_contains "$OUT" 'pct=20 ' 'the reading prints the value the gauge gave, not a rounded one'
 pass 'headroom applies the tight threshold to the whole value, not its integer part'
+
+# --- headroom: no emitted row is dropped unaccounted for ---------------------
+#
+# The fourth appearance of one defect class, and the reason the previous guard
+# missed it: the invariant was phrased as "every provider NAMED anywhere appears
+# in the output", and a row whose `provider` cell is empty carries no name, so it
+# slipped underneath the rule. It was dropped by the quota loop, excluded from
+# the name sweep, and never reached the row-less exit because another row had
+# been emitted - leaving `HEADROOM_SUMMARY: verdict=ok measured=1 tight=0 wall=0
+# unknown=0` and no note at all, over a report carrying a row at 3% that was
+# thrown away. The rule is now about ROWS, not names.
+CASE="$TMP_ROOT/hr-unattributable"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" unattributable-row
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'the attributable row still reads normally'
+assert_contains "$OUT" 'HEADROOM: (unattributable rows) unknown reason=unattributable-row' \
+  'a row the gauge emitted with no provider is surfaced rather than discarded'
+assert_contains "$OUT" '1 row(s) in the report carried no provider' \
+  'and the line says how many rows could not be attributed'
+assert_not_contains "$OUT" 'verdict=ok' \
+  'a reading that threw a row away must never describe itself as fully measured'
+assert_contains "$OUT" 'verdict=partial measured=1 tight=0 wall=0 unknown=1' \
+  'the discarded row is counted as unknown, so unknown=0 keeps meaning nothing was dropped'
+assert_contains "$OUT" 'UNMEASURED, not healthy' 'and the unmeasured note is carried'
+assert_not_contains "$OUT" 'pct=3' 'an unattributable percentage is never presented as a reading'
+pass 'headroom accounts for a row it cannot attribute instead of dropping it'
+
+# --- headroom: an unknown's reason is true of the provider it names ----------
+#
+# The sweep's fallback reason was `no-measurable-window` for a provider named
+# only in `exhaustion[]` - a provider whose limiting window and usable runway the
+# gauge DID report, so the machine-readable reason contradicted the human detail
+# printed beside it. An unknown carrying a reason that can be false is the one
+# thing this surface must not emit.
+CASE="$TMP_ROOT/hr-exhaustion-only"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" exhaustion-only
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: cursor unknown reason=no-quota-row' \
+  'a provider known only through its runway is missing a quota row, not a window'
+assert_not_contains "$OUT" 'reason=no-measurable-window' \
+  'the reason must not deny a window the report actually carried'
+assert_contains "$OUT" 'named only in exhaustion' 'and the detail still names where it was seen'
+assert_contains "$OUT" 'verdict=partial measured=1 tight=0 wall=0 unknown=1' \
+  'the provider is counted as unknown rather than vanishing'
+pass 'headroom gives a runway-only provider a reason that is true of it'
 
 # --- headroom: a row nobody can attribute is not a reading -------------------
 #

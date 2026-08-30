@@ -108,7 +108,7 @@ The distinction holds in both directions: the unmodified live report on the same
 
 ## An unmeasured provider never reads as healthy
 
-Five ways a provider can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
+Seven ways a reading can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
 
 A percentage that is not a number.
 `toon_block` resolves fields by name and yields `-` for one the header never declared, so an upstream rename of `effectivePercentRemaining` leaves every row unreadable at once.
@@ -182,6 +182,34 @@ HEADROOM_SUMMARY: verdict=tight measured=3 tight=2 wall=0 unknown=0 source=quota
 ```
 
 Each line prints the value the gauge gave rather than a rounded one, so a reader can reconcile the reading with the report it came from.
+
+A row the gauge emitted with no provider in it.
+The invariant above is phrased in terms of provider NAMES, and a row whose `provider` cell is declared but empty carries none, so it slipped underneath the rule: dropped by the quota loop, excluded from the name sweep, and never reaching the row-less exit because another row had been emitted.
+A report mixing one named row with one unattributable row printed a clean, complete gauge over a row at 3% that was thrown away:
+
+```
+HEADROOM: claude ok pct=84 bound=five_hour resets=2026-08-27T02:19:59Z runway=unknown(-) confidence=-
+HEADROOM_SUMMARY: verdict=ok measured=1 tight=0 wall=0 unknown=0 source=quota-axi/0.1.40
+```
+
+`toon_block` yields `-` for a field the header never declared AND for a declared field whose cell is empty, which is why this row looked like a layout change rather than an incomplete row; that ambiguity is now stated in `toon_block`'s own header rather than left to be rediscovered.
+The invariant is restated about ROWS - no row the gauge emitted is discarded unaccounted for - so the count reaches the reading and the summary can no longer describe itself as complete:
+
+```
+HEADROOM: claude ok pct=84 bound=five_hour resets=2026-08-27T02:19:59Z runway=unknown(-) confidence=-
+HEADROOM: (unattributable rows) unknown reason=unattributable-row status=unattributable_row detail=1 row(s) in the report carried no provider, so no reading could be attributed to them
+HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
+```
+
+A report whose rows are ALL unattributable still leaves through the single unmeasurable exit as `(all providers) unknown reason=no-named-provider-row`, because then no reading came back at all.
+
+An unknown carrying a reason that is false of the provider it names.
+A provider named only in `exhaustion[]` fell through to the scope-based default and printed `reason=no-measurable-window` - for a provider whose limiting window and usable runway the gauge DID report, with the contradicting detail on the same line.
+What it is actually missing is a quota row, which is a different absence from having one at model scope only, so the two now carry different reasons:
+
+```
+HEADROOM: cursor unknown reason=no-quota-row status=not_reported scope=all_models detail=named only in exhaustion, with no account-level quota row and nothing in attention
+```
 
 ## Each number carries the window that bounds it
 

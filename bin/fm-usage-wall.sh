@@ -70,11 +70,16 @@
 # unresolved, a provider needing authentication - prints `unknown` with the
 # concrete reason. There is no code path from a failed read to `ok`.
 #
-# And no provider this report NAMES is ever missing from the reading. Every name
+# And nothing this report emits is ever missing from the reading. Every name
 # appearing anywhere - `quota` at any scope, `exhaustion`, `attention` - gets a
 # line: measured when an account-scoped row was read, unknown with its reason
 # otherwise. That is swept from the report's own names rather than enumerated
 # shape by shape, because enumerating kept leaving one more way to be missed.
+# A row carrying no provider at all has no name to be swept by, so it is counted
+# where it is dropped and reported as one `unattributable-row` line - a rule
+# about names alone let exactly such a row vanish under a summary reading
+# `measured=1 unknown=0`. No emitted row is discarded unaccounted for, which is
+# what makes `unknown=0` mean everything the gauge reported was read.
 #
 # It never prompts. `quota-axi` returns auth_required and unknown headroom until
 # the operator approves keychain access once, and the command that does that
@@ -377,6 +382,16 @@ first_wall_line() {  # <evidence>
 # declared header. An absent field prints "-", so a caller never silently reads
 # a neighbouring column. Quoted fields (a value containing a comma, colon, or
 # space) are honoured.
+#
+# "-" MEANS "no value for this field in this row", and it is deliberately
+# ambiguous between three ways that happens: the header never declared the
+# field, the row is shorter than the header, or the cell is declared and empty.
+# A reader of a VALUE needs the same thing from all three - there is nothing to
+# read - so they are not separated here. A caller that must tell "the layout
+# changed" from "this row is incomplete" cannot do it from this output, and
+# must not assume it can: the empty `provider` cell that let a row vanish from
+# the reading looked exactly like a renamed `provider` field to everything
+# downstream.
 toon_block() {  # <block-name> <comma-separated-field-names> ; TOON on stdin
   awk -v block="$1" -v want="$2" '
     function unquote(s) {
@@ -556,21 +571,31 @@ cmd_headroom() {
     return 0
   fi
 
-  local measured=0 tight=0 wall=0 unknown=0 rows='' summary_verdict
+  local measured=0 tight=0 wall=0 unknown=0 unattributable=0 rows='' summary_verdict
   while IFS="$(printf '\t')" read -r provider scope pct runway conf win resets; do
-    # A row nobody can attribute is not a reading. `toon_block` yields `-` for a
-    # `provider` field the header never declared, which an upstream rename does
-    # to every row at once, and `- ok pct=84` is a healthy dispatch gauge for a
-    # provider no one can act on. Those rows leave through the row-less exit
-    # below instead.
-    case "$provider" in ''|'-') continue ;; esac
+    # A row nobody can attribute is not a reading: `- ok pct=84` is a healthy
+    # dispatch gauge for a provider no one can act on. But it is still a row the
+    # gauge EMITTED, so it is counted rather than discarded. The invariant the
+    # sweep below enforces is phrased in terms of provider NAMES, and a row
+    # carrying no name slips underneath it - which is how a report mixing named
+    # rows with one empty `provider` cell read `verdict=ok measured=1 unknown=0`
+    # over a row at 3% that was thrown away. Nothing the report emits may be
+    # dropped without being accounted for, named or not.
+    #
+    # An empty TABLE is not an emitted row: `toon_block` prints nothing for a
+    # sparse block, and the here-doc below then yields one blank line whose
+    # every field is empty. A real row always carries a field for each name
+    # asked for, `-` at worst, so the blank line is told apart by all of them
+    # being empty rather than by the provider alone.
+    if [ -z "$provider$scope$pct$runway$conf$win$resets" ]; then continue; fi
+    case "$provider" in ''|'-') unattributable=$((unattributable + 1)); continue ;; esac
     # One account-level reading per provider. A model-scoped row bounds only that
     # model (quota-axi owns that relationship) and is not the dispatch gauge.
     case "$scope" in
       all_models|unresolved) ;;
       *) continue ;;
     esac
-    local verdict detail hint='' runway_s runway_win pct_int pct_frac pct_exact
+    local verdict detail runway_s runway_win pct_int pct_frac pct_exact
     # Sparse by design: a provider with no exhaustion row has an UNKNOWN runway,
     # never a zero one, so the lookup misses rather than defaulting.
     runway_s=$(printf '%s\n' "$exhaustion" | awk -F'\t' -v p="$provider" -v sc="$scope" '$1 == p && $2 == sc { print $3; exit }')
@@ -649,7 +674,7 @@ cmd_headroom() {
       detail="$detail runway_bound=$runway_win runway_resets=unknown"
     fi
     detail="$detail confidence=$conf"
-    rows="$rows$provider	$verdict	$detail$hint"$'\n'
+    rows="$rows$provider	$verdict	$detail"$'\n'
   done <<EOF
 $quota
 EOF
@@ -667,7 +692,8 @@ EOF
   # flagged had no line at all. Ordering account scope first keeps the
   # account-level reason the one that gets printed when both exist.
   while IFS="$(printf '\t')" read -r provider scope kind reason remedy; do
-    case "$provider" in ''|'-') continue ;; esac
+    if [ -z "$provider$scope$kind$reason$remedy" ]; then continue; fi
+    case "$provider" in ''|'-') unattributable=$((unattributable + 1)); continue ;; esac
     printf '%s\n' "$rows" | awk -F'\t' -v p="$provider" '$1 == p { found = 1 } END { exit !found }' && continue
     local ahint='' areason ascope=''
     unknown=$((unknown + 1))
@@ -699,9 +725,8 @@ EOF
   # sweeps the report's own names instead of enumerating shapes, and a new table
   # or scope upstream cannot reopen the class.
   #
-  # `-` is not a name: `toon_block` yields it for a `provider` field the header
-  # never declared, and a row nobody can attribute is not a provider to account
-  # for. Those leave through the row-less exit below.
+  # `-` is not a name, so an unattributable row cannot be swept by name. It is
+  # accounted for separately below, from the count the two loops kept.
   local mentioned mprovider mscopes msources mreason
   mentioned=$(
     {
@@ -724,14 +749,46 @@ EOF
     [ -n "$mprovider" ] || continue
     printf '%s\n' "$rows" | awk -F'\t' -v p="$mprovider" '$1 == p { found = 1 } END { exit !found }' && continue
     unknown=$((unknown + 1))
+    # The reason has to be true of THIS provider, not of the common case. A
+    # provider named only in `exhaustion` has a limiting window and a usable
+    # runway - the gauge reported both - so `no-measurable-window` would
+    # contradict the detail printed beside it. What it is actually missing is a
+    # quota row at all, which is a different absence from having one at model
+    # scope only.
     case "$msources" in
       *quota*) mreason=$(headroom_unknown_reason "$mscopes" not_reported_quota) ;;
+      *exhaustion*) mreason=$(headroom_unknown_reason "$mscopes" not_reported_exhaustion) ;;
       *) mreason=$(headroom_unknown_reason "$mscopes" not_reported) ;;
     esac
     rows="$rows$mprovider	unknown	reason=$mreason status=not_reported scope=$mscopes detail=named only in $msources, with no account-level quota row and nothing in attention"$'\n'
   done <<EOF
 $mentioned
 EOF
+
+  # The report parsed but named no provider this reading could attribute a line
+  # to - an upstream rename of `provider` leaves every row unnamed at once, the
+  # same class of layout change the percentage guard above exists for. That is
+  # the same condition as a gauge that could not be read, and it leaves through
+  # the same single exit - otherwise the text emitter names the reason and the
+  # JSON emitter returns an empty one, and `fm-usage-wall-headroom.v1` stops
+  # meaning one shape. A provider that IS named can no longer arrive here: the
+  # sweep above gives it a line whatever scope it appeared at.
+  rowcount=$(printf '%s' "$rows" | grep -c . 2>/dev/null) || rowcount=0
+  if [ "$rowcount" -eq 0 ]; then
+    headroom_unmeasurable no-named-provider-row \
+      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
+    return 0
+  fi
+
+  # Rows the gauge emitted that no name could be attached to. Some reading DID
+  # come back - the exit above owns the case where none did - so these belong in
+  # it, as one line rather than one per row: their number is the fact, and there
+  # is nothing to tell them apart by. Counting them here is what stops the
+  # summary claiming a complete measurement over a row it threw away.
+  if [ "$unattributable" -gt 0 ]; then
+    unknown=$((unknown + 1))
+    rows="$rows(unattributable rows)	unknown	reason=$(headroom_unknown_reason '' unattributable_row) status=unattributable_row detail=$unattributable row(s) in the report carried no provider, so no reading could be attributed to them"$'\n'
+  fi
 
   # Verdict precedence: wall > tight > partial > ok, with unknown reserved for a
   # reading nobody got. `wall` outranks `tight` because they are different
@@ -753,21 +810,6 @@ EOF
     summary_verdict=partial
   else
     summary_verdict=ok
-  fi
-
-  # The report parsed but named no provider this reading could attribute a line
-  # to - an upstream rename of `provider` leaves every row unnamed at once, the
-  # same class of layout change the percentage guard above exists for. That is
-  # the same condition as a gauge that could not be read, and it leaves through
-  # the same single exit - otherwise the text emitter names the reason and the
-  # JSON emitter returns an empty one, and `fm-usage-wall-headroom.v1` stops
-  # meaning one shape. A provider that IS named can no longer arrive here: the
-  # sweep above gives it a line whatever scope it appeared at.
-  rowcount=$(printf '%s' "$rows" | grep -c . 2>/dev/null) || rowcount=0
-  if [ "$rowcount" -eq 0 ]; then
-    headroom_unmeasurable no-named-provider-row \
-      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
-    return 0
   fi
 
   if [ "$json" -eq 1 ]; then
@@ -806,6 +848,8 @@ headroom_unknown_reason() {  # <scope> <provider-status>
     error) printf 'provider-read-failed' ; return 0 ;;
     unreadable_percent) printf 'unreadable-percent' ; return 0 ;;
     not_reported_quota) printf 'no-account-level-row' ; return 0 ;;
+    not_reported_exhaustion) printf 'no-quota-row' ; return 0 ;;
+    unattributable_row) printf 'unattributable-row' ; return 0 ;;
   esac
   case "$1" in
     unresolved) printf 'unresolved-scope' ;;

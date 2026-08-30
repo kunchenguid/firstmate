@@ -34,8 +34,11 @@ A gauge that rendered "could not read it" the same way as "plenty left" would be
 
 So `headroom` has three provider verdicts that mean a reading was taken (`ok`, `tight`, `wall`) and one that means none was (`unknown`), and there is no code path from a failed read to a healthy verdict.
 Absent, erroring, hanging, unparseable, unresolved, and unauthenticated all land on `unknown` with the concrete reason attached, and the one-time operator command is named on the line that needs it.
-A provider the report NAMES is never dropped, wherever it is named: after the account-level reading and the flagged-provider reading, every name appearing anywhere in `quota[]` at any scope, `exhaustion[]`, or `attention[]` is swept and given its own line - measured when an account-scoped row was read, unknown with its reason otherwise.
+Nothing the report emits is ever dropped from the reading: after the account-level reading and the flagged-provider reading, every name appearing anywhere in `quota[]` at any scope, `exhaustion[]`, or `attention[]` is swept and given its own line - measured when an account-scoped row was read, unknown with its reason otherwise.
 That is swept from the report's own names rather than enumerated shape by shape, because each earlier attempt closed one way a provider could be missed and left another open.
+A rule about names has one gap of its own, and it is the last way this class reappeared: a row whose `provider` cell is empty carries no name to sweep by, so it is counted where it is dropped and reported as a single `unattributable-row` line.
+The invariant is therefore about ROWS - no row the gauge emitted is discarded unaccounted for - which is what lets `unknown=0` mean everything the gauge reported was actually read.
+Every unknown also carries a reason that is true of the provider it names: a provider known only through `exhaustion[]` is missing a quota row, not a measurable window, and saying otherwise would contradict the detail printed beside it.
 A provider that quietly disappears is worse than one reported unknown, because the summary above it then reads as if everything measurable had been measured.
 
 The aggregate carries that vocabulary plus one verdict a single provider cannot need, and its precedence is `wall` > `tight` > `partial` > `ok`, with `unknown` reserved for a reading nobody got.
