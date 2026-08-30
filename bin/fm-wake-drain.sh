@@ -363,7 +363,10 @@ print_status_sections() {
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   fm_lock_acquire_wait "$lock" || return 1
-  snapshot=$(status_presentation_snapshot "$STATE") || rc=1
+  snapshot=$(status_presentation_snapshot "$STATE") || {
+    printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
+    rc=1
+  }
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
     fm_wake_print_annotations "$rows" "$snapshot" || rc=1
     if [ "$rc" -eq 0 ]; then

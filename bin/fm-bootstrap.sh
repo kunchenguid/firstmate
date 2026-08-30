@@ -12,6 +12,8 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "HOME_SUMMARY: <ledger never published|not republished since
+#                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -1270,6 +1272,57 @@ detect_local_config() {
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
+  fi
+  detect_home_summary_publication
+}
+
+# This home's ledger publication is deliberately best-effort: every lifecycle
+# trigger calls it with --best-effort so a failure can never change the result
+# of a session start, a spawn, a teardown, or a watcher poll. That is correct,
+# and it also means a home that never manages to publish says nothing at all -
+# the failures land only in the bounded home-local record nobody reads.
+#
+# So read that same record here, where a session start already looks, and say so
+# once when the evidence is a pattern rather than a blip: the ledger has not
+# been (re)published, and at least FM_HOME_SUMMARY_FAILURE_REPORT attempts have
+# failed since whenever it last was. No new record, no new state, no retry
+# policy - just the existing evidence, surfaced.
+detect_home_summary_publication() {
+  local log="$STATE/.home-summary-refresh.log" ledger="$STATE/home-summary.json"
+  local since='' counted failures last threshold
+  threshold=${FM_HOME_SUMMARY_FAILURE_REPORT:-2}
+  case "$threshold" in ''|*[!0-9]*|0) threshold=2 ;; esac
+  [ -f "$log" ] && [ -r "$log" ] && [ ! -L "$log" ] || return 0
+  if [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ]; then
+    since=$(LC_ALL=C sed -n 's/.*"generated"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$ledger" 2>/dev/null | head -1)
+  fi
+  # Publication and failure stamps have whole-second precision, so failures in
+  # the publication's own second remain quiet until a later failure advances
+  # the record. That bounded delay avoids a precision dependency in bootstrap.
+  counted=$(LC_ALL=C awk -v since="$since" '
+    match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\]/) {
+      stamp = substr($0, 2, RLENGTH - 2)
+      if (since == "" || stamp > since) {
+        n += 1
+        last = substr($0, RLENGTH + 2)
+      } else if (stamp == since) {
+        same_second += 1
+      }
+    }
+    END {
+      if (since != "" && n > 0) n += same_second
+      printf "%d\t%s", n + 0, last
+    }' "$log" 2>/dev/null) || return 0
+  failures=${counted%%$'\t'*}
+  last=${counted#*$'\t'}
+  case "$failures" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$failures" -ge "$threshold" ] || return 0
+  last=$(printf '%s' "$last" | cut -c1-200)
+  if [ -z "$since" ]; then
+    echo "HOME_SUMMARY: this home has never published state/home-summary.json; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
+  else
+    echo "HOME_SUMMARY: state/home-summary.json has not been republished since $since; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
   fi
 }
 

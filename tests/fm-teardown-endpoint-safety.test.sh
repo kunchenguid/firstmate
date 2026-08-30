@@ -243,6 +243,44 @@ test_supported_backend_endpoint_records_validate() {
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
 }
 
+write_orca_meta() {  # <case-dir> <task-id> <orca-worktree-id>
+  local dir=$1 id=$2 worktree_id=$3
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$worktree_id"
+}
+
+test_orca_composite_worktree_id_rejects_malformed_halves() {
+  local dir id=orca-composite-task pty bad
+  local -a bad_ids
+  dir=$(make_case orca-composite)
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  pty=c3bcc5b7-c52e-415c-97d4-99b0e08024df
+
+  write_orca_meta "$dir" "$id" "$pty::$dir/worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2> "$dir/stderr" \
+    || fail "valid composite Orca worktree id refused: $(cat "$dir/stderr")"
+
+  bad_ids=(
+    "::$dir/worktree"
+    "$pty::worktree"
+    "$pty::$dir/worktree/../project"
+    "$pty::$dir/worktree/.."
+    "$pty::$dir/worktree"$'\t''trailing'
+  )
+  for bad in "${bad_ids[@]}"; do
+    write_orca_meta "$dir" "$id" "$bad"
+    if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" > "$dir/stdout" 2> "$dir/stderr"; then
+      fail "malformed Orca worktree id accepted: '$bad'"
+    fi
+    assert_contains "$(cat "$dir/stderr")" "malformed or inconsistent" \
+      "malformed Orca worktree id should refuse as an inconsistent endpoint: '$bad'"
+  done
+  pass "cleanup identity: an Orca worktree id with an empty id half, a relative or traversing path half, or a control character refuses"
+}
+
 test_tmux_empty_target_refuses_without_invocation() {
   local dir rc
   dir=$(make_case direct-empty)
@@ -369,6 +407,7 @@ test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_orca_composite_worktree_id_rejects_malformed_halves
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup

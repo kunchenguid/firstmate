@@ -673,6 +673,9 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+SPAWN_ENDPOINT_ABORT_CLEANUP=0
+SPAWN_ENDPOINT_ABORT_BACKEND=
+SPAWN_ENDPOINT_ABORT_TARGET=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -698,6 +701,20 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+spawn_endpoint_abort_metadata_published() {
+  # A fresh endpoint can be rolled back only until this invocation has
+  # published its own complete task record. Check the unique spawn generation
+  # as well as the normal endpoint binding so a stale same-id record cannot
+  # protect a newly-created endpoint from rollback.
+  local meta=$1 generation
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  generation=$(fm_backend_meta_exact_value "$meta" spawn_gen) || return 1
+  [ "$generation" = "$SPAWN_GEN" ] || return 1
+  fm_backend_validate_task_endpoint "$meta" "$ID" >/dev/null 2>&1 || return 1
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$SPAWN_ENDPOINT_ABORT_BACKEND" ] \
+    && [ "$FM_BACKEND_VALIDATED_TARGET" = "$SPAWN_ENDPOINT_ABORT_TARGET" ]
 }
 
 spawn_abort_cleanup() {
@@ -743,6 +760,12 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ "$SPAWN_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_ENDPOINT_ABORT_CLEANUP=0
+    if ! spawn_endpoint_abort_metadata_published "$STATE/$ID.meta"; then
+      fm_backend_kill "$SPAWN_ENDPOINT_ABORT_BACKEND" "$SPAWN_ENDPOINT_ABORT_TARGET" 2>/dev/null || true
+    fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -2159,6 +2182,17 @@ EOF
     ;;
 esac
 fi
+# A fresh ordinary endpoint has no durable identity until metadata is published.
+# If that publication fails, remove the endpoint instead of leaving an orphan
+# that normal teardown cannot address. Orca owns a worktree as well and has its
+# dedicated rollback above; projected Herdr panes have their exact journal-led
+# cleanup already armed.
+if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ] \
+   && { [ "$BACKEND" != herdr ] || [ "${HERDR_PROJECTED:-0}" -ne 1 ]; }; then
+  SPAWN_ENDPOINT_ABORT_BACKEND=$BACKEND
+  SPAWN_ENDPOINT_ABORT_TARGET=$T
+  SPAWN_ENDPOINT_ABORT_CLEANUP=1
+fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -2756,7 +2790,7 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+} > "$SPAWN_META_PATH" || exit 1
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
@@ -2773,6 +2807,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
+SPAWN_ENDPOINT_ABORT_CLEANUP=0
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 

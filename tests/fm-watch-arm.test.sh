@@ -95,11 +95,13 @@ write_remote_delta() {  # <result-path> <status-line>
 }
 
 status_signature() {  # <status-path>
-  if [ "$(uname)" = Darwin ]; then
-    stat -f '%z:%Fm' "$1"
-  else
-    stat -c '%s:%Y' "$1"
-  fi
+  bash -c '
+    . "$1"
+    reported=$(status_observed_signature "$2") || exit 1
+    size=$(_fm_status_file_size "$2") || exit 1
+    ident=$(_fm_open_decisions_file_ident "$2") || exit 1
+    printf "v2\t%s\t%s@%s" "$reported" "$size" "$ident"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$1"
 }
 
 wait_for_file_text() {  # <file> <fixed-text>

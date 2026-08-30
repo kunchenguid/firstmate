@@ -13,7 +13,7 @@
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
-#                          has a captain-relevant verb OR a no-verb signal's crew
+#                          span has a captain-relevant event OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
@@ -155,10 +155,9 @@ if [ "$(uname)" = Darwin ]; then
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
-# The size:mtime signal signature and .seen-* marker format are owned by
-# bin/fm-wake-lib.sh (fm_wake_signal_sig, fm_wake_signal_seen_path), shared
-# with the drain's annotation staleness check and this home's own bookkeeping
-# writers' guarded self-announced append.
+# bin/fm-classify-lib.sh owns status reported-state signatures and presentation
+# markers, while bin/fm-wake-lib.sh owns their wake-facing routing, the legacy
+# turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
@@ -792,24 +791,30 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
-# Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
-# compared against a persisted size:mtime signature (.seen-*) rather than
-# mtime-vs-a-startup-touch, so signals that land while no watcher is running
-# are caught by the next one, and same-second writes cannot slip through a
-# strict -nt comparison. Pure read: prints one "<seen-file>\t<sig>\t<file>"
-# line per changed file. .seen-* is updated only after the wake is either
-# surfaced or intentionally absorbed, so a watcher killed mid-cycle never
-# swallows a signal.
+# Layer 2 + 3 signal scan: status files and turn-end markers.
+# Each file is compared against its persisted reported signature in .seen-* rather
+# than mtime-vs-a-startup-touch, so signals that land while no watcher is running
+# are caught by the next one and same-second writes cannot slip through a strict
+# -nt comparison.
+# Status signatures include observable file and readability state, while turn-end
+# markers retain their size-and-mtime signature.
+# Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
+# The caller records reported state only after surfacing or intentional absorption,
+# and commits a status classification position only after a successful span read.
 scan_signals() {
   local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
-    [ -e "$f" ] || continue
+    if [ ! -e "$f" ]; then
+      case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
+    fi
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
-    if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
-      printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
-    fi
+    case "$f" in
+      *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
+      *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
+    esac
+    printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
   done
   return 0
 }
@@ -945,36 +950,95 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+# 0 when any signaled status file carries a captain-relevant event in the bytes
+# appended since this watcher last classified it. The start offset is the
+# classified-position field in that file's .seen-* marker, and fm-classify-lib.sh's
+# status-span contract owns both that format and what counts as actionable in
+# the span. Reading the SPAN rather than the last line is what stops a later
+# routine append - a `working:` note landing inside SIGNAL_GRACE below - from
+# hiding the `needs-decision`, `blocked`, `failed`, or `done` event that arrived
+# just before it: the .seen-* marker advances either way, so an event absorbed
+# here is never re-read. Non-.status arguments (.turn-ended markers, which carry
+# no verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal is
+# only benign when the crew is also provably working (signal_crew_provably_working).
+signal_files_actionable() {  # <status-file> ...
+  local f task record rest endpoint ident rc found=1
+  FM_SIGNAL_SURFACE_ENDPOINTS=''
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    record=$(status_span_first_actionable_record "$f" \
+      "$(fm_wake_signal_seen_size "$STATE" "$f")")
+    rc=$?
+    [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
+    if [ "$rc" -eq 2 ]; then
+      # Could not classify this log. Surface it rather than absorbing it, and
+      # record NO classified endpoint for it below, so its content is classified
+      # again once it is readable. The wake signature still advances, which is
+      # what bounds this to one report per distinct file state.
+      found=0
+      continue
+    fi
+    endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+    FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
+    [ "$rc" -eq 0 ] && found=0
+  done
+  return "$found"
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
-# Mark every current captain-relevant status as surfaced. Called after the
-# heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
-# by the next heartbeat.
+# Mark each actionable status log through the endpoint captured by the heartbeat
+# scan. Called after the backstop enqueues its wake, so the same events are not
+# re-surfaced by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f task last
-  while IFS=$(printf '\t') read -r f task last; do
+  local f endpoint ident rc=0
+  while IFS=$(printf '\t') read -r f endpoint ident; do
     [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
-  done < <(scan_captain_relevant_statuses "$STATE")
+    if [ "$endpoint" = ERROR ]; then
+      mark_surface_reported "$f" "$ident" || rc=1
+    else
+      mark_surfaced "$f" "$endpoint" "$ident" || rc=1
+    fi
+  done <<EOF
+$FM_HEARTBEAT_SURFACE_ENDPOINTS
+EOF
+  return "$rc"
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
-# any captain-relevant status has NOT already been surfaced to firstmate (its
-# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
-# effects: the caller enqueues first, then marks surfaced. Because every
-# captain-relevant signal/stale already marks itself surfaced when it wakes
-# firstmate, this normally finds nothing and the heartbeat is absorbed; it
-# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
+# any status log carries a captain-relevant event past the position already
+# surfaced to firstmate (.hb-surfaced-<task>). It walks every log rather than only
+# those whose LAST line looks captain-relevant, because the event this backstop
+# most needs to catch is precisely one a later routine append has already moved
+# past. Pure detect, no side effects: the caller enqueues first, then marks
+# surfaced. Because every captain-relevant signal/stale already marks itself
+# surfaced when it wakes firstmate, this normally finds nothing and the heartbeat
+# is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
-  while IFS=$(printf '\t') read -r f task last; do
-    [ -n "$f" ] || continue
-    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-    [ "$surfaced" = "$last" ] && continue
-    return 0
-  done < <(scan_captain_relevant_statuses "$STATE")
-  return 1
+  local f task record rest endpoint ident rc found=1 sig marker
+  FM_HEARTBEAT_SURFACE_ENDPOINTS=''
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
+    rc=$?
+    [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
+    if [ "$rc" -eq 2 ]; then
+      sig=$(status_observed_signature "$f")
+      marker=$(_hb_surfaced_path "$task")
+      status_presentation_marker_reported_matches "$marker" "$sig" && continue
+      FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"ERROR"$'\t'"${sig}"$'\n'
+      found=0
+      continue
+    fi
+    endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+    FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
+    [ "$rc" -eq 0 ] && found=0
+  done
+  return "$found"
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -1107,6 +1171,36 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+# Side-band ledger publication, detached from the poll loop.
+#
+# The poll loop owns the liveness beacon below, and fm-guard.sh reads that
+# beacon's freshness as proof that supervision is alive. Publication is a
+# side-band nicety bounded by FM_HOME_SUMMARY_TIMEOUT, but that bound is far
+# larger than one poll and, in a home whose publication keeps failing, it is
+# paid on every poll - so running it inline puts up to a full publication
+# deadline between two beacon touches and can starve the guard's grace. Nothing
+# in the poll depends on the ledger, so start it and move on: the beacon keeps
+# advancing no matter how slow the publication is.
+#
+# The trade the detachment makes: a reader can briefly see a ledger that
+# predates the event this poll just surfaced, where the inline call published
+# first. Publication is eventually consistent by design and every reader
+# re-derives current state from the owning home anyway, while beacon freshness
+# is what the whole supervision chain rests on.
+HOME_SUMMARY_PID=
+home_summary_refresh_detached() {
+  if [ -n "$HOME_SUMMARY_PID" ]; then
+    if kill -0 "$HOME_SUMMARY_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$HOME_SUMMARY_PID" 2>/dev/null || true
+    HOME_SUMMARY_PID=
+  fi
+  FM_HOME_SUMMARY_IF_IDLE=1 \
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+  HOME_SUMMARY_PID=$!
+}
+
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -1196,7 +1290,7 @@ while :; do
   touch "$STATE/.last-watcher-beat"
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    home_summary_refresh_detached
   fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
@@ -1327,10 +1421,11 @@ while :; do
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
-    # trigger for this home's published summary. Refresh before either
-    # surfacing or absorbing the signal so an actionable exit cannot leave the
-    # ledger behind the event it reports. Publication failure stays side-band.
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    # trigger for this home's published summary. Start it before either
+    # surfacing or absorbing the signal, but never wait on it: see
+    # home_summary_refresh_detached for why publication stays off the beacon's
+    # path. Publication failure stays side-band.
+    home_summary_refresh_detached
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
@@ -1341,7 +1436,8 @@ EOF
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
-    #   - any status file carries a captain-relevant verb;
+    #   - any status file gained a captain-relevant event since it was last
+    #     classified (its whole new span, not merely its last line);
     #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
     #     NOT provably working - the crew stopped its turn with no actively-running
     #     pipeline and no busy pane, so it may be done (even via an interactive menu
@@ -1352,29 +1448,67 @@ EOF
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    FM_SIGNAL_SURFACE_ENDPOINTS=''
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    signal_files_actionable $files
+    signal_actionable=$?
+    # shellcheck disable=SC2086  # same space-separated status-path list
+    if afk_present || [ "$signal_actionable" -eq 0 ] || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
       done <<EOF
 $pending
 EOF
+      # The wake signature advances for every file in this batch, including one
+      # whose span could not be classified: it has now been reported, and this is
+      # what bounds an unreadable log to one report per distinct file state. Only
+      # a SUCCESSFULLY classified log commits a classification position below, so
+      # an unreadable log's content is still classified once it becomes readable.
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
-        mark_surfaced "$f"
+        case "$f" in
+          *.status)
+            fm_wake_status_reported_commit "$STATE" "$f" "$sig" || true
+            mark_surface_reported "$f" "$sig" || true
+            ;;
+          *) printf '%s' "$sig" > "$sf" ;;
+        esac
       done <<EOF
 $pending
+EOF
+      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+        [ -n "$f" ] || continue
+        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
+        mark_surfaced "$f" "$surface_end" "$surface_ident"
+      done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
+        case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
       done <<EOF
 $pending
 EOF
+      signal_commit_error=0
+      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+        [ -n "$f" ] || continue
+        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" \
+          || signal_commit_error=1
+      done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+      if [ "$signal_commit_error" -ne 0 ]; then
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        done <<EOF
+$pending
+EOF
+        wake "$reason"
+      fi
       triage_log "absorbed benign $reason"
     fi
   fi
@@ -1464,7 +1598,13 @@ EOF
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
+              stale_record=$(status_span_first_actionable_record "$stale_status" 0)
+              case $? in
+                0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
+                *) stale_end=''; stale_ident='' ;;
+              esac
+              mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
@@ -1587,14 +1727,20 @@ EOF
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+      # Backstop: a captain-relevant event the per-wake path absorbed by mistake.
+      # Enqueue first, then record every status log surfaced through its end so the
+      # next heartbeat does not re-fire it (enqueue-before-suppress preserved);
+      # this wake sends firstmate to the whole fleet, so every log is read.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
+      mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
     else
+      if ! mark_all_captain_relevant_surfaced; then
+        fm_wake_append heartbeat heartbeat heartbeat || exit 1
+        touch "$STATE/.last-heartbeat"
+        wake "heartbeat"
+      fi
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
