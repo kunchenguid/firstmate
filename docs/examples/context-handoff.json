@@ -7,6 +7,18 @@
   "approved_source_roots": [
     "/absolute/approved/firstmate/data/root"
   ],
+  "registration_allowlist": [
+    {
+      "source_record": "/absolute/approved/firstmate/data/root/durable-owner.md",
+      "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "statement_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "kind": "project-fact",
+      "confidence": "verified",
+      "sphere": "privat",
+      "provider_class": "anthropic-claude-obsidian",
+      "supersedes": []
+    }
+  ],
   "allowed_provider_classes": [
     "anthropic-claude-obsidian"
   ],

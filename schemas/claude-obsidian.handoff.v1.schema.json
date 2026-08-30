@@ -64,7 +64,7 @@
         "confidence",
         "sphere",
         "provider_class",
-        "sensitive_scan",
+        "eligibility_sha256",
         "supersedes"
       ],
       "properties": {
@@ -113,8 +113,9 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9-]{1,63}$"
         },
-        "sensitive_scan": {
-          "const": "passed"
+        "eligibility_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "supersedes": {
           "type": "array",

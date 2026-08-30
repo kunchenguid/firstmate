@@ -3,4 +3,4 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec python3 "$ROOT/tests/fm-context-handoff.test.py"
+exec python3 "$ROOT/test-support/fm-context-handoff.test.py"
