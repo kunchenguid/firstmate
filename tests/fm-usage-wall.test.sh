@@ -70,31 +70,16 @@ fm_git_identity
 # header deliberately reproduces the vendor's own quirk of declaring a count
 # that does not match its field list, so the parser is pinned against the real
 # shape rather than a tidied one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-effective|model-scoped-only|reordered|divergent|singular-only>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only>
+  # The FLOOR-COMPLIANT layout, as quota-axi 0.1.29 and newer emit it and as
+  # verified live against 0.1.34 on this host: quota[], exhaustion[] and
+  # attention[]. The pre-floor effective[]/providers[]/windows[] shape is not
+  # generated here, because a build emitting it is refused before parsing.
   case "$1" in
-    model-scoped-only)
-      # An effective block that PARSES but carries no account-level row: every
-      # row is scoped to one model, which quota-axi owns the meaning of and
-      # which is not the dispatch gauge. Nothing was read, so both emitters owe
-      # the same reason for the same unknown.
+    no-quota)
+      # Neither table present: nothing to read, so nothing may be claimed.
       cat <<'EOF'
 bin: /fake/quota-axi
-providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
-  claude,max,oauth,fresh,unknown,none
-windows[1]{provider,id,label,percentRemaining,resetsAt,pace,state}:
-  claude,five_hour,session,84,"2026-08-27T02:19:59Z",ahead,fresh
-effective[7]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowId,runway,usableRunwaySeconds,projectionConfidence}:
-  claude,claude-opus-5,84,five_hour,five_hour,projected_exhaustion,14400,early
-EOF
-      return 0
-      ;;
-    no-effective)
-      cat <<'EOF'
-bin: /fake/quota-axi
-providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
-  claude,max,oauth,fresh,unknown,none
-windows[1]{provider,id,label,percentRemaining,resetsAt,pace,state}:
-  claude,five_hour,session,84,"2026-08-27T02:19:59Z",ahead,fresh
 EOF
       return 0
       ;;
@@ -102,71 +87,68 @@ EOF
       # Same facts, different field order, plus an unknown extra field.
       cat <<'EOF'
 bin: /fake/quota-axi
-providers[1]{authStatus,provider,plan,source,status,refreshedAt}:
-  unknown,claude,max,oauth,fresh,none
-windows[1]{resetsAt,provider,id,label,percentRemaining,pace,state}:
-  "2026-08-27T02:19:59Z",claude,five_hour,session,84,ahead,fresh
-effective[7]{someNewField,scope,provider,limitingWindowId,effectivePercentRemaining,usableRunwaySeconds,runway,projectionConfidence}:
-  ignored,all_models,claude,five_hour,84,14400,projected_exhaustion,early
+quota[1]{someNewField,scope,provider,limitedBy,effectivePercentRemaining,runway,confidence,resetsAt}:
+  ignored,all_models,claude,five_hour,84,projected_exhaustion,early,"2026-08-27T02:19:59Z"
+exhaustion[1]{scope,provider,limitingWindowId,usableRunwaySeconds}:
+  all_models,claude,five_hour,14400
+EOF
+      return 0
+      ;;
+    singular-only)
+      # No limitedBy at all: one window bounds both answers, and the percentage
+      # must still carry it rather than printing an absent-field marker.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,resetsAt}:
+  claude,all_models,84,projected_exhaustion,early,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,14400,five_hour
+EOF
+      return 0
+      ;;
+    model-scoped-only)
+      # A quota table that parses but yields no account-level row: a reading
+      # nobody got, and both emitters must say so identically.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt}:
+  claude,"model:fable",84,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+EOF
+      return 0
+      ;;
+    divergent)
+      # The two windows answer different questions and disagree loudly: the
+      # percentage is held down by the seven-day window while the runway is
+      # bounded by the five-hour one. Mislabelling either is unmistakable here,
+      # which is the point - a fixture where they agree cannot catch it.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,35,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,2400,five_hour
 EOF
       return 0
       ;;
   esac
-  if [ "$1" = singular-only ]; then
-    # Only `limitingWindowId`; no plural field at all. Both answers are bounded
-    # by the one window, so there is nothing to name separately.
-    cat <<'EOF'
-bin: /fake/quota-axi
-providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
-  claude,max,oauth,fresh,unknown,none
-windows[1]{provider,id,label,percentRemaining,resetsAt,pace,state}:
-  claude,five_hour,session,84,"2026-08-27T02:19:59Z",ahead,fresh
-effective[7]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowId,runway,usableRunwaySeconds,projectionConfidence}:
-  claude,all_models,84,five_hour,five_hour,projected_exhaustion,14400,early
-EOF
-    return 0
-  fi
-  if [ "$1" = divergent ]; then
-    # The two windows answer different questions and disagree loudly: the
-    # five-hour window is nearly full while the SEVEN-DAY window is the one
-    # actually holding the account down, and their resets are a week apart.
-    # Mislabelling either is unmistakable here, which is the whole point - the
-    # defect hid for as long as it did only because the two usually agree.
-    cat <<'EOF'
-bin: /fake/quota-axi
-providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
-  claude,max,oauth,fresh,unknown,none
-windows[2]{provider,id,label,percentRemaining,resetsAt,pace,state}:
-  claude,five_hour,session,85,"2026-08-29T04:09:59Z",ahead,fresh
-  claude,seven_day,week,35,"2026-09-02T07:59:59Z",ahead,fresh
-effective[8]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowIds,runway,usableRunwaySeconds,projectionConfidence,limitingWindowId}:
-  claude,all_models,35,"five_hour + seven_day",seven_day,projected_exhaustion,2400,early,five_hour
-EOF
-    return 0
-  fi
-  local pct=84 runway=14400 cursor_row='  cursor,unresolved,unknown,unknown,unknown,unknown,unknown'
+  local pct=84 runway=14400
   case "$1" in
     tight-pct) pct=12 ;;
     tight-runway) pct=90; runway=600 ;;
     exhausted) pct=0 ;;
   esac
   printf 'bin: /fake/quota-axi\n'
-  printf 'providers[2]{provider,plan,source,status,authStatus,refreshedAt}:\n'
-  printf '  claude,max,oauth,fresh,unknown,none\n'
+  printf 'quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt}:\n'
+  printf '  claude,all_models,%s,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"\n' "$pct"
+  printf 'exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:\n'
+  printf '  claude,all_models,%s,five_hour\n' "$runway"
+  # attention[] is sparse and carries the reason a provider has no quota row.
   if [ "$1" = auth ]; then
-    printf '  cursor,unknown,unavailable,auth_required,unknown,none\n'
+    printf 'attention[1]{provider,scope,kind,detail,remedy}:\n'
+    printf '  cursor,all,auth_required,Cursor sign-in required,none\n'
   else
-    printf '  cursor,pro,oauth,fresh,unknown,none\n'
-  fi
-  printf 'windows[2]{provider,id,label,percentRemaining,resetsAt,pace,state}:\n'
-  printf '  claude,five_hour,session,%s,"2026-08-27T02:19:59Z",ahead,fresh\n' "$pct"
-  printf '  claude,seven_day,week,92,"2026-09-02T07:59:59Z",on_pace,fresh\n'
-  printf 'effective[7]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowId,runway,usableRunwaySeconds,projectionConfidence}:\n'
-  printf '  claude,all_models,%s,"five_hour + seven_day",five_hour,projected_exhaustion,%s,early\n' "$pct" "$runway"
-  if [ "$1" = auth ]; then
-    printf '%s\n' "$cursor_row"
-  else
-    printf '  cursor,all_models,77,seven_day,seven_day,projected_exhaustion,20000,early\n'
+    printf 'quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt}:\n'
+    printf '  cursor,all_models,77,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"\n'
   fi
 }
 
@@ -248,8 +230,12 @@ assert_contains "$OUT" 'resets=2026-09-02T07:59:59Z' \
   "the reset shown beside the percentage is that window's own reset"
 assert_contains "$OUT" 'runway_bound=five_hour' \
   'the runway names its own limiting window when it differs'
-assert_contains "$OUT" 'runway_resets=2026-08-29T04:09:59Z' \
-  "and carries that window's own reset, so neither clock is attributed to the other"
+# This layout publishes a reset only for the percentage's own window, so the
+# runway's is reported as unknown rather than borrowed from the other window or
+# quietly dropped. A borrowed clock is the failure this pair of fields exists to
+# prevent: it sends a reader to wait out a window that was never the constraint.
+assert_contains "$OUT" 'runway_resets=unknown' \
+  "an unpublished reset is named as unknown, never borrowed from the other window"
 assert_not_contains "$OUT" 'pct=35 bound=five_hour' \
   'the percentage must never be attributed to a window sitting at 85 percent'
 pass 'headroom labels the percentage and the runway with their own windows and resets'
@@ -347,10 +333,10 @@ assert_contains "$OUT" 'verdict=unknown' 'a hanging gauge summarizes as unknown'
 pass 'headroom bounds a hanging quota-axi and reports unknown'
 
 CASE="$TMP_ROOT/hr-noeff"; mkdir -p "$CASE"
-fake_quota "$CASE/fakebin" no-effective
+fake_quota "$CASE/fakebin" no-quota
 OUT=$(run_headroom "$CASE/fakebin")
-assert_contains "$OUT" 'unknown reason=quota-axi printed no effective-headroom block' \
-  'a report without derived headroom is unmeasurable, not inferred from raw windows'
+assert_contains "$OUT" 'unknown reason=quota-axi printed no quota or attention block' \
+  'a report with neither table is unmeasurable, not inferred from anything else'
 assert_not_contains "$OUT" 'pct=84' 'a raw window percent is never presented as effective headroom'
 pass 'headroom refuses to infer headroom from raw windows alone'
 
@@ -440,14 +426,28 @@ assert_contains "$OUT" 'pct=84 bound=five_hour' \
 assert_contains "$OUT" 'runway=4h0m' 'a reordered report still yields the same runway'
 pass 'headroom survives upstream field reordering and additions'
 
-# --- headroom: a below-floor build still yields a reading -------------------
-
+# --- headroom: a below-floor build is refused, loudly -----------------------
+#
+# This command reads the table layout a floor-compliant build emits. Builds
+# below the floor emit a different one entirely, so parsing them would mean
+# declaring a build unsupported and then reading it anyway - and a reading that
+# looks fine from a build we reject is the exact failure this surface exists to
+# prevent. The refusal must therefore be louder than an ordinary unknown and
+# must name both versions, so an operator can act on it rather than wonder why
+# every provider went quiet.
+#
+# This case is covered by a stub rather than a live old build, because no
+# below-floor build remains reachable on this host; the floor path above is
+# verified live against a real 0.1.34.
 CASE="$TMP_ROOT/hr-floor"; mkdir -p "$CASE"
 fake_quota "$CASE/fakebin" healthy 0.0.1
 OUT=$(run_headroom "$CASE/fakebin")
-assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'an older but working build still produces a reading'
-assert_contains "$OUT" 'build=below-floor' 'the reading discloses that the build is below the shared floor'
-pass 'headroom reports a below-floor build rather than blanking its reading'
+assert_contains "$OUT" 'below the supported floor' 'a below-floor build is refused rather than parsed'
+assert_contains "$OUT" '0.0.1' 'the refusal names the installed version'
+assert_contains "$OUT" 'build=below-floor' 'and still carries the build label'
+assert_not_contains "$OUT" 'pct=84' 'a build we refuse to run must never yield a percentage'
+assert_contains "$OUT" 'UNMEASURED, not healthy' 'the refusal keeps the unmeasured note'
+pass 'headroom refuses a below-floor build and says so in terms an operator can act on'
 
 # --- headroom: an UNREAD build is not an OLD build ---------------------------
 #

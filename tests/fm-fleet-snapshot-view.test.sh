@@ -27,7 +27,7 @@ SH
   cat > "$fb/quota-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  --version) printf '0.0.0\n'; exit 0 ;;
+  --version) printf '0.1.40\n'; exit 0 ;;
 esac
 exit 1
 SH

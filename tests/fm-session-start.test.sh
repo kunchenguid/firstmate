@@ -90,12 +90,10 @@ make_fake_toolchain() {
 if [ "${1:-}" = --version ]; then printf '0.1.40\n'; exit 0; fi
 cat <<'EOF'
 bin: /fake/quota-axi
-providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
-  claude,max,oauth,fresh,unknown,none
-windows[1]{provider,id,label,percentRemaining,resetsAt,pace,state}:
-  claude,five_hour,session,73,"2026-08-27T02:19:59Z",ahead,fresh
-effective[7]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowId,runway,usableRunwaySeconds,projectionConfidence}:
-  claude,all_models,73,five_hour,five_hour,projected_exhaustion,14400,early
+quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,73,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,14400,five_hour
 EOF
 SH
   chmod +x "$fakebin/quota-axi"
