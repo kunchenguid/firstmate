@@ -66,6 +66,8 @@ case "${1:-}" in
   axi)
     shift
     case "${1:-}" in
+      '')
+        printf '%s\n' "${FM_FAKE_AXI_HOME:-}" ;;
       status)
         shift
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
@@ -162,6 +164,7 @@ arm_idle_record() {  # <state-dir> <id>
 reset_fakes() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_STATUS_RUN=""
+  FM_FAKE_AXI_HOME=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
@@ -170,7 +173,7 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_AXI_HOME FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -733,6 +736,52 @@ EOF
   assert_contains "$out" "state: working" "this branch's own run attributed via the runs list"
   assert_contains "$out" "source: run-step" "runs-list-resolved run -> run-step source"
   pass "cross-branch run is attributed via the real runs list"
+}
+
+test_cross_branch_passive_ci_monitor_parks() {
+  reset_fakes
+  local d short; d=$(new_case crossbranch-ci-wait)
+  make_repo_on_branch "$d/wt" fm/feat-cross-ci-wait
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cross-ci-wait.meta" "window=fm:fm-feat-cross-ci-wait" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_AXI_HOME="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  01OTHER,fm/other-crew,running,aaaaaaa,
+  01TARGET,fm/feat-cross-ci-wait,running,${short},https://github.com/o/r/pull/2
+EOF
+)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_ci_monitoring fm/feat-cross-ci-wait | sed 's/01RUN/01TARGET/')"
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  local out; out=$(run_crew_state "$d" feat-cross-ci-wait)
+  assert_contains "$out" "state: parked" "cross-branch passive CI monitor -> parked"
+  assert_contains "$out" "waiting for CI checks" "cross-branch passive CI monitor names the wait"
+  assert_not_contains "$out" "state: working" "cross-branch passive CI monitor must not appear active"
+  pass "cross-branch passive CI monitor parks from exact run status"
+}
+
+test_cross_branch_ci_remediation_stays_working() {
+  reset_fakes
+  local d short; d=$(new_case crossbranch-ci-fixing)
+  make_repo_on_branch "$d/wt" fm/feat-cross-ci-fixing
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cross-ci-fixing.meta" "window=fm:fm-feat-cross-ci-fixing" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_AXI_HOME="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  01OTHER,fm/other-crew,running,aaaaaaa,
+  01TARGET,fm/feat-cross-ci-fixing,running,${short},https://github.com/o/r/pull/2
+EOF
+)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_ci_monitoring fm/feat-cross-ci-fixing | sed 's/01RUN/01TARGET/')"
+  FM_FAKE_CI_LOGS="issues detected: ci failure - auto-fix enabled"
+  local out; out=$(run_crew_state "$d" feat-cross-ci-fixing)
+  assert_contains "$out" "state: working" "cross-branch CI remediation -> working"
+  assert_contains "$out" "ci remediation active" "cross-branch CI remediation names active work"
+  assert_not_contains "$out" "state: parked" "cross-branch CI remediation must not appear passive"
+  pass "cross-branch CI remediation stays working from exact run status"
 }
 
 # The runs list is newest-first; a branch with an OLDER completed run must not
@@ -1589,6 +1638,8 @@ test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
+test_cross_branch_passive_ci_monitor_parks
+test_cross_branch_ci_remediation_stays_working
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored

@@ -60,7 +60,7 @@ Any direct or remaining historical annotation prints every status line unread at
 [`bin/fm-nm-run-lib.sh`](../bin/fm-nm-run-lib.sh)'s header owns the exact branch, head, pipeline-custody, and newest-first attribution rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 A passive CI or check-registration wait is parked rather than underway, an active CI remediation remains working, and a trusted `no_ci: true` or green-check marker reports the deliverable done even while no-mistakes keeps monitoring the PR.
-The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+The most recent recognized ci log marker wins, so checks-green monitoring reports done, a later re-arm or failed-check marker reports parked, and an active issue-remediation marker returns the crew to working.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
