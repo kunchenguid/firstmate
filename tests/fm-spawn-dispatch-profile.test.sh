@@ -49,6 +49,16 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --version ]; then
+  [ -z "${FM_FAKE_CODEX_PROBE_LOG:-}" ] || printf '%s\n' "$0" >> "$FM_FAKE_CODEX_PROBE_LOG"
+  printf 'codex-cli %s\n' "${FM_FAKE_CODEX_VERSION:-0.149.1}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
   printf '%s\n' "$fakebin"
 }
 
@@ -93,6 +103,8 @@ run_spawn() {
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_CODEX_VERSION="${FM_TEST_CODEX_VERSION:-0.149.1}" \
+    FM_FAKE_CODEX_PROBE_LOG="${FM_TEST_CODEX_PROBE_LOG:-}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
@@ -417,21 +429,137 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_omits_invalid_max_effort() {
-  local rec id out status launch
+test_codex_threads_max_effort() {
+  local rec id out status launch probe_log probed_binary
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
+  probe_log="$CASE_DIR/codex-probe.log"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  out=$(FM_TEST_CODEX_PROBE_LOG="$probe_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.6-sol --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  expect_code 0 "$status" "codex spawn with max effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+  probed_binary=$(cat "$probe_log")
+  [ "$probed_binary" = "$FAKEBIN_DIR/codex" ] || fail "Codex max probe did not use the selected executable: $probed_binary"
+  assert_contains "$launch" "'$probed_binary' --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread max reasoning effort config"
+  pass "codex max probes and launches the same concrete executable"
+}
+
+test_raw_codex_max_probes_the_named_executable() {
+  local rec id out status launch raw_codex probe_log probed_binary
+  id=profile-raw-codex-max-z4a
+  rec=$(make_spawn_case profile-raw-codex-max codex "$id")
+  read_case_record "$rec"
+  raw_codex="$CASE_DIR/raw-bin/codex"
+  probe_log="$CASE_DIR/raw-codex-probe.log"
+  mkdir -p "$(dirname "$raw_codex")"
+  cat > "$raw_codex" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "$0" > "$FM_RAW_CODEX_PROBE_LOG"
+  printf '%s\n' 'codex-cli 0.149.1'
+fi
+SH
+  chmod +x "$raw_codex"
+
+  out=$(FM_TEST_CODEX_VERSION=0.142.1 FM_RAW_CODEX_PROBE_LOG="$probe_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "$raw_codex __EFFORTFLAG__--raw" --effort max)
+  status=$?
+  expect_code 0 "$status" "raw Codex max should probe the executable named by the launch command"
+  probed_binary=$(cat "$probe_log")
+  [ "$probed_binary" = "$raw_codex" ] \
+    || fail "raw Codex max probe used a different executable: $probed_binary"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$raw_codex' -c 'model_reasoning_effort=\"max\"' --raw" \
+    "raw Codex launch did not preserve the probed executable and max effort"
+  pass "raw Codex max probes the executable named by the launch command"
+}
+
+test_assignment_prefixed_raw_codex_max_replaces_the_command_word() {
+  local rec id out status launch probe_log probed_binary
+  id=profile-assignment-raw-codex-max-z4aa
+  rec=$(make_spawn_case profile-assignment-raw-codex-max codex "$id")
+  read_case_record "$rec"
+  probe_log="$CASE_DIR/raw-codex-probe.log"
+
+  out=$(FM_TEST_CODEX_PROBE_LOG="$probe_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "CODEX_BIN=codex codex __EFFORTFLAG__--raw" --effort max)
+  status=$?
+  expect_code 0 "$status" "assignment-prefixed raw Codex max should launch the probed executable"
+  probed_binary=$(cat "$probe_log")
+  [ "$probed_binary" = "$FAKEBIN_DIR/codex" ] \
+    || fail "assignment-prefixed raw Codex max probed a different executable: $probed_binary"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_BIN=codex '$probed_binary' -c 'model_reasoning_effort=\"max\"' --raw" \
+    "assignment-prefixed raw Codex max did not replace the parsed command word"
+  assert_not_contains "$launch" "CODEX_BIN='$probed_binary' codex" \
+    "assignment-prefixed raw Codex max replaced an assignment value instead of the command word"
+  pass "assignment-prefixed raw Codex max launches the same executable it probes"
+}
+
+test_missing_raw_codex_max_refuses_without_path_fallback() {
+  local rec id out status missing_codex launch
+  id=profile-missing-raw-codex-max-z4ab
+  rec=$(make_spawn_case profile-missing-raw-codex-max codex "$id")
+  read_case_record "$rec"
+  missing_codex="$CASE_DIR/missing-bin/codex"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "$missing_codex __EFFORTFLAG__--raw" --effort max)
+  status=$?
+  expect_code 1 "$status" "missing raw Codex max executable should refuse instead of falling back to PATH"
+  assert_contains "$out" "Codex executable '$missing_codex' was not found or is not executable" \
+    "missing raw Codex max refusal did not identify the selected executable"
+  launch=$(cat "$LAUNCH_LOG")
+  [ -z "$launch" ] || fail "missing raw Codex max fell back to the PATH executable: $launch"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing raw Codex max refusal must happen before metadata publication"
+  pass "missing raw Codex max refuses without falling back to a different PATH executable"
+}
+
+test_old_codex_refuses_max_effort() {
+  local rec id out status launch
+  id=profile-codex-old-max-z4b
+  rec=$(make_spawn_case profile-codex-old-max codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CODEX_VERSION=0.142.1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort max)
+  status=$?
+  expect_code 1 "$status" "older Codex spawn must refuse an explicit unsupported max effort"
+  assert_contains "$out" "refusing to launch without the explicitly selected effort" \
+    "older Codex max refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "older Codex refusal must happen before metadata publication"
+  launch=$(cat "$LAUNCH_LOG")
+  [ -z "$launch" ] || fail "older Codex launched after refusing max effort: $launch"
+  pass "older Codex refuses to launch without explicit max effort"
+}
+
+test_unparseable_codex_refuses_max_effort() {
+  local rec id out status launch
+  id=profile-codex-unparseable-max-z4c
+  rec=$(make_spawn_case profile-codex-unparseable-max codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CODEX_VERSION=development \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort max)
+  status=$?
+  expect_code 1 "$status" "unparseable Codex version must refuse an explicit max effort"
+  assert_contains "$out" "requires codex-cli 0.149.1 or newer with a parseable version" \
+    "unparseable Codex max refusal did not identify the compatibility boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "unparseable Codex refusal must happen before metadata publication"
+  launch=$(cat "$LAUNCH_LOG")
+  [ -z "$launch" ] || fail "unparseable Codex launched after refusing max effort: $launch"
+  pass "unparseable Codex version refuses to launch without explicit max effort"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -805,7 +933,12 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_threads_max_effort
+test_raw_codex_max_probes_the_named_executable
+test_assignment_prefixed_raw_codex_max_replaces_the_command_word
+test_missing_raw_codex_max_refuses_without_path_fallback
+test_old_codex_refuses_max_effort
+test_unparseable_codex_refuses_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

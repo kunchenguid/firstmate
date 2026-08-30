@@ -12,6 +12,7 @@ set -u
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-captain-hold)
+TMP_ROOT=$(cd -P -- "$TMP_ROOT" && pwd -P)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -127,10 +128,11 @@ EOF
       and (.reports | any(.id == "sample-route-review"))
   ' >/dev/null || fail "the pre-policy omission shape was not reproduced: $json"
 
-  set +e
-  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"
-  rc=$?
-  set -e
+  if run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
   [ "$rc" -ne 0 ] || fail "completed investigation teardown erased a report-only unresolved captain call"
   assert_present "$home/state/$id.meta" "refused completion must preserve investigation metadata"
   assert_grep "REFUSED" "$home/teardown.err" "refusal must be explicit"
@@ -708,7 +710,8 @@ SH
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/adapter-root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    "$ROOT/bin/fm-procevent.sh" start fixture-src >/dev/null 2>&1
+    "$ROOT/bin/fm-procevent.sh" start fixture-src > "$home/start.out" 2> "$home/start.err" \
+    || fail "could not start the fixture channel source: $(cat "$home/start.err")"
   assert_absent "$home/state/procevent-inbox/fixture-src.1.handled" \
     "feeding a captain answer retired the notification firstmate still needs"
   assert_present "$home/state/procevent-inbox/fixture-src.1.result" \
@@ -731,11 +734,12 @@ SH
 
   # Replaying the same capture is a no-op, not a rejected different decision. A
   # run that could not close every answered key still reports nonzero.
-  set +e
-  out=$(run_lavish "$home" answers "$result" \
-    | run_captain "$home" answers --source "the captured result fixture-src sequence 1" 2>&1)
-  rc=$?
-  set -e
+  if out=$(run_lavish "$home" answers "$result" \
+    | run_captain "$home" answers --source "the captured result fixture-src sequence 1" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
   [ "$rc" -ne 0 ] || fail "a run that skipped a key reported success"
   assert_contains "$out" "closed: sample-membership-call" \
     "replaying an identical capture was not idempotent: $out"
@@ -786,10 +790,11 @@ session:
 prompts[1]{uid,prompt,selector,tag,text}:
   "2","Only choice: yes\n\nContext data:\n{\n  \"question\": \"sample-only-call\",\n  \"answer\": \"yes\"\n}","form",choice,"Only choice: yes"
 EOF
-  set +e
-  out=$(run_captain "$home" binding "$sid" 2>&1)
-  rc=$?
-  set -e
+  if out=$(run_captain "$home" binding "$sid" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
   [ "$rc" -ne 0 ] || fail "an unbound source reported a binding"
   [ -z "$out" ] || fail "an unbound source printed a binding: $out"
   show=$(tasks_in "$home" show sample-only-call --full)
