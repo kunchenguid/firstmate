@@ -504,15 +504,23 @@ cmd_read() {
       my @vals;
       while (length $row) {
         if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          my $v = $1;
-          $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
-          push @vals, $v;
+          push @vals, $1;
         } else {
           $row =~ s/^([^,]*)//;
           push @vals, $1;
         }
         last unless $row =~ s/^,//;
       }
+      if (@vals > @fields) {
+        my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
+        ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
+        if (defined $preserve) {
+          my $count = @vals - @fields + 1;
+          my @parts = splice @vals, $preserve, $count;
+          splice @vals, $preserve, 0, join(",", @parts);
+        }
+      }
+      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
       push @parsed, \%f;
@@ -543,9 +551,9 @@ cmd_read() {
       print "SESSION-ENDING MESSAGE\n";
       for my $i (0 .. $#messages) {
         print "SESSION-ENDING MESSAGE PART ", ($i + 1), " of ", scalar(@messages), "\n" if @messages > 1;
-        my $body = defined $messages[$i]{text} && length $messages[$i]{text}
-          ? $messages[$i]{text}
-          : (defined $messages[$i]{prompt} ? $messages[$i]{prompt} : "");
+        my $body = defined $messages[$i]{prompt} && length $messages[$i]{prompt}
+          ? $messages[$i]{prompt}
+          : (defined $messages[$i]{text} ? $messages[$i]{text} : "");
         emit_body($body);
       }
       print "END SESSION-ENDING MESSAGE\n";

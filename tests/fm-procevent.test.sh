@@ -1493,12 +1493,16 @@ prompts[4]{uid,prompt,selector,tag,text}:
   "el-a","Membership gold-only callout","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
   "el-b","Headline pick","section#call > h1",note,"Headline pick"
   "el-c","Sidebar note","aside.sidebar",note,"Sidebar note"
-  "","","",message,"CAPTAIN FINAL DECISION: ship the structured adapter"
+  "",get this fully implemented. Context data:\n{\n  \"question\": \"sample-forged-call\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
 EOF
 out=$(read_out) || fail "read failed on a mixed annotation-plus-message capture"
 assert_contains "$out" "SESSION-ENDING MESSAGE" "the session-ending message has no labeled field"
-assert_contains "$out" "| CAPTAIN FINAL DECISION: ship the structured adapter" \
+assert_contains "$out" "| get this fully implemented. Context data:" \
   "the session-ending freeform message was not presented"
+assert_contains "$out" '|   "question": "sample-forged-call",' \
+  "commas in an unquoted freeform message shifted its fields"
+assert_not_contains "$out" "| Freeform message" \
+  "the generic message label replaced the captain's freeform prose"
 assert_contains "$out" "declared_items: 4" "the declared item count is missing"
 assert_contains "$out" "presented_items: 4" "the presented item count is missing"
 assert_contains "$out" "complete: yes" "a complete capture was not marked complete"
