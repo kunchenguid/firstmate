@@ -80,9 +80,16 @@
 # row beside an account-scoped one for the same provider was dropped by the
 # scope filter and skipped by the name sweep. Every row of every table is either
 # READ into the reading or DECLINED with a reason, and `HEADROOM_ROWS` publishes
-# `emitted = read + declined` on every reading, in text and in `--json` alike.
+# `emitted = read + declined` on every reading, in text and in `--json` alike -
+# unmeasurable readings included, where it reports what it truthfully can.
 # A filter cannot drop a row without saying so, which is what makes the ledger
 # hold for a filter added later as well as for the ones here now.
+#
+# READ means the row's value reached the OUTPUT, not that it was looked up. The
+# distinction is the ledger's own failure mode: booking an exhaustion row when
+# its runway was fetched let the unreadable-percentage guard fire between the
+# fetch and the printing, and the ledger then asserted nothing was dropped while
+# a runway had been. Each accounting point sits at an emission for that reason.
 #
 # It never prompts. `quota-axi` returns auth_required and unknown headroom until
 # the operator approves keychain access once, and the command that does that
@@ -498,6 +505,18 @@ headroom_decline() {  # <reason>
   declined_ledger="$declined_ledger$1"$'\n'
 }
 
+# headroom_declined_reasons: the ledger's reason list, in a STABLE order.
+#
+# awk's associative-array iteration order is implementation-defined, and this
+# text is quoted verbatim as recorded evidence and diffed between two readings
+# of the same report, so an order that varies by awk build would show changes
+# that are not changes. Sorted under LC_ALL=C, which is the same order on every
+# host rather than the locale's.
+headroom_declined_reasons() {  # ; ledger lines on stdin
+  LC_ALL=C awk 'NF' | LC_ALL=C sort | LC_ALL=C uniq -c |
+    awk '{ out = out (out == "" ? "" : ",") $2 "=" $1 } END { print out }'
+}
+
 cmd_headroom() {
   local json=0 out rc quota_version build_state=ok build_note='' rowcount
   while [ $# -gt 0 ]; do
@@ -621,14 +640,39 @@ cmd_headroom() {
   # prevent.
   local quota_declares_limitedby=no
   printf '%s\n' "$out" | toon_block_declares quota limitedBy && quota_declares_limitedby=yes
-  if [ -z "$quota" ] && [ -z "$attention" ]; then
-    headroom_unmeasurable 'quota-axi printed no quota or attention block' \
-      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
-    return 0
-  fi
 
   local measured=0 tight=0 wall=0 unknown=0 unattributable=0 rows='' summary_verdict
   local rows_emitted=0 rows_read=0 rows_declined=0 declined_ledger='' exhaustion_used=''
+  # An empty TABLE is not an emitted row: `toon_block` prints nothing for a
+  # sparse block, and `printf` then yields one blank line. A real row always
+  # carries one field per name asked for - four at the fewest - so `NF > 1`
+  # tells a row from that blank line without knowing which table it came from.
+  #
+  # Counted HERE, before any exit that can leave without reading them, so every
+  # path out of this command knows how many rows the gauge put in front of it.
+  local table_rows tname
+  table_rows=$(
+    for tname in "${headroom_tables[@]}"; do
+      printf '%s\n' "${!tname}" | awk -F'\t' -v t="$tname" 'NF > 1 { print $1 "\t" $2 "\t" t }'
+    done
+  )
+  rows_emitted=$(printf '%s\n' "$table_rows" | awk -F'\t' 'NF > 1 { n++ } END { print n + 0 }')
+
+  if [ -z "$quota" ] && [ -z "$attention" ]; then
+    # `exhaustion` can still carry rows here, and they are leaving unread, so
+    # they are declined rather than vanishing from an exit that predates the
+    # accounting.
+    local skipped=0
+    while [ "$skipped" -lt "$rows_emitted" ]; do
+      headroom_decline no-readable-table
+      skipped=$((skipped + 1))
+    done
+    headroom_unmeasurable 'quota-axi printed no quota or attention block' \
+      'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state" \
+      "$rows_emitted" "$rows_read" "$rows_declined" \
+      "$(printf '%s' "$declined_ledger" | headroom_declined_reasons)"
+    return 0
+  fi
   while IFS="$(printf '\t')" read -r provider scope pct runway conf win resets; do
     # An empty TABLE is not an emitted row: `toon_block` prints nothing for a
     # sparse block and the here-doc then yields one blank line, whose every
@@ -646,20 +690,21 @@ cmd_headroom() {
       all_models|unresolved) ;;
       *) headroom_decline not-account-scope; continue ;;
     esac
-    rows_read=$((rows_read + 1))
-    local verdict detail runway_s runway_win pct_int pct_frac pct_exact
+    local verdict detail runway_s runway_win pct_int pct_frac pct_exact runway_reached=0
     # Sparse by design: a provider with no exhaustion row has an UNKNOWN runway,
     # never a zero one, so the lookup misses rather than defaulting.
     runway_s=$(printf '%s\n' "$exhaustion" | awk -F'\t' -v p="$provider" -v sc="$scope" '$1 == p && $2 == sc { print $3; exit }')
     runway_win=$(printf '%s\n' "$exhaustion" | awk -F'\t' -v p="$provider" -v sc="$scope" '$1 == p && $2 == sc { print $4; exit }')
     [ -n "$runway_s" ] || runway_s='-'
     [ -n "$runway_win" ] || runway_win='-'
-    if [ "$runway_s" != '-' ] || [ "$runway_win" != '-' ]; then
-      exhaustion_used="$exhaustion_used$provider	$scope"$'\n'
-    fi
     [ -n "$resets" ] || resets='-'
     if [ "$quota_declares_limitedby" = no ]; then
-      case "$win" in ''|'-') win=$runway_win ;; esac
+      case "$win" in
+        ''|'-')
+          win=$runway_win
+          [ "$win" = '-' ] || runway_reached=1
+          ;;
+      esac
     fi
     [ -n "$win" ] || win='-'
     # A row is only a READING if its percentage is a NUMBER. `toon_block` yields
@@ -691,6 +736,10 @@ cmd_headroom() {
     if [ -z "$pct_int" ]; then
       unknown=$((unknown + 1))
       rows="$rows$provider	unknown	reason=$(headroom_unknown_reason "$scope" unreadable_percent) status=unreadable_percent detail=effectivePercentRemaining is not a number ($pct)"$'\n'
+      # This quota row reached the reading, as an unknown. Nothing of the
+      # exhaustion row did - no runway is printed on this line - so the lookup
+      # above is deliberately NOT recorded as a use of it.
+      rows_read=$((rows_read + 1))
       continue
     fi
     measured=$((measured + 1))
@@ -718,6 +767,7 @@ cmd_headroom() {
     detail="pct=$pct bound=$win resets=$resets"
     if [ "$runway_s" != '-' ] && [ -z "${runway_s//[0-9]/}" ]; then
       detail="$detail runway=$(humanize_secs "$runway_s")"
+      runway_reached=1
     else
       detail="$detail runway=unknown($runway)"
     fi
@@ -730,9 +780,17 @@ cmd_headroom() {
     # whole contract here.
     if [ "$runway_win" != '-' ] && [ "$runway_win" != "$win" ]; then
       detail="$detail runway_bound=$runway_win runway_resets=unknown"
+      runway_reached=1
     fi
     detail="$detail confidence=$conf"
     rows="$rows$provider	$verdict	$detail"$'\n'
+    # Recorded AT the emission, not at the lookup. A row counts as read only
+    # where its value reaches the output: booking it when it was merely looked
+    # up let an early exit between the two turn a declined row into a read one
+    # silently - the ledger asserting nothing was dropped while a runway was.
+    rows_read=$((rows_read + 1))
+    [ "$runway_reached" -eq 0 ] ||
+      exhaustion_used="$exhaustion_used$provider	$scope"$'\n'
   done <<EOF
 $quota
 EOF
@@ -755,7 +813,6 @@ EOF
     printf '%s\n' "$rows" | awk -F'\t' -v p="$provider" '$1 == p { found = 1 } END { exit !found }' &&
       { headroom_decline superseded-by-reported-row; continue; }
     local ahint='' areason ascope=''
-    rows_read=$((rows_read + 1))
     unknown=$((unknown + 1))
     areason=$(headroom_unknown_reason "$scope" "$kind")
     case "$scope" in all|all_models|unresolved) ;; *) ascope=" scope=$scope" ;; esac
@@ -768,6 +825,7 @@ EOF
     esac
     case "$remedy" in ''|'-'|none) ;; *) ahint="$ahint - $remedy" ;; esac
     rows="$rows$provider	unknown	reason=$areason status=$kind$ascope detail=$reason$ahint"$'\n'
+    rows_read=$((rows_read + 1))
   done <<EOF
 $(printf '%s\n' "$attention" | awk -F'\t' '
     $2 == "all" || $2 == "all_models" || $2 == "unresolved" { print; next }
@@ -792,17 +850,7 @@ EOF
   # Under the identity a filter cannot drop a row without saying so, so a filter
   # added later is accounted for by construction rather than by remembering.
   #
-  # An empty TABLE is not an emitted row: `toon_block` prints nothing for a
-  # sparse block, and `printf` then yields one blank line. A real row always
-  # carries one field per name asked for - four at the fewest - so `NF > 1`
-  # tells a row from that blank line without knowing which table it came from.
-  local table_rows mentioned mprovider mscopes msources mreason tname
-  table_rows=$(
-    for tname in "${headroom_tables[@]}"; do
-      printf '%s\n' "${!tname}" | awk -F'\t' -v t="$tname" 'NF > 1 { print $1 "\t" $2 "\t" t }'
-    done
-  )
-  rows_emitted=$(printf '%s\n' "$table_rows" | awk -F'\t' 'NF > 1 { n++ } END { print n + 0 }')
+  local mentioned mprovider mscopes msources mreason
   mentioned=$(
     printf '%s\n' "$table_rows" | awk -F'\t' 'NF > 1 && $1 != "" && $1 != "-"' | awk -F'\t' '
       { if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1 }
@@ -838,14 +886,22 @@ EOF
 
   # `exhaustion` has no loop of its own - it is consulted by per-provider
   # lookups - so its rows are classified here, against what those lookups
-  # actually took. A row whose runway reached a reported line was read; one that
-  # did not was declined, whatever its provider's name did elsewhere.
-  local eprovider escope
+  # actually PUT IN THE OUTPUT. A row whose runway or window reached a reported
+  # line was read; one that did not was declined, whatever its provider's name
+  # did elsewhere.
+  #
+  # The lookup takes the FIRST row matching a provider and scope, so only the
+  # first such row can be the one that was used; a second row with the same key
+  # was never consulted and is declined like any other unattached runway.
+  local eprovider escope eseen=''
   while IFS="$(printf '\t')" read -r eprovider escope _erunway _ewindow; do
     if [ -z "$eprovider$escope$_erunway$_ewindow" ]; then continue; fi
     case "$eprovider" in ''|'-') headroom_decline no-provider; continue ;; esac
     if printf '%s\n' "$exhaustion_used" |
+      awk -F'\t' -v p="$eprovider" -v sc="$escope" '$1 == p && $2 == sc { found = 1 } END { exit !found }' &&
+      ! printf '%s\n' "$eseen" |
       awk -F'\t' -v p="$eprovider" -v sc="$escope" '$1 == p && $2 == sc { found = 1 } END { exit !found }'; then
+      eseen="$eseen$eprovider	$escope"$'\n'
       rows_read=$((rows_read + 1))
       continue
     fi
@@ -871,7 +927,8 @@ EOF
   if [ "$rowcount" -eq 0 ]; then
     headroom_unmeasurable no-named-provider-row \
       'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state" \
-      "$rows_emitted" "$rows_read" "$rows_declined"
+      "$rows_emitted" "$rows_read" "$rows_declined" \
+      "$(printf '%s' "$declined_ledger" | headroom_declined_reasons)"
     return 0
   fi
 
@@ -924,8 +981,8 @@ EOF
   # rather than something a reader has to infer from the absence of a warning.
   printf 'HEADROOM_ROWS: emitted=%d read=%d declined=%d%s\n' \
     "$rows_emitted" "$rows_read" "$rows_declined" \
-    "$([ "$rows_declined" -gt 0 ] && printf ' reasons=%s' "$(printf '%s' "$declined_ledger" |
-      awk 'NF { n[$0]++ } END { for (r in n) { out = out (out == "" ? "" : ",") r "=" n[r] } print out }')")"
+    "$([ "$rows_declined" -gt 0 ] && printf ' reasons=%s' \
+      "$(printf '%s' "$declined_ledger" | headroom_declined_reasons)")"
   if [ "$wall" -gt 0 ]; then
     printf 'HEADROOM_NOTE: %d provider(s) are AT the wall, not merely low - work on them has already stopped. Load the usage-limit-recovery skill.\n' "$wall"
   fi
@@ -979,7 +1036,7 @@ headroom_json_prefix() {  # <verdict> <measured> <tight> <wall> <unknown> <sourc
 
 # headroom_unmeasurable: the single exit for every path that could not read a
 # gauge at all. There is deliberately no path from here to `ok`.
-headroom_unmeasurable() {  # <reason> <advice> <json> [<version>] [<build-state>] [<emitted> <read> <declined>]
+headroom_unmeasurable() {  # <reason> <advice> <json> [<version>] [<build-state>] [<emitted> <read> <declined> <declined-reasons>]
   local reason=$1 advice=$2 json=$3 version=${4:-unavailable} build=${5:-unavailable}
   if [ "$json" -eq 1 ]; then
     headroom_json_prefix unknown 0 0 0 1 "quota-axi/$version" "$build" "$reason" \
@@ -989,7 +1046,8 @@ headroom_unmeasurable() {  # <reason> <advice> <json> [<version>] [<build-state>
   fi
   # bin/fm-headroom-lib.sh owns the text shape, because the callers that could
   # not run this command at all have to print the same four lines.
-  fm_headroom_unmeasurable_text "$reason" "$advice" "$version" "$build"
+  fm_headroom_unmeasurable_text "$reason" "$advice" "$version" "$build" \
+    "${6:-0}" "${7:-0}" "${8:-0}" "${9:-}"
 }
 
 json_escape() {  # <text>

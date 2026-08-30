@@ -19,8 +19,17 @@
 #       all, and `unavailable` is no gauge to read.
 #
 #   fm_headroom_unmeasurable_text <reason> <advice> [<version>] [<build-state>]
-#       The four-line unknown reading. There is deliberately no path from here
+#                                 [<emitted> <read> <declined> <declined-reasons>]
+#       The unknown reading, in full. There is deliberately no path from here
 #       to `ok`.
+#
+#       It carries `HEADROOM_ROWS` like every other reading, because an
+#       unmeasurable one is exactly where a reader most needs to know whether
+#       anything was accounted for: a report whose every row carried no provider
+#       leaves through here having emitted three rows and read none, and saying
+#       so is the point. A caller with no report to account for - the gauge was
+#       never run, or never answered - passes nothing and the ledger reads all
+#       zeroes, which is the truth for that path.
 
 # The floor constant belongs to bin/fm-quota-axi-lib.sh, which every caller that
 # can produce a `below-floor` state already sources. A caller that cannot reach
@@ -33,13 +42,17 @@ fm_headroom_build_note() {  # <build-state>
   esac
 }
 
-fm_headroom_unmeasurable_text() {  # <reason> <advice> [<version>] [<build-state>]
+fm_headroom_unmeasurable_text() {  # <reason> <advice> [<version>] [<build-state>] [<emitted> <read> <declined> <declined-reasons>]
   local reason=$1 advice=$2 version=${3:-unavailable} build=${4:-unavailable} note root
+  local emitted=${5:-0} read_rows=${6:-0} declined=${7:-0} declined_reasons=${8:-}
   note=$(fm_headroom_build_note "$build")
   root=${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
   printf 'HEADROOM: (all providers) unknown reason=%s\n' "$reason"
   printf 'HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/%s%s\n' \
     "$version" "$note"
+  printf 'HEADROOM_ROWS: emitted=%d read=%d declined=%d%s\n' \
+    "$emitted" "$read_rows" "$declined" \
+    "$([ -n "$declined_reasons" ] && printf ' reasons=%s' "$declined_reasons")"
   printf 'HEADROOM_NOTE: headroom is UNMEASURED, not healthy - %s.\n' "$advice"
   printf 'HEADROOM_NEXT: %s/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.\n' "$root"
 }

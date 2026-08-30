@@ -73,7 +73,7 @@ fm_git_identity
 # carrying `spendPriority`, an `exhaustion[N]` block, and a sparse `attention[N]`
 # block - so the parser is pinned against the emitted shape rather than a tidied
 # one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider|unattributable-in-quota|unattributable-in-exhaustion|unattributable-in-attention|unattributable-every-table|exhaustion-only|auth-with-remedy|mixed-scopes-and-tables|empty-limitedby-cell>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider|unattributable-in-quota|unattributable-in-exhaustion|unattributable-in-attention|unattributable-every-table|exhaustion-only|auth-with-remedy|mixed-scopes-and-tables|empty-limitedby-cell|unreadable-pct-with-runway|all-rows-unnamed>
   # The FLOOR-COMPLIANT layout, as quota-axi 0.1.29 and newer emit it and as
   # verified live against 0.1.34 on this host: quota[], exhaustion[] and
   # attention[]. The pre-floor effective[]/providers[]/windows[] shape is not
@@ -267,6 +267,34 @@ exhaustion[2]{provider,scope,usableRunwaySeconds,limitingWindowId}:
 attention[2]{provider,scope,kind,detail,remedy}:
   claude,"model:fable",unmeasurable,"model:fable blocks spendPriority",none
   codex,all,error,Codex quota unavailable,none
+EOF
+      return 0
+      ;;
+    unreadable-pct-with-runway)
+      # The header rename this parser documents as its motivating case, beside
+      # an exhaustion row that matches the quota row's provider and scope. The
+      # runway is looked up and then never printed, because the row leaves
+      # through the unreadable-percentage guard first.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,percentRemaining,limitedBy,resetsAt}:
+  claude,all_models,84,five_hour,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,14400,five_hour
+EOF
+      return 0
+      ;;
+    all-rows-unnamed)
+      # Every row in every table carries an empty `provider` cell, so the
+      # reading leaves through the unmeasurable exit having emitted three rows
+      # and read none - the sharpest case for the ledger to exist.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[2]{provider,scope,effectivePercentRemaining,limitedBy,resetsAt}:
+  ,all_models,84,five_hour,"2026-08-27T02:19:59Z"
+  ,all_models,3,five_hour,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  ,all_models,14400,five_hour
 EOF
       return 0
       ;;
@@ -829,6 +857,58 @@ if command -v jq >/dev/null 2>&1; then
     || fail "--json must publish the same row identity as the text form: $OUT"
 fi
 pass 'headroom publishes a row ledger in which emitted equals read plus declined'
+
+# --- headroom: a row is read where its value is emitted, not where it is read up
+#
+# The ledger booked a row as read at the point it was LOOKED UP rather than at
+# the point its value reached the output, so any early exit between the two
+# turned a declined row into a read one silently. The unreadable-percentage
+# guard is exactly such an exit: the quota row's runway is looked up, the guard
+# fires, and no runway is ever printed - yet the exhaustion row was counted read
+# and the ledger published `emitted=2 read=2 declined=0`, asserting nothing was
+# dropped while a runway had been. That is the same unaccounted discard the row
+# identity exists to make impossible, this time inside the ledger itself.
+CASE="$TMP_ROOT/hr-runway-discarded"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" unreadable-pct-with-runway
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude unknown reason=unreadable-percent' \
+  'the quota row still reaches the reading, as an unknown'
+assert_not_contains "$OUT" 'runway=' \
+  'no runway is printed on that line, so nothing of the exhaustion row was emitted'
+assert_contains "$OUT" 'HEADROOM_ROWS: emitted=2 read=1 declined=1 reasons=runway-not-attached=1' \
+  'a runway that never reached the output is declined, not counted read'
+pass 'headroom counts a row read only where its value is emitted'
+
+# --- headroom: an unmeasurable reading carries the ledger too ----------------
+#
+# The claim is that the ledger is published on EVERY reading, and the reading
+# that most needs it is the one that measured nothing: a report whose every row
+# carries an empty provider emitted three rows and read none. The text form
+# published no ledger at all, in exactly the shape bin/fm-session-start.sh and
+# bin/fm-fleet-view.sh render, while `--json` on the same input carried the
+# counts - so the two emitters disagreed about whether the fact existed.
+CASE="$TMP_ROOT/hr-unnamed-ledger"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" all-rows-unnamed
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: (all providers) unknown reason=no-named-provider-row' \
+  'the reading still leaves through the single unmeasurable exit'
+assert_contains "$OUT" 'HEADROOM_ROWS: emitted=3 read=0 declined=3 reasons=no-provider=3' \
+  'and it publishes what it emitted, what it read, and why the rest was declined'
+if command -v jq >/dev/null 2>&1; then
+  JOUT=$(run_headroom "$CASE/fakebin" --json)
+  printf '%s' "$JOUT" | jq -e '.rows.emitted == 3 and .rows.read == 0 and .rows.declined == 3' >/dev/null \
+    || fail "--json must carry the same ledger as the text form on an unmeasurable reading: $JOUT"
+fi
+# A reading with no report to account for - no gauge on PATH - reports all
+# zeroes rather than omitting the line, so the ledger's presence is not itself a
+# signal a reader has to interpret.
+CASE="$TMP_ROOT/hr-nogauge-ledger"; mkdir -p "$CASE/fakebin"
+OUT=$( PATH="$CASE/fakebin:/usr/bin:/bin:/usr/sbin:/sbin" "$WALL" headroom 2>&1 )
+assert_contains "$OUT" 'HEADROOM_ROWS: emitted=0 read=0 declined=0' \
+  'a reading that never saw a report accounts for nothing, and says so'
+assert_not_contains "$OUT" 'reasons=' \
+  'with no reasons list, because no row was declined'
+pass 'headroom publishes the row ledger on unmeasurable readings as well'
 
 # --- headroom: an empty cell is not a singular-window gauge ------------------
 #
@@ -2005,8 +2085,21 @@ assert_contains "$BACK" 'branch: unknown' \
   'a plain directory inside a repository is not that repository'
 assert_not_contains "$BACK" 'ancestor-branch-not-the-task' \
   'the ancestor branch must never be reported as the task local copy branch'
-assert_not_contains "$BACK" 'uncommitted: 1' \
-  'nor the ancestor uncommitted count'
+# Read the ancestor's count from git rather than hardcoding one. The literal
+# `uncommitted: 1` asserted here before could not fail: the ancestor's count in
+# this fixture is 2 - `ancestor-dirty.txt` and the untracked `sub/` holding the
+# nested copy, since `git status --porcelain` reports repo-wide status from any
+# subdirectory - so the assertion passed whether the gate worked or not. That is
+# the substring-pin defect this suite is elsewhere careful about, in its own
+# assertion. Asking git for the number makes it fail exactly when the gate
+# regresses and the ancestor's state is borrowed.
+ANCESTOR_DIRTY=$(git -C "$CASE/repo" status --porcelain | grep -c .)
+[ "$ANCESTOR_DIRTY" -gt 0 ] \
+  || fail 'the ancestor must be dirty for this case to distinguish borrowed state from unknown'
+assert_not_contains "$BACK" "uncommitted: $ANCESTOR_DIRTY" \
+  'the ancestor uncommitted count must never be reported as the task local copy count'
+assert_contains "$BACK" 'uncommitted: unknown' \
+  'nothing about a copy git cannot read is measured'
 assert_contains "$BACK" 'git cannot read it as a repository' \
   'the record says the copy could not be read, rather than borrowing what is above it'
 pass 'resume does not read an ancestor repository as the task local copy'

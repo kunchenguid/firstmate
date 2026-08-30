@@ -71,6 +71,7 @@ The verdict is `unknown` with its reason, never `ok`:
 ```
 HEADROOM: (all providers) unknown reason=quota-axi is not installed
 HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/unavailable build=unavailable
+HEADROOM_ROWS: emitted=0 read=0 declined=0
 HEADROOM_NOTE: headroom is UNMEASURED, not healthy - install it with npm install -g quota-axi to get a reading.
 HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.
 ```
@@ -89,6 +90,7 @@ The refusal names the installed version and the floor in the line itself, and th
 ```
 HEADROOM: (all providers) unknown reason=quota-axi 0.0.1 is below the supported floor 0.1.29, and its report layout is not the one this gauge reads
 HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/0.0.1 build=below-floor(0.1.29)
+HEADROOM_ROWS: emitted=0 read=0 declined=0
 HEADROOM_NOTE: headroom is UNMEASURED, not healthy - upgrade quota-axi to 0.1.29 or newer, then re-read; until then no provider headroom is measured.
 HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.
 ```
@@ -117,7 +119,7 @@ The distinction holds in both directions: the unmodified live report on the same
 
 ## An unmeasured provider never reads as healthy
 
-Eleven ways a reading can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
+Twelve ways a reading can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
 
 A percentage that is not a number.
 `toon_block` resolves fields by name and yields `-` for one the header never declared, so an upstream rename of `effectivePercentRemaining` leaves every row unreadable at once.
@@ -228,7 +230,16 @@ Every live-captured row on this host carries `remedy=none`, so this is CONSTRUCT
 HEADROOM: cursor unknown reason=auth-required status=auth_required detail=Cursor sign-in required - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read - sign in at cursor.com/settings
 ```
 
-A report whose rows are ALL unattributable still leaves through the single unmeasurable exit as `(all providers) unknown reason=no-named-provider-row`, because then no reading came back at all.
+A report whose rows are ALL unattributable still leaves through the single unmeasurable exit as `(all providers) unknown reason=no-named-provider-row`, because then no reading came back at all - and it carries the ledger, which is the reading that most needs one:
+
+```
+HEADROOM: (all providers) unknown reason=no-named-provider-row
+HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
+HEADROOM_ROWS: emitted=3 read=0 declined=3 reasons=no-provider=3
+```
+
+The ledger is published on every reading, unmeasurable ones included, so its presence is never itself a signal to interpret: a reading that never saw a report at all - no gauge on `PATH` - reports `emitted=0 read=0 declined=0` rather than omitting the line.
+Both emitters carry it, so the text form and `--json` cannot disagree about whether the fact exists; they did, and only `--json` had it.
 
 An unknown carrying a reason that is false of the provider it names.
 A provider named only in `exhaustion[]` fell through to the scope-based default and printed `reason=no-measurable-window` - for a provider whose limiting window and usable runway the gauge DID report, with the contradicting detail on the same line.
@@ -276,6 +287,29 @@ HEADROOM: claude tight pct=34 bound=- resets=2026-09-02T08:00:00Z runway=35m run
 ```
 
 A gauge that declares no `limitedBy` at all still binds the percentage to the single window there is, which is the reading the fallback exists for; narrowing it did not remove it, and that is pinned too.
+
+A row booked as read where it was LOOKED UP rather than where its value was emitted.
+The ledger above closed the gap between the tables and the reading, and then left one inside itself: an exhaustion row's runway was recorded as used at the lookup, and the unreadable-percentage guard fires after that and before anything is printed.
+On a report renaming `effectivePercentRemaining` - the layout change this parser documents as its motivating case - the runway was looked up, discarded, and still counted:
+
+```
+HEADROOM: claude unknown reason=unreadable-percent status=unreadable_percent detail=effectivePercentRemaining is not a number (-)
+HEADROOM_ROWS: emitted=2 read=2 declined=0
+```
+
+`read=2 declined=0` asserts nothing was dropped while a runway had been, which is the same unaccounted discard the row identity exists to prevent, now inside the accounting rather than outside it.
+The accounting point moved to the EMISSION: a row counts as read only where its value reaches the output, and the exhaustion row is booked after the reported line is appended, not when its lookup returned:
+
+```
+HEADROOM: claude unknown reason=unreadable-percent status=unreadable_percent detail=effectivePercentRemaining is not a number (-)
+HEADROOM_ROWS: emitted=2 read=1 declined=1 reasons=runway-not-attached=1
+```
+
+Every early exit between the lookup and the emission was then walked rather than assumed: the blank-line guard (not a row), the unattributable-provider guard, the scope filter, and the unreadable-percentage guard.
+The first is not an emitted row; the middle two decline with a reason; the last appends its own line and is counted read there.
+The quota loop has exactly two emission points and both increment the ledger at the append, so no path can leave between the two points unaccounted, and the script carries no `set -e` that could add an implicit one.
+
+The reasons list is emitted in sorted order under `LC_ALL=C`, because awk's associative-array iteration order is implementation-defined and this line is quoted here as recorded evidence and diffed between two readings of the same report.
 
 ## Each number carries the window that bounds it
 
