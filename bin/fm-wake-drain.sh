@@ -19,6 +19,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# The steering inbox owns whether an answer has reached its worker yet, which
+# is what separates a decision that is genuinely still open from one whose
+# answer is sitting unread. Read-only here: this section never commits a
+# deferred closure, it only refuses to present an unread answer as progress.
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -244,7 +250,10 @@ EOF
 # common case.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+  local output='' used=0 shown=0 omitted=0 bytes unread_task='' unread_keys='' room
+  # An answer that is delivered but still unread is the one thing on this row a
+  # reader must not miss, so it is never what the per-item cut sacrifices.
+  local unread_note=' (answer already delivered, still unread by the worker)'
 
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
@@ -258,11 +267,26 @@ print_open_decisions_section() {
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
+    # A decision whose answer is already enqueued but NOT yet acknowledged is
+    # still genuinely open, and re-answering it would only enqueue a second
+    # record behind the same swallowed doorbell. Say so on the row. The fold is
+    # grouped by task (one status file at a time), so one lookup per task
+    # covers all of its rows, and an empty result costs no further work.
+    if [ "$unread_task" != "$task" ]; then
+      unread_task=$task
+      unread_keys=$(fm_task_inbox_pending_answer_keys "$STATE" "$task" status-key 2>/dev/null) || unread_keys=
+    fi
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
-    fm_cap_line_var "$line" $((item_bytes - 1))
-    line=$FM_LINE_CAP_LINE
+    room=$((item_bytes - 1))
+    if [ -n "$unread_keys" ] && printf '%s\n' "$unread_keys" | grep -Fxq -- "$key"; then
+      fm_cap_line_var "$line" $((room - ${#unread_note}))
+      line="$FM_LINE_CAP_LINE$unread_note"
+    else
+      fm_cap_line_var "$line" "$room"
+      line=$FM_LINE_CAP_LINE
+    fi
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))

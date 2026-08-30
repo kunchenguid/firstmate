@@ -5,27 +5,41 @@
 # historically stayed open forever when the answer kicked off work: the worker's
 # next line is working [key=<workstream>], never resolved [key=<decision>].
 # fm-send's --resolve-key removes that writer-dependency at its source: the
-# ANSWERING firstmate closes the decision in this home's own ledger at answer
-# time - for a local target that is ENQUEUE time, because the durable inbox
-# write is delivery to the task's record. These tests drive the real fm-send
-# executable over stubbed transports and assert closure through the real
-# consumer (fm-wake-drain.sh's OPEN DECISIONS section), never through source
-# text:
-#   1. An answer send closes the open decision, including the answer-starts-work
-#      scenario where the worker never writes a matching resolved line.
-#   2. A routine steer without the flag never closes anything, and a working:/
+# ANSWERING firstmate closes the decision in this home's own ledger.
+#
+# WHEN that close lands is the second half of the contract, and it was wrong:
+# on the local inbox plane it happened at ENQUEUE, so an answer whose doorbell
+# was skipped to protect pending composer text read as answered while the
+# worker had not seen it. A supervisor reading records rather than panes then
+# concluded work was moving when it was stopped - observed twice on 2026-08-27,
+# once costing about fifteen idle minutes on a decision that was already made.
+# The local close is therefore gated on the worker's own ACKNOWLEDGEMENT.
+#
+# These tests drive the real fm-send executable over stubbed transports and
+# assert closure through the real consumer (fm-wake-drain.sh's OPEN DECISIONS
+# section), never through source text:
+#   1. An UNREAD answer never reads as resolved: no closing line, the decision
+#      still lists as open, and the listing says the answer is already
+#      delivered so it is not answered a second time. This is the regression
+#      for the reported defect.
+#   2. The worker's acknowledgement is what closes it, including the
+#      answer-starts-work scenario where the worker never writes a matching
+#      resolved line itself.
+#   3. A routine steer without the flag never closes anything, and a working:/
 #      done: line still cannot clear a captain decision.
-#   3. A key that is not open refuses BEFORE anything is sent (mistype safety).
-#   4. The close happens at enqueue: a failed doorbell ring still closes the
-#      answered key (the record is durably sent), while a failed ENQUEUE - the
-#      real local failure - closes nothing and leaves the decision open.
-#   5. A local secondmate answer is marked+corr'd in its record yet closes the
+#   4. A key that is not open refuses BEFORE anything is sent (mistype safety).
+#   5. A failed doorbell ring is still a durably sent answer that closes on
+#      acknowledgement, while a failed ENQUEUE - the real local failure - parks
+#      nothing and leaves the decision open, and an unwritable closure fails
+#      loudly rather than silently never committing.
+#   6. A local secondmate answer is marked+corr'd in its record yet closes the
 #      same way, and the closing line carries the plain answer, not marker or
 #      corr bytes.
-#   6. A remote secondmate answer differs only at the transport layer: the
-#      message crosses the stubbed ssh transport while the close is the same
-#      local ledger append; a failed transport closes nothing.
-#   7. Flag misuse (--key, empty message, explicit backend target) refuses.
+#   7. A remote secondmate answer differs at the transport layer AND in when it
+#      closes: the parent cannot observe a remote home's acknowledgement, so
+#      that plane still closes at the remote enqueue and leans on its
+#      pending-reply expectation; a failed transport closes nothing.
+#   8. Flag misuse (--key, empty message, explicit backend target) refuses.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -41,7 +55,8 @@ TMP_ROOT=$(fm_test_tmproot fm-send-resolve-key)
 # Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit path
 # reach a clean "empty" verdict (numeric cursor_y, empty bordered composer).
 # FM_FAKE_TMUX_SEND_FAIL=1 makes send-keys fail so the delivery-failure leg can
-# assert that a failed send closes nothing.
+# assert that a failed send closes nothing; FM_FAKE_TMUX_COMPOSER=pending
+# renders the occupied composer that makes fm-send skip the doorbell.
 make_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -67,7 +82,15 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    # FM_FAKE_TMUX_COMPOSER=pending renders a composer visibly holding text,
+    # which is what makes fm-send skip the doorbell.
+    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+      printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -111,6 +134,34 @@ drain_out() {  # <home>
   FM_STATE_OVERRIDE="$1/state" "$DRAIN" 2>/dev/null
 }
 
+# The worker reads its inbox and acknowledges every record, exactly as the
+# brief scaffold tells it to: the mv into handled/ IS the acknowledgement.
+worker_acks() {  # <home> <task>
+  local home=$1 task=$2 f moved=0
+  for f in "$home/state/$task.inbox"/*.msg; do
+    [ -e "$f" ] || continue
+    mv "$f" "$home/state/$task.inbox/handled/" || fail "the worker could not acknowledge $f"
+    moved=1
+  done
+  [ "$moved" = 1 ] || fail "there was nothing for the worker to acknowledge in $task"
+}
+
+# The watcher's per-poll commit of acknowledged closures, driven through the
+# production library rather than a copy of its logic here.
+commit_answers() {  # <home> <task>
+  FM_STATE_OVERRIDE="$1/state" bash -c '
+    . "$1"
+    fm_task_inbox_commit_resolutions "$2" "$3" "$2/$3.status"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$1/state" "$2"
+}
+
+# What the worker sees end to end: it reads the record, acknowledges it, and
+# the next supervision poll commits the closure the answer parked.
+worker_reads_and_acks() {  # <home> <task>
+  worker_acks "$1" "$2"
+  commit_answers "$1" "$2" >/dev/null || fail "the acknowledged closure failed to commit for $2"
+}
+
 test_answer_send_closes_open_decision() {
   local dir fb log home rc out
   dir="$TMP_ROOT/closes"; mkdir -p "$dir"
@@ -129,20 +180,96 @@ test_answer_send_closes_open_decision() {
   grep -qF "go with REST" "$home/state/t1.inbox/001.msg" \
     || fail "the answer text should reach the worker's durable inbox record"
   assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the answer"
+
+  # Delivered is not read. Until the worker acknowledges the record, the
+  # decision is still open in the durable ledger.
+  assert_no_grep 'resolved [key=api-shape]' "$home/state/t1.status" \
+    "an unacknowledged answer must not read as resolved"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "the decision should still list as open before the worker reads it: $out"
+
+  worker_reads_and_acks "$home" t1
   grep -F 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" >/dev/null \
-    || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
+    || fail "the acknowledgement did not close the decision:"$'\n'"$(cat "$home/state/t1.status")"
 
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
     fail "the answered decision still lists as open: $out"
   fi
-  pass "fm-send --resolve-key: the answer send itself closes the open decision"
+  pass "fm-send --resolve-key: the worker's acknowledgement of the answer closes the decision"
 }
 
-# The answerer's close is this home's own bookkeeping: it must not re-wake the
-# session that wrote it, while any other writer's later line on the same task
-# still must. Both directions are read through the production seen-signature
-# gate the watcher's signal scan consumes (bin/fm-wake-lib.sh).
+# THE REGRESSION for the reported defect, driven exactly as it happened: the
+# worker's composer visibly holds pending text (a stray typed word, or an
+# overlay panel holding focus), so fm-send correctly skips the doorbell. The
+# skip is right. What was wrong is what the records claimed afterwards. If the
+# close ever moves back to enqueue time, this case fails on the first
+# assertion.
+test_undelivered_answer_never_reads_as_resolved() {
+  local dir fb log home err rc out
+  dir="$TMP_ROOT/undelivered"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home undelivered)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t1.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" FM_FAKE_TMUX_COMPOSER=pending \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t1 --resolve-key api-shape "go with REST" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a skipped doorbell is still a durably sent answer"
+  assert_contains "$(cat "$err")" "doorbell skipped" \
+    "the fail-safe skip itself must be preserved, not weakened"
+  [ ! -s "$log" ] || fail "a visibly pending composer must not be rung:"$'\n'"$(cat "$log")"
+  [ -f "$home/state/t1.inbox/001.msg" ] || fail "the answer was not durably recorded"
+  [ ! -e "$home/state/t1.inbox/handled/001.msg" ] || fail "nothing acknowledged this record"
+
+  assert_no_grep 'resolved' "$home/state/t1.status" \
+    "an answer the worker never received must not read as answered in the status log"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "an undelivered answer silently closed the captain-facing decision: $out"
+  assert_contains "$out" "still unread by the worker" \
+    "the listing should say the answer is already delivered so it is not re-answered blindly"
+  pass "fm-send --resolve-key: a swallowed doorbell leaves the decision open and says so"
+}
+
+# The closure is parked on the record, so a closure that cannot be parked must
+# be loud: the answer is already delivered, and a silent failure would mean the
+# decision never closes and nobody knows why.
+test_unparkable_closure_fails_loudly() {
+  local dir fb log home err rc out
+  dir="$TMP_ROOT/unparkable"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home unparkable)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t1.status"
+  # A non-file already occupying the sidecar path the first record will claim.
+  mkdir -p "$home/state/t1.inbox/handled" "$home/state/t1.inbox/.001.resolve"
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t1 --resolve-key api-shape "go with REST" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unparkable closure should exit nonzero"
+  assert_contains "$(cat "$err")" "do not resend the answer" \
+    "the error must say the answer WAS delivered"
+  assert_contains "$(cat "$err")" "stays OPEN" \
+    "the error must say which way the decision fails"
+  assert_contains "$(cat "$err")" "echo 'resolved [key=api-shape]: <how it was answered>' >> $home/state/t1.status" \
+    "the error must carry the exact manual close command, as a failed direct append does"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "an unparkable closure silently closed the decision: $out"
+  pass "fm-send --resolve-key: a closure that cannot be parked fails loudly and leaves the decision open"
+}
+
+# The close is this home's own bookkeeping: it must not re-wake the session
+# that wrote it, while any other writer's later line on the same task still
+# must. Both directions are read through the production seen-signature gate the
+# watcher's signal scan consumes (bin/fm-wake-lib.sh). The commit moved to the
+# acknowledgement, so this pins that the property travelled with it.
 test_answer_close_is_self_announced() {
   local dir fb log home rc
   dir="$TMP_ROOT/self-announced"; mkdir -p "$dir"
@@ -158,6 +285,7 @@ test_answer_close_is_self_announced() {
 
   run_send "$fb" "$home" "$log" t9 --resolve-key port-choice "use 9090"; rc=$?
   expect_code 0 "$rc" "the answer send should succeed"
+  worker_reads_and_acks "$home" t9
   grep -F 'resolved [key=port-choice]: answered: use 9090' "$home/state/t9.status" >/dev/null \
     || fail "the closing resolved line is missing"
   FM_STATE_OVERRIDE="$home/state" bash -c '
@@ -193,6 +321,7 @@ test_colon_first_key_position_is_answerable() {
 
   run_send "$fb" "$home" "$log" t8 --resolve-key seam-max-bound "cap it at 4"; rc=$?
   expect_code 0 "$rc" "answering a colon-first stated key should succeed, not refuse as unknown"
+  worker_reads_and_acks "$home" t8
   grep -F 'resolved [key=seam-max-bound]: answered: cap it at 4' "$home/state/t8.status" >/dev/null \
     || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t8.status")"
 
@@ -216,6 +345,7 @@ test_answer_starts_work_never_orphans() {
   # The forensic scenario: the answer starts a workstream, so the worker's next
   # events use a DIFFERENT key namespace and it never writes
   # resolved [key=rollout] itself.
+  worker_reads_and_acks "$home" t2
   printf 'working [key=phased-impl]: building region gates\n' >> "$home/state/t2.status"
   printf 'done [key=phased-impl]: PR up\n' >> "$home/state/t2.status"
 
@@ -274,10 +404,10 @@ test_not_open_key_refuses_before_send() {
   pass "fm-send --resolve-key: a key that is not open refuses loudly before anything is sent"
 }
 
-# The close is an enqueue-time fact: the durable record IS the delivery, so a
-# failed doorbell keystroke must not reopen the split-brain where the close
-# waited on an unconfirmable submit.
-test_failed_ring_still_closes_at_enqueue() {
+# A failed doorbell keystroke is not a failed answer: the durable record is the
+# delivery, so the send still succeeds and the closure is still parked. What it
+# must NOT do is close the decision before the worker has read that record.
+test_failed_ring_still_closes_on_acknowledgement() {
   local dir fb log home rc out
   dir="$TMP_ROOT/ring-fail"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
@@ -292,13 +422,16 @@ test_failed_ring_still_closes_at_enqueue() {
   expect_code 0 "$rc" "a failed doorbell must not fail the durably enqueued answer"
   grep -qF 'token is in the vault now' "$home/state/t5.inbox/001.msg" \
     || fail "the answer must be durably recorded despite the failed ring"
+  assert_no_grep 'resolved [key=creds]' "$home/state/t5.status" \
+    "a failed doorbell means the worker has not seen the answer yet"
+  worker_reads_and_acks "$home" t5
   grep -F 'resolved [key=creds]' "$home/state/t5.status" >/dev/null \
-    || fail "the enqueued answer must close the decision at answer time: $(cat "$home/state/t5.status")"
+    || fail "the acknowledged answer must close the decision: $(cat "$home/state/t5.status")"
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F '[key=creds]' >/dev/null; then
-    fail "the answered blocker still lists as open after an enqueue-time close: $out"
+    fail "the answered blocker still lists as open after acknowledgement: $out"
   fi
-  pass "fm-send --resolve-key: the close happens at enqueue, surviving a failed doorbell"
+  pass "fm-send --resolve-key: a failed doorbell still closes once the worker acknowledges the record"
 }
 
 # The real local failure - an unwritable record - is the case that must never
@@ -320,6 +453,8 @@ test_failed_enqueue_does_not_close() {
   if grep -F 'resolved' "$home/state/t5.status" >/dev/null; then
     fail "a failed enqueue still closed the decision: $(cat "$home/state/t5.status")"
   fi
+  [ -z "$(find "$home/state" -name '*.resolve' 2>/dev/null)" ] \
+    || fail "a failed enqueue still parked a closure that would commit later"
   [ ! -s "$log" ] || fail "a failed enqueue still typed something: $(cat "$log")"
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=creds]' >/dev/null \
@@ -342,6 +477,7 @@ test_multiple_keys_close_together() {
   run_send "$fb" "$home" "$log" t6 --resolve-key k1 --resolve-key k2 \
     "one answer covering both"; rc=$?
   expect_code 0 "$rc" "an answer resolving two keys should succeed"
+  worker_reads_and_acks "$home" t6
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=k3]' >/dev/null \
     || fail "the unanswered third decision must stay open: $out"
@@ -367,6 +503,7 @@ test_local_secondmate_answer_marked_and_closed() {
     "$FM_FROMFIRST_MARK"corr=*) : ;;
     *) fail "the secondmate answer's record lost its from-firstmate marker/corr framing: $got" ;;
   esac
+  worker_reads_and_acks "$home" domain
   closing=$(grep -F 'resolved [key=fleet-split]' "$home/state/domain.status" || true)
   [ -n "$closing" ] || fail "the secondmate decision was not closed: $(cat "$home/state/domain.status")"
   case "$closing" in
@@ -384,8 +521,12 @@ test_local_secondmate_answer_marked_and_closed() {
 }
 
 # Remote secondmate: the answer crosses the (stubbed) ssh transport through the
-# real fm-on.sh + registry route, while the close is the SAME local ledger
-# append as every other target kind - the transport is the only difference.
+# real fm-on.sh + registry route, and the close is the SAME local ledger append
+# as every other target kind. This plane still closes at the remote enqueue:
+# the parent cannot observe a remote home's handled/ move without a network
+# round trip per poll, and every marked remote request carries a durable
+# pending-reply expectation that recovers and escalates on its own - the
+# backstop the local crewmate plane never had.
 setup_remote_home() {  # <name> -> echoes home dir with remote meta + registry
   local home
   home=$(setup_home "$1")
@@ -536,12 +677,14 @@ test_flag_misuse_refuses() {
 }
 
 test_answer_send_closes_open_decision
+test_undelivered_answer_never_reads_as_resolved
+test_unparkable_closure_fails_loudly
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
-test_failed_ring_still_closes_at_enqueue
+test_failed_ring_still_closes_on_acknowledgement
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed

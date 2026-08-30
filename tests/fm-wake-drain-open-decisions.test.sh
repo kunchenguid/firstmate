@@ -3,15 +3,34 @@
 # DECISIONS section bin/fm-wake-drain.sh prints on every drain (including the
 # empty-queue fast path). The section is pure wiring around
 # fm-classify-lib.sh's status_open_decisions fold (the ONE authoritative
-# open/resolved statement); these tests exercise the real drain script over
-# crafted status logs and assert on its printed output, not on the fold's own
-# source text.
+# open/resolved statement) plus one steering-inbox read; these tests exercise
+# the real drain script over crafted status logs and assert on its printed
+# output, not on the fold's own source text.
+#
+# The inbox read exists because "open" hides a distinction that cost a
+# supervision turn twice on 2026-08-27: a decision nobody has answered, and a
+# decision whose answer is already sitting unread in the worker's instruction
+# inbox. Re-answering the second one only enqueues a second record behind the
+# same swallowed doorbell, so the row says which it is.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+
+# Drive the steering-inbox library through its own executable surface, so these
+# cases never restate the record or sidecar format.
+inbox_lib() {  # <state> <function> [args...]
+  local state=$1
+  shift
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fn=$2
+    shift 2
+    "$fn" "$@"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$@"
+}
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-tests)
 
@@ -183,6 +202,99 @@ test_status_symlink_is_not_followed() {
 # thing wherever an agent meets it. This pins the drain's own end of that
 # contract: the lede survives, the marker appears, and the item still fits the
 # section's per-item budget including the newline it is charged for.
+# A delivered-but-unread answer is still an OPEN decision - that is the whole
+# point of the acknowledgement gate - but the row must say so, or a supervisor
+# answers it again into the same blocked composer.
+test_unread_answer_is_marked_on_the_open_row() {
+  local dir state out rec
+  dir=$(make_case unread-answer)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task-u.status"
+  printf 'needs-decision [key=other-call]: unanswered so far\n' >> "$state/task-u.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" task-u "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "" >/dev/null
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a pending answer"
+  grep -F 'task-u [key=api-shape]' "$out" | grep -F 'still unread by the worker' >/dev/null \
+    || fail "the answered-but-unread decision was not marked:"$'\n'"$(cat "$out")"
+  grep -F 'task-u [key=other-call]' "$out" | grep -Fv 'still unread' >/dev/null \
+    || fail "a decision with NO answer in flight was wrongly marked as delivered:"$'\n'"$(cat "$out")"
+
+  # The acknowledgement closes it, and the row disappears entirely.
+  mv "$rec" "$state/task-u.inbox/handled/"
+  inbox_lib "$state" fm_task_inbox_commit_resolutions "$state" task-u "$state/task-u.status" >/dev/null \
+    || fail "the acknowledged closure failed to commit"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after the acknowledgement"
+  if grep -F '[key=api-shape]' "$out" >/dev/null; then
+    fail "the acknowledged decision still lists as open:"$'\n'"$(cat "$out")"
+  fi
+  grep -F '[key=other-call]' "$out" >/dev/null \
+    || fail "the genuinely open decision disappeared:"$'\n'"$(cat "$out")"
+  pass "an open decision whose answer is delivered but unread says so, and clears on acknowledgement"
+}
+
+# A retired orphan must not shadow a later, genuine reopening of its key. The
+# orphaned closure (its record removed instead of moved) is surfaced once and
+# set aside under handled/orphaned/; after firstmate settles it by hand and
+# the same key reopens afresh, that decision has NO answer in flight, so its
+# row must read plainly - no "still unread" annotation - and the ladder must
+# not escalate again on the retired orphan's behalf.
+test_reopened_key_after_a_retired_orphan_reads_plainly() {
+  local dir state out rec action
+  dir=$(make_case orphan-reopened)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task-o.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" task-o "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "" >/dev/null
+  rm -f "$rec"
+  action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" task-o)
+  case "$action" in
+    "escalate "*" orphaned "*) ;;
+    *) fail "the orphaned closure should escalate: $action" ;;
+  esac
+  inbox_lib "$state" fm_task_inbox_record_orphan_escalated "$state" task-o "${action##* }" \
+    || fail "could not surface and retire the orphan"
+  printf 'resolved [key=api-shape]: answered: go with REST (closed by hand)\n' >> "$state/task-o.status"
+  printf 'needs-decision [key=api-shape]: pick again for v2\n' >> "$state/task-o.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after a retired orphan"
+  grep -F 'task-o [key=api-shape]' "$out" | grep -F 'pick again for v2' >/dev/null \
+    || fail "the reopened decision was not listed as open:"$'\n'"$(cat "$out")"
+  if grep -F 'task-o [key=api-shape]' "$out" | grep -F 'still unread' >/dev/null; then
+    fail "a reopened key with no answer in flight was marked as already answered by a retired orphan:"$'\n'"$(cat "$out")"
+  fi
+  action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" task-o)
+  [ "$action" = quiet ] || fail "the retired orphan escalated again for the reopened key: $action"
+  pass "a key reopened after its orphaned answer was retired reads as plainly open, with no repeat escalation"
+}
+
+# The unread marker is the one thing on the row a supervisor must not miss, so
+# it is never what the per-item byte cut sacrifices.
+test_unread_marker_survives_the_per_item_cap() {
+  local dir state out rec line
+  dir=$(make_case unread-capped)
+  state="$dir/state"
+  out="$dir/drain.out"
+  {
+    printf 'needs-decision [key=api-shape]: pick REST or RPC'
+    awk 'BEGIN { while (i++ < 200) printf " and-then-some" }'
+    printf '\n'
+  } > "$state/task-uc.status"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" task-uc "go with REST")
+  inbox_lib "$state" fm_task_inbox_defer_resolution "$rec" "go with REST" "api-shape" "" >/dev/null
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a capped unread row"
+  line=$(grep -F 'task-uc' "$out")
+  case "$line" in
+    *'[truncated] (answer already delivered, still unread by the worker)') : ;;
+    *) fail "the unread marker was truncated away instead of the note: $line" ;;
+  esac
+  [ "${#line}" -le 219 ] || fail "an annotated item ran ${#line} characters past its per-item budget"
+  pass "the delivered-but-unread marker survives the per-item cap"
+}
+
 test_over_long_decision_note_is_capped_with_a_marker() {
   local dir state out line longest
   dir=$(make_case long-note)
@@ -217,6 +329,9 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
+test_unread_answer_is_marked_on_the_open_row
+test_reopened_key_after_a_retired_orphan_reads_plainly
+test_unread_marker_survives_the_per_item_cap
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library

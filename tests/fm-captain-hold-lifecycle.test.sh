@@ -72,6 +72,23 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+# Simulate the worker's own acknowledgement of the local steering-inbox plane:
+# move every still-pending record into handled/, then run the exact commit
+# pass bin/fm-watch.sh runs on its poll (bin/fm-task-inbox-lib.sh's
+# fm_task_inbox_commit_resolutions). A --resolve-key answer on this plane
+# parks its closure beside the record and does not read as resolved anywhere
+# until this runs - see the header contract in bin/fm-send.sh.
+run_ack_and_commit_resolutions() {  # <home> <id>
+  local home=$1 id=$2
+  mv "$home/state/$id.inbox"/*.msg "$home/state/$id.inbox/handled/" 2>/dev/null || true
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" bash -c '
+      . "$1"
+      fm_task_inbox_commit_resolutions "$2" "$3" "$2/$3.status"
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state" "$id"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -928,7 +945,7 @@ test_legacy_identities_keep_working() {
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
-  local home id fb show
+  local home id fb show closed
   home=$(make_home chat-channel)
   id=sample-chat-review
   mkdir -p "$home/data/$id"
@@ -988,6 +1005,12 @@ SH
   grep -qF "go with option A" "$home/state/$id.inbox/001.msg" \
     || fail "the answer text never reached the worker's durable inbox record"
   show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
+  assert_contains "$show" "state: queued" \
+    "a chat answer read as resolved before the worker acknowledged it"
+  closed=$(run_ack_and_commit_resolutions "$home" "$id") \
+    || fail "the acknowledged chat answer failed to commit"
+  assert_contains "$closed" "chat-choice" "the acknowledged chat answer never committed its closure"
+  show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
   assert_contains "$show" "state: done" "a chat answer left the legacy row open"
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"
 
@@ -998,10 +1021,17 @@ SH
     "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
     || fail "an answer keyed by a task id was refused by the chat channel"
   show=$(tasks_in "$home" show sample-chat-followup --full)
+  assert_contains "$show" "state: queued" \
+    "a chat answer read as resolved before the worker acknowledged it"
+  closed=$(run_ack_and_commit_resolutions "$home" "$id") \
+    || fail "the acknowledged task-id chat answer failed to commit"
+  assert_contains "$closed" "sample-chat-followup" \
+    "the acknowledged task-id chat answer never committed its closure"
+  show=$(tasks_in "$home" show sample-chat-followup --full)
   assert_contains "$show" "state: done" "a chat answer left the task-id call open"
   assert_contains "$show" "Resolution mode: answered" "the chat-answered call did not record its close path"
   assert_contains "$show" "Answer: take the second option" "the chat-answered call lost the captain answer"
-  assert_contains "$show" "answer sent to $id" "the chat-answered call lost its channel provenance"
+  assert_contains "$show" "answer acknowledged by $id" "the chat-answered call lost its channel provenance"
 
   if env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
