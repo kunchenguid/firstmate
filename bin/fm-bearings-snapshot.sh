@@ -210,6 +210,13 @@ gh_bounded() {  # <args...>
     env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
 }
 
+# The roster lookup in bin/fm-ci-checks-lib.sh reaches GitHub through this, so
+# its calls carry the same bound every other network read on this path does
+# rather than being the one that can hang the snapshot.
+fm_ci_gh() {  # <args...>
+  gh_bounded "$@" 2>/dev/null
+}
+
 if [ "$INCLUDE_PRS" = 1 ]; then
   if ! command -v gh >/dev/null 2>&1; then
     PR_STATUS='unavailable (gh not found)'
@@ -243,7 +250,15 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" "$FM_CI_CHECKS_JQ_DEFS"'
+      # Each repository is judged against its own required suite roster
+      # (bin/fm-ci-checks-lib.sh owns where that comes from), resolved once per
+      # repository here rather than once per row. A repository whose roster
+      # cannot be established is classified against an empty one, which the
+      # classifier refuses as incomplete: an unknown standard costs these rows
+      # their green, and can never hand one out.
+      if fm_ci_roster "$repo" 2>/dev/null; then repo_roster=$FM_CI_ROSTER; else repo_roster='[]'; fi
+      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" \
+        --argjson fm_ci_roster "$repo_roster" "$FM_CI_CHECKS_JQ_DEFS"'
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,

@@ -49,6 +49,21 @@ SH
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
+# The per-repository required suite roster (bin/fm-ci-checks-lib.sh): the
+# snapshot asks each repository what its own CI workflow reports before it can
+# call any of that repository's rows green. The fixture answers with the roster
+# the PR fixtures below carry, so a row that is genuinely complete reads as
+# passing rather than as a roster it could not establish.
+if [ "${1:-}" = api ]; then
+  case "${2:-}" in
+    */actions/workflows/*/runs*) printf '{"workflow_runs":[{"id":5150,"name":"CI"}]}\n' ;;
+    */actions/workflows*)        printf '{"total_count":1,"workflows":[{"id":77,"name":"CI"}]}\n' ;;
+    */jobs*)
+      printf '%s\n' '{"total_count":12,"jobs":[{"name":"Lint"},{"name":"Test coverage guard"},{"name":"Behavior portable parallel 1"},{"name":"Behavior portable parallel 2"},{"name":"Behavior portable serial 1"},{"name":"Behavior portable serial 2"},{"name":"Behavior portable serial 3"},{"name":"Behavior portable serial 4"},{"name":"Behavior tests (Herdr)"},{"name":"Behavior timing aggregate"},{"name":"Stock macOS Bash snapshot compatibility"},{"name":"Repo invariants"}]}' ;;
+    *)                           printf '{"default_branch":"main"}\n' ;;
+  esac
+  exit 0
+fi
 if [ "${FAKE_GH_BOT_ONLY:-0}" = 1 ]; then
   # A pull request whose only check is a third-party App: it has no workflow
   # behind it, so it carries no workflow name.
@@ -63,10 +78,10 @@ if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
 JSON
   exit 0
 fi
-# The complete required-suite roster (bin/fm-ci-checks-lib.sh
-# FM_CI_REQUIRED_SUITES), all green - the default fixture stands in for a
-# pull request CI genuinely validated, so it must carry evidence that would
-# actually classify as passing rather than one lone suite.
+# The complete required-suite roster the api fixture above reports for this
+# repository, all green - the default fixture stands in for a pull request CI
+# genuinely validated, so it must carry evidence that would actually classify
+# as passing rather than one lone suite.
 cat <<'JSON'
 [{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","workflowName":"CI","name":"Lint","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Test coverage guard","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable parallel 1","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable parallel 2","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable serial 1","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable serial 2","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable serial 3","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable serial 4","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior tests (Herdr)","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior timing aggregate","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Stock macOS Bash snapshot compatibility","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Repo invariants","conclusion":"SUCCESS","status":"COMPLETED"}]}]
 JSON

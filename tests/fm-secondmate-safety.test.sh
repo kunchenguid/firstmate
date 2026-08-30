@@ -47,8 +47,29 @@ SH
   : > "$log"
 }
 
+# The landing guard in fm-pr-check.sh asks the forge whether this machine can
+# merge into the target repository, and fails closed when it gets no answer.
+# This test's fixture URL names a repository no forge can resolve, so the guard
+# refuses before reaching the FM_HOME assertions this test exists for. Stub only
+# that lookup, reproducing the real CLI's contract of one bare boolean on stdout
+# and exit 0, so the guard still runs its own code path and this test stays
+# about path isolation rather than about forge reachability.
+make_fake_landing_forge() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" api "*"/repos/"*) printf 'true\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/gh-axi"
+  printf '%s\n' "$dir"
+}
+
 test_fm_home_parameterization() {
-  local brief home_one home_two out
+  local brief home_one home_two out fakebin
   home_one="$TMP_ROOT/home one"
   home_two="$TMP_ROOT/home-two"
   mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state"
@@ -74,7 +95,9 @@ test_fm_home_parameterization() {
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
   printf 'project=x\n' > "$home_one/state/task-a.meta"
-  FM_HOME="$home_one" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
+  fakebin=$(make_fake_landing_forge "$TMP_ROOT/pr-check-forge")
+  PATH="$fakebin:$PATH" FM_HOME="$home_one" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
     || fail "fm-pr-check failed under FM_HOME"
   [ -f "$home_one/state/task-a.check.sh" ] || fail "pr check was not written under FM_HOME/state"
   [ ! -e "$home_two/state/task-a.check.sh" ] || fail "pr check leaked into another home"

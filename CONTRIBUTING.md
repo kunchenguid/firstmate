@@ -59,6 +59,7 @@ bin/fm-pr-ci-verify.sh <pr-url>   # did repository suites actually run and pass 
 
 It reports which suites ran and where, accepts a commit your fork validated while the upstream run is still held, and refuses every outcome that only looks green.
 [`bin/fm-ci-checks-lib.sh`](bin/fm-ci-checks-lib.sh) owns that rule, and everything in this repo that turns checks into a verdict classifies through it.
+The roster it requires is read from the repository the pull request targets, so a change that deliberately adds or removes a CI job is judged against a roster the target branch has not recorded yet; `FM_CI_REQUIRED_SUITES` in that script's header is the override for exactly that case.
 
 ## Repo conventions
 
