@@ -43,9 +43,9 @@ A genuine auto-arm failure describes the automatic mechanism as broken and never
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
-No adapter starts a replacement with shell `&`.
+No adapter starts a replacement with an unverified fire-and-forget shell `&`; the Claude guard's last-resort arm spawns the watcher detached and claims recovery only after verifying the live cycle against the strict predicate.
 
-The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode.
+The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode, where that backstop includes restoring the standing cycle itself when the auto-arm claims nothing for an event epoch it provably fired on ([`turnend-guard.md`](turnend-guard.md#harness-integrations)).
 
 ## Recovery episode acknowledgement
 
@@ -120,8 +120,8 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
-`FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
-`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset; [`turnend-guard.md`](turnend-guard.md#regression-coverage) lists that suite's full generation and legacy claim coverage.
+`FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state plus a pid-reuse-wedged claim mutex, runs session start first, completes two tokenless cycles through the identity-hardened steal, and checks the competing-live-owner negative control.
+`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, positive recovery reset, and the guard-owned last-resort arm restoring a lapsed cycle at the next turn end; [`turnend-guard.md`](turnend-guard.md#regression-coverage) lists that suite's full generation and legacy claim coverage.
 
 ## Active limits and verification
 

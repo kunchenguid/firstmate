@@ -75,7 +75,14 @@
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
-#   3. only when neither materializes is the auto-arm genuinely absent: re-block
+#   3. when neither materializes the auto-arm is genuinely absent for an event
+#      epoch it provably fired on (Claude runs the Stop batch in parallel and
+#      exit 2 never suppresses the sibling), so the guard restores the standing
+#      cycle itself: it spawns the watcher singleton detached, verifies it
+#      against the same strict predicate within FM_CLAUDE_GUARD_ARM_CONFIRM
+#      seconds (default 5), and on success blocks once with the restored-cycle
+#      banner so one handling turn drains what the lapse queued;
+#   4. only when that last resort cannot verify a cycle either: re-block
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
@@ -454,8 +461,60 @@ if autoarm_owns_recovery; then
   exit 0
 fi
 
-# The auto-arm genuinely failed to establish: consume the bounded re-block
-# budget before considering the verified one-time attended fail-open.
+# --- guard-owned last-resort arm ---------------------------------------------
+# Claude runs both Stop hooks of the batch in parallel and a guard exit 2 never
+# suppresses the asyncRewake sibling (verified live, docs/verification/
+# supervision.md "Stop hook execution semantics"), so reaching this point means
+# the auto-arm fired for this very Stop and still claimed nothing: it is wedged,
+# gated, or dead. Re-blocking alone cannot restore supervision - it only forces
+# turns that end against the same absent claim - so the synchronous guard
+# restores the standing cycle itself. It spawns the home-scoped watcher
+# singleton detached (own process group via monitor mode, nohup, stdio
+# detached, the same three-way detachment bin/fm-startup-network.sh documents)
+# so the cycle survives this hook's exit, then verifies honestly against the
+# same strict predicate before claiming recovery. The watcher queues every
+# actionable wake durably (fm_wake_append) before closing, so a close with no
+# listening arm loses nothing: the next drain presents it. The singleton lock
+# makes a race with a late-claiming auto-arm harmless - one of the two attaches
+# or stands down. While away mode is active the daemon owns the watcher, so the
+# guard never spawns over it.
+guard_last_resort_arm() {
+  local monitor_was_on=0 confirm deadline
+  [ ! -e "$STATE/.afk" ] || return 1
+  [ -x "$WATCH" ] || return 1
+  confirm=${FM_CLAUDE_GUARD_ARM_CONFIRM:-5}
+  case "$confirm" in ''|*[!0-9]*|0) confirm=5 ;; esac
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  nohup "$WATCH" >/dev/null 2>&1 </dev/null &
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  deadline=$(( $(date +%s) + confirm + 1 ))
+  while :; do
+    fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 0.2
+  done
+}
+
+if guard_last_resort_arm; then
+  fm_failure_episode_reset "$STATE" || true
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  SUPERVISION RESTORED BY THE TURN-END GUARD (last resort)\n'
+    printf '●  The Stop-owned auto-arm claimed nothing for this event epoch, so this guard\n'
+    printf '●  started the home watcher itself (pid %s, beacon fresh) and verified it live.\n' "$FM_WATCHER_HEALTHY_PID"
+    printf '●  One handling turn now: run bin/fm-wake-drain.sh, handle anything pending, then\n'
+    printf '●  end the turn - the standing cycle is live and a healthy next stop is allowed.\n'
+    printf '●  Do not run bin/fm-watch-arm.sh yourself.\n'
+    printf '●%s\n' "$rule"
+  } >&2
+  exit 2
+fi
+
+# The auto-arm genuinely failed to establish and the last-resort arm could not
+# verify a cycle either: consume the bounded re-block budget before considering
+# the verified one-time attended fail-open.
 budget_account_current_epoch || block_stop
 terminal_fail_open
 terminal_status=$?

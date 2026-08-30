@@ -486,7 +486,7 @@ fm_lock_claim_blocked_by_steal() {
 }
 
 fm_lock_claim() {
-  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
+  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back identity
   fm_current_pid mypid || return 1
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
     fm_lock_discard_owner "$ownerdir"
@@ -496,6 +496,13 @@ fm_lock_claim() {
   if [ "$back" != "$mypid" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
+  fi
+  # Best-effort holder identity, so a later contender can tell this live pid
+  # from a reused one (fm_lock_holder_alive). A failed computation degrades
+  # this one hold to the legacy bare-liveness read instead of blocking the
+  # claim.
+  if identity=$(fm_pid_identity "$mypid" 2>/dev/null) && [ -n "$identity" ]; then
+    printf '%s\n' "$identity" > "$ownerdir/pid-identity" 2>/dev/null || true
   fi
   if ! fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
@@ -572,7 +579,7 @@ fm_lock_recheck_stale_owner() {
   fi
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
-  if fm_pid_alive "$actual_pid"; then
+  if fm_lock_holder_alive "$lockdir" "$actual_pid"; then
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
@@ -890,6 +897,27 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# True while the recorded holder of <lockdir> is genuinely alive: its pid is
+# live AND, when the hold records the holder's pid-identity, the live process
+# still answers to that identity. A live pid whose recorded identity no longer
+# matches is pid reuse after a mid-hold kill and reads as dead, so the ordinary
+# steal path reclaims it; without this check one such reused pid wedged
+# state/.claude-autoarm.lock and silently froze the Stop-owned auto-arm's
+# claim ledger for hours (guard blocking every turn end), and the same shape on
+# a marker lock can hang a starting watcher inside fm_lock_acquire_wait.
+# An identityless hold (a pre-identity build's, or a failed identity
+# computation at claim time) keeps the conservative bare-liveness read, as does
+# a holder whose current identity cannot be computed right now.
+fm_lock_holder_alive() {  # <lockdir> <pid>
+  local lockdir=$1 pid=$2 recorded current
+  fm_pid_alive "$pid" || return 1
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ -n "$recorded" ] || return 0
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 0
+  [ -n "$current" ] || return 0
+  [ "$current" = "$recorded" ]
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -918,7 +946,7 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  if fm_pid_alive "$pid"; then
+  if fm_lock_holder_alive "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
@@ -936,7 +964,7 @@ fm_lock_try_acquire() {
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if fm_pid_alive "$cur"; then
+  if fm_lock_holder_alive "$lockdir" "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
@@ -1279,7 +1307,9 @@ fm_failure_episode_reset() {
 #     state/.claude-autoarm.lock survives only as a micro-mutex serializing
 #     individual ledger reads-then-writes (a few non-blocking file
 #     operations); a holder that dies inside the hold is reclaimed by
-#     fm_lock_try_acquire's ordinary dead-owner steal.
+#     fm_lock_try_acquire's ordinary dead-owner steal, which
+#     fm_lock_holder_alive extends to a dead holder whose pid was reused by a
+#     live unrelated process.
 #   - A superseded owner goes COMPLETELY silent - cleanup only. Ownership is
 #     re-verified before every side effect: each arm invocation, each
 #     episode-state mutation, each ledger write, and each continuation.

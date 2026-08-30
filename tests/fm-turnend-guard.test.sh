@@ -2069,6 +2069,108 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   pass "fm-turnend-guard: with away mode off, the poll-derived grace never applies"
 }
 
+# --- --claude guard-owned last-resort arm -------------------------------------
+# Claude runs the Stop batch's hooks in parallel and a guard exit 2 never
+# suppresses the asyncRewake sibling, so an unclaimed epoch at block time means
+# the auto-arm is wedged or dead and re-blocking alone can never restore the
+# cycle (the 2026-08-17/28 frozen-ledger incidents). The guard must restore a
+# live verified watcher itself and survive its own exit.
+
+# A watcher stand-in that exercises the REAL singleton lock, identity, and
+# beacon mechanics through the copied fm-wake-lib.sh, so the guard's strict
+# health predicate cannot tell it from the real one; the real watcher's full
+# source graph is deliberately not dragged into the fixture (the same tradeoff
+# the auto-arm tests make with their arm fixtures).
+write_watcher_fixture() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+LOCK="$STATE/.watch.lock"
+fm_lock_try_acquire "$LOCK" || exit 0
+printf '%s\n' "$FM_HOME" > "$LOCK/fm-home"
+printf '%s\n' "$SCRIPT_DIR/fm-watch.sh" > "$LOCK/watcher-path"
+fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null
+while :; do
+  touch "$STATE/.last-watcher-beat"
+  sleep 0.2
+done
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+}
+
+kill_fixture_watcher() {
+  local dir=$1 pid
+  pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  kill "$pid" 2>/dev/null || true
+}
+
+# THE incident regression: watcher lapsed with work in flight, the auto-arm
+# claims nothing, and the next turn end must restore a live verified cycle
+# with no manual intervention - then allow the following stop on health alone.
+test_hook_claude_mode_last_resort_arm_restores_cycle() {
+  local dir out status lock_pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-last-resort")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  write_watcher_fixture "$dir"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "the restoring stop must still yield one handling turn"
+  assert_contains "$out" "SUPERVISION RESTORED BY THE TURN-END GUARD" \
+    "the restored block must carry the restored-cycle banner, not the blind-turn banner"
+  case "$out" in
+    *"TURN WOULD END BLIND"*) fail "restored cycle still printed the blind-turn banner" ;;
+  esac
+  lock_pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || fail "last-resort arm left no watcher lock behind"
+  kill -0 "$lock_pid" 2>/dev/null || fail "last-resort watcher did not survive the guard's exit"
+  [ -e "$dir/state/.last-watcher-beat" ] || fail "last-resort watcher never beat the beacon"
+  find "$dir/state/.last-watcher-beat" -newer "$dir/state/task1.meta" | grep -q . \
+    || fail "last-resort watcher's beacon is not fresh"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  kill_fixture_watcher "$dir"
+  expect_code 0 "$status" "the stop after a guard-restored cycle must be allowed on health alone"
+  [ -z "$out" ] || fail "healthy post-restore stop produced output: $out"
+  pass "fm-turnend-guard --claude: a lapsed cycle is restored at the next turn end without manual intervention"
+}
+
+# When the spawned watcher cannot establish (here: it exits before ever taking
+# the lock), the guard must fall through to today's bounded re-block instead of
+# claiming recovery.
+test_hook_claude_mode_last_resort_arm_failure_still_blocks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-last-resort-fail")
+  : > "$dir/state/task1.meta"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/bin/fm-watch.sh"
+  chmod +x "$dir/bin/fm-watch.sh"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 FM_CLAUDE_GUARD_ARM_CONFIRM=1 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "an unverifiable last-resort arm must still block the stop"
+  assert_contains "$out" "TURN WOULD END BLIND" "an unverifiable last-resort arm must keep the blind-turn banner"
+  assert_absent "$dir/state/.watch.lock" "a failed last-resort arm left a watcher lock behind"
+  pass "fm-turnend-guard --claude: an unverifiable last-resort arm falls back to the bounded re-block"
+}
+
+# While away mode owns triage the daemon owns the watcher: the guard must not
+# spawn a competing cycle even though it still blocks the blind stop.
+test_hook_claude_mode_last_resort_arm_stands_down_for_afk() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-last-resort-afk")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  write_watcher_fixture "$dir"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "an away-mode blind stop must still block"
+  assert_contains "$out" "TURN WOULD END BLIND" "away-mode block must keep the blind-turn banner"
+  assert_absent "$dir/state/.watch.lock" "the guard spawned a watcher over the away daemon's ownership"
+  pass "fm-turnend-guard --claude: the last-resort arm stands down while away mode owns the watcher"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -2156,3 +2258,6 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace
 test_hook_away_daemon_blocks_dead_daemon_despite_poll_derived_grace
 test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
 test_hook_no_afk_ignores_poll_derived_grace
+test_hook_claude_mode_last_resort_arm_restores_cycle
+test_hook_claude_mode_last_resort_arm_failure_still_blocks
+test_hook_claude_mode_last_resort_arm_stands_down_for_afk

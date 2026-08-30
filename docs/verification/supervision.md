@@ -252,6 +252,24 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
 
+### Claude Stop-hook execution semantics, 2026-08-30
+
+Established on macOS (Darwin 25.3.0) against Claude Code 2.1.251, with a throwaway project whose `.claude/settings.json` registered two Stop hooks in the tracked shape: a synchronous guard hook, then an `asyncRewake: true` hook, both appending timestamped run records (pid, payload hash, `stop_hook_active`, `ps`-walked ancestry) to a shared log.
+Headless runs used `claude -p 'Reply with exactly: hi' --model haiku` (once with `--output-format stream-json --verbose` piped through a timestamper); the interactive run drove the same fixture in `claude --model haiku` under a private tmux server, with the guard exiting 2 on one selected stop and the async hook sleeping 60-90s.
+
+| Question | Result |
+| --- | --- |
+| Do both Stop hooks of one batch run when the first exits 2? | Yes, in parallel: on the blocked stop the async hook's record predates the guard's exit-2 by ~2s (guard slept 2s; async spawned 0.2s earlier). Registration order is irrelevant. Matches the vendor hooks guide: "all matching hooks run in parallel". |
+| Does a running `asyncRewake` instance suppress or serialize later firings (interactive)? | No: a second user turn's Stop batch ran ~1.3s after the message while the previous instance was still sleeping, and two async instances were live concurrently (`ps` showed both). |
+| Does the forced continuation after a blocked stop wait for the async sibling (interactive)? | No: the continuation and its next Stop batch completed ~2s after the block while the 60s async instance was still running. |
+| Does it wait in headless `-p`? | Yes, headless only: the continuation's thinking tokens started ~58s after the block, 1.4s after the 60s async instance exited, and `claude -p` also waited for the last async instance before exiting. |
+| Is the hook a descendant of the harness process? | Yes: every hook's ancestry walk reached the invoking `claude` process (headless labs), and the live main home showed the auto-arm hook's parent pid equal to the pid recorded in `state/.lock`. |
+| Consecutive-block override | The vendor guide documents an 8-consecutive-block override with `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` raising it; not re-measured here. |
+
+Consequence recorded in [`turnend-guard.md`](../turnend-guard.md#harness-integrations): a Stop that reaches the guard's block point with no auto-arm claim proves the auto-arm fired and went silent, so the guard's last-resort arm restores the cycle itself rather than re-blocking into the 2026-08-17/28 frozen-ledger shape (every turn end blocked, `state/.claude-autoarm-epoch` frozen at the previous terminal outcome, recovery only by manual arm).
+The reproduced silent-freeze mechanism - a role-less `.claude-autoarm.lock` micro-mutex hold whose dead holder's pid a live unrelated process reuses - is pinned portably by `tests/fm-claude-stop-autoarm.test.sh` (wedged-mutex reclaim and matching-identity defer) and `tests/fm-watcher-lock.test.sh` (identity-hardened steal in both directions), and live by the pre-wedged claim mutex in `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh`, which is also the command that refreshes this evidence against a newer Claude build.
+That live guard was last refreshed on 2026-09-01 against Claude Code 2.1.252 on the same platform, passing with the same verdict: stale session lock reclaimed, pid-reuse-wedged claim mutex reclaimed, two tokenless Stop-owned rewake cycles completed, and the competing-live-owner boundary preserved.
+
 ### Cursor primary park, 2026-08-13
 
 Cursor was validated as a primary on 2026-08-13 against the installed CLI on macOS 26.5.2 arm64 with tmux 3.6a, in a throwaway firstmate home on a private tmux socket, never against a live home and never with a user-scope hook.
