@@ -152,7 +152,7 @@ remote_spawn_generation_valid() {
 }
 
 remote_endpoint_launch_complete() {
-  local harness spawn_gen complete_gen required_count delivered_count required_gen delivered_gen
+  local harness spawn_gen complete_gen required_gen delivered_gen
   harness=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" harness 2>/dev/null) || return 1
   case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;; *) return 1 ;; esac
   [ "$harness" = codex ] || return 0
@@ -162,13 +162,6 @@ remote_endpoint_launch_complete() {
     && remote_spawn_generation_valid "$complete_gen" \
     && [ "$complete_gen" = "$spawn_gen" ] \
     || return 1
-  required_count=$(grep -c '^startup_brief_required_spawn_gen=' "$REMOTE_ENDPOINT_META" 2>/dev/null || true)
-  delivered_count=$(grep -c '^startup_brief_delivered_spawn_gen=' "$REMOTE_ENDPOINT_META" 2>/dev/null || true)
-  case "$required_count:$delivered_count" in
-    0:0) return 0 ;;
-    1:1) ;;
-    *) return 1 ;;
-  esac
   required_gen=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" startup_brief_required_spawn_gen 2>/dev/null) || return 1
   delivered_gen=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" startup_brief_delivered_spawn_gen 2>/dev/null) || return 1
   remote_spawn_generation_valid "$required_gen" \

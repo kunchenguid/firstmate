@@ -862,10 +862,33 @@ remote_delivered_gen=$(sed -n 's/^startup_brief_delivered_spawn_gen=//p' "$REMOT
   && [ "$remote_delivered_gen" = "$remote_spawn_gen" ] \
   || fail "successful remote Codex launch did not bind completion to its spawn generation"
 
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-missing-brief-receipts.meta"
+awk '!/^startup_brief_required_spawn_gen=/ && !/^startup_brief_delivered_spawn_gen=/' \
+  "$remote_route_meta" > "$TMP_ROOT/remote-ios-missing-brief-receipts.meta"
+mv "$TMP_ROOT/remote-ios-missing-brief-receipts.meta" "$remote_route_meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-missing-brief-receipts-before-launch.meta"
+launches_before_missing_brief_receipts=$(grep -c '^tab create' "$HERDR_LOG" || true)
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-missing-brief-receipts.out" 2>&1
+missing_brief_receipts_rc=$?
+set -e
+[ "$missing_brief_receipts_rc" -ne 0 ] \
+  || fail "remote spawn reused an endpoint without startup-brief receipts"
+assert_grep 'alive without matching launch-complete and startup-brief receipts' \
+  "$TMP_ROOT/spawn-missing-brief-receipts.out" \
+  "missing startup-brief receipts did not produce the fail-closed refusal"
+cmp -s "$TMP_ROOT/remote-ios-missing-brief-receipts-before-launch.meta" "$remote_route_meta" \
+  || fail "missing-receipt refusal rewrote the incomplete endpoint record"
+launches_after_missing_brief_receipts=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_missing_brief_receipts" -eq "$launches_after_missing_brief_receipts" ] \
+  || fail "missing-receipt refusal launched a replacement endpoint"
+mv "$TMP_ROOT/remote-ios-before-missing-brief-receipts.meta" "$remote_route_meta"
+
 # A live endpoint from before receipt publication must not remain permanently
 # stranded: ordinary launch still refuses it, while the explicit migration path
 # retires only this legacy shape and proves a fresh receipt on its replacement.
-remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
 awk -v pane="$legacy_pane" '
   /^spawn_gen=/ || /^startup_brief_required_spawn_gen=/ || /^launch_complete_spawn_gen=/ || /^startup_brief_delivered_spawn_gen=/ { next }
