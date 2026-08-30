@@ -4,12 +4,16 @@
 #
 # ONE owner of the steering-inbox contract: the record format, sequence
 # allocation, the idempotent re-enqueue dedup, the handled/ acknowledgement,
-# the self-describing doorbell line, and the watcher's re-ring ladder policy.
+# the self-describing doorbell line, the watcher's re-ring ladder policy, and
+# the acknowledgement-gated decision closure below.
 # bin/fm-send.sh writes and rings locally, the host-local remote steer leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and rings
-# on the remote host, bin/fm-watch.sh polls and re-rings, and the brief
-# scaffold (bin/fm-brief.sh) tells the worker how to read and acknowledge;
-# none of them restates the format.
+# on the remote host, bin/fm-watch.sh polls, re-rings, and commits the closures
+# the worker has acknowledged, bin/fm-teardown.sh runs that same commit once
+# more before the inbox is removed, bin/fm-wake-drain.sh reads only whether an
+# answer is still unacknowledged, and the brief scaffold (bin/fm-brief.sh)
+# tells the worker how to read and acknowledge; none of them restates the
+# format.
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
 # payload moves to the filesystem, which is reliable; the terminal carries only
@@ -160,8 +164,10 @@
 # marker failure may produce a rare duplicate rather than silently lose a wake.
 #
 # fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
-# other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
-# and tests. No side effects on source beyond its sourced libraries.
+# other helpers are dependency-light. Sourced by bin/fm-send.sh,
+# bin/fm-remote-secondmate-control.sh, bin/fm-watch.sh, bin/fm-teardown.sh,
+# bin/fm-wake-drain.sh, and tests. No side effects on source beyond its sourced
+# libraries.
 #
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
