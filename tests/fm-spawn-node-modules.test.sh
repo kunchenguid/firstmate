@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-spawn.sh's fresh Beeline worktree dependency sharing.
 #
-# A full node_modules symlink would retain npm workspace links back to the
-# primary checkout. These tests use a real git worktree and a tiny fabricated
-# dependency tree to prove third-party packages stay shared while @beeline
-# packages and binaries resolve into the spawned worktree's own source.
+# These tests use a real git worktree and a tiny fabricated dependency tree to
+# prove third-party packages stay shared while @beeline packages and binaries
+# resolve into the spawned worktree's own source.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -35,23 +34,27 @@ set -u
 last=
 for last in "$@"; do :; done
 case "${FM_FAIL_NODE_MODULES_LINK:-0}:$last" in
-  1:*/.fm-node-modules.*/node_modules/third-party) exit 42 ;;
+  1:*/.fm-node-modules.*/third-party) exit 42 ;;
 esac
 exec /bin/ln "$@"
 SH
   chmod +x "$fakebin/ln"
-  local real_python
-  real_python=$(command -v python3)
-  cat > "$fakebin/python3" <<SH
+  local real_node
+  real_node=$(command -v node)
+  cat > "$fakebin/node" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = - ] && [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ]; then
   mkdir -p "\$FM_NODE_MODULES_RACE_TARGET/node_modules"
   printf 'worker install\n' > "\$FM_NODE_MODULES_RACE_TARGET/node_modules/owned.txt"
 fi
-exec "$real_python" "\$@"
+if [ "\${1:-}" = - ] && [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ]; then
+  kill -TERM "\$PPID"
+  exit 143
+fi
+exec "$real_node" "\$@"
 SH
-  chmod +x "$fakebin/python3"
+  chmod +x "$fakebin/node"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -101,12 +104,13 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' FM_FAKE_PANE_PATH="$WORKTREE_DIR" \
     FM_FAIL_NODE_MODULES_LINK="${FM_FAIL_NODE_MODULES_LINK:-0}" \
     FM_NODE_MODULES_RACE_TARGET="${FM_NODE_MODULES_RACE_TARGET:-}" \
+    FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links() {
-  local rec id out status third_party_link workspace_link absolute_workspace_link bin_link bin_out
+  local rec id out status node_modules_link third_party_link workspace_link absolute_workspace_link bin_link bin_out
   id=node-modules-share-z1
   rec=$(make_case shared-dependencies "$id")
   read_case "$rec"
@@ -117,7 +121,13 @@ test_spawn_shares_dependencies_and_repoints_workspace_links() {
   assert_contains "$out" "spawned $id" "spawn did not report success"
 
   [ -d "$WORKTREE_DIR/node_modules" ] || fail "worktree node_modules was not created"
-  [ ! -L "$WORKTREE_DIR/node_modules" ] || fail "worktree node_modules must be a link farm, not one primary symlink"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "worktree node_modules was not atomically published"
+  node_modules_link=$(readlink "$WORKTREE_DIR/node_modules")
+  case "$node_modules_link" in
+    .fm-node-modules.*) ;;
+    *) fail "worktree node_modules did not point to its local dependency link farm" ;;
+  esac
+  [ -d "$WORKTREE_DIR/$node_modules_link" ] || fail "worktree dependency link farm is missing"
   third_party_link=$(readlink "$WORKTREE_DIR/node_modules/third-party")
   [ "$third_party_link" = "$PROJECT_DIR/node_modules/third-party" ] \
     || fail "third-party package did not share the primary dependency tree"
@@ -219,10 +229,29 @@ test_spawn_cleans_staging_after_setup_failure() {
   pass "fm-spawn cleans dependency staging after setup failure"
 }
 
+test_spawn_cleans_staging_after_interrupt() {
+  local rec id out status candidate
+  id=node-modules-interrupt-z6
+  rec=$(make_case setup-interrupt "$id")
+  read_case "$rec"
+
+  out=$(FM_INTERRUPT_NODE_MODULES_PUBLICATION=1 run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should stop when dependency publication is interrupted"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "interrupted setup left a dependency publication"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "interrupted setup leaked a staging dependency tree"
+  done
+  pass "fm-spawn cleans dependency staging after interruption"
+}
+
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_cleans_staging_after_setup_failure
+test_spawn_cleans_staging_after_interrupt
 
 echo "# all fm-spawn-node-modules tests passed"

@@ -628,6 +628,9 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+NODE_MODULES_ABORT_STAGING=
+NODE_MODULES_ABORT_TARGET=
+NODE_MODULES_ABORT_LINK=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -646,8 +649,23 @@ parse_orca_worktree_result() {
   fi
 }
 
+cleanup_beeline_node_modules_staging() {
+  if [ -n "$NODE_MODULES_ABORT_TARGET" ] \
+     && [ -L "$NODE_MODULES_ABORT_TARGET" ] \
+     && [ "$(readlink "$NODE_MODULES_ABORT_TARGET" 2>/dev/null || true)" = "$NODE_MODULES_ABORT_LINK" ]; then
+    rm -f -- "$NODE_MODULES_ABORT_TARGET" 2>/dev/null || true
+  fi
+  if [ -n "$NODE_MODULES_ABORT_STAGING" ]; then
+    rm -rf -- "$NODE_MODULES_ABORT_STAGING" 2>/dev/null || true
+  fi
+  NODE_MODULES_ABORT_STAGING=
+  NODE_MODULES_ABORT_TARGET=
+  NODE_MODULES_ABORT_LINK=
+}
+
 spawn_abort_cleanup() {
   local status=$?
+  cleanup_beeline_node_modules_staging
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -1295,6 +1313,14 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+exclude_path() {
+  local rel=$1 EXCL
+  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
+  [ -n "$EXCL" ] || return 0
+  mkdir -p "$(dirname "$EXCL")"
+  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+}
+
 share_beeline_node_modules() {
   local source source_real target staging_root staging entry name entry_real link_target
   local has_beeline_workspace publish_status
@@ -1317,9 +1343,11 @@ share_beeline_node_modules() {
   [ "$has_beeline_workspace" = 1 ] || return 0
 
   staging_root=$(mktemp -d "$WT/.fm-node-modules.XXXXXX") || return 1
-  staging="$staging_root/node_modules"
+  staging="$staging_root"
+  NODE_MODULES_ABORT_STAGING=$staging_root
+  NODE_MODULES_ABORT_TARGET=$target
+  NODE_MODULES_ABORT_LINK=$(basename "$staging_root")
   if ! (
-    mkdir "$staging" || exit 1
     for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
       name=$(basename "$entry")
@@ -1363,48 +1391,37 @@ share_beeline_node_modules() {
       done
     fi
 
-    publish_status=0
-    python3 - "$staging" "$target" <<'PY' || publish_status=$?
-import ctypes
-import errno
-import os
-import sys
-
-source = os.fsencode(sys.argv[1])
-target = os.fsencode(sys.argv[2])
-libc = ctypes.CDLL(None, use_errno=True)
-
-if sys.platform == "darwin":
-    rename_exclusive = libc.renamex_np
-    rename_exclusive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-    result = rename_exclusive(source, target, 0x00000004)
-elif sys.platform.startswith("linux"):
-    rename_exclusive = libc.renameat2
-    rename_exclusive.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    result = rename_exclusive(-100, source, -100, target, 0x00000001)
-else:
-    sys.exit(1)
-
-if result == 0:
-    sys.exit(0)
-if ctypes.get_errno() == errno.EEXIST:
-    sys.exit(3)
-sys.exit(1)
-PY
-    case "$publish_status" in
-      0|3) : ;;
-      *) exit 1 ;;
-    esac
   ); then
-    rm -rf -- "$staging_root" || true
+    cleanup_beeline_node_modules_staging
     return 1
   fi
 
-  if [ -e "$staging" ] || [ -L "$staging" ]; then
-    rm -rf -- "$staging_root" || true
-    return 0
-  fi
-  rmdir "$staging_root"
+  publish_status=0
+  node - "$NODE_MODULES_ABORT_LINK" "$target" <<'JS' || publish_status=$?
+const fs = require('node:fs');
+
+try {
+  fs.symlinkSync(process.argv[2], process.argv[3], 'dir');
+} catch (error) {
+  if (error.code === 'EEXIST') process.exit(3);
+  throw error;
+}
+JS
+  case "$publish_status" in
+    0)
+      exclude_path '.fm-node-modules.*/'
+      NODE_MODULES_ABORT_STAGING=
+      NODE_MODULES_ABORT_TARGET=
+      NODE_MODULES_ABORT_LINK=
+      ;;
+    3)
+      cleanup_beeline_node_modules_staging
+      ;;
+    *)
+      cleanup_beeline_node_modules_staging
+      return 1
+      ;;
+  esac
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -1878,13 +1895,6 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
-exclude_path() {
-  local rel=$1 EXCL
-  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
-  [ -n "$EXCL" ] || return 0
-  mkdir -p "$(dirname "$EXCL")"
-  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
-}
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
