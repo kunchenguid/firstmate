@@ -76,6 +76,9 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
 
   out=$("$RENDER" --harness pi)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$out" "starts monitoring automatically when supervision demand appears" "pi protocol does not describe demand-driven automatic start"
+  assert_contains "$out" "retires monitoring automatically when that demand clears" "pi protocol does not describe demand-driven idle retirement"
+  assert_not_contains "$out" "First cycle only" "pi protocol still spends a normal model turn on initial watcher start"
   assert_contains "$ordinary" "Pi extension already owns watcher continuity" "pi ordinary-wake line does not leave continuity to the extension"
   assert_not_contains "$ordinary" "fm_watch_arm_pi" "pi ordinary-wake line incorrectly calls the recovery tool"
   out=$("$RENDER" --harness pi --repair-line)

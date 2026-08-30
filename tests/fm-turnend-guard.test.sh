@@ -33,6 +33,31 @@ test_predicate_healthy_no_inflight() {
   pass "fm_supervision_unhealthy: false with no state/*.meta at all"
 }
 
+test_predicate_counts_only_published_task_records() {
+  local state="$TMP_ROOT/pred-published/state"
+  mkdir -p "$state"
+  : > "$state/.task1.meta.spawn.123"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "staged task record counted as published work"
+  [ "$FM_SUP_NEEDED" = false ] || fail "staged task record started supervision"
+  : > "$state/task1.meta"
+  printf 'malformed but published\n' > "$state/task2.meta"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 2 ] || fail "dead or malformed published task records did not count"
+  [ "$FM_SUP_NEEDED" = true ] || fail "published task records did not start supervision"
+  pass "fm_supervision_status: published task records count while staged records do not"
+}
+
+test_predicate_uncertain_published_state_keeps_supervision() {
+  local state="$TMP_ROOT/pred-uncertain/state"
+  mkdir -p "$state"
+  ln -s missing-target "$state/task1.meta"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_CERTAIN" = false ] || fail "a symlinked published task record was treated as certain idle state"
+  [ "$FM_SUP_NEEDED" = true ] || fail "uncertain published task state silenced supervision"
+  pass "fm_supervision_status: uncertain published state keeps supervision active"
+}
+
 test_predicate_unhealthy_no_beacon() {
   local state="$TMP_ROOT/pred-nobeat/state"
   mkdir -p "$state"
@@ -74,7 +99,9 @@ test_predicate_queue_pending_flag() {
   printf 'record\n' > "$state/.wake-queue"
   fm_supervision_status "$state" 300
   [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a non-empty wake queue must read as pending"
-  pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
+  [ "$FM_SUP_NEEDED" = true ] || fail "a pending durable wake must keep supervision needed"
+  fm_supervision_needed "$state" 300 || fail "a pending durable wake must keep the watcher active until drain"
+  pass "fm_supervision_status: a pending durable wake keeps supervision needed until drain"
 }
 
 test_predicate_x_mode_needs_supervision() {
@@ -386,6 +413,17 @@ test_hook_x_mode_reason_sources_cadence() {
   expect_code 2 "$status" "hook must block when in-flight X-mode work has no live watcher"
   assert_contains "$out" "source '$home/config/x-mode.env' first" "block reason must source the effective X-mode cadence"
   pass "fm-turnend-guard: X-mode repair reason sources the cadence config"
+}
+
+test_hook_pending_wake_only_blocks_in_default_mode() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pending-wake-only")
+  printf 'pending wake\n' > "$dir/state/.wake-queue"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "default hook mode must block while a durable wake remains pending"
+  assert_contains "$out" "pending durable wake needs supervision" "pending-wake-only blind stop must identify its supervision need"
+  assert_not_contains "$out" "X-mode relay polling needs supervision" "pending wake was misreported as Relay demand"
+  pass "fm-turnend-guard: pending durable wake remains guarded until drain"
 }
 
 test_hook_x_mode_only_blocks_in_default_mode() {
@@ -977,6 +1015,7 @@ test_pi_extension_injects_once_per_logical_agent_run() {
   mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-pi-watch-coordination.ts" "$repo/.pi/extensions/lib/fm-pi-watch-coordination.ts"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1035,6 +1074,77 @@ EOF
   pass ".pi primary extension: no-tool and multi-tool runs each inject exactly one guard follow-up"
 }
 
+test_pi_guard_waits_for_watcher_demand_reconciliation() {
+  local repo home ext log out status
+  repo="$TMP_ROOT/pi-guard-reconcile-root"
+  home="$TMP_ROOT/pi-guard-reconcile-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  log="$TMP_ROOT/pi-guard-reconcile.log"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-pi-watch-coordination.ts" "$repo/.pi/extensions/lib/fm-pi-watch-coordination.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+exit 0
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$repo/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" "$repo/bin/fm-cd-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const listeners = new Map();
+let release = () => {};
+const reconciliation = new Promise((resolve) => {
+  release = resolve;
+});
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  events: {
+    on(event, handler) {
+      listeners.set(event, handler);
+    },
+    emit(event, payload) {
+      listeners.get(event)?.(payload);
+    },
+  },
+  sendUserMessage: async () => {},
+};
+pi.events.on("fm-primary-pi-watch:reconcile-demand", (request) => {
+  request.waitUntil(reconciliation);
+});
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const settledRun = handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+for (let i = 0; i < 100 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (existsSync(process.env.FM_GUARD_LOG)) throw new Error("guard ran before watcher demand reconciliation settled");
+release();
+await settledRun;
+if (!existsSync(process.env.FM_GUARD_LOG)) throw new Error("guard did not run after watcher demand reconciliation settled");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi turn-end guard must wait for watcher demand reconciliation: $out"
+  [ -z "$out" ] || fail "Pi guard reconciliation test printed output: $out"
+  pass ".pi primary guard waits for local watcher demand reconciliation before repair"
+}
+
 test_pi_extension_retries_after_followup_delivery_failure() {
   local repo home ext out status
   repo="$TMP_ROOT/pi-delivery-failure-root"
@@ -1043,6 +1153,7 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-pi-watch-coordination.ts" "$repo/.pi/extensions/lib/fm-pi-watch-coordination.ts"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1751,6 +1862,8 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
 }
 
 test_predicate_healthy_no_inflight
+test_predicate_counts_only_published_task_records
+test_predicate_uncertain_published_state_keeps_supervision
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
@@ -1767,6 +1880,7 @@ test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
+test_hook_pending_wake_only_blocks_in_default_mode
 test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
@@ -1795,6 +1909,7 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
+test_pi_guard_waits_for_watcher_demand_reconciliation
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks

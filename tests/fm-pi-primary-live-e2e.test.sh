@@ -257,9 +257,11 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$PROJECT/.pi/extensions/lib/fm-branch-dispatch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/fm-operational-input.ts"
+cp "$ROOT/.pi/extensions/lib/fm-pi-watch-coordination.ts" "$PROJECT/.pi/extensions/lib/fm-pi-watch-coordination.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
 cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"
+cp "$ROOT/bin/fm-supervision-lib.sh" "$PROJECT/bin/fm-supervision-lib.sh"
 cp "$ROOT/bin/fm-supervision-instructions.sh" "$PROJECT/bin/fm-supervision-instructions.sh"
 chmod +x "$PROJECT/bin/fm-operational-input.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
@@ -304,9 +306,16 @@ printf '%s\n' "$pane" | grep -Fq "calm transcript" \
 send_prompt "/calm"
 sleep 0.2
 
+send_prompt "Reply exactly READY_FOR_WATCH. After the next watcher wake, run bin/fm-wake-drain.sh and reply exactly HANDLED without calling fm_watch_arm_pi."
+wait_for_exact_line "READY_FOR_WATCH" 120 || fail "Pi did not settle the demand-driven watcher setup turn"
 : > "$HOME_DIR/state/pi-e2e.meta"
-send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
-wait_for_text "watcher: started Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
+i=0
+while [ "$i" -lt 240 ]; do
+  [ -s "$HOME_DIR/state/.watch.lock/pid" ] && break
+  sleep 0.25
+  i=$((i + 1))
+done
+[ -s "$HOME_DIR/state/.watch.lock/pid" ] || fail "Pi did not start watcher monitoring when task demand appeared"
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
 i=0
@@ -327,7 +336,7 @@ if printf '%s\n' "$pane" | grep -Fq "$foreground_arm"; then
   fail "Pi used a foreground bash watcher arm"
 fi
 arm_tool_result_count=$(printf '%s\n' "$pane" | grep -Ec 'watcher: (started|unchanged|not armed|read-only)' || true)
-[ "$arm_tool_result_count" -eq 1 ] || fail "Pi model re-armed from memory instead of the extension (tool-result count $arm_tool_result_count)"
+[ "$arm_tool_result_count" -eq 0 ] || fail "Pi spent a model tool call on demand-driven monitoring (tool-result count $arm_tool_result_count)"
 
 pid_file=$(find "$HOME_DIR/state" -maxdepth 3 -type f -name pid | head -1)
 [ -n "$pid_file" ] || fail "re-armed watcher pid was not recorded"

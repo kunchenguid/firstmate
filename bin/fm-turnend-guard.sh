@@ -187,8 +187,12 @@ block_stop() {
       printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
       printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
-    else
+    elif [ "$FM_SUP_QUEUE_PENDING" = true ]; then
+      printf '●  A pending durable wake needs supervision until drain, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
+    elif [ -f "$STATE/x-watch.check.sh" ]; then
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
+    else
+      printf '●  Supervision demand state is uncertain, and no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
@@ -422,8 +426,12 @@ if [ "$terminal_status" -eq 0 ]; then
     NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
   elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
     NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
-  else
+  elif [ "$FM_SUP_QUEUE_PENDING" = true ]; then
+    NEED_DESC="a durable wake still pending drain"
+  elif [ -f "$STATE/x-watch.check.sh" ]; then
     NEED_DESC="X-mode relay polling active"
+  else
+    NEED_DESC="supervision demand state uncertain"
   fi
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
   exit 0

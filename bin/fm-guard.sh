@@ -150,7 +150,8 @@ fi
 
 # Compute supervision need and watcher-beacon freshness via the shared
 # grace-based predicate (bin/fm-supervision-lib.sh). Act when work, an event
-# source, or an X-mode relay poll needs supervision.
+# source, an X-mode relay poll, a pending durable wake, or uncertain state needs
+# supervision.
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
@@ -207,8 +208,12 @@ if [ "$watcher_healthy" = false ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
       elif [ "$sources" -gt 0 ]; then
         printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
-      else
+      elif "$queue_pending"; then
+        printf '●  A pending durable wake needs supervision until drain, but %s.\n' "$watcher_cause"
+      elif [ -f "$STATE/x-watch.check.sh" ]; then
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
+      else
+        printf '●  Supervision demand state is uncertain, but %s.\n' "$watcher_cause"
       fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'

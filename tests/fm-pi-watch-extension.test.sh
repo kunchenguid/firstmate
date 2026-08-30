@@ -35,9 +35,11 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-pi-watch-coordination.ts" "$repo/.pi/extensions/lib/fm-pi-watch-coordination.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
-  chmod +x "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-supervision-lib.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
@@ -70,6 +72,267 @@ export const Type = {
   },
 };
 JS
+}
+
+test_pi_session_start_arms_only_with_supervision_demand() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-demand-start-root"
+  home="$TMP_ROOT/pi-demand-start-home"
+  log="$TMP_ROOT/pi-demand-start.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+async function runScenario(name, expectedDemand) {
+  rmSync(process.env.FM_ARM_LOG, { force: true });
+  const state = `${process.env.FM_HOME}/state`;
+  rmSync(`${state}/task.meta`, { force: true });
+  rmSync(`${state}/.task.meta.spawn.123`, { force: true });
+  rmSync(`${state}/x-watch.check.sh`, { force: true });
+  rmSync(`${state}/.wake-queue`, { force: true });
+  rmSync(`${state}/procevent`, { force: true, recursive: true });
+  if (name === "task") writeFileSync(`${state}/task.meta`, "published task\n");
+  if (name === "staged") writeFileSync(`${state}/.task.meta.spawn.123`, "staged task\n");
+  if (name === "relay") writeFileSync(`${state}/x-watch.check.sh`, "relay\n");
+  if (name === "queue") writeFileSync(`${state}/.wake-queue`, "pending wake\n");
+  if (name === "source") {
+    mkdirSync(`${state}/procevent`);
+    writeFileSync(`${state}/procevent/source.source`, "registered source\n");
+  }
+  if (name === "uncertain") symlinkSync("missing", `${state}/task.meta`);
+  writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+  const handlers = new Map();
+  let modelTurns = 0;
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool() {},
+    sendUserMessage: async () => {
+      modelTurns += 1;
+    },
+  };
+  const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?scenario=${name}`);
+  mod.default(pi);
+  await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+  for (let i = 0; i < 200 && expectedDemand && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const armed = existsSync(process.env.FM_ARM_LOG);
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+  return { armed, modelTurns };
+}
+
+for (const name of ["idle", "staged"]) {
+  const result = await runScenario(name, false);
+  if (result.armed) throw new Error(`${name} session started watcher monitoring`);
+  if (result.modelTurns !== 0) throw new Error(`${name} session started ${result.modelTurns} model turns`);
+}
+for (const name of ["task", "relay", "source", "queue", "uncertain"]) {
+  const result = await runScenario(name, true);
+  if (!result.armed) throw new Error(`${name} supervision demand did not start watcher monitoring`);
+  if (result.modelTurns !== 0) throw new Error(`${name} automatic watcher start used ${result.modelTurns} model turns`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session start must arm only when supervision demand exists: $out"
+  [ -z "$out" ] || fail "Pi demand-driven session-start test printed output: $out"
+  pass "Pi session start arms only with supervision demand and uses zero model turns"
+}
+
+test_pi_settled_run_retires_idle_monitoring_without_model_turn() {
+  local repo home plugin log retired out status
+  repo="$TMP_ROOT/pi-demand-retire-root"
+  home="$TMP_ROOT/pi-demand-retire-home"
+  log="$TMP_ROOT/pi-demand-retire.log"
+  retired="$TMP_ROOT/pi-demand-retire.done"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'printf "retired\n" > "${FM_RETIRED_FILE:?}"; exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RETIRED_FILE="$retired" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let modelTurns = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "published task\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+for (let i = 0; i < 200 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("watcher did not start for published work");
+rmSync(`${process.env.FM_HOME}/state/task.meta`);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, { isIdle: () => true });
+for (let i = 0; i < 200 && !existsSync(process.env.FM_RETIRED_FILE); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_RETIRED_FILE)) throw new Error("idle watcher was not intentionally retired");
+if (modelTurns !== 0) throw new Error(`idle retirement used ${modelTurns} model turns`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (modelTurns !== 0) throw new Error("intentional idle retirement was reported as a watcher failure");
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi settled run must retire idle monitoring without a model turn: $out"
+  [ -z "$out" ] || fail "Pi demand-driven idle-retirement test printed output: $out"
+  pass "Pi settled run retires idle monitoring silently with zero model turns"
+}
+
+test_pi_idle_retirement_race_restarts_monitoring() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-demand-retire-race-root"
+  home="$TMP_ROOT/pi-demand-retire-race-home"
+  log="$TMP_ROOT/pi-demand-retire-race.log"
+  stop="$TMP_ROOT/pi-demand-retire-race.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  trap 'printf "replacement demand\n" > "${FM_HOME:?}/state/replacement.meta"; exit 0' TERM INT
+else
+  trap 'exit 0' TERM INT
+fi
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let modelTurns = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "initial demand\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+for (let i = 0; i < 200 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+rmSync(`${process.env.FM_HOME}/state/task.meta`);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, { isIdle: () => true });
+for (let i = 0; i < 300; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`retirement race started ${rows.length} watcher cycles`);
+if (!existsSync(`${process.env.FM_HOME}/state/replacement.meta`)) throw new Error("retirement race fixture did not publish replacement demand");
+if (modelTurns !== 0) throw new Error(`retirement race used ${modelTurns} model turns`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must re-read demand and restart immediately after idle retirement: $out"
+  [ -z "$out" ] || fail "Pi demand retirement-race test printed output: $out"
+  pass "Pi idle retirement re-reads demand and restarts monitoring without a model turn"
+}
+
+test_pi_state_hint_starts_new_external_demand() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-demand-state-hint-root"
+  home="$TMP_ROOT/pi-demand-state-hint-home"
+  log="$TMP_ROOT/pi-demand-state-hint.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_DEMAND_DEBOUNCE_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let modelTurns = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("idle session started monitoring before external demand");
+writeFileSync(`${process.env.FM_HOME}/state/external.meta`, "external published demand\n");
+for (let i = 0; i < 300 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("state change hint did not start monitoring");
+if (modelTurns !== 0) throw new Error(`state change hint used ${modelTurns} model turns`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi state hint must start monitoring when external demand appears: $out"
+  [ -z "$out" ] || fail "Pi demand state-hint test printed output: $out"
+  pass "Pi filtered state hint starts external supervision demand with zero model turns"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -181,13 +444,10 @@ mod.default(pi);
 if (!tool) throw new Error("Pi watch tool was not registered");
 if (tool.label !== "Arm firstmate watcher") throw new Error(`unexpected label: ${tool.label}`);
 if (tool.parameters?.type !== "object") throw new Error("tool parameters are not a TypeBox object schema");
-const metadata = [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join("\n");
-if (metadata.includes("Always use this tool")) throw new Error(`broad tool-selection metadata remained visible: ${metadata}`);
-if (!tool.description.includes("first required Pi watcher cycle")) throw new Error(`tool description omitted the first-cycle condition: ${tool.description}`);
-if (!tool.promptSnippet.includes("ordinary re-arming is automatic")) throw new Error(`tool snippet omitted automatic continuation: ${tool.promptSnippet}`);
-if (!tool.promptGuidelines.some((guideline) => guideline.includes("ordinary signal, stale, check, or heartbeat handling"))) {
-  throw new Error(`tool guidelines omitted ordinary-notification prevention: ${tool.promptGuidelines}`);
-}
+if (tool.promptSnippet !== undefined) throw new Error(`repair tool added normal-session prompt snippet overhead: ${tool.promptSnippet}`);
+if (tool.promptGuidelines !== undefined) throw new Error(`repair tool added normal-session prompt guideline overhead: ${tool.promptGuidelines}`);
+if (!tool.description.includes("Rare explicit repair")) throw new Error(`tool description omitted the repair-only boundary: ${tool.description}`);
+if (tool.description.includes("first required Pi watcher cycle")) throw new Error(`tool description still asks the model to start normal monitoring: ${tool.description}`);
 const result = await tool.execute("tool-call-1", {}, undefined, undefined, {});
 if (!Array.isArray(result.content) || result.content[0]?.type !== "text") {
   throw new Error(`invalid tool content: ${JSON.stringify(result)}`);
@@ -1604,15 +1864,12 @@ function liveArmPids() {
 }
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/session-transition.meta`, "published task\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 
 const startup = makePi();
 mod.default(startup.pi);
 await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
-const first = await startup.getTool().execute("startup", {}, undefined, undefined, {});
-if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
-  throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
-}
 await waitFor(() => {
   const arm = currentArm();
   return arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid);
@@ -1634,13 +1891,6 @@ async function replaceSession(previous, reason) {
     reason,
     previousSessionFile: `/tmp/previous-${reason}.jsonl`,
   }, {});
-  const armed = await next.getTool().execute(`arm-${reason}`, {}, undefined, undefined, {});
-  if (!armed.details?.ok) {
-    throw new Error(`${reason} replacement arm failed: ${JSON.stringify(armed.details)}`);
-  }
-  if (String(armed.details.message).includes("shutting down")) {
-    throw new Error(`${reason} replacement still refused with shutting-down latch`);
-  }
   await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== previousArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
@@ -1660,11 +1910,7 @@ current = await replaceSession(current, "fork");
 const sameInstanceArm = currentArm();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 await current.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-const sameInstanceResult = await current.getTool().execute("same-instance", {}, undefined, undefined, {});
-if (!sameInstanceResult.details?.ok || String(sameInstanceResult.details.message).includes("shutting down")) {
-  throw new Error(`same-instance replacement arm failed: ${JSON.stringify(sameInstanceResult.details)}`);
-  }
-  await waitFor(() => {
+await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== sameInstanceArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
   }, "same-instance replacement child and arm record");
@@ -2804,6 +3050,10 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_session_start_arms_only_with_supervision_demand
+test_pi_settled_run_retires_idle_monitoring_without_model_turn
+test_pi_idle_retirement_race_restarts_monitoring
+test_pi_state_hint_starts_new_external_demand
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

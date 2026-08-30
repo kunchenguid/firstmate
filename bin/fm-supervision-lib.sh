@@ -25,34 +25,86 @@ fm_sup_stat_mtime() {
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
 #   FM_SUP_SOURCES        count of registered process-to-event sources
-#   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
-#                         registered event source (a source is a wait on an
-#                         external process, not a task, so it has no metadata)
+#   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, a
+#                         registered event source, or a pending durable wake
+#                         (a source is a wait on an external process, not a task,
+#                         so it has no metadata)
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
+#   FM_SUP_CERTAIN        true/false - every demand-bearing state path was safely
+#                         classifiable; uncertainty keeps FM_SUP_NEEDED true
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source path beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
-
-  for meta in "$state"/*.meta; do
-    [ -e "$meta" ] || continue
-    FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
-  done
+  FM_SUP_CERTAIN=true
   FM_SUP_SOURCES=0
-  for source in "$state"/procevent/*.source; do
-    [ -e "$source" ] || continue
-    FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
-  done
+
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    if [ ! -d "$state" ] || [ -L "$state" ] || [ ! -r "$state" ] || [ ! -x "$state" ]; then
+      FM_SUP_CERTAIN=false
+    else
+      # Published task records use the non-hidden state/<id>.meta name. Spawn and
+      # relaunch stage dot-prefixed .<id>.meta.* files before atomic publication,
+      # so the glob deliberately excludes them. Record contents and endpoint
+      # liveness do not affect demand: dead, stalled, and malformed published
+      # tasks still need supervision.
+      for meta in "$state"/*.meta; do
+        [ -e "$meta" ] || [ -L "$meta" ] || continue
+        if [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ]; then
+          FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
+        else
+          FM_SUP_CERTAIN=false
+        fi
+      done
+
+      path="$state/procevent"
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        if [ ! -d "$path" ] || [ -L "$path" ] || [ ! -r "$path" ] || [ ! -x "$path" ]; then
+          FM_SUP_CERTAIN=false
+        else
+          for source in "$path"/*.source; do
+            [ -e "$source" ] || [ -L "$source" ] || continue
+            if [ -f "$source" ] && [ ! -L "$source" ] && [ -r "$source" ]; then
+              FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
+            else
+              FM_SUP_CERTAIN=false
+            fi
+          done
+        fi
+      fi
+
+      path="$state/.wake-queue"
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        if [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ]; then
+          # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
+          [ -s "$path" ] && FM_SUP_QUEUE_PENDING=true
+        else
+          FM_SUP_CERTAIN=false
+        fi
+      fi
+
+      path="$state/x-watch.check.sh"
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        if [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ]; then
+          FM_SUP_NEEDED=true
+        else
+          FM_SUP_CERTAIN=false
+        fi
+      fi
+    fi
+  fi
+
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
-    || [ -f "$state/x-watch.check.sh" ] \
-    || [ "$FM_SUP_SOURCES" -gt 0 ]; then
+    || [ "$FM_SUP_SOURCES" -gt 0 ] \
+    || [ "$FM_SUP_QUEUE_PENDING" = true ] \
+    || [ "$FM_SUP_CERTAIN" = false ]; then
     FM_SUP_NEEDED=true
   fi
 
@@ -69,8 +121,6 @@ fm_supervision_status() {
     fi
   fi
 
-  # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
-  [ -s "$state/.wake-queue" ] && FM_SUP_QUEUE_PENDING=true
   return 0
 }
 

@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -27,6 +27,10 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import {
+  FM_PI_WATCH_RECONCILE_EVENT,
+  type PiWatchReconcileRequest,
+} from "./lib/fm-pi-watch-coordination.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -58,6 +62,10 @@ type SessionGeneration = {
   retryTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
+  reconcileTail: Promise<void>;
+  demandWatchers: FSWatcher[];
+  demandHintTimer: ReturnType<typeof setTimeout> | null;
+  demandHintsReliable: boolean;
   seq: number;
 };
 
@@ -88,6 +96,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const supervisionLib = `${fmRoot}/bin/fm-supervision-lib.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -101,6 +110,7 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const demandDebounceMs = positiveInteger("FM_PI_DEMAND_DEBOUNCE_MS", 50);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
@@ -109,6 +119,7 @@ let activeGeneration: SessionGeneration | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
+const intentionalIdleRetirements = new WeakSet<ChildProcess>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -190,6 +201,49 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   };
 }
 
+function readSupervisionDemand(): Promise<"needed" | "idle" | "uncertain"> {
+  return new Promise((resolveDemand) => {
+    let output = "";
+    let settled = false;
+    const settle = (demand: "needed" | "idle" | "uncertain"): void => {
+      if (settled) return;
+      settled = true;
+      resolveDemand(demand);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(
+        "bash",
+        [
+          "-c",
+          '. "$1" || exit 1; fm_supervision_status "$2"; printf "needed=%s certain=%s\\n" "$FM_SUP_NEEDED" "$FM_SUP_CERTAIN"',
+          "fm-pi-supervision-demand",
+          supervisionLib,
+          state,
+        ],
+        { stdio: ["ignore", "pipe", "ignore"] },
+      );
+    } catch {
+      settle("uncertain");
+      return;
+    }
+    child.stdout?.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    child.on("error", () => settle("uncertain"));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        settle("uncertain");
+        return;
+      }
+      const result = output.trim();
+      if (result === "needed=true certain=true") settle("needed");
+      else if (result === "needed=false certain=true") settle("idle");
+      else settle("uncertain");
+    });
+  });
+}
+
 function createGeneration(): SessionGeneration {
   return {
     id: ++nextGenerationId,
@@ -198,6 +252,10 @@ function createGeneration(): SessionGeneration {
     retryTimer: null,
     retryFailures: 0,
     restoring: false,
+    reconcileTail: Promise.resolve(),
+    demandWatchers: [],
+    demandHintTimer: null,
+    demandHintsReliable: true,
     seq: 0,
   };
 }
@@ -214,6 +272,9 @@ function stopGeneration(generation: SessionGeneration): void {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   generation.retryTimer = null;
+  if (generation.demandHintTimer) clearTimeout(generation.demandHintTimer);
+  generation.demandHintTimer = null;
+  for (const watcher of generation.demandWatchers.splice(0)) watcher.close();
   if (generation.child) generation.child.kill("SIGTERM");
   generation.child = null;
 }
@@ -522,6 +583,11 @@ export default function (pi: ExtensionAPI) {
       releaseChild();
       if (!generationIsLive(owner)) return;
       const classification = classifyClose(stdout, stderr, code, signal);
+      if (intentionalIdleRetirements.has(armChild) && classification.kind === "failure") {
+        intentionalIdleRetirements.delete(armChild);
+        void queueDemandReconciliation(owner);
+        return;
+      }
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         if (owner.restoring) return;
@@ -552,6 +618,11 @@ export default function (pi: ExtensionAPI) {
       settleReadiness(false);
       releaseChild();
       if (!generationIsLive(owner)) return;
+      if (intentionalIdleRetirements.has(armChild)) {
+        intentionalIdleRetirements.delete(armChild);
+        void queueDemandReconciliation(owner);
+        return;
+      }
       if (owner.restoring) return;
       scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
@@ -561,17 +632,112 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  pi.on?.("session_start", () => {
+  async function reconcileDemand(owner: SessionGeneration): Promise<void> {
+    if (!generationIsLive(owner)) return;
+    const observedDemand = await readSupervisionDemand();
+    if (!generationIsLive(owner)) return;
+    const demand = owner.demandHintsReliable ? observedDemand : "uncertain";
+    if (demand !== "idle") {
+      startArm(owner);
+      return;
+    }
+    const armChild = owner.child;
+    if (!armChild) return;
+    intentionalIdleRetirements.add(armChild);
+    const retired = await retireArm(armChild);
+    if (!retired) intentionalIdleRetirements.delete(armChild);
+    if (!generationIsLive(owner)) return;
+    const observedAfterRetirement = await readSupervisionDemand();
+    if (!generationIsLive(owner)) return;
+    const demandAfterRetirement = owner.demandHintsReliable ? observedAfterRetirement : "uncertain";
+    if (demandAfterRetirement === "idle") return;
+    startArm(owner);
+  }
+
+  function queueDemandReconciliation(owner: SessionGeneration): Promise<void> {
+    const run = owner.reconcileTail.then(
+      () => reconcileDemand(owner),
+      () => reconcileDemand(owner),
+    );
+    owner.reconcileTail = run.catch(() => {
+      // An uncertain reconciliation is retried by the next lifecycle or state hint.
+    });
+    return run;
+  }
+
+  function scheduleDemandHint(owner: SessionGeneration): void {
+    if (!generationIsLive(owner)) return;
+    if (owner.demandHintTimer) clearTimeout(owner.demandHintTimer);
+    const timer = setTimeout(() => {
+      if (owner.demandHintTimer === timer) owner.demandHintTimer = null;
+      if (generationIsLive(owner)) void queueDemandReconciliation(owner);
+    }, demandDebounceMs);
+    timer.unref();
+    owner.demandHintTimer = timer;
+  }
+
+  function watchDemandDirectory(
+    owner: SessionGeneration,
+    directory: string,
+    relevant: (filename: string | null) => boolean,
+  ): void {
+    try {
+      const watcher = watch(directory, (eventType, filename) => {
+        const name = filename === null ? null : String(filename);
+        if (eventType === "rename" && directory === state && name === "procevent") {
+          installDemandWatchers(owner);
+        }
+        if (relevant(name)) scheduleDemandHint(owner);
+      });
+      watcher.on("error", () => {
+        owner.demandHintsReliable = false;
+        scheduleDemandHint(owner);
+      });
+      watcher.unref();
+      owner.demandWatchers.push(watcher);
+    } catch {
+      owner.demandHintsReliable = false;
+      scheduleDemandHint(owner);
+    }
+  }
+
+  function installDemandWatchers(owner: SessionGeneration): void {
+    if (!generationIsLive(owner)) return;
+    for (const watcher of owner.demandWatchers.splice(0)) watcher.close();
+    owner.demandHintsReliable = true;
+    watchDemandDirectory(owner, state, (filename) => {
+      if (filename === null) return true;
+      if (filename === ".wake-queue" || filename === "x-watch.check.sh" || filename === "procevent") return true;
+      return !filename.startsWith(".") && filename.endsWith(".meta");
+    });
+    const procevent = `${state}/procevent`;
+    if (existsSync(procevent)) {
+      watchDemandDirectory(owner, procevent, (filename) =>
+        filename === null || filename.endsWith(".source"));
+    }
+  }
+
+  pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
+    installDemandWatchers(generation);
+    await queueDemandReconciliation(generation);
+  });
+  pi.events?.on?.(FM_PI_WATCH_RECONCILE_EVENT, (value) => {
+    const request = value as Partial<PiWatchReconcileRequest>;
+    if (typeof request.waitUntil !== "function") return;
+    request.waitUntil(queueDemandReconciliation(generation));
+  });
+  pi.on?.("agent_settled", async () => {
+    await queueDemandReconciliation(generation);
   });
   pi.on?.("session_shutdown", () => {
     stopGeneration(generation);
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {
-    description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
+    description: "Explicitly repair firstmate watcher supervision through the Pi extension.",
     handler: async (_args, ctx) => {
       const result = startArm(generation);
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
@@ -581,11 +747,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool?.({
     name: "fm_watch_arm_pi",
     label: "Arm firstmate watcher",
-    description: "Start the first required Pi watcher cycle, or repair one only after a notification says the cycle is missing, failed, or unhealthy. Do not call after ordinary work or ordinary notifications; the Pi extension re-arms automatically. Never run bin/fm-watch-arm.sh through bash.",
-    promptSnippet: "Start the first required Pi watcher cycle or repair a cycle reported missing, failed, or unhealthy; ordinary re-arming is automatic.",
-    promptGuidelines: [
-      "Call fm_watch_arm_pi only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy. Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling because the Pi extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.",
-    ],
+    description: "Rare explicit repair for a Pi watcher cycle reported missing, failed, or unhealthy. Normal demand-based start, stop, and continuation are automatic. Never run bin/fm-watch-arm.sh through bash.",
     parameters: Type.Object({}),
     renderShell: "self",
     renderCall: (_args, theme, context) => {

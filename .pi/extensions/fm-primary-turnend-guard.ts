@@ -8,6 +8,10 @@ import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
 } from "./lib/fm-operational-input.ts";
+import {
+  FM_PI_WATCH_RECONCILE_EVENT,
+  type PiWatchReconcileRequest,
+} from "./lib/fm-pi-watch-coordination.ts";
 
 let guardFollowupActive = false;
 
@@ -438,6 +442,17 @@ async function claimSessionstartMessage(
   return sessionstartMessage(generation, result);
 }
 
+async function waitForWatchDemandReconciliation(pi: ExtensionAPI): Promise<void> {
+  const waits: Promise<unknown>[] = [];
+  const request: PiWatchReconcileRequest = {
+    waitUntil(promise) {
+      waits.push(Promise.resolve(promise));
+    },
+  };
+  pi.events?.emit?.(FM_PI_WATCH_RECONCILE_EVENT, request);
+  await Promise.all(waits.map((wait) => wait.catch(() => undefined)));
+}
+
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
@@ -580,6 +595,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    await waitForWatchDemandReconciliation(pi);
     const result = await runGuard();
     if (result.code !== 2) return;
 
