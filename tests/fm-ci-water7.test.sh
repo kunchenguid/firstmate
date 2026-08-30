@@ -362,6 +362,17 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
   assert_contains "$out" "duplicate step names" \
     "workflow duplicate-step failure was not explicit"
 
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"},{"status":"completed"}]} -->'
+  rc=0
+  out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=44 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "workflow accepted a malformed attestation step: rc=$rc out=$out"
+  assert_contains "$out" "malformed steps member" \
+    "workflow malformed-step failure was not explicit"
+
   tmp=$(fm_test_tmproot fm-ci-water7-unsigned)
   fakebin="$tmp/fakebin"
   mkdir -p "$fakebin"

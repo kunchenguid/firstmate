@@ -573,6 +573,10 @@ fm_remote_job_next_seq() { # [stage-dir destination]
           rm -f -- "$stage/state" "$stage/seq"
           return 1
         fi
+        if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
+          ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
+          return 1
+        fi
         rm -f -- "$destination/.owner-pid" "$destination/.owner-start" || true
       fi
       printf '%s\n' "$value"
@@ -613,6 +617,7 @@ fm_remote_job_cancel() { # <account-home> <id>
 fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdin is captured
   local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes queue_deadline owner_start
   shift 4
+  FM_REMOTE_JOB_ID=
   fm_remote_job_prepare_state "$account_home" || return 1
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
     FM_REMOTE_JOB_ERROR="remote job root is unavailable or unsafe"
@@ -665,6 +670,7 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   fm_remote_job_safe_id "$id" || { rm -rf -- "$stage"; return 1; }
   destination="$FM_REMOTE_JOB_JOBS/$id"
   [ ! -e "$destination" ] && [ ! -L "$destination" ] || { rm -rf -- "$stage"; return 1; }
+  FM_REMOTE_JOB_ID=$id
   if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
     ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
     rm -rf -- "$stage"
@@ -676,8 +682,6 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
     FM_REMOTE_JOB_ERROR="cannot allocate and publish a remote job staging sequence"
     return 1
   fi
-  # shellcheck disable=SC2034 # Sourceable API consumed by callers that do not use command substitution.
-  FM_REMOTE_JOB_ID=$id
   if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
     ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
     fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || true

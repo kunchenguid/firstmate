@@ -393,6 +393,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add tests/fixtures/vendor/pyyaml-6.0.2/LICENSE
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm nested-fixture-change
 
+  rm "$repo/tests/fixtures/vendor/pyyaml-6.0.2/LICENSE"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-no-mistakes-required.test.sh" \
+    "a deleted nested fixture selects its suite through the existing parent"
+  git -C "$repo" add -u -- tests/fixtures/vendor/pyyaml-6.0.2/LICENSE
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm deleted-nested-fixture-change
+
   mkdir -p "$repo/rejected"
   printf 'night report\n' >"$repo/gnhf-night-report.md"
   printf 'rejected candidate\n' >"$repo/rejected/1-candidate.md"

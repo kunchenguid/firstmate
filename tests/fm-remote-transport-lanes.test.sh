@@ -170,6 +170,16 @@ wait_for_state() { # <id> <state>
   return 1
 }
 
+RACE_PROBE_COUNT="$TMP_ROOT/post-publish-probe-count"
+: > "$RACE_PROBE_COUNT"
+post_publish_disconnect_probe() {
+  local calls
+  calls=$(cat "$RACE_PROBE_COUNT")
+  calls=$((calls + 1))
+  printf '%s\n' "$calls" > "$RACE_PROBE_COUNT"
+  [ "$calls" -lt 2 ] || kill -TERM "$BASHPID"
+}
+
 HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" > "$TMP_ROOT/worker.out" 2> "$TMP_ROOT/worker.err" &
@@ -377,6 +387,23 @@ ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 \
 sleep 1
 assert_absent "$STAGING_EFFECT" "a disconnected caller's staged job executed after publication"
 pass "a caller disconnect during stdin staging cancels before publication can escape"
+
+RACE_EFFECT="$TMP_ROOT/post-publish-race-effect"
+set +e
+(
+  JOB_ID=
+  JOB_COMPLETED=0
+  trap 'cancel_id=${JOB_ID:-${FM_REMOTE_JOB_ID:-}}; [ -n "$cancel_id" ] && fm_remote_job_cancel "$ACCOUNT_HOME" "$cancel_id"; exit 143' TERM
+  FM_REMOTE_JOB_DISCONNECT_PROBE=post_publish_disconnect_probe
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" fm-touch-job.sh "$RACE_EFFECT" < /dev/null > /dev/null
+)
+RACE_RC=$?
+set -e
+[ "$RACE_RC" -eq 143 ] || fail "the post-publication disconnect probe did not interrupt staging: rc=$RACE_RC"
+[ "$(cat "$RACE_PROBE_COUNT")" = 2 ] || fail "the post-publication disconnect window was not exercised"
+sleep 1
+assert_absent "$RACE_EFFECT" "a post-publication disconnect allowed the queued job to execute"
+pass "a post-publication disconnect cancels through the pre-bound job identity"
 
 # T3: after the cancellations, a burst of short bounded commands meets its own
 # budget - no convoy behind abandoned work.

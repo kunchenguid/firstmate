@@ -1346,14 +1346,12 @@ families_for_changed_path() {
       ;;
     tests/fixtures/*)
       fixture_ref=$path
-      if [ -e "$path" ]; then
-        while case "$fixture_ref" in tests/fixtures/*/*) true ;; *) false ;; esac; do
-          families_for_test_reference "$fixture_ref" && return 0
-          fixture_ref=${fixture_ref%/*}
-        done
-        families_for_test_reference "$fixture_ref" \
-          || printf '%s\n' "__unmapped__:$path"
-      fi
+      while case "$fixture_ref" in tests/fixtures/*/*) true ;; *) false ;; esac; do
+        families_for_test_reference "$fixture_ref" && return 0
+        fixture_ref=${fixture_ref%/*}
+      done
+      families_for_test_reference "$fixture_ref" \
+        || printf '%s\n' "__unmapped__:$path"
       ;;
     bin/*)
       # A deleted script has no consuming suite left to select, the same rule
