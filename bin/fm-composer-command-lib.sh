@@ -81,13 +81,20 @@
 # success. The marker is written only after fm_tmux_submit_core reports the
 # proof-carrying "empty" verdict (the composer actually cleared), never
 # before, so a crash before that point leaves nothing marked and a safe retry
-# is still possible - the only cost is that a crash in the narrow window AFTER
-# a confirmed submit but BEFORE the marker write could in principle retype an
-# already-delivered command on retry. That window is a few milliseconds of one
-# local file write, and /compact is idempotent to invoke twice, so this is an
-# accepted, documented tradeoff rather than a real hazard. A short-lived
-# per-key mkdir claim (state/.composer-command-inflight/<key>) additionally
-# rejects a second CONCURRENT attempt at the same key rather than racing it.
+# is still possible. The write is then VERIFIED (the file's existence is
+# checked, not either command's exit code) rather than assumed: a live
+# failure at that point - a read-only or full state directory - is reported
+# as a distinct, loud outcome (rc 10) rather than swallowed into an ordinary
+# success, because the command has already run and cannot be undone, and
+# silently claiming success would leave a later same-key call free to resubmit
+# it. The one window this cannot close is a hard process kill between the
+# confirmed submit and the marker write actually landing on disk - no
+# in-process check can run after the process is gone. That window is a few
+# milliseconds of one local file write, and /compact is idempotent to invoke
+# twice, so it remains an accepted, documented tradeoff rather than a real
+# hazard. A short-lived per-key mkdir claim
+# (state/.composer-command-inflight/<key>) additionally rejects a second
+# CONCURRENT attempt at the same key rather than racing it.
 #
 # Sourcing: set -u safe. Depends on bin/fm-supervisor-target-lib.sh (session
 # discovery) and bin/fm-tmux-lib.sh (busy/composer read and submit) being
@@ -282,6 +289,9 @@ fm_epoch_now() {
 #   7  the recorded session endpoint no longer exists
 #   8  the session is busy (mid-turn) or its composer is not confirmed empty
 #   9  the submit could not be confirmed delivered
+#   10 the command WAS submitted but the durable marker could not be written -
+#      see the comment at the marker write below for why this cannot report
+#      success
 fm_composer_command_deliver() {  # <text> <key> <config-dir> <state-dir>
   local text=$1 key=$2 config_dir=$3 state_dir=$4
   local marker cmd backend target harness verdict retries sleep_s settle
@@ -347,8 +357,22 @@ fm_composer_command_deliver() {  # <text> <key> <config-dir> <state-dir>
     return 9
   fi
 
-  mkdir -p "$(dirname "$marker")" 2>/dev/null || true
-  : > "$marker" 2>/dev/null || true
+  # The command has ALREADY run at this point (the submit above was
+  # confirmed), so a failure here cannot be swallowed into an ordinary
+  # success: doing that would leave no durable record, and a later same-key
+  # call would find no marker, pass every guard again, and resubmit - a real
+  # double delivery, exactly what this contract exists to prevent. Verify the
+  # marker actually exists after the attempt rather than trusting either
+  # command's own exit code, so a partial failure (mkdir ok, write not) is
+  # still caught. There is no way to "undo" the already-run command, so the
+  # only honest response is to report the failure loudly and distinctly
+  # rather than pretend delivery completed cleanly.
+  mkdir -p "$(dirname "$marker")" 2>/dev/null
+  : > "$marker" 2>/dev/null
+  if [ ! -e "$marker" ]; then
+    printf '%s was delivered to this home'"'"'s own session (key=%s), but the durable delivered-marker could not be written: a later retry for this exact key may resubmit it\n' "$cmd" "$key"
+    return 10
+  fi
   printf 'delivered %s to this home'"'"'s own session (key=%s)\n' "$cmd" "$key"
   return 0
 }

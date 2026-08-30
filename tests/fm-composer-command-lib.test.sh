@@ -198,6 +198,34 @@ pass "a second delivery attempt for the same key is a no-op success and never re
 [ ! -s "$CALLS_FILE" ] || fail "a restart-simulated re-delivery for an already-delivered key must never resend"
 pass "the delivered marker survives a simulated restart, so the same key is never delivered twice"
 
+# --- marker write failure after a confirmed submit must not claim success ---
+# The command has already run at this point (submit was confirmed). A live
+# failure writing its durable marker (a read-only marker directory here, not
+# a process crash) must be reported loudly and distinctly, never swallowed
+# into an ordinary success - silently claiming success would leave a later
+# same-key call free to resubmit the same command.
+
+WRITEFAIL_KEY="k-writefail"
+mkdir -p "$STATE3/.composer-command-delivered"
+chmod 0500 "$STATE3/.composer-command-delivered"
+out=$(fm_composer_command_deliver "/compact" "$WRITEFAIL_KEY" "$CFG_ON" "$STATE3"); rc=$?
+chmod 0700 "$STATE3/.composer-command-delivered"
+[ "$rc" -eq 10 ] || fail "a marker write failure after a confirmed submit must report rc=10, got $rc: $out"
+assert_contains "$out" "durable delivered-marker could not be written" \
+  "a marker write failure must be reported, never silently claimed as success"
+[ ! -e "$STATE3/.composer-command-delivered/$WRITEFAIL_KEY" ] \
+  || fail "the marker must not exist when its write genuinely failed"
+pass "a marker write failure after a confirmed submit is reported loudly (rc=10), never claimed as durable success"
+
+# Once the marker path is writable again, the SAME key must still be treated
+# as undelivered (free to retry) rather than permanently stuck or falsely
+# marked delivered by the failed attempt.
+out=$(fm_composer_command_deliver "/compact" "$WRITEFAIL_KEY" "$CFG_ON" "$STATE3"); rc=$?
+[ "$rc" -eq 0 ] || fail "a retry after the marker directory is writable again must succeed, got $rc: $out"
+assert_present "$STATE3/.composer-command-delivered/$WRITEFAIL_KEY" \
+  "a successful retry must finally write the marker"
+pass "once the marker path is writable again, a same-key retry succeeds and finally records delivery"
+
 # --- concurrent in-flight claim: no double-send race -------------------------
 
 CLAIM_KEY="k-inflight"
