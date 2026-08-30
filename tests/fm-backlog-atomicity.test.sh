@@ -1192,6 +1192,34 @@ test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
   pass "session start preserves a pending close across a transient backlog read failure"
 }
 
+test_recovery_retry_preserves_incomplete_cleanup_warning() {
+  local case_dir home id marker out
+  id=atomic-heal-retry-warning-b10
+  case_dir=$(make_home heal-retry-warning)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-warning"
+  marker="$home/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-warning\narg=--note\narg=local%%20main\n' \
+    "$id" "$home/data" > "$marker"
+  break_verb "$case_dir" show
+
+  out=$(run_bootstrap "$case_dir")
+  assert_absent "$home/state/$id.meta" \
+    "failed replay did not cross the task-record removal boundary"
+  assert_present "$marker" "failed replay discarded its pending close"
+  rm -f "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = done ] \
+    || fail "retried recovery left the item In flight: $out"
+  assert_contains "$out" "endpoint or local copy may remain" \
+    "retry lost the incomplete physical-cleanup warning"
+  assert_absent "$marker" "retried recovery retained its applied marker"
+  pass "recovery retries preserve incomplete-cleanup warnings"
+}
+
 test_recovery_finishes_a_close_for_the_same_meta_incarnation() {
   local case_dir id out
   id=atomic-heal-same-incarnation-b11
@@ -1666,6 +1694,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
+test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_both_records_when_meta_removal_fails
 test_recovery_rejects_a_marker_for_another_task_identity

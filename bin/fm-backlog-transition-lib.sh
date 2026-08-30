@@ -526,7 +526,7 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
 # before any meta or backlog mutation.
 fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
   local state=$1 marker=$2 marker_name expected_id
-  local id data marker_spawn_gen meta_spawn_gen row_state cleanup_incomplete=0
+  local id data marker_spawn_gen meta_spawn_gen row_state cleanup_incomplete=1
   local args=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
   [ -e "$marker" ] || [ -L "$marker" ] || return 0

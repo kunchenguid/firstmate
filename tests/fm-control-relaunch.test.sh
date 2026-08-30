@@ -1320,6 +1320,32 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_refuses_a_pending_authoritative_close() {
+  local dir meta marker out rc
+  dir=$(new_case pending-close rl36)
+  add_ship_task "$dir" rl36 claude
+  meta="$dir/home/state/rl36.meta"
+  printf 'spawn_gen=spawn-pending\n' >> "$meta"
+  cp "$meta" "$dir/meta.before"
+  mkdir -p "$dir/wt/.claude"
+  printf 'prior wiring\n' > "$dir/wt/.claude/settings.local.json"
+  marker="$dir/home/state/rl36.backlog-close"
+  printf 'id=rl36\ndata=%s\nspawn_gen=spawn-pending\narg=--note\narg=local%%20main\n' \
+    "$dir/home/data" > "$marker"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl36 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunching over a pending close should refuse"
+  assert_contains "$out" "pending authoritative backlog close" \
+    "the refusal should identify the close that still owns the task"
+  cmp -s "$dir/meta.before" "$meta" \
+    || fail "pending-close refusal replaced the task incarnation"
+  assert_grep 'prior wiring' "$dir/wt/.claude/settings.local.json" \
+    "pending-close refusal cleared the prior worker wiring"
+  assert_present "$marker" "pending-close refusal discarded the authoritative close"
+  pass "fm-spawn --relaunch: pending closes refuse before replacement begins"
+}
+
 test_spawn_relaunch_refuses_contradicting_flags() {
   local dir out rc
   dir=$(new_case flags rl16)
@@ -1437,6 +1463,7 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
+test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
