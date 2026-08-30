@@ -60,7 +60,7 @@
 # pushed branch whose done line carries the full https PR URL, and local-only is done only
 # at a complete committed branch. This scaffold emits text and cannot observe a git push,
 # so it makes no attempt to verify one; enforcement is firstmate sending back a completion
-# report with no pushed branch behind it (AGENTS.md section 7).
+# report that does not meet its mode's Definition of done (AGENTS.md section 7).
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -509,9 +509,9 @@ $RULE1
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done,
    or until an explicit handoff stop that Definition of done names.
-   Before you write a \`done:\` line, check it against Definition of done: a \`done:\` with no pushed
-   branch behind it is not a delivery and will be sent straight back to you. Firstmate can only
-   evaluate, merge, and deploy work it can actually see.
+   Before you write a \`done:\` line, check it against Definition of done: a \`done:\` that does not
+   meet Definition of done's bar is not a delivery and will be sent straight back to you. Firstmate
+   can only evaluate, merge, and deploy work it can actually see.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
