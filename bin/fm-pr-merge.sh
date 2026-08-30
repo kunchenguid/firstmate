@@ -269,7 +269,12 @@ gitlab_verify_mergeable() {
   # becomes an empty string or the literal "null", neither of which satisfies any
   # check below, so an unreadable field refuses the merge instead of passing it.
   if ! fields=$(printf '%s' "$json" | jq -r '
-      if type == "object" then
+      if type != "object" then
+        error("merge request payload is not an object")
+      elif (.has_conflicts | type) != "boolean"
+        or (.blocking_discussions_resolved | type) != "boolean" then
+        error("merge request payload has non-boolean mergeability fields")
+      else
         "state=" + ((.state // "") | tostring),
         "detail=" + ((.detailed_merge_status // "") | tostring),
         "conflicts=" + (.has_conflicts | tostring),
@@ -277,8 +282,6 @@ gitlab_verify_mergeable() {
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring)
-      else
-        error("merge request payload is not an object")
       end' 2>/dev/null); then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1

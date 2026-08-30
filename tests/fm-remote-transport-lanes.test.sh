@@ -492,6 +492,65 @@ test_failed_reclamation_reserves_home() {
 
 test_failed_reclamation_reserves_home
 
+test_pid_reuse_keeps_live_group_lane_reserved() {
+  local home="$TMP_ROOT/home-pid-reuse"
+  local running="$STATE_ROOT/jobs/job-pid-reuse-running"
+  local queued="$STATE_ROOT/jobs/job-pid-reuse-queued"
+  local effect="$TMP_ROOT/pid-reuse-effect"
+  local descendant_file="$TMP_ROOT/pid-reuse-descendant"
+  local group_pid helper_pid descendant_pid deadline
+  mkdir -p "$home" "$running/.claim" "$queued"
+  chmod 700 "$home" "$running" "$running/.claim" "$queued"
+  python3 - "$descendant_file" <<'PY' &
+import os
+import subprocess
+import sys
+
+child = subprocess.Popen(["bash", "-c", "sleep 30 & wait"], preexec_fn=os.setsid)
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(str(child.pid))
+child.wait()
+PY
+  helper_pid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$descendant_file" ] && break
+    sleep 0.01
+  done
+  [ -s "$descendant_file" ] || fail "PID reuse fixture did not publish its process group"
+  group_pid=$(cat "$descendant_file")
+  descendant_pid=$(ps -o pid= -g "$group_pid" | awk -v leader="$group_pid" '$1 != leader && $1 ~ /^[0-9]+$/ { print $1; exit }')
+  [ -n "$descendant_pid" ] || fail "PID reuse fixture did not retain a live descendant"
+  kill -0 -- "-$group_pid" 2>/dev/null || fail "PID reuse fixture process group is not live"
+  kill -0 "$descendant_pid" 2>/dev/null || fail "PID reuse fixture descendant is not live"
+
+  deadline=$(( $(date +%s) + 60 ))
+  printf 'running\n' > "$running/state"
+  printf '%s\n' "$home" > "$running/home"
+  printf '%s\n' "$group_pid" > "$running/.claim/group"
+  printf 'pid-reused\n' > "$running/.claim/group_start"
+  printf 'queued\n' > "$queued/state"
+  printf '%s\n' "$REMOTE_ROOT" > "$queued/root"
+  printf '%s\n' "$home" > "$queued/home"
+  printf '%s\n' "$deadline" > "$queued/queue_deadline"
+  printf '5\n' > "$queued/timeout"
+  printf '%s\0%s\0' fm-touch-job.sh "$effect" > "$queued/argv"
+  : > "$queued/stdin"
+  : > "$queued/stdout"
+  : > "$queued/stderr"
+  chmod 600 "$running/state" "$running/home" "$running/.claim/group" \
+    "$running/.claim/group_start" "$queued"/*
+  sleep 1
+  [ ! -e "$effect" ] || fail "a queued job ran beside a live PID-reused process group"
+  [ "$(job_state "${queued##*/}")" = queued ] \
+    || fail "PID-reused live group did not retain the queued same-home reservation"
+  [ -e "$running/.claim/group" ] || fail "PID-reused live group claim was released"
+  kill -KILL -- "-$group_pid" 2>/dev/null || true
+  wait "$helper_pid" 2>/dev/null || true
+  pass "PID reuse keeps a live descendant group in one-lane custody"
+}
+
+test_pid_reuse_keeps_live_group_lane_reserved
+
 # Stage litter: an abandoned .stage.* older than the reap age does not survive
 # a worker pass, while fresh staging is left alone.
 OLD_STAGE="$STATE_ROOT/jobs/.stage.abandoned"

@@ -1702,6 +1702,30 @@ test_gitlab_each_condition_refuses_independently() {
   pass "fm-pr-merge refuses on each GitLab pre-merge condition independently"
 }
 
+test_gitlab_mergeability_requires_boolean_fields() {
+  local case_dir rc name field
+  for name in conflicts discussions; do
+    case "$name" in
+      conflicts) field='conflicts="false"' ;;
+      discussions) field='discussions="true"' ;;
+    esac
+    case_dir=$(make_gitlab_case "gitlab-non-boolean-$name" "$field")
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "gitlab-non-boolean-$name: malformed mergeability data must refuse"
+    assert_grep 'could not read the GitLab merge request state before merging' \
+      "$case_dir/stderr" "gitlab-non-boolean-$name: malformed mergeability data was accepted"
+    [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+      || fail "gitlab-non-boolean-$name: a merge was attempted on malformed mergeability data"
+  done
+  pass "fm-pr-merge rejects non-boolean GitLab mergeability fields"
+}
+
 test_gitlab_reports_every_failing_condition() {
   local case_dir rc expected
   case_dir=$(make_gitlab_case gitlab-refuse-all \
@@ -2614,6 +2638,7 @@ test_gitlab_imposes_no_merge_method
 test_gitlab_extra_args_forwarded
 test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
+test_gitlab_mergeability_requires_boolean_fields
 test_gitlab_reports_every_failing_condition
 test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses

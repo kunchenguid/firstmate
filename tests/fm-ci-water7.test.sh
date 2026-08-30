@@ -143,8 +143,17 @@ portable_commands = {
     )
     for job_id in ("tests-portable-parallel-1", "tests-portable-parallel-2")
 }
-assert "bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1" in portable_commands["tests-portable-parallel-1"]
-assert "bin/fm-test-run.sh --lane portable-parallel-2" in portable_commands["tests-portable-parallel-2"]
+normalize_command = lambda command: " ".join(command.split())
+assert normalize_command(portable_commands["tests-portable-parallel-1"]) == (
+    'set -eu mkdir -p "$RUNNER_TEMP/fm-test" '
+    'bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1 '
+    '\\ --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"'
+)
+assert normalize_command(portable_commands["tests-portable-parallel-2"]) == (
+    'set -eu mkdir -p "$RUNNER_TEMP/fm-test" '
+    'bin/fm-test-run.sh --lane portable-parallel-2 '
+    '\\ --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"'
+)
 
 required_tool_step = {
     "name": "Install required test tools",
