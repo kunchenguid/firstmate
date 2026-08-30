@@ -117,6 +117,7 @@ else:
                 "HOME": str(self.root / "synthetic-home"),
                 "FM_HANDOFF_TESTING": "1",
                 "FM_HANDOFF_TEST_NOW": FIXED_NOW,
+                "FM_HANDOFF_TEST_PROCESS_CAPABILITY": "claude-process-generation-1",
                 "FAKE_HERDR_LOG": str(self.herdr_log),
                 "FAKE_HERDR_MODE_FILE": str(self.herdr_mode),
                 "FAKE_CLAUDE_SESSION": self.claude_session,
@@ -267,11 +268,12 @@ else:
             },
         )
 
-    def bind_claude(self, source: str = "startup", session: str | None = None):
+    def bind_claude(self, source: str = "startup", session: str | None = None, *, extra_env=None):
         return self.run(
             "claude-hook",
             input_value={"hook_event_name": "SessionStart", "session_id": session or self.claude_session, "source": source},
             cwd=self.vault,
+            extra_env=extra_env,
         )
 
     def hook(self, payload):
@@ -470,6 +472,14 @@ def test_caps_atomicity_and_failure_receipts(tmp: Path) -> None:
     receipts = [json.loads(path.read_text()) for path in (fsync_env.home / "state" / "context-handoff" / "receipts").glob("*.json")]
     check(any(item.get("reason") == "atomic-seal-failed" for item in receipts), "fsync failure left no durable failure receipt")
     check(not list((fsync_env.home / "state" / "context-handoff" / "records").glob("*.json")), "fsync failure published a partial envelope")
+    state_chain_env = Environment(tmp, "state-directory-chain-fsync")
+    state_chain_env.register("Every newly created state directory entry must be durable before sealing succeeds.")
+    state_chain_records = state_chain_env.home / "state" / "context-handoff" / "records"
+    state_chain_records.rmdir()
+    state_chain_failure = state_chain_env.seal_pi(extra_env={"FM_HANDOFF_TEST_FAILPOINT": "before-created-directory-fsync"})
+    check(state_chain_failure["status"] == "seal-failed", "new state directory fsync failure did not stop sealing")
+    state_chain_retry = state_chain_env.seal_pi()
+    check(state_chain_retry["status"] == "sealed", "state directory fsync recovery did not permit a later durable seal")
 
 
 def test_exact_delivery_and_no_launch(tmp: Path) -> None:
@@ -485,12 +495,12 @@ def test_exact_delivery_and_no_launch(tmp: Path) -> None:
     check(busy["reason"] == "recipient-not-idle", "busy exact recipient was notified")
     env.herdr_mode.write_text("ready\n")
     delivered = env.run("deliver")
-    check(delivered["status"] == "notified", "exact ready recipient was not notified")
+    check(delivered["status"] == "pending" and delivered["reason"] == "recipient-atomic-generation-prompt-unsupported", "delivery did not fail closed without an atomic generation precondition")
     again = env.run("deliver")
-    check(again["status"] == "nothing-pending", "successful notification replayed")
+    check(again["status"] == "pending", "unsupported atomic delivery did not retain the record pending")
     calls = [json.loads(line) for line in env.herdr_log.read_text().splitlines()]
     prompts = [call for call in calls if call[:2] == ["agent", "prompt"]]
-    check(len(prompts) == 1 and prompts[0][3] == "/firstmate-context-handoff:consume", "delivery did not use one constant prompt")
+    check(not prompts, "delivery used a probe-then-prompt sequence without an atomic generation condition")
     log_text = env.herdr_log.read_text()
     check(seal["record_id"] not in log_text and "Keep retries" not in log_text, "delivery exposed record identity or content")
     check(not any(any(word in part for word in ("start", "restart", "respawn")) for call in calls for part in call), "delivery attempted to launch or restart a process")
@@ -503,14 +513,14 @@ def test_exact_delivery_and_no_launch(tmp: Path) -> None:
     multi.enable(delivery_enabled=True)
     first_record_id, second_record_id = sorted((first["record_id"], second["record_id"]))
     first_delivery = multi.run("deliver")
-    check(first_delivery["record_id"] == first_record_id, "delivery did not notify the first queued record")
+    check(first_delivery["status"] == "pending", "first queued record escaped the unsupported atomic delivery hold")
     second_queue_path = multi.home / "state" / "context-handoff" / "queue" / f"{second_record_id}.json"
     check(json.loads(second_queue_path.read_text())["status"] == "pending", "one notification marked an unconsumed second record notified")
     next_value, error = multi.mcp("next_curated_handoff", {})
     check(not error and next_value["record_id"] == first_record_id, "first notification did not expose exactly the first record")
     multi.mcp("record_curation_disposition", {"record_id": first_record_id, "disposition": "duplicate", "rationale": "The first durable fact already exists."})
     second_delivery = multi.run("deliver")
-    check(second_delivery["record_id"] == second_record_id, "second pending record was not notified after first consumption")
+    check(second_delivery["status"] == "pending", "second queued record escaped the unsupported atomic delivery hold")
 
 
 def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
@@ -608,6 +618,31 @@ def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
     check(source_blocked["decision"] == "block", "Claude source validation failure did not block compaction")
     source_receipts = [json.loads(path.read_text()) for path in (source_failure_env.home / "state" / "context-handoff" / "receipts").glob("*.json")]
     check(any(item.get("reason") == "registered-candidate-validation-failed" and item.get("failure_code") == "SOURCE_HASH_MISMATCH" for item in source_receipts), "Claude candidate validation failure left no durable receipt")
+
+    retry_env = Environment(tmp, "claude-provider-failure-retry")
+    retry_env.enable(consumer_enabled=True)
+    retry_env.bind_claude()
+    retry_env.register("A successful Claude compaction retry must deliver its exact earlier seal.", harness="claude")
+    check(retry_env.hook({"hook_event_name": "PreCompact", "trigger": "auto"}) is None, "Claude retry fixture PreCompact failed")
+    retry_queue_path = next((retry_env.home / "state" / "context-handoff" / "queue").glob("handoff-*.json"))
+    check(retry_env.hook({"hook_event_name": "StopFailure"}) is None, "Claude provider failure hook emitted content")
+    check(json.loads(retry_queue_path.read_text())["compaction"] == "failed", "Claude provider failure did not bind the exact PreCompact seal")
+    check(retry_env.hook({"hook_event_name": "PreCompact", "trigger": "auto"}) is None, "Claude provider retry did not rebind its durable seal")
+    check(retry_env.hook({"hook_event_name": "PostCompact", "trigger": "auto"}) is None, "Claude retry PostCompact emitted content")
+    retry_queue = json.loads(retry_queue_path.read_text())
+    check(retry_queue["compaction"] == "succeeded" and retry_queue["status"] == "pending", "successful Claude retry remained stuck after its earlier provider failure")
+
+    capability_env = Environment(tmp, "consumer-process-capability")
+    capability_env.enable(consumer_enabled=True)
+    capability_env.bind_claude()
+    initial, initial_error = capability_env.mcp("next_curated_handoff", {})
+    check(not initial_error and initial["status"] == "empty", "initial consumer process capability did not authorize its MCP server")
+    replacement_capability = {"FM_HANDOFF_TEST_PROCESS_CAPABILITY": "claude-process-generation-2"}
+    capability_env.bind_claude(extra_env=replacement_capability)
+    stale, stale_error = capability_env.mcp("next_curated_handoff", {})
+    check(stale_error and stale["code"] == "CONSUMER_SESSION", "stale MCP server inherited replacement-session authority")
+    replacement, replacement_error = capability_env.mcp("next_curated_handoff", {}, extra_env=replacement_capability)
+    check(not replacement_error and replacement["status"] == "empty", "replacement MCP process capability was not authorized")
 
 
 def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
@@ -732,6 +767,31 @@ def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
     check(not crash_ack.exists(), "direct apply unexpectedly wrote the source acknowledgement")
     healed, error = crash_env.commit(crash_seal["record_id"], crash_prepared["approval_sha256"])
     check(not error and healed["status"] == "acknowledged" and crash_ack.exists(), "apply-complete-before-ack did not heal")
+
+    disposition_after_apply = Environment(tmp, "disposition-after-completed-apply")
+    disposition_after_apply.enable(consumer_enabled=True)
+    disposition_after_apply_seal = disposition_after_apply.make_ready_record("A completed Save must win over a later non-save disposition.")
+    disposition_after_apply.bind_claude()
+    disposition_after_apply_prepared = disposition_after_apply.prepare(disposition_after_apply_seal["record_id"])
+    disposition_after_apply_bundle = disposition_after_apply.home / "state" / "context-handoff" / "bundles" / disposition_after_apply_seal["record_id"] / f"{disposition_after_apply_prepared['bundle_sha256']}.json"
+    disposition_apply = subprocess.run(
+        [str(disposition_after_apply.python), str(disposition_after_apply.core), "transaction", "apply", str(disposition_after_apply_bundle), "--vault", str(disposition_after_apply.vault), "--approved-plan-sha256", disposition_after_apply_prepared["approval_sha256"]],
+        env=disposition_after_apply.base_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    check(disposition_apply.returncode == 0, f"completed-Save disposition fixture failed: {disposition_apply.stderr}")
+    disposition_result, disposition_error = disposition_after_apply.mcp(
+        "record_curation_disposition",
+        {"record_id": disposition_after_apply_seal["record_id"], "disposition": "duplicate", "rationale": "The durable fact already exists."},
+    )
+    disposition_ack_path = disposition_after_apply.home / "state" / "context-handoff" / "acks" / f"{disposition_after_apply_seal['record_id']}.json"
+    disposition_record_path = disposition_after_apply.home / "state" / "context-handoff" / "quarantine" / f"disposition-{disposition_after_apply_seal['record_id']}.json"
+    check(not disposition_error and disposition_result["disposition"] == "saved", "non-save disposition bypassed completed-Save recovery")
+    check(json.loads(disposition_ack_path.read_text())["disposition"] == "saved" and not disposition_record_path.exists(), "completed Save was contradicted by a durable non-save acknowledgement")
 
     ack_crash_env = Environment(tmp, "ack-before-queue-crash")
     ack_crash_env.enable(consumer_enabled=True)
