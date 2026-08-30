@@ -410,6 +410,66 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+test_unsynced_flagged_project_skipped_with_zero_output() {
+  local home clone out before_tracking after_tracking
+  home=$(new_home)
+  clone=$(build_pair "$home" xiu)
+  advance_origin "$home" xiu C1
+  before_tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+  # Dirty and behind: without the +unsynced flag this clone would be reported
+  # STUCK (dirty tree on the default branch), never silently skipped.
+  echo dirty >> "$clone/file.txt"
+  mkdir -p "$home/data"
+  printf -- '- xiu [no-mistakes +unsynced] - test project (added 2026-08-30)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  [ -z "$out" ] || fail "+unsynced clone produced output on stdout: $out"
+  after_tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+  [ "$after_tracking" = "$before_tracking" ] \
+    || fail "+unsynced clone's origin/main tracking ref moved, proving a fetch ran"
+  pass "+unsynced clone is skipped with zero fetch and zero output"
+}
+
+test_unsynced_flag_composes_with_yolo_in_either_order() {
+  local home clone out before_tracking after_tracking
+  home=$(new_home)
+  clone=$(build_pair "$home" phi)
+  advance_origin "$home" phi C1
+  before_tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+  echo dirty >> "$clone/file.txt"
+  mkdir -p "$home/data"
+  printf -- '- phi [direct-PR +yolo +unsynced] - test project (added 2026-08-30)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  [ -z "$out" ] || fail "+unsynced clone (with +yolo present) produced output: $out"
+  after_tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+  [ "$after_tracking" = "$before_tracking" ] \
+    || fail "+unsynced clone's origin/main tracking ref moved, proving a fetch ran"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" phi)" = "direct-PR on" ] \
+    || fail "+unsynced token corrupted the mode/yolo parse for phi"
+  pass "+unsynced composes with +yolo in either order and does not disturb mode/yolo parsing"
+}
+
+test_unsynced_whole_fleet_form_skips_flagged_clone_only() {
+  local home clone_a out
+  home=$(new_home)
+  clone_a=$(build_pair "$home" chi)
+  build_pair "$home" psi >/dev/null
+  advance_origin "$home" chi C1
+  advance_origin "$home" psi C1
+  echo dirty >> "$clone_a/file.txt"
+  mkdir -p "$home/data"
+  printf -- '- chi [no-mistakes +unsynced] - test project (added 2026-08-30)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home")
+
+  assert_not_contains "$out" "chi" "+unsynced clone produces no line at all in the whole-fleet sweep"
+  assert_contains "$out" "psi: synced" "the unflagged sibling clone still syncs normally"
+  pass "whole-fleet sweep skips only the +unsynced clone, with zero trace of it in the output"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -704,6 +764,9 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_unsynced_flagged_project_skipped_with_zero_output
+test_unsynced_flag_composes_with_yolo_in_either_order
+test_unsynced_whole_fleet_form_skips_flagged_clone_only
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

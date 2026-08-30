@@ -12,7 +12,10 @@
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
-# and fetch failures.
+# and fetch failures. A project registry-flagged "+unsynced" (see
+# bin/fm-project-mode.sh's header) is skipped even more quietly: no fetch, no
+# drift check, and no output at all, because the captain edits and pulls that
+# clone directly outside firstmate by design.
 # A candidate under projects/ must be the root of its own work tree: git discovery
 # walks up, so a plain nested directory would otherwise resolve to the enclosing
 # repository (the firstmate checkout) and be synced under that directory's label.
@@ -300,6 +303,14 @@ report_stuck() {
 sync_project() {
   PROJ=$1
   label=$(project_label)
+
+  # A captain-flagged "+unsynced" project (data/projects.md, resolved via
+  # fm-project-mode.sh --unsynced) is edited and pulled outside firstmate by
+  # design. Skip it before any other check, with zero output either way, so it
+  # is never fetched, never drift-checked, and never reported as STUCK.
+  if [ "$("$FM_ROOT/bin/fm-project-mode.sh" --unsynced "$label" 2>/dev/null || echo no)" = "yes" ]; then
+    return 0
+  fi
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
