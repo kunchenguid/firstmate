@@ -13,7 +13,7 @@ metadata:
 
 Load this skill before scoping any quantitative experiment, before writing a backtest brief, and before interpreting a backtest result.
 This skill is the single owner of the fleet's general quant-experiment method.
-It does not authorize a backtest, data access, promotion, or an order.
+It remains `RESEARCH_ONLY` and `NO_ORDER`; it does not authorize a backtest, an RD-Agent run, data access, promotion, spending, use of a paid API, or changes to another project.
 
 ## Decide the test first
 
