@@ -364,7 +364,7 @@ $ no-mistakes axi logs --run <run> --step review --full
 
 ```
 USAGE_WALL: proof wall source=step-log:review line="  "I'll start by examining the current state of the code and the findings.You've hit your session limit - resets 1:40am (America/Los_Angeles)""
-USAGE_WALL_NEXT: this is a provider usage limit, not a crash - the work is intact. Load the usage-limit-recovery skill before touching the task.
+USAGE_WALL_NEXT: a usage-limit phrasing and the non-zero exit the harness itself printed were both read in this evidence; load the usage-limit-recovery skill, which owns what that means for the work, before touching the task.
 ```
 
 That verdict is only correct because the run exposed a defect first.
@@ -529,7 +529,7 @@ agent state: dead
 
 === 2. diagnose separates the wall from a crash ===
 USAGE_WALL: proofcrew wall source=endpoint line="You've hit your weekly limit - resets Aug 26 at 10am (Europe/Rome)"
-USAGE_WALL_NEXT: this is a provider usage limit, not a crash - the work is intact. Load the usage-limit-recovery skill before touching the task.
+USAGE_WALL_NEXT: a usage-limit phrasing and the non-zero exit the harness itself printed were both read in this evidence; load the usage-limit-recovery skill, which owns what that means for the work, before touching the task.
 
 === 3. the whole terminal server goes away (this is the #3113 shape) ===
 agent state: missing

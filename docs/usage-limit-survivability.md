@@ -63,6 +63,11 @@ The command never passes `--allow-keychain-prompt` itself: it runs inside a sess
 It labels a reading; it never gates, blocks, or reorders a dispatch.
 Firstmate and the captain decide what runs, and there is deliberately no budgeting, scheduling, or admission logic anywhere in this surface.
 
+The same line separates evidence from meaning, which is why `diagnose` reports rather than concludes.
+Matching a vendor phrasing against a corroborating exit line is exact work and belongs in a script; deciding that a stranded task's work is therefore intact is a reading of that match, and readings belong to an agent.
+So a `wall` verdict states what was read and hands off to `.agents/skills/usage-limit-recovery`, which owns what the match means and what to do about it.
+The script never prints that the work is intact: it looked at a terminal capture and a step log, and at no branch, worktree, or commit such a claim would be about.
+
 Headroom is read out of `quota-axi`'s default TOON rather than its JSON, because the TOON is the surface `AGENTS.md` section 4 already makes the dispatch-facing one, and because it renders the derived per-provider reading directly rather than leaving this command to re-derive it from raw windows.
 The command reads exactly the layout a floor-compliant build emits: `quota[]` for the account percentage with the window that bounds it and that window's reset, `exhaustion[]` for the runway with its own bounding window, and `attention[]` for the kind, detail and remedy of a provider with no measurable window.
 The TOON block is parsed by field name out of its own declared header, so an upstream provider, window, or field addition shifts nothing; a reordered report is a test case, not a hope.
@@ -140,14 +145,14 @@ A task with no endpoint recorded at all is not an unread endpoint and never carr
 
 This detector reads a terminal capture and a pipeline step log, and both can contain this repository's own documentation of the detector.
 The recovery skill and the verification record quote the vendor's limit phrasings verbatim, because a record that paraphrased its evidence would stop being a record.
-The digest runs `diagnose --endpoint-only` automatically for every endpoint it cannot read as alive, so a crewmate who merely had this surface's skill or diff on screen when their endpoint died would otherwise be told `wall source=endpoint`, and told that the work is intact, about a task that genuinely failed.
+The digest runs `diagnose --endpoint-only` automatically for every endpoint it cannot read as alive, so a crewmate who merely had this surface's skill or diff on screen when their endpoint died would otherwise be told `wall source=endpoint`, and routed into the recovery procedure, about a task that genuinely failed.
 
 That is a defect class rather than a detail of this one command: a mechanism whose evidence source includes its own documentation.
 It will recur in anything that greps for text this repository also discusses, so it is worth recognising by name before writing the next such detector.
 
 The two error directions are not symmetric, and that is what decides the fix.
 A missed wall is self-correcting, because whoever is reading carries on and finds the real cause.
-A false wall asserts the work is intact and stops the reading, so a confident wrong verdict is strictly worse than an honest unknown.
+A false wall sends the reader into a recovery procedure that starts from the work being intact, and so stops the reading, which makes a confident wrong verdict strictly worse than an honest unknown.
 
 Only the positive is therefore tightened.
 A `wall` verdict needs the vendor phrasing and the harness's own non-zero exit in the same evidence, on a different line, and the corroborating line must not itself carry a limit phrasing.

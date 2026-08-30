@@ -16,8 +16,9 @@
 #
 #   headroom   read the gauge BEFORE dispatching, and never read an unmeasured
 #              gauge as a healthy one.
-#   diagnose   decide from evidence whether a stranded task hit the wall or
-#              actually failed, so the two are never confused again.
+#   diagnose   report whether the recorded evidence for a stranded task carries
+#              a corroborated usage-limit signature, so a wall and a crash are
+#              never confused again.
 #   resume     regenerate, from live durable state, exactly what a recovery
 #              needs to know about every task in flight.
 #
@@ -25,6 +26,13 @@
 # captain choose. There is deliberately no budgeting, scheduling, throttling, or
 # admission policy here, and the `tight` label below is presentation only - it
 # never gates, blocks, or reorders a dispatch.
+#
+# It decides no MEANING either. A verdict states what the evidence carries - a
+# corroborated signature, none, or nothing readable - and stops there; what that
+# implies for the work is a reading, and .agents/skills/usage-limit-recovery
+# owns it. So `wall` is never printed as "the work is intact": this command
+# looked at a terminal capture and a step log, and at no branch, worktree, or
+# commit that such a claim would be about.
 #
 # The recovery PROCEDURE is not here either: .agents/skills/usage-limit-recovery
 # owns it. This script owns the data that procedure reads. Neither restates the
@@ -336,14 +344,15 @@ USAGE_WALL_EXIT_PATTERNS="$USAGE_WALL_EXIT_PATTERNS|exit(ed with)? code [1-9]"
 # the verification record quote the vendor phrasings verbatim, and the digest
 # runs `diagnose --endpoint-only` automatically for every endpoint it cannot read
 # as alive. A crewmate merely reading or working on this surface would otherwise
-# get `wall source=endpoint` plus "this is a provider usage limit, not a crash -
-# the work is intact" on a task that genuinely failed.
+# get `wall source=endpoint` and be routed into the recovery procedure on a task
+# that genuinely failed.
 #
 # The two error directions are not symmetric. A MISSED wall is self-correcting:
-# whoever is reading carries on and finds the real cause. A FALSE wall asserts
-# the work is intact and STOPS the reading. A confident wrong verdict is strictly
-# worse than an honest unknown, so only the POSITIVE is tightened here; the
-# negative stays `no-signature`, which is explicitly not proof the work crashed.
+# whoever is reading carries on and finds the real cause. A FALSE wall sends the
+# reader into a recovery procedure that starts from the work being intact, and
+# so STOPS the reading. A confident wrong verdict is strictly worse than an
+# honest unknown, so only the POSITIVE is tightened here; the negative stays
+# `no-signature`, which is explicitly not proof the work crashed.
 #
 # It costs no true positive on record: every real detection - the 2026-08-23
 # review and test step logs, and the 2026-08-27 run that stranded this very
@@ -1391,11 +1400,14 @@ diagnose_inconclusive() {  # <id> <checked> <reason-slug> <detail> [<unread>] [<
   printf 'USAGE_WALL_NEXT: the evidence that separates a usage wall from a crash could not be read; do not record a failure until it can.\n'
 }
 
+# wall_verdict: the corroborated positive. It prints WHAT was read and leaves
+# the reading to the skill; the header's "It decides no MEANING either"
+# paragraph owns why it never states what the verdict implies for the work.
 wall_verdict() {  # <id> <source> <line>
   local capped=$3
   [ "${#capped}" -le 200 ] || capped="${capped:0:200} [truncated]"
   printf 'USAGE_WALL: %s wall source=%s line="%s"\n' "$1" "$2" "$capped"
-  printf 'USAGE_WALL_NEXT: this is a provider usage limit, not a crash - the work is intact. Load the usage-limit-recovery skill before touching the task.\n'
+  printf 'USAGE_WALL_NEXT: a usage-limit phrasing and the non-zero exit the harness itself printed were both read in this evidence; load the usage-limit-recovery skill, which owns what that means for the work, before touching the task.\n'
 }
 
 # fm_meta_get_local: meta lookup that does not require the backend library, so

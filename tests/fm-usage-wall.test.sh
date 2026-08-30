@@ -1554,8 +1554,11 @@ fake_tmux "$CASE_FB" fm-wallcrew "$CASE/capture.txt"
 OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose wallcrew)
 assert_contains "$OUT" 'USAGE_WALL: wallcrew wall source=endpoint' 'a limit line in the endpoint output is a wall'
 assert_contains "$OUT" "$WEEKLY_LIMIT_LINE" 'the verdict quotes the line it matched'
-assert_contains "$OUT" 'not a crash' 'the wall verdict says plainly that this is not a crash'
-assert_contains "$OUT" 'usage-limit-recovery' 'the wall verdict routes to the recovery procedure'
+assert_contains "$OUT" 'the non-zero exit the harness itself printed were both read' \
+  'the wall verdict states the evidence it read, not what that evidence means'
+assert_not_contains "$OUT" 'the work is intact' \
+  'the verdict never claims the state of a branch this command never looked at'
+assert_contains "$OUT" 'usage-limit-recovery' 'the wall verdict routes to the owner of the reading'
 pass 'diagnose reads a usage wall out of the endpoint output'
 
 # --- diagnose: the limit line in a failed step log --------------------------
@@ -1627,8 +1630,8 @@ fake_tmux "$CASE_FB" fm-docscrew "$CASE/capture.txt"
 OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose docscrew --endpoint-only)
 assert_not_contains "$OUT" 'wall source=' \
   'this repository own documentation of the detector must never read as a wall'
-assert_not_contains "$OUT" 'the work is intact' \
-  'a false wall is the one direction that stops the reading, so it must not be claimed here'
+assert_not_contains "$OUT" 'load the usage-limit-recovery skill' \
+  'a false wall is the one direction that stops the reading, so it must not route here'
 pass 'diagnose does not read this repository own tracked phrasings as a wall'
 
 # The same text on the step-log path, where the negative is `no-signature`
