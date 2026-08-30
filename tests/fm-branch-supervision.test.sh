@@ -550,21 +550,6 @@ test_branch_prompt_carries_new_phase_escalation_rule() {
 
   out=$("$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
 
-  # Executable reachability: the worker charter's reserved new-phase key crosses
-  # the real classifier boundary, while ordinary working updates still do not.
-  # The branch, not this mechanical edge, makes the context-dependent verdict.
-  # shellcheck source=bin/fm-classify-lib.sh
-  . "$ROOT/bin/fm-classify-lib.sh"
-  status_is_captain_relevant \
-    "working [key=new-phase-schema-rewrite]: full table rewrite required; revised rough duration 20 minutes" \
-    || fail "a structured new-phase update cannot reach branch supervision"
-  status_is_captain_relevant \
-    "working: rewriting the table; roughly 20 minutes" \
-    && fail "ordinary working progress became mechanically captain-relevant"
-  status_is_captain_relevant \
-    "working [key=ordinary-progress]: rewriting the table; roughly 20 minutes" \
-    && fail "an ordinary keyed phase became mechanically captain-relevant"
-
   # The ONE-TIME escalation: an explicit captain-requested operation that
   # unexpectedly grows a new multi-minute phase surfaces exactly one outcome,
   # and that outcome must name both the condition and the revised duration.
@@ -572,14 +557,14 @@ test_branch_prompt_carries_new_phase_escalation_rule() {
     "- an explicit captain-requested operation that unexpectedly gains a new multi-minute phase - name the condition and the revised rough duration in the summary." \
     "branch prompt lost the unexpected-new-phase escalation trigger"
   assert_contains "$out" \
-    "report it once per new phase, immediately when you observe its structured wake." \
-    "new-phase escalation lost its immediate, surface-once-per-phase contract"
+    "report it once per new phase, on the next routine supervision pass on which you observe the new phase, not the instant the phase appears." \
+    "new-phase escalation lost its next-pass, surface-once-per-phase contract"
 
   # The NON-escalation cases: the expected wait itself, its background work, its
   # ordinary progress, and a repeat of an estimate already reported all stay
   # routine. A repeated unchanged estimate re-surfacing would defeat the rule.
   assert_contains "$out" \
-    "For an expected wait, background work, ordinary progress, or any later repeat of an estimate you already reported, report verdict routine with silent true so the wake is durably handled without surfacing an outcome." \
+    "Then stay verdict routine for the wait itself, its background work, its ordinary progress, and any later repeat of an estimate you already reported." \
     "new-phase rule lost its expected-wait, background-work, ordinary-progress, or repeated-estimate silence"
 
   # The RE-surface cases: a materially changed estimate, a failure, and a needed
@@ -618,7 +603,7 @@ This rule is unconditional: do not qualify it by whether the result is healthy, 
   credential=$(printf '%s\n' "$out" | grep -n -- "- a needed credential or login" | head -1 | cut -d: -f1)
   security=$(printf '%s\n' "$out" | grep -n -- "- anything destructive, irreversible, or security-sensitive" | head -1 | cut -d: -f1)
   phase=$(printf '%s\n' "$out" | grep -n "unexpectedly gains a new multi-minute phase" | head -1 | cut -d: -f1)
-  quiet=$(printf '%s\n' "$out" | grep -n "For an expected wait, background work, ordinary progress" | head -1 | cut -d: -f1)
+  quiet=$(printf '%s\n' "$out" | grep -n "Then stay verdict routine for the wait itself" | head -1 | cut -d: -f1)
   resurface=$(printf '%s\n' "$out" | grep -n "Escalate the same operation again only when" | head -1 | cut -d: -f1)
   [ -n "$uncond" ] && [ -n "$failure" ] && [ -n "$credential" ] && [ -n "$security" ] \
     && [ -n "$phase" ] && [ -n "$quiet" ] && [ -n "$resurface" ] \

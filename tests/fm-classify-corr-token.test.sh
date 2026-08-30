@@ -271,12 +271,6 @@ test_captain_relevance_and_pause_are_unchanged_without_a_token() {
   status_is_captain_relevant 'working: still going' && fail "working: regressed to captain-relevant"
   status_is_captain_relevant 'working: rebased onto merged #76' \
     && fail "nonterminal free-text guard regressed"
-  status_is_captain_relevant 'working [key=ordinary-progress]: roughly 20 minutes' \
-    && fail "an ordinary keyed working phase became captain-relevant"
-  status_is_captain_relevant 'working [key=new-phase-schema-rewrite]: full rewrite; revised rough duration 20 minutes' \
-    || fail "the reserved new-phase update cannot reach supervision"
-  status_is_captain_relevant "working corr=$CORR [key=new-phase-schema-rewrite]: full rewrite; revised rough duration 20 minutes" \
-    || fail "a correlated reserved new-phase update cannot reach supervision"
   status_is_captain_relevant 'merged' || fail "legacy bare free-text regressed"
   status_is_captain_relevant 'resolved [key=q1]: answered' && fail "resolved regressed to captain-relevant"
 
