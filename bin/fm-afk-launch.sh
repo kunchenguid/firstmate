@@ -29,8 +29,8 @@
 #                              just refreshes state/.afk; a recorded-but-dead
 #                              terminal is reconciled (closed by id) first.
 #   fm-afk-launch.sh start-native
-#                              Prepare lifecycle state for a harness-native
-#                              background job and record that no terminal exists.
+#                              Record no terminal for a harness-native background
+#                              job; unsupported for Claude/Herdr, which uses start.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
