@@ -863,6 +863,28 @@ test_completion_refuses_a_legacy_record_without_an_incarnation() {
   pass "completion leaves legacy records open when no incarnation can be recorded"
 }
 
+test_completion_refuses_ambiguous_incarnation_metadata() {
+  local case_dir id meta marker out rc=0
+  id=atomic-close-ambiguous-incarnation-b7
+  case_dir=$(make_home close-ambiguous-incarnation)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only \
+    "spawn_gen=spawn-old" "spawn_gen=spawn-current"
+  meta="$(home_of "$case_dir")/state/$id.meta"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown accepted ambiguous incarnation metadata"
+  assert_contains "$out" "has 2 spawn generation fields" \
+    "teardown did not report the ambiguous incarnation"
+  assert_present "$meta" "ambiguous-incarnation refusal removed the task record"
+  assert_absent "$marker" "ambiguous-incarnation refusal published a close"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "ambiguous-incarnation refusal changed the backlog row"
+  pass "completion refuses ambiguous task incarnations"
+}
+
 test_completion_records_a_relative_report_for_relocated_data() {
   local case_dir id relocated backlog out
   id=atomic-close-relocated-scout-b7
@@ -1291,6 +1313,30 @@ test_recovery_finishes_a_close_for_the_same_meta_incarnation() {
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "session start retained the completed incarnation's close marker"
   pass "session start finishes a close for the matching meta incarnation"
+}
+
+test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata() {
+  local case_dir home id marker out
+  id=atomic-heal-ambiguous-incarnation-b12
+  case_dir=$(make_home heal-ambiguous-incarnation)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes \
+    "spawn_gen=spawn-old" "spawn_gen=spawn-current"
+  marker="$home/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-current\narg=--note\narg=local%%20main\n' \
+    "$id" "$home/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  assert_contains "$out" "has 2 spawn generation fields" \
+    "recovery did not report ambiguous incarnation metadata"
+  assert_present "$marker" "ambiguous metadata caused recovery to discard the close"
+  assert_present "$home/state/$id.meta" \
+    "ambiguous metadata caused recovery to remove the task record"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "ambiguous metadata allowed recovery to close the backlog row"
+  pass "recovery preserves closes for ambiguous task incarnations"
 }
 
 test_recovery_preserves_both_records_when_meta_removal_fails() {
@@ -1757,6 +1803,7 @@ test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
 test_completion_closes_a_scout_with_its_report
 test_completion_refuses_a_legacy_record_without_an_incarnation
+test_completion_refuses_ambiguous_incarnation_metadata
 test_completion_records_a_relative_report_for_relocated_data
 test_space_containing_scout_report_marker_replays
 test_trailing_newline_data_path_fails_closed
@@ -1775,6 +1822,7 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
+test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata
 test_recovery_preserves_both_records_when_meta_removal_fails
 test_recovery_preserves_a_close_beside_symlinked_metadata
 test_recovery_rejects_a_marker_for_another_task_identity

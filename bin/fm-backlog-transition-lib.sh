@@ -254,6 +254,31 @@ fm_backlog_record_publish() {
   return 0
 }
 
+fm_backlog_meta_spawn_gen() {
+  local meta=$1 count value
+  FM_BACKLOG_META_SPAWN_GEN=
+  fm_backlog_record_present "$meta" || return 1
+  count=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$meta" 2>/dev/null) || {
+    FM_BACKLOG_TRANSITION_ERROR="unreadable spawn generation in task record $meta"
+    return 1
+  }
+  if [ "$count" -ne 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="task record $meta has $count spawn generation fields; exactly one is required"
+    return 1
+  fi
+  value=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { sub(/^[^=]*=/, ""); print }' "$meta" 2>/dev/null) || {
+    FM_BACKLOG_TRANSITION_ERROR="unreadable spawn generation in task record $meta"
+    return 1
+  }
+  case "$value" in
+    ''|.*|*[!A-Za-z0-9._-]*)
+      FM_BACKLOG_TRANSITION_ERROR="invalid spawn generation in task record $meta"
+      return 1
+      ;;
+  esac
+  FM_BACKLOG_META_SPAWN_GEN=$value
+}
+
 fm_backlog_row_dispatchable() {
   case "$1" in
     in_flight\ *|queued\ no) return 0 ;;
@@ -556,7 +581,8 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_TRANSITION_ERROR="unsafe interrupted task record at $meta"
       return 1
     fi
-    meta_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$meta" | head -1)
+    fm_backlog_meta_spawn_gen "$meta" || return 1
+    meta_spawn_gen=$FM_BACKLOG_META_SPAWN_GEN
     if [ "$meta_spawn_gen" != "$marker_spawn_gen" ]; then
       fm_backlog_close_marker_remove "$marker" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale

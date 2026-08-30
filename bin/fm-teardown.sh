@@ -273,7 +273,7 @@ META_LOCK_HELD=1
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
-TEARDOWN_META_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
+TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
@@ -288,9 +288,12 @@ if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
     TEARDOWN_BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
   fi
 fi
-if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] && [ -z "$TEARDOWN_META_SPAWN_GEN" ]; then
-  echo "error: task $ID's record has no spawn_gen; refusing automatic teardown because a durable backlog close cannot identify this incarnation - relaunch the task to publish an incarnation, then retry teardown" >&2
-  exit 1
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+  if ! fm_backlog_meta_spawn_gen "$META"; then
+    echo "error: task $ID's record has no spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown" >&2
+    exit 1
+  fi
+  TEARDOWN_META_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 fi
 
 REMOTE_HANDOFF_DIR_PRESENT=0
