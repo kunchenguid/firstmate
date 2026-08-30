@@ -1173,11 +1173,11 @@ backlog_done_args() {
 # invariant). This prints what already happened, so the follow-up wording stays
 # only where a human still owes the edit.
 backlog_refresh_reminder() {
-  local data_relative backlog_display
+  local backlog_display
   [ "$KIND" = secondmate ] && return 0
   [ "$CLEANUP_RECOVERY" = orca ] && return 0
-  if data_relative=$(fm_backlog_data_relative "$DATA"); then
-    backlog_display="$data_relative/backlog.md"
+  if backlog_display=$(fm_backlog_file "$DATA"); then
+    :
   else
     backlog_display="${DATA%/}/backlog.md"
   fi

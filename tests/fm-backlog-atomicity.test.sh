@@ -462,13 +462,14 @@ test_recovery_uses_the_parent_of_a_trailing_slash_data_record() {
 }
 
 test_completion_targets_a_nested_relative_data_directory() {
-  local case_dir id relative_data data backlog out
+  local case_dir id relative_data data data_resolved backlog out
   id=atomic-close-relative-data-b2
   case_dir=$(make_home close-relative-data)
   relative_data=relocated/data
   data="$case_dir/$relative_data"
   mkdir -p "$case_dir/relocated"
   mv "$(home_of "$case_dir")/data" "$data"
+  data_resolved=$(cd "$data" && pwd -P)
   backlog="$data/backlog.md"
   tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
   tasks-axi start "$id" --file "$backlog" >/dev/null
@@ -485,15 +486,18 @@ test_completion_targets_a_nested_relative_data_directory() {
     "relative-data teardown retained its task record"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "relative-data teardown retained its close marker"
+  assert_contains "$out" "closed in $data_resolved/backlog.md" \
+    "relative-data completion collapsed the configured backlog path"
   pass "completion targets nested relative data from the caller directory"
 }
 
 test_immediate_child_absolute_data_dispatches_and_completes() {
-  local case_dir id data backlog out
+  local case_dir id data data_resolved backlog out
   id=atomic-immediate-child-data-b2
   case_dir=$(make_home immediate-child-data "$id")
   data="$case_dir/fm-records"
   mv "$(home_of "$case_dir")/data" "$data"
+  data_resolved=$(cd "$data" && pwd -P)
   backlog="$data/backlog.md"
   tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
 
@@ -507,7 +511,7 @@ test_immediate_child_absolute_data_dispatches_and_completes() {
     || fail "immediate-child-data teardown failed: $out"
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "immediate-child absolute completion mutated a different backlog"
-  assert_contains "$out" "fm-records/backlog.md" \
+  assert_contains "$out" "closed in $data_resolved/backlog.md" \
     "relocated completion confirmed the wrong backlog path"
   pass "an immediate-child absolute data path keeps one paired backlog"
 }
@@ -1719,18 +1723,22 @@ test_home_without_a_backlog_dispatches_and_completes() {
 }
 
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog() {
-  local case_dir id out
+  local case_dir id data data_resolved out
   id=atomic-manual-b12
   case_dir=$(make_home manual-backend "$id")
   printf '%s\n' manual > "$(home_of "$case_dir")/config/backlog-backend"
+  data="$case_dir/manual-data"
+  mv "$(home_of "$case_dir")/data" "$data"
+  data_resolved=$(cd "$data" && pwd -P)
   # Deliberately no backlog item: on a manual home the operator owns the file,
   # so neither half of the lifecycle may hard-fail over its contents.
-  out=$(run_ship_spawn "$case_dir" "$id") || fail "manual-backend spawn failed: $out"
+  out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") \
+    || fail "manual-backend spawn failed: $out"
   assert_contains "$out" "spawned $id" "manual-backend spawn did not report success"
-  mv "$(home_of "$case_dir")/data" "$case_dir/manual-data"
 
-  out=$(run_teardown "$case_dir" "$id") || fail "manual-backend teardown failed: $out"
-  assert_contains "$out" "Update $(home_of "$case_dir")/data/backlog.md" \
+  out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
+    || fail "manual-backend teardown failed: $out"
+  assert_contains "$out" "Update $data_resolved/backlog.md" \
     "manual-backend teardown did not name its configured backlog path"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "manual-backend teardown recorded a close it never owed"
