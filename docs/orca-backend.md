@@ -75,7 +75,7 @@ It never raw-deletes an Orca worktree.
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
-- Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
+- Firstmate reads no version or protocol floor from Orca: `orca status --json` reports `result.runtime.appVersion`, but readiness alone is the compatibility gate.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 
 ## Regression entry points

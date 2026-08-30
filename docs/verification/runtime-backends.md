@@ -178,7 +178,8 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was refreshed on 2026-08-30 with metadata fixtures for every supported backend and the current composite Orca worktree-id shape.
+The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a, and its metadata-fixture cells were refreshed on 2026-08-30 for every supported backend, including the current composite Orca worktree-id shape.
+The dedicated tmux cell below is skipped when tmux is absent, so its recorded result stays attributed to the tmux 3.6a run.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -712,6 +713,7 @@ Observed fields:
 ```text
 result.runtime.reachable=true
 result.runtime.state=ready
+result.runtime.appVersion=1.4.192
 ```
 
 `orca terminal create --json` returned `result.terminal.handle`.
