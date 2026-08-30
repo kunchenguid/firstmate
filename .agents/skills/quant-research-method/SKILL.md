@@ -24,7 +24,7 @@ A factor test needs no strategy, no entry rule, and no exit rule.
 Specifying entry or exit rules for one is an attribution error.
 
 A gate test asks whether trading only in a stated condition improves a stated strategy.
-Run the factor test first.
+Run the factor test first unless the gate brief cites a recorded factor-test result for the exact feature definition.
 Then implement the gate as an explicit custom state strategy with stated transitions, decision time, execution time, and exposure.
 Compare it to the same ungated strategy with exposure-matched and volatility-matched controls.
 Inheriting a framework strategy for a gate test is worse than adding entry or exit rules to a factor test because it answers an unstated trading question.
@@ -71,6 +71,7 @@ Name the estimator and predeclare a lag or block length that covers the forward-
 Do not thin the series or report naive uncertainty as a substitute.
 Naive standard errors were 1.7x to 2.9x too narrow in prior real-data checks, so estimate the correction instead of applying a fixed multiplier.
 Use walk-forward splits for research selection and reserve a sealed holdout, frozen specification, predefined metrics, and selection-aware inference for confirmation.
+Purge from every earlier fold each sample whose label interval intersects a later fold or the sealed holdout.
 
 ## Treat the null honestly
 
@@ -94,12 +95,14 @@ Before accepting a result, run the detector named for every applicable failure m
 - **Framework-default strategy:** diff the run configuration against the brief and reject any unnamed strategy class or parameter.
 - **Double lag:** assert the signal, decision, and execution timestamps have exactly the declared lag, with one transformation owning it.
 - **Coverage-support confusion:** report panel observation dates and per-signal populated-bucket dates as distinct fields.
+- **Split-boundary label leakage:** assert no earlier-fold label interval intersects a later fold or the sealed holdout, and record every purged sample.
 
 ## Close the methodology loop
 
 Every traversal records two findings alongside the market feedback record.
 The market finding says whether the hypothesis survived.
 The required `METHODOLOGY FINDING` says what in the process was wrong or nearly misleading and names the rule that would have caught it.
+If no flaw or near miss is detected, record `METHODOLOGY FINDING: NONE_DETECTED`, the completed detector set, and the independent external-review status.
 
 Before closing the traversal, check that the methodology finding exists.
 If it generalizes beyond that experiment, append the failure mode and its detector to this skill in the same change, then verify the skill contains both.
