@@ -90,7 +90,7 @@
         <text x="830" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
         <!-- the merge commit that persists the exact captain outcome -->
         <g id="merge-commit">
-          <title>Merged and surfaced: the main brain is woken exactly once</title>
+          <title>Merged and surfaced: the exact captain outcome persists visibly once</title>
           <circle cx="1040" cy="210" r="13" fill="#FFB454"></circle>
           <circle cx="1040" cy="210" r="21" fill="none" stroke="#FFB454" stroke-width="1.5" opacity="0.5"></circle>
           <path d="M 1019 189 A 30 30 0 0 1 1061 189" fill="none" stroke="#FFB454" stroke-width="2.5" stroke-linecap="round" opacity="0.8"></path>
