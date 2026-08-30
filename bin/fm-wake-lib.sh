@@ -1611,6 +1611,23 @@ fm_wake_status_mark_current() {  # <state> <status-file>
   fm_wake_status_seen_commit "$1" "$2" "$size" "$ident"
 }
 
+fm_status_lock_path() {  # <status-file>
+  local file=$1 dir base
+  dir=${file%/*}
+  base=${file##*/}
+  [ -n "$dir" ] && [ "$dir" != "$file" ] && [ -n "$base" ] || return 1
+  printf '%s/.%s.write.lock' "$dir" "$base"
+}
+
+fm_status_append() {  # <status-file> <line>
+  local file=$1 line=$2 lock status=0
+  lock=$(fm_status_lock_path "$file") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  printf '%s\n' "$line" >> "$file" || status=1
+  fm_lock_release "$lock"
+  return "$status"
+}
+
 # Guarded self-announced status append - the one dedup primitive for a status
 # line THIS home's own machinery writes as bookkeeping it has already presented
 # in the very turn or tick that writes it (an answerer-closes resolved line, a
@@ -1629,7 +1646,7 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # and wakes as before: task identity alone can never suppress new content.
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
-fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
+_fm_wake_status_append_self_announced_locked() {  # <state> <status-file> <line>
   local state=$1 file=$2 line=$3 marker pre_sig='' pre_size='' pre_ident='' post_size post_ident
   local LC_ALL=C
   _fm_wake_require_classify || return 1
@@ -1650,6 +1667,15 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
   fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1
   return 0
+}
+
+fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
+  local state=$1 file=$2 line=$3 lock status=0
+  lock=$(fm_status_lock_path "$file") || return 2
+  fm_lock_acquire_wait "$lock" || return 2
+  _fm_wake_status_append_self_announced_locked "$state" "$file" "$line" || status=$?
+  fm_lock_release "$lock"
+  return "$status"
 }
 
 # Map one structurally valid signal key to its home-local status filename.

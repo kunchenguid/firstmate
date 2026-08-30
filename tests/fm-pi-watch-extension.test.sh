@@ -438,6 +438,95 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+test_pi_actionable_closes_queue_while_delivery_is_in_flight() {
+  local repo home plugin log second stop out status
+  repo="$TMP_ROOT/pi-actionable-queue-root"
+  home="$TMP_ROOT/pi-actionable-queue-home"
+  log="$TMP_ROOT/pi-actionable-queue.log"
+  second="$TMP_ROOT/pi-actionable-queue.second"
+  stop="$TMP_ROOT/pi-actionable-queue.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: first actionable wake\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation-%s\n' "$$" "$count"
+if [ "$count" -eq 2 ]; then
+  while [ ! -e "$FM_SECOND_WAKE_FILE" ]; do sleep 0.02; done
+  printf 'signal: second actionable wake\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_SECOND_WAKE_FILE="$second" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let releaseFirst = () => {};
+const firstDeliveryBlocked = new Promise((resolve) => {
+  releaseFirst = resolve;
+});
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+    if (prompts.length === 1) await firstDeliveryBlocked;
+  },
+};
+const armCount = () => existsSync(process.env.FM_ARM_LOG)
+  ? (readFileSync(process.env.FM_ARM_LOG, "utf8").match(/^arm=/gm) || []).length
+  : 0;
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-actionable-queue", {}, undefined, undefined, {});
+await waitFor(() => armCount() === 2 && prompts.length === 1, "first actionable delivery did not block with a ready successor");
+writeFileSync(process.env.FM_SECOND_WAKE_FILE, "wake\n");
+await waitFor(() => armCount() === 3, "second actionable close did not restore supervision");
+if (prompts.length !== 1) throw new Error(`second delivery bypassed serialization: ${prompts.join(" | ")}`);
+releaseFirst();
+await waitFor(() => prompts.length === 2, "second actionable close was dropped after the first delivery settled");
+if (!prompts[0].includes("first actionable wake") || !prompts[1].includes("second actionable wake")) {
+  throw new Error(`actionable delivery order changed: ${prompts.join(" | ")}`);
+}
+const confirmations = readFileSync(process.env.FM_ARM_LOG, "utf8").match(/^confirmed /gm) || [];
+if (confirmations.length !== 2) throw new Error(`expected two recovery confirmations, got ${confirmations.length}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi actionable closes must queue while delivery is in flight"
+  [ -z "$out" ] || fail "Pi actionable queue test printed output: $out"
+  pass "Pi actionable closes queue while delivery is in flight"
+}
+
 test_pi_transient_delivery_retry_keeps_successor_supervised() {
   local repo home plugin log stop release out status
   repo="$TMP_ROOT/pi-delivery-retry-supervision-root"
@@ -3005,6 +3094,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_actionable_closes_queue_while_delivery_is_in_flight
 test_pi_transient_delivery_retry_keeps_successor_supervised
 test_pi_persistent_delivery_retry_surfaces_bounded_failure
 test_pi_branch_offer_owns_actionable_wake

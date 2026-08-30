@@ -467,6 +467,57 @@ SH
   pass "fm-send inbox: status changes are refused at record publication"
 }
 
+test_status_append_is_linearized_with_publication() {
+  local dir err expected real_mv observation
+  dir=$(setup_case status-publication-lock); err="$dir/send.err"
+  printf 'done: committed-ready\n' > "$dir/home/state/t1.status"
+  expected=$(bash -c '. "$1"; status_observed_signature "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$dir/home/state/t1.status") \
+    || fail "could not sample the status fixture"
+  real_mv=$(command -v mv)
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${2:-}" = "${FM_PUBLICATION_RECORD:?}" ]; then
+  (
+    printf 'attempted\n' > "${FM_STATUS_WRITER_ATTEMPT:?}"
+    # shellcheck source=/dev/null
+    . "${FM_WAKE_LIB:?}"
+    fm_status_append "${FM_EXPECTED_STATUS_FILE:?}" 'blocked: concurrent supported writer'
+    if [ -f "$FM_PUBLICATION_RECORD" ]; then
+      printf 'inbox-visible\n' > "${FM_STATUS_WRITER_OBSERVATION:?}"
+    else
+      printf 'inbox-missing\n' > "${FM_STATUS_WRITER_OBSERVATION:?}"
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  while [ ! -e "${FM_STATUS_WRITER_ATTEMPT:?}" ]; do sleep 0.01; done
+fi
+exec "${FM_REAL_MV:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_STATUS_SIGNATURE="$expected" \
+    FM_EXPECTED_STATUS_FILE="$dir/home/state/t1.status" \
+    FM_PUBLICATION_RECORD="$dir/home/state/t1.inbox/001.msg" \
+    FM_STATUS_WRITER_ATTEMPT="$dir/status-writer-attempt" \
+    FM_STATUS_WRITER_OBSERVATION="$dir/status-writer-observation" \
+    FM_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
+    FM_REAL_MV="$real_mv" \
+    -- t1 "validate before a later blocker" \
+    || fail "the serialized status publication failed: $(cat "$err")"
+  for _ in {1..500}; do
+    [ -s "$dir/status-writer-observation" ] && break
+    sleep 0.01
+  done
+  observation=$(cat "$dir/status-writer-observation" 2>/dev/null || true)
+  [ "$observation" = inbox-visible ] \
+    || fail "the status writer crossed the inbox publication boundary first: ${observation:-missing observation}"
+  assert_contains "$(cat "$dir/home/state/t1.status")" "blocked: concurrent supported writer" \
+    "the serialized status writer should still append after publication"
+  pass "fm-send inbox: status append and record publication are linearized"
+}
+
 test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable); err="$dir/send.err"
@@ -497,4 +548,5 @@ test_meta_lock_contention_fails_bounded
 test_expected_worktree_head_is_revalidated_before_enqueue
 test_expected_head_enqueue_excludes_concurrent_commit
 test_expected_status_signature_is_revalidated_at_publication
+test_status_append_is_linearized_with_publication
 test_unwritable_inbox_fails_loudly

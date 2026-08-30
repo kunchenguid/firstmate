@@ -246,6 +246,7 @@ FM_SEND_HEAD_GUARD_PID=
 FM_SEND_HEAD_GUARD_PREPARED=0
 FM_SEND_INBOX_META_LOCK_HELD=
 FM_SEND_INBOX_SEQ_LOCK_HELD=
+FM_SEND_STATUS_LOCK_HELD=
 INBOX_TASK_ID=
 
 fm_task_inbox_publish_guard() {
@@ -330,6 +331,10 @@ fm_send_head_guard_acquire() {  # <worktree> <expected-head>
 }
 
 fm_send_cleanup() {
+  if [ -n "$FM_SEND_STATUS_LOCK_HELD" ]; then
+    fm_lock_release "$FM_SEND_STATUS_LOCK_HELD"
+    FM_SEND_STATUS_LOCK_HELD=
+  fi
   fm_send_head_guard_release
   if [ -n "$FM_SEND_INBOX_SEQ_LOCK_HELD" ]; then
     fm_lock_release "$FM_SEND_INBOX_SEQ_LOCK_HELD"
@@ -1041,7 +1046,8 @@ else
       exit 1
     fi
 
-    if [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ]; then
+    if [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ] \
+      || [ -n "${FM_SEND_EXPECTED_STATUS_SIGNATURE:-}" ]; then
       INBOX_DIR=$(fm_task_inbox_dir "$STATE" "$INBOX_TASK_ID")
       mkdir -p "$INBOX_DIR/handled" || inbox_write_rc=1
       INBOX_SEQ_LOCK="$INBOX_DIR/.seq.lock"
@@ -1050,21 +1056,39 @@ else
       fi
       if [ "${inbox_write_rc:-0}" -eq 0 ]; then
         FM_SEND_INBOX_SEQ_LOCK_HELD=$INBOX_SEQ_LOCK
-        fm_send_head_guard_acquire "$CURRENT_INBOX_WORKTREE" "$FM_SEND_EXPECTED_WORKTREE_HEAD" \
-          || inbox_write_rc=1
+        if [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ]; then
+          fm_send_head_guard_acquire "$CURRENT_INBOX_WORKTREE" "$FM_SEND_EXPECTED_WORKTREE_HEAD" \
+            || inbox_write_rc=1
+        fi
+      fi
+      if [ "${inbox_write_rc:-0}" -eq 0 ] && [ -n "${FM_SEND_EXPECTED_STATUS_SIGNATURE:-}" ]; then
+        INBOX_STATUS_LOCK=$(fm_status_lock_path "$STATE/$INBOX_TASK_ID.status") || inbox_write_rc=1
+        if [ "${inbox_write_rc:-0}" -eq 0 ]; then
+          fm_task_inbox_lock_acquire "$INBOX_STATUS_LOCK" || inbox_write_rc=1
+        fi
+        if [ "${inbox_write_rc:-0}" -eq 0 ]; then
+          FM_SEND_STATUS_LOCK_HELD=$INBOX_STATUS_LOCK
+        fi
       fi
       if [ "${inbox_write_rc:-0}" -eq 0 ]; then
-        CURRENT_INBOX_HEAD=$(git -C "$CURRENT_INBOX_WORKTREE" rev-parse --verify HEAD 2>/dev/null || true)
-        CURRENT_INBOX_STATUS=$(git -C "$CURRENT_INBOX_WORKTREE" status --porcelain 2>/dev/null || printf 'unreadable')
-        if [ "$CURRENT_INBOX_HEAD" != "$FM_SEND_EXPECTED_WORKTREE_HEAD" ] || [ -n "$CURRENT_INBOX_STATUS" ]; then
-          inbox_write_rc=1
-        elif [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
+        if [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ]; then
+          CURRENT_INBOX_HEAD=$(git -C "$CURRENT_INBOX_WORKTREE" rev-parse --verify HEAD 2>/dev/null || true)
+          CURRENT_INBOX_STATUS=$(git -C "$CURRENT_INBOX_WORKTREE" status --porcelain 2>/dev/null || printf 'unreadable')
+          if [ "$CURRENT_INBOX_HEAD" != "$FM_SEND_EXPECTED_WORKTREE_HEAD" ] || [ -n "$CURRENT_INBOX_STATUS" ]; then
+            inbox_write_rc=1
+          fi
+        fi
+        if [ "${inbox_write_rc:-0}" -eq 0 ] && [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
           INBOX_RECORD=$(_fm_task_inbox_write_idempotent_locked "$INBOX_DIR" "$MESSAGE" \
             "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
-        else
+        elif [ "${inbox_write_rc:-0}" -eq 0 ]; then
           INBOX_RECORD=$(_fm_task_inbox_write_record_locked "$INBOX_DIR" "$MESSAGE" \
             "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
         fi
+      fi
+      if [ -n "$FM_SEND_STATUS_LOCK_HELD" ]; then
+        fm_lock_release "$FM_SEND_STATUS_LOCK_HELD"
+        FM_SEND_STATUS_LOCK_HELD=
       fi
       fm_send_head_guard_release
       if [ -n "$FM_SEND_INBOX_SEQ_LOCK_HELD" ]; then

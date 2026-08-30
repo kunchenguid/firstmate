@@ -58,7 +58,8 @@ type SessionGeneration = {
   retryTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
-  deliveryInFlight: boolean;
+  actionableRestorationQueue: Promise<void>;
+  actionableDeliveryQueue: Promise<void>;
   seq: number;
 };
 
@@ -201,7 +202,8 @@ function createGeneration(): SessionGeneration {
     retryTimer: null,
     retryFailures: 0,
     restoring: false,
-    deliveryInFlight: false,
+    actionableRestorationQueue: Promise.resolve(),
+    actionableDeliveryQueue: Promise.resolve(),
     seq: 0,
   };
 }
@@ -507,6 +509,37 @@ export default function (pi: ExtensionAPI) {
     owner.retryTimer = timer;
   }
 
+  function enqueueActionableClose(
+    owner: SessionGeneration,
+    classification: CloseClassification,
+    predecessorArmPid: string,
+  ): void {
+    owner.actionableRestorationQueue = owner.actionableRestorationQueue.then(async () => {
+      if (!generationIsLive(owner)) return;
+      owner.retryFailures = 0;
+      owner.restoring = true;
+      let ownsRestoration = true;
+      try {
+        const restoration = await restoreAfterActionableClose(owner, predecessorArmPid);
+        if (!generationIsLive(owner)) return;
+        owner.restoring = false;
+        ownsRestoration = false;
+        const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
+        owner.actionableDeliveryQueue = owner.actionableDeliveryQueue.then(async () => {
+          await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
+        }).catch((error) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore an actionable wake\n${detail}`);
+      } finally {
+        if (generationIsLive(owner) && ownsRestoration) owner.restoring = false;
+      }
+    });
+  }
+
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     const ownership = lockOwnership();
@@ -593,31 +626,7 @@ export default function (pi: ExtensionAPI) {
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
-        if (owner.restoring) return;
-        owner.retryFailures = 0;
-        owner.restoring = true;
-        void (async () => {
-          let ownsRestoration = true;
-          try {
-            const restoration = await restoreAfterActionableClose(owner, predecessor);
-            if (!generationIsLive(owner)) return;
-            owner.restoring = false;
-            ownsRestoration = false;
-            const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-            if (owner.deliveryInFlight) return;
-            owner.deliveryInFlight = true;
-            try {
-              await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
-            } finally {
-              owner.deliveryInFlight = false;
-            }
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
-          } finally {
-            if (generationIsLive(owner) && ownsRestoration) owner.restoring = false;
-          }
-        })();
+        enqueueActionableClose(owner, classification, predecessor);
         return;
       }
       if (owner.restoring) return;
