@@ -676,6 +676,7 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TRACEPARENT_PROOF=
+SPAWN_TRACEFREE_SCRIPT=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -793,6 +794,7 @@ spawn_abort_cleanup() {
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
   [ -z "$SPAWN_TRACEPARENT_PROOF" ] || rm -f "$SPAWN_TRACEPARENT_PROOF" 2>/dev/null || true
+  [ -z "$SPAWN_TRACEFREE_SCRIPT" ] || rm -f "$SPAWN_TRACEFREE_SCRIPT" 2>/dev/null || true
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -2185,23 +2187,39 @@ spawn_send_text_line() {  # <target> <text>
 }
 spawn_bind_tracefree_launch() {
   local probe="$TASK_TMP/pane-shell.$SPAWN_GEN" proof="$TASK_TMP/traceparent-cleared.$SPAWN_GEN"
-  local command pane_shell pane_shell_name i=0
+  local command pane_shell pane_shell_name script sq_proof sq_script sq_launch i=0
   SPAWN_TRACEPARENT_PROOF=
+  SPAWN_TRACEFREE_SCRIPT=
   rm -f "$probe" "$proof"
   if [ "$RELAUNCH" -eq 1 ]; then
-    # Relaunches always use a generated POSIX launch template, independent of
-    # the interactive shell that happens to own the reused pane.
-    pane_shell=/bin/sh
-  else
-    command="/bin/sh -c 'name=\$(ps -p \"\$PPID\" -o comm= | tr -d \"[:space:]\") || exit; name=\${name##*/}; name=\${name#-}; command -v \"\$name\" > \"\$1\"' sh $(shell_quote "$probe")"
-    spawn_send_text_line "$T" "$command" || { rm -f "$probe" "$proof"; return 1; }
-    while [ ! -s "$probe" ] && [ "$i" -lt 20 ]; do
-      sleep 0.1
-      i=$((i + 1))
-    done
-    [ -s "$probe" ] || { rm -f "$probe" "$proof"; return 1; }
-    IFS= read -r pane_shell < "$probe" || { rm -f "$probe" "$proof"; return 1; }
+    # The reused pane sees only this argument-safe bootstrap. The generated
+    # POSIX launch stays in a file, so csh, fish, and other interactive shells
+    # never parse its quoting before /bin/sh does.
+    script=$(mktemp "$TASK_TMP/tracefree-launch.$SPAWN_GEN.XXXXXX") || return 1
+    sq_proof=$(shell_quote "$proof")
+    sq_script=$(shell_quote "$script")
+    sq_launch=$(shell_quote "$LAUNCH")
+    {
+      printf '%s\n' '#!/bin/sh'
+      # shellcheck disable=SC2016  # expansion belongs to the generated script
+      printf '%s\n' 'test -z "${TRACEPARENT+x}" || exit 1'
+      printf ': > %s\n' "$sq_proof"
+      printf 'rm -f %s\n' "$sq_script"
+      printf 'exec /bin/sh -c %s\n' "$sq_launch"
+    } > "$script" || { rm -f "$script" "$proof"; return 1; }
+    SPAWN_TRACEFREE_SCRIPT=$script
+    LAUNCH="/usr/bin/env -u TRACEPARENT /bin/sh $script"
+    SPAWN_TRACEPARENT_PROOF=$proof
+    return 0
   fi
+  command="/bin/sh -c 'name=\$(ps -p \"\$PPID\" -o comm= | tr -d \"[:space:]\") || exit; name=\${name##*/}; name=\${name#-}; command -v \"\$name\" > \"\$1\"' sh $(shell_quote "$probe")"
+  spawn_send_text_line "$T" "$command" || { rm -f "$probe" "$proof"; return 1; }
+  while [ ! -s "$probe" ] && [ "$i" -lt 20 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$probe" ] || { rm -f "$probe" "$proof"; return 1; }
+  IFS= read -r pane_shell < "$probe" || { rm -f "$probe" "$proof"; return 1; }
   pane_shell_name=${pane_shell##*/}
   case "$pane_shell_name" in
     sh|bash|zsh|dash|ash|ksh|mksh|fish|csh|tcsh) : ;;
@@ -2220,7 +2238,9 @@ spawn_verify_traceparent_clear() {
   done
   [ -e "$SPAWN_TRACEPARENT_PROOF" ] && status=0
   rm -f "$SPAWN_TRACEPARENT_PROOF"
+  [ -z "$SPAWN_TRACEFREE_SCRIPT" ] || rm -f "$SPAWN_TRACEFREE_SCRIPT"
   SPAWN_TRACEPARENT_PROOF=
+  SPAWN_TRACEFREE_SCRIPT=
   return "$status"
 }
 spawn_current_path() {  # <target>

@@ -34,6 +34,7 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
 FISH_BIN=$(command -v fish) || fail "fish is required for relaunch regressions"
+CSH_BIN=$(command -v csh) || fail "csh is required for relaunch regressions"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
@@ -75,7 +76,7 @@ case "${1:-}" in
     if [ "$literal" = 1 ]; then
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
-        *'/traceparent-cleared.'*) printf '%s' "$payload" > "$D/pending-launch" ;;
+        *'/traceparent-cleared.'*|*'/tracefree-launch.'*) printf '%s' "$payload" > "$D/pending-launch" ;;
       esac
       case "$payload" in
         /exit|/quit)
@@ -83,7 +84,7 @@ case "${1:-}" in
           printf 'zsh' > "$D/foreground"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
-        *'encode launch-brief'*)
+        *'encode launch-brief'*|*'/tracefree-launch.'*)
           cat "$D/becomes" > "$D/command"
           if [ -n "${FM_FAKE_STALE_LAUNCH_TITLE:-}" ]; then
             printf 'zsh' > "$D/foreground"
@@ -218,7 +219,7 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
     FM_FAKE_STALE_LAUNCH_TITLE="${FM_FAKE_STALE_LAUNCH_TITLE:-}" \
     FM_FAKE_PANE_SHELL="${FM_FAKE_PANE_SHELL:-}" \
-    FM_FAKE_PANE_SHELL_EXEC="${FM_FAKE_PANE_SHELL_EXEC:-}" \
+    FM_FAKE_PANE_SHELL_EXEC="${FM_FAKE_PANE_SHELL_EXEC:-$FISH_BIN}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -317,7 +318,8 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   [ "$(journal_field "$dir" rl1 phase)" = complete ] \
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
-  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  [ "$(cat "$dir/fake/foreground")" = claude ] \
+    || fail "the replacement agent should be running"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
@@ -407,7 +409,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
 }
 
 test_disabled_relaunch_clears_prior_trace_context() {
-  local dir out rc launch
+  local dir out rc
   dir=$(new_case trace-off rl33)
   add_ship_task "$dir" rl33 claude
   printf '%s\n' 'traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
@@ -415,20 +417,18 @@ test_disabled_relaunch_clears_prior_trace_context() {
   printf '%s\n' "$$" > "$dir/home/state/.lock"
   printf '%s off\n' "$$" > "$dir/home/state/.trace-context-effective"
 
-  out=$(run_control "$dir" rl33 relaunch --note "crossing trace boundary"); rc=$?
-  expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
-  [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
-    || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  launch=$(tail -1 "$dir/fake/literal")
-  ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
-    || fail "disabled relaunch must not export a replacement trace carrier"
   cat > "$dir/fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 printf '%s' "${TRACEPARENT-unset}" > "$FM_FAKE_DIR/fish-traceparent"
 SH
   chmod +x "$dir/fakebin/claude"
-  TRACEPARENT=stale PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" \
-    "$FISH_BIN" -c "$launch" >/dev/null 2>&1
+
+  out=$(run_control "$dir" rl33 relaunch --note "crossing trace boundary"); rc=$?
+  expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
+    || fail "disabled relaunch must remove the prior trace carrier from metadata"
+  ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
+    || fail "disabled relaunch must not export a replacement trace carrier"
   [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
     || fail "the real fish launch retained stale TRACEPARENT"
   pass "fm-control relaunch: disabling tracing clears metadata and the replacement environment in fish"
@@ -439,34 +439,19 @@ test_generated_relaunch_is_not_reparsed_by_a_c_shell() {
   dir=$(new_case c-shell rl37)
   add_ship_task "$dir" rl37 claude
   result="$dir/fake/c-shell-launch"
-  cat > "$dir/fakebin/csh" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" = -c ] || exit 64
-command=${2:-}
-printf '%s\n' "$command" >> "$FM_FAKE_DIR/c-shell-commands"
-case "$command" in
-  /bin/sh\ -c\ *|env\ -u\ TRACEPARENT\ /bin/sh\ -c\ *) exec /bin/sh -c "$command" ;;
-  *) : > "$FM_FAKE_DIR/c-shell-reparsed-launch"; exit 64 ;;
-esac
-SH
-  chmod +x "$dir/fakebin/csh"
   cat > "$dir/fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 printf '%s|%s' "${TRACEPARENT-unset}" "$*" > "$FM_FAKE_DIR/c-shell-launch"
 SH
   chmod +x "$dir/fakebin/claude"
 
-  out=$(FM_FAKE_PANE_SHELL=csh FM_FAKE_PANE_SHELL_EXEC="$dir/fakebin/csh" \
-    run_control "$dir" rl37 relaunch --model model-csh --effort high --note "cross-shell replacement"); rc=$?
+  out=$(FM_FAKE_PANE_SHELL_EXEC="$CSH_BIN" \
+    run_control "$dir" rl37 relaunch --model "model'csh" --effort high --note "cross-shell replacement"); rc=$?
   expect_code 0 "$rc" "a generated relaunch from a C-shell pane should succeed"$'\n'"$out"
-  [ -s "$dir/fake/c-shell-commands" ] \
-    || fail "the C-shell fixture did not parse the submitted launch"
-  [ ! -e "$dir/fake/c-shell-reparsed-launch" ] \
-    || fail "the generated replacement command was reparsed by the C shell"
   [ -s "$result" ] || fail "the replacement agent never started"
   assert_contains "$(cat "$result")" "unset|" \
     "the C-shell relaunch must clear TRACEPARENT from the replacement environment"
-  assert_contains "$(cat "$result")" "--model model-csh --effort high" \
+  assert_contains "$(cat "$result")" "--model model'csh --effort high" \
     "the shell-neutral relaunch must preserve model and effort flags"
   pass "fm-control relaunch: a generated launch crosses a C-shell pane without C-shell reparsing"
 }
@@ -517,7 +502,8 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
   [ ! -e "$dir/wt/.claude/settings.local.json" ] \
     || fail "the previous harness's per-task wiring must be cleared on a switch"
-  assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
+  [ "$(cat "$dir/fake/foreground")" = codex ] \
+    || fail "the selected replacement agent should be running"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
@@ -668,8 +654,8 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
   assert_contains "$out" "could not retire claude wiring" \
     "the failure should identify prior wiring cleanup"
   [ -e "$hook" ] || fail "the fixture should retain the undeletable prior hook"
-  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
-    "replacement launch must not be armed after wiring cleanup fails"
+  [ "$(wc -l < "$dir/fake/literal" | tr -d ' ')" = 1 ] \
+    || fail "replacement launch must not be armed after wiring cleanup fails"
   [ "$(journal_field "$dir" rl29 phase)" = failed:launching ] \
     || fail "the transaction should record the partial launch failure"
   [ "$(journal_field "$dir" rl29 rollback)" = prior-record-kept ] \

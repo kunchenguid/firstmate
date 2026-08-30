@@ -172,8 +172,9 @@ jobs:
           if bin/fm-test-run.sh --list --lane "$lane" \
             | grep -Eq 'tests/(fm-control-relaunch|fm-trace-context-spawn)\.test\.sh'; then
             sudo apt-get update
-            sudo apt-get install -y fish
+            sudo apt-get install -y fish tcsh
             fish --version
+            csh --version
           fi
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
