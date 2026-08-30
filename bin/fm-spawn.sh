@@ -189,11 +189,12 @@
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
 # success. A ship or scout dispatch therefore REFUSES up front, before any
-# endpoint, worktree, or record exists, when the home's backlog has no item for
-# the id or already records it as finished, and a transition that fails after
-# publication removes the record it just wrote rather than leaving a worker the
-# backlog does not own. A relaunch re-reads the row instead of re-running the
-# transition, so an already In-flight item is left untouched. The transition is
+# endpoint, worktree, or record exists, unless the home's backlog has an
+# unheld, unblocked Queued or In flight item for the id; a transition that fails
+# after publication removes the record it just wrote rather than leaving a
+# worker the backlog does not own. A relaunch re-reads the row instead of
+# re-running the transition, so an eligible In-flight item is left untouched.
+# The transition is
 # skipped entirely for --secondmate spawns (persistent agents are not work
 # items), on a config/backlog-backend=manual home, and in a home that keeps no
 # data/backlog.md. An automatic-backend home with a backlog but no compatible
