@@ -844,6 +844,80 @@ test_test_scope_renders_named_and_deliberate_broad_scopes() {
   pass "fm-brief.sh: named and deliberately broad test scopes render distinguishably"
 }
 
+# A worker that commits locally, reports done, and never pushes strands the change
+# where firstmate cannot evaluate, merge, or deploy it, and leaves a worktree that
+# teardown then refuses to clean up. The scaffold cannot observe a git push, so the
+# guarantee it can actually make is a contract-strength one: every delivery mode must
+# say, in the definition of done, that a local commit is not done.
+test_done_requires_a_pushed_branch_per_mode() {
+  local home brief
+  home="$TMP_ROOT/done-push-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" push-nm some-proj --mode no-mistakes \
+    --test-scope 'tests/x.test.sh' >/dev/null 2>&1 \
+    || fail "no-mistakes brief should scaffold"
+  brief="$home/data/push-nm/brief.md"
+  assert_grep "Done means a PUSHED branch with a green PR behind it. A local commit is not done." "$brief" \
+    "no-mistakes DOD did not make a pushed branch the definition of done"
+  assert_grep "HANDOFF CHECKPOINT, not the finish line" "$brief" \
+    "no-mistakes DOD did not mark the implementation commit as a handoff rather than completion"
+  assert_grep "MUST carry the full" "$brief" \
+    "no-mistakes DOD did not require the full PR URL on the done line"
+  # The premature terminal report is the exact failure this closes: committing must
+  # no longer be described as a point at which the worker writes a `done:` line.
+  # shellcheck disable=SC2016  # literal backticks in the brief text, not expansion
+  assert_no_grep 'append `done: {summary}`' "$brief" \
+    "no-mistakes DOD still tells the worker to report done at the implementation commit"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" push-dpr some-proj --mode direct-PR \
+    --test-scope 'tests/x.test.sh' >/dev/null 2>&1 \
+    || fail "direct-PR brief should scaffold"
+  brief="$home/data/push-dpr/brief.md"
+  assert_grep "Done means a PUSHED branch with a PR behind it. A local commit is not done." "$brief" \
+    "direct-PR DOD did not make a pushed branch the definition of done"
+  assert_grep "MUST carry the full" "$brief" \
+    "direct-PR DOD did not require the full PR URL on the done line"
+
+  # local-only deliberately has no remote, so "pushed" cannot mean a remote push here.
+  # The equivalent guarantee is a complete committed branch firstmate can merge, and the
+  # mode's no-remote rule must survive the change rather than be contradicted by it.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" push-lo some-proj --mode local-only \
+    --test-scope 'tests/x.test.sh' >/dev/null 2>&1 \
+    || fail "local-only brief should scaffold"
+  brief="$home/data/push-lo/brief.md"
+  # shellcheck disable=SC2016  # literal backticks in the brief text, not expansion
+  assert_grep 'COMMITTED `fm/push-lo` branch that firstmate can merge' "$brief" \
+    "local-only DOD did not require a complete committed branch"
+  assert_grep "Uncommitted work is not done." "$brief" \
+    "local-only DOD did not rule out uncommitted work"
+  assert_grep "Do NOT push to any remote" "$brief" \
+    "local-only DOD lost its no-remote rule"
+  pass "fm-brief.sh: every delivery mode makes a pushed, visible branch the definition of done"
+}
+
+# The status protocol is where a worker actually writes its done line, so the same
+# contract has to appear at that point of use, not only in the definition of done.
+test_status_protocol_rejects_a_done_with_nothing_behind_it() {
+  local home brief kind flags
+  home="$TMP_ROOT/done-status-home"
+  mkdir -p "$home/data"
+  for kind in no-mistakes direct-PR local-only; do
+    flags="--mode $kind"
+    # shellcheck disable=SC2086  # flags is an intentional word-split arg list
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "status-$kind" some-proj $flags \
+      --test-scope 'tests/x.test.sh' >/dev/null 2>&1 \
+      || fail "$kind: brief should scaffold"
+    brief="$home/data/status-$kind/brief.md"
+    assert_grep "is not a delivery and will be sent straight back to you" "$brief" \
+      "$kind: status protocol did not warn that an unbacked done goes straight back"
+    # shellcheck disable=SC2016  # literal backticks in the brief text, not expansion
+    assert_grep 'Before you write a `done:` line, check it against Definition of done' "$brief" \
+      "$kind: status protocol did not point the done line at the definition of done"
+  done
+  pass "fm-brief.sh: the status protocol rejects a done line with no delivery behind it"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -867,3 +941,5 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_test_scope_is_required_for_crewmate_briefs
 test_test_scope_renders_named_and_deliberate_broad_scopes
+test_done_requires_a_pushed_branch_per_mode
+test_status_protocol_rejects_a_done_with_nothing_behind_it

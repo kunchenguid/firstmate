@@ -21,8 +21,11 @@ fm_dod_block() {  # <mode> <task-id>
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+**Done means a PUSHED branch with a PR behind it. A local commit is not done.**
+A commit that exists only in this disposable worktree has reached nobody: firstmate has nothing to
+evaluate, merge, or deploy, and the worktree cannot even be cleaned up while it holds unlanded work.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append
+\`done: PR {url}\` to the status file and stop. That line MUST carry the full \`https://...\` PR URL.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -31,9 +34,12 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+**Done means a COMPLETE, COMMITTED \`fm/$id\` branch that firstmate can merge. Uncommitted work is not done.**
+Firstmate cannot merge what it cannot see, and this mode has no remote to fall back on: everything you
+intend to land must be committed on that branch before you report done.
+Do NOT push to any remote, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
+When it is implemented and committed, verify nothing is left behind with \`git status --porcelain\`, then append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -41,9 +47,15 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+**Done means a PUSHED branch with a green PR behind it. A local commit is not done.**
+A commit that exists only in this disposable worktree has reached nobody: firstmate has nothing to
+evaluate, merge, or deploy, and the worktree cannot even be cleaned up while it holds unlanded work.
+The pipeline is what pushes your branch and opens that PR, so running it is not optional and
+\`tests + lint green\` on your own is not a substitute for it.
+Committing the implementation is a HANDOFF CHECKPOINT, not the finish line: append
+\`working: implementation committed, ready for validation\` and stop there.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Do NOT report \`done:\` at that point - in this mode the only \`done:\` that ends the task is the PR line below.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -58,6 +70,7 @@ Two firstmate-specific rules layer on top of that guidance:
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+That line MUST carry the full \`https://...\` PR URL; a done report with no pushed branch behind it is not a delivery.
 EOF
       ;;
     *)
