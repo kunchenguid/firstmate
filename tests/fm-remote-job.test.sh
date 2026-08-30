@@ -453,11 +453,16 @@ done
 assert_present "$STARTED" "the shutdown fixture did not begin executing"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 kill -TERM "$WORKER_PID"
-for _ in $(seq 1 100); do
-  kill -0 "$WORKER_PID" 2>/dev/null || break
+# Durable ownership release is the worker's shutdown contract. On Linux an
+# already-exited serving child can remain visible to kill -0 as a zombie until
+# its restart supervisor is scheduled to reap it, which is not a live worker
+# and made this assertion depend on CI host load.
+for _ in $(seq 1 200); do
+  [ ! -e "$STATE_ROOT/worker.pid" ] && [ ! -d "$STATE_ROOT/worker.lock" ] && break
   sleep 0.05
 done
-kill -0 "$WORKER_PID" 2>/dev/null && fail "the worker did not finish its TERM shutdown"
+assert_absent "$STATE_ROOT/worker.pid" "the worker did not release its pid after TERM shutdown"
+assert_absent "$STATE_ROOT/worker.lock" "the worker did not release ownership after TERM shutdown"
 HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=1 \
   "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" >> "$TMP_ROOT/worker.out" 2>> "$TMP_ROOT/worker.err" &

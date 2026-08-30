@@ -26,8 +26,8 @@
 #      validation and record publication, so a concurrent commit cannot race
 #      a stale head-bound instruction into the durable inbox, and an exact
 #      replay remains one durable record without retaining the transaction.
-#  11. A worktree write that lands while the durable record is staged is
-#      observed by the publication guard and leaves no authoritative record.
+#  11. A worktree write that races the record's atomic publication is observed
+#      by the post-publication guard and leaves no authoritative record.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -436,28 +436,30 @@ SH
 }
 
 test_expected_head_enqueue_refuses_concurrent_dirty_worktree() {
-  local dir err wt expected real_mktemp rc records
+  local dir err wt expected real_mv rc records
   dir=$(setup_case expected-head-dirty-race); err="$dir/send.err"
   wt="$dir/worktree"
   fm_git_init_commit "$wt"
   expected=$(git -C "$wt" rev-parse HEAD)
   printf 'worktree=%s\n' "$wt" >> "$dir/home/state/t1.meta"
-  real_mktemp=$(command -v mktemp)
-  cat > "$dir/fakebin/mktemp" <<'SH'
+  real_mv=$(command -v mv)
+  cat > "$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 set -eu
-case "$*" in
-  *'/t1.inbox/.staging.'*)
+"${FM_REAL_MV:?}" "$@"
+last=
+for arg in "$@"; do last=$arg; done
+case "$last" in
+  *'/t1.inbox/'[0-9][0-9][0-9].msg)
     printf 'concurrent write\n' > "${FM_EXPECTED_DIRTY_RACE_WORKTREE:?}/uncommitted.txt"
     ;;
 esac
-exec "${FM_REAL_MKTEMP:?}" "$@"
 SH
-  chmod +x "$dir/fakebin/mktemp"
+  chmod +x "$dir/fakebin/mv"
   run_send "$dir" "$err" \
     FM_SEND_IDEMPOTENT=1 \
     FM_SEND_EXPECTED_WORKTREE_HEAD="$expected" \
-    FM_REAL_MKTEMP="$real_mktemp" \
+    FM_REAL_MV="$real_mv" \
     FM_EXPECTED_DIRTY_RACE_WORKTREE="$wt" \
     -- t1 "validate exact clean head $expected"
   rc=$?

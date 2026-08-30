@@ -48,6 +48,17 @@ die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 encode() { base64 | tr -d '\n'; }
 safe_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
+replace_literal_once() {  # <value> <needle> <replacement>
+  local value=$1 needle=$2 replacement=$3 prefix suffix
+  case "$value" in
+    *"$needle"*)
+      prefix=${value%%"$needle"*}
+      suffix=${value#*"$needle"}
+      printf '%s%s%s\n' "$prefix" "$replacement" "$suffix"
+      ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
 
 TMP=
 REGISTRY_LOCK=
@@ -153,14 +164,14 @@ REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
 PARENT_STATUS_APPEND="$SCRIPT_DIR/fm-status-append.sh"
 REMOTE_STATUS_APPEND="$REMOTE_ROOT/bin/fm-status-append.sh"
 while IFS= read -r line || [ -n "$line" ]; do
-  line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
-  printf '%s\n' "${line//"$PARENT_STATUS_APPEND"/"$REMOTE_STATUS_APPEND"}"
+  line=$(replace_literal_once "$line" "$PARENT_STATUS" "$REMOTE_STATUS")
+  replace_literal_once "$line" "$PARENT_STATUS_APPEND" "$REMOTE_STATUS_APPEND"
 done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
-for project in "${PROJECT_NAMES[@]}"; do
+for project in ${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
