@@ -193,9 +193,23 @@ test_idle_busy_and_burst_coalescing() {
   prompt=$(cat "$dir/queue.log")
   assert_contains "$prompt" "--thread $UUID_A" "queue adapter did not target the validated UUID"
   assert_contains "$prompt" "FIRSTMATE_OP: v1 watcher:" "queue adapter did not use a typed operational prompt"
+  assert_contains "$prompt" "Drain durable wakes with bin/fm-wake-drain.sh" \
+    "queue prompt omitted the durable drain duty"
+  assert_contains "$prompt" "run the printed post-handling acknowledgement" \
+    "queue prompt omitted the post-handling acknowledgement duty"
+  assert_contains "$prompt" "preserve watcher continuity per the emitted supervision protocol" \
+    "queue prompt omitted the supervision-continuity duty"
+  assert_contains "$prompt" "give the captain a project-facing outcome" \
+    "queue prompt omitted the captain-facing project outcome duty"
+  assert_contains "$prompt" "re-anchor to the preceding captain conversation" \
+    "queue prompt omitted the conversational re-anchor duty"
+  assert_contains "$prompt" "resume or explicitly close any captain goal that remained active" \
+    "queue prompt omitted the active-goal resume-or-close duty"
+  assert_contains "$prompt" "do not end on internal Watcher mechanics alone" \
+    "queue prompt allowed an internal-mechanics-only ending"
   assert_not_contains "$prompt" "crew.status" "queue prompt leaked the event payload"
   [ -s "$dir/state/.wake-queue" ] || fail "queue acceptance acknowledged durable wakes"
-  pass "idle delivery is accepted and busy/burst delivery serializes behind one outstanding doorbell"
+  pass "idle delivery emits the full handling and conversational contract while busy/burst delivery serializes behind one outstanding doorbell"
 }
 
 test_failures_preserve_wakes_and_fallback_safely() {

@@ -14,6 +14,7 @@ When this session owns supervision and away mode is not active:
 3. Ensure the present-mode daemon is running with `bin/fm-present-launch.sh start`.
    It is idempotent, reconciles a leaked terminal before relaunching, and may use a detached tmux session only to host the watcher when the Codex primary itself is on an independent pty.
 4. On a `FIRSTMATE_OP: v1 watcher:` message or a marked terminal fallback (`FM_INJECT_MARK` prefix), drain and handle the durable queue, run its acknowledgement, and re-run `bin/fm-present-launch.sh start` before ending the turn.
+   Then give the captain a project-facing outcome, re-anchor to the preceding captain conversation, and resume or explicitly close any captain goal that remained active before the operational message; do not end on internal Watcher mechanics alone.
 5. Never use shell `&`, Codex background tasks, or `bin/fm-watch-arm.sh` for routine Codex supervision.
    The daemon owns its separate terminal, and the PreToolUse seatbelt in `.codex/hooks.json` denies backgrounded, piped, or bundled arm commands.
 

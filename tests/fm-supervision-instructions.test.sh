@@ -15,6 +15,10 @@ test_selected_harness_block_only() {
   assert_contains "$out" "Mode: Codex durable-wake supervision" "codex snippet missing"
   assert_contains "$out" "bin/fm-present-launch.sh start" "codex snippet missing the present-mode daemon primary wake path"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint backstop helper missing"
+  assert_contains "$out" "re-anchor to the preceding captain conversation" \
+    "codex snippet missing the conversational re-anchor contract"
+  assert_contains "$out" "resume or explicitly close any captain goal that remained active" \
+    "codex snippet missing the active-goal resume-or-close contract"
   assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." "renderer printed the claude snippet too"
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
   pass "renderer prints exactly the selected harness block"

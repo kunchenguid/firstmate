@@ -152,7 +152,7 @@ fm_codex_queue_deliver() {
     return 1
   fi
   fm_operational_input_encode watcher \
-    'Drain durable wakes with bin/fm-wake-drain.sh, handle every presented item, run the printed post-handling acknowledgement, and preserve watcher continuity per the emitted supervision protocol.' \
+    'Drain durable wakes with bin/fm-wake-drain.sh, handle every presented item, run the printed post-handling acknowledgement, and preserve watcher continuity per the emitted supervision protocol. Then give the captain a project-facing outcome, re-anchor to the preceding captain conversation, and resume or explicitly close any captain goal that remained active before this operational message; do not end on internal Watcher mechanics alone.' \
     prompt || { fm_lock_release "$FM_CODEX_PRIMARY_LOCK"; return 1; }
   fm_codex_queue_write_outstanding_locked "$thread" "$binding_generation" \
     "$FM_CODEX_QUEUE_RECOVERY" "$FM_CODEX_QUEUE_HIGHEST" submitting \
