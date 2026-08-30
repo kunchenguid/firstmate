@@ -279,27 +279,31 @@ SH
 }
 
 test_the_window_is_four_hours() {
-  local home mate fakebin snap out now
+  local home mate fakebin snap out now real_date
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home fourhours mate)
   snap="$home/snapshot.json"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
   run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null || fail "the first ask failed"
-  now=$(date +%s)
+  now=2000000000
+  real_date=$(command -v date)
   cat > "$fakebin/date" <<'SH'
 #!/usr/bin/env bash
-if [ -n "${FM_TEST_DATE_NOW:-}" ] && [ "${1:-}" = +%s ]; then
-  printf '%s\n' "$FM_TEST_DATE_NOW"
+set -u
+if [ "$#" -eq 1 ] && [ "$1" = +%s ]; then
+  printf '%s\n' "$FM_FAKE_NOW"
   exit 0
 fi
-exec /bin/date "$@"
+exec "$FM_REAL_DATE" "$@"
 SH
   chmod +x "$fakebin/date"
   # One second short of four hours is still inside; one second past is not.
   printf '%s\n' "$((now - 14399))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  out=$(FM_FAKE_NOW=$now FM_REAL_DATE=$real_date \
+    run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "cooldown: mate" "the window was shorter than four hours: $out"
   printf '%s\n' "$((now - 14401))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  out=$(FM_FAKE_NOW=$now FM_REAL_DATE=$real_date \
+    run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "sent: mate" "the window was longer than four hours: $out"
   pass "the cooldown window is four hours"
 }
