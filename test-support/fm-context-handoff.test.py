@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "fm-context-handoff.py"
 PLUGIN = ROOT / "integrations" / "claude-context-handoff"
-FIXTURE_CORE = ROOT / "tests" / "fixtures" / "context-handoff-transaction-core.py"
+FIXTURE_CORE = ROOT / "test-support" / "fixtures" / "context-handoff-transaction-core.py"
 FIXED_NOW = "2026-08-30T20:00:00Z"
 
 
@@ -105,6 +105,7 @@ else:
             "delivery_enabled": False,
             "consumer_enabled": False,
         }
+        self.registration_allowlist: list[dict[str, object]] = []
         self.write_config()
 
     def base_env(self) -> dict[str, str]:
@@ -133,6 +134,7 @@ else:
             "schema": "firstmate.context-handoff.config.v1",
             **self.flags,
             "approved_source_roots": [str(self.source)],
+            "registration_allowlist": self.registration_allowlist,
             "allowed_provider_classes": ["anthropic-claude-obsidian"],
             "vault": {"path": str(self.vault), "device": info.st_dev, "inode": info.st_ino},
             "recipient": {
@@ -166,6 +168,34 @@ else:
         self.flags.update(flags)
         self.write_config()
 
+    def authorize_registration(
+        self,
+        statement: str,
+        *,
+        kind: str = "gotcha",
+        source: Path | None = None,
+        source_sha: str | None = None,
+        provider: str = "anthropic-claude-obsidian",
+        confidence: str = "verified",
+        sphere: str = "privat",
+        supersedes: list[str] | None = None,
+    ) -> dict[str, object]:
+        source = source or self.source_file
+        contract = {
+            "source_record": str(source.absolute()),
+            "source_sha256": source_sha or digest(source),
+            "statement_sha256": hashlib.sha256(statement.encode("utf-8")).hexdigest(),
+            "kind": kind,
+            "confidence": confidence,
+            "sphere": sphere,
+            "provider_class": provider,
+            "supersedes": sorted(supersedes or []),
+        }
+        if contract not in self.registration_allowlist:
+            self.registration_allowlist.append(contract)
+            self.write_config()
+        return contract
+
     def run(self, *args: str, input_value=None, expect: int = 0, extra_env=None, cwd: Path | None = None):
         env = self.base_env()
         if extra_env:
@@ -189,29 +219,37 @@ else:
             return json.loads(completed.stdout)
         return None
 
-    def register(self, statement: str, *, harness: str = "pi", kind: str = "gotcha", source: Path | None = None, source_sha: str | None = None, provider: str = "anthropic-claude-obsidian", expect: int = 0):
+    def register(self, statement: str, *, harness: str = "pi", kind: str = "gotcha", source: Path | None = None, source_sha: str | None = None, provider: str = "anthropic-claude-obsidian", authorize: bool = True, expect: int = 0):
         source = source or self.source_file
-        return self.run(
-            "register",
-            "--source-harness",
-            harness,
-            "--kind",
-            kind,
-            "--statement",
-            statement,
-            "--source-record",
-            str(source),
-            "--source-sha256",
-            source_sha or digest(source),
-            "--confidence",
-            "verified",
-            "--sphere",
-            "privat",
-            "--provider-class",
-            provider,
-            expect=expect,
-            extra_env={"PI_SESSION_ID": "pi-session-1"},
-        )
+        contract = None
+        if authorize:
+            contract = self.authorize_registration(statement, kind=kind, source=source, source_sha=source_sha, provider=provider)
+        try:
+            return self.run(
+                "register",
+                "--source-harness",
+                harness,
+                "--kind",
+                kind,
+                "--statement",
+                statement,
+                "--source-record",
+                str(source),
+                "--source-sha256",
+                source_sha or digest(source),
+                "--confidence",
+                "verified",
+                "--sphere",
+                "privat",
+                "--provider-class",
+                provider,
+                expect=expect,
+                extra_env={"PI_SESSION_ID": "pi-session-1"},
+            )
+        finally:
+            if expect != 0 and contract in self.registration_allowlist:
+                self.registration_allowlist.remove(contract)
+                self.write_config()
 
     def seal_pi(self, session: str = "pi-session-1", trigger: str = "threshold", *, expect: int = 0, extra_env=None):
         return self.run("seal", "--source-harness", "pi", "--trigger", trigger, input_value={"session_id": session}, expect=expect, extra_env=extra_env)
@@ -237,7 +275,24 @@ else:
 
     def hook(self, payload):
         payload = {"session_id": self.claude_session, **payload}
-        return self.run("claude-hook", input_value=payload, cwd=self.vault)
+        completed = subprocess.run(
+            [str(CLI), "claude-hook"],
+            input=json.dumps(payload, separators=(",", ":")),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=self.vault,
+            env=self.base_env(),
+            check=False,
+            timeout=45,
+        )
+        if completed.returncode == 2:
+            check(completed.stdout == "", "Claude deny transport wrote to stdout")
+            value = json.loads(completed.stderr)
+            check(value["hookSpecificOutput"]["permissionDecision"] == "deny", "Claude exit-2 hook result was not a deny")
+            return value
+        check(completed.returncode == 0, f"Claude hook failed: {completed.stderr}")
+        return json.loads(completed.stdout) if completed.stdout.strip() else None
 
     def mcp(self, name: str, arguments: dict):
         request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
@@ -322,6 +377,11 @@ def test_registration_sealing_and_rejections(tmp: Path) -> None:
         "Keep this local-only message body.",
     ):
         env.register(statement, expect=2)
+    for statement in (
+        "The taxpayer identifier is 123-45-6789.",
+        "Alice Smith's account balance is EUR 5,000.",
+    ):
+        env.register(statement, authorize=False, expect=2)
     env.register("Provider-class refusal is durable.", provider="openai-ok", expect=2)
     env.register("A changed source hash must fail.", source_sha="0" * 64, expect=2)
     symlink = env.root / "source-link.md"
@@ -354,6 +414,7 @@ def test_registration_sealing_and_rejections(tmp: Path) -> None:
 
 def test_caps_atomicity_and_failure_receipts(tmp: Path) -> None:
     overlap_env = Environment(tmp, "state-vault-overlap")
+    overlap_env.authorize_registration("State must remain outside the selected Vault.")
     overlapping_vault = overlap_env.home / "state" / "context-handoff" / "vault"
     overlapping_vault.joinpath(".obsidian").mkdir(parents=True)
     config_path = overlap_env.home / "config" / "context-handoff.json"
@@ -361,7 +422,7 @@ def test_caps_atomicity_and_failure_receipts(tmp: Path) -> None:
     overlap_info = overlapping_vault.stat()
     config_value["vault"] = {"path": str(overlapping_vault), "device": overlap_info.st_dev, "inode": overlap_info.st_ino}
     config_path.write_text(json.dumps(config_value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-    overlap_env.register("State must remain outside the selected Vault.", expect=2)
+    overlap_env.register("State must remain outside the selected Vault.", authorize=False, expect=2)
     state_symlink_env = Environment(tmp, "state-symlink")
     outside_state = state_symlink_env.root / "outside-state"
     outside_state.mkdir()
@@ -416,6 +477,23 @@ def test_exact_delivery_and_no_launch(tmp: Path) -> None:
     check(seal["record_id"] not in log_text and "Keep retries" not in log_text, "delivery exposed record identity or content")
     check(not any(any(word in part for word in ("start", "restart", "respawn")) for call in calls for part in call), "delivery attempted to launch or restart a process")
 
+    multi = Environment(tmp, "delivery-multiple")
+    multi.enable(consumer_enabled=True)
+    first = multi.make_ready_record("Deliver the first durable record separately.")
+    second = multi.make_ready_record("Deliver the second durable record separately.")
+    multi.bind_claude()
+    multi.enable(delivery_enabled=True)
+    first_record_id, second_record_id = sorted((first["record_id"], second["record_id"]))
+    first_delivery = multi.run("deliver")
+    check(first_delivery["record_id"] == first_record_id, "delivery did not notify the first queued record")
+    second_queue_path = multi.home / "state" / "context-handoff" / "queue" / f"{second_record_id}.json"
+    check(json.loads(second_queue_path.read_text())["status"] == "pending", "one notification marked an unconsumed second record notified")
+    next_value, error = multi.mcp("next_curated_handoff", {})
+    check(not error and next_value["record_id"] == first_record_id, "first notification did not expose exactly the first record")
+    multi.mcp("record_curation_disposition", {"record_id": first_record_id, "disposition": "duplicate", "rationale": "The first durable fact already exists."})
+    second_delivery = multi.run("deliver")
+    check(second_delivery["record_id"] == second_record_id, "second pending record was not notified after first consumption")
+
 
 def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
     env = Environment(tmp, "claude-hooks")
@@ -423,6 +501,7 @@ def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
     wrong = env.bind_claude(session="another-session")
     check(wrong is None, "wrong Claude session generation was bound")
     env.bind_claude()
+    env.authorize_registration("Use one bounded Save transaction for this durable fact.", kind="decision")
     registered, error = env.mcp(
         "register_curated_candidate",
         {
@@ -442,6 +521,7 @@ def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
     marker = "COMPACT_SUMMARY_MUST_NOT_PERSIST"
     post = env.hook({"hook_event_name": "PostCompact", "trigger": "manual", "compact_summary": marker, "transcript_path": "/forbidden/transcript"})
     check(post is None, "Claude PostCompact emitted content")
+    env.authorize_registration("Review the next bounded handoff after automatic compaction.", kind="next-step")
     registered_auto, error = env.mcp(
         "register_curated_candidate",
         {
@@ -474,6 +554,7 @@ def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
     failure_env = Environment(tmp, "claude-seal-failure")
     failure_env.enable(consumer_enabled=True)
     failure_env.bind_claude()
+    failure_env.authorize_registration("Stop compaction when this curated candidate cannot be sealed.")
     value, error = failure_env.mcp(
         "register_curated_candidate",
         {
@@ -583,6 +664,48 @@ def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
     healed, error = crash_env.commit(crash_seal["record_id"], crash_prepared["approval_sha256"])
     check(not error and healed["status"] == "acknowledged" and crash_ack.exists(), "apply-complete-before-ack did not heal")
 
+    stale_env = Environment(tmp, "apply-before-ack-stale-approval")
+    stale_env.enable(consumer_enabled=True)
+    stale_seal = stale_env.make_ready_record("Heal only from the approval named by the completed result.")
+    stale_env.bind_claude()
+    stale_a = stale_env.prepare(stale_seal["record_id"])
+    stale_env.vault.joinpath("wiki", "index.md").write_text("# External edit\n", encoding="utf-8")
+    stale_a_bundle = stale_env.home / "state" / "context-handoff" / "bundles" / stale_seal["record_id"] / f"{stale_a['bundle_sha256']}.json"
+    stale_conflict = subprocess.run(
+        [str(stale_env.python), str(stale_env.core), "transaction", "apply", str(stale_a_bundle), "--vault", str(stale_env.vault), "--approved-plan-sha256", stale_a["approval_sha256"]],
+        env=stale_env.base_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    check(stale_conflict.returncode == 75, "stale approval setup did not produce a transaction conflict")
+    stale_b_bundle = None
+    for index in range(512):
+        candidate = stale_env.bundle(stale_seal["record_id"], suffix=f" Recovery {index}")
+        candidate["expected_hashes"]["wiki/index.md"] = digest(stale_env.vault / "wiki" / "index.md")
+        candidate_sha = hashlib.sha256((json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
+        if candidate_sha < stale_a["bundle_sha256"]:
+            stale_b_bundle = candidate
+            break
+    check(stale_b_bundle is not None, "could not construct deterministic stale-approval filename ordering")
+    stale_b = stale_env.prepare(stale_seal["record_id"], stale_b_bundle)
+    stale_b_path = stale_env.home / "state" / "context-handoff" / "bundles" / stale_seal["record_id"] / f"{stale_b['bundle_sha256']}.json"
+    stale_success = subprocess.run(
+        [str(stale_env.python), str(stale_env.core), "transaction", "apply", str(stale_b_path), "--vault", str(stale_env.vault), "--approved-plan-sha256", stale_b["approval_sha256"]],
+        env=stale_env.base_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    check(stale_success.returncode == 0, f"fresh approval did not apply before acknowledgement: {stale_success.stderr}")
+    recovered_queue, error = stale_env.mcp("next_curated_handoff", {})
+    stale_ack = stale_env.home / "state" / "context-handoff" / "acks" / f"{stale_seal['record_id']}.json"
+    check(not error and recovered_queue["status"] == "empty" and stale_ack.exists(), "completed-result approval binding did not heal past a stale approval")
+
     conflict_env = Environment(tmp, "conflict")
     conflict_env.enable(consumer_enabled=True)
     conflict_seal = conflict_env.make_ready_record("Re-read coupled files after an expected hash conflict.")
@@ -665,7 +788,7 @@ def test_payload_mismatch_disable_and_dispositions(tmp: Path) -> None:
     record_path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     record_path.chmod(0o600)
     next_value, error = mismatch.mcp("next_curated_handoff", {})
-    check(error and next_value["code"] in {"ENVELOPE_BINDING", "PAYLOAD_MISMATCH"}, "changed payload under one ID was not refused")
+    check(error and next_value["code"] in {"ELIGIBILITY_CONTRACT", "ENVELOPE_BINDING", "PAYLOAD_MISMATCH"}, "changed payload under one ID was not refused")
     queue = json.loads((mismatch.home / "state" / "context-handoff" / "queue" / f"{seal['record_id']}.json").read_text())
     check(queue["status"] == "quarantined", "changed payload was not quarantined")
 
@@ -689,6 +812,16 @@ def test_payload_mismatch_disable_and_dispositions(tmp: Path) -> None:
 def test_pi_extension_handlers_and_model_free_discovery(tmp: Path) -> None:
     env = Environment(tmp, "pi-extension")
     env.register("Cancel compaction only when this non-empty register cannot seal.")
+    exit_root = env.root / "adapter-exit"
+    malformed_root = env.root / "adapter-malformed"
+    for adapter_root, body in (
+        (exit_root, "#!/usr/bin/env bash\nexit 7\n"),
+        (malformed_root, "#!/usr/bin/env bash\nprintf '{}\\n'\n"),
+    ):
+        adapter_root.joinpath("bin").mkdir(parents=True)
+        adapter = adapter_root / "bin" / "fm-context-handoff.py"
+        adapter.write_text(body, encoding="utf-8")
+        adapter.chmod(0o755)
     script = r'''
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
@@ -709,14 +842,71 @@ await handlers.get("session_compact_failed")({ reason:"overflow" }, ctx);
 const retry = await handlers.get("session_before_compact")({ reason:"overflow" }, ctx);
 if (retry?.cancel) throw new Error("failed compaction did not retain retryable seal");
 await handlers.get("session_compact")({ reason:"overflow" }, ctx);
+const empty = await handlers.get("session_before_compact")({ reason:"threshold" }, ctx);
+if (empty?.cancel) throw new Error("explicit empty result cancelled compaction");
+for (const badRoot of [process.env.MISSING_ROOT, process.env.EXIT_ROOT, process.env.MALFORMED_ROOT]) {
+  const badHandlers = new Map();
+  mod.registerContextHandoff({ on(name, handler) { badHandlers.set(name, handler); } }, badRoot, process.env.FM_HOME);
+  const failed = await badHandlers.get("session_before_compact")({ reason:"threshold" }, ctx);
+  if (!failed?.cancel) throw new Error(`adapter failure did not cancel compaction: ${badRoot}`);
+}
 '''
     node_env = env.base_env()
-    node_env.update({"EXT": str(ROOT / ".pi" / "extensions" / "lib" / "fm-context-handoff.ts"), "ROOT": str(ROOT), "PI_SESSION_ID": "pi-session-1"})
+    node_env.update({
+        "EXT": str(ROOT / ".pi" / "extensions" / "lib" / "fm-context-handoff.ts"),
+        "ROOT": str(ROOT),
+        "PI_SESSION_ID": "pi-session-1",
+        "MISSING_ROOT": str(env.root / "adapter-missing"),
+        "EXIT_ROOT": str(exit_root),
+        "MALFORMED_ROOT": str(malformed_root),
+    })
     completed = subprocess.run(["node", "--input-type=module"], input=script, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env=node_env, check=False, timeout=45)
     check(completed.returncode == 0, f"Pi extension model-free lifecycle smoke failed: {completed.stderr}")
     check(completed.stdout == "", "Pi extension smoke exposed output")
-    validate = subprocess.run(["claude", "plugin", "validate", str(PLUGIN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=ROOT, env={**os.environ, "HOME": str(env.root / "claude-home")}, check=False, timeout=45)
-    check(validate.returncode == 0, f"Claude plugin model-free validation failed: {validate.stdout}{validate.stderr}")
+    disabled = Environment(tmp, "pi-extension-disabled")
+    disabled.enable(sealing_enabled=False)
+    disabled_script = r'''
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const mod = await import(pathToFileURL(process.env.EXT).href + `?disabled=${Date.now()}`);
+mod.registerContextHandoff({ on(name, handler) { handlers.set(name, handler); } }, process.env.ROOT, process.env.FM_HOME);
+const result = await handlers.get("session_before_compact")({ reason:"threshold" }, { sessionManager:{ getSessionId(){ return "pi-session-1"; } } });
+if (result?.cancel) throw new Error("explicit disabled result cancelled compaction");
+'''
+    disabled_env = disabled.base_env()
+    disabled_env.update({"EXT": str(ROOT / ".pi" / "extensions" / "lib" / "fm-context-handoff.ts"), "ROOT": str(ROOT), "PI_SESSION_ID": "pi-session-1"})
+    disabled_completed = subprocess.run(["node", "--input-type=module"], input=disabled_script, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env=disabled_env, check=False, timeout=45)
+    check(disabled_completed.returncode == 0 and disabled_completed.stdout == "", f"Pi disabled adapter contract failed: {disabled_completed.stderr}")
+    hook_manifest = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())
+    expected_events = {"SessionStart", "PreCompact", "PostCompact", "StopFailure", "PreToolUse", "PostToolUse"}
+    check(set(hook_manifest.get("hooks", {})) == expected_events, "Claude plugin lifecycle event contract is incomplete")
+    expected_command = 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py" claude-hook'
+    for registrations in hook_manifest["hooks"].values():
+        check(isinstance(registrations, list) and registrations, "Claude plugin lifecycle event has no registration")
+        for registration in registrations:
+            hooks = registration.get("hooks")
+            check(isinstance(hooks, list) and len(hooks) == 1, "Claude plugin lifecycle registration is ambiguous")
+            check(hooks[0] == {"type": "command", "command": expected_command, "timeout": 10}, "Claude plugin hook transport differs from its executable contract")
+    env.enable(consumer_enabled=True)
+    adapter_deny = subprocess.run(
+        [sys.executable, str(PLUGIN / "scripts" / "adapter.py"), "claude-hook"],
+        input=json.dumps({"hook_event_name": "PreToolUse", "session_id": env.claude_session, "tool_name": "Write", "tool_input": {"file_path": str(env.vault / "blocked.md")}}, separators=(",", ":")),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=env.vault,
+        env=env.base_env(),
+        check=False,
+        timeout=45,
+    )
+    check(adapter_deny.returncode == 2 and adapter_deny.stdout == "", "Claude plugin adapter did not preserve the exit-2 empty-stdout deny transport")
+    adapter_deny_value = json.loads(adapter_deny.stderr)
+    check(adapter_deny_value["hookSpecificOutput"]["permissionDecision"] == "deny", "Claude plugin adapter stderr was not a deny result")
+    if os.environ.get("FM_CLAUDE_PLUGIN_VALIDATE_LIVE") == "1":
+        claude = shutil.which("claude")
+        check(claude is not None, "FM_CLAUDE_PLUGIN_VALIDATE_LIVE requires the claude executable")
+        validate = subprocess.run([claude, "plugin", "validate", "--strict", str(PLUGIN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=ROOT, env={**os.environ, "HOME": str(env.root / "claude-home")}, check=False, timeout=45)
+        check(validate.returncode == 0, f"Claude plugin model-free validation failed: {validate.stdout}{validate.stderr}")
 
 
 def main() -> int:

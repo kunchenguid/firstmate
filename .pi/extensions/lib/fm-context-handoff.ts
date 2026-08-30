@@ -36,6 +36,7 @@ function runHandoff(
 ): Promise<HandoffResult> {
   return new Promise((resolve) => {
     let stdout = "";
+    let outputExceeded = false;
     let settled = false;
     const finish = (result: HandoffResult): void => {
       if (settled) return;
@@ -44,7 +45,7 @@ function runHandoff(
     };
     let child;
     try {
-      child = spawn("python3", [`${root}/bin/fm-context-handoff.py`, ...args], {
+      child = spawn(`${root}/bin/fm-context-handoff.py`, args, {
         env: { ...process.env, FM_HOME: fmHome },
         stdio: ["pipe", "pipe", "ignore"],
       });
@@ -53,12 +54,25 @@ function runHandoff(
       return;
     }
     child.stdout.on("data", (chunk: Buffer) => {
-      if (stdout.length <= 64 * 1024) stdout += chunk.toString("utf8");
+      const text = chunk.toString("utf8");
+      if (stdout.length + text.length > 64 * 1024) {
+        outputExceeded = true;
+        return;
+      }
+      stdout += text;
     });
     child.on("error", () => finish({ status: "adapter-failed" }));
-    child.on("close", () => {
+    child.on("close", (code) => {
+      if (code !== 0 || outputExceeded) {
+        finish({ status: "adapter-failed" });
+        return;
+      }
       try {
         const parsed = JSON.parse(stdout || "{}") as HandoffResult;
+        if (!parsed || typeof parsed !== "object" || typeof parsed.status !== "string") {
+          finish({ status: "adapter-failed" });
+          return;
+        }
         finish(parsed);
       } catch {
         finish({ status: "adapter-failed" });
@@ -95,6 +109,9 @@ export function registerContextHandoff(
       return;
     }
     if (result.status === "seal-failed" && result.had_candidates === true) {
+      return { cancel: true };
+    }
+    if (result.status === "adapter-failed") {
       return { cancel: true };
     }
   });

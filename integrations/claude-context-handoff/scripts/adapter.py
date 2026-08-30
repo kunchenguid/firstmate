@@ -14,7 +14,7 @@ def main() -> None:
     core = firstmate_root / "bin" / "fm-context-handoff.py"
     if not core.is_file():
         raise SystemExit(2)
-    os.execv(sys.executable, [sys.executable, str(core), *sys.argv[1:]])
+    os.execv(str(core), [str(core), *sys.argv[1:]])
 
 
 if __name__ == "__main__":
