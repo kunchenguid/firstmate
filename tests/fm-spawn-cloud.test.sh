@@ -169,6 +169,9 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_TEST_TREEHOUSE_CALLS:-}" ]; then
+  printf 'TREEHOUSE %s\n' "$*" >> "$FM_TEST_TREEHOUSE_CALLS"
+fi
 if [ "${1:-}" = get ]; then
   selected=${FM_FAKE_TREEHOUSE_WORKTREE:?}
   # Compartment-child fixture: model Treehouse's root-scoped pool selection.
@@ -409,6 +412,7 @@ make_cloud_case() {
   write_fixture_provider "$case_dir/provider.py"
   : > "$case_dir/launch.log"
   : > "$case_dir/tmux-calls.log"
+  : > "$case_dir/treehouse-calls.log"
   : > "$case_dir/herdr.log"
   printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$case_dir/herdr-state.json"
   printf '%s\n' "$case_dir|$home|$project|$worktree|$fakebin"
@@ -432,6 +436,7 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_WORKTREE="$worktree" \
     FM_TEST_LAUNCH_LOG="$case_dir/launch.log" \
     FM_TEST_TMUX_CALLS="$case_dir/tmux-calls.log" \
+    FM_TEST_TREEHOUSE_CALLS="$case_dir/treehouse-calls.log" \
     FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
     FM_HERDR_LOG="$case_dir/herdr.log" \
     FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json" \
@@ -452,6 +457,22 @@ run_cloud_spawn() {
     FM_WORKER_PROVIDER_COMMAND="python3 $case_dir/provider.py" \
     FIXTURE_STATE="$case_dir/provider-state.json" \
     run_spawn "$case_dir" "$home" "$worktree" "$fakebin" "$@"
+}
+
+run_azure_only_config_spawn() {
+  local case_dir=$1 home=$2 worktree=$3 fakebin=$4
+  shift 4
+  (
+    unset FM_SPAWN_CLOUD FM_SPAWN_SECONDMATE_CLOUD
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+      FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+      FM_AZURE_OWNER_TAG=owner \
+      FM_AZURE_NAMING_PREFIX=fmtest \
+      FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+      FM_WORKER_PROVIDER_COMMAND="python3 $case_dir/provider.py" \
+      FIXTURE_STATE="$case_dir/provider-state.json" \
+      run_spawn "$case_dir" "$home" "$worktree" "$fakebin" "$@"
+  )
 }
 
 # --- tests ------------------------------------------------------------------
@@ -736,6 +757,153 @@ test_cloud_spawn_config_file_default_and_env_override() {
   assert_no_grep 'placement=' "$HOME_DIR/state/$id.meta" "an env-overridden local spawn recorded a placement key"
   assert_grep 'LAUNCH' "$CASE_DIR/launch.log" "the env-overridden local spawn never typed its launch command"
   pass "config/spawn-cloud sets the durable default and FM_SPAWN_CLOUD overrides it per spawn"
+}
+
+test_azure_only_routes_every_new_ship_and_scout_without_local_fallback() {
+  local kind record id out status meta args
+  for kind in ship scout; do
+    id="azure-only-${kind}-p1"
+    record=$(make_cloud_case "azure-only-$kind" "$id")
+    read_cloud_case "$record"
+    printf 'azure-only\n' > "$HOME_DIR/config/spawn-cloud"
+    args=()
+    [ "$kind" != scout ] || args=(--scout)
+    out=$(FM_TEST_ACTUAL_USD=2000 \
+      run_azure_only_config_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
+      "$id" "$PROJECT_DIR" ${args[@]+"${args[@]}"})
+    status=$?
+    expect_code 0 "$status" "azure-only $kind should stay durably queued when Azure admission is unavailable: $out"
+    assert_contains "$out" "placement=azure worker=queued" \
+      "azure-only $kind did not stay on the queued Azure lane: $out"
+    assert_contains "$out" "harness=pi" \
+      "azure-only $kind did not use the pi-codex Azure runtime: $out"
+    meta="$HOME_DIR/state/$id.meta"
+    assert_grep 'placement=azure' "$meta" "azure-only $kind did not record Azure placement"
+    assert_grep "kind=$kind" "$meta" "azure-only $kind recorded the wrong kind"
+    assert_no_grep 'LAUNCH' "$CASE_DIR/launch.log" \
+      "azure-only $kind fell back to a local agent while queued"
+    assert_grep "\"task\":\"$id\"" "$HOME_DIR/state/azure-workers/controller.json" \
+      "azure-only $kind was not durably queued in the controller"
+  done
+  pass "azure-only places every new ship and scout on Azure and queues without a local fallback"
+}
+
+test_azure_only_precedence_cannot_be_loosened_and_environment_can_tighten() {
+  local value record id out status
+  for value in '' off local; do
+    id="azure-only-refuse-${value:-empty}-p2"
+    record=$(make_cloud_case "azure-only-refuse-${value:-empty}" "$id")
+    read_cloud_case "$record"
+    printf 'azure-only\n' > "$HOME_DIR/config/spawn-cloud"
+    out=$(FM_SPAWN_CLOUD="$value" \
+      run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+    status=$?
+    expect_code 1 "$status" "durable azure-only policy must refuse FM_SPAWN_CLOUD=${value:-<empty>}: $out"
+    assert_contains "$out" "azure-only placement policy from config/spawn-cloud refuses FM_SPAWN_CLOUD" \
+      "the durable-policy refusal did not name the conflicting environment value: $out"
+    assert_absent "$HOME_DIR/state/$id.meta" "a refused placement override wrote task metadata"
+    [ ! -s "$CASE_DIR/treehouse-calls.log" ] || fail "a refused placement override acquired a worktree"
+    assert_absent "$HOME_DIR/state/azure-workers/controller.json" \
+      "a refused placement override requested cloud capacity"
+  done
+
+  id=azure-only-env-tighten-p3
+  record=$(make_cloud_case azure-only-env-tighten "$id")
+  read_cloud_case "$record"
+  printf 'local\n' > "$HOME_DIR/config/spawn-cloud"
+  out=$(FM_SPAWN_CLOUD=azure-only FM_TEST_ACTUAL_USD=2000 \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+    FM_WORKER_PROVIDER_COMMAND="python3 $CASE_DIR/provider.py" \
+    FIXTURE_STATE="$CASE_DIR/provider-state.json" \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 0 "$status" "FM_SPAWN_CLOUD=azure-only should tighten an ordinary config value: $out"
+  assert_contains "$out" "placement=azure worker=queued" \
+    "the environment-tightened policy did not use Azure: $out"
+  assert_no_grep 'LAUNCH' "$CASE_DIR/launch.log" \
+    "the environment-tightened policy launched a local agent"
+  pass "azure-only precedence is monotone: durable policy cannot be loosened and the environment may tighten"
+}
+
+test_azure_only_refuses_incompatible_and_recovery_routes_before_mutation() {
+  local record id out status
+  id=azure-only-refusal-matrix-p4
+  record=$(make_cloud_case azure-only-refusal-matrix "$id")
+  read_cloud_case "$record"
+  printf 'azure-only\n' > "$HOME_DIR/config/spawn-cloud"
+  mv "$CASE_DIR/pi-agent-home" "$CASE_DIR/pi-agent-home-unavailable"
+
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR" --harness claude)
+  status=$?
+  expect_code 1 "$status" "azure-only should refuse a non-pi harness before account preflight: $out"
+  assert_contains "$out" "incompatible harness 'claude' was refused" \
+    "non-pi harness refusal was not policy-specific: $out"
+
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR" 'pi --fast')
+  status=$?
+  expect_code 1 "$status" "azure-only should refuse a raw launch before account preflight: $out"
+  assert_contains "$out" "refuses raw launch commands" "raw launch refusal was not policy-specific: $out"
+
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR" --backend tmux)
+  status=$?
+  expect_code 1 "$status" "azure-only should refuse an explicit backend before account preflight: $out"
+  assert_contains "$out" "refuses --backend" "backend refusal was not policy-specific: $out"
+
+  for recovery in --resume-account --continue-account --recover-direct-account; do
+    out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$recovery")
+    status=$?
+    expect_code 1 "$status" "azure-only should refuse $recovery before metadata or endpoint recovery: $out"
+    assert_contains "$out" "because those routes start a local agent process" \
+      "$recovery refusal did not name the prevented local process: $out"
+  done
+
+  assert_absent "$HOME_DIR/state/$id.meta" "a policy refusal wrote task metadata"
+  [ ! -s "$CASE_DIR/treehouse-calls.log" ] || fail "a policy refusal acquired a worktree"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "a policy refusal launched a local endpoint"
+  [ ! -s "$CASE_DIR/herdr.log" ] || fail "a policy refusal created a tracking endpoint"
+  assert_absent "$HOME_DIR/state/azure-workers/controller.json" \
+    "a policy refusal requested cloud capacity"
+  assert_absent "$HOME_DIR/state/$id.cloud-account" \
+    "a policy refusal copied provider credentials"
+  pass "azure-only refuses raw, incompatible, backend, and local recovery routes before mutation"
+}
+
+test_azure_only_preserves_existing_local_and_unlanded_work() {
+  local record id out status
+  id=azure-only-existing-local-p5
+  record=$(make_cloud_case azure-only-existing-local "$id")
+  read_cloud_case "$record"
+  printf 'azure-only\n' > "$HOME_DIR/config/spawn-cloud"
+  printf 'unlanded local work\n' > "$WORKTREE_DIR/unlanded.txt"
+  cat > "$HOME_DIR/state/$id.meta" <<EOF
+window=firstmate:fm-$id
+worktree=$WORKTREE_DIR
+project=$PROJECT_DIR
+harness=codex
+kind=ship
+generation_id=local-generation
+EOF
+  cp "$HOME_DIR/state/$id.meta" "$CASE_DIR/existing-local.meta.before"
+  mv "$CASE_DIR/pi-agent-home" "$CASE_DIR/pi-agent-home-unavailable"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "azure-only must refuse implicit migration of an existing local task: $out"
+  assert_contains "$out" "will not migrate or reclassify existing local task $id" \
+    "the refusal did not name preservation of the existing local task: $out"
+  cmp -s "$CASE_DIR/existing-local.meta.before" "$HOME_DIR/state/$id.meta" \
+    || fail "the existing local task metadata changed during refusal"
+  assert_grep 'unlanded local work' "$WORKTREE_DIR/unlanded.txt" \
+    "the existing unlanded work was removed during refusal"
+  [ ! -s "$CASE_DIR/treehouse-calls.log" ] || fail "existing local preservation acquired another worktree"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "existing local preservation started another local agent"
+  assert_absent "$HOME_DIR/state/azure-workers/controller.json" \
+    "existing local preservation reclassified the task into the cloud controller"
+  pass "azure-only leaves existing local metadata, worktree, and unlanded work unchanged"
 }
 
 test_cloud_spawn_refuses_unknown_switch_value() {
@@ -1496,7 +1664,7 @@ run_child_spawn() {  # <case> <primary> <sub> <worktree> <fakebin> [extra env as
     FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json" \
     CODEX_HOME="$case_dir/codex-home" \
     PI_CODING_AGENT_DIR="$case_dir/pi-agent-home" \
-    FM_SPAWN_CLOUD=azure \
+    FM_SPAWN_CLOUD=azure-only \
     FM_AZURE_SUBSCRIPTION_ID="$SUB" \
     FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
     FM_AZURE_OWNER_TAG=owner \
@@ -1889,6 +2057,10 @@ test_respawn_sweeps_stale_cloud_artifacts
 test_queued_spawn_converges_through_the_monitor
 test_monitor_stands_down_when_dispatch_already_claimed
 test_cloud_spawn_config_file_default_and_env_override
+test_azure_only_routes_every_new_ship_and_scout_without_local_fallback
+test_azure_only_precedence_cannot_be_loosened_and_environment_can_tighten
+test_azure_only_refuses_incompatible_and_recovery_routes_before_mutation
+test_azure_only_preserves_existing_local_and_unlanded_work
 test_cloud_spawn_refuses_unknown_switch_value
 test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request
 test_a_spawn_that_cannot_stage_its_snapshot_removes_projection

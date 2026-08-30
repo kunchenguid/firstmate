@@ -32,22 +32,21 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
-#   Cloud placement: FM_SPAWN_CLOUD=azure (or a config/spawn-cloud file whose
-#   first line is azure) places a NEW ship/scout crewmate on an elastic Azure
-#   worker through bin/fm-worker-lifecycle.sh instead of creating a local
-#   backend endpoint; the recorded metadata carries placement=azure plus the
-#   account_home and worktree_git_dir_identity bindings that lifecycle derives
-#   its request from, and window= stays empty so local endpoint probes fail
-#   closed. Cloud spawns run ENTIRELY on the pi-codex runtime: harness
-#   dispatch and claude profile routing are bypassed. account_home comes from
+#   Cloud placement: FM_SPAWN_CLOUD or config/spawn-cloud selects the existing
+#   elastic Azure worker lane. docs/configuration.md "Agent placement" is the
+#   single owner of accepted values, precedence, and the durable azure-only
+#   policy. fm-spawn resolves and enforces that policy before worktree,
+#   endpoint, credential-copy, or cloud-capacity mutation. The recorded
+#   metadata carries placement=azure plus the account_home and
+#   worktree_git_dir_identity bindings that lifecycle derives its request from,
+#   and window= stays empty so local endpoint probes fail closed. Cloud spawns
+#   run ENTIRELY on the pi-codex runtime: harness dispatch and claude profile
+#   routing are bypassed. account_home comes from
 #   config/azure-worker-account-home when that file exists, otherwise from the
 #   pi coding-agent directory for backward compatibility. The controller
 #   load-balances usable profiles and gives each assignment one private
 #   single-profile snapshot; the worker never receives the canonical pool.
-#   With the switch off (default),
-#   spawns stay byte-identical to the local path. Secondmate and
-#   account-recovery spawns always stay local, and --backend, raw launch
-#   commands, or a non-pi harness cannot be combined with cloud placement.
+#   Ordinary off/default placement keeps the local path byte-identical.
 #   FM_SPAWN_PARENT_TASK / FM_SPAWN_PARENT_TASK_GENERATION mark a cloud spawn as
 #   a SECONDMATE COMPARTMENT CHILD: both are forwarded to the lifecycle request
 #   as --parent-task/--parent-task-generation, where the controller's fan-out,
@@ -596,40 +595,168 @@ RECOVERY_ACCOUNT=0
   echo "error: --backlog-row-exemption applies only to a genuinely new ship or scout task" >&2
   exit 1
 }
-# Cloud placement switch (Phase 6 activation). FM_SPAWN_CLOUD wins over the
-# durable config/spawn-cloud file; both accept azure (place new ship/scout
-# crewmates on elastic Azure workers through bin/fm-worker-lifecycle.sh) or
-# off/local (default). Any other value fails closed. When the switch is off,
-# spawn behavior and task metadata stay byte-identical to the local-only path.
-# Account-recovery spawns always stay on the local backend by design
-# (recovery re-binds a local endpoint). Secondmate spawns stay local too
-# UNLESS FM_SPAWN_SECONDMATE_CLOUD=1 (R2/R3 design B.9, expand/contract): with
-# the flag set, a --secondmate spawn with cloud placement becomes a
-# compartment - an ordinary reviewed worker slot whose queue entry carries
-# role=secondmate, whose durable home stays on this machine, and whose
-# session legs are dispatched by bin/fm-secondmate-cloud-monitor.sh (this
-# spawn queues the request and launches the monitor; it never dispatches an
-# execute itself). With the flag unset or any other value the gate below is
-# byte-identical to the pre-flag behavior.
+# Cloud placement and its durable policy are resolved before any owned spawn
+# mutation. docs/configuration.md "Agent placement" is the single contract
+# owner; this block is the enforcing implementation.
 SPAWN_CLOUD=off
 SPAWN_CLOUD_VALUE=
 SPAWN_CLOUD_SOURCE=default
-if [ -n "${FM_SPAWN_CLOUD+x}" ]; then
-  SPAWN_CLOUD_VALUE=$FM_SPAWN_CLOUD
-  SPAWN_CLOUD_SOURCE=FM_SPAWN_CLOUD
-elif [ -f "$CONFIG/spawn-cloud" ] && [ ! -L "$CONFIG/spawn-cloud" ]; then
-  SPAWN_CLOUD_VALUE=$(head -n1 "$CONFIG/spawn-cloud" 2>/dev/null | tr -d '[:space:]')
-  SPAWN_CLOUD_SOURCE=config/spawn-cloud
+SPAWN_PLACEMENT_POLICY=
+SPAWN_CLOUD_CONFIG_VALUE=
+SPAWN_CLOUD_CONFIG_PRESENT=0
+SPAWN_CLOUD_ENV_SET=0
+if [ -e "$CONFIG/spawn-cloud" ] || [ -L "$CONFIG/spawn-cloud" ]; then
+  SPAWN_CLOUD_CONFIG_PRESENT=1
+  [ -f "$CONFIG/spawn-cloud" ] && [ ! -L "$CONFIG/spawn-cloud" ] || {
+    echo "error: config/spawn-cloud must be a regular non-symlink file" >&2
+    exit 1
+  }
+  spawn_cloud_config_lines=$(awk 'END { print NR }' "$CONFIG/spawn-cloud" 2>/dev/null) || {
+    echo "error: cannot read config/spawn-cloud" >&2
+    exit 1
+  }
+  [ "$spawn_cloud_config_lines" = 1 ] || {
+    echo "error: config/spawn-cloud must contain exactly one line" >&2
+    exit 1
+  }
+  SPAWN_CLOUD_CONFIG_VALUE=$(tr -d '[:space:]' < "$CONFIG/spawn-cloud") || {
+    echo "error: cannot read config/spawn-cloud" >&2
+    exit 1
+  }
 fi
-case "$SPAWN_CLOUD_VALUE" in
-  ''|off|local) SPAWN_CLOUD=off ;;
-  azure) SPAWN_CLOUD=azure ;;
+if [ -n "${FM_SPAWN_CLOUD+x}" ]; then
+  SPAWN_CLOUD_ENV_SET=1
+fi
+if [ "$SPAWN_CLOUD_CONFIG_PRESENT" = 1 ] && [ -z "$SPAWN_CLOUD_CONFIG_VALUE" ]; then
+  echo "error: config/spawn-cloud must contain one of azure-only, azure, off, or local" >&2
+  exit 1
+fi
+case "$SPAWN_CLOUD_CONFIG_VALUE" in
+  ''|off|local|azure|azure-only) ;;
   *)
-    echo "error: unknown cloud placement '$SPAWN_CLOUD_VALUE' from $SPAWN_CLOUD_SOURCE (accepted: azure, off, local)" >&2
+    echo "error: unknown cloud placement '$SPAWN_CLOUD_CONFIG_VALUE' from config/spawn-cloud (accepted: azure-only, azure, off, local)" >&2
     exit 1
     ;;
 esac
-if [ "$SPAWN_CLOUD" = azure ] \
+if [ "$SPAWN_CLOUD_ENV_SET" = 1 ]; then
+  case "${FM_SPAWN_CLOUD:-}" in
+    ''|off|local|azure|azure-only) ;;
+    *)
+      echo "error: unknown cloud placement '${FM_SPAWN_CLOUD:-}' from FM_SPAWN_CLOUD (accepted: azure-only, azure, off, local)" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$SPAWN_CLOUD_CONFIG_VALUE" = azure-only ]; then
+  SPAWN_PLACEMENT_POLICY=azure-only
+  if [ "$SPAWN_CLOUD_ENV_SET" = 1 ]; then
+    case "${FM_SPAWN_CLOUD:-}" in
+      ''|off|local)
+        echo "error: azure-only placement policy from config/spawn-cloud refuses FM_SPAWN_CLOUD='${FM_SPAWN_CLOUD:-}'; remove the local/off override" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  SPAWN_CLOUD=azure
+  SPAWN_CLOUD_VALUE=azure-only
+  SPAWN_CLOUD_SOURCE=config/spawn-cloud
+elif [ "$SPAWN_CLOUD_ENV_SET" = 1 ]; then
+  SPAWN_CLOUD_VALUE=${FM_SPAWN_CLOUD:-}
+  SPAWN_CLOUD_SOURCE=FM_SPAWN_CLOUD
+  case "$SPAWN_CLOUD_VALUE" in
+    ''|off|local) SPAWN_CLOUD=off ;;
+    azure) SPAWN_CLOUD=azure ;;
+    azure-only)
+      SPAWN_CLOUD=azure
+      SPAWN_PLACEMENT_POLICY=azure-only
+      ;;
+  esac
+else
+  SPAWN_CLOUD_VALUE=$SPAWN_CLOUD_CONFIG_VALUE
+  [ -z "$SPAWN_CLOUD_VALUE" ] || SPAWN_CLOUD_SOURCE=config/spawn-cloud
+  case "$SPAWN_CLOUD_VALUE" in
+    ''|off|local) SPAWN_CLOUD=off ;;
+    azure) SPAWN_CLOUD=azure ;;
+  esac
+fi
+
+azure_only_explicit_harness() {
+  local candidate=
+  if [ "$HARNESS_SET" = 1 ]; then
+    candidate=$HARNESS_ARG
+  elif case "${POS[0]:-}" in *=*) true ;; *) false ;; esac; then
+    candidate=
+  elif [ "$KIND" != secondmate ]; then
+    candidate=${POS[2]:-}
+  else
+    case "${POS[1]:-}" in
+      ''|claude|codex|opencode|pi|grok) candidate=${POS[1]:-} ;;
+      *' '*)
+        if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+          candidate=${POS[2]:-}
+        else
+          candidate=${POS[1]}
+        fi
+        ;;
+      *) candidate=${POS[2]:-} ;;
+    esac
+  fi
+  printf '%s\n' "$candidate"
+}
+
+if [ "$SPAWN_PLACEMENT_POLICY" = azure-only ]; then
+  [ "$RECOVERY_ACCOUNT" = 0 ] || {
+    echo "error: azure-only placement policy refuses --resume-account, --continue-account, and --recover-direct-account because those routes start a local agent process; existing task state is unchanged" >&2
+    exit 1
+  }
+  [ "$BACKEND_SET" = 0 ] || {
+    echo "error: azure-only placement policy refuses --backend; Azure execution with its Herdr tracking monitor is mandatory" >&2
+    exit 1
+  }
+  if [ "$KIND" = secondmate ] && [ -n "${FM_SPAWN_SECONDMATE_CLOUD+x}" ] \
+    && [ "${FM_SPAWN_SECONDMATE_CLOUD:-}" != 1 ]; then
+    echo "error: azure-only placement policy refuses FM_SPAWN_SECONDMATE_CLOUD='${FM_SPAWN_SECONDMATE_CLOUD:-}'; secondmate agent sessions must use the Azure compartment lane" >&2
+    exit 1
+  fi
+  azure_only_harness=$(azure_only_explicit_harness)
+  case "$azure_only_harness" in
+    ''|pi) ;;
+    *' '*|*$'\t'*)
+      echo "error: azure-only placement policy refuses raw launch commands; the pi-codex Azure runtime is mandatory" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: azure-only placement policy runs only the pi-codex Azure runtime; incompatible harness '$azure_only_harness' was refused" >&2
+      exit 1
+      ;;
+  esac
+  unset azure_only_harness
+  azure_only_existing_id=${POS[0]:-}
+  case "$azure_only_existing_id" in
+    ''|*=*) ;;
+    *)
+      azure_only_existing_meta="$STATE/$azure_only_existing_id.meta"
+      if [ -e "$azure_only_existing_meta" ] || [ -L "$azure_only_existing_meta" ]; then
+        azure_only_existing_snapshot=$(node "$SCRIPT_DIR/fm-contained-read.cjs" "$STATE" "$azure_only_existing_meta" 1048576) || {
+          echo "error: unsafe existing metadata for azure-only placement at $azure_only_existing_meta" >&2
+          exit 1
+        }
+        azure_only_existing_placement=$(printf '%s\n' "$azure_only_existing_snapshot" | sed -n 's/^placement=//p')
+        [ "$azure_only_existing_placement" = azure ] || {
+          echo "error: azure-only placement policy will not migrate or reclassify existing local task $azure_only_existing_id; its endpoint, metadata, worktree, and unlanded work remain unchanged" >&2
+          exit 1
+        }
+      fi
+      ;;
+  esac
+  unset azure_only_existing_id azure_only_existing_meta azure_only_existing_snapshot azure_only_existing_placement
+fi
+
+# Optional `azure` placement keeps the transition gate: secondmate agents use
+# the compartment only when FM_SPAWN_SECONDMATE_CLOUD=1, and legacy account
+# recovery stays local. azure-only already refused local recovery above and
+# opens the secondmate compartment without requiring the transition flag.
+if [ "$SPAWN_CLOUD" = azure ] && [ "$SPAWN_PLACEMENT_POLICY" != azure-only ] \
   && { { [ "$KIND" = secondmate ] && [ "${FM_SPAWN_SECONDMATE_CLOUD:-}" != 1 ]; } || [ "$RECOVERY_ACCOUNT" = 1 ]; }; then
   echo "notice: cloud placement covers new ship/scout spawns only; this spawn stays on the local backend" >&2
   SPAWN_CLOUD=off

@@ -1385,7 +1385,10 @@ class Relay:
         for key in list(env):
             if key.startswith("FM_SECONDMATE_"):
                 env.pop(key, None)
-        env["FM_SPAWN_CLOUD"] = "azure"
+        # Nested children enter the mandatory policy, not merely the optional
+        # cloud lane, so no inherited or ambient local/off choice can make a
+        # child agent start on the monitor host.
+        env["FM_SPAWN_CLOUD"] = "azure-only"
         env["FM_SPAWN_PARENT_TASK"] = self.task
         env["FM_SPAWN_PARENT_TASK_GENERATION"] = self.generation
         # After the pops, on purpose: see ORDERING HAZARD above.

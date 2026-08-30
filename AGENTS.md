@@ -78,6 +78,7 @@ Load `harness-adapters` before every spawn, recovery, trust or permission dialog
 An explicit per-task captain choice wins, followed by the best-fit rule in `config/crew-dispatch.json`, that file's default, then `config/crew-harness` or firstmate's own adapter.
 Consult all configured natural-language dispatch rules and select the best fit rather than using first-match behavior.
 When the dispatch file exists, pass the resolved concrete profile explicitly to `bin/fm-spawn.sh`.
+Resolve agent placement through `bin/fm-spawn.sh`; `docs/configuration.md` "Agent placement" owns the durable policy and precedence.
 `config/secondmate-harness` independently selects the primary's secondmate adapter.
 `docs/configuration.md`, `bin/fm-harness.sh`, `bin/fm-dispatch-select.sh`, and `bin/fm-spawn.sh` own profile schema, fallback, quota balancing, model and effort flags, account routing, inheritance, and exact launch mechanics.
 Quota trouble must trigger a safe alternate eligible profile or a narrow blocker, never forgotten work.

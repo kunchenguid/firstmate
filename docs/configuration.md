@@ -21,6 +21,35 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Agent placement (config/spawn-cloud / FM_SPAWN_CLOUD)
+
+`config/spawn-cloud` is the single durable placement policy for agents launched by `bin/fm-spawn.sh`.
+It must be a regular non-symlink file containing exactly one line, with one of `azure-only`, `azure`, `off`, or `local`; an absent file is equivalent to `off`.
+`FM_SPAWN_CLOUD` is the per-invocation environment input and accepts the same values, while an explicitly empty value retains its legacy meaning of ordinary `off` outside the mandatory policy.
+For ordinary `azure`, `off`, and `local` settings, an explicitly set `FM_SPAWN_CLOUD` wins over `config/spawn-cloud`, preserving the existing optional-cloud behavior.
+`FM_SPAWN_CLOUD=azure-only` may tighten an ordinary config value for one invocation, while a durable `config/spawn-cloud=azure-only` cannot be weakened: an explicitly set empty, `off`, or `local` environment value is refused rather than treated as an override.
+Unknown values and malformed config files fail before spawn-owned mutation.
+
+`azure` is the transitional optional-cloud value.
+It places new ship and scout agents on the existing Azure worker lane, keeps legacy account-recovery routes local, and places a secondmate agent in the Azure compartment only when `FM_SPAWN_SECONDMATE_CLOUD=1`.
+`off` and `local` retain the ordinary local path and metadata shape.
+
+`azure-only` is the mandatory placement policy.
+It applies to every new ship crewmate, scout, secondmate agent session, and nested child created by the active home.
+Ship and scout agents use the existing elastic Azure worker path.
+Secondmate agents use the existing Azure compartment and bounded session-leg path automatically, while their durable home and the non-agent Herdr tracking monitor remain local during the transition.
+The compartment monitor launches every nested child with `FM_SPAWN_CLOUD=azure-only`, and `config/spawn-cloud` is inherited into secondmate homes so a secondmate-local spawn entry point cannot silently create a local child.
+The primary Firstmate process itself is outside the policy; only agent processes created through `fm-spawn.sh` are governed.
+
+The mandatory policy is resolved before worktree acquisition, backend endpoint creation, credential copying, or cloud-capacity request.
+It refuses an explicit or ambient empty, `off`, or `local` placement override, a raw launch command, a harness other than the Azure lane's `pi` runtime, any explicit local backend selection, a secondmate compartment opt-out, and every `--resume-account`, `--continue-account`, or `--recover-direct-account` route because those recovery routes start a local agent process.
+An existing task whose metadata is not already `placement=azure` is never converted by a later spawn invocation while the policy is active.
+Its local endpoint, metadata, worktree, staged state, and unlanded work remain untouched for operator handling.
+An existing Azure task may be reconciled through the Azure lane, and a local tracking monitor may be restarted because that monitor is not an agent process.
+If Azure admission is temporarily unavailable, the task remains durably queued under the existing controller contract; if preflight or the controller refuses the request, the spawn fails clearly.
+Neither outcome starts a local fallback.
+The policy changes placement admission only and does not relax the Azure controller, account projection, result-return, release, budget, credential-custody, or irreversible-data-loss contracts documented in [`azure-workers.md`](azure-workers.md).
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 The runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
@@ -183,7 +212,7 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
-The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, `config/claude-crew-model`, `config/backlog-backend`, and `config/account-routing-mode` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates use the primary dispatch, model-anchor, and routing policy.
+The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, `config/claude-crew-model`, `config/backlog-backend`, `config/account-routing-mode`, and `config/spawn-cloud` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates use the primary dispatch, model-anchor, routing, and placement policies.
 `config/secondmate-harness` and `config/secondmate-account-pool` are not inherited because they are primary-owned knobs for launching secondmate agents.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
@@ -507,7 +536,7 @@ It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync 
 `NUDGE_SECONDMATES:` lists stable `fm-<id>` task selectors; the `bootstrap-diagnostics` skill owns the send procedure.
 The same bootstrap run also emits `SECONDMATE_LIVENESS:` outcomes for live secondmate endpoints; the `bootstrap-diagnostics` skill owns the response to handled, deferred, skipped, and failed outcomes.
 For a mid-session inherited config edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `claude-crew-model`, `backlog-backend`, and `account-routing-mode` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `claude-crew-model`, `backlog-backend`, `account-routing-mode`, and `spawn-cloud` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 

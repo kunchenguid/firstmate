@@ -5,8 +5,9 @@
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
 # spawn on codex too, primary config/claude-crew-model pins their Claude model,
-# and primary config/backlog-backend=manual makes that home hand-edit backlog
-# files too).
+# primary config/backlog-backend=manual makes that home hand-edit backlog
+# files too, and primary config/spawn-cloud=azure-only keeps every new nested
+# child on the mandatory Azure lane).
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
@@ -29,7 +30,7 @@
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness claude-crew-model backlog-backend account-routing-mode}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness claude-crew-model backlog-backend account-routing-mode spawn-cloud}"
 
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp

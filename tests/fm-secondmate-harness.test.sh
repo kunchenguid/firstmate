@@ -16,10 +16,11 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/claude-crew-model, and config/backlog-backend - down into each
-#      secondmate home's config/, so the secondmate's OWN crewmates, dispatch
-#      profiles, Claude model anchor, and backlog backend inherit the primary's
-#      settings. It is primary-authoritative (re-pushed at secondmate spawn, on
+#      config/claude-crew-model, config/backlog-backend, and config/spawn-cloud
+#      - down into each secondmate home's config/, so the secondmate's OWN
+#      crewmates, dispatch profiles, Claude model anchor, backlog backend, and
+#      placement policy inherit the primary's settings. It is
+#      primary-authoritative (re-pushed at secondmate spawn, on
 #      the bootstrap secondmate sweep, and by config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
 #      not spawn secondmates).
@@ -163,6 +164,7 @@ test_propagate_lib() {
   printf 'codex\n' > "$src/crew-harness"
   printf 'claude-opus-5\n' > "$src/claude-crew-model"
   printf 'manual\n' > "$src/backlog-backend"
+  printf 'azure-only\n' > "$src/spawn-cloud"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
   propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "propagate returned non-zero"
@@ -172,6 +174,7 @@ test_propagate_lib() {
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
   [ "$(cat "$dest/claude-crew-model")" = claude-opus-5 ] || fail "Claude crew model anchor not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
+  [ "$(cat "$dest/spawn-cloud")" = azure-only ] || fail "spawn-cloud placement policy not propagated"
 
   # 2. idempotent: an unchanged re-run does not churn the mtime
   m1=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
@@ -189,11 +192,13 @@ test_propagate_lib() {
   printf 'claude\n' > "$src/crew-harness"
   printf 'claude-opus-5-custom\n' > "$src/claude-crew-model"
   printf 'tasks-axi\n' > "$src/backlog-backend"
+  printf 'azure\n' > "$src/spawn-cloud"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] || fail "changed dispatch profile did not converge"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
   [ "$(cat "$dest/claude-crew-model")" = claude-opus-5-custom ] || fail "changed Claude model anchor did not converge"
   [ "$(cat "$dest/backlog-backend")" = tasks-axi ] || fail "changed backlog backend did not converge"
+  [ "$(cat "$dest/spawn-cloud")" = azure ] || fail "changed placement policy did not converge"
 
   outside="$d/outside-target"
   rm -f "$dest/crew-harness" "$outside"
@@ -206,12 +211,13 @@ test_propagate_lib() {
   [ "$(cat "$outside")" = outside ] || fail "destination symlink target was overwritten"
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
-  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/claude-crew-model" "$src/backlog-backend"
+  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/claude-crew-model" "$src/backlog-backend" "$src/spawn-cloud"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/claude-crew-model" ] && fail "Claude model anchor absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
+  [ -e "$dest/spawn-cloud" ] && fail "spawn-cloud absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
   ln -s "$d/missing-target" "$dest/crew-harness"
@@ -234,6 +240,7 @@ test_propagate_lib() {
   printf 'codex\n' > "$src/crew-harness"
   printf 'claude-opus-5\n' > "$src/claude-crew-model"
   printf 'manual\n' > "$src/backlog-backend"
+  printf 'azure-only\n' > "$src/spawn-cloud"
   rm -rf "$d/dest2"
   mkdir -p "$d/dest2"
   propagate_inheritable_config "$src" "$d/dest2"
@@ -242,6 +249,7 @@ test_propagate_lib() {
   [ "$(cat "$d/dest2/crew-harness")" = codex ] || fail "crew-harness not propagated alongside"
   [ "$(cat "$d/dest2/claude-crew-model")" = claude-opus-5 ] || fail "Claude crew model not propagated alongside"
   [ "$(cat "$d/dest2/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
+  [ "$(cat "$d/dest2/spawn-cloud")" = azure-only ] || fail "spawn-cloud not propagated alongside"
 
   # 6. nothing to propagate -> destination dir is never created (a true no-op)
   rm -rf "$d/src3" "$d/dest3"
@@ -782,7 +790,7 @@ new_world() {
   {
     printf 'projects/\nstate/\ndata/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
-    printf 'config/crew-harness\nconfig/claude-crew-model\nconfig/secondmate-harness\nconfig/backlog-backend\n'
+    printf 'config/crew-harness\nconfig/claude-crew-model\nconfig/secondmate-harness\nconfig/backlog-backend\nconfig/spawn-cloud\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -854,6 +862,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'claude-opus-5\n' > "$w/home/config/claude-crew-model"
   printf 'manual\n' > "$w/home/config/backlog-backend"
+  printf 'azure-only\n' > "$w/home/config/spawn-cloud"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
@@ -864,6 +873,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: Claude crew model anchor not pushed into the live home"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
     || fail "sweep: backlog-backend not pushed into the live home"
+  [ "$(cat "$w/sm/config/spawn-cloud" 2>/dev/null)" = azure-only ] \
+    || fail "sweep: azure-only placement policy not pushed into the live home"
   [ -e "$w/sm/config/secondmate-harness" ] \
     && fail "sweep: secondmate-harness was inherited (must not be)"
 
@@ -872,6 +883,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   printf 'claude\n' > "$w/home/config/crew-harness"
   printf 'claude-opus-5-custom\n' > "$w/home/config/claude-crew-model"
   printf 'tasks-axi\n' > "$w/home/config/backlog-backend"
+  printf 'azure\n' > "$w/home/config/spawn-cloud"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = claude ] \
     || fail "sweep: home did not re-converge to the primary's new crew-harness"
@@ -881,10 +893,13 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: home did not re-converge to the primary's new Claude crew model anchor"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = tasks-axi ] \
     || fail "sweep: home did not re-converge to the primary's new backlog-backend"
+  [ "$(cat "$w/sm/config/spawn-cloud" 2>/dev/null)" = azure ] \
+    || fail "sweep: home did not re-converge to the primary's new placement policy"
 
   # Mirror absence: primary clears inheritable config; the home's copies are removed.
   rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" \
-    "$w/home/config/claude-crew-model" "$w/home/config/backlog-backend"
+    "$w/home/config/claude-crew-model" "$w/home/config/backlog-backend" \
+    "$w/home/config/spawn-cloud"
   run_bootstrap "$w" >/dev/null
   [ -e "$w/sm/config/crew-dispatch.json" ] \
     && fail "sweep: home crew-dispatch.json not removed after the primary cleared it"
@@ -894,6 +909,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     && fail "sweep: home Claude crew model anchor not removed after the primary cleared it"
   [ -e "$w/sm/config/backlog-backend" ] \
     && fail "sweep: home backlog-backend not removed after the primary cleared it"
+  [ -e "$w/sm/config/spawn-cloud" ] \
+    && fail "sweep: home spawn-cloud not removed after the primary cleared it"
   pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"
 }
 
@@ -1013,6 +1030,7 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'claude-opus-5\n' > "$w/home/config/claude-crew-model"
   printf 'manual\n' > "$w/home/config/backlog-backend"
+  printf 'azure-only\n' > "$w/home/config/spawn-cloud"
   err="$w/config-push-basic.err"
   out=$(run_config_push "$w" 2>"$err"); status=$?
 
@@ -1029,6 +1047,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "config push did not report Claude crew model as pushed"
   assert_contains "$out" "backlog-backend: pushed" \
     "config push did not report backlog-backend as pushed"
+  assert_contains "$out" "spawn-cloud: pushed" \
+    "config push did not report the placement policy as pushed"
   assert_not_contains "$out" "NUDGE_SECONDMATES" \
     "config push must not nudge secondmates"
   [ "$(git -C "$w/sm" rev-parse HEAD)" = "$old_head" ] \
@@ -1045,6 +1065,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "idempotent config push did not report Claude crew model as unchanged"
   assert_contains "$out2" "backlog-backend: unchanged" \
     "idempotent config push did not report backlog-backend as unchanged"
+  assert_contains "$out2" "spawn-cloud: unchanged" \
+    "idempotent config push did not report the placement policy as unchanged"
   pass "B12 config-push propagates via shared live discovery, reports items, and does not fast-forward or nudge"
 }
 

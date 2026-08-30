@@ -1515,7 +1515,8 @@ PY
     "the child spawn carried no task home, so it would mint an unrestricted primary-owned request"
   assert_contains "$env_line" "FM_SPAWN_PARENT_TASK=$ID" "the child spawn lost the parent task"
   assert_contains "$env_line" "FM_SPAWN_PARENT_TASK_GENERATION=$GEN" "the child spawn lost the parent generation"
-  assert_contains "$env_line" "FM_SPAWN_CLOUD=azure" "the child spawn was not placed on the cloud lane"
+  assert_contains "$env_line" "FM_SPAWN_CLOUD=azure-only" \
+    "the nested child did not enter the mandatory Azure placement policy"
   # NO state-dir pin: that name is persisted into the child's durable cloud
   # environment, so a pin would outlive this spawn and misdirect every later
   # execute and release. With FM_HOME unmoved the default is already right.
@@ -2939,6 +2940,65 @@ PY
   pass "on-flag: --secondmate routes through role=secondmate request + monitor launch, with no spawn-side execute"
 }
 
+test_azure_only_policy_routes_secondmate_without_transition_flag() {
+  local out rc meta
+  setup_spawn_world azure-only-policy compass
+  mkdir -p "$SP_HOME/config"
+  printf 'azure-only\n' > "$SP_HOME/config/spawn-cloud"
+  out=$(run_gate_spawn compass \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+    FM_SECONDMATE_LEG_SECONDS=7200 \
+    FM_WORKER_PROVIDER_COMMAND="python3 $SP_DIR/provider.py" \
+    FIXTURE_STATE="$SP_DIR/provider-state.json" \
+    -- --secondmate)
+  rc=$?
+  expect_code 0 "$rc" "azure-only secondmate should enter the compartment without the transition flag: $out"
+  assert_contains "$out" "placement=azure" \
+    "azure-only secondmate did not report Azure placement: $out"
+  assert_not_contains "$out" "$GATE_NOTICE" \
+    "azure-only secondmate fell through the optional-cloud local gate: $out"
+  meta="$SP_HOME/state/compass.meta"
+  assert_grep 'kind=secondmate' "$meta" "azure-only secondmate meta lost its kind"
+  assert_grep 'placement=azure' "$meta" "azure-only secondmate meta lost its placement"
+  assert_grep 'harness=pi' "$meta" "azure-only secondmate did not use the pi-codex runtime"
+  assert_grep 'fm-secondmate-cloud-monitor.sh' "$SP_HERDR_LOG" \
+    "azure-only secondmate did not launch its local non-agent compartment monitor"
+  [ ! -s "$SP_TMUX_LOG" ] || fail "azure-only secondmate launched a local agent process: $(cat "$SP_TMUX_LOG")"
+  [ "$(cat "$SP_SUB/config/spawn-cloud" 2>/dev/null)" = azure-only ] \
+    || fail "azure-only placement policy was not inherited into the secondmate home"
+  python3 - "$SP_HOME/state/azure-workers/controller.json" compass <<'PY' \
+    || fail "azure-only secondmate was not admitted as a compartment"
+import json
+import sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+items = [item for key, item in state["queue"].items() if key.startswith(sys.argv[2] + "@")]
+assert len(items) == 1, items
+assert items[0]["role"] == "secondmate", items[0]
+assert items[0]["status"] == "assigned", items[0]
+PY
+  pass "azure-only routes secondmate agent sessions through the Azure compartment while home and monitor stay local"
+}
+
+test_azure_only_policy_refuses_secondmate_local_opt_out_before_mutation() {
+  local out rc
+  setup_spawn_world azure-only-opt-out sextant
+  mkdir -p "$SP_HOME/config"
+  printf 'azure-only\n' > "$SP_HOME/config/spawn-cloud"
+  out=$(run_gate_spawn sextant FM_SPAWN_SECONDMATE_CLOUD=off -- --secondmate)
+  rc=$?
+  expect_code 1 "$rc" "azure-only secondmate must refuse a local compartment opt-out: $out"
+  assert_contains "$out" "refuses FM_SPAWN_SECONDMATE_CLOUD='off'" \
+    "secondmate opt-out refusal did not name the policy conflict: $out"
+  assert_absent "$SP_HOME/state/sextant.meta" "the refused secondmate opt-out wrote metadata"
+  assert_absent "$SP_HOME/state/azure-workers/controller.json" \
+    "the refused secondmate opt-out requested cloud capacity"
+  [ ! -s "$SP_HERDR_LOG" ] || fail "the refused secondmate opt-out created a tracking endpoint"
+  [ ! -s "$SP_TMUX_LOG" ] || fail "the refused secondmate opt-out created a local agent endpoint"
+  pass "azure-only refuses a secondmate local opt-out before endpoint or capacity mutation"
+}
+
 test_spawn_forwards_the_parent_pair_into_the_request() {
   local out rc
   setup_spawn_world parent-pair keel
@@ -2997,6 +3057,8 @@ test_fm_send_local_secondmate_path_is_unchanged
 test_fm_send_cloud_secondmate_without_assignment_refuses
 test_spawn_gate_off_flag_is_byte_identical
 test_spawn_gate_on_flag_routes_compartment_and_never_executes
+test_azure_only_policy_routes_secondmate_without_transition_flag
+test_azure_only_policy_refuses_secondmate_local_opt_out_before_mutation
 test_spawn_forwards_the_parent_pair_into_the_request
 test_valid_child_request_spawns_with_the_exact_parent_pair
 test_invalid_child_requests_refuse_by_name_and_never_reach_the_request
