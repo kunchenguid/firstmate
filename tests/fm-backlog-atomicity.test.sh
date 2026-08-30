@@ -338,6 +338,28 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   pass "dispatch publishes the record and moves the backlog item In flight in one run"
 }
 
+test_dispatch_refuses_a_pending_authoritative_close() {
+  local case_dir id marker out rc=0
+  id=atomic-dispatch-pending-close-b1
+  case_dir=$(make_home dispatch-pending-close "$id")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-closing\narg=--pr\narg=https://github.com/example/repo/pull/12\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$marker"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted work with an authoritative close still pending"
+  assert_contains "$out" "pending authoritative backlog close" \
+    "spawn did not explain why the pending close blocks dispatch"
+  assert_present "$marker" "spawn discarded the pending authoritative close"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "spawn published a new worker over a pending close"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "refused dispatch changed the pending close's backlog row"
+  pass "dispatch refuses to supersede a pending authoritative close"
+}
+
 test_dispatch_reads_the_row_from_the_backlog_root() {
   local case_dir id out
   id=atomic-dispatch-root-b2
@@ -658,6 +680,25 @@ test_dispatch_defers_interruption_across_backlog_commit() {
       "a $timing-commit interruption removed the paired task record"
   done
   pass "dispatch retries interrupted transitions before honoring termination"
+}
+
+test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
+  local case_dir home id out rc=0
+  id=atomic-dispatch-kimi-readiness-signal-b5
+  case_dir=$(make_home dispatch-kimi-readiness-signal "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  interrupt_kimi_readiness "$case_dir"
+
+  out=$(HOME="$home" FM_KIMI_READY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    run_spawn "$case_dir" "$id" "$case_dir/project" --harness kimi \
+      --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Kimi readiness interruption was reported as success"
+  assert_absent "$home/state/$id.meta" \
+    "Kimi readiness interruption retained an unconfirmed task record"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "Kimi readiness interruption committed unconfirmed work In flight: $out"
+  pass "Kimi readiness interruptions fail before backlog commit"
 }
 
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight() {
@@ -1043,6 +1084,26 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "a replayed close left its record behind"
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
+}
+
+test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
+  local case_dir id marker out
+  id=atomic-heal-done-backfill-b9
+  case_dir=$(make_home heal-done-backfill)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi done "$id" --file "$(backlog_of "$case_dir")" >/dev/null
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-done\narg=--pr\narg=https://github.com/example/repo/pull/13\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "replaying a completion link changed the closed row: $out"
+  assert_grep 'https://github.com/example/repo/pull/13' "$(backlog_of "$case_dir")" \
+    "recovery discarded the recorded link because the item was already Done"
+  assert_absent "$marker" "recovery retained an applied completion-link marker"
+  pass "recovery backfills recorded links onto already Done items"
 }
 
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
@@ -1507,6 +1568,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
 }
 
 test_dispatch_moves_the_item_in_flight_in_the_same_run
+test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_reads_the_row_from_the_backlog_root
 test_recovery_uses_the_parent_of_a_trailing_slash_data_record
 test_completion_targets_a_nested_relative_data_directory
@@ -1523,6 +1585,7 @@ test_dispatch_reports_an_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
 test_dispatch_rolls_back_before_a_failed_launch_delivery
 test_dispatch_defers_interruption_across_backlog_commit
+test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
@@ -1540,6 +1603,7 @@ test_recovery_reports_an_owned_row_read_failure
 test_orca_cleanup_recovery_never_transitions_the_backlog
 test_recovery_marks_an_owned_record_in_flight
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_both_records_when_meta_removal_fails

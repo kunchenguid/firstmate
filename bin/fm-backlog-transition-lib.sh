@@ -563,7 +563,15 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
     row_state=
   fi
   case "$row_state" in
-    done\ *|'')
+    done\ *)
+      if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" \
+          "${args[@]+"${args[@]}"}"; then
+        FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
+        return 0
+      fi
+      return 1
+      ;;
+    '')
       fm_backlog_close_marker_remove "$marker" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0

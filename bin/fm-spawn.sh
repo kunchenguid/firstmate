@@ -2776,6 +2776,11 @@ SPAWN_META_PATH="$STATE/$ID.meta"
 SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
 fm_lock_acquire_wait "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=1
+if [ "$RELAUNCH" -eq 0 ] \
+   && { [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; }; then
+  echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
+  exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
 else
@@ -3002,41 +3007,29 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-SPAWN_DEFERRED_SIGNAL=
-if [ "$BACKLOG_TRANSITION" = 1 ]; then
-  trap 'SPAWN_DEFERRED_SIGNAL=HUP' HUP
-  trap 'SPAWN_DEFERRED_SIGNAL=INT' INT
-  trap 'SPAWN_DEFERRED_SIGNAL=TERM' TERM
-fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
-  KIMI_DELIVERY_FAILED=0
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
-    [ -n "$SPAWN_DEFERRED_SIGNAL" ] || exit 1
-    KIMI_DELIVERY_FAILED=1
+    exit 1
   fi
-  if [ "$KIMI_DELIVERY_FAILED" = 0 ]; then
-    KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
-    KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
-    KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
-    KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
-    if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
-        "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-        "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
-      kimi_spawn_fail "kimi brief pointer could not be submitted"
-      [ -n "$SPAWN_DEFERRED_SIGNAL" ] || exit 1
-      KIMI_DELIVERY_FAILED=1
-    fi
-  fi
-  if [ "$KIMI_DELIVERY_FAILED" = 0 ] && [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
+  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
+  KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
+  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+  if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+      "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
+      "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
     kimi_spawn_fail "kimi brief pointer could not be submitted"
-    [ -n "$SPAWN_DEFERRED_SIGNAL" ] || exit 1
-    KIMI_DELIVERY_FAILED=1
+    exit 1
   fi
-  if [ "$KIMI_DELIVERY_FAILED" = 0 ] && ! kimi_wait_for_delivery; then
+  if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
+    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    exit 1
+  fi
+  if ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
-    [ -n "$SPAWN_DEFERRED_SIGNAL" ] || exit 1
+    exit 1
   fi
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
@@ -3056,6 +3049,12 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
+fi
+SPAWN_DEFERRED_SIGNAL=
+if [ "$BACKLOG_TRANSITION" = 1 ]; then
+  trap 'SPAWN_DEFERRED_SIGNAL=HUP' HUP
+  trap 'SPAWN_DEFERRED_SIGNAL=INT' INT
+  trap 'SPAWN_DEFERRED_SIGNAL=TERM' TERM
 fi
 SPAWN_BACKLOG_COMMIT_STATUS=0
 if spawn_commit_backlog_transition; then
