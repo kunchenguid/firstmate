@@ -1956,8 +1956,17 @@ fm_backend_herdr_process_matches_agent() {  # <harness> <process>
   esac
 }
 
+fm_backend_herdr_interpreter_script_matches_agent() {  # <harness> <interpreter> <script>
+  local harness=$1 interpreter=${2##*/} script=$3
+  interpreter=${interpreter#-}
+  [ "$harness" = cursor ] || return 1
+  case "$interpreter" in node|node-*|node[0-9]*) ;; *) return 1 ;; esac
+  case "$script" in */cursor-agent/versions/*/index.js) return 0 ;; *) return 1 ;; esac
+}
+
 fm_backend_herdr_agent_started() {  # <target> <harness>
   local target=$1 harness=$2 agent_info agent info shell_pid foreground_pgid processes process
+  local name argv0 script
   fm_backend_herdr_parse_target "$target" || return 1
   [ "$(fm_backend_herdr_pane_presence_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = present ] || return 1
   agent_info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
@@ -1983,11 +1992,17 @@ fm_backend_herdr_agent_started() {  # <target> <harness>
     .result.process_info.foreground_processes
     | select(type == "array" and length > 0)
     | .[]
-    | (.name, .argv0, .argv[]?)
-    | select(type == "string" and length > 0)
+    | select(type == "object")
+    | @json
   ' 2>/dev/null) || return 1
   while IFS= read -r process; do
-    fm_backend_herdr_process_matches_agent "$harness" "$process" && return 0
+    name=$(printf '%s' "$process" | jq -r '(.name // empty) | select(type == "string")' 2>/dev/null) || continue
+    argv0=$(printf '%s' "$process" | jq -r '(.argv0 // .argv[0] // empty) | select(type == "string")' 2>/dev/null) || continue
+    fm_backend_herdr_process_matches_agent "$harness" "$name" && return 0
+    fm_backend_herdr_process_matches_agent "$harness" "$argv0" && return 0
+    script=$(printf '%s' "$process" | jq -r '(.argv[1] // empty) | select(type == "string")' 2>/dev/null) || continue
+    fm_backend_herdr_interpreter_script_matches_agent "$harness" "$name" "$script" && return 0
+    fm_backend_herdr_interpreter_script_matches_agent "$harness" "$argv0" "$script" && return 0
   done <<EOF
 $processes
 EOF

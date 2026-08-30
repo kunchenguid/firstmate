@@ -2954,7 +2954,7 @@ test_agent_started_rejects_unrelated_foreground_processes_and_accepts_the_regist
   dir="$TMP_ROOT/agent-started-unrelated"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"sleep","argv0":"sleep"}]}}}\n' > "$resp/3.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"sleep","argv0":"sleep","argv":["sleep","pi"]}]}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 pi' "$ROOT"; then
@@ -2964,7 +2964,7 @@ test_agent_started_rejects_unrelated_foreground_processes_and_accepts_the_regist
   dir="$TMP_ROOT/agent-started-wrong-harness"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"pi","argv0":"/usr/local/bin/pi"}]}}}\n' > "$resp/3.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"node","argv0":"/Applications/Pi Launcher.app/Contents/Resources/pi/pi-launcher","argv":["pi-launcher","pi"]}]}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 claude' "$ROOT"; then
@@ -2979,6 +2979,15 @@ test_agent_started_rejects_unrelated_foreground_processes_and_accepts_the_regist
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 pi' "$ROOT" \
     || fail "a registered Herdr agent in its own foreground process group should prove replacement start"
+
+  dir="$TMP_ROOT/agent-started-interpreter"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"cursor","agent_status":"blocked"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"node","argv0":"node","argv":["node","/Users/example/.local/share/cursor-agent/versions/2026.08.11-e8db854/index.js"]}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 cursor' "$ROOT" \
+    || fail "a verified Cursor interpreter script should prove replacement start"
   pass "fm_backend_herdr_agent_started: only the registered foreground agent proves replacement start"
 }
 
