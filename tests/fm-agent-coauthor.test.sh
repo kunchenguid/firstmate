@@ -379,13 +379,30 @@ test_every_verified_harness_reaches_task_local_sanitizer() {
     assert_contains "$launch" 'core.hooksPath' "$harness launch did not select the sanitizer relay"
     if [ "$harness" = cursor-agent ]; then
       first_launch=$(sed -n '1p' "$case_dir/launch")
-      assert_contains "$first_launch" "'$fakebin/cursor-agent' --trust --force" \
-        "cursor-agent launch lost its resolved executable or persistent interactive command"
-      case " $first_launch" in
-        *' cursor --trust --force'*)
+      cursor_argv=$(python3 - "$first_launch" <<'PY'
+import re
+import shlex
+import sys
+
+tokens = shlex.split(sys.argv[1])
+while tokens and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', tokens[0]):
+    tokens.pop(0)
+print("\n".join(tokens))
+PY
+      ) || fail "cursor-agent launch could not be parsed as shell argv"
+      cursor_arg0=$(printf '%s\n' "$cursor_argv" | sed -n '1p')
+      cursor_arg1=$(printf '%s\n' "$cursor_argv" | sed -n '2p')
+      cursor_arg2=$(printf '%s\n' "$cursor_argv" | sed -n '3p')
+      cursor_arg_count=$(printf '%s\n' "$cursor_argv" | sed '/^$/d' | wc -l | tr -d ' ')
+      [ "$cursor_arg0" != cursor ] || {
           fail "cursor-agent launch fell back to the bare cursor command"
-          ;;
-      esac
+      }
+      [ "$cursor_arg0" = "$fakebin/cursor-agent" ] || {
+        fail "cursor-agent launch used an unexpected executable: $cursor_arg0"
+      }
+      [ "$cursor_arg1" = --trust ] && [ "$cursor_arg2" = --force ] && [ "$cursor_arg_count" -eq 3 ] || {
+        fail "cursor-agent launch argv was not exactly executable, --trust, --force: $cursor_argv"
+      }
       assert_not_contains "$first_launch" 'encode launch-brief' \
         "cursor-agent launch must not pass the brief as a positional argument"
       assert_not_contains "$first_launch" '--print' \

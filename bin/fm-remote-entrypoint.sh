@@ -179,7 +179,11 @@ if ! fm_remote_job_ensure_worker "$ROOT" "$ACCOUNT_HOME"; then
 fi
 FM_REMOTE_JOB_DISCONNECT_PROBE=entrypoint_caller_connected
 if ! fm_remote_job_stage "$ACCOUNT_HOME" "$ROOT" "$HOME_PATH" "$COMMAND" "${ARGV[@]:1}" >/dev/null; then
-  JOB_ID=
+  if [ "${FM_REMOTE_JOB_PUBLISHED:-0}" -eq 1 ]; then
+    JOB_ID=${FM_REMOTE_JOB_ID:-}
+  else
+    JOB_ID=
+  fi
   die "${FM_REMOTE_JOB_ERROR:-cannot stage remote job}" 70
 fi
 JOB_ID=$FM_REMOTE_JOB_ID

@@ -172,12 +172,17 @@ wait_for_state() { # <id> <state>
 
 RACE_PROBE_COUNT="$TMP_ROOT/post-publish-probe-count"
 : > "$RACE_PROBE_COUNT"
-post_publish_disconnect_probe() {
+post_publish_running_disconnect_probe() {
   local calls
   calls=$(cat "$RACE_PROBE_COUNT")
   calls=$((calls + 1))
   printf '%s\n' "$calls" > "$RACE_PROBE_COUNT"
-  [ "$calls" -lt 2 ]
+  [ "$calls" -lt 2 ] && return 0
+  for _ in $(seq 1 200); do
+    [ -f "$RACE_RUNNING_START" ] && return 1
+    sleep 0.05
+  done
+  return 1
 }
 
 HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
@@ -389,25 +394,43 @@ sleep 1
 assert_absent "$STAGING_EFFECT" "a disconnected caller's staged job executed after publication"
 pass "a caller disconnect during stdin staging cancels before publication can escape"
 
-RACE_EFFECT="$TMP_ROOT/post-publish-race-effect"
+RACE_RUNNING_START="$TMP_ROOT/post-publish-running-start"
+RACE_RUNNING_FINISH="$TMP_ROOT/post-publish-running-finish"
+RACE_RETURN_ID="$TMP_ROOT/post-publish-return-id"
+RACE_RETURN_RECORD="$TMP_ROOT/post-publish-return-record"
+RACE_RETURN_ERROR="$TMP_ROOT/post-publish-return-error"
+: > "$RACE_PROBE_COUNT"
 set +e
 (
-  FM_REMOTE_JOB_DISCONNECT_PROBE=post_publish_disconnect_probe
-  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" fm-touch-job.sh "$RACE_EFFECT" < /dev/null > /dev/null
+  FM_REMOTE_JOB_WAIT_GRACE=0
+  FM_REMOTE_JOB_DISCONNECT_PROBE=post_publish_running_disconnect_probe
+  race_stage_rc=0
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" fm-two-phase-job.sh "$RACE_RUNNING_START" "$RACE_RUNNING_FINISH" 10 < /dev/null > /dev/null || race_stage_rc=$?
+  printf '%s\n' "${FM_REMOTE_JOB_ID:-}" > "$RACE_RETURN_ID"
+  if [ -n "${FM_REMOTE_JOB_ID:-}" ] && [ -d "$STATE_ROOT/jobs/$FM_REMOTE_JOB_ID" ] && [ ! -L "$STATE_ROOT/jobs/$FM_REMOTE_JOB_ID" ]; then
+    printf 'present\n' > "$RACE_RETURN_RECORD"
+  else
+    printf 'absent\n' > "$RACE_RETURN_RECORD"
+  fi
+  printf '%s\n' "${FM_REMOTE_JOB_ERROR:-}" > "$RACE_RETURN_ERROR"
+  exit "$race_stage_rc"
 )
 RACE_RC=$?
 set -e
 [ "$RACE_RC" -eq 1 ] || fail "the post-publication disconnect probe did not interrupt staging: rc=$RACE_RC"
 [ "$(cat "$RACE_PROBE_COUNT")" = 2 ] || fail "the post-publication disconnect window was not exercised"
+[ -s "$RACE_RETURN_ID" ] || fail "the post-publication cancellation lost the exact published job id"
+[ "$(cat "$RACE_RETURN_RECORD")" = present ] || fail "bounded cancellation did not retain the published job record"
+assert_grep 'cancellation remains unconfirmed for job job-' "$RACE_RETURN_ERROR" \
+  "bounded cancellation did not name the retained job"
 for _ in $(seq 1 200); do
-  ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 || break
+  [ ! -d "$STATE_ROOT/jobs/$(cat "$RACE_RETURN_ID")" ] && break
   sleep 0.05
 done
-ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 \
-  && fail "a post-publication disconnect left its published job record behind"
-sleep 1
-assert_absent "$RACE_EFFECT" "a post-publication disconnect allowed the queued job to execute"
-pass "a post-publication disconnect cancels the exact published job"
+[ ! -d "$STATE_ROOT/jobs/$(cat "$RACE_RETURN_ID")" ] \
+  || fail "the post-publication cancellation record was not eventually retired"
+assert_absent "$RACE_RUNNING_FINISH" "a post-publication disconnect allowed a running job to finish"
+pass "post-publication cancellation retains identity until retirement is confirmed"
 
 # T3: after the cancellations, a burst of short bounded commands meets its own
 # budget - no convoy behind abandoned work.
