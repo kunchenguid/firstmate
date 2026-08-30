@@ -51,7 +51,8 @@ export PATH
 # binary, never copies: a copied platform binary fails code-signing validation
 # and is killed on macOS arm64. The symlink name is what the kernel records as
 # the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
+ln -s "$SLEEP_BIN" "$LAB/bin/claude/claude"
+ln -s "$SLEEP_BIN" "$LAB/bin/codex"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
@@ -150,12 +151,22 @@ assert_sources_disagree() {  # <target> <label>
 # tmux and ps, while Linux can expose the symlink name through both, so the
 # version-string case below owns the cross-platform divergence assertion.
 
-new_window agent "$LAB/bin/claude-link" 900
+new_window agent "$LAB/bin/claude/claude" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 fm_backend_agent_started tmux "$SESSION:agent" claude \
   || fail "a running harness-named foreground process must prove replacement start"
 pass "tmux liveness: a harness-named foreground process classifies alive and proves replacement start"
+
+new_window wrong-harness "$LAB/bin/codex" 900
+wait_for_state "$SESSION:wrong-harness" alive \
+  || fail "a running codex executable must classify alive"
+fm_backend_agent_started tmux "$SESSION:wrong-harness" codex \
+  || fail "a running codex executable must prove a selected codex replacement start"
+if fm_backend_agent_started tmux "$SESSION:wrong-harness" claude; then
+  fail "a foreground codex executable must not prove a selected claude replacement start"
+fi
+pass "tmux liveness: replacement proof requires the selected foreground harness"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
@@ -165,6 +176,8 @@ pass "tmux liveness: a harness-named foreground process classifies alive and pro
 new_window muse "$LAB/bin/muse-bin-0.1.0-R708.1" 900
 wait_for_state "$SESSION:muse" alive \
   || fail "muse's version-suffixed binary name must classify alive"
+fm_backend_agent_started tmux "$SESSION:muse" muse \
+  || fail "muse's version-suffixed binary must prove selected muse replacement start"
 pass "tmux liveness: muse's version-suffixed muse-bin-<version> classifies alive"
 
 for decoy in musescore amuse muse-binary muse-bind; do
@@ -189,6 +202,8 @@ if [ -n "$CC_BIN" ] &&
   new_window titled "$LAB/bin/claude/2.1.220"
   wait_for_state "$SESSION:titled" alive \
     || fail "a version-named executable under a harness install path must classify alive"
+  fm_backend_agent_started tmux "$SESSION:titled" claude \
+    || fail "a version-named executable under the claude install path must prove replacement start"
   assert_sources_disagree "$SESSION:titled" "version-string process name"
   pass "tmux liveness: a version-named executable under a harness install path classifies alive"
 
@@ -214,6 +229,8 @@ pass "tmux liveness: a process neither name source attributes stays ambiguous ra
 new_window launcher "$LAB/bin/agent-launcher"
 wait_for_state "$SESSION:launcher" alive \
   || fail "a launcher running a harness child must classify alive, never dead"
+fm_backend_agent_started tmux "$SESSION:launcher" pi \
+  || fail "a launcher running a foreground pi child must prove selected pi replacement start"
 comms_classify_agent "$SESSION:launcher" \
   || fail "the launcher's harness child must be visible in the foreground process group"
 pass "tmux liveness: a launcher whose own identity reads as a bare shell classifies alive from its harness child"
@@ -230,7 +247,7 @@ pass "tmux liveness: an idle shell pane classifies dead"
 # `set -m` gives the background job its own process group, which is what an
 # interactive shell does for a job an exited agent left behind.
 
-new_window background bash -c "set -m; '$LAB/bin/claude-link' 900 & printf '%s\n' \"\$!\" > '$LAB/bg.pid'; exec /bin/sh"
+new_window background bash -c "set -m; '$LAB/bin/claude/claude' 900 & printf '%s\n' \"\$!\" > '$LAB/bg.pid'; exec /bin/sh"
 bg_pid=
 for _ in $(seq 1 100); do
   [ -s "$LAB/bg.pid" ] && bg_pid=$(cat "$LAB/bg.pid") && break

@@ -904,7 +904,7 @@ fm_backend_agent_started() {  # <backend> <target> <harness>
   local backend=$1 target=$2 harness=$3
   fm_backend_source "$backend" || return 1
   case "$backend" in
-    tmux) fm_backend_tmux_agent_started "$target" ;;
+    tmux) fm_backend_tmux_agent_started "$target" "$harness" ;;
     herdr) fm_backend_herdr_agent_started "$target" "$harness" ;;
     *) return 1 ;;
   esac

@@ -124,7 +124,7 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   started=0
   for _ in $(seq 1 300); do
     state=$(fm_backend_agent_state tmux "$target")
-    if [ "$state" = alive ] && fm_backend_agent_started tmux "$target" claude; then
+    if [ "$state" = alive ] && fm_backend_agent_started tmux "$target" "$harness"; then
       started=1
       break
     fi

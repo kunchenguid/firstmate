@@ -263,8 +263,8 @@ fm_backend_tmux_window_exists() {  # <target>
 # foreground process group only. Unlike recovery state below, it deliberately
 # ignores pane_current_command: that title can remain agent-shaped over a live
 # shell and must not turn a submitted launch line into relaunch success.
-fm_backend_tmux_agent_started() {  # <target>
-  local target=$1 requested=$1 names name
+fm_backend_tmux_agent_started() {  # <target> <harness>
+  local target=$1 harness=$2 requested=$1 names name
   fm_backend_tmux_window_exists "$requested" || return 1
   case "$target" in
     *:*:*|'':*|*:'') return 1 ;;
@@ -274,7 +274,7 @@ fm_backend_tmux_agent_started() {  # <target>
   names=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] \
+    fm_harness_selected_executable_matches "$harness" "$name" '' \
       && fm_backend_tmux_window_exists "$requested" && return 0
   done <<EOF
 $names
@@ -282,7 +282,7 @@ EOF
   names=$(fm_backend_tmux_foreground_argv0s "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] \
+    fm_harness_selected_executable_matches "$harness" '' "$name" \
       && fm_backend_tmux_window_exists "$requested" && return 0
   done <<EOF
 $names

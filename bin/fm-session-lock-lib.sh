@@ -45,6 +45,56 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+fm_harness_selected_executable_matches() {  # <harness> <comm> [argv0]
+  local harness=$1 comm=$2 argv0=${3:-} value base name
+  [ -n "$harness" ] || return 1
+  if [ "$harness" = cursor ]; then
+    fm_cursor_process_matches "$comm" '' "$argv0"
+    return
+  fi
+  for value in "$comm" "$argv0"; do
+    [ -n "$value" ] || continue
+    base=${value##*/}
+    base=${base#-}
+    case "$harness" in
+      claude|codex|opencode|grok)
+        [ "$base" = "$harness" ] && return 0
+        name=$(fm_harness_path_name "$value" 2>/dev/null) || name=
+        [ "$name" = "$harness" ] && return 0
+        ;;
+      kimi)
+        case "$base" in kimi|kimi-code) return 0 ;; esac
+        name=$(fm_harness_path_name "$value" 2>/dev/null) || name=
+        [ "$name" = kimi ] && return 0
+        ;;
+      pi|pi-signed)
+        case "$base" in pi|pi-signed|pi-launcher|Pi) return 0 ;; esac
+        name=$(fm_harness_path_name "$value" 2>/dev/null) || name=
+        case "$name" in pi|pi-signed) return 0 ;; esac
+        ;;
+      muse)
+        case "$base" in muse|muse-bin-*) return 0 ;; esac
+        case "/$value/" in */muse/*) return 0 ;; esac
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
+
+fm_harness_selected_interpreter_script_matches() {  # <harness> <comm> <argv0> <script>
+  local harness=$1 comm=$2 argv0=$3 script=$4 value base
+  [ "$harness" = cursor ] || return 1
+  for value in "$comm" "$argv0"; do
+    base=${value##*/}
+    base=${base#-}
+    case "$base" in
+      node|node-*|node[0-9]*) fm_cursor_path_is_cursor "$script" && return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #

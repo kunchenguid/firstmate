@@ -2961,6 +2961,16 @@ test_agent_started_rejects_unrelated_foreground_processes_and_accepts_the_regist
     fail "a stale pi registration over a foreground sleep process must not prove replacement start"
   fi
 
+  dir="$TMP_ROOT/agent-started-substring"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"claude-bootstrap","argv0":"/tmp/claude-bootstrap"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 claude' "$ROOT"; then
+    fail "a stale claude registration over /tmp/claude-bootstrap must not prove replacement start"
+  fi
+
   dir="$TMP_ROOT/agent-started-wrong-harness"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"

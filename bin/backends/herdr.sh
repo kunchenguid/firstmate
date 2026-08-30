@@ -72,6 +72,9 @@ FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-session-lock-lib.sh"
+
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
@@ -1924,44 +1927,12 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # fm_backend_herdr_agent_started: positive replacement-launch proof. Native
 # registration must name a live agent, and process-info must show that agent in
 # a foreground process group distinct from the endpoint shell.
-fm_backend_herdr_process_matches_agent() {  # <harness> <process>
-  local harness=$1 process=$2 name=${2##*/} family
+fm_backend_herdr_registered_agent_matches_harness() {  # <harness> <agent>
+  local harness=$1 agent=$2
   case "$harness" in
-    pi|pi-signed)
-      case "$name" in
-        pi|pi-signed|pi-launcher|Pi) return 0 ;;
-      esac
-      return 1
-      ;;
-    claude*) family=claude ;;
-    codex*) family=codex ;;
-    opencode*) family=opencode ;;
-    grok*) family=grok ;;
-    kimi*) family=kimi ;;
-    cursor*) family=cursor ;;
-    muse*)
-      case "$name" in
-        muse|muse-bin-*) return 0 ;;
-      esac
-      case "/$process/" in
-        */muse/*) return 0 ;;
-      esac
-      return 1
-      ;;
-    *) return 1 ;;
+    pi|pi-signed) case "$agent" in pi|pi-signed) return 0 ;; *) return 1 ;; esac ;;
+    *) [ "$agent" = "$harness" ] ;;
   esac
-  case "$process" in
-    *"$family"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-fm_backend_herdr_interpreter_script_matches_agent() {  # <harness> <interpreter> <script>
-  local harness=$1 interpreter=${2##*/} script=$3
-  interpreter=${interpreter#-}
-  [ "$harness" = cursor ] || return 1
-  case "$interpreter" in node|node-*|node[0-9]*) ;; *) return 1 ;; esac
-  case "$script" in */cursor-agent/versions/*/index.js) return 0 ;; *) return 1 ;; esac
 }
 
 fm_backend_herdr_agent_started() {  # <target> <harness>
@@ -1977,7 +1948,7 @@ fm_backend_herdr_agent_started() {  # <target> <harness>
     | .agent
     | select(type == "string" and length > 0)
   ' 2>/dev/null) || return 1
-  fm_backend_herdr_process_matches_agent "$harness" "$agent" || return 1
+  fm_backend_herdr_registered_agent_matches_harness "$harness" "$agent" || return 1
   info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
   printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" '
     .result.type == "pane_process_info"
@@ -1998,11 +1969,9 @@ fm_backend_herdr_agent_started() {  # <target> <harness>
   while IFS= read -r process; do
     name=$(printf '%s' "$process" | jq -r '(.name // empty) | select(type == "string")' 2>/dev/null) || continue
     argv0=$(printf '%s' "$process" | jq -r '(.argv0 // .argv[0] // empty) | select(type == "string")' 2>/dev/null) || continue
-    fm_backend_herdr_process_matches_agent "$harness" "$name" && return 0
-    fm_backend_herdr_process_matches_agent "$harness" "$argv0" && return 0
+    fm_harness_selected_executable_matches "$harness" "$name" "$argv0" && return 0
     script=$(printf '%s' "$process" | jq -r '(.argv[1] // empty) | select(type == "string")' 2>/dev/null) || continue
-    fm_backend_herdr_interpreter_script_matches_agent "$harness" "$name" "$script" && return 0
-    fm_backend_herdr_interpreter_script_matches_agent "$harness" "$argv0" "$script" && return 0
+    fm_harness_selected_interpreter_script_matches "$harness" "$name" "$argv0" "$script" && return 0
   done <<EOF
 $processes
 EOF
