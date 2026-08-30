@@ -1215,9 +1215,14 @@ backlog_record_reconcile() {
     meta_lock=$(fm_meta_lock_path "$STATE/$label.meta") || continue
     fm_lock_try_acquire "$meta_lock" || continue
     if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA"; then
-      if [ "$FM_BACKLOG_CLOSE_REPLAY_RESULT" = closed ]; then
-        echo "BOOTSTRAP_INFO: closed the backlog item for $label that an interrupted cleanup left open"
-      fi
+      case "$FM_BACKLOG_CLOSE_REPLAY_RESULT" in
+        closed)
+          echo "BOOTSTRAP_INFO: closed the backlog item for $label that an interrupted cleanup left open"
+          ;;
+        closed_incomplete)
+          echo "BOOTSTRAP_INFO: closed the backlog item for $label after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
+          ;;
+      esac
     else
       echo "BACKLOG_RECONCILE: $label: recorded backlog close could not be replayed: $FM_BACKLOG_TRANSITION_ERROR"
     fi

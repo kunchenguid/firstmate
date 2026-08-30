@@ -181,6 +181,22 @@ SH
   chmod +x "$case_dir/fakebin/tmux"
 }
 
+interrupt_teardown_during_treehouse_return() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = return ] && [ ! -f "$case_dir/teardown-interrupted" ]; then
+  : > "$case_dir/teardown-interrupted"
+  teardown_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
+  case "\$teardown_pid" in ''|*[!0-9]*) exit 1 ;; esac
+  kill -TERM "\$teardown_pid"
+  kill -TERM "\$\$"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 interrupt_kimi_readiness() {  # <case-dir>
   local case_dir=$1 home
   home=$(home_of "$case_dir")
@@ -965,6 +981,35 @@ test_completion_fails_loudly_and_records_the_close_it_still_owes() {
   pass "completion refuses to report success while its item is still open, and records what it owes"
 }
 
+test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
+  local case_dir home id marker out rc=0
+  id=atomic-close-destructive-interrupt-b8
+  case_dir=$(make_home close-destructive-interrupt "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
+  marker="$home/state/$id.backlog-close"
+  interrupt_teardown_during_treehouse_return "$case_dir"
+
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "interrupted destructive cleanup reported success"
+  assert_present "$marker" \
+    "destructive cleanup began before recording its authoritative close"
+  assert_present "$home/state/$id.meta" \
+    "interrupted destructive cleanup lost the task incarnation"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "interrupted cleanup changed the backlog before recovery"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = done ] \
+    || fail "restart left interrupted cleanup In flight: $out"
+  assert_absent "$marker" "restart retained the recovered close marker"
+  assert_absent "$home/state/$id.meta" "restart retained the interrupted task record"
+  assert_contains "$out" "endpoint or local copy may remain" \
+    "restart silently hid potentially incomplete physical cleanup"
+  pass "restart recovers closes recorded before destructive cleanup"
+}
+
 test_completion_fails_when_its_close_marker_cannot_be_removed() {
   local case_dir id marker out rc=0
   id=atomic-close-marker-remove-failure-b8
@@ -1597,6 +1642,7 @@ test_trailing_newline_data_path_fails_closed
 test_control_character_data_path_is_refused_before_cleanup
 test_completion_preserves_records_when_meta_removal_fails
 test_completion_fails_loudly_and_records_the_close_it_still_owes
+test_interrupted_destructive_cleanup_leaves_a_recoverable_close
 test_completion_fails_when_its_close_marker_cannot_be_removed
 test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure

@@ -53,7 +53,7 @@ FM_BACKLOG_TRANSITION_ERROR=
 FM_BACKLOG_ROW_RESULT=
 FM_BACKLOG_ROW_STATE=
 FM_BACKLOG_ROW_ERROR=
-# Set by fm_backlog_close_marker_replay: closed | stale | noop.
+# Set by fm_backlog_close_marker_replay: closed | closed_incomplete | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
 
@@ -526,7 +526,7 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
 # before any meta or backlog mutation.
 fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
   local state=$1 marker=$2 marker_name expected_id
-  local id data marker_spawn_gen meta_spawn_gen row_state
+  local id data marker_spawn_gen meta_spawn_gen row_state cleanup_incomplete=0
   local args=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
@@ -550,6 +550,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
+    cleanup_incomplete=1
     fm_backlog_atomic_transition remove "$state/$id.meta" "the interrupted task record" \
       || return 1
   fi
@@ -566,7 +567,11 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
     done\ *)
       if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" \
           "${args[@]+"${args[@]}"}"; then
-        FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
+        if [ "$cleanup_incomplete" = 1 ]; then
+          FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
+        else
+          FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
+        fi
         return 0
       fi
       return 1
@@ -579,7 +584,11 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   esac
   if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" \
       "${args[@]+"${args[@]}"}"; then
-    FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
+    if [ "$cleanup_incomplete" = 1 ]; then
+      FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
+    else
+      FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
+    fi
     return 0
   fi
   return 1
