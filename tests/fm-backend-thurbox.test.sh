@@ -671,16 +671,34 @@ test_send_key_refuses_dead_target() {
 # capture + composer
 # ============================================================================
 
-test_capture_reads_output_field_and_trims_locally() {
+test_capture_returns_the_whole_screen_not_its_bottom_rows() {
   reset_world
   add_row "$UUID" "$TITLE" "%20" local-tmux -
-  printf 'l1\nl2\nl3\nl4\nl5\n' > "$FM_TB_CAPTURE"
+  # A visible pane is one row per screen line: content at the top and blank
+  # rows below it, which `session capture` returns exactly as
+  # `capture-pane -p` does. A bottom-N trim of that screen therefore hands the
+  # caller nothing but blanks whenever the content stops short of the last row
+  # - a silent empty pane for fm-peek and the watcher's tail, exit 0.
+  printf 'l1\nl2\nl3\n\n\n\n\n\n' > "$FM_TB_CAPTURE"
   local out
   out=$(fm_backend_thurbox_capture "$UUID:%20" 2 fm-t1) || fail "capture failed"
-  # VERIFIED: --lines bounds thurbox's fetch but the response is not trimmed to
-  # it, so the adapter trims locally.
-  [ "$out" = $'l4\nl5' ] || fail "capture did not trim to the requested line count: '$out'"
-  pass "capture reads .output and trims to the requested lines locally"
+  case "$out" in
+    *l1*l2*l3*) : ;;
+    *) fail "capture dropped a partially-filled pane's content: '$out'" ;;
+  esac
+
+  # `--lines N` is still the bound, passed to thurbox rather than applied
+  # locally: it is a SCROLLBACK count, so N rows of history arrive ahead of the
+  # screen exactly the way `capture-pane -p -S -N` delivers them.
+  reset_world
+  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  printf 'old1\nold2\nold3\n' > "$TMP_ROOT/scrollback"
+  export FM_TB_SCROLLBACK="$TMP_ROOT/scrollback"
+  printf 'screen1\nscreen2\n' > "$FM_TB_CAPTURE"
+  out=$(fm_backend_thurbox_capture "$UUID:%20" 2 fm-t1) || fail "capture failed"
+  [ "$out" = $'old2\nold3\nscreen1\nscreen2' ] \
+    || fail "capture did not bound scrollback through --lines: '$out'"
+  pass "capture returns thurbox's bounded response whole, blanks and scrollback included"
 }
 
 test_capture_is_plain_text_composer_is_styled() {
@@ -1246,7 +1264,7 @@ test_target_ready_refuses_when_pane_is_dead
 test_send_literal_types_without_submitting
 test_send_key_normalizes_to_thurbox_names
 test_send_key_refuses_dead_target
-test_capture_reads_output_field_and_trims_locally
+test_capture_returns_the_whole_screen_not_its_bottom_rows
 test_capture_is_plain_text_composer_is_styled
 test_composer_caps_claim_styled_and_cursor
 test_composer_state_unknown_when_pane_unreadable

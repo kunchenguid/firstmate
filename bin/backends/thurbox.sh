@@ -646,16 +646,22 @@ fm_backend_thurbox_send_text_line() {  # <target> <text> [expected-label]
 # Plain by construction: no `--ansi`, so this is the styled capture's
 # counterpart and the only one a human or an LLM ever sees.
 #
-# Verified `--lines` bounds thurbox's scrollback fetch but the response is not
-# itself trimmed to that count, so the result is trimmed locally - the same
-# "fetch generous, trim locally" posture herdr and cmux already take for their
-# own reasons.
+# NOT trimmed locally, unlike herdr's and cmux's "fetch generous, trim locally"
+# captures: those trim because their fetch is unbounded, whereas `--lines N`
+# already bounds thurbox's fetch the exact way `capture-pane -p -S -N` bounds
+# tmux's - N rows of scrollback ahead of the WHOLE visible screen. `.output` is
+# therefore already the reference adapter's answer, and a local `tail -n N`
+# would not shorten a scrollback overrun, it would cut the SCREEN: the visible
+# pane carries one row per pane line including the trailing blanks below the
+# content, so the bottom N rows of a partially-filled pane are blank. Trimming
+# handed fm-peek and the watcher's tail an empty capture, exit 0, for any pane
+# whose output does not reach the bottom of the screen.
 fm_backend_thurbox_capture() {  # <target> <lines> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${3:-}" || return 1
   local lines=${2:-200} out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   out=$(fm_backend_thurbox_pane_state "$lines" false | jq -r '.output // empty' 2>/dev/null) || return 1
-  printf '%s' "$out" | tail -n "$lines"
+  printf '%s' "$out"
 }
 
 # fm_backend_thurbox_composer_capture: the composer screen WITH ANSI styling.
