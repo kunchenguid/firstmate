@@ -301,6 +301,7 @@ export default function (pi: ExtensionAPI) {
       event.source !== "extension" ||
       event.streamingBehavior !== "followUp" ||
       Boolean(event.images?.length) ||
+      typeof event.text !== "string" ||
       !event.text.includes(rearmResurfaceBody)
     ) {
       return { action: "continue" };

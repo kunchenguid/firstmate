@@ -226,6 +226,7 @@ await expectDelivered("idle extension input", { streamingBehavior: undefined });
 await expectDelivered("extension input with an image", {
   images: [{ type: "image", source: { type: "base64", mediaType: "image/png", data: "AA==" } }],
 });
+await expectDelivered("extension input without text", { text: undefined });
 await expectDelivered("captain text containing the reason", {
   source: "interactive",
   text: "please investigate check: rearm-resurface without swallowing this",
