@@ -73,7 +73,7 @@ fm_git_identity
 # carrying `spendPriority`, an `exhaustion[N]` block, and a sparse `attention[N]`
 # block - so the parser is pinned against the emitted shape rather than a tidied
 # one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-attention|unreadable-pct|repeated-block>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|unnamed-provider>
   # The FLOOR-COMPLIANT layout, as quota-axi 0.1.29 and newer emit it and as
   # verified live against 0.1.34 on this host: quota[], exhaustion[] and
   # attention[]. The pre-floor effective[]/providers[]/windows[] shape is not
@@ -151,6 +151,65 @@ quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidenc
   cursor,all_models,77,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
 exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
   claude,all_models,14400,five_hour
+EOF
+      return 0
+      ;;
+    sparse-repeated-block)
+      # The LIVE shape: the real 0.1.34 header, two same-named blocks separated
+      # by the sparse `exhaustion[0]:` line a real report emits, and a second
+      # header that drops `limitedBy`. The header-parsing path used to be two
+      # copies and only one of them cleared the field-index map, so the second
+      # block kept `limitedBy` at the first header's position 7 - which is
+      # `resetsAt` in the second - and printed the RESET TIME as the window
+      # bounding the percentage, in the gauge whose whole contract is that each
+      # number carries the window bounding IT.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,97,2.1358,through_reset,early,five_hour,"2026-08-30T08:00:00Z"
+exhaustion[0]:
+quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,resetsAt}:
+  cursor,all_models,77,1.0,projected_exhaustion,early,"2026-09-02T07:59:59Z"
+attention[1]{provider,scope,kind,detail,remedy}:
+  codex,all,error,Codex quota unavailable,none
+EOF
+      return 0
+      ;;
+    model-scoped-orphan)
+      # A provider whose ONLY quota row is model-scoped and which attention never
+      # names at all, beside a healthy provider. It fell through both loops and
+      # vanished, leaving `verdict=ok measured=1 unknown=0` with a provider at 3%
+      # invisible to the dispatch decision.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  cursor,all_models,77,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
+  claude,"model:fable",3,unknown,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  cursor,all_models,14400,seven_day
+EOF
+      return 0
+      ;;
+    fractional-pct)
+      # A fractional percentage is a NUMBER. No observed build emits one, but
+      # rejecting it would blank a gauge that was fully readable on a build that
+      # clears the floor - and `0.4` must read tight rather than as a wall,
+      # because a wall is the claim that the provider has already stopped.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,34.5,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+  cursor,all_models,0.4,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
+EOF
+      return 0
+      ;;
+    unnamed-provider)
+      # An upstream rename of `provider` leaves every row unattributable at once.
+      # `- ok pct=84` would be a healthy dispatch gauge nobody can act on.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  all_models,84,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
 EOF
       return 0
       ;;
@@ -394,22 +453,26 @@ assert_contains "$OUT" 'unknown reason=quota-axi printed no quota or attention b
 assert_not_contains "$OUT" 'pct=84' 'a raw window percent is never presented as effective headroom'
 pass 'headroom refuses to infer headroom from raw windows alone'
 
-# A quota block that parses but yields no account-level row, with nothing flagged
-# in attention either, is a reading nobody got, and the two emitters must say so
-# identically. The text form used to name the reason while --json returned an
+# A quota block that parses but yields no account-level row is a reading nobody
+# got, and the two emitters must say so identically - naming the PROVIDER, not
+# just the fleet. The text form used to name the reason while --json returned an
 # empty one and unknown=0, so a programmatic reader branching on .verdict got an
 # unknown it could not explain from a schema id that promises a reason on every
-# path.
+# path; both then reported the fleet collectively, losing the one name the
+# reader needed.
 CASE="$TMP_ROOT/hr-modelscoped"; mkdir -p "$CASE"
 fake_quota "$CASE/fakebin" model-scoped-only
 OUT=$(run_headroom "$CASE/fakebin")
-assert_contains "$OUT" 'unknown reason=no-account-level-row'   'a report with only model-scoped rows names why no account-level gauge was read'
+assert_contains "$OUT" 'HEADROOM: claude unknown reason=no-account-level-row' \
+  'a report with only model-scoped rows names the provider AND why no account-level gauge was read'
 assert_contains "$OUT" 'verdict=unknown' 'a report with no account-level row summarizes as unknown'
 assert_not_contains "$OUT" 'pct=84' 'a model-scoped row is never presented as the dispatch gauge'
 if command -v jq >/dev/null 2>&1; then
   OUT=$(run_headroom "$CASE/fakebin" --json)
-  printf '%s' "$OUT" | jq -e '.verdict == "unknown" and .measured == 0 and .unknown == 1 and .reason == "no-account-level-row"' >/dev/null \
-    || fail "--json must carry the same reason as the text form for a row-less read: $OUT"
+  printf '%s' "$OUT" | jq -e '.verdict == "unknown" and .measured == 0 and .unknown == 1
+      and (.providers | length) == 1 and .providers[0].provider == "claude"
+      and (.providers[0].detail | startswith("reason=no-account-level-row"))' >/dev/null \
+    || fail "--json must carry the same provider and reason as the text form for a row-less read: $OUT"
 fi
 pass 'headroom reports a row-less effective block as unknown with the same reason on both emitters'
 
@@ -467,6 +530,100 @@ assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'the first block of a repeat
 assert_contains "$OUT" 'HEADROOM: cursor ok pct=77' 'the second block of a repeated name is read too'
 assert_contains "$OUT" 'measured=2' 'both blocks contribute to the reading'
 pass 'headroom reads a second block that shares the first block name'
+
+# --- headroom: a second block reads its OWN header --------------------------
+#
+# Reproduces the live 0.1.34 shape: a sparse `exhaustion[0]:` line between two
+# same-named quota blocks, with the second header dropping `limitedBy`. The
+# header-parsing path was two copies and only one of them cleared the field index
+# map, so the second block kept `limitedBy` at the first header's position and
+# printed `bound=2026-09-02T07:59:59Z` - the row's own RESET TIME labelled as the
+# window bounding its percentage. That is the mislabelled window this surface's
+# per-number window contract exists to prevent, and the separating line is one a
+# supported build actually emits.
+CASE="$TMP_ROOT/hr-sparse-repeated"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" sparse-repeated-block
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude ok pct=97 bound=five_hour resets=2026-08-30T08:00:00Z' \
+  'the first block still carries its own bounding window and reset'
+assert_contains "$OUT" 'HEADROOM: cursor ok pct=77 bound=- resets=2026-09-02T07:59:59Z' \
+  'the second block reports a field its own header omits as absent, not from the first header'
+assert_not_contains "$OUT" 'bound=2026-09-02T07:59:59Z' \
+  'a reset time must never be presented as the window bounding the percentage'
+assert_contains "$OUT" 'HEADROOM: codex unknown' \
+  'the attention block after the second quota block is still read'
+pass 'headroom reads a repeated block through its own header even across a sparse table'
+
+# --- headroom: every provider the report names gets a line -------------------
+#
+# The invariant, asserted directly rather than one shape at a time. Each earlier
+# fix enumerated a way a provider could be missed and left another: filtering
+# attention to account scope missed a provider flagged at model scope, and
+# deduping against emitted rows still missed one whose only quota row is
+# model-scoped and which attention never names - it vanished while the summary
+# read `verdict=ok measured=1 unknown=0` with a provider at 3% invisible.
+for FIXTURE in healthy auth model-scoped-attention model-scoped-orphan sparse-repeated-block divergent; do
+  CASE="$TMP_ROOT/hr-invariant-$FIXTURE"; mkdir -p "$CASE"
+  fake_quota "$CASE/fakebin" "$FIXTURE"
+  OUT=$(run_headroom "$CASE/fakebin")
+  # The report's own provider names: the first field of every indented row in a
+  # block the gauge reads. This is the gauge's input, not its source.
+  NAMES=$(awk '
+    /^(quota|exhaustion|attention)\[[0-9]+\]\{/ { inb = 1; next }
+    /^[ \t]+[^ \t]/ { if (inb) { split($0, f, ","); gsub(/^[ \t]+|[ \t]+$|"/, "", f[1]); print f[1] } ; next }
+    { inb = 0 }
+  ' "$CASE/fakebin/.quota-report" | sort -u)
+  [ -n "$NAMES" ] || fail "fixture $FIXTURE names no provider, so it cannot test the invariant"
+  while read -r NAME; do
+    [ -n "$NAME" ] || continue
+    assert_contains "$OUT" "HEADROOM: $NAME " \
+      "every provider the report names must appear in the reading ($FIXTURE/$NAME)"
+  done <<INV
+$NAMES
+INV
+done
+CASE="$TMP_ROOT/hr-invariant-model-scoped-orphan"
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude unknown reason=no-account-level-row' \
+  'a provider named only at model scope is reported unknown with its reason'
+assert_not_contains "$OUT" 'pct=3 ' 'a model-scoped percentage is never presented as the dispatch gauge'
+assert_contains "$OUT" 'verdict=partial measured=1 tight=0 wall=0 unknown=1' \
+  'and the summary stops calling that reading fully ok'
+pass 'headroom gives every provider the report names a line, at any scope and in any table'
+
+# --- headroom: a fractional percentage is a number --------------------------
+#
+# The command's own contract is that a reading needs a percentage that is a
+# NUMBER. An integer-only guard rejected `34.5` and blanked a gauge that was
+# fully readable on a build clearing the floor - the false unmeasurable this
+# surface exists to remove, arriving from the opposite direction. `0.4` is the
+# tightest possible reading and still not a wall: a wall is the claim that the
+# provider has ALREADY stopped.
+CASE="$TMP_ROOT/hr-fractional"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" fractional-pct
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude ok pct=34.5' 'a fractional percentage is read, and reported verbatim'
+assert_contains "$OUT" 'HEADROOM: cursor tight pct=0.4' 'a fraction of a percent is tight'
+assert_not_contains "$OUT" 'cursor wall' 'a provider with headroom left has not already stopped'
+assert_contains "$OUT" 'verdict=tight measured=2 tight=1 wall=0 unknown=0' \
+  'both fractional rows are measurements, not unreadable ones'
+assert_not_contains "$OUT" 'unreadable-percent' 'a number must not be reported as not a number'
+pass 'headroom reads a fractional percentage as the number it is'
+
+# --- headroom: a row nobody can attribute is not a reading -------------------
+#
+# The same class of upstream layout change the percentage guard exists for, one
+# field over: a renamed `provider` leaves every row unattributable, and
+# `HEADROOM: - ok pct=84` is a healthy dispatch gauge for a provider no one can
+# act on. It leaves through the single row-less exit instead.
+CASE="$TMP_ROOT/hr-unnamed"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" unnamed-provider
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'unknown reason=no-named-provider-row' \
+  'a report whose rows carry no provider name says so'
+assert_not_contains "$OUT" 'pct=84' 'an unattributable percentage is never presented as a reading'
+assert_contains "$OUT" 'verdict=unknown measured=0' 'and nothing was measured'
+pass 'headroom refuses to report a percentage it cannot attribute to a provider'
 
 # --- headroom: auth_required is unknown, with the one-time command ----------
 

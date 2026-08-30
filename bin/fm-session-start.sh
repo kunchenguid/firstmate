@@ -266,6 +266,8 @@ stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-headroom-lib.sh
+. "$SCRIPT_DIR/fm-headroom-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
@@ -872,12 +874,14 @@ FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER_TIMEO
   fm_run_timed "$SESSION_START_HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null
 SESSION_START_HEADROOM_RC=$?
 if [ "$SESSION_START_HEADROOM_RC" -ne 0 ]; then
-  # Same fallback as bin/fm-fleet-view.sh, from the same owner: only 124 is a
-  # timeout, and an unknown that names a reason which can be false is worse than
-  # one that names the real exit.
-  printf 'HEADROOM: (all providers) unknown reason=%s\n' \
-    "$(fm_run_timed_reason "$SESSION_START_HEADROOM_RC" "$SESSION_START_HEADROOM_TIMEOUT" 'headroom read')"
-  printf 'HEADROOM_NOTE: headroom is UNMEASURED, not healthy - treat every provider as unproven when deciding what to dispatch.\n'
+  # Same fallback as bin/fm-fleet-view.sh, from the same two owners: only 124 is
+  # a timeout, and an unknown that names a reason which can be false is worse
+  # than one that names the real exit, while bin/fm-headroom-lib.sh owns the
+  # four-line shape so a gauge that could not be RUN reads exactly like a gauge
+  # that could not be READ. `build=unknown` because the version was never read.
+  fm_headroom_unmeasurable_text \
+    "$(fm_run_timed_reason "$SESSION_START_HEADROOM_RC" "$SESSION_START_HEADROOM_TIMEOUT" 'headroom read')" \
+    'treat every provider as unproven when deciding what to dispatch' unknown unknown
 fi
 
 subsection "Work under way (state/*.meta)"

@@ -1661,7 +1661,15 @@ EOF
     "the reason must come from the run's own status, not from the negation's"
   assert_contains "$out" "UNMEASURED, not healthy" \
     "the unknown keeps the note that it is unmeasured rather than fine"
-  pass "the digest headroom fallback states the real reason and keeps the unmeasured note"
+  # A gauge that could not be RUN must read exactly like a gauge that could not
+  # be READ. The fallback used to emit two of the four lines, so a reader or
+  # consumer scanning for the summary verdict found none on exactly the paths
+  # where the gauge failed. bin/fm-headroom-lib.sh now owns the shape.
+  assert_contains "$out" "HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1" \
+    "the fallback carries the same summary verdict every real unmeasurable reading carries"
+  assert_contains "$out" "HEADROOM_NEXT:" \
+    "and the same next step out of it"
+  pass "the digest headroom fallback states the real reason and emits a full unknown reading"
 }
 
 test_fleet_state_stage_fits_its_share_of_the_session_bound() {

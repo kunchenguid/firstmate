@@ -66,17 +66,22 @@ HEADROOM_NOTE: headroom is UNMEASURED, not healthy - install it with npm install
 HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.
 ```
 
-`tests/fm-usage-wall.test.sh` pins the remaining unmeasurable paths - a failing gauge, a hanging gauge, a report with neither table, a row whose percentage is not a number, and `auth_required` - along with the rule that `--allow-keychain-prompt` is never passed.
+`tests/fm-usage-wall.test.sh` pins the remaining unmeasurable paths - a failing gauge, a hanging gauge, a report with neither table, a row whose percentage is not a number, a row that names no provider, and `auth_required` - along with the rule that `--allow-keychain-prompt` is never passed.
+
+The two surfaces that RENDER this gauge - the fleet view and the session-start digest - print the same four lines when they could not run the command at all, from the one owner in [`bin/fm-headroom-lib.sh`](../../bin/fm-headroom-lib.sh).
+Written out per caller, the copies had drifted (`treat it as unproven` against `treat every provider as unproven`) and both emitted only the first and third lines, so a reader or consumer scanning for `HEADROOM_SUMMARY: verdict=` found no verdict on exactly the paths where the gauge failed.
+`tests/fm-fleet-snapshot-view.test.sh` and `tests/fm-session-start.test.sh` each drive that fallback through a real non-zero exit and assert the full shape, so a gauge that could not be RUN reads exactly like a gauge that could not be READ.
 
 ## A build below the floor is refused, not read
 
-Stub-covered, as stated above: no below-floor build is reachable on this host, so the stub declares `0.1.17` and serves a report the gauge never reaches.
+Stub-covered, as stated above: no below-floor build is reachable on this host, so the stub declares `0.0.1` - the version `tests/fm-usage-wall.test.sh` actually gives it - and serves a report the gauge never reaches.
 The refusal names the installed version and the floor in the line itself, and the `build=` label agrees with the verdict rather than sitting beside a contradictory one:
 
 ```
-HEADROOM: (all providers) unknown reason=quota-axi 0.1.17 is below the supported floor 0.1.29, and its report layout is not the one this gauge reads
-HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/0.1.17 build=below-floor(0.1.29)
+HEADROOM: (all providers) unknown reason=quota-axi 0.0.1 is below the supported floor 0.1.29, and its report layout is not the one this gauge reads
+HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/0.0.1 build=below-floor(0.1.29)
 HEADROOM_NOTE: headroom is UNMEASURED, not healthy - upgrade quota-axi to 0.1.29 or newer, then re-read; until then no provider headroom is measured.
+HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.
 ```
 
 No percentage appears, because nothing was parsed.
@@ -103,7 +108,7 @@ The distinction holds in both directions: the unmodified live report on the same
 
 ## An unmeasured provider never reads as healthy
 
-Two ways a provider can go unmeasured without the gauge noticing, both reproduced against stub reports and both now pinned in `tests/fm-usage-wall.test.sh`.
+Four ways a provider can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
 
 A percentage that is not a number.
 `toon_block` resolves fields by name and yields `-` for one the header never declared, so an upstream rename of `effectivePercentRemaining` leaves every row unreadable at once.
@@ -123,6 +128,45 @@ The dedupe now suppresses only a provider this reading actually reported, and re
 HEADROOM: cursor ok pct=77 bound=seven_day resets=2026-09-02T07:59:59Z runway=unknown(projected_exhaustion) confidence=early
 HEADROOM: claude unknown reason=auth-required status=auth_required detail=Claude sign-in required - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
 HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
+```
+
+A provider whose only `quota[]` row is model-scoped and which `attention[]` never names at all.
+It fell through both loops the same way, and the dedupe fix above did not reach it because there was no `attention[]` row to read: `verdict=ok measured=1 unknown=0` with a provider at 3 percent invisible to the dispatch decision.
+Enumerating the ways a provider can be missed is what kept reopening this, so the reading now sweeps every name the report mentions anywhere - `quota[]` at any scope, `exhaustion[]`, `attention[]` - and `tests/fm-usage-wall.test.sh` asserts that invariant directly over six fixtures rather than adding a case per shape:
+
+```
+HEADROOM: cursor ok pct=77 bound=seven_day resets=2026-09-02T07:59:59Z runway=4h0m confidence=early
+HEADROOM: claude unknown reason=no-account-level-row status=not_reported scope=model:fable detail=named only in quota, with no account-level quota row and nothing in attention
+HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
+```
+
+A second `quota[]` block reading the FIRST block's column positions.
+The header-parsing path was two copies and only one of them cleared the field-index map, so a second same-named block separated from the first by any non-indented line inherited the earlier positions - and the live 0.1.34 report emits exactly such a line, the sparse `exhaustion[0]:`.
+With the live header first and a second block that drops `limitedBy`, `limitedBy` kept the first header's position 7, which is `resetsAt` in the second, and the row's own RESET TIME was printed as the window bounding its percentage:
+
+```
+HEADROOM: cursor ok pct=77 bound=2026-09-02T07:59:59Z resets=2026-09-02T07:59:59Z runway=unknown(projected_exhaustion) confidence=early
+```
+
+That is the mislabelled window the section below exists to prevent, reached through the report shape a supported build actually emits.
+The two copies are now one function, so both entries clear and repopulate identically and a field the second header omits reads as absent:
+
+```
+HEADROOM: claude ok pct=97 bound=five_hour resets=2026-08-30T08:00:00Z runway=unknown(through_reset) confidence=early
+HEADROOM: cursor ok pct=77 bound=- resets=2026-09-02T07:59:59Z runway=unknown(projected_exhaustion) confidence=early
+HEADROOM: codex unknown reason=provider-read-failed status=error detail=Codex quota unavailable
+HEADROOM_SUMMARY: verdict=partial measured=2 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
+```
+
+A percentage rejected for being fractional.
+The guard accepted integers only while this command's own header states the rule as a number, so `34.5` read `unreadable-percent` and blanked a gauge that was fully readable on a build clearing the floor - the same false unmeasurable, arriving from the opposite direction and invisible to the below-floor refusal because the build is supported.
+No observed build emits a fraction, so this is CONSTRUCTED rather than observed; it is fixed as a coherence defect, code disagreeing with its own authoritative description.
+A fraction of a percent reads `tight`, not `wall`, because `wall` is the claim that the provider has already stopped:
+
+```
+HEADROOM: claude ok pct=34.5 bound=five_hour resets=2026-08-27T02:19:59Z runway=unknown(projected_exhaustion) confidence=early
+HEADROOM: cursor tight pct=0.4 bound=seven_day resets=2026-09-02T07:59:59Z runway=unknown(projected_exhaustion) confidence=early
+HEADROOM_SUMMARY: verdict=tight measured=2 tight=1 wall=0 unknown=0 source=quota-axi/0.1.40
 ```
 
 ## Each number carries the window that bounds it

@@ -59,13 +59,19 @@
 #
 # UNMEASURABLE IS UNKNOWN, NEVER FINE. This is the whole point of the command,
 # so it is structural rather than conventional: a reading is emitted only from a
-# present account-scoped `quota` row whose `effectivePercentRemaining` is a
-# number. Every other outcome - quota-axi absent, the call timing out, neither
-# table present, the percentage unreadable, the scope unresolved, a provider
-# needing authentication - prints `unknown` with the concrete reason. A provider
-# `attention` names always gets a line, measured or unknown, whatever scope that
-# line arrived at, so none is dropped between the two tables. There is no code
-# path from a failed read to `ok`.
+# present account-scoped `quota` row that names its provider and whose
+# `effectivePercentRemaining` is a number - a decimal included, because a
+# fraction is a number and refusing one would blank a gauge that was readable.
+# Every other outcome - quota-axi absent, the call timing out, neither table
+# present, the percentage unreadable, the provider unnamed, the scope
+# unresolved, a provider needing authentication - prints `unknown` with the
+# concrete reason. There is no code path from a failed read to `ok`.
+#
+# And no provider this report NAMES is ever missing from the reading. Every name
+# appearing anywhere - `quota` at any scope, `exhaustion`, `attention` - gets a
+# line: measured when an account-scoped row was read, unknown with its reason
+# otherwise. That is swept from the report's own names rather than enumerated
+# shape by shape, because enumerating kept leaving one more way to be missed.
 #
 # It never prompts. `quota-axi` returns auth_required and unknown headroom until
 # the operator approves keychain access once, and the command that does that
@@ -204,6 +210,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-headroom-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-headroom-lib.sh"
 # Sourced at top level, not lazily: the run helpers are read inside command
 # substitutions, and a library sourced inside one dies with its subshell.
 # fm-nm-run-lib.sh sources nothing itself, so this costs nothing on the
@@ -384,30 +392,33 @@ toon_block() {  # <block-name> <comma-separated-field-names> ; TOON on stdin
       out[++n] = unquote(cur)
       return n
     }
+    # ONE header-parsing path, reached from both the "not in a block" and the
+    # "this line ended the block" branches. They were copies, and they had
+    # already diverged by the one line that clears the index map: a second block
+    # of the same name reached through the other branch inherited the FIRST
+    # header field positions, so a field the second header does not declare was
+    # read from a stale column and reported as measured. Two same-named blocks
+    # separated by a non-indented line - the sparse `exhaustion[0]:` a live
+    # report emits - is exactly that shape. Clearing and repopulating happen
+    # here, once, so a third copy cannot appear.
+    function read_header(line,   hdr, nf, i, fields) {
+      if (line !~ "^" block "\\[[0-9]+\\]\\{[^}]*\\}:[ \t]*$") { return 0 }
+      hdr = line
+      sub(/^[^{]*\{/, "", hdr)
+      sub(/\}.*$/, "", hdr)
+      delete idx
+      nf = split(hdr, fields, ",")
+      for (i = 1; i <= nf; i++) { idx[fields[i]] = i }
+      return 1
+    }
     BEGIN { nw = split(want, wantf, ","); inblock = 0 }
     {
       if (!inblock) {
-        if ($0 ~ "^" block "\\[[0-9]+\\]\\{[^}]*\\}:[ \t]*$") {
-          hdr = $0
-          sub(/^[^{]*\{/, "", hdr)
-          sub(/\}.*$/, "", hdr)
-          nf = split(hdr, fields, ",")
-          for (i = 1; i <= nf; i++) { idx[fields[i]] = i }
-          inblock = 1
-        }
+        inblock = read_header($0)
         next
       }
       if ($0 !~ /^[ \t]+[^ \t]/) {
-        inblock = 0
-        if ($0 ~ "^" block "\\[[0-9]+\\]\\{[^}]*\\}:[ \t]*$") {
-          hdr = $0
-          sub(/^[^{]*\{/, "", hdr)
-          sub(/\}.*$/, "", hdr)
-          delete idx
-          nf = split(hdr, fields, ",")
-          for (i = 1; i <= nf; i++) { idx[fields[i]] = i }
-          inblock = 1
-        }
+        inblock = read_header($0)
         next
       }
       n = split_row($0, vals)
@@ -479,7 +490,7 @@ cmd_headroom() {
     # is below, so the label and the verdict can only ever agree.
     build_state=below-floor
   fi
-  build_note=$(headroom_build_note "$build_state")
+  build_note=$(fm_headroom_build_note "$build_state")
 
   # A below-floor gauge is REFUSED here rather than parsed. This command reads
   # the table layout a floor-compliant build emits; older builds emit a
@@ -544,14 +555,19 @@ cmd_headroom() {
 
   local measured=0 tight=0 wall=0 unknown=0 rows='' summary_verdict
   while IFS="$(printf '\t')" read -r provider scope pct runway conf win resets; do
-    [ -n "$provider" ] || continue
+    # A row nobody can attribute is not a reading. `toon_block` yields `-` for a
+    # `provider` field the header never declared, which an upstream rename does
+    # to every row at once, and `- ok pct=84` is a healthy dispatch gauge for a
+    # provider no one can act on. Those rows leave through the row-less exit
+    # below instead.
+    case "$provider" in ''|'-') continue ;; esac
     # One account-level reading per provider. A model-scoped row bounds only that
     # model (quota-axi owns that relationship) and is not the dispatch gauge.
     case "$scope" in
       all_models|unresolved) ;;
       *) continue ;;
     esac
-    local verdict detail hint='' runway_s runway_win
+    local verdict detail hint='' runway_s runway_win pct_int pct_digits
     # Sparse by design: a provider with no exhaustion row has an UNKNOWN runway,
     # never a zero one, so the lookup misses rather than defaulting.
     runway_s=$(printf '%s\n' "$exhaustion" | awk -F'\t' -v p="$provider" -v sc="$scope" '$1 == p && $2 == sc { print $3; exit }')
@@ -560,22 +576,37 @@ cmd_headroom() {
     [ -n "$runway_win" ] || runway_win='-'
     [ -n "$resets" ] || resets='-'
     case "$win" in ''|'-') win=$runway_win ;; esac
-    # A row is only a READING if its percentage is a number. `toon_block` yields
+    # A row is only a READING if its percentage is a NUMBER. `toon_block` yields
     # `-` for a field the header never declared or a row left empty, and an
     # upstream rename of `effectivePercentRemaining` renames it for every row at
     # once, so an unguarded row would count as measured and compare its way to
     # `ok` - a clean dispatch gauge for a provider nobody measured.
+    #
+    # A number, not an integer. Observed builds emit whole percentages, but
+    # rejecting `34.5` would blank a gauge that was fully readable on a build
+    # that clears the floor - the same false-unmeasurable this command exists to
+    # remove, arriving from the opposite direction and invisible to the
+    # below-floor refusal because the build is supported. So a decimal is
+    # accepted and reported verbatim; only the comparisons take an integer.
+    pct_int=''
     case "$pct" in
-      ''|*[!0-9]*)
-        unknown=$((unknown + 1))
-        rows="$rows$provider	unknown	reason=$(headroom_unknown_reason "$scope" unreadable_percent) status=unreadable_percent detail=effectivePercentRemaining is not a number ($pct)"$'\n'
-        continue
-        ;;
+      ''|*[!0-9.]*|*.*.*|.) ;;
+      *.*) case "${pct%%.*}${pct#*.}" in ''|*[!0-9]*) ;; *) pct_int=${pct%%.*}; [ -n "$pct_int" ] || pct_int=0 ;; esac ;;
+      *) pct_int=$pct ;;
     esac
+    if [ -z "$pct_int" ]; then
+      unknown=$((unknown + 1))
+      rows="$rows$provider	unknown	reason=$(headroom_unknown_reason "$scope" unreadable_percent) status=unreadable_percent detail=effectivePercentRemaining is not a number ($pct)"$'\n'
+      continue
+    fi
     measured=$((measured + 1))
-    if [ "$pct" -eq 0 ]; then
+    # `wall` is the claim that this provider has ALREADY stopped, so it is read
+    # from the value being zero rather than from the truncated integer: 0.4%
+    # remaining is the tightest possible reading and still not a stopped one.
+    pct_digits=${pct//./}
+    if [ -z "${pct_digits//0/}" ]; then
       verdict=wall; wall=$((wall + 1))
-    elif [ "$pct" -le "$TIGHT_PCT" ]; then
+    elif [ "$pct_int" -le "$TIGHT_PCT" ]; then
       verdict=tight; tight=$((tight + 1))
     elif [ "$runway_s" != '-' ] && [ -z "${runway_s//[0-9]/}" ] && [ "$runway_s" -le "$TIGHT_RUNWAY" ]; then
       verdict=tight; tight=$((tight + 1))
@@ -617,7 +648,7 @@ EOF
   # flagged had no line at all. Ordering account scope first keeps the
   # account-level reason the one that gets printed when both exist.
   while IFS="$(printf '\t')" read -r provider scope kind reason remedy; do
-    [ -n "$provider" ] || continue
+    case "$provider" in ''|'-') continue ;; esac
     printf '%s\n' "$rows" | awk -F'\t' -v p="$provider" '$1 == p { found = 1 } END { exit !found }' && continue
     local ahint='' areason ascope=''
     unknown=$((unknown + 1))
@@ -633,6 +664,54 @@ $(printf '%s\n' "$attention" | awk -F'\t' '
     $2 == "all" || $2 == "all_models" || $2 == "unresolved" { print; next }
     { rest = rest $0 "\n" }
     END { printf "%s", rest }')
+EOF
+
+  # THE INVARIANT, enforced here rather than case by case: a provider the report
+  # names ANYWHERE - `quota` at any scope, `exhaustion`, `attention` - gets a
+  # line in the reading. Measured when an account-scoped row was actually read,
+  # unknown with its reason otherwise.
+  #
+  # Every previous attempt enumerated the ways a provider could be missed, and
+  # each one left another: filtering attention to account scope missed a
+  # provider flagged at model scope, and deduping against emitted rows still
+  # missed a provider whose only quota row is model-scoped and which attention
+  # never names at all - it fell through both loops while the summary read
+  # `verdict=ok measured=1 unknown=0` with a provider at 3% invisible. So this
+  # sweeps the report's own names instead of enumerating shapes, and a new table
+  # or scope upstream cannot reopen the class.
+  #
+  # `-` is not a name: `toon_block` yields it for a `provider` field the header
+  # never declared, and a row nobody can attribute is not a provider to account
+  # for. Those leave through the row-less exit below.
+  local mentioned mprovider mscopes msources mreason
+  mentioned=$(
+    {
+      printf '%s\n' "$quota" | awk -F'\t' '$1 != "" && $1 != "-" { print $1 "\t" $2 "\tquota" }'
+      printf '%s\n' "$exhaustion" | awk -F'\t' '$1 != "" && $1 != "-" { print $1 "\t" $2 "\texhaustion" }'
+      printf '%s\n' "$attention" | awk -F'\t' '$1 != "" && $1 != "-" { print $1 "\t" $2 "\tattention" }'
+    } | awk -F'\t' '
+      { if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1 }
+        if (!(($1 SUBSEP $2) in scope_seen)) {
+          scope_seen[$1 SUBSEP $2] = 1
+          scopes[$1] = (scopes[$1] == "" ? $2 : scopes[$1] "," $2)
+        }
+        if (!(($1 SUBSEP $3) in src_seen)) {
+          src_seen[$1 SUBSEP $3] = 1
+          sources[$1] = (sources[$1] == "" ? $3 : sources[$1] "," $3)
+        } }
+      END { for (i = 1; i <= n; i++) print order[i] "\t" scopes[order[i]] "\t" sources[order[i]] }'
+  )
+  while IFS="$(printf '\t')" read -r mprovider mscopes msources; do
+    [ -n "$mprovider" ] || continue
+    printf '%s\n' "$rows" | awk -F'\t' -v p="$mprovider" '$1 == p { found = 1 } END { exit !found }' && continue
+    unknown=$((unknown + 1))
+    case "$msources" in
+      *quota*) mreason=$(headroom_unknown_reason "$mscopes" not_reported_quota) ;;
+      *) mreason=$(headroom_unknown_reason "$mscopes" not_reported) ;;
+    esac
+    rows="$rows$mprovider	unknown	reason=$mreason status=not_reported scope=$mscopes detail=named only in $msources, with no account-level quota row and nothing in attention"$'\n'
+  done <<EOF
+$mentioned
 EOF
 
   # Verdict precedence: wall > tight > partial > ok, with unknown reserved for a
@@ -657,14 +736,17 @@ EOF
     summary_verdict=ok
   fi
 
-  # Every quota row was model-scoped and nothing was flagged, so no account-level
-  # gauge was read at all. That is the same condition as a gauge that could not be
-  # read, and it leaves through the same single exit - otherwise the text emitter
-  # names the reason and the JSON emitter returns an empty one, and
-  # `fm-usage-wall-headroom.v1` stops meaning one shape.
+  # The report parsed but named no provider this reading could attribute a line
+  # to - an upstream rename of `provider` leaves every row unnamed at once, the
+  # same class of layout change the percentage guard above exists for. That is
+  # the same condition as a gauge that could not be read, and it leaves through
+  # the same single exit - otherwise the text emitter names the reason and the
+  # JSON emitter returns an empty one, and `fm-usage-wall-headroom.v1` stops
+  # meaning one shape. A provider that IS named can no longer arrive here: the
+  # sweep above gives it a line whatever scope it appeared at.
   rowcount=$(printf '%s' "$rows" | grep -c . 2>/dev/null) || rowcount=0
   if [ "$rowcount" -eq 0 ]; then
-    headroom_unmeasurable no-account-level-row \
+    headroom_unmeasurable no-named-provider-row \
       'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
     return 0
   fi
@@ -704,23 +786,11 @@ headroom_unknown_reason() {  # <scope> <provider-status>
     auth_required) printf 'auth-required' ; return 0 ;;
     error) printf 'provider-read-failed' ; return 0 ;;
     unreadable_percent) printf 'unreadable-percent' ; return 0 ;;
+    not_reported_quota) printf 'no-account-level-row' ; return 0 ;;
   esac
   case "$1" in
     unresolved) printf 'unresolved-scope' ;;
     *) printf 'no-measurable-window' ;;
-  esac
-}
-
-# headroom_build_note: the one owner of the build label, so the summary line and
-# every unmeasurable exit describe the same build the same way. Four states, kept
-# apart on purpose: `ok` says nothing, `below-floor` is a version that was READ
-# and found older than the floor, `unknown` is a version that could not be read
-# at all, and `unavailable` is no gauge to read.
-headroom_build_note() {  # <build-state>
-  case "$1" in
-    below-floor) printf ' build=below-floor(%s)' "$FM_QUOTA_AXI_MIN" ;;
-    unknown) printf ' build=unknown' ;;
-    unavailable) printf ' build=unavailable' ;;
   esac
 }
 
@@ -742,18 +812,15 @@ headroom_json_prefix() {  # <verdict> <measured> <tight> <wall> <unknown> <sourc
 # headroom_unmeasurable: the single exit for every path that could not read a
 # gauge at all. There is deliberately no path from here to `ok`.
 headroom_unmeasurable() {  # <reason> <advice> <json> [<version>] [<build-state>]
-  local reason=$1 advice=$2 json=$3 version=${4:-unavailable} build=${5:-unavailable} note
-  note=$(headroom_build_note "$build")
+  local reason=$1 advice=$2 json=$3 version=${4:-unavailable} build=${5:-unavailable}
   if [ "$json" -eq 1 ]; then
     headroom_json_prefix unknown 0 0 0 1 "quota-axi/$version" "$build" "$reason"
     printf ']}\n'
     return 0
   fi
-  printf 'HEADROOM: (all providers) unknown reason=%s\n' "$reason"
-  printf 'HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/%s%s\n' \
-    "$version" "$note"
-  printf 'HEADROOM_NOTE: headroom is UNMEASURED, not healthy - %s.\n' "$advice"
-  printf 'HEADROOM_NEXT: %s/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.\n' "$FM_ROOT"
+  # bin/fm-headroom-lib.sh owns the text shape, because the callers that could
+  # not run this command at all have to print the same four lines.
+  fm_headroom_unmeasurable_text "$reason" "$advice" "$version" "$build"
 }
 
 json_escape() {  # <text>

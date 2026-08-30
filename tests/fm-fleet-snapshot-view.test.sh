@@ -682,7 +682,16 @@ test_view_headroom_fallback_states_a_true_reason() {
     "the view must not claim a timeout that did not happen"
   assert_contains "$view" "UNMEASURED, not healthy" \
     "the fallback must keep the note that an unknown is unmeasured rather than fine"
-  pass "fleet view fallback states the real reason and keeps the unmeasured note"
+  assert_contains "$view" "treat every provider as unproven" \
+    "the fallback must say what every other unmeasurable reading says, in the same words"
+  # The two fallback copies had already drifted, and both emitted two of the four
+  # lines a real unmeasurable reading emits - so a consumer scanning for the
+  # summary verdict found none on exactly the path where the gauge failed.
+  assert_contains "$view" "HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1" \
+    "the fallback must carry the summary verdict every real unmeasurable reading carries"
+  assert_contains "$view" "HEADROOM_NEXT:" \
+    "and the same next step out of it"
+  pass "fleet view fallback states the real reason and emits a full unknown reading"
 }
 
 test_view_renders_dead_secondmate_agent_status() {

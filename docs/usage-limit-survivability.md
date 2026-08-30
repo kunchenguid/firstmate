@@ -34,7 +34,8 @@ A gauge that rendered "could not read it" the same way as "plenty left" would be
 
 So `headroom` has three provider verdicts that mean a reading was taken (`ok`, `tight`, `wall`) and one that means none was (`unknown`), and there is no code path from a failed read to a healthy verdict.
 Absent, erroring, hanging, unparseable, unresolved, and unauthenticated all land on `unknown` with the concrete reason attached, and the one-time operator command is named on the line that needs it.
-A provider the gauge names is never dropped between the two tables it is read from: the account-level reading and the flagged-provider reading apply different scope filters, so the second dedupes against the rows the first actually emitted rather than against every name it saw.
+A provider the report NAMES is never dropped, wherever it is named: after the account-level reading and the flagged-provider reading, every name appearing anywhere in `quota[]` at any scope, `exhaustion[]`, or `attention[]` is swept and given its own line - measured when an account-scoped row was read, unknown with its reason otherwise.
+That is swept from the report's own names rather than enumerated shape by shape, because each earlier attempt closed one way a provider could be missed and left another open.
 A provider that quietly disappears is worse than one reported unknown, because the summary above it then reads as if everything measurable had been measured.
 
 The aggregate carries that vocabulary plus one verdict a single provider cannot need, and its precedence is `wall` > `tight` > `partial` > `ok`, with `unknown` reserved for a reading nobody got.
@@ -56,7 +57,9 @@ Firstmate and the captain decide what runs, and there is deliberately no budgeti
 Headroom is read out of `quota-axi`'s default TOON rather than its JSON, because the TOON is the surface `AGENTS.md` section 4 already makes the dispatch-facing one, and because it renders the derived per-provider reading directly rather than leaving this command to re-derive it from raw windows.
 The command reads exactly the layout a floor-compliant build emits: `quota[]` for the account percentage with the window that bounds it and that window's reset, `exhaustion[]` for the runway with its own bounding window, and `attention[]` for the kind, detail and remedy of a provider with no measurable window.
 The TOON block is parsed by field name out of its own declared header, so an upstream provider, window, or field addition shifts nothing; a reordered report is a test case, not a hope.
-A field the header does not declare reads as absent rather than as a value, so an upstream rename leaves the row UNKNOWN instead of letting an unreadable percentage compare its way to healthy.
+A field the header does not declare reads as absent rather than as a value, so an upstream rename leaves the row UNKNOWN instead of letting an unreadable percentage compare its way to healthy - and a renamed `provider` field leaves the whole reading unknown rather than reporting a healthy percentage nobody can attribute.
+Each block resolves its own header, including a second block of the same name later in the report, so a sparse table between them cannot leave the second reading the first one's column positions.
+A percentage is required to be a NUMBER rather than an integer: no observed build emits a fraction, but refusing one would blank a gauge that was fully readable, and a fraction of a percent reads `tight` rather than `wall`, because `wall` is the claim that the provider has already stopped.
 
 A `quota-axi` older than the floor `bin/fm-quota-axi-lib.sh` owns is REFUSED before anything is parsed, and the refusal names both the installed version and the floor.
 Builds below the floor emit a different report layout entirely, so keeping a parser for it would mean this repository declaring a build unsupported and then reading it anyway - and a reading that looks fine from a build we reject is the precise failure this surface exists to prevent.

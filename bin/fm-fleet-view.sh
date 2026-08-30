@@ -26,6 +26,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-headroom-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-headroom-lib.sh"
 
 HEADROOM_TIMEOUT=${FM_FLEET_VIEW_HEADROOM_TIMEOUT:-30}
 case "$HEADROOM_TIMEOUT" in ''|*[!0-9]*|0) HEADROOM_TIMEOUT=30 ;; esac
@@ -60,10 +62,13 @@ HEADROOM=$(FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_
   fm_run_timed "$HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) || {
   headroom_rc=$?
   headroom_reason=$(fm_run_timed_reason "$headroom_rc" "$HEADROOM_TIMEOUT" 'headroom read')
-  # The note travels with the fallback: an unknown that loses it reads as absent
-  # rather than unmeasured, which is the confusion this whole surface refuses.
-  HEADROOM="HEADROOM: (all providers) unknown reason=$headroom_reason
-HEADROOM_NOTE: headroom is UNMEASURED, not healthy - treat it as unproven when deciding what to dispatch."
+  # The WHOLE unknown reading travels with the fallback, from the one owner of
+  # its shape: an unknown that loses the note reads as absent rather than
+  # unmeasured, and one that loses HEADROOM_SUMMARY leaves a reader scanning for
+  # `verdict=` with no verdict at all on exactly the path where the gauge could
+  # not be read. `build=unknown` because the version was never read either.
+  HEADROOM=$(fm_headroom_unmeasurable_text "$headroom_reason" \
+    'treat every provider as unproven when deciding what to dispatch' unknown unknown)
 }
 
 printf '%s\n' "$SNAPSHOT" | jq -r '

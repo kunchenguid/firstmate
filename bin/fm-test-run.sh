@@ -1212,9 +1212,10 @@ families_for_changed_path() {
     bin/fm-home-summary-refresh.sh)
       printf '%s\n' snapshot-bearings
       ;;
-    bin/fm-usage-wall.sh)
+    bin/fm-usage-wall.sh|bin/fm-headroom-lib.sh)
       # The usage-wall surface is read from three places: its own contract
-      # tests, the session-start digest, and the heartbeat fleet view.
+      # tests, the session-start digest, and the heartbeat fleet view. The
+      # headroom library is the shape those same three emit an unknown in.
       printf '%s\n' pure-contract-unit
       printf '%s\n' session-bootstrap
       printf '%s\n' snapshot-bearings
