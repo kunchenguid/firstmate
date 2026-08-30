@@ -25,6 +25,10 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-inbox-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-delivery-continuation-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -305,6 +309,41 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_relaunch_quarantines_predecessor_validation_continuation() {
+  local dir out rc head delivery continuation continuation_record ordinary_record new_record spawn_after
+  dir=$(new_case stale-continuation rl37)
+  add_ship_task "$dir" rl37 claude
+  printf '%s\n' 'spawn_gen=g1' >> "$dir/home/state/rl37.meta"
+  head=$(git -C "$dir/wt" rev-parse --verify HEAD)
+  delivery=$(fm_delivery_continuation_id rl37 "$head" g1)
+  continuation=$(fm_delivery_continuation_message rl37 "$head" g1 "$delivery")
+  ordinary_record=$(fm_task_inbox_write "$dir/home/state" rl37 "continue the ordinary cleanup") \
+    || fail "ordinary steer fixture write failed"
+  continuation_record=$(fm_task_inbox_write "$dir/home/state" rl37 "$continuation") \
+    || fail "predecessor continuation fixture write failed"
+
+  out=$(run_control "$dir" rl37 relaunch --note "continue without predecessor authority"); rc=$?
+  expect_code 0 "$rc" "relaunch should quarantine predecessor validation authority"$'\n'"$out"
+  spawn_after=$(meta_field "$dir" rl37 spawn_gen)
+  [ -n "$spawn_after" ] && [ "$spawn_after" != g1 ] \
+    || fail "relaunch must publish a replacement generation"
+  [ ! -e "$continuation_record" ] \
+    || fail "the predecessor continuation must leave the replacement's executable inbox"
+  [ -f "$dir/home/state/rl37.inbox/quarantined/${continuation_record##*/}" ] \
+    || fail "the predecessor continuation must remain durable in quarantine"
+  [ "$(fm_task_inbox_body "$dir/home/state/rl37.inbox/quarantined/${continuation_record##*/}")" = "$continuation" ] \
+    || fail "the quarantined continuation must remain byte-exact"
+  [ -f "$ordinary_record" ] \
+    || fail "an ordinary pending steer must survive relaunch"
+  [ "$(fm_task_inbox_body "$ordinary_record")" = "continue the ordinary cleanup" ] \
+    || fail "the surviving ordinary steer must remain byte-exact"
+  new_record=$(fm_task_inbox_write "$dir/home/state" rl37 "replacement-owned follow-up") \
+    || fail "replacement steer write failed"
+  [ "$new_record" = "$dir/home/state/rl37.inbox/003.msg" ] \
+    || fail "quarantined sequences must not be reused, got $new_record"
+  pass "fm-control relaunch: predecessor validation is quarantined while ordinary steers survive"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -1478,6 +1517,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_quarantines_predecessor_validation_continuation
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context

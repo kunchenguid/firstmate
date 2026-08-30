@@ -283,6 +283,10 @@ fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-delivery-continuation-lib.sh
+. "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -718,6 +722,8 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+SPAWN_INBOX_LOCK=
+SPAWN_INBOX_LOCK_HELD=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -838,9 +844,9 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
-    SPAWN_TASK_LOCK_HELD=0
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+  if [ "$SPAWN_INBOX_LOCK_HELD" = 1 ]; then
+    SPAWN_INBOX_LOCK_HELD=0
+    fm_lock_release "$SPAWN_INBOX_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
     if ! spawn_fresh_commit_rollback; then
@@ -850,6 +856,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
+  fi
+  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
@@ -2923,6 +2933,13 @@ spawn_commit_backlog_transition() {
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_INBOX_DIR=$(fm_task_inbox_dir "$STATE" "$ID")
+  if [ -d "$SPAWN_INBOX_DIR" ]; then
+    SPAWN_INBOX_LOCK="$SPAWN_INBOX_DIR/.seq.lock"
+    fm_task_inbox_lock_acquire "$SPAWN_INBOX_LOCK" || exit 1
+    SPAWN_INBOX_LOCK_HELD=1
+    fm_delivery_continuation_quarantine_stale_locked "$STATE" "$ID" "$SPAWN_GEN" || exit 1
+  fi
   SPAWN_META_PUBLISH_STARTED=1
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
@@ -2931,6 +2948,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  if [ "$SPAWN_INBOX_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$SPAWN_INBOX_LOCK"
+    SPAWN_INBOX_LOCK_HELD=0
+  fi
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so

@@ -23,6 +23,7 @@
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
+#   <task>.inbox/quarantined/  retained records that no current worker may act on
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
@@ -37,8 +38,8 @@
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
 #
-# Sequence numbers are never reused within a task: allocation scans both the
-# inbox root and handled/, so a message is processed at most once per worker
+# Sequence numbers are never reused within a task: allocation scans the inbox
+# root, handled/, and quarantined/, so a message is processed at most once per worker
 # lifetime even if every doorbell is duplicated. Concurrent writers serialize
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
@@ -115,11 +116,11 @@ fm_task_inbox_seq_of() {  # <basename>
   printf '%s' "$((10#$n))"
 }
 
-# Next unused sequence, scanning the inbox root AND handled/ so an
+# Next unused sequence, scanning every durable record directory so an
 # acknowledged sequence is never reissued. Caller must hold .seq.lock.
 fm_task_inbox_next_seq() {  # <inbox-dir>
   local dir=$1 max=0 d f n
-  for d in "$dir" "$dir/handled"; do
+  for d in "$dir" "$dir/handled" "$dir/quarantined"; do
     for f in "$d"/*.msg; do
       [ -e "$f" ] || continue
       n=$(fm_task_inbox_seq_of "${f##*/}") || continue

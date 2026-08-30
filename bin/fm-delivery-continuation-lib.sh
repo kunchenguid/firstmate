@@ -88,8 +88,8 @@ fm_delivery_continuation_message() {  # <task> <head> <spawn-gen> <delivery-id>
   printf 'Begin the already-authorized /no-mistakes validation flow now. Do not merge.'
 }
 
-fm_delivery_continuation_parse_record() {  # <record> <task> <spawn-gen>
-  local rec=$1 task=$2 spawn_gen=$3 body first rest schema_field task_field spawn_field head_field delivery_field extra
+fm_delivery_continuation_record_identity() {  # <record>
+  local rec=$1 body first rest schema_field task_field spawn_field head_field delivery_field extra task spawn_gen
   body=$(fm_task_inbox_body "$rec" 2>/dev/null) || return 1
   case "$body" in
     *$'\n'*) first=${body%%$'\n'*}; rest=${body#*$'\n'} ;;
@@ -101,8 +101,10 @@ $first
 EOF
   [ "$first" = FIRSTMATE_DELIVERY ] || return 1
   [ "$schema_field" = "schema=$FM_DELIVERY_CONTINUATION_SCHEMA" ] || return 1
-  [ "$task_field" = "task=$task" ] || return 1
-  [ "$spawn_field" = "spawn_gen=$spawn_gen" ] || return 1
+  case "$task_field" in task=*) task=${task_field#task=} ;; *) return 1 ;; esac
+  case "$spawn_field" in spawn_gen=*) spawn_gen=${spawn_field#spawn_gen=} ;; *) return 1 ;; esac
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$spawn_gen" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   [ -z "$extra" ] || return 1
   case "$head_field" in head=*) head_field=${head_field#head=} ;; *) return 1 ;; esac
   case "$delivery_field" in delivery=*) delivery_field=${delivery_field#delivery=} ;; *) return 1 ;; esac
@@ -113,7 +115,34 @@ EOF
     *) return 1 ;;
   esac
   [ "$delivery_field" = "$(fm_delivery_continuation_id "$task" "$head_field" "$spawn_gen")" ] || return 1
-  printf '%s\t%s\n' "$head_field" "$delivery_field"
+  printf '%s\t%s\t%s\t%s\n' "$task" "$spawn_gen" "$head_field" "$delivery_field"
+}
+
+fm_delivery_continuation_parse_record() {  # <record> <task> <spawn-gen>
+  local parsed task=$2 spawn_gen=$3
+  parsed=$(fm_delivery_continuation_record_identity "$1") || return 1
+  [ "${parsed%%$'\t'*}" = "$task" ] || return 1
+  parsed=${parsed#*$'\t'}
+  [ "${parsed%%$'\t'*}" = "$spawn_gen" ] || return 1
+  printf '%s\n' "${parsed#*$'\t'}"
+}
+
+fm_delivery_continuation_quarantine_stale_locked() {  # <state-dir> <task> <spawn-gen>
+  local state=$1 task=$2 spawn_gen=$3 dir quarantine record parsed parsed_task parsed_gen
+  dir=$(fm_task_inbox_dir "$state" "$task")
+  for record in "$dir"/*.msg; do
+    [ -f "$record" ] || continue
+    parsed=$(fm_delivery_continuation_record_identity "$record") || continue
+    parsed_task=${parsed%%$'\t'*}
+    [ "$parsed_task" = "$task" ] || continue
+    parsed=${parsed#*$'\t'}
+    parsed_gen=${parsed%%$'\t'*}
+    [ "$parsed_gen" != "$spawn_gen" ] || continue
+    quarantine="$dir/quarantined"
+    mkdir -p "$quarantine" || return 1
+    [ ! -e "$quarantine/${record##*/}" ] || return 1
+    mv "$record" "$quarantine/${record##*/}" || return 1
+  done
 }
 
 fm_delivery_continuation_state() {  # <state-dir> <task> <spawn-gen> [expected-head]
