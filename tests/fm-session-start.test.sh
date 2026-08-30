@@ -1253,7 +1253,7 @@ EOF
     printf 'working: short line kept whole\n'
   } > "$home/state/task-cap.status"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_SESSION_START_STATUS_TAIL=5 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "$lede" "the cap discarded the lede that carries the state word and decision key"
   assert_contains "$out" " [truncated]" "an over-long status line was not marked as truncated"
