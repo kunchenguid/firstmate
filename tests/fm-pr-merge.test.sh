@@ -93,10 +93,31 @@ REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin policybin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  policybin="$case_dir/policybin"
+  mkdir -p "$case_dir/state" "$fakebin" "$policybin"
+  cat > "$policybin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr checks")
+    printf 'summary: "%s"\n' "${FM_FAKE_GH_CHECKS_SUMMARY:-2 passed, 0 failed, 2 total}"
+    ;;
+  api\ *)
+    case "$*" in
+      *mergeable_state*) printf '%s\n' "${FM_FAKE_GH_MERGEABLE:-true}" ;;
+      *)
+        jq_filter=${4:-}
+        [ "${3:-}" = "--jq" ] && [ -n "$jq_filter" ] || exit 2
+        jq -n --arg body "${FM_FAKE_GH_PR_BODY:-}" "{body: \$body} | $jq_filter"
+        ;;
+    esac
+    ;;
+  *) exec "$FM_TEST_GH_AXI_DELEGATE" "$@" ;;
+esac
+SH
+  chmod +x "$policybin/gh-axi"
   # Initialize the project as a git repo so the fork's Review receipt gate
   # (firstmate_review_receipt_required) does not fire for non-Firstmate projects.
   git init --quiet "$case_dir/project" 2>/dev/null
@@ -156,6 +177,60 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+add_override_receipt_write_failure() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */.fm-pr-merge-meta.XXXXXX) exit 1 ;;
+esac
+command -p mktemp "$@"
+SH
+  chmod +x "$case_dir/fakebin/mktemp"
+}
+
+# Fails the receipt's final publish, so the staged file exists and has already
+# passed every validation when the write path gives up.
+add_override_receipt_publish_failure() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.fm-pr-merge-meta.*) exit 1 ;;
+  esac
+done
+command -p mv "$@"
+SH
+  chmod +x "$case_dir/fakebin/mv"
+}
+
+# Signals the merge itself mid-staging without failing the command, so only the
+# script's own signal and exit handling can remove the staged file.
+add_override_receipt_signal_during_staging() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.fm-pr-merge-meta.*)
+      command -p chmod "$@" || exit 1
+      kill -TERM "$PPID"
+      exit 0
+      ;;
+  esac
+done
+command -p chmod "$@"
+SH
+  chmod +x "$case_dir/fakebin/chmod"
+}
+
+assert_no_staged_merge_meta() {  # <case-dir> <msg>
+  local case_dir=$1 msg=$2 leftovers
+  leftovers=$(find "$case_dir/state" -maxdepth 1 -name '.fm-pr-merge-meta.*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$leftovers" = 0 ] || fail "$msg (found $leftovers)"
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
@@ -344,6 +419,16 @@ mirror_path_without() {
   done <<EOF
 $search
 EOF
+  # macOS's Perl dispatch rejects /usr/bin/shasum when it is reached through a
+  # differently named symlink. Preserve the command's real argv[0] in the
+  # synthetic PATH or poll authentication hashes become empty before this
+  # helper reaches the gh-less behavior it is meant to exercise.
+  if [ -L "$dir/shasum" ]; then
+    entry=$(readlink "$dir/shasum")
+    rm "$dir/shasum"
+    printf '#!/bin/sh\nexec "%s" "$@"\n' "$entry" > "$dir/shasum"
+    chmod +x "$dir/shasum"
+  fi
   ! PATH="$dir" command -v "$omit" >/dev/null 2>&1 \
     || fail "the $omit-free search path still resolved $omit"
 }
@@ -360,6 +445,7 @@ run_pr_merge() {
   FM_HOME="${FM_TEST_HOME:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
@@ -367,7 +453,7 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$case_dir/policybin:$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
   if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then

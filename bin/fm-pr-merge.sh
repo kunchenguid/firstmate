@@ -719,9 +719,7 @@ record_pr_metadata || exit 1
 case "$PROVIDER" in
   github)
     MISSING_REVIEW_OVERRIDE=0
-    FM_REVIEW_RECEIPT_REQUIRED=0
     if firstmate_review_receipt_required; then
-      FM_REVIEW_RECEIPT_REQUIRED=1
       if ! firstmate_review_recorded; then
         if [ "$ALLOW_MISSING_REVIEW" -ne 1 ]; then
           echo "error: refusing Firstmate merge without a recorded passing no-mistakes Review; pass --allow-missing-review only with explicit captain authorization" >&2
@@ -731,31 +729,30 @@ case "$PROVIDER" in
       fi
     fi
 
-    # The --allow-red gate applies only to the Firstmate repository (or an
-    # unresolvable project), matching the Review receipt gate's scope.
-    if [ "$FM_REVIEW_RECEIPT_REQUIRED" -eq 1 ]; then
-      CHECKS_OUTPUT=
-      MERGEABLE_OUTPUT=
-      CHECKS_GREEN=0
-      MERGEABLE_GREEN=0
-      if CHECKS_OUTPUT=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>&1); then
-        if printf '%s\n' "$CHECKS_OUTPUT" \
-          | grep -Eq '^summary: "[0-9]+ passed, 0 failed(, [0-9]+ skipped)?, [1-9][0-9]* total"$'; then
-          CHECKS_GREEN=1
-        fi
+    # Keep the all-project red-merge guard independent of the Firstmate-only
+    # Review receipt. Queue-aware outcome verification below is
+    # post-call evidence; it must not let a non-green PR reach the forge call.
+    CHECKS_OUTPUT=
+    MERGEABLE_OUTPUT=
+    CHECKS_GREEN=0
+    MERGEABLE_GREEN=0
+    if CHECKS_OUTPUT=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>&1); then
+      if printf '%s\n' "$CHECKS_OUTPUT" \
+        | grep -Eq '^summary: "[0-9]+ passed, 0 failed(, [0-9]+ skipped)?, [1-9][0-9]* total"$'; then
+        CHECKS_GREEN=1
       fi
-      if MERGEABLE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
-        --jq '.mergeable == true and .mergeable_state == "clean"' 2>&1); then
-        if printf '%s\n' "$MERGEABLE_OUTPUT" | grep -qx true; then
-          MERGEABLE_GREEN=1
-        fi
+    fi
+    if MERGEABLE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
+      --jq '.mergeable == true and .mergeable_state == "clean"' 2>&1); then
+      if printf '%s\n' "$MERGEABLE_OUTPUT" | grep -qx true; then
+        MERGEABLE_GREEN=1
       fi
-      if { [ "$CHECKS_GREEN" -ne 1 ] || [ "$MERGEABLE_GREEN" -ne 1 ]; } \
-        && [ "$ALLOW_RED" -ne 1 ]; then
-        echo "error: refusing to merge non-green PR $URL; pass --allow-red only with captain authorization" >&2
-        printf '%s\n' "$CHECKS_OUTPUT" "$MERGEABLE_OUTPUT" >&2
-        exit 1
-      fi
+    fi
+    if { [ "$CHECKS_GREEN" -ne 1 ] || [ "$MERGEABLE_GREEN" -ne 1 ]; } \
+      && [ "$ALLOW_RED" -ne 1 ]; then
+      echo "error: refusing to merge non-green PR $URL; pass --allow-red only with captain authorization" >&2
+      printf '%s\n' "$CHECKS_OUTPUT" "$MERGEABLE_OUTPUT" >&2
+      exit 1
     fi
 
     merge_output=

@@ -346,7 +346,7 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
 
 <!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
 
-  out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=42 bash -c "$script" 2>&1) || rc=$?
+  out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=42 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
   rc=${rc:-0}
   [ "$rc" -eq 0 ] || fail "signed no-mistakes PR body was rejected: rc=$rc out=$out"
   assert_contains "$out" "Found no-mistakes signature in PR #42 body."
@@ -419,6 +419,7 @@ EOF
     PR_BODY='opened-event snapshot without the signature yet' \
     PR_AUTHOR=test \
     PR_NUMBER=88 \
+    PR_HEAD_SHA=abc123 \
     bash -c "$script" 2>&1
   ) || rc=$?
   [ "$rc" -eq 0 ] || fail "stale opened payload should pass after live poll: rc=$rc out=$out"
