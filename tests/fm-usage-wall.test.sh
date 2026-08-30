@@ -12,12 +12,14 @@
 #     (b) tight by percent, tight by runway, and exhausted are distinguishable
 #         from ok
 #     (c) EVERY unmeasurable path - quota-axi absent, erroring, hanging,
-#         printing no effective block, or reporting auth_required - reports
-#         `unknown` and is never reported as healthy
+#         printing neither table, carrying a non-numeric percentage, or
+#         reporting auth_required - reports `unknown` and is never reported as
+#         healthy, and a provider quota-axi names is never silently dropped
 #     (d) the auth_required line names the one-time operator command
 #     (e) the reading survives upstream reordering or adding fields, because it
 #         is resolved by field name out of the block's own header
-#     (f) a below-floor quota-axi still yields a reading, labelled as such
+#     (f) a below-floor quota-axi is REFUSED before parsing, naming the
+#         installed version and the floor, and never yields a percentage
 #     (g) credentials are never prompted for: --allow-keychain-prompt is never
 #         passed
 #     (h) one reading costs one --version and one shared budget across both
@@ -66,11 +68,12 @@ fm_git_identity
 
 # --- fixtures ---------------------------------------------------------------
 
-# quota_toon <mode>: a quota-axi default-TOON report. The `effective[7]{...}`
-# header deliberately reproduces the vendor's own quirk of declaring a count
-# that does not match its field list, so the parser is pinned against the real
-# shape rather than a tidied one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only>
+# quota_toon <mode>: a quota-axi default-TOON report, in the layout captured
+# live from quota-axi 0.1.34 on 2026-08-30 - one multi-row `quota[N]` block
+# carrying `spendPriority`, an `exhaustion[N]` block, and a sparse `attention[N]`
+# block - so the parser is pinned against the emitted shape rather than a tidied
+# one.
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-attention|unreadable-pct|repeated-block>
   # The FLOOR-COMPLIANT layout, as quota-axi 0.1.29 and newer emit it and as
   # verified live against 0.1.34 on this host: quota[], exhaustion[] and
   # attention[]. The pre-floor effective[]/providers[]/windows[] shape is not
@@ -101,6 +104,51 @@ EOF
 bin: /fake/quota-axi
 quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,resetsAt}:
   claude,all_models,84,projected_exhaustion,early,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,14400,five_hour
+EOF
+      return 0
+      ;;
+    unreadable-pct)
+      # The header renames effectivePercentRemaining, which is the same class of
+      # upstream layout change this parser was rewritten for. `toon_block` yields
+      # `-` for a field the header never declared, and a row that cannot be read
+      # must never be counted as one that was.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,percentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,84,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,14400,five_hour
+EOF
+      return 0
+      ;;
+    model-scoped-attention)
+      # A provider whose only quota row is model-scoped, flagged at ACCOUNT scope
+      # in attention, beside a healthy provider. The quota loop skips the model
+      # scope and the attention loop must not skip the flag, or the provider
+      # disappears from a reading that then calls itself ok.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,"model:fable",4,unknown,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+  cursor,all_models,77,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
+attention[1]{provider,scope,kind,detail,remedy}:
+  claude,all_models,auth_required,Claude sign-in required,none
+EOF
+      return 0
+      ;;
+    repeated-block)
+      # Two blocks with the SAME name, back to back. No observed build emits
+      # this, so it is the tolerance that keeps a fixture from having to be
+      # shaped around the parser: a block header must be readable even when it
+      # is the line that terminates the block before it.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,84,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  cursor,all_models,77,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
 exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
   claude,all_models,14400,five_hour
 EOF
@@ -137,18 +185,24 @@ EOF
     tight-runway) pct=90; runway=600 ;;
     exhausted) pct=0 ;;
   esac
+  # ONE quota block with every row in it, exactly as a real gauge emits it, and
+  # carrying spendPriority and projectedExhaustedAt - fields this reading does
+  # not use but the emitted layout does.
   printf 'bin: /fake/quota-axi\n'
-  printf 'quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt}:\n'
-  printf '  claude,all_models,%s,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"\n' "$pct"
-  printf 'exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:\n'
-  printf '  claude,all_models,%s,five_hour\n' "$runway"
+  if [ "$1" = auth ]; then
+    printf 'quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n'
+    printf '  claude,all_models,%s,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"\n' "$pct"
+  else
+    printf 'quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n'
+    printf '  claude,all_models,%s,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"\n' "$pct"
+    printf '  cursor,all_models,77,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"\n'
+  fi
+  printf 'exhaustion[1]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:\n'
+  printf '  claude,all_models,%s,"2026-08-27T02:19:59Z",five_hour\n' "$runway"
   # attention[] is sparse and carries the reason a provider has no quota row.
   if [ "$1" = auth ]; then
     printf 'attention[1]{provider,scope,kind,detail,remedy}:\n'
     printf '  cursor,all,auth_required,Cursor sign-in required,none\n'
-  else
-    printf 'quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt}:\n'
-    printf '  cursor,all_models,77,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"\n'
   fi
 }
 
@@ -340,23 +394,79 @@ assert_contains "$OUT" 'unknown reason=quota-axi printed no quota or attention b
 assert_not_contains "$OUT" 'pct=84' 'a raw window percent is never presented as effective headroom'
 pass 'headroom refuses to infer headroom from raw windows alone'
 
-# An effective block that parses but yields no account-level row is a reading
-# nobody got, and the two emitters must say so identically. The text form used
-# to name `no-effective-rows` while --json returned an empty reason and
-# unknown=0, so a programmatic reader branching on .verdict got an unknown it
-# could not explain from a schema id that promises a reason on every path.
+# A quota block that parses but yields no account-level row, with nothing flagged
+# in attention either, is a reading nobody got, and the two emitters must say so
+# identically. The text form used to name the reason while --json returned an
+# empty one and unknown=0, so a programmatic reader branching on .verdict got an
+# unknown it could not explain from a schema id that promises a reason on every
+# path.
 CASE="$TMP_ROOT/hr-modelscoped"; mkdir -p "$CASE"
 fake_quota "$CASE/fakebin" model-scoped-only
 OUT=$(run_headroom "$CASE/fakebin")
-assert_contains "$OUT" 'unknown reason=no-effective-rows'   'a report with only model-scoped rows names why no account-level gauge was read'
+assert_contains "$OUT" 'unknown reason=no-account-level-row'   'a report with only model-scoped rows names why no account-level gauge was read'
 assert_contains "$OUT" 'verdict=unknown' 'a report with no account-level row summarizes as unknown'
 assert_not_contains "$OUT" 'pct=84' 'a model-scoped row is never presented as the dispatch gauge'
 if command -v jq >/dev/null 2>&1; then
   OUT=$(run_headroom "$CASE/fakebin" --json)
-  printf '%s' "$OUT" | jq -e '.verdict == "unknown" and .measured == 0 and .unknown == 1 and .reason == "no-effective-rows"' >/dev/null \
+  printf '%s' "$OUT" | jq -e '.verdict == "unknown" and .measured == 0 and .unknown == 1 and .reason == "no-account-level-row"' >/dev/null \
     || fail "--json must carry the same reason as the text form for a row-less read: $OUT"
 fi
 pass 'headroom reports a row-less effective block as unknown with the same reason on both emitters'
+
+# --- headroom: a percentage that is not a number is UNKNOWN, never ok --------
+#
+# The single outcome this whole surface forbids. `toon_block` resolves fields by
+# name and yields `-` for one the header never declared, so an upstream rename of
+# `effectivePercentRemaining` - the same class of layout change that forced this
+# parser to be rewritten - leaves every row with an unreadable percentage. Before
+# the guard the row was counted as MEASURED and compared its way to `ok`, and the
+# summary printed `verdict=ok measured=1 unknown=0`: a clean dispatch gauge for a
+# provider nobody measured.
+CASE="$TMP_ROOT/hr-badpct"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" unreadable-pct
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude unknown reason=unreadable-percent' \
+  'a row whose percentage is not a number reads unknown with a concrete reason'
+assert_not_contains "$OUT" 'HEADROOM: claude ok' 'an unreadable percentage must never read as healthy'
+assert_contains "$OUT" 'verdict=unknown measured=0 tight=0 wall=0 unknown=1' \
+  'an unreadable percentage is not counted as a measurement'
+assert_not_contains "$OUT" 'integer expression expected' \
+  'the guard runs before the comparisons, so no arithmetic is attempted on it'
+assert_contains "$OUT" 'UNMEASURED, not healthy' 'and the unmeasured note is carried'
+pass 'headroom reports a non-numeric percentage as unknown rather than measuring it'
+
+# --- headroom: a flagged provider is never silently dropped ------------------
+#
+# The quota loop reports only account-scoped rows and the attention loop used to
+# skip any provider named anywhere in quota[], by name alone. A provider whose
+# only quota row is model-scoped therefore fell through both and vanished:
+# neither measured nor unknown, with the summary free to read `ok` while a
+# provider quota-axi explicitly flagged had no line at all.
+CASE="$TMP_ROOT/hr-attn-scope"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" model-scoped-attention
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: cursor ok pct=77' 'the measurable provider still reads ok'
+assert_contains "$OUT" 'HEADROOM: claude unknown reason=auth-required' \
+  'a provider flagged at account scope is reported even when its only quota row is model-scoped'
+assert_not_contains "$OUT" 'pct=4 ' 'a model-scoped percentage is never presented as the dispatch gauge'
+assert_contains "$OUT" 'verdict=partial measured=1 tight=0 wall=0 unknown=1' \
+  'a dropped provider would have left this reading calling itself fully ok'
+pass 'headroom never drops a provider between the quota and attention tables'
+
+# --- headroom: two blocks of one name are both read -------------------------
+#
+# A block ends at the first line that is not an indented row, and that line may
+# itself be the next block's header. Consuming it lost the second block whole,
+# which is invisible while every emitted report carries one block per name - and
+# it is exactly the kind of parser limitation a fixture gets quietly shaped
+# around instead of fixed.
+CASE="$TMP_ROOT/hr-repeated"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" repeated-block
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'the first block of a repeated name is read'
+assert_contains "$OUT" 'HEADROOM: cursor ok pct=77' 'the second block of a repeated name is read too'
+assert_contains "$OUT" 'measured=2' 'both blocks contribute to the reading'
+pass 'headroom reads a second block that shares the first block name'
 
 # --- headroom: auth_required is unknown, with the one-time command ----------
 
@@ -1384,6 +1494,39 @@ run_wall "$CASE_HOME" "$CASE_FB" resume >/dev/null
 SHARED_HITS=$(grep -c 'SHARED: another task in this home records the same local copy' "$CASE_HOME/state/resume-record.md")
 [ "$SHARED_HITS" = 2 ] || fail "both tasks sharing one local copy must be flagged, got $SHARED_HITS"
 pass 'resume names a local copy claimed by two tasks on both rows'
+
+# --- resume: a field arriving as two lines is refused, not misassigned -------
+#
+# The fields are read one per LINE, so a value carrying a newline adds an array
+# element and shifts every later field by one: the pull-request line then holds
+# prose and the remote-host line holds the open captain calls. On a record read
+# during a recovery, a wrong value is worse than a missing one, so the count is
+# validated in BOTH directions and a shifted read leaves the existing RECORD
+# INCOMPLETE line instead. jq is the boundary the fields arrive over, so the
+# extra line is injected there, on top of a real jq doing the real query.
+CASE="$TMP_ROOT/rs-split"; mkdir -p "$CASE"
+make_task "$CASE" splitcrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-splitcrew "$CASE/capture.txt"
+REAL_JQ=$(command -v jq)
+cat > "$CASE_FB/jq" <<SH
+#!/usr/bin/env bash
+# Every other jq call passes through byte for byte; only the field query the
+# record is composed from gets a value split across two lines.
+if printf '%s' "\$*" | grep -q 'endpoint.exists == null'; then
+  "$REAL_JQ" "\$@" | awk 'NR == 10 { print "state: working"; print "CONTINUATION LINE"; next } { print }'
+  exit "\${PIPESTATUS[0]}"
+fi
+exec "$REAL_JQ" "\$@"
+SH
+chmod +x "$CASE_FB/jq"
+run_wall "$CASE_HOME" "$CASE_FB" resume >/dev/null
+RECORD="$CASE_HOME/state/resume-record.md"
+assert_grep 'RECORD INCOMPLETE' "$RECORD" \
+  'a field that arrived as two lines refuses the row rather than shifting every later field'
+assert_no_grep 'pull request: CONTINUATION LINE' "$RECORD" \
+  'the continuation must never be printed as the pull request'
+pass 'resume refuses a shifted field read instead of printing misassigned values'
 
 # --- resume: a failed generation keeps the previous record -------------------
 

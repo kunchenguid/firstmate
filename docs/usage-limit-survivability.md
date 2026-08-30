@@ -34,6 +34,8 @@ A gauge that rendered "could not read it" the same way as "plenty left" would be
 
 So `headroom` has three provider verdicts that mean a reading was taken (`ok`, `tight`, `wall`) and one that means none was (`unknown`), and there is no code path from a failed read to a healthy verdict.
 Absent, erroring, hanging, unparseable, unresolved, and unauthenticated all land on `unknown` with the concrete reason attached, and the one-time operator command is named on the line that needs it.
+A provider the gauge names is never dropped between the two tables it is read from: the account-level reading and the flagged-provider reading apply different scope filters, so the second dedupes against the rows the first actually emitted rather than against every name it saw.
+A provider that quietly disappears is worse than one reported unknown, because the summary above it then reads as if everything measurable had been measured.
 
 The aggregate carries that vocabulary plus one verdict a single provider cannot need, and its precedence is `wall` > `tight` > `partial` > `ok`, with `unknown` reserved for a reading nobody got.
 `wall` outranks `tight` because those are different states rather than degrees of one: `tight` means a dispatch may still land, while `wall` means that provider has already stopped and every worker on it is down.
@@ -51,9 +53,14 @@ The command never passes `--allow-keychain-prompt` itself: it runs inside a sess
 It labels a reading; it never gates, blocks, or reorders a dispatch.
 Firstmate and the captain decide what runs, and there is deliberately no budgeting, scheduling, or admission logic anywhere in this surface.
 
-Headroom is read out of `quota-axi`'s default TOON rather than its JSON, because at the observed build (0.1.17) `quota-axi --json` is schemaVersion 3 and carries raw provider windows only, with no derived headroom, status, or authentication fields at all.
+Headroom is read out of `quota-axi`'s default TOON rather than its JSON, because the TOON is the surface `AGENTS.md` section 4 already makes the dispatch-facing one, and because it renders the derived per-provider reading directly rather than leaving this command to re-derive it from raw windows.
+The command reads exactly the layout a floor-compliant build emits: `quota[]` for the account percentage with the window that bounds it and that window's reset, `exhaustion[]` for the runway with its own bounding window, and `attention[]` for the kind, detail and remedy of a provider with no measurable window.
 The TOON block is parsed by field name out of its own declared header, so an upstream provider, window, or field addition shifts nothing; a reordered report is a test case, not a hope.
-A `quota-axi` older than the floor `bin/fm-quota-axi-lib.sh` owns still yields a reading, labelled `build=below-floor`, because blanking a working gauge to `unknown` would be a false negative in exactly the case it exists for.
+A field the header does not declare reads as absent rather than as a value, so an upstream rename leaves the row UNKNOWN instead of letting an unreadable percentage compare its way to healthy.
+
+A `quota-axi` older than the floor `bin/fm-quota-axi-lib.sh` owns is REFUSED before anything is parsed, and the refusal names both the installed version and the floor.
+Builds below the floor emit a different report layout entirely, so keeping a parser for it would mean this repository declaring a build unsupported and then reading it anyway - and a reading that looks fine from a build we reject is the precise failure this surface exists to prevent.
+The refusal is deliberately louder than an ordinary `unknown`, and the summary still carries `build=below-floor(<min>)` so the label and the verdict agree rather than sitting side by side saying different things.
 `bin/fm-bootstrap.sh` remains the owner of the operator-facing MISSING diagnostic for that build.
 A build whose version could not be read at all is labelled `build=unknown` rather than `build=below-floor`, because the floor comparator treats an unreadable version as incompatible and printing that as a fact would be a definite claim about something never measured.
 

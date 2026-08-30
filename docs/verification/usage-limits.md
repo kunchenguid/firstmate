@@ -5,26 +5,55 @@ Refresh it by re-running the commands below on the host in question.
 
 ## Environment
 
-- Dates: 2026-08-26, extended 2026-08-27 with the live-fleet record, the predicted wall, and the wall this surface was itself stranded by
-- Platform: Darwin 25.5.0
-- `quota-axi 0.1.17` (below the `FM_QUOTA_AXI_MIN` floor, which is the case the reading is required to survive)
+- Dates: 2026-08-26, extended 2026-08-27 with the live-fleet record, the predicted wall, and the wall this surface was itself stranded by; the headroom sections re-taken 2026-08-30 against the floor-compliant gauge
+- Platform: Darwin 25.6.0
+- `quota-axi 0.1.34` (at or above the `FM_QUOTA_AXI_MIN` floor of `0.1.29`, which is the only build this gauge reads)
 - `no-mistakes version v1.57.0 (0fcbbff) 2026-08-22T05:14:30Z`
 - `tmux 3.7b`
 
+## How the two gauge paths are verified, and why differently
+
+This is an asymmetry, and it is deliberate rather than an omission.
+
+The FLOOR path is verified LIVE, by executing `bin/fm-usage-wall.sh headroom` against the real `quota-axi 0.1.34` on this host; every headroom sample below that is not explicitly marked otherwise is that command's own output.
+The BELOW-FLOOR path is covered by a STUB, in `tests/fm-usage-wall.test.sh`, because no real below-floor build remains reachable here to execute against.
+Neither is described as the other anywhere on this page.
+
+Two samples below are constructed rather than observed, and each says so on the spot: they take this host's real report and drive a single field, because the conditions they show (an exhausted account, two windows disagreeing) are not on demand.
+
 ## The gauge reads, and an unread gauge is distinguishable from a healthy one
 
-`bin/fm-usage-wall.sh headroom` against the live `quota-axi`, one measurable provider and five unmeasurable ones in a single reading:
+`bin/fm-usage-wall.sh headroom` against the live `quota-axi 0.1.34`, one measurable provider and nine unmeasurable ones in a single reading:
 
 ```
-HEADROOM: claude tight pct=10 bound=five_hour resets=2026-08-27T02:20:00.207154+00:00 runway=5m confidence=established
-HEADROOM: codex unknown reason=provider-read-failed status=error auth=unknown
-HEADROOM: cursor unknown reason=auth-required status=auth_required auth=unknown - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
-HEADROOM: copilot unknown reason=auth-required status=auth_required auth=unknown - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
-HEADROOM: grok unknown reason=auth-required status=auth_required auth=unusable - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
-HEADROOM: kimi unknown reason=auth-required status=auth_required auth=unknown - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
-HEADROOM_SUMMARY: verdict=tight measured=1 tight=1 wall=0 unknown=5 source=quota-axi/0.1.17 build=below-floor(0.1.29)
+HEADROOM: claude ok pct=97 bound=five_hour resets=2026-08-30T07:59:59.909540+00:00 runway=unknown(through_reset) confidence=early
+HEADROOM: codex unknown reason=provider-read-failed status=error detail=Codex quota unavailable
+HEADROOM: cursor unknown reason=auth-required status=auth_required detail=Cursor sign-in required - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
+HEADROOM: copilot unknown reason=auth-required status=auth_required detail=GitHub Copilot sign-in required - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
+HEADROOM: grok unknown reason=auth-required status=auth_required detail=Grok sign-in required (auth unusable) - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
+HEADROOM: kimi unknown reason=auth-required status=auth_required detail=kimi_credential_unavailable - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
+HEADROOM: zai unknown reason=auth-required status=auth_required detail=zai_credential_unavailable - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
+HEADROOM: agy unknown reason=no-measurable-window status=unavailable detail=Antigravity/agy is not running
+HEADROOM: alibaba unknown reason=no-measurable-window status=unavailable detail=bl_cli_unavailable
+HEADROOM: opencode-go unknown reason=auth-required status=auth_required detail=opencode_go_credential_unavailable - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
+HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=9 source=quota-axi/0.1.34
 HEADROOM_NOTE: an unknown provider is UNMEASURED, not healthy - treat its headroom as unproven when deciding what to dispatch.
 HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.
+```
+
+That reading is taken from this report, which is what the floor-compliant gauge actually emits.
+Note `exhaustion[0]:` - an empty table, rendered with a zero count and no field list at all - which is why the runway above reads `unknown(through_reset)` rather than zero, and note that `claude` is present twice, once at account scope and once at `model:fable`:
+
+```
+$ quota-axi
+quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,97,2.1358,through_reset,early,five_hour,"2026-08-30T08:00:00.092088+00:00"
+  claude,"model:fable",97,unknown,through_reset,early,five_hour,"2026-08-30T08:00:00.092088+00:00"
+exhaustion[0]:
+attention[10]{provider,scope,kind,detail,remedy}:
+  claude,"model:fable",unmeasurable,"model:fable blocks spendPriority",none
+  codex,all,error,Codex quota unavailable,none
+  ...
 ```
 
 The same command with no `quota-axi` on `PATH`.
@@ -37,55 +66,89 @@ HEADROOM_NOTE: headroom is UNMEASURED, not healthy - install it with npm install
 HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.
 ```
 
-`tests/fm-usage-wall.test.sh` pins the remaining unmeasurable paths - a failing gauge, a hanging gauge, a report with no derived-headroom block, and `auth_required` - along with the rule that `--allow-keychain-prompt` is never passed.
+`tests/fm-usage-wall.test.sh` pins the remaining unmeasurable paths - a failing gauge, a hanging gauge, a report with neither table, a row whose percentage is not a number, and `auth_required` - along with the rule that `--allow-keychain-prompt` is never passed.
+
+## A build below the floor is refused, not read
+
+Stub-covered, as stated above: no below-floor build is reachable on this host, so the stub declares `0.1.17` and serves a report the gauge never reaches.
+The refusal names the installed version and the floor in the line itself, and the `build=` label agrees with the verdict rather than sitting beside a contradictory one:
+
+```
+HEADROOM: (all providers) unknown reason=quota-axi 0.1.17 is below the supported floor 0.1.29, and its report layout is not the one this gauge reads
+HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/0.1.17 build=below-floor(0.1.29)
+HEADROOM_NOTE: headroom is UNMEASURED, not healthy - upgrade quota-axi to 0.1.29 or newer, then re-read; until then no provider headroom is measured.
+```
+
+No percentage appears, because nothing was parsed.
+That is the point: builds below the floor emit a different layout, and a reading that looked fine from a build this repository rejects is the exact failure this surface exists to prevent.
 
 ## An exhausted provider reads as `wall`, in prose and in the JSON
 
-Taken against the live `quota-axi` report with the account-level row's `effectivePercentRemaining` driven to `0`, which is the one field that separates an exhausted provider from a low one.
+CONSTRUCTED, not observed: this host's real `quota-axi 0.1.34` report with the account-level row's `effectivePercentRemaining` driven to `0`, which is the one field that separates an exhausted provider from a low one.
 Everything else in the report is the host's real output:
 
 ```
-HEADROOM: claude wall pct=0 bound=five_hour resets=2026-08-27T18:39:59.918728+00:00 runway=9m confidence=early
-HEADROOM_SUMMARY: verdict=wall measured=1 tight=0 wall=1 unknown=5 source=quota-axi/0.1.17 build=below-floor(0.1.29)
+HEADROOM: claude wall pct=0 bound=five_hour resets=2026-08-30T08:00:00.092088+00:00 runway=unknown(through_reset) confidence=early
+HEADROOM_SUMMARY: verdict=wall measured=1 tight=0 wall=1 unknown=9 source=quota-axi/0.1.34
 HEADROOM_NOTE: 1 provider(s) are AT the wall, not merely low - work on them has already stopped. Load the usage-limit-recovery skill.
 ```
 
 The same reading through `--json`, which is what a programmatic consumer branches on:
 
 ```
-.verdict = 'wall'  .wall = 1  .tight = 0
+{"verdict":"wall","wall":1,"tight":0,"measured":1,"unknown":9}
 ```
 
-The distinction holds in both directions: the unmodified live report on the same host reported `.verdict = 'tight'  .wall = 0  .tight = 1`.
+The distinction holds in both directions: the unmodified live report on the same host, taken minutes earlier, returned `{"verdict":"partial","wall":0,"tight":0,"measured":1,"unknown":9}`.
 
-`tight` is reached by either threshold independently, which a single reading can show.
-On 2026-08-27 the same command reported the measurable provider at 84 percent remaining and still called it `tight`, because the projected runway was inside the hour:
+## An unmeasured provider never reads as healthy
+
+Two ways a provider can go unmeasured without the gauge noticing, both reproduced against stub reports and both now pinned in `tests/fm-usage-wall.test.sh`.
+
+A percentage that is not a number.
+`toon_block` resolves fields by name and yields `-` for one the header never declared, so an upstream rename of `effectivePercentRemaining` leaves every row unreadable at once.
+Before the guard the row was counted as MEASURED and compared its way to healthy - `HEADROOM: claude ok pct=- ...` under `verdict=ok measured=1 unknown=0`, a clean dispatch gauge for a provider nobody measured.
+It now reads:
 
 ```
-HEADROOM: claude tight pct=84 bound=five_hour resets=2026-08-27T08:39:59.783103+00:00 runway=35m confidence=early
-HEADROOM_SUMMARY: verdict=tight measured=1 tight=1 wall=0 unknown=5 source=quota-axi/0.1.17 build=below-floor(0.1.29)
+HEADROOM: claude unknown reason=unreadable-percent status=unreadable_percent detail=effectivePercentRemaining is not a number (-)
+HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
+```
+
+A provider named in `attention[]` whose only `quota[]` row is model-scoped.
+The quota loop reports account scope only, and the attention loop used to skip any provider named anywhere in `quota[]`, by name alone, so such a provider fell through both and vanished: `verdict=ok measured=1 unknown=0` with no `claude` line at all.
+The dedupe now suppresses only a provider this reading actually reported, and reads `attention[]` account-scope-first rather than filtered to it:
+
+```
+HEADROOM: cursor ok pct=77 bound=seven_day resets=2026-09-02T07:59:59Z runway=unknown(projected_exhaustion) confidence=early
+HEADROOM: claude unknown reason=auth-required status=auth_required detail=Claude sign-in required - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
+HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
 ```
 
 ## Each number carries the window that bounds it
 
-Two windows answer two different questions, and on 2026-08-28 they disagreed sharply on this host.
-The five-hour window was nearly full while the seven-day window was the one actually holding the account down, and their resets are a week apart.
+Two windows answer two different questions, and pairing a percentage with the other window's reset sends a reader off to wait out a window that was never the constraint.
+
+CONSTRUCTED, not observed: this host's real 0.1.34 report with the account row's percentage and `limitedBy` moved to the seven-day window and an `exhaustion[]` row added bounding the runway by the five-hour one.
+The live report on this host has `exhaustion[0]:` and a single `limitedBy`, so a divergence cannot be waited for:
 
 ```
 $ quota-axi
-  claude,five_hour,session,72,"2026-08-29T04:10:00.470828+00:00",ahead,fresh
-  claude,seven_day,week,34,"2026-09-02T08:00:00.470847+00:00",ahead,fresh
-  claude,all_models,34,five_hour + seven_day,seven_day,projected_exhaustion,2146,"2026-08-28T23:59:41.580Z",five_hour,early,cycle_average,none,none,known
+quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,34,2.1358,projected_exhaustion,early,seven_day,"2026-09-02T08:00:00.470847+00:00"
+  claude,"model:fable",97,unknown,through_reset,early,five_hour,"2026-08-30T08:00:00.092088+00:00"
+exhaustion[1]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:
+  claude,all_models,2100,"2026-08-30T03:48:51.786Z",five_hour
 
 $ bin/fm-usage-wall.sh headroom
-HEADROOM: claude tight pct=34 bound=seven_day resets=2026-09-02T08:00:00.233048+00:00 runway=35m runway_bound=five_hour runway_resets=2026-08-29T04:10:00.232949+00:00 confidence=early
+HEADROOM: claude tight pct=34 bound=seven_day resets=2026-09-02T08:00:00.470847+00:00 runway=35m runway_bound=five_hour runway_resets=unknown confidence=early
 ```
 
-The percentage is bounded by `seven_day` and carries the seven-day reset; the runway is bounded by `five_hour` and carries its own.
-Before this was fixed the line read `pct=34 bound=five_hour` with the five-hour reset, which claimed the window sitting at 72 percent was the one at 34, and pointed at a reset tonight for a constraint that does not lift until next week.
-The reset half is the one that bites: a reader who waits out the named window is waiting on a clock that was never the constraint.
+The percentage is bounded by `seven_day` and carries the seven-day reset; the runway is bounded by `five_hour` and is named separately because it differs.
+`runway_resets=unknown` is the honest half: this layout publishes a reset only for the percentage's own window, so the runway's reset is reported as not known rather than borrowed from the other window, which would point a reader at the wrong clock.
+Before this was fixed the line read `pct=34 bound=five_hour` with the five-hour reset, which claimed the window sitting at 97 percent was the one at 34.
 It stayed latent because the two windows usually agree, so `tests/fm-usage-wall.test.sh` pins a fixture where they diverge far enough that mislabelling either is unmistakable.
-A gauge that emits only the singular `limitingWindowId` bounds both answers with it, and that reading is unchanged.
+A gauge that publishes only one window bounds both answers with it, and that reading is unchanged.
 
 ## The gauge saw a real wall before it landed
 

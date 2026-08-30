@@ -33,11 +33,18 @@
 # --- headroom ---------------------------------------------------------------
 #
 # Reads `quota-axi`'s default TOON, which is the surface AGENTS.md section 4
-# already makes the dispatch-facing one, and the only surface that carries the
-# derived `effective` headroom block: at the observed build (0.1.17) `quota-axi
-# --json` is schemaVersion 3 and carries raw provider windows only, with no
-# effective-headroom, status, or authStatus fields at all. So there is no JSON
-# fallback here - a JSON read could not answer the question this command asks.
+# already makes the dispatch-facing one, and reads exactly the layout a
+# floor-compliant build emits: `quota[]` (the account percentage, its bounding
+# window `limitedBy`, and that window's `resetsAt`), `exhaustion[]` (the runway
+# `usableRunwaySeconds` and its own bounding window `limitingWindowId`), and
+# `attention[]` (the kind, detail, and remedy for a provider with no measurable
+# window). Each number therefore carries the window that bounds IT, and the
+# runway's window is named only when it differs from the percentage's.
+#
+# `exhaustion[]` and `attention[]` are SPARSE - an empty table renders with a
+# zero count and no field list at all - so a provider with no exhaustion row has
+# an UNKNOWN runway, never a zero one.
+#
 # The TOON block is parsed BY FIELD NAME out of its own declared header, never
 # by column position, so a provider, window, or field added upstream shifts
 # nothing.
@@ -52,10 +59,12 @@
 #
 # UNMEASURABLE IS UNKNOWN, NEVER FINE. This is the whole point of the command,
 # so it is structural rather than conventional: a reading is emitted only from a
-# present, parseable `effective` row whose `effectivePercentRemaining` is a
-# number. Every other outcome - quota-axi absent, the call timing out, the
-# effective block missing, the scope unresolved, a provider needing
-# authentication - prints `unknown` with the concrete reason. There is no code
+# present account-scoped `quota` row whose `effectivePercentRemaining` is a
+# number. Every other outcome - quota-axi absent, the call timing out, neither
+# table present, the percentage unreadable, the scope unresolved, a provider
+# needing authentication - prints `unknown` with the concrete reason. A provider
+# `attention` names always gets a line, measured or unknown, whatever scope that
+# line arrived at, so none is dropped between the two tables. There is no code
 # path from a failed read to `ok`.
 #
 # It never prompts. `quota-axi` returns auth_required and unknown headroom until
@@ -65,13 +74,14 @@
 # command runs quota-axi WITHOUT that flag, always, and names the flag in the
 # unknown line as the one-time operator action instead.
 #
-# It reports below-floor builds rather than suppressing them. bin/fm-quota-axi-lib.sh
-# owns FM_QUOTA_AXI_MIN, the version extraction, and the comparison; bin/fm-bootstrap.sh
-# owns turning a failing check into the operator MISSING diagnostic. A gauge that
-# blanked itself to `unknown` on an older-but-working build would be a false
-# negative in exactly the situation it exists for, so a parseable reading is
-# still reported and the summary carries `build=below-floor(<min>)` so the
-# reading is never mistaken for a fully supported one.
+# It REFUSES a below-floor build, loudly, before parsing anything, naming both
+# the installed version and the floor in the unknown line. bin/fm-quota-axi-lib.sh
+# owns FM_QUOTA_AXI_MIN, the version extraction, and the comparison;
+# bin/fm-bootstrap.sh owns turning a failing check into the operator MISSING
+# diagnostic. Builds below the floor emit a different report layout entirely, so
+# reading one would mean declaring a build unsupported and then reading it
+# anyway; the summary still carries `build=below-floor(<min>)` so the refusal and
+# the build label agree. docs/usage-limit-survivability.md owns the reasoning.
 #
 # A build that could not be READ is a third state, `build=unknown`, never
 # `below-floor`: the comparator treats an empty string as incompatible, so
@@ -387,7 +397,19 @@ toon_block() {  # <block-name> <comma-separated-field-names> ; TOON on stdin
         }
         next
       }
-      if ($0 !~ /^[ \t]+[^ \t]/) { inblock = 0; next }
+      if ($0 !~ /^[ \t]+[^ \t]/) {
+        inblock = 0
+        if ($0 ~ "^" block "\\[[0-9]+\\]\\{[^}]*\\}:[ \t]*$") {
+          hdr = $0
+          sub(/^[^{]*\{/, "", hdr)
+          sub(/\}.*$/, "", hdr)
+          delete idx
+          nf = split(hdr, fields, ",")
+          for (i = 1; i <= nf; i++) { idx[fields[i]] = i }
+          inblock = 1
+        }
+        next
+      }
       n = split_row($0, vals)
       out = ""
       for (i = 1; i <= nw; i++) {
@@ -453,9 +475,8 @@ cmd_headroom() {
     quota_version=unknown
     build_state=unknown
   elif ! fm_quota_axi_version_at_least "$version_raw"; then
-    # A below-floor build is reported, not suppressed: bin/fm-bootstrap.sh owns
-    # the operator-facing MISSING diagnostic, and blanking a parseable reading
-    # here would be a false negative in exactly the case this gauge exists for.
+    # A version that was READ and found older than the floor. The refusal itself
+    # is below, so the label and the verdict can only ever agree.
     build_state=below-floor
   fi
   build_note=$(headroom_build_note "$build_state")
@@ -539,6 +560,18 @@ cmd_headroom() {
     [ -n "$runway_win" ] || runway_win='-'
     [ -n "$resets" ] || resets='-'
     case "$win" in ''|'-') win=$runway_win ;; esac
+    # A row is only a READING if its percentage is a number. `toon_block` yields
+    # `-` for a field the header never declared or a row left empty, and an
+    # upstream rename of `effectivePercentRemaining` renames it for every row at
+    # once, so an unguarded row would count as measured and compare its way to
+    # `ok` - a clean dispatch gauge for a provider nobody measured.
+    case "$pct" in
+      ''|*[!0-9]*)
+        unknown=$((unknown + 1))
+        rows="$rows$provider	unknown	reason=$(headroom_unknown_reason "$scope" unreadable_percent) status=unreadable_percent detail=effectivePercentRemaining is not a number ($pct)"$'\n'
+        continue
+        ;;
+    esac
     measured=$((measured + 1))
     if [ "$pct" -eq 0 ]; then
       verdict=wall; wall=$((wall + 1))
@@ -574,20 +607,32 @@ EOF
   # Providers with no measurable window never appear in `quota` at all - they
   # exist only in `attention`, which is where their reason and remedy live. A
   # provider missing from `quota` is UNMEASURED, and saying so is the point.
+  #
+  # Deduped against the rows this reading ACTUALLY emitted rather than against
+  # every name in `quota`, and read account-scope-first rather than filtered to
+  # account scope. The quota loop reports only account-scoped rows, so matching a
+  # provider by name alone - or dropping its attention row for being model-scoped
+  # - let a provider whose only rows are model-scoped fall through both loops and
+  # vanish, leaving the summary free to read `ok` while a provider quota-axi
+  # flagged had no line at all. Ordering account scope first keeps the
+  # account-level reason the one that gets printed when both exist.
   while IFS="$(printf '\t')" read -r provider scope kind reason remedy; do
     [ -n "$provider" ] || continue
-    case "$scope" in all|all_models|unresolved) ;; *) continue ;; esac
-    printf '%s\n' "$quota" | awk -F'\t' -v p="$provider" '$1 == p { found = 1 } END { exit !found }' && continue
-    local ahint='' areason
+    printf '%s\n' "$rows" | awk -F'\t' -v p="$provider" '$1 == p { found = 1 } END { exit !found }' && continue
+    local ahint='' areason ascope=''
     unknown=$((unknown + 1))
     areason=$(headroom_unknown_reason "$scope" "$kind")
+    case "$scope" in all|all_models|unresolved) ;; *) ascope=" scope=$scope" ;; esac
     case "$kind" in
       auth_required) ahint=" - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read" ;;
     esac
     case "$remedy" in ''|'-'|none) ;; *) ahint=" - $remedy" ;; esac
-    rows="$rows$provider	unknown	reason=$areason status=$kind detail=$reason$ahint"$'\n'
+    rows="$rows$provider	unknown	reason=$areason status=$kind$ascope detail=$reason$ahint"$'\n'
   done <<EOF
-$attention
+$(printf '%s\n' "$attention" | awk -F'\t' '
+    $2 == "all" || $2 == "all_models" || $2 == "unresolved" { print; next }
+    { rest = rest $0 "\n" }
+    END { printf "%s", rest }')
 EOF
 
   # Verdict precedence: wall > tight > partial > ok, with unknown reserved for a
@@ -612,14 +657,14 @@ EOF
     summary_verdict=ok
   fi
 
-  # Every effective row was model-scoped, so no account-level gauge was read at
-  # all. That is the same condition as a gauge that could not be read, and it
-  # leaves through the same single exit - otherwise the text emitter names the
-  # reason and the JSON emitter returns an empty one, and `fm-usage-wall-headroom.v1`
-  # stops meaning one shape.
+  # Every quota row was model-scoped and nothing was flagged, so no account-level
+  # gauge was read at all. That is the same condition as a gauge that could not be
+  # read, and it leaves through the same single exit - otherwise the text emitter
+  # names the reason and the JSON emitter returns an empty one, and
+  # `fm-usage-wall-headroom.v1` stops meaning one shape.
   rowcount=$(printf '%s' "$rows" | grep -c . 2>/dev/null) || rowcount=0
   if [ "$rowcount" -eq 0 ]; then
-    headroom_unmeasurable no-effective-rows \
+    headroom_unmeasurable no-account-level-row \
       'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
     return 0
   fi
@@ -658,6 +703,7 @@ headroom_unknown_reason() {  # <scope> <provider-status>
   case "$2" in
     auth_required) printf 'auth-required' ; return 0 ;;
     error) printf 'provider-read-failed' ; return 0 ;;
+    unreadable_percent) printf 'unreadable-percent' ; return 0 ;;
   esac
   case "$1" in
     unresolved) printf 'unresolved-scope' ;;
@@ -1246,7 +1292,11 @@ resume_task() {  # <snapshot-json> <task-id>
     (.pr.url // "-"),
     (((.hints.open_decisions // []) | map("\(.key) (\(.verb))") | join("; ")) | if . == "" then "-" else . end),
     ((.remote.host // "-") | tostring)')
-  if [ "${#f[@]}" -lt 13 ]; then
+  # Exactly thirteen, in both directions. jq -r prints one line per field, so a
+  # value carrying a newline adds an array element and shifts every field after
+  # it - a record that reports another task's prose as this one's pull request
+  # rather than saying it could not be read.
+  if [ "${#f[@]}" -ne 13 ]; then
     printf '## %s\n\n' "$id"
     printf -- '- RECORD INCOMPLETE: this task could not be read out of the fleet snapshot; read %s directly before acting on it.\n\n' "$meta"
     return 0
