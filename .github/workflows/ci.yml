@@ -139,8 +139,8 @@ jobs:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
-    # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
-    # a hang tripwire with margin, not the expected healthy end of the lane.
+    # Measured two-worker wall is ~9 min on the current proven scripts; this cap
+    # is a hang tripwire with margin, not the expected healthy end of the lane.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -169,7 +169,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
+          bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()

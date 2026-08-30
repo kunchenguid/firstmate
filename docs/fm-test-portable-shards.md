@@ -38,17 +38,17 @@ The 2026-08-30 proof ran 25 candidates with four workers and no failures.
 
 ## Parallel lanes
 
-The lane membership partition is the 2026-07-29 longest-processing-time assignment over the 24 candidates proven at that time, plus `tests/fm-slack-captain-channel.test.sh`, which was added to the proven set and inserted into `portable-parallel-1` afterwards without a rebalance.
-The 2026-08-30 archive refresh records the current candidate set after replacing the obsolete decision-hold lifecycle candidate with the captain-hold lifecycle candidate; it changes no lane membership.
-The estimates below therefore apply the current durations to that fixed partition; they are not a fresh longest-processing-time balance, and neither the partition nor the listed execution order is sorted by the current durations.
+The lane membership partition is the proven-isolated set reported by `bin/fm-test-isolation-proof.sh --list`.
+The 2026-08-30 archive refresh records the current candidate set after replacing the obsolete decision-hold lifecycle candidate with the canonical captain-hold lifecycle candidate.
+`portable-parallel-1` is ordered by the current measured durations so its `--jobs 2` scheduler balances the two workers.
 
-| Lane | Script count | Estimated duration |
-|---|---:|---:|
-| `portable-parallel-1` | 12 | 1091581 ms (~1091.6 s) |
-| `portable-parallel-2` | 13 | 542444 ms (~542.4 s) |
-| imbalance | | 549137 ms |
+| Lane | Script count | Serial sum | Estimated `--jobs 2` wall |
+|---|---:|---:|---:|
+| `portable-parallel-1` | 12 | 1091581 ms | 546416 ms (~546.4 s) |
+| `portable-parallel-2` | 13 | 547931 ms | 275047 ms (~275.0 s) |
 
 `bin/fm-test-run.sh` contains the exact ordered memberships in `list_portable_parallel_1` and `list_portable_parallel_2`.
+Water 7 invokes `--jobs 2` only for `portable-parallel-1`; `portable-parallel-2` remains serial because its concurrency oracle was rejected.
 
 ## Portable serial remainder
 
@@ -58,9 +58,9 @@ Membership is derived rather than enumerated, so a newly added test lands here b
 
 ## Hosted CI and Water 7 fallback
 
-`.github/workflows/ci.yml` runs the two portable parallel lanes, four serial shards, and real-Herdr family as separate GitHub-hosted `ubuntu-latest` jobs.
+`.github/workflows/ci.yml` runs `portable-parallel-1` with `--jobs 2`, `portable-parallel-2` serially, four serial shards, and the real-Herdr family as separate GitHub-hosted `ubuntu-latest` jobs.
 Shard membership and count remain owned by `bin/fm-test-run.sh`, and CI refuses a matrix count that disagrees with that owner.
-See [verification/ci-portable-parallel-jobs.md](verification/ci-portable-parallel-jobs.md) for the measured oracle evidence.
+The superseded historical Water 7 oracle is retained in [verification/ci-portable-parallel-jobs.md](verification/ci-portable-parallel-jobs.md); current candidate-set evidence is in [fm-test-isolation-proof.md](fm-test-isolation-proof.md).
 If primary CI fails, `.github/workflows/ci-water7-fallback.yml` runs `bin/fm-ci.sh` as one self-hosted Water 7 `Suite`; maintainers may also dispatch it manually.
 That fallback discovers and executes the serial shards sequentially, and admits and validates its verdict through the shared-host load guard.
 Static portability checks run on Linux, while [CONTRIBUTING.md](../CONTRIBUTING.md) records the required local stock-macOS Bash lane rather than adding a hosted macOS dependency.

@@ -351,24 +351,23 @@ tests/fm-slack-captain-channel.test.sh
 EOF
 }
 
-# Portable parallel shard 1: fixed partition of the proven-isolated set from the
-# 2026-07-29 LPT assignment plus tests/fm-slack-captain-channel.test.sh, inserted
-# afterwards without a rebalance. Later concurrent-proof refreshes in
-# docs/fm-test-isolation-proof.json restate durations without changing this
-# membership or its listed order, so neither tracks the current durations.
+# Portable parallel shard 1: duration-balanced order for the current partition,
+# using the measured timings in docs/fm-test-isolation-proof.json. Keep this
+# order aligned with that archive because --jobs 2 assigns each next script to
+# the worker that becomes available first.
 list_portable_parallel_1() {
   cat <<'EOF'
 tests/fm-x-mode.test.sh
-tests/fm-slack-captain-channel.test.sh
-tests/fm-cd-pretool-check.test.sh
-tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-test-run.test.sh
-tests/fm-composer-ghost.test.sh
-tests/fm-grok-harness.test.sh
+tests/fm-slack-captain-channel.test.sh
+tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-lint.test.sh
-tests/fm-pi-primary-types.test.sh
-tests/fm-review-diff.test.sh
+tests/fm-cd-pretool-check.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-composer-ghost.test.sh
 tests/fm-brief.test.sh
+tests/fm-review-diff.test.sh
+tests/fm-pi-primary-types.test.sh
 tests/fm-transition-lib.test.sh
 EOF
 }
