@@ -461,6 +461,37 @@ assert_grep 'stdin=payload byte one' "$TMP_ROOT/payload-out" "--stdin did not de
 assert_grep 'stdin=payload byte two' "$TMP_ROOT/payload-out" "--stdin lost part of the payload"
 pass "--stdin still delivers a payload caller's bytes"
 
+test_failed_reclamation_reserves_home() {
+  local home="$TMP_ROOT/home-failed-reclaim"
+  local running="$STATE_ROOT/jobs/job-failed-reclaim-running"
+  local queued="$STATE_ROOT/jobs/job-failed-reclaim-queued"
+  local effect="$TMP_ROOT/failed-reclaim-effect"
+  local deadline
+  mkdir -p "$home" "$running/.claim" "$queued"
+  chmod 700 "$home" "$running" "$running/.claim" "$queued"
+  deadline=$(( $(date +%s) + 60 ))
+  printf 'running\n' > "$running/state"
+  printf '%s\n' "$home" > "$running/home"
+  ln -s "$TMP_ROOT/missing-supervisor" "$running/.claim/supervisor"
+  printf 'queued\n' > "$queued/state"
+  printf '%s\n' "$REMOTE_ROOT" > "$queued/root"
+  printf '%s\n' "$home" > "$queued/home"
+  printf '%s\n' "$deadline" > "$queued/queue_deadline"
+  printf '5\n' > "$queued/timeout"
+  printf '%s\0%s\0' fm-touch-job.sh "$effect" > "$queued/argv"
+  : > "$queued/stdin"
+  : > "$queued/stdout"
+  : > "$queued/stderr"
+  chmod 600 "$running/state" "$running/home" "$queued"/*
+  sleep 1
+  [ ! -e "$effect" ] || fail "a queued job ran after running-job reclamation failed"
+  [ "$(job_state "${queued##*/}")" = queued ] \
+    || fail "failed running-job reclamation did not retain the queued same-home reservation"
+  pass "failed running-job reclamation reserves the home against a second lane"
+}
+
+test_failed_reclamation_reserves_home
+
 # Stage litter: an abandoned .stage.* older than the reap age does not survive
 # a worker pass, while fresh staging is left alone.
 OLD_STAGE="$STATE_ROOT/jobs/.stage.abandoned"

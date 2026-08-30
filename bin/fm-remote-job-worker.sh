@@ -969,7 +969,10 @@ worker_process_once() { # <account-home>
         candidates="$candidates$seq"$'\t'"$id"$'\t'"$home"$'\n'
         ;;
       running)
-        worker_lane_owns_job "$job" || worker_reclaim_running_job "$job" || true
+        if ! worker_lane_owns_job "$job" && ! worker_reclaim_running_job "$job"; then
+          home=$(worker_read_text "$job" home 8192 2>/dev/null || true)
+          [ -n "$home" ] && reserved_homes+=("$home")
+        fi
         continue
         ;;
       *) continue ;;
