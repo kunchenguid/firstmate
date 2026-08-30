@@ -105,9 +105,9 @@ if [ -z "$parsed" ]; then
   exit 0
 fi
 
-mode=$(printf '%s\n' "$parsed" | cut -d' ' -f1)
-yolo=$(printf '%s\n' "$parsed" | cut -d' ' -f2)
-unsynced=$(printf '%s\n' "$parsed" | cut -d' ' -f3)
+read -r mode yolo unsynced <<EOF
+$parsed
+EOF
 
 if [ "$UNSYNCED_QUERY" -eq 1 ]; then
   case "$unsynced" in yes) echo yes ;; *) echo no ;; esac

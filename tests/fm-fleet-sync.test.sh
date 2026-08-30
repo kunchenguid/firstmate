@@ -432,23 +432,30 @@ test_unsynced_flagged_project_skipped_with_zero_output() {
 }
 
 test_unsynced_flag_composes_with_yolo_in_either_order() {
-  local home clone out before_tracking after_tracking
+  local home name clone out before_tracking after_tracking
   home=$(new_home)
-  clone=$(build_pair "$home" phi)
-  advance_origin "$home" phi C1
-  before_tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
-  echo dirty >> "$clone/file.txt"
   mkdir -p "$home/data"
-  printf -- '- phi [direct-PR +yolo +unsynced] - test project (added 2026-08-30)\n' > "$home/data/projects.md"
+  # Both token orderings the grammar promises, each on its own clone.
+  {
+    printf -- '- phi [direct-PR +yolo +unsynced] - test project (added 2026-08-30)\n'
+    printf -- '- rho [direct-PR +unsynced +yolo] - test project (added 2026-08-30)\n'
+  } > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  for name in phi rho; do
+    clone=$(build_pair "$home" "$name")
+    advance_origin "$home" "$name" C1
+    before_tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+    echo dirty >> "$clone/file.txt"
 
-  [ -z "$out" ] || fail "+unsynced clone (with +yolo present) produced output: $out"
-  after_tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
-  [ "$after_tracking" = "$before_tracking" ] \
-    || fail "+unsynced clone's origin/main tracking ref moved, proving a fetch ran"
-  [ "$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" phi)" = "direct-PR on" ] \
-    || fail "+unsynced token corrupted the mode/yolo parse for phi"
+    out=$(run_sync "$home" "$clone")
+
+    [ -z "$out" ] || fail "+unsynced clone $name (with +yolo present) produced output: $out"
+    after_tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+    [ "$after_tracking" = "$before_tracking" ] \
+      || fail "+unsynced clone $name's origin/main tracking ref moved, proving a fetch ran"
+    [ "$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" "$name")" = "direct-PR on" ] \
+      || fail "+unsynced token corrupted the mode/yolo parse for $name"
+  done
   pass "+unsynced composes with +yolo in either order and does not disturb mode/yolo parsing"
 }
 

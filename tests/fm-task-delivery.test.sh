@@ -380,6 +380,54 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+# The --unsynced query is its own mechanical contract (bin/fm-fleet-sync.sh is
+# the consumer): it answers yes/no on stdout and nothing else, never warns, and
+# never disturbs the two-word posture the other callers read.
+test_project_mode_answers_the_unsynced_query() {
+  local home bare proj out err
+  home="$TMP_ROOT/project-mode-unsynced/home"
+  bare="$TMP_ROOT/project-mode-unsynced/bare"
+  mkdir -p "$home/data" "$bare/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- plainproj [no-mistakes] - fixture (added 2026-01-01)
+- legacyproj - fixture (added 2026-01-01)
+- flaggedproj [no-mistakes-prod-only +unsynced] - fixture (added 2026-01-01)
+- yolofirst [direct-PR +yolo +unsynced] - fixture (added 2026-01-01)
+- unsyncedfirst [direct-PR +unsynced +yolo] - fixture (added 2026-01-01)
+EOF
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced flaggedproj 2>/dev/null)
+  [ "$out" = "yes" ] || fail "a +unsynced registry line did not answer yes (got '$out')"
+  for proj in yolofirst unsyncedfirst; do
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced "$proj" 2>/dev/null)
+    [ "$out" = "yes" ] || fail "+unsynced alongside +yolo did not answer yes for $proj (got '$out')"
+  done
+
+  for proj in plainproj legacyproj; do
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced "$proj" 2>/dev/null)
+    [ "$out" = "no" ] || fail "an unflagged project answered the unsynced query wrong (got '$out' for $proj)"
+  done
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced ghostproj 2>/dev/null)
+  [ "$out" = "no" ] || fail "an unregistered project did not answer no (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced ghostproj 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "the unsynced query warned about an unregistered project: $err"
+
+  out=$(FM_HOME="$bare" "$PROJECT_MODE" --unsynced flaggedproj 2>/dev/null)
+  [ "$out" = "no" ] || fail "a missing registry did not answer no (got '$out')"
+  err=$(FM_HOME="$bare" "$PROJECT_MODE" --unsynced flaggedproj 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "the unsynced query warned about a missing registry: $err"
+
+  # The flag is invisible to the posture callers, in either token order.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" flaggedproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "+unsynced leaked into the mechanical posture (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw unsyncedfirst 2>/dev/null)
+  [ "$out" = "direct-PR on" ] || fail "+unsynced ahead of +yolo broke the raw posture (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" unsyncedfirst 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a +unsynced token was mistaken for an unknown mode: $err"
+  pass "fm-project-mode: --unsynced answers yes/no only, and the flag never disturbs the posture output"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -388,4 +436,5 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
+test_project_mode_answers_the_unsynced_query
 echo "# all fm-task-delivery tests passed"
