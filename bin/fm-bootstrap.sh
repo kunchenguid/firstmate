@@ -1323,7 +1323,6 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
       exit 1
     fi
   fi
-  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup
   if backlog_record_reconcile; then
     :
