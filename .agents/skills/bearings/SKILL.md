@@ -150,7 +150,7 @@ Rules that keep the contract unambiguous:
 
   > The refund fix is ready and waiting on your merge word, captain.
   > You reported the double-charge bug Tuesday, and checks are green.
-  > Say 'merge it', or open https://github.com/acme/pay/pull/482 to look first.
+  > Say 'merge it' to approve https://github.com/acme/pay/pull/482.
 - Detailed decisions, plans, full gate reasons, and evidence stay out of chat; file mode puts them in the report, while lavish mode puts only its payload-backed interactive detail on the board.
 - In file mode, include the report path or link inside the four-section digest without adding another heading.
 - In lavish mode, include the board URL inside the four-section digest the same way.
