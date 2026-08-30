@@ -57,7 +57,7 @@ A `quota-axi` older than the floor `bin/fm-quota-axi-lib.sh` owns still yields a
 `bin/fm-bootstrap.sh` remains the owner of the operator-facing MISSING diagnostic for that build.
 A build whose version could not be read at all is labelled `build=unknown` rather than `build=below-floor`, because the floor comparator treats an unreadable version as incompatible and printing that as a fact would be a definite claim about something never measured.
 
-The whole reading is bounded by one cumulative budget shared across both `quota-axi` calls, and both callers bound the command below their own bound.
+The whole reading is bounded by one cumulative budget shared across both `quota-axi` calls, and each caller bounds the command below the bound it is working within, as [`bin/fm-timeout-lib.sh`](../bin/fm-timeout-lib.sh)'s `fm_inner_bound` defines including its floor.
 A bound granted per call, under a caller bounding the total, is a false-unmeasurable generator: the caller's kill lands first, and a gauge that was about to answer gets reported as one that could not be read.
 
 ## Why the record is generated, not saved

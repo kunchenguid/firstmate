@@ -77,6 +77,28 @@ new_world() {
 make_fake_toolchain() {
   local fakebin=$1
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  # quota-axi is stubbed like every other tool the digest shells out to, because
+  # the digest now reads headroom on every run. Without it, any host where
+  # quota-axi resolves inside BASE_PATH turns this unit suite into a real
+  # provider read: host-dependent results, a network call, and a verdict that
+  # depends on the runner's own quota. The stub's percentage is deliberately one
+  # no real gauge would report, so a regression that bypasses it is visible
+  # rather than silently live - the same guard tests/fm-fleet-snapshot-view.test.sh
+  # already uses for its own gauge.
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '0.1.40\n'; exit 0; fi
+cat <<'EOF'
+bin: /fake/quota-axi
+providers[1]{provider,plan,source,status,authStatus,refreshedAt}:
+  claude,max,oauth,fresh,unknown,none
+windows[1]{provider,id,label,percentRemaining,resetsAt,pace,state}:
+  claude,five_hour,session,73,"2026-08-27T02:19:59Z",ahead,fresh
+effective[7]{provider,scope,effectivePercentRemaining,boundedBy,limitingWindowId,runway,usableRunwaySeconds,projectionConfidence}:
+  claude,all_models,73,five_hour,five_hour,projected_exhaustion,14400,early
+EOF
+SH
+  chmod +x "$fakebin/quota-axi"
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -1659,6 +1681,12 @@ EOF
   # fails if a future edit makes the stage take an unreasonable share.
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_not_contains "$out" "FLEET_STATE_BOUNDS:"     "the shipped headroom and wall-scan defaults must fit inside their share of FM_SESSION_START_TIMEOUT"
+  # The gauge reading must come from the fixture's stub, never from the host's
+  # own quota-axi. This percentage is the stub's and no real gauge would report
+  # it, so a regression that bypasses the stub fails here instead of quietly
+  # making the suite host-dependent and network-bound.
+  assert_contains "$out" "pct=73" \
+    "the digest must read the fixture's gauge, not whatever gauge the host happens to have"
 
   # And the check is live rather than vacuous: widen the wall budget past the
   # share and the digest says so, naming all three numbers.
