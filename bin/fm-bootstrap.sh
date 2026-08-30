@@ -1215,6 +1215,10 @@ backlog_record_reconcile() {
   # Finish any close an interrupted cleanup recorded but never landed.
   for marker in "$STATE"/*.backlog-close; do
     [ -e "$marker" ] || [ -L "$marker" ] || continue
+    if ! fm_backlog_record_present "$marker" "pending-close record" "$STATE"; then
+      echo "BACKLOG_RECONCILE: unsafe pending close refused: $FM_BACKLOG_TRANSITION_ERROR"
+      return 2
+    fi
     label=$(basename "$marker" .backlog-close)
     meta_lock=$(fm_meta_lock_path "$STATE/$label.meta") || continue
     fm_lock_try_acquire "$meta_lock" || continue
@@ -1237,13 +1241,21 @@ backlog_record_reconcile() {
   # backlog read. A pending close remains authoritative even when replay failed:
   # the record sweep below must not start that item while its marker survives.
   for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
+      echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
+      return 2
+    fi
     has_record=1
     break
   done
   [ "$has_record" = 1 ] || return 0
   for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
+      echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
+      return 2
+    fi
     id=$(basename "$meta" .meta)
     meta_lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$meta_lock" || continue
@@ -1251,8 +1263,12 @@ backlog_record_reconcile() {
       fm_lock_release "$meta_lock"
       continue
     fi
-    if [ -f "$meta" ] && [ ! -L "$meta" ] \
-       && [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
+    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
+      echo "BACKLOG_RECONCILE: $id: post-lock worker record check refused: $FM_BACKLOG_TRANSITION_ERROR"
+      fm_lock_release "$meta_lock"
+      return 2
+    fi
+    if [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
        && [ "$(fm_meta_get "$meta" cleanup_recovery)" != orca ]; then
       row=
       if fm_backlog_row_probe "$DATA" "$id"; then
@@ -1314,12 +1330,20 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   BOOTSTRAP_BACKLOG_GATE_KIND=secondmate
   for BOOTSTRAP_BACKLOG_MARKER in "$STATE"/*.backlog-close; do
     [ -e "$BOOTSTRAP_BACKLOG_MARKER" ] || [ -L "$BOOTSTRAP_BACKLOG_MARKER" ] || continue
+    if ! fm_backlog_record_present "$BOOTSTRAP_BACKLOG_MARKER" "pending-close record" "$STATE"; then
+      echo "error: bootstrap refused unsafe pending close ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      exit 1
+    fi
     BOOTSTRAP_BACKLOG_GATE_KIND=ship
     break
   done
   if [ "$BOOTSTRAP_BACKLOG_GATE_KIND" = secondmate ]; then
     for BOOTSTRAP_BACKLOG_META in "$STATE"/*.meta; do
-      [ -f "$BOOTSTRAP_BACKLOG_META" ] && [ ! -L "$BOOTSTRAP_BACKLOG_META" ] || continue
+      [ -e "$BOOTSTRAP_BACKLOG_META" ] || [ -L "$BOOTSTRAP_BACKLOG_META" ] || continue
+      if ! fm_backlog_record_present "$BOOTSTRAP_BACKLOG_META" "task record" "$STATE"; then
+        echo "error: bootstrap refused unsafe worker record ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+        exit 1
+      fi
       if [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" kind)" != secondmate ] \
          && [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" cleanup_recovery)" != orca ]; then
         BOOTSTRAP_BACKLOG_GATE_KIND=ship

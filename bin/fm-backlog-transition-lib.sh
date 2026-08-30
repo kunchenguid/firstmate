@@ -19,10 +19,10 @@
 #
 # SCOPE. fm_backlog_transition_applies is the single gate. It excludes
 # secondmates (persistent agents are never backlog items, AGENTS.md section 10),
-# homes whose configured backlog backend is manual or whose tasks-axi is not
-# compatible (bin/fm-tasks-axi-lib.sh), and homes that keep no backlog file at
-# all. Those return-1 exemptions are never errors; an unresolvable configured
-# data directory instead returns 2 so callers refuse before mutation.
+# homes whose configured backlog backend is manual and homes that keep no
+# backlog file at all. Those return-1 exemptions are never errors; an
+# unresolvable configured data directory or incompatible tasks-axi instead
+# returns 2 so callers refuse before mutation.
 #
 # ADDRESSING. Every call passes `--file <data>/backlog.md` so the mutation lands
 # in the home that owns the task regardless of the caller's working directory,
@@ -159,7 +159,7 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     FM_BACKLOG_TRANSITION_SKIP="this home keeps no backlog at $file"
     return 1
   fi
-  if ! fm_backlog_record_present "$file" "backlog file"; then
+  if ! fm_backlog_record_present "$file" "backlog file" "$data"; then
     return 2
   fi
   if ! fm_tasks_axi_compatible; then
@@ -184,7 +184,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   }
-  if ! fm_backlog_record_present "$file" "backlog file"; then
+  if ! fm_backlog_record_present "$file" "backlog file" "$data"; then
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   fi
@@ -230,7 +230,7 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   shift 3
   FM_BACKLOG_TRANSITION_ERROR=
   file=$(fm_backlog_file "$data") || return 1
-  fm_backlog_record_present "$file" "backlog file" || return 1
+  fm_backlog_record_present "$file" "backlog file" "$data" || return 1
   out=$(cd "$(fm_backlog_root "$data")" 2>/dev/null && tasks-axi "$verb" "$id" \
       --file "$file" "$@" 2>&1)
   command_status=$?
@@ -251,11 +251,23 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
-fm_backlog_record_present() {
-  local path=$1 label=${2:-record} parent
+fm_backlog_record_parent_authorized() {
+  local path=$1 label=$2 root=$3 parent parent_resolved root_resolved
   parent=${path%/*}
   [ "$parent" != "$path" ] || parent=.
+  fm_backlog_directory_present "$root" "$label authorized directory" || return 1
   fm_backlog_directory_present "$parent" "$label parent directory" || return 1
+  parent_resolved=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
+  root_resolved=$(CDPATH='' cd -- "$root" 2>/dev/null && pwd -P) || return 1
+  if [ "$parent_resolved" != "$root_resolved" ]; then
+    FM_BACKLOG_TRANSITION_ERROR="$label is outside its authorized directory at $path"
+    return 1
+  fi
+}
+
+fm_backlog_record_present() {
+  local path=$1 label=${2:-record} root=$3
+  fm_backlog_record_parent_authorized "$path" "$label" "$root" || return 1
   if [ ! -f "$path" ] || [ -L "$path" ]; then
     FM_BACKLOG_TRANSITION_ERROR="$label is not a regular non-symlink file at $path"
     return 1
@@ -264,12 +276,10 @@ fm_backlog_record_present() {
 }
 
 fm_backlog_record_remove() {
-  local path=$1 label=$2 parent
-  parent=${path%/*}
-  [ "$parent" != "$path" ] || parent=.
-  fm_backlog_directory_present "$parent" "$label parent directory" || return 1
+  local path=$1 label=$2 root=$3
+  fm_backlog_record_parent_authorized "$path" "$label" "$root" || return 1
   if [ -e "$path" ] || [ -L "$path" ]; then
-    fm_backlog_record_present "$path" "$label" || return 1
+    fm_backlog_record_present "$path" "$label" "$root" || return 1
   fi
   if ! rm -f "$path" 2>/dev/null || [ -e "$path" ] || [ -L "$path" ]; then
     FM_BACKLOG_TRANSITION_ERROR="$label could not be removed at $path"
@@ -279,18 +289,19 @@ fm_backlog_record_remove() {
 }
 
 fm_backlog_record_publish() {
-  local source=$1 target=$2 label=$3 source_parent target_parent
+  local source=$1 target=$2 label=$3 root=$4 source_parent target_parent
   source_parent=${source%/*}
   [ "$source_parent" != "$source" ] || source_parent=.
   target_parent=${target%/*}
   [ "$target_parent" != "$target" ] || target_parent=.
   fm_backlog_directory_present "$source_parent" "$label source directory" || return 1
   fm_backlog_directory_present "$target_parent" "$label target directory" || return 1
-  fm_backlog_record_present "$source" "$label staged record" || return 1
+  fm_backlog_record_present "$source" "$label staged record" "$root" || return 1
+  fm_backlog_record_parent_authorized "$target" "$label target" "$root" || return 1
   if [ -e "$target" ] || [ -L "$target" ]; then
-    fm_backlog_record_present "$target" "$label target" || return 1
+    fm_backlog_record_present "$target" "$label target" "$root" || return 1
   fi
-  if ! mv -f "$source" "$target" 2>/dev/null || ! fm_backlog_record_present "$target" "$label"; then
+  if ! mv -f "$source" "$target" 2>/dev/null || ! fm_backlog_record_present "$target" "$label" "$root"; then
     [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
       || FM_BACKLOG_TRANSITION_ERROR="$label publication failed at $target"
     return 1
@@ -299,9 +310,9 @@ fm_backlog_record_publish() {
 }
 
 fm_backlog_meta_spawn_gen() {
-  local meta=$1 count value
+  local meta=$1 state=$2 count value
   FM_BACKLOG_META_SPAWN_GEN=
-  fm_backlog_record_present "$meta" || return 1
+  fm_backlog_record_present "$meta" "task record" "$state" || return 1
   count=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$meta" 2>/dev/null) || {
     FM_BACKLOG_TRANSITION_ERROR="unreadable spawn generation in task record $meta"
     return 1
@@ -331,8 +342,8 @@ fm_backlog_row_dispatchable() {
 }
 
 fm_backlog_dispatch_transition() {
-  local meta=$1 data=$2 id=$3 row row_status
-  fm_backlog_record_present "$meta" || return 1
+  local meta=$1 data=$2 id=$3 state=$4 row row_status
+  fm_backlog_record_present "$meta" "task record" "$state" || return 1
   fm_backlog_row_probe "$data" "$id"
   row_status=$?
   if [ "$row_status" -ne 0 ]; then
@@ -356,7 +367,7 @@ fm_backlog_dispatch_transition() {
 
 fm_backlog_dispatch_rollback() {
   local meta=$1 busy_script=$2 state=$3 id=$4 gen=$5 failed=0
-  fm_backlog_record_remove "$meta" "provisional task record" || failed=1
+  fm_backlog_record_remove "$meta" "provisional task record" "$state" || failed=1
   if [ -n "$gen" ]; then
     "$busy_script" retire "$state" "$id" --gen "$gen" >/dev/null 2>&1 || failed=1
     if [ -e "$state/$id.busy-state" ] || [ -L "$state/$id.busy-state" ] \
@@ -372,11 +383,11 @@ fm_backlog_dispatch_rollback() {
 }
 
 fm_backlog_close_transition() {
-  local meta=$1 marker=$2 data=$3 id=$4
-  shift 4
-  [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" || return 1
+  local meta=$1 marker=$2 data=$3 id=$4 state=$5
+  shift 5
+  [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
   fm_backlog_done "$data" "$id" "$@" || return 1
-  fm_backlog_record_remove "$marker" "pending-close record"
+  fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
 fm_backlog_atomic_transition() {
@@ -397,8 +408,8 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
   printf '%s/%s.backlog-close\n' "$1" "$2"
 }
 
-fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id>
-  local marker=$1 authorized_data data_resolved expected_id=$3 parent
+fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
+  local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
   local id='' data='' marker_spawn_gen='' line raw_bytes arg_value
   local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
   local percent_tail percent_valid
@@ -408,10 +419,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   FM_BACKLOG_CLOSE_VALIDATED_DATA=
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
-  parent=${marker%/*}
-  [ "$parent" != "$marker" ] || parent=.
-  fm_backlog_directory_present "$parent" "pending-close record directory" || return 1
-  fm_backlog_record_present "$marker" "pending-close record" || return 1
+  fm_backlog_record_present "$marker" "pending-close record" "$state" || return 1
   raw_bytes=$(LC_ALL=C od -An -t u1 "$marker" 2>/dev/null) || {
     FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
     return 1
@@ -544,21 +552,19 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=("${args[@]+"${args[@]}"}")
 }
 
-fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> [flag...]
-  local tmp=$1 id=$2 data spawn_gen=$4 arg previous_arg='' parent
+fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> [flag...]
+  local tmp=$1 id=$2 data spawn_gen=$4 state=$5 arg previous_arg=''
   local serialized_args=()
   data=$(fm_backlog_data_absolute "$3") || {
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $3"
     return 1
   }
-  parent=${tmp%/*}
-  [ "$parent" != "$tmp" ] || parent=.
-  fm_backlog_directory_present "$parent" "pending-close staging directory" || return 1
+  fm_backlog_record_parent_authorized "$tmp" "pending-close staging path" "$state" || return 1
   if [ -e "$tmp" ] || [ -L "$tmp" ]; then
     FM_BACKLOG_TRANSITION_ERROR="unsafe pending-close staging path $tmp"
     return 1
   fi
-  shift 4
+  shift 5
   for arg in "$@"; do
     if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
       serialized_args+=("local%20main")
@@ -575,7 +581,7 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
       printf 'arg=%s\n' "$arg"
     done
   } > "$tmp" || { rm -f "$tmp"; return 1; }
-  fm_backlog_close_marker_validate "$tmp" "$data" "$id" \
+  fm_backlog_close_marker_validate "$tmp" "$data" "$id" "$state" \
     || { rm -f "$tmp"; return 1; }
 }
 
@@ -586,19 +592,19 @@ fm_backlog_close_marker_write() {  # <state-dir> <id> <data-dir> <spawn-gen> [fl
   shift 4
   marker=$(fm_backlog_close_marker_path "$state" "$id") || return 1
   tmp="$state/.$id.backlog-close.${BASHPID:-$$}"
-  fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$@" || return 1
-  fm_backlog_atomic_transition publish "$tmp" "$marker" "pending-close record" \
+  fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" "$@" || return 1
+  fm_backlog_atomic_transition publish "$tmp" "$marker" "pending-close record" "$state" \
     || { rm -f "$tmp"; return 1; }
 }
 
-fm_backlog_close_marker_remove() {  # <marker-path>
-  fm_backlog_atomic_transition remove "$1" "pending-close record"
+fm_backlog_close_marker_remove() {  # <marker-path> <state-dir>
+  fm_backlog_atomic_transition remove "$1" "pending-close record" "$2"
 }
 
 fm_backlog_close_marker_clear() {  # <state-dir> <id>
   local marker
   marker=$(fm_backlog_close_marker_path "$1" "$2") || return 1
-  fm_backlog_close_marker_remove "$marker"
+  fm_backlog_close_marker_remove "$marker" "$1"
 }
 
 # Replay one recorded close. Returns 0 when the row is closed or the marker is
@@ -616,7 +622,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
     *.backlog-close) expected_id=${marker_name%.backlog-close} ;;
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close record name $marker"; return 1 ;;
   esac
-  fm_backlog_close_marker_validate "$marker" "$3" "$expected_id" || return 1
+  fm_backlog_close_marker_validate "$marker" "$3" "$expected_id" "$state" || return 1
   id=$FM_BACKLOG_CLOSE_VALIDATED_ID
   data=$FM_BACKLOG_CLOSE_VALIDATED_DATA
   marker_spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
@@ -626,19 +632,19 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
-    if ! fm_backlog_record_present "$meta"; then
+    if ! fm_backlog_record_present "$meta" "task record" "$state"; then
       FM_BACKLOG_TRANSITION_ERROR="unsafe interrupted task record at $meta"
       return 1
     fi
-    fm_backlog_meta_spawn_gen "$meta" || return 1
+    fm_backlog_meta_spawn_gen "$meta" "$state" || return 1
     meta_spawn_gen=$FM_BACKLOG_META_SPAWN_GEN
     if [ "$meta_spawn_gen" != "$marker_spawn_gen" ]; then
-      fm_backlog_close_marker_remove "$marker" || return 1
+      fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
     cleanup_incomplete=1
-    fm_backlog_atomic_transition remove "$meta" "the interrupted task record" \
+    fm_backlog_atomic_transition remove "$meta" "the interrupted task record" "$state" \
       || return 1
   fi
   if fm_backlog_row_probe "$data" "$id"; then
@@ -652,7 +658,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   fi
   case "$row_state" in
     done\ *)
-      if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" \
+      if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" "$state" \
           "${args[@]+"${args[@]}"}"; then
         if [ "$cleanup_incomplete" = 1 ]; then
           FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
@@ -664,12 +670,12 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       return 1
       ;;
     '')
-      fm_backlog_close_marker_remove "$marker" || return 1
+      fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
       ;;
   esac
-  if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" \
+  if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" "$state" \
       "${args[@]+"${args[@]}"}"; then
     if [ "$cleanup_incomplete" = 1 ]; then
       FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete

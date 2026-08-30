@@ -1298,7 +1298,7 @@ test_recovery_marks_an_owned_record_in_flight() {
 }
 
 test_recovery_ignores_a_symlinked_worker_record() {
-  local case_dir home id target out
+  local case_dir home id target out rc=0
   id=atomic-heal-symlink-meta-b8
   case_dir=$(make_home heal-symlink-meta)
   home=$(home_of "$case_dir")
@@ -1307,12 +1307,15 @@ test_recovery_ignores_a_symlinked_worker_record() {
   printf 'kind=ship\nspawn_gen=unpublished\n' > "$target"
   ln -s "$target" "$home/state/$id.meta"
 
-  out=$(run_bootstrap "$case_dir")
+  out=$(run_bootstrap "$case_dir") || rc=$?
+  [ "$rc" -ne 0 ] || fail "session start accepted a symlinked worker record"
+  assert_contains "$out" "bootstrap refused unsafe worker record" \
+    "session start did not report the unsafe worker record"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "session start treated a symlink as an owned worker record: $out"
   [ -L "$home/state/$id.meta" ] \
     || fail "session start replaced or removed the inert symlinked record"
-  pass "session start ignores symlinked worker records"
+  pass "session start rejects symlinked worker records"
 }
 
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
@@ -1694,7 +1697,7 @@ test_recovery_rejects_invalid_close_arguments() {
 }
 
 test_recovery_rejects_a_symlinked_close_marker() {
-  local case_dir id marker payload out
+  local case_dir id marker payload out rc=0
   id=atomic-marker-symlink-b12
   case_dir=$(make_home marker-symlink)
   add_item "$case_dir" "$id"
@@ -1706,9 +1709,10 @@ test_recovery_rejects_a_symlinked_close_marker() {
   ln -s "$payload" "$marker"
   rm -f "$payload"
 
-  out=$(run_bootstrap "$case_dir")
+  out=$(run_bootstrap "$case_dir") || rc=$?
+  [ "$rc" -ne 0 ] || fail "bootstrap accepted a symlinked close marker"
   [ -L "$marker" ] || fail "dangling symlink close marker was consumed: $out"
-  assert_contains "$out" "recorded backlog close could not be replayed" \
+  assert_contains "$out" "bootstrap refused unsafe pending close" \
     "dangling symlink close marker was silently skipped"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "symlinked close marker changed the backlog row: $out"
@@ -1755,6 +1759,42 @@ test_recovery_rejects_a_legacy_close_without_an_incarnation() {
   assert_present "$(home_of "$case_dir")/state/$id.backlog-close" \
     "session start consumed an unversioned close marker"
   pass "session start rejects an unversioned close marker"
+}
+
+test_bootstrap_rechecks_worker_record_boundary_after_locking() {
+  local case_dir foreign_case home foreign_state id real_ln out rc=0
+  id=atomic-bootstrap-state-swap-b13
+  case_dir=$(make_home bootstrap-state-swap)
+  foreign_case=$(make_home bootstrap-state-swap-foreign)
+  home=$(home_of "$case_dir")
+  foreign_state="$(home_of "$foreign_case")/state"
+  add_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=local-worker"
+  write_task_meta "$foreign_case" "$id" ship no-mistakes "spawn_gen=foreign-worker"
+  real_ln=$(command -v ln)
+  cat > "$case_dir/fakebin/ln" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"$home/state/.meta-$id.lock"*)
+    if [ ! -e "$case_dir/state-swapped" ]; then
+      : > "$case_dir/state-swapped"
+      mv "$home/state" "$home/state-original" || exit 1
+      "$real_ln" -s "$foreign_state" "$home/state" || exit 1
+    fi
+    ;;
+esac
+exec "$real_ln" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/ln"
+
+  out=$(run_bootstrap "$case_dir") || rc=$?
+  [ "$rc" -ne 0 ] || fail "bootstrap trusted a worker record after its state boundary changed"
+  assert_contains "$out" "post-lock worker record check refused" \
+    "bootstrap did not report the post-lock state-boundary failure"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "bootstrap changed the local row after reading through a swapped state path"
+  assert_present "$foreign_state/$id.meta" "bootstrap removed the foreign worker record"
+  pass "bootstrap rechecks worker-record containment after locking"
 }
 
 test_bootstrap_refuses_a_symlinked_state_directory_before_reconciliation() {
@@ -1903,7 +1943,7 @@ SH
 
   out=$(run_teardown "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "teardown trusted a record after its parent was swapped"
-  assert_contains "$out" "task record parent directory is not a real directory" \
+  assert_contains "$out" "task record authorized directory is not a real directory" \
     "post-lock record check did not report the swapped parent"
   assert_present "$foreign_state/$id.meta" "teardown removed the foreign record"
   assert_present "$foreign_worktree" "teardown removed the foreign local copy"
@@ -2085,6 +2125,7 @@ test_recovery_rejects_invalid_close_arguments
 test_recovery_rejects_a_symlinked_close_marker
 test_recovery_drops_a_close_for_a_newer_meta_incarnation
 test_recovery_rejects_a_legacy_close_without_an_incarnation
+test_bootstrap_rechecks_worker_record_boundary_after_locking
 test_bootstrap_refuses_a_symlinked_state_directory_before_reconciliation
 test_bootstrap_stops_when_data_disappears_before_reconciliation
 test_bootstrap_addressing_exemptions_remain_nonfatal
