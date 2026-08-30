@@ -161,9 +161,10 @@ fm_startup_memory_estimated_tokens_for_bytes() {
 }
 
 # fm_startup_memory_measure_file <path>
-# Prints "<bytes> <estimated-tokens> <present|absent>".  Memory files must be
-# ordinary files when present so a measurement never follows a symlink or reads
-# a special file.
+# Prints "<bytes> <estimated-tokens> <present|absent>".  Memory files must
+# resolve to ordinary readable regular files when present, so an intentional
+# symlink is measured from its resolved target while every special target type
+# is rejected before content is read.
 fm_startup_memory_measure_file() {
   local path=$1 bytes tokens
   FM_STARTUP_MEMORY_MEASURE_BYTES=""
@@ -176,12 +177,78 @@ fm_startup_memory_measure_file() {
     printf '0 0 absent\n'
     return 0
   fi
-  if [ -L "$path" ] || [ ! -f "$path" ]; then
-    fm_startup_memory_budget_fail "memory file is not an ordinary regular file: $path"
-    return 1
-  fi
-  bytes=$(LC_ALL=C wc -c < "$path" 2>/dev/null | tr -d '[:space:]') || {
-    fm_startup_memory_budget_fail "could not measure memory file: $path"
+  bytes=$(LC_ALL=C perl - "$path" <<'PERL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT :mode);
+
+my $path = shift @ARGV;
+
+sub fail {
+  print $_[0], "\n";
+  exit 1;
+}
+
+sub kind_for_mode {
+  my ($mode) = @_;
+  return 'a directory' if S_ISDIR($mode);
+  return 'a FIFO' if S_ISFIFO($mode);
+  return 'a socket' if S_ISSOCK($mode);
+  return 'a character device' if S_ISCHR($mode);
+  return 'a block device' if S_ISBLK($mode);
+  return 'a symlink' if S_ISLNK($mode);
+  return 'not an ordinary regular file';
+}
+
+my @link_stat = lstat($path);
+@link_stat or fail("memory file could not be inspected: $path");
+my $is_symlink = S_ISLNK($link_stat[2]);
+
+# stat() follows the link, so the kernel classifies each failure class and a
+# dangling target is never reported as a loop.
+$! = 0;
+my @target_stat = stat($path);
+if (!@target_stat) {
+  if ($is_symlink) {
+    fail("memory file symlink loop: $path") if $!{ELOOP};
+    fail("memory file symlink target does not exist: $path") if $!{ENOENT} || $!{ENOTDIR};
+    fail("memory file symlink target could not be resolved ($!): $path");
+  }
+  fail("memory file target could not be inspected: $path");
+}
+if (!S_ISREG($target_stat[2])) {
+  fail("memory file target is " . kind_for_mode($target_stat[2]) . ", not an ordinary readable regular file: $path");
+}
+
+# The target can be replaced between the stat above and the open, so open
+# without blocking (a swapped-in FIFO must not hang the measurement), then
+# re-check type and dev/ino on the open descriptor before any byte is read.
+sysopen(my $fh, $path, O_RDONLY | O_NONBLOCK)
+  or fail("memory file target could not be read: $path");
+my @fh_stat = stat($fh);
+@fh_stat or fail("memory file target could not be inspected after open: $path");
+if (!S_ISREG($fh_stat[2])) {
+  fail("memory file target changed to " . kind_for_mode($fh_stat[2]) . " while being measured: $path");
+}
+if ($target_stat[0] != $fh_stat[0] || $target_stat[1] != $fh_stat[1]) {
+  fail("memory file target changed while being measured: $path");
+}
+
+binmode($fh) or fail("memory file target could not be read: $path");
+my $bytes = 0;
+while (1) {
+  my $n = sysread($fh, my $buffer, 65536);
+  if (!defined $n) {
+    next if $!{EINTR};
+    fail("memory file target could not be measured: $path");
+  }
+  last if $n == 0;
+  $bytes += $n;
+}
+print $bytes, "\n";
+PERL
+  ) || {
+    fm_startup_memory_budget_fail "${bytes:-memory file could not be measured: $path}"
     return 1
   }
   case "$bytes" in
