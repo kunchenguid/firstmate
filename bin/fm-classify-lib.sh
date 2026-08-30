@@ -535,6 +535,34 @@ status_declared_wait_kind() {  # <status-file> -> captain-held|paused|decision|<
   return 0
 }
 
+# The stable identity of the declared wait <status-file> currently carries, so a
+# one-shot surface can be keyed on the DECLARATION itself rather than on a
+# whole-file signature that any later unrelated status append would perturb.
+# status_declared_wait_kind above owns WHICH wait is declared; this owns WHAT
+# that wait is, so the same unanswered wait keeps one identity across later
+# status growth while a genuinely new wait - a fresh pause reason, a newly opened
+# decision, a decision answered then reopened - changes it. Empty when no wait is
+# declared.
+#
+# A paused or captain-held wait is named by the last status line that declares
+# it, so a new declaration line is a new wait. An open-decision wait is named by
+# the durable open set itself (status_open_decisions), which unrelated appends
+# leave byte-for-byte unchanged: keying that case on the whole-file signature is
+# exactly the leak where a worker's progress line, appended while the captain
+# still owes the decision, bought another bare stale wake for the same unanswered
+# gate. Output is a single line so a marker file holds it as one token.
+status_declared_wait_signature() {  # <status-file> -> stable id of the declared wait, empty when none
+  local f=$1 kind payload encoded
+  kind=$(status_declared_wait_kind "$f") || return 1
+  [ -n "$kind" ] || return 0
+  case "$kind" in
+    decision) payload=$(status_open_decisions "$f") ;;
+    *)        payload=$(last_status_line "$f") ;;
+  esac
+  encoded=$(printf '%s\0%s' "$kind" "$payload" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+  printf 'dw1:%s' "$encoded"
+}
+
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
 _fm_open_set_has() {  # <open-set> <key>
   case "$1" in

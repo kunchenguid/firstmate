@@ -2240,6 +2240,58 @@ test_open_decision_churning_pane_surfaces_once_per_declaration() {
   pass "an open decision absorbs a churning pane the same way, and stops absorbing once it is answered"
 }
 
+# The one-shot must key on the DECLARED WAIT itself, not on a whole-file
+# signature. A worker awaiting a decision keeps writing its own status log -
+# progress notes, heartbeat lines - while the captain still owes the answer.
+# Each such append grows the file, so a one-shot keyed on the whole-file
+# signature (which carries the byte size) treated the unchanged, still-open
+# decision as a NEW declaration and queued another bare stale wake for it: the
+# same 2026-08-29 flood, one step removed from the pane-hash churn the case above
+# pins. This drives the real watcher over an open-decision pane, records the bare
+# count after the one-shot, then appends unrelated progress lines to the status
+# log (re-priming the seen baseline exactly as firstmate does after surfacing a
+# status change) and keeps churning: the still-open decision must buy no further
+# bare wake.
+test_open_decision_survives_unrelated_status_appends() {
+  local dir state fakebin out capture_file statusf window sig counts total bare before
+  dir=$(make_case decision-status-append); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-gate"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'needs-decision: playtest-suite + physics design committed for review [key=w25-design]\n' \
+    > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+
+  declared_wait_churn_rounds "$state" "$fakebin" "$window" "$capture_file" "$out" 5 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  counts=$(count_stale_wakes "$state" "$window")
+  before=${counts##* }
+  [ "$before" -le 1 ] \
+    || fail "an open decision on a churning pane queued $before bare stale wakes before any append"
+
+  # Two unrelated progress lines while the decision stays open. The last line is
+  # no longer captain-relevant, but the durable fold still holds the decision, so
+  # status_declared_wait_kind still reports the wait - and its identity must not
+  # move just because the file grew.
+  printf 'working: still drafting the physics tuning pass\n' >> "$statusf"
+  printf 'working: reran the playtest suite, no regressions\n' >> "$statusf"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$statusf" \
+    || fail "could not re-prime the status baseline after the unrelated appends"
+
+  declared_wait_churn_rounds "$state" "$fakebin" "$window" "$capture_file" "$out" 5 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  counts=$(count_stale_wakes "$state" "$window")
+  total=${counts%% *}; bare=${counts##* }
+  [ "$bare" -le "$before" ] \
+    || fail "an unrelated status append bought $bare bare stale wakes for the same unanswered decision (was $before)"
+  [ "$total" -le 1 ] \
+    || fail "an open decision queued $total stale wakes across unrelated status growth"
+  pass "an open decision keeps one identity across unrelated status appends, buying no further bare wake"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4048,6 +4100,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_declared_pause_churning_pane_surfaces_once_per_declaration
 test_open_decision_churning_pane_surfaces_once_per_declaration
+test_open_decision_survives_unrelated_status_appends
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

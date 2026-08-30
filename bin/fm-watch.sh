@@ -984,16 +984,24 @@ pause_state_class() {  # <window> <task>
 # the durable fold still holds open); this owns what the watcher does with it.
 #
 # A declared wait still surfaces ONCE, so a live gate is never hidden behind the
-# bounded cadence - but that one-shot is keyed on the DECLARATION, the status
-# log's own signature, never on the pane hash. A crew that declared a wait
-# usually leaves a live harness rendering a spinner, a token counter or a clock,
-# so its pane hash changes every few minutes; a hash-keyed one-shot therefore
-# re-fires for the whole wait, and each re-fire costs a full supervision turn.
-# That is the 2026-08-29 flood of bare stale wakes for a crew awaiting the
-# captain, interleaved with its own correct long-cadence rechecks. Keying on the
-# declaration is the same fix busy_turn_bound_check's away-mode arm already
-# applies, for the same reason. Away mode itself is excluded by the callers on
-# purpose: the daemon owns triage there and classifies the plain identity.
+# bounded cadence - but that one-shot is keyed on the DECLARATION itself
+# (status_declared_wait_signature: the pause reason for a declared pause, the
+# durable open set for an open decision), never on the pane hash and never on the
+# whole-file signature. A crew that declared a wait usually leaves a live harness
+# rendering a spinner, a token counter or a clock, so its pane hash changes every
+# few minutes; a hash-keyed one-shot therefore re-fires for the whole wait, and
+# each re-fire costs a full supervision turn. That is the 2026-08-29 flood of
+# bare stale wakes for a crew awaiting the captain, interleaved with its own
+# correct long-cadence rechecks. A whole-file signature has the same defect one
+# step removed: it carries the file size, so a worker's own progress line -
+# appended while the decision the captain still owes stays open - would perturb
+# it and buy another bare wake for the same unanswered gate. Keying off the
+# status side rather than the pane hash is the same fix busy_turn_bound_check's
+# away-mode arm applies against a ticking footer; this normal-mode arm sharpens
+# it to the declared wait's own identity, so a later status append cannot re-fire
+# it either. Away mode itself is excluded by the callers on purpose: it handles
+# only the last-line paused or captain-held wait, which any append ends outright,
+# and the daemon owns triage there and classifies the plain identity.
 #
 # Pause tracking is set here on the one-shot surface and cleared here when there
 # is no declared wait, so a caller cannot surface without the bookkeeping that
@@ -1008,7 +1016,14 @@ stale_declared_wait_absorb() {  # <window> <task> <hash>
     return 1
   fi
   marker="$STATE/.paused-surfaced-$key"
-  declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  # Key the one-shot on the declared wait's own identity, never on the whole-file
+  # signature: status_observed_signature includes the file size, so a worker's
+  # unrelated progress line - appended while an open decision the captain still
+  # owes stays open - would change the whole-file signature and buy another bare
+  # stale wake for the same unanswered gate. status_declared_wait_signature keeps
+  # one identity for that unchanged wait and changes only when the wait itself
+  # does. status_declared_wait_kind was non-empty above, so this is too.
+  declared="declared:$(status_declared_wait_signature "$statusf" || true)"
   if [ "$(cat "$marker" 2>/dev/null || true)" = "$declared" ]; then
     handle_paused_stale "$win" "$task" "$h"
     return 0

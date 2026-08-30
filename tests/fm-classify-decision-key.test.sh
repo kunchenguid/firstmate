@@ -304,6 +304,51 @@ test_decision_render_always_names_the_answerable_key() {
   pass "status_decision_render always names the answerable key and flags a foreign token as prose"
 }
 
+# status_declared_wait_signature names WHAT a declared wait is, so the watcher's
+# one-shot surface can key on the declaration itself. The identity must survive
+# an unrelated status append while the same wait is still open - that append is
+# exactly the worker progress line that, when the identity carried the whole-file
+# size instead, bought another bare stale wake for a decision the captain still
+# owed - and must change the moment the wait genuinely changes.
+test_declared_wait_signature_is_stable_across_unrelated_appends() {
+  local dir f open_sig grown_sig second_sig answered_sig paused_sig repaused_sig
+  dir=$(case_dir declared-wait-sig)
+  f="$dir/t.status"
+
+  # An open decision, then a worker progress line that does not touch it.
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$f"
+  open_sig=$(status_declared_wait_signature "$f")
+  [ -n "$open_sig" ] || fail "an open decision produced no declared-wait signature"
+  printf 'working: still drafting the request schema\n' >> "$f"
+  grown_sig=$(status_declared_wait_signature "$f")
+  [ "$grown_sig" = "$open_sig" ] \
+    || fail "an unrelated append changed the open-decision declared-wait signature: '$open_sig' -> '$grown_sig'"
+
+  # A genuinely new decision is a new wait and must change the identity.
+  printf 'needs-decision [key=store]: sqlite or postgres\n' >> "$f"
+  second_sig=$(status_declared_wait_signature "$f")
+  [ "$second_sig" != "$grown_sig" ] \
+    || fail "a newly opened decision left the declared-wait signature unchanged"
+
+  # Answering both leaves no wait, so the identity is empty.
+  printf 'resolved [key=api-shape]: answered: REST\n' >> "$f"
+  printf 'resolved [key=store]: answered: postgres\n' >> "$f"
+  answered_sig=$(status_declared_wait_signature "$f")
+  [ -z "$answered_sig" ] \
+    || fail "an answered decision still carried a declared-wait signature: '$answered_sig'"
+
+  # A declared pause is named by the pause line itself: a new reason is a new wait.
+  printf 'paused: waiting on the upstream release\n' > "$f"
+  paused_sig=$(status_declared_wait_signature "$f")
+  [ -n "$paused_sig" ] || fail "a declared pause produced no declared-wait signature"
+  [ "$paused_sig" != "$answered_sig" ] || fail "a declared pause collapsed to the empty signature"
+  printf 'paused: waiting on a different upstream release\n' >> "$f"
+  repaused_sig=$(status_declared_wait_signature "$f")
+  [ "$repaused_sig" != "$paused_sig" ] \
+    || fail "a fresh pause reason reused the previous declared-wait signature"
+  pass "status_declared_wait_signature holds one identity for an unchanged wait and changes only when the wait does"
+}
+
 test_incremental_agrees_with_full_fold_across_appends() {
   local dir f expected
   dir=$(case_dir incremental)
@@ -342,6 +387,7 @@ test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
 test_note_tail_token_stays_prose
 test_decision_render_always_names_the_answerable_key
+test_declared_wait_signature_is_stable_across_unrelated_appends
 
 # status_key_closing_verb reports HOW the status side currently reads one key,
 # which is what lets a consumer tell a settled key from a key handed to a
