@@ -221,6 +221,10 @@ esac
 # --- a finished child worker inside the remote secondmate home --------------
 CHILD_WT="$REMOTE_HOME/projects/alpha"
 mkdir -p "$REMOTE_HOME/state"
+# This regression exercises remote-parent binding, not backlog mutation. Keep
+# its synthetic child home on the supported hand-edited backend so teardown's
+# fused automatic close is correctly exempt without requiring a tasks-axi mock.
+printf '%s\n' manual > "$REMOTE_HOME/config/backlog-backend"
 write_child_meta() {
   fm_write_meta "$REMOTE_HOME/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \

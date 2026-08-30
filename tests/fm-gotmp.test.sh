@@ -47,7 +47,7 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
-  mkdir -p "$fake/bin/backends" "$fake/state"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   # fm-backend.sh + its tmux adapter: symlink the REAL files (teardown sources
@@ -148,7 +148,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # not error and must not remove anything.
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
-  mkdir -p "$fake/bin/backends" "$fake/state"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"

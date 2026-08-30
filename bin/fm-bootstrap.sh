@@ -1193,6 +1193,9 @@ crew_dispatch_validate() {
 # backstops for what this cannot see. Never reads or writes another home.
 backlog_record_reconcile() {
   local marker meta meta_lock id row label has_record=0 gate_status
+  # A fresh home with no state directory has no physical task records to pair.
+  # Keep bootstrap diagnostics working without creating state just for a no-op.
+  [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
   if ! fm_backlog_directory_present "$STATE" "state directory"; then
     echo "error: backlog reconciliation refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
     return 2
@@ -1323,33 +1326,35 @@ fi
 # sessions never touch state, and the deferred network pass never repeats it:
 # the local pass that ran first already closed that window.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
-  if ! fm_backlog_directory_present "$STATE" "state directory"; then
-    echo "error: bootstrap cannot reconcile task state ($FM_BACKLOG_TRANSITION_ERROR)" >&2
-    exit 1
-  fi
   BOOTSTRAP_BACKLOG_GATE_KIND=secondmate
-  for BOOTSTRAP_BACKLOG_MARKER in "$STATE"/*.backlog-close; do
-    [ -e "$BOOTSTRAP_BACKLOG_MARKER" ] || [ -L "$BOOTSTRAP_BACKLOG_MARKER" ] || continue
-    if ! fm_backlog_record_present "$BOOTSTRAP_BACKLOG_MARKER" "pending-close record" "$STATE"; then
-      echo "error: bootstrap refused unsafe pending close ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+  if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+    if ! fm_backlog_directory_present "$STATE" "state directory"; then
+      echo "error: bootstrap cannot reconcile task state ($FM_BACKLOG_TRANSITION_ERROR)" >&2
       exit 1
     fi
-    BOOTSTRAP_BACKLOG_GATE_KIND=ship
-    break
-  done
-  if [ "$BOOTSTRAP_BACKLOG_GATE_KIND" = secondmate ]; then
-    for BOOTSTRAP_BACKLOG_META in "$STATE"/*.meta; do
-      [ -e "$BOOTSTRAP_BACKLOG_META" ] || [ -L "$BOOTSTRAP_BACKLOG_META" ] || continue
-      if ! fm_backlog_record_present "$BOOTSTRAP_BACKLOG_META" "task record" "$STATE"; then
-        echo "error: bootstrap refused unsafe worker record ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    for BOOTSTRAP_BACKLOG_MARKER in "$STATE"/*.backlog-close; do
+      [ -e "$BOOTSTRAP_BACKLOG_MARKER" ] || [ -L "$BOOTSTRAP_BACKLOG_MARKER" ] || continue
+      if ! fm_backlog_record_present "$BOOTSTRAP_BACKLOG_MARKER" "pending-close record" "$STATE"; then
+        echo "error: bootstrap refused unsafe pending close ($FM_BACKLOG_TRANSITION_ERROR)" >&2
         exit 1
       fi
-      if [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" kind)" != secondmate ] \
-         && [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" cleanup_recovery)" != orca ]; then
-        BOOTSTRAP_BACKLOG_GATE_KIND=ship
-        break
-      fi
+      BOOTSTRAP_BACKLOG_GATE_KIND=ship
+      break
     done
+    if [ "$BOOTSTRAP_BACKLOG_GATE_KIND" = secondmate ]; then
+      for BOOTSTRAP_BACKLOG_META in "$STATE"/*.meta; do
+        [ -e "$BOOTSTRAP_BACKLOG_META" ] || [ -L "$BOOTSTRAP_BACKLOG_META" ] || continue
+        if ! fm_backlog_record_present "$BOOTSTRAP_BACKLOG_META" "task record" "$STATE"; then
+          echo "error: bootstrap refused unsafe worker record ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+          exit 1
+        fi
+        if [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" kind)" != secondmate ] \
+           && [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" cleanup_recovery)" != orca ]; then
+          BOOTSTRAP_BACKLOG_GATE_KIND=ship
+          break
+        fi
+      done
+    fi
   fi
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$BOOTSTRAP_BACKLOG_GATE_KIND"; then
     :

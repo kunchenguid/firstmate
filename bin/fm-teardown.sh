@@ -2895,6 +2895,11 @@ if [ "$BACKLOG_CLOSED" = 1 ]; then
     echo "error: $ID's endpoint and local copy are cleaned up, but its backlog item could not be closed atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending close is recorded and the next session start retries it" >&2
     exit 1
   fi
+elif [ "$KIND" = secondmate ] && [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+  # A nested remote retirement can keep its route record inside the home being
+  # removed. remove_firstmate_home above already performed that physical
+  # deletion; do not turn its confirmed absence into a false cleanup failure.
+  :
 else
   if ! fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE"; then
     fm_lock_release "$META_LOCK"
