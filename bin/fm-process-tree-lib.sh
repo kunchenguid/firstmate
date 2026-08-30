@@ -12,11 +12,15 @@
 # no-ops is worse than no guard because it is trusted.
 # FM_PROCESS_RECORDS binds each exact PID to its birth identity at the decision
 # snapshot. Unresolved identity-bound candidates are retained across rescans
-# until gone, replaced, or non-live. Descendant walks carry pid+identity together
-# and include or queue a walk PID only when its live identity still matches that
-# bound birth identity. A recycled PID is never adopted as lineage; a replacement
-# may be signaled only if cwd-root discovery independently finds it under a task
-# root. Callers may signal only those records after rechecking identity.
+# until gone, replaced, or non-live. An attempt aborted by a mid-scan exit or
+# replacement does not throw away what it already bound: its bound records and
+# the aborted node's snapshot subtree are carried into the retry, where every
+# carried record is re-verified by the same rules before it can be collected.
+# Descendant walks carry pid+identity together and include or queue a walk PID
+# only when its live identity still matches that bound birth identity. A
+# recycled PID is never adopted as lineage; a replacement may be signaled only
+# if cwd-root discovery independently finds it under a task root. Callers may
+# signal only those records after rechecking identity.
 #
 # Ownership and coverage are separate questions, and conflating them is how a
 # guard becomes useless in either direction:
@@ -44,6 +48,16 @@
 #     sitting under a task root can never cause a false refusal. They are still
 #     traversed as intermediaries so our own descendants below them are found,
 #     but they are never included and never signaled.
+#     KNOWN LIMITATION, stated rather than hidden: on a hidepid=1 /proc mount a
+#     live foreign-uid process's stat read fails and kill -0 reports EPERM, so
+#     it is dropped from the snapshot as gone; on hidepid=2 (the logind default
+#     on some distributions) foreign /proc entries are invisible to the glob
+#     entirely. Either way a foreign-uid intermediary cannot be traversed, so
+#     our own descendants sitting below it are undercounted while the reap
+#     still reports a clean result. Userspace cannot detect that invisibility -
+#     /proc is the sole coverage authority by design, and there is no second
+#     source to notice the gap. The durable fix is a cgroup or session
+#     ownership boundary, which belongs to the resource guard rather than here.
 # The rule underneath: claim what you can observe, disclose what you cannot, and
 # refuse only on evidence. Refusing on theory is as useless as passing on faith.
 # shellcheck disable=SC2034
@@ -68,6 +82,8 @@ FM_PROCESS_RECORD_ERROR_PID=
 FM_PROCESS_FOUND_IDENTITY=
 FM_PROCESS_RECORD_PIDS=
 FM_PROCESS_WALK_RECORDS=
+FM_PROCESS_SUBTREE_RECORDS=
+FM_PROCESS_UNSTABLE_RECHECK_PID=
 FM_PROCESS_STAT_PPID=
 FM_PROCESS_STAT_STATE=
 FM_PROCESS_STAT_STARTTIME=
@@ -130,6 +146,10 @@ fm_process_snapshot() {
     printf -v line '%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$uid" "$state" "$identity"
     FM_PROCESS_SNAPSHOT=${FM_PROCESS_SNAPSHOT}${line}
   done
+  if [ -z "$FM_PROCESS_SNAPSHOT" ]; then
+    fm_process_error "/proc process enumeration found no processes"
+    return 1
+  fi
 }
 
 fm_process_cwd_pids_proc() {  # <canonical-root>
@@ -160,6 +180,7 @@ fm_process_cwd_pids_proc() {  # <canonical-root>
             :
           else
             rc=$?
+            [ "$rc" -eq 2 ] && FM_PROCESS_UNSTABLE_RECHECK_PID=$pid
             return "$rc"
           fi
           FM_PROCESS_ROOT_PIDS=${FM_PROCESS_ROOT_PIDS}${pid}$'\n'
@@ -378,6 +399,44 @@ $records
 EOF
 }
 
+# Every snapshot row reachable from <root-pid> by ppid edges, as pid<tab>identity
+# records. Used only when a recheck aborts an attempt (rc 2): the aborted node's
+# descendants may already be reparented by the retry, so they are carried into
+# it as identity-bound walk records and re-verified there like any other seed.
+fm_process_snapshot_subtree_records() {  # <root-pid>
+  local root_pid=$1 pid ppid uid state identity seen='' out='' current
+  local -a frontier
+  local frontier_index=0
+  FM_PROCESS_SUBTREE_RECORDS=
+  while IFS=$'\t' read -r pid ppid uid state identity; do
+    [ -n "$pid" ] || continue
+    [ "$pid" = "$root_pid" ] || continue
+    case "$state" in
+      Z*) return 0 ;;
+    esac
+    out=${out}${pid}$'\t'${identity}$'\n'
+    seen=${pid}$'\n'
+    frontier+=("$pid")
+    break
+  done <<< "$FM_PROCESS_SNAPSHOT"
+  while [ "$frontier_index" -lt "${#frontier[@]}" ]; do
+    current=${frontier[$frontier_index]}
+    frontier_index=$((frontier_index + 1))
+    while IFS=$'\t' read -r pid ppid uid state identity; do
+      [ -n "$pid" ] || continue
+      [ "$ppid" = "$current" ] || continue
+      case "$state" in
+        Z*) continue ;;
+      esac
+      fm_process_pid_list_contains "$seen" "$pid" && continue
+      seen=${seen}${pid}$'\n'
+      out=${out}${pid}$'\t'${identity}$'\n'
+      frontier+=("$pid")
+    done <<< "$FM_PROCESS_SNAPSHOT"
+  done
+  FM_PROCESS_SUBTREE_RECORDS=$out
+}
+
 fm_process_collect_candidate() {  # <canonical-root>...
   local canonical root_record root pid ppid uid state child identity child_identity
   local queue_record sorted_pids sorted_records rc
@@ -389,6 +448,7 @@ fm_process_collect_candidate() {  # <canonical-root>...
   FM_PROCESS_CANDIDATE_PIDS=
   FM_PROCESS_CANDIDATE_RECORDS=
   FM_PROCESS_UNCOVERED_PIDS=
+  FM_PROCESS_UNSTABLE_RECHECK_PID=
   FM_PROCESS_FAILED_DIR=${1:-}
   fm_process_snapshot || return 1
 
@@ -397,7 +457,12 @@ fm_process_collect_candidate() {  # <canonical-root>...
     if fm_process_cwd_pids "$canonical"; then
       :
     else
-      return $?
+      rc=$?
+      if [ "$rc" -eq 2 ]; then
+        fm_process_snapshot_subtree_records "${FM_PROCESS_UNSTABLE_RECHECK_PID:-}"
+        FM_PROCESS_CANDIDATE_RECORDS=${records}${FM_PROCESS_SUBTREE_RECORDS}
+      fi
+      return "$rc"
     fi
     roots_text=${roots_text}${FM_PROCESS_ROOT_RECORDS}
   done
@@ -462,6 +527,10 @@ fm_process_collect_candidate() {  # <canonical-root>...
       :
     else
       rc=$?
+      if [ "$rc" -eq 2 ]; then
+        fm_process_snapshot_subtree_records "$pid"
+        FM_PROCESS_CANDIDATE_RECORDS=${records}${FM_PROCESS_SUBTREE_RECORDS}
+      fi
       return "$rc"
     fi
     while IFS=$'\t' read -r child ppid uid state child_identity; do
@@ -479,6 +548,10 @@ fm_process_collect_candidate() {  # <canonical-root>...
         :
       else
         rc=$?
+        if [ "$rc" -eq 2 ]; then
+          fm_process_snapshot_subtree_records "$child"
+          FM_PROCESS_CANDIDATE_RECORDS=${records}${FM_PROCESS_SUBTREE_RECORDS}
+        fi
         return "$rc"
       fi
       if [ "$uid" != "$FM_PROCESS_CURRENT_UID" ]; then
@@ -513,7 +586,7 @@ fm_process_collect_candidate() {  # <canonical-root>...
 }
 
 fm_process_pids_under_roots() {  # <dir>...
-  local dir canonical previous_records='' candidate_records='' retained_records='' attempt=1 rc
+  local dir canonical previous_records='' candidate_records='' retained_records='' carried_records='' attempt=1 rc
   local saved_walk=${FM_PROCESS_WALK_RECORDS:-}
   local -a canonical_roots
   canonical_roots=()
@@ -536,7 +609,7 @@ fm_process_pids_under_roots() {  # <dir>...
 
   [ "${#canonical_roots[@]}" -gt 0 ] || return 0
   while [ "$attempt" -le 4 ]; do
-    FM_PROCESS_WALK_RECORDS=${saved_walk}${retained_records}
+    FM_PROCESS_WALK_RECORDS=${saved_walk}${retained_records}${carried_records}
     if fm_process_collect_candidate "${canonical_roots[@]}"; then
       FM_PROCESS_WALK_RECORDS=$saved_walk
       candidate_records=$FM_PROCESS_CANDIDATE_RECORDS
@@ -546,6 +619,7 @@ fm_process_pids_under_roots() {  # <dir>...
         return 1
       fi
       retained_records=$FM_PROCESS_MERGED_RECORDS
+      carried_records=''
       if [ "$attempt" -gt 1 ] && [ "$retained_records" = "$previous_records" ]; then
         fm_process_walk_pids_from_records "$retained_records"
         FM_PROCESS_PIDS=$FM_PROCESS_RECORD_PIDS
@@ -557,6 +631,7 @@ fm_process_pids_under_roots() {  # <dir>...
       rc=$?
       FM_PROCESS_WALK_RECORDS=$saved_walk
       [ "$rc" -eq 2 ] || return 1
+      carried_records=${carried_records}${FM_PROCESS_CANDIDATE_RECORDS:-}
       previous_records="unstable-attempt-$attempt"
     fi
     attempt=$((attempt + 1))
