@@ -149,6 +149,29 @@ aws_call() {
 
 # ---------------------------------------------------------------- note
 
+# Deliver <body> as keystrokes into THIS home's own firstmate session when it
+# is byte-identical (trimmed) to an allowlisted command invocation AND
+# config/composer-commands opts in - bin/fm-composer-command-lib.sh owns
+# recognition, session resolution, the busy/composer guard, and the
+# idempotency marker keyed on <id>. A note that is not a recognized command,
+# or the whole feature being off, is a silent no-op here: the note above is
+# already queued and woken exactly as it always was, so nothing about
+# ordinary note behavior changes. Any other outcome (busy, unresolved
+# session, unconfirmed submit) prints its own line rather than failing the
+# note queue - the note itself remains the durable, visible fallback.
+try_deliver_command() {  # <id> <body>
+  local id=$1 body=$2 lib="$FM_ROOT/bin/fm-composer-command-lib.sh"
+  [ -r "$lib" ] || return 0
+  # shellcheck source=/dev/null
+  . "$lib"
+  fm_composer_command_enabled "$CONFIG" || return 0
+  fm_composer_command_match "$body" >/dev/null 2>&1 || return 0
+  local out rc
+  out=$(fm_composer_command_deliver "$body" "$id" "$CONFIG" "$STATE"); rc=$?
+  printf '  %s\n' "$out"
+  return "$rc"
+}
+
 # Append exactly one wake so firstmate picks the note up at its next drain.
 # Failure to wake is NOT allowed to lose the note: the record is already on
 # disk, so we report the wake failure and still exit non-zero loudly.
@@ -193,6 +216,7 @@ queue_note() {
   else
     die "note $id is saved at $INBOX/$id.note but firstmate was NOT woken"
   fi
+  try_deliver_command "$id" "$body" || true
 }
 
 cmd_note() {

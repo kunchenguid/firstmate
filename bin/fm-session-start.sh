@@ -332,6 +332,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-composer-command-lib.sh
+. "$SCRIPT_DIR/fm-composer-command-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
@@ -648,6 +650,12 @@ if [ "$READ_ONLY" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
+  # Captures THIS home's own pane target/backend with certainty, ONLY while
+  # config/composer-commands opts in, so a later composer-command delivery
+  # (bin/fm-inbox.sh) can resolve firstmate's own session from durable state
+  # instead of guessing. See bin/fm-composer-command-lib.sh for the full
+  # contract; a no-op when the feature is off.
+  fm_composer_command_session_start "$CONFIG" "$STATE"
   # A full locked start publishes this home's current structured summary.
   # Publication is side-band and best-effort, so it can never change the
   # session-start result. A context re-emit is not another session start.

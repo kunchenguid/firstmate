@@ -180,6 +180,17 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Composer command delivery (config/composer-commands)
+
+The optional local, gitignored `config/composer-commands` presence flag enables default-off delivery of a captain note that is exactly an allowlisted slash-command invocation as keystrokes into THIS home's own primary session, instead of only queueing it as ordinary note text (`bin/fm-inbox.sh note`).
+Recognition is byte-exact after trimming leading/trailing whitespace: `/compact` matches, `/compact now` or `please /compact` do not, and an unrecognized note behaves exactly as it does today.
+The allowlist is fixed in `bin/fm-composer-command-lib.sh` (`/compact` only, since it is local and reversible with no side effect beyond the current session's own context) and is not configurable, so this file can only ever turn on delivery of that fixed, reviewed set - it can never grow the set of deliverable commands.
+This home's own session target is captured with certainty only from within its own live session-start turn (the same `discover_supervisor_target`/`discover_supervisor_backend` primitives `FM_SUPERVISOR_TARGET`/`FM_SUPERVISOR_BACKEND` use), bound to that session's lock, and persisted to `state/.composer-session-target`; a later restart into a different session invalidates the prior record rather than resolving it as current.
+Only a `tmux` target is currently supported for delivery; delivery is refused, not attempted, for any other recorded backend.
+A resolved session that is busy (mid-turn) or whose composer is not confirmed empty defers delivery and reports why, rather than queueing a retry or interleaving with a live turn; the note itself still remains queued as the durable, visible fallback.
+Delivery is keyed by the note's own id and marked durably delivered only after a confirmed submit, so a note is never delivered twice, including across a restart.
+See `bin/fm-composer-command-lib.sh`'s header for the full contract and rationale.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
