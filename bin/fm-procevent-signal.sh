@@ -28,6 +28,7 @@ SEND_TIMEOUT=${FM_SIGNAL_COMMAND_TIMEOUT:-30}
 SOURCE_ID=signal-account
 SIGNAL_STATE_DIR="$STATE/signal"
 PRIVATE_TEMP_DIR="$SIGNAL_STATE_DIR/tmp"
+PRIVATE_INVOCATION_TEMP_DIR="$PRIVATE_TEMP_DIR/invocation.$$"
 SIGNAL_DATA_DIR="$SIGNAL_STATE_DIR/data"
 SIGNAL_CLI=(signal-cli --data-dir "$SIGNAL_DATA_DIR")
 
@@ -40,14 +41,8 @@ SIGNAL_CLI=(signal-cli --data-dir "$SIGNAL_DATA_DIR")
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-PRIVATE_TEMPFILES=()
-
 cleanup_private_tempfiles() {
-  local file
-  for file in "${PRIVATE_TEMPFILES[@]:-}"; do
-    [ -n "$file" ] && rm -f -- "$file"
-  done
-  PRIVATE_TEMPFILES=()
+  rm -rf -- "$PRIVATE_INVOCATION_TEMP_DIR"
 }
 
 exit_on_signal() {
@@ -86,8 +81,8 @@ private_tempfile() {
   local target=$1 prefix=$2 file
   ensure_private_directory "$SIGNAL_STATE_DIR" || return 1
   ensure_private_directory "$PRIVATE_TEMP_DIR" || return 1
-  file=$(umask 077; mktemp "$PRIVATE_TEMP_DIR/$prefix.XXXXXX") || return 1
-  PRIVATE_TEMPFILES+=("$file")
+  ensure_private_directory "$PRIVATE_INVOCATION_TEMP_DIR" || return 1
+  file=$(umask 077; mktemp "$PRIVATE_INVOCATION_TEMP_DIR/$prefix.XXXXXX") || return 1
   chmod 600 "$file" || return 1
   printf -v "$target" '%s' "$file"
 }
@@ -440,7 +435,7 @@ cmd_send_locked() {
 }
 
 cmd_send() {
-  local selector=${1-} message=${2:--} lock send_rc=0 staged='' ownership_status
+  local selector=${1-} message=${2:--} lock send_rc=0 staged='' ownership_status send_owner_pid
   validate_selector "$selector"
   if [ "$message" = - ]; then
     private_tempfile staged fm-signal-input || die "cannot create private Signal message"
@@ -451,12 +446,15 @@ cmd_send() {
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock Signal lifecycle"
+    send_owner_pid=$BASHPID
     # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
     interrupt_send() {
       local status=$1
-      trap - EXIT HUP INT TERM
-      cleanup_private_tempfiles
-      fm_lock_release "$lock"
+      if [ "$BASHPID" != "$send_owner_pid" ]; then
+        trap - EXIT HUP INT TERM
+        exit "$status"
+      fi
+      trap '' HUP INT TERM
       exit "$status"
     }
     trap 'interrupt_send 129' HUP
@@ -472,7 +470,7 @@ cmd_send() {
     # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
     restore_source() {
       local status=$?
-      trap - EXIT
+      trap - EXIT HUP INT TERM
       cleanup_private_tempfiles
       if ! (cmd_arm_locked "$selector") >/dev/null 2>&1 \
         || ! "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 \
