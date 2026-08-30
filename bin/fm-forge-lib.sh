@@ -80,7 +80,7 @@ fm_forge_safe_ssh_config() {
 fm_forge_checkout_remote() {
   local checkout=${1:-} remote
   [ -d "$checkout" ] || return 1
-  remote=$(git -C "$checkout" remote get-url origin 2>/dev/null) && {
+  remote=$(command git -C "$checkout" remote get-url origin 2>/dev/null) && {
     printf '%s\n' "$remote"
     return 0
   }
@@ -94,7 +94,7 @@ fm_forge_detect_provider() {
     echo "unknown"
     return 0
   fi
-  if ! git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! command git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "local"
     return 0
   fi
@@ -127,9 +127,13 @@ fm_forge_detect_provider() {
 # fm_forge_resolve_host <remote-url-or-ssh-alias> [resolve-ssh]
 # Resolves HTTPS, Git, and SSH remote URLs to a lowercase hostname.
 fm_forge_resolve_host() {
-  local remote_url=${1:-} host="" resolve_ssh=0
+  local remote_url=${1:-} host="" resolve_ssh=0 resolve_requested=${2:-1}
 
   [ -n "$remote_url" ] || return 1
+  case "$resolve_requested" in
+    0|1) ;;
+    *) return 2 ;;
+  esac
   case "$remote_url" in
     ssh://*|git+ssh://*)
       host=${remote_url#*://}
@@ -157,11 +161,11 @@ fm_forge_resolve_host() {
   # HTTPS origin could classify the origin from an unrelated SSH alias and send
   # authentication to the wrong forge host.
   case "$remote_url" in
-    ssh://*|git+ssh://*) resolve_ssh=1 ;;
+    ssh://*|git+ssh://*) resolve_ssh=$resolve_requested ;;
     *://*) ;;
-    *:*) resolve_ssh=1 ;;
+    *:*) resolve_ssh=$resolve_requested ;;
   esac
-  if [ "$resolve_ssh" -eq 1 ] && [ "${2:-1}" -eq 1 ] \
+  if [ "$resolve_ssh" -eq 1 ] && [ "$resolve_requested" -eq 1 ] \
     && command -v ssh >/dev/null 2>&1; then
     local resolved
     resolved=$(fm_forge_safe_ssh_config | ssh -G -F /dev/stdin -- "$host" 2>/dev/null \
