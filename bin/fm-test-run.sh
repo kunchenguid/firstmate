@@ -1248,7 +1248,7 @@ families_for_changed_path() {
     bin/fm-context-handoff.py|libexec/fm-context-handoff.py|test-support/fm-context-handoff.test.py|\
     test-support/fixtures/context-handoff-transaction-core.py|tests/fm-context-handoff.test.py|\
     tests/fixtures/context-handoff-transaction-core.py|schemas/claude-obsidian.handoff.v1.schema.json|\
-    integrations/claude-context-handoff/*|integrations/claude-context-handoff/**/*|\
+    integrations/claude-context-handoff/*|\
     .pi/extensions/lib/fm-context-handoff.ts)
       printf '%s\n' pure-contract-unit
       ;;
