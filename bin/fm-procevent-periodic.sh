@@ -440,8 +440,9 @@ cmd_run() {
     ran_at=$(date +%s)
     next_due=$(( ran_at + SPEC_INTERVAL ))
     if ! write_due_retrying "$sid" "$next_due"; then
+      unregister_self "$sid"
       emit_doc "$sid" rejected \
-        "refused without running the check: its bytes do not match the registered trust binding, and the next-due time could not be recorded; re-arm to restore the cadence" \
+        "refused without running the check: its bytes do not match the registered trust binding, and the next-due time could not be recorded; retired to stop a repeat-wake loop - re-arm to restore the cadence" \
         '' "$ran_at" "$next_due" ''
       exit 0
     fi
@@ -471,8 +472,9 @@ cmd_run() {
   # persistent one reaches this refusal.
   next_due=$(( ran_at + SPEC_INTERVAL ))
   if ! write_due_retrying "$sid" "$next_due"; then
+    unregister_self "$sid"
     emit_doc "$sid" rejected \
-      "the check ran but its next-due time could not be recorded; re-arm to restore the cadence" \
+      "the check ran but its next-due time could not be recorded; retired to stop a repeat-wake loop - re-arm to restore the cadence" \
       "$rc" "$ran_at" "$next_due" "$out"
     exit 0
   fi
@@ -532,6 +534,27 @@ cmd_silent() {
 }
 
 # --- retire ------------------------------------------------------------------
+
+# unregister_self <source-id>: drop the runner registration and the private
+# spec, trust, and due state for the source this very process is currently
+# running as. Used only by cmd_run's persistent-write-failure paths: a
+# next-due write that exhausts its retries can never be advanced, so leaving
+# the source registered would have reconcile restart it every cycle against a
+# due marker stuck in the past - a repeat-wake storm instead of the single
+# announcement the caller already promised. This must NOT shell out to
+# `fm-procevent.sh retire`: that command calls stop_runner_pid on the still-
+# live claim it finds, which is this process's own runner group - self-
+# retiring that way sends SIGTERM to the very check that is still finishing
+# up and emitting its own outcome. Dropping the registration directly is
+# enough: this process is already on its way to a normal exit, and the
+# runner that invoked it releases the claim itself once it does.
+unregister_self() {  # <source-id>
+  local sid=$1
+  fm_procevent_source_lock_acquire "$sid" || return 1
+  rm -f -- "$(fm_procevent_registry_dir "$STATE")/$sid.source" \
+    "$(spec_file "$sid")" "$(trust_file "$sid")" "$(due_file "$sid")"
+  fm_procevent_source_lock_release "$sid"
+}
 
 cmd_retire() {
   local name=${1-} sid

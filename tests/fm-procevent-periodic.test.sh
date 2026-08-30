@@ -218,12 +218,13 @@ assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-trust 1" \
   "a refusal wakes firstmate instead of failing silently"
 pass "a mutated check executable is refused without running and still wakes firstmate"
 
-# --- a trust refusal whose schedule write also fails is its own outcome ------
+# --- a trust refusal whose schedule write also fails retires the source -----
 # The executable-mismatch refusal writes a new due time before it emits, the
 # same as a normal run does. If that write itself fails, the refusal must say
-# so distinctly rather than silently keeping the stale (now past-due)
-# schedule under a plain trust-mismatch message, because a past-due schedule
-# lets the watcher's next reconcile repeat the refusal immediately.
+# so distinctly, and the source must be retired rather than left registered
+# with its stale (now past-due) schedule, because a past-due schedule lets
+# the watcher's next reconcile restart the source and repeat the refusal
+# forever instead of announcing it once.
 H="$TMP_ROOT/h-trustduewrite"; new_home "$H"
 MUT2="$TMP_ROOT/mutable2.sh"
 MUT2LOG="$TMP_ROOT/mutable2-runs"
@@ -241,22 +242,28 @@ fi
 exec "$real_mv" "\$@"
 SH
 chmod +x "$FAKEBIN2/mv"
-before_due=$(cat "$H/state/periodic/periodic-trustduewrite.due")
 PATH="$FAKEBIN2:$PATH" pe "$H" start periodic-trustduewrite >/dev/null
 wait_for_result "$H" periodic-trustduewrite 1 || fail "the trust+schedule-write refusal captured no result"
 RESULT=$(result_path "$H" periodic-trustduewrite 1)
 assert_grep 'status: rejected' "$RESULT" "a changed executable is still refused"
 assert_grep 'next-due time could not be recorded' "$RESULT" \
   "the refusal names the failed schedule write, not just the trust mismatch"
+assert_grep 'retired to stop a repeat-wake loop' "$RESULT" \
+  "the refusal explains that the source was retired"
 assert_contains "$(count_lines "$MUT2LOG")" 0 "the mutated check never ran"
-after_due=$(cat "$H/state/periodic/periodic-trustduewrite.due")
-assert_contains "$after_due" "$before_due" "a failed schedule write leaves the durable due file untouched"
 if per "$H" silent "$RESULT"; then
   fail "a refusal must never declare silence"
 fi
 assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-trustduewrite 1" \
   "the combined refusal still wakes firstmate instead of failing silently"
-pass "a trust refusal whose schedule write also fails announces the write failure distinctly"
+assert_absent "$H/state/procevent/periodic-trustduewrite.source" \
+  "a persistent schedule-write failure retires the source instead of leaving it to hot-loop"
+assert_absent "$H/state/periodic/periodic-trustduewrite.due" \
+  "retiring on a persistent write failure also drops the stale due marker"
+PATH="$FAKEBIN2:$PATH" pe "$H" reconcile >/dev/null
+assert_absent "$(result_path "$H" periodic-trustduewrite 2)" \
+  "reconcile does not restart a source that retired itself on a persistent write failure"
+pass "a trust refusal whose schedule write also fails announces once and retires instead of hot-looping"
 
 # --- a mutated spec is refused without running anything ----------------------
 H="$TMP_ROOT/h-spec"; new_home "$H"
@@ -387,11 +394,16 @@ assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-nat124 1" \
   "a natural exit 124 still wakes firstmate the same as any other timeout"
 pass "a check that exits 124 on its own is classified as a timeout, not preserved as a report"
 
-# --- a failed schedule write is announced, not swallowed --------------------
+# --- a failed schedule write is announced and the source is retired ---------
 # write_due renames its temp file onto <sid>.due with `mv -f`. A PATH-shimmed
 # mv that fails only for that exact rename target reproduces a write failure
 # (a full or read-only filesystem) without disturbing any other file under
 # PERIODIC_DIR, so the check itself still runs normally.
+# A persistent failure (every retry exhausted) can never advance the due
+# marker, so leaving the source registered would have the runner's own
+# reconcile restart it against a due marker stuck in the past - a repeat-wake
+# loop instead of the single announcement below. The run retires itself
+# instead, which is what makes "re-arm to restore the cadence" true.
 H="$TMP_ROOT/h-duewrite"; new_home "$H"
 per "$H" arm duewrite --interval 3600 --timeout 60 -- "$CLEAN" >/dev/null
 real_mv=$(command -v mv) || fail "could not locate mv for the schedule-write fixture"
@@ -411,6 +423,8 @@ RESULT=$(result_path "$H" periodic-duewrite 1)
 assert_grep 'status: rejected' "$RESULT" "a failed schedule write is announced as a refusal"
 assert_grep 'next-due time could not be recorded' "$RESULT" \
   "the refusal names the schedule write as the cause"
+assert_grep 'retired to stop a repeat-wake loop' "$RESULT" \
+  "the refusal explains that the source was retired"
 assert_grep 'daily sweep header' "$RESULT" "the refusal still keeps the check's own evidence"
 assert_contains "$(per "$H" classify "$RESULT")" rejected "classify reads the refusal"
 if per "$H" silent "$RESULT"; then
@@ -418,16 +432,23 @@ if per "$H" silent "$RESULT"; then
 fi
 assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-duewrite 1" \
   "a failed schedule write wakes firstmate instead of masking the outcome"
-pass "a check that ran but could not have its schedule recorded announces instead of masking it"
+assert_absent "$H/state/procevent/periodic-duewrite.source" \
+  "a persistent schedule-write failure retires the source instead of leaving it to hot-loop"
+assert_absent "$H/state/periodic/periodic-duewrite.due" \
+  "retiring on a persistent write failure also drops the stale due marker"
+PATH="$FAKEBIN:$PATH" pe "$H" reconcile >/dev/null
+assert_absent "$(result_path "$H" periodic-duewrite 2)" \
+  "reconcile does not restart a source that retired itself on a persistent write failure"
+pass "a check that ran but could not have its schedule recorded announces once and retires instead of hot-looping"
 
 # --- a transient schedule-write failure self-heals within one run -----------
-# A persistent write failure (above) is announced every reconcile cycle
-# because the due marker stays in the past and the source is non-terminal.
-# For a failure that clears after a couple of attempts (the common real case:
-# momentary disk pressure), the retry inside write_due_retrying must absorb it
-# within this one run so the check's own outcome is captured normally instead
-# of forcing repeated refusals across cycles. A counter file makes the shimmed
-# mv fail exactly twice, then succeed like the real command.
+# A persistent write failure (above) retires the source so it is announced
+# exactly once instead of looping. For a failure that clears after a couple
+# of attempts (the common real case: momentary disk pressure), the retry
+# inside write_due_retrying must absorb it within this one run so the check's
+# own outcome is captured normally instead of forcing a refusal at all. A
+# counter file makes the shimmed mv fail exactly twice, then succeed like the
+# real command.
 H="$TMP_ROOT/h-duewrite-transient"; new_home "$H"
 per "$H" arm duewritetransient --interval 3600 --timeout 60 -- "$CLEAN" >/dev/null
 FAKEBIN="$TMP_ROOT/duewrite-transient-fakebin"; mkdir -p "$FAKEBIN"
