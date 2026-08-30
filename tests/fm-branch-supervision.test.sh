@@ -12,6 +12,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-branch-supervision)
+fm_git_identity fmtest fmtest@example.invalid
 
 # --- byte-stable branch prompt ------------------------------------------------
 
