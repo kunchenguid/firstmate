@@ -852,7 +852,7 @@ COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quot
 FORGE_PROJECTS_RAW=$(fm_forge_scan_registered_projects "$PROJECTS")
 FORGE_PROJECTS=$(while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
   [ -n "${_proj_provider:-}" ] || continue
-  _proj_mode=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-project-mode.sh" "$_proj_id" 2>/dev/null || true)
+  _proj_mode=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$_proj_id" 2>/dev/null || true)
   [ "${_proj_mode%% *}" = local-only ] && continue
   printf '%s\t%s\t%s\n' "$_proj_id" "$_proj_provider" "${_proj_host:-}"
 done <<< "$FORGE_PROJECTS_RAW")
