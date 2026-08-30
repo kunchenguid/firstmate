@@ -735,6 +735,31 @@ test_branch_grant_refuses_rows_already_claimed_by_main() {
   pass "branch grant cannot take a row already claimed by main"
 }
 
+test_extra_field_row_cannot_be_granted_or_consumed() {
+  local dir state before out err rc
+  dir=$(make_case extra-field-row)
+  state="$dir/state"
+  printf '%s\n' '1700000000\t1\tsignal\ttask-a.status\tsignal: task-a.status\textra' > "$state/.wake-queue"
+  before="$dir/before"
+  cp "$state/.wake-queue" "$before"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "drain rejected an otherwise recoverable malformed queue fixture"
+  cmp -s "$before" "$state/.wake-queue" \
+    || fail "drain consumed a row with an extra durable field"
+
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" extra-field || fail "branch owner activation failed"
+  out="$dir/grant.out"
+  err="$dir/grant.err"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish extra-field 1 > "$out" 2> "$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "branch grant accepted a row with an extra durable field"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "malformed row received a branch grant snapshot"
+  cmp -s "$before" "$state/.wake-queue" \
+    || fail "branch grant changed a row with an extra durable field"
+  pass "extra-field wake rows stay ungranted and unconsumed"
+}
+
 test_actor_filter_precedes_same_key_deduplication() {
   local dir state main_sequence main_generation branch_sequence branch_generation
   dir=$(make_case actor-dedup-order)
@@ -1227,6 +1252,7 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
 test_branch_grant_refuses_rows_already_claimed_by_main
+test_extra_field_row_cannot_be_granted_or_consumed
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses

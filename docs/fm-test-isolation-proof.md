@@ -83,7 +83,7 @@ This record is the concurrent isolation proof for the portable parallel candidat
 The candidate set now uses `tests/fm-captain-hold-lifecycle.test.sh` in place of the obsolete decision-hold lifecycle candidate.
 The whole proof was re-run at concurrency 4 to produce a single coherent 25-candidate archive.
 This run supersedes the 2026-08-20 proof (`FM_ISOLATION_SUMMARY total=25 failed=0 concurrency=4 duration_ms=189201`); every duration above comes from the one run recorded here.
-The candidate set is whatever `bin/fm-test-isolation-proof.sh --list` reports and is unchanged by this refresh.
+The refreshed candidate set supersedes the obsolete decision-hold set and is whatever `bin/fm-test-isolation-proof.sh --list` reports.
 
 ## Scope
 

@@ -110,7 +110,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const eligibleSeqs: string[] = [];
   for (const line of rows) {
     const fields = line.split("\t");
-    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
+    if (fields.length !== 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
     const seq = fields[1];
     const kind = fields[2];
     const key = fields[3];

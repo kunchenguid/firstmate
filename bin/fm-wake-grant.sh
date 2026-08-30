@@ -86,7 +86,7 @@ case "${1:-}" in
         while ((getline line < requested) > 0) wanted[line]=1
         while ((getline line < main) > 0) owned[line]=1
       }
-      NF >= 5 && $2 ~ /^[0-9]+$/ && $2 in wanted { present[$2]=1 }
+      NF == 5 && $2 ~ /^[0-9]+$/ && $2 in wanted { present[$2]=1 }
       END {
         for (seq in wanted) if (seq in owned) exit 3
         for (seq in wanted) if (!(seq in present)) exit 1
