@@ -2,10 +2,8 @@
 # fm-secondmate-report.sh - optional helper to append a correlated parent report.
 #
 # A secondmate answering a marked from-firstmate request must report on the
-# parent status channel with the request's corr=<id> token. This helper makes
-# that easy, but correctness must not depend on using it: a plain echo of a
-# status line that includes the same corr token is equally valid
-# (bin/fm-pending-reply-lib.sh).
+# parent status channel with the request's corr=<id> token. This helper formats
+# that event and publishes it through bin/fm-status-append.sh.
 #
 # Usage:
 #   fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>
@@ -68,21 +66,23 @@ if [ ! -d "$(dirname "$STATUS_FILE")" ]; then
 fi
 
 token=$(fm_pending_reply_corr_token "$CORR")
+LINE=
 if [ "$DOC_MODE" = 1 ]; then
   [ $# -ge 1 ] || usage
   DOC_PATH=$1
   shift
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (%s via-helper)\n' "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$STATUS_FILE"
+    LINE=$(printf '%s [%s]: %s (%s via-helper)' "$VERB" "$token" "$NOTE" "$DOC_PATH")
   else
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$DOC_PATH" >> "$STATUS_FILE"
+    LINE=$(printf '%s [%s]: %s (via-helper)' "$VERB" "$token" "$DOC_PATH")
   fi
 else
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$STATUS_FILE"
+    LINE=$(printf '%s [%s]: %s (via-helper)' "$VERB" "$token" "$NOTE")
   else
-    printf '%s [%s]: (via-helper)\n' "$VERB" "$token" >> "$STATUS_FILE"
+    LINE=$(printf '%s [%s]: (via-helper)' "$VERB" "$token")
   fi
 fi
+"$SCRIPT_DIR/fm-status-append.sh" "$STATUS_FILE" "$LINE"

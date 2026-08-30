@@ -481,9 +481,7 @@ set -eu
 if [ "${2:-}" = "${FM_PUBLICATION_RECORD:?}" ]; then
   (
     printf 'attempted\n' > "${FM_STATUS_WRITER_ATTEMPT:?}"
-    # shellcheck source=/dev/null
-    . "${FM_WAKE_LIB:?}"
-    fm_status_append "${FM_EXPECTED_STATUS_FILE:?}" 'blocked: concurrent supported writer'
+    "${FM_STATUS_APPEND:?}" "${FM_EXPECTED_STATUS_FILE:?}" 'blocked: concurrent supported writer'
     if [ -f "$FM_PUBLICATION_RECORD" ]; then
       printf 'inbox-visible\n' > "${FM_STATUS_WRITER_OBSERVATION:?}"
     else
@@ -502,7 +500,7 @@ SH
     FM_PUBLICATION_RECORD="$dir/home/state/t1.inbox/001.msg" \
     FM_STATUS_WRITER_ATTEMPT="$dir/status-writer-attempt" \
     FM_STATUS_WRITER_OBSERVATION="$dir/status-writer-observation" \
-    FM_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
+    FM_STATUS_APPEND="$ROOT/bin/fm-status-append.sh" \
     FM_REAL_MV="$real_mv" \
     -- t1 "validate before a later blocker" \
     || fail "the serialized status publication failed: $(cat "$err")"
