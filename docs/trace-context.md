@@ -100,9 +100,9 @@ This is a deliberate, source-owned choice:
   There is no configured provider command, no network, and no watchdog.
   The normal cost is small, but `od`/`tr` are external processes, so there is no hard latency guarantee - this is not a guaranteed-negligible bound.
   Any entropy or self-validation failure that returns omits the carrier for that spawn without aborting source work; a corrupt recorded carrier is re-minted as a fresh root rather than propagated (it is not an omission).
-  If the pre-launch carrier export fails, or recording the carrier fails after export, Firstmate clears `TRACEPARENT` in the detected existing pane interpreter and requires positive proof that it is absent before appending the unchanged launch program.
-  This preserves that pane interpreter's parsing of raw launch programs, including builtins and compound commands, instead of converting them into environment-command arguments.
-  A failed shell detection, clear, or proof refuses the launch; a proven clear omits the `traceparent=` metadata claim and still launches the task, so the child never receives an identity absent from its metadata.
+  If the pre-launch carrier export fails, or recording the carrier fails after export, Firstmate binds the `TRACEPARENT` clear, absence proof, and unchanged raw launch into one program for the detected existing pane interpreter.
+  The launch runs only after that in-program proof, so an interactive prompt hook cannot restore the carrier between proof and launch, and builtins or compound commands keep the pane interpreter's parsing context.
+  A failed shell detection, submission, clear, or proof refuses the launch; a proven clear omits the `traceparent=` metadata claim and still launches the task, so the child never receives an identity absent from its metadata.
 - **Metadata-only.**
   The value lives in the ephemeral pane shell and in `state/<id>.meta`; teardown removes state as before, so there is no new durable surface and no schema migration.
 

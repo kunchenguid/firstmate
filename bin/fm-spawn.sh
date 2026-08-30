@@ -194,8 +194,9 @@
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
-# TRACEPARENT; the default-off path writes neither, leaving the generated meta
-# and launch environment unchanged.
+# TRACEPARENT. A fresh default-off spawn writes neither and leaves the launch
+# environment unchanged; a default-off relaunch clears any leftover pane value
+# in the same submitted shell program that runs the unchanged raw launch.
 #   --traceparent <carrier> delivers a carrier that a REMOTE parent already
 #   resolved and will record, instead of resolving one from this home's frozen
 #   decision. It is accepted only for --secondmate spawns, only as a strictly
