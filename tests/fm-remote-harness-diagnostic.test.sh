@@ -54,7 +54,7 @@ case "$pid:$field" in
   701:args=) printf '%s\n' 'bash -l' ;;
   701:ppid=) printf '%s\n' 1 ;;
   702:comm=) printf '%s\n' node ;;
-  702:args=) printf '%s\n' 'node /opt/openai/codex/bin/codex.js' ;;
+  702:args=) printf '%s\n' 'node /opt/openai/node_modules/@openai/codex/bin/codex.js' ;;
   702:ppid=) printf '%s\n' 701 ;;
   *) exit 1 ;;
 esac
@@ -79,7 +79,7 @@ EOF
     "diagnostic retains the observed kernel command name"
   assert_contains "$out" 'args=redacted' \
     "diagnostic redacts the observed process arguments"
-  assert_not_contains "$out" 'node\ /opt/openai/codex/bin/codex.js' \
+  assert_not_contains "$out" 'node\ /opt/openai/node_modules/@openai/codex/bin/codex.js' \
     "diagnostic does not expose the fixture command line"
   assert_contains "$out" 'result=verified-harness-found' \
     "diagnostic delegates classification to the shared matcher"

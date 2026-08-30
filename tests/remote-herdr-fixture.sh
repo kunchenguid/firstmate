@@ -28,9 +28,14 @@
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
-  mkdir -p "$remote_root/bin"
+  local codex_script="$1/lib/node_modules/@openai/codex/bin/codex.js"
+  mkdir -p "$remote_root/bin" "$(dirname "$codex_script")"
   command -v node >/dev/null 2>&1 || return 1
-  ln -sf "$(command -v node)" "$remote_root/bin/codex"
+  cat > "$codex_script" <<'JS'
+#!/usr/bin/env node
+setInterval(() => {}, 1000);
+JS
+  chmod +x "$codex_script"
   cat > "$script" <<SH
 #!/usr/bin/env bash
 set -u
@@ -38,7 +43,7 @@ STATE='$state'
 LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
-CODEX_BIN='$remote_root/bin/codex'
+CODEX_BIN='$codex_script'
 NODE_BIN='$(command -v node)'
 PROCESS_MODE_FILE='$state.process-mode'
 SH
@@ -105,7 +110,7 @@ case "${1:-} ${2:-}" in
     agent_pid=$(cat "$agent_pid_file" 2>/dev/null || true)
     if [ "$process_mode" != generic-only ] && ! kill -0 "$agent_pid" 2>/dev/null; then
       CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54 \
-        "$CODEX_BIN" -e 'setInterval(() => {}, 1000)' >/dev/null 2>&1 &
+        "$NODE_BIN" "$CODEX_BIN" -e 'setInterval(() => {}, 1000)' >/dev/null 2>&1 &
       agent_pid=$!
       printf '%s\n' "$agent_pid" > "$agent_pid_file"
     fi

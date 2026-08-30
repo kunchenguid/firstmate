@@ -283,14 +283,18 @@ SH
 }
 
 test_remote_codex_session_binding_claims_only_the_matching_session() {
-  local dir fakebin proc home session other out binding mode
+  local dir fakebin proc home session other out binding mode codex_exe
   dir="$TMP_ROOT/remote-codex-binding"
   fakebin=$(fm_fakebin "$dir")
   proc="$dir/proc"
   home="$dir/home"
   session=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54
   other=16b9797f-12d9-4645-b3af-0d0f6c2e8b8a
-  mkdir -p "$proc/4242" "$home/state"
+  codex_exe="$dir/verified/codex"
+  mkdir -p "$proc/4242" "$home/state" "$(dirname "$codex_exe")"
+  : > "$codex_exe"
+  chmod +x "$codex_exe"
+  ln -s "$(command -v node)" "$proc/4242/exe"
   printf 'CODEX_SESSION_ID=%s\0PATH=/usr/bin\0' "$session" > "$proc/4242/environ"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -319,7 +323,7 @@ case "$pid:$field" in
     case "${FM_TEST_CODEX_SHAPE:-exact}" in
       decoy) printf '%s\n' 'node -e noop /tmp/codex/data' ;;
       helper-script) printf '%s\n' 'node /tmp/codex/helper.js' ;;
-      script) printf '%s\n' 'node /opt/openai/codex/bin/codex.js' ;;
+      script) printf '%s\n' 'node /opt/openai/node_modules/@openai/codex/bin/codex.js' ;;
       helper) printf '%s\n' 'codex-helper --serve' ;;
       login) printf '%s\n' '-codex --interactive' ;;
       double-login) printf '%s\n' '--codex --interactive' ;;
@@ -364,20 +368,36 @@ SH
   fi
   [ ! -e "$home/state/.fm-codex-session-binding" ] \
     || fail "rejected Codex helper evidence published a binding"
-  FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
-    bash -c '. "$1"; fm_harness_process_matches -codex "-codex --interactive" /opt/openai/bin/codex' _ "$LIB" \
-    || fail "a login-style process with an exact Codex launcher lost its supported identity"
-  if FM_TEST_CODEX_SHAPE=login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
-    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB"; then
-    fail "a cosmetic login-style Codex name became identity authority without an exact launcher"
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; fm_harness_process_matches codex "codex --interactive" codex' _ "$LIB"; then
+    fail "a bare Codex launcher name became identity authority without process evidence"
   fi
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a Node executable reached through a Codex-named symlink became binding authority"
+  fi
+  [ ! -e "$home/state/.fm-codex-session-binding" ] \
+    || fail "rejected Node symlink evidence published a Codex binding"
+  rm -f "$proc/4242/exe"
+  ln -s "$codex_exe" "$proc/4242/exe"
+  FM_TEST_CODEX_SHAPE=login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
+    || fail "a login-style process backed by a verified Codex executable lost its supported identity"
   if FM_TEST_CODEX_SHAPE=double-login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB"; then
     fail "more than one leading dash became Codex identity authority"
   fi
+  rm -f "$proc/4242/exe"
+  ln -s "$(command -v node)" "$proc/4242/exe"
   FM_TEST_CODEX_SHAPE=script FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
     || fail "the installed Codex script entrypoint was not recognized"
+  rm -f "$proc/4242/exe"
+  ln -s "$codex_exe" "$proc/4242/exe"
   out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"

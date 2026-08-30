@@ -142,7 +142,7 @@ fm_codex_host_agent_matches() { # <pid>; prove the host-side process is Codex, n
   args=$(ps -o args= -p "$pid" 2>/dev/null) \
     || { FM_CODEX_HOST_MATCH_REASON='reject:args-unreadable'; return 1; }
   argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
-  if ! fm_harness_process_matches "$comm" "$args" "$argv0"; then
+  if ! fm_harness_process_matches "$comm" "$args" "$argv0" "$pid"; then
     FM_CODEX_HOST_MATCH_REASON=$FM_HARNESS_MATCH_REASON
     return 1
   fi
@@ -282,16 +282,26 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
-fm_codex_launcher_path_matches() {  # <path>
-  local base
-  [ -n "$1" ] || return 1
-  base=$(basename -- "$1")
-  [ "$base" = codex ]
-}
-
 fm_codex_script_path_matches() {  # <path>
   case "$1" in
-    */codex/bin/codex.js) return 0 ;;
+    */node_modules/@openai/codex/bin/codex.js) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_codex_executable_identity_matches() {  # <pid> <comm>
+  local pid=$1 comm=$2 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} executable= base
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  base=$(basename -- "$comm")
+  case "$base" in codex|-codex) ;; *) return 1 ;; esac
+  if [ -L "$proc_root/$pid/exe" ]; then
+    executable=$(readlink "$proc_root/$pid/exe" 2>/dev/null) || return 1
+    [ "$(basename -- "$executable")" = codex ]
+    return
+  fi
+  [ "$proc_root" = /proc ] && [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+  case "$comm" in
+    /*) [ "$base" = codex ] && [ -f "$comm" ] && [ ! -L "$comm" ] && [ -x "$comm" ] ;;
     *) return 1 ;;
   esac
 }
@@ -313,23 +323,28 @@ FM_HARNESS_IS_CLAUDE=0
 # a refusal diagnostic; it is deliberately not lock or dispatch authority.
 FM_HARNESS_MATCH_REASON=
 FM_HARNESS_MATCH_NAME=
-fm_harness_process_matches() {  # <comm> <args> [argv0]
-  local comm=$1 args=$2 base argv0 name token
+fm_harness_process_matches() {  # <comm> <args> [argv0] [pid]
+  local comm=$1 args=$2 base argv0 name token pid=${4:-}
   local -a words
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_MATCH_REASON=
   FM_HARNESS_MATCH_NAME=
   base=$(basename -- "$comm")
   argv0=${3:-${args%% *}}
-  if fm_codex_launcher_path_matches "$comm" || fm_codex_launcher_path_matches "$argv0"; then
-    FM_HARNESS_MATCH_NAME=codex
-    FM_HARNESS_MATCH_REASON="accept:exact-codex-launcher observed-basename=$base"
-    return 0
-  fi
+  case "$base" in
+    codex|-codex)
+      if fm_codex_executable_identity_matches "$pid" "$comm"; then
+        FM_HARNESS_MATCH_NAME=codex
+        FM_HARNESS_MATCH_REASON="accept:verified-codex-executable observed-basename=$base"
+        return 0
+      fi
+      FM_HARNESS_MATCH_REASON="reject:unverified-codex-launcher observed-basename=$base"
+      return 1
+      ;;
+    *codex*) FM_HARNESS_MATCH_REASON="reject:non-exact-codex-basename=$base"; return 1 ;;
+  esac
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in
-      -codex) FM_HARNESS_MATCH_REASON='reject:cosmetic-login-codex-without-exact-launcher'; return 1 ;;
-      *codex*) FM_HARNESS_MATCH_REASON="reject:non-exact-codex-basename=$base"; return 1 ;;
       *claude*) name=claude ;;
       *opencode*) name=opencode ;;
       *grok*) name=grok ;;
@@ -414,7 +429,7 @@ fm_harness_ancestry_diagnostic() {  # [pid]
     args=$(ps -o args= -p "$pid" 2>/dev/null || true)
     argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    if fm_harness_process_matches "$comm" "$args" "$argv0"; then
+    if fm_harness_process_matches "$comm" "$args" "$argv0" "$pid"; then
       printf 'hop=%s pid=%s ppid=%q comm=%q argv0=%q args=redacted match=%q\n' \
         "$hop" "$pid" "$ppid" "$comm" "$argv0" "$FM_HARNESS_MATCH_REASON"
       matched=1
@@ -460,7 +475,7 @@ fm_harness_ancestry_pids() {
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
-    if fm_harness_process_matches "$comm" "$args" "$argv0"; then
+    if fm_harness_process_matches "$comm" "$args" "$argv0" "$pid"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -514,7 +529,7 @@ fm_harness_pid_alive() {
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
-  fm_harness_process_matches "$comm" "$args" "$argv0"
+  fm_harness_process_matches "$comm" "$args" "$argv0" "$pid"
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
