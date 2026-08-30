@@ -26,7 +26,9 @@
 #     targets it, not the daemon's own new pane. The incident evidence supports
 #     the inference that Claude's native background Bash retains the target's
 #     native busy state and therefore cannot deliver away-mode injection on
-#     herdr.
+#     herdr. Migrate an already-live native daemon through fm-afk-return.sh
+#     begin/check before a fresh launcher start, never through raw stop/start:
+#     stop success does not prove a guard-blocked final flush delivered.
 #   - Other harnesses with a native in-pane tracked-background tool run this
 #     directly via that tool only when it does not retain the target busy.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
@@ -53,12 +55,12 @@ fm_afk_start_usage() {
 # artifacts so they cannot surface as stale escalations under the new session.
 # These are session-scoped by timing: a fresh entry owns a new supervision
 # session and the new daemon has not produced anything yet, so anything present
-# here belongs to a PRIOR session. This never drops a genuinely-pending
-# escalation - the delivery buffer is a transient cache, and any condition still
-# true (a crew still blocked, a check still firing) is re-derived and re-escalated
-# fresh by the daemon's heartbeat catch-all scan and the durable
-# state/.wake-queue replay (see docs/herdr-backend.md "Away-mode stale-artifact
-# lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
+# here belongs to a PRIOR session. The supported live-session return or migration
+# first runs fm-afk-return.sh begin/check, which preserves buffered escalation and
+# wedge evidence in its fail-closed catch-up gate before this cache is cleared.
+# A raw stop/start is not a supported migration because the source wake may
+# already be acknowledged and therefore may not reconstruct the buffered digest
+# (see docs/herdr-backend.md "Away-mode supervisor support").
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
 fm_afk_clear_stale_artifacts() {  # <state-dir>

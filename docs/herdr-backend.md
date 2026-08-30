@@ -296,14 +296,17 @@ The busy guard must defer in that shape, so native same-pane hosting cannot deli
 On a fresh launch, run `bin/fm-afk-launch.sh start` from that primary instead.
 It captures the captain pane first, creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
 If a native-hosted daemon is already live, `start` only refreshes `state/.afk` and reports that no new terminal was created.
-After `bin/fm-afk-launch.sh stop` succeeds, migrate it with `bin/fm-afk-launch.sh start`, never by launching `start-native` again.
+Do not migrate it with a raw `bin/fm-afk-launch.sh stop` followed by `start`: stop success proves lifecycle shutdown but does not prove that a guard-blocked final flush delivered, and the fresh start clears the remaining session buffer even when its source wake was already acknowledged.
+Run `bin/fm-afk-return.sh begin` instead; it creates a fail-closed catch-up gate before shutdown, then retains buffered-escalation and wedge evidence and presents the durable wake drain.
+Process that catch-up and any blocker; if the gate remains pending, run `bin/fm-afk-return.sh check` until it succeeds, and run `bin/fm-afk-launch.sh start` only after either command reports that catch-up is clear.
+Never migrate by launching `start-native` again.
 Pi uses the same terminal-backed route because it has no native tracked background mechanism.
 Other native background mechanisms remain eligible only when they do not retain their supervisor target in a busy state.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 
 On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
-A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
+A fresh entry clears stale transient escalation caches, so the supported return and migration path first carries any live buffer into the durable catch-up gate; durable queue and task records alone do not prove that an already acknowledged escalation will be reconstructed.
 
 ## Destructive lab safety
 

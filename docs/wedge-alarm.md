@@ -17,7 +17,9 @@ The busy guard queries Herdr native agent state before its harness-scoped render
 Together, those observations support the inference that the native background job itself holds the target's native agent state `working` for its lifetime.
 Under that inferred mechanism, same-target native hosting cannot deliver by construction.
 That is a hosting limitation, not a reason to weaken the guard: on a fresh launch, use `bin/fm-afk-launch.sh start` so the daemon runs in its own non-visible workspace with an explicit target.
-If the native-hosted daemon is already live, `start` only refreshes the away flag and cannot move it; after `bin/fm-afk-launch.sh stop` succeeds, run `bin/fm-afk-launch.sh start`, not `start-native`.
+If the native-hosted daemon is already live, `start` only refreshes the away flag and cannot move it.
+Do not use a raw stop-then-start migration because stop success does not prove that a guard-blocked final flush delivered, while the fresh start clears the remaining buffer.
+Use `bin/fm-afk-return.sh begin`, process its retained catch-up evidence and blockers, complete `bin/fm-afk-return.sh check` if the gate remains pending, and run `bin/fm-afk-launch.sh start`, not `start-native`, only after catch-up is clear; [`herdr-backend.md`](herdr-backend.md#away-mode-supervisor-support) owns the mechanism.
 `FM_MAX_DEFER_SECS` bounds how long that deferral can remain silent: once the threshold is reached, it raises this alarm and preserves the buffered escalation.
 Treat the alarm as a visible delivery failure, not as permission to override either guard.
 

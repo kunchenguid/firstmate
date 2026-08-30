@@ -9,11 +9,11 @@
 # inference that a native background Bash job retains the supervised Claude
 # pane's busy state, so that hosting cannot deliver through the busy guard.
 # Claude/herdr therefore uses this script's non-visible tracked terminal path.
-# A live daemon makes `start` refresh .afk without creating a terminal; migrate
-# a native-hosted daemon after `stop` succeeds with a fresh `start`, never
-# `start-native`. A harness with NO native background mechanism (pi) uses the
-# same terminal-backed path. It never splits the captain's active pane, and
-# NEVER uses shell `&` (which herdr/codex can reap).
+# A live daemon makes `start` refresh .afk without a terminal; migrate native
+# hosting through fm-afk-return.sh begin/check before fresh `start`, never raw
+# stop/start or `start-native`: stop success does not attest delivery, and fresh
+# start clears the buffer. A harness with NO native background mechanism (pi)
+# uses the same path, never splits the captain pane, and NEVER uses shell `&`.
 #
 # Correct supervisor targeting: the daemon finds the captain pane to inject into
 # from its OWN inherited env (discover_supervisor_target). Running it in a
@@ -34,7 +34,9 @@
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
-#                              id, then clear state/.afk last.
+#                              id, then clear state/.afk last. This low-level exit
+#                              does not attest delivery; normal return and live
+#                              migration use fm-afk-return.sh begin/check.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #

@@ -29,8 +29,11 @@ batched digest rather than per-wake injections.
    - **Claude on Herdr:** do not use the Claude native background Bash path.
      On a fresh launch, run `bin/fm-afk-launch.sh start`; the terminal-backed launcher captures the captain target before creating its separate non-visible workspace and passes that target explicitly to the daemon.
      If a native-hosted daemon is already live, `start` only refreshes `state/.afk` and returns with no new terminal, so it cannot migrate that daemon.
-     After `bin/fm-afk-launch.sh stop` succeeds, enter again with `bin/fm-afk-launch.sh start`.
-     Do not follow the stop with `start-native`, which recreates the same unsupported same-target construction.
+     Do not migrate it with a raw `bin/fm-afk-launch.sh stop` followed by `start`: a successful low-level stop proves lifecycle shutdown, not delivery, and a blocked final flush leaves a buffer that the fresh start would clear after its source wake may already be acknowledged.
+     Instead run `bin/fm-afk-return.sh begin`, which creates the fail-closed return gate before shutdown and retains the buffered escalation and wedge evidence in that gate.
+     Process the emitted catch-up and any blocker; if the gate remains pending, run `bin/fm-afk-return.sh check` until it succeeds.
+     Only after `begin` or `check` reports that catch-up is clear may you enter again with `bin/fm-afk-launch.sh start`.
+     Do not use `start-native`, which recreates the same unsupported same-target construction.
      The incident evidence supports the inference that the native job keeps the supervised Claude pane's Herdr agent state `working` for the daemon's lifetime, so the busy guard correctly defers every injection.
    - **Other harnesses WITH a native in-pane tracked-background tool** (for example, Grok's background tool): first run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
@@ -221,9 +224,9 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts that must be presented through the return gate before a live session is replaced, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
-Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
+Always exit or migrate a live session through `bin/fm-afk-return.sh begin` and its successful `check`; that path creates the durable catch-up gate before calling the lower-level launcher stop, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
 
 ## Reliability properties
