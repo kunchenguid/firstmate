@@ -1045,7 +1045,7 @@ headroom_unmeasurable() {  # <reason> <advice> <json> [<version>] [<build-state>
     return 0
   fi
   # bin/fm-headroom-lib.sh owns the text shape, because the callers that could
-  # not run this command at all have to print the same four lines.
+  # not run this command at all have to print the same lines.
   fm_headroom_unmeasurable_text "$reason" "$advice" "$version" "$build" \
     "${6:-0}" "${7:-0}" "${8:-0}" "${9:-}"
 }

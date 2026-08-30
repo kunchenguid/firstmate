@@ -78,8 +78,8 @@ HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record 
 
 `tests/fm-usage-wall.test.sh` pins the remaining unmeasurable paths - a failing gauge, a hanging gauge, a report with neither table, a row whose percentage is not a number, a row that names no provider, and `auth_required` - along with the rule that `--allow-keychain-prompt` is never passed.
 
-The two surfaces that RENDER this gauge - the fleet view and the session-start digest - print the same four lines when they could not run the command at all, from the one owner in [`bin/fm-headroom-lib.sh`](../../bin/fm-headroom-lib.sh).
-Written out per caller, the copies had drifted (`treat it as unproven` against `treat every provider as unproven`) and both emitted only the first and third lines, so a reader or consumer scanning for `HEADROOM_SUMMARY: verdict=` found no verdict on exactly the paths where the gauge failed.
+The two surfaces that RENDER this gauge - the fleet view and the session-start digest - print the same lines when they could not run the command at all, from the one owner in [`bin/fm-headroom-lib.sh`](../../bin/fm-headroom-lib.sh), exactly as shown in the two samples above.
+Written out per caller, the copies had drifted (`treat it as unproven` against `treat every provider as unproven`) and both emitted only the reason and the note, so a reader or consumer scanning for `HEADROOM_SUMMARY: verdict=` found no verdict on exactly the paths where the gauge failed.
 `tests/fm-fleet-snapshot-view.test.sh` and `tests/fm-session-start.test.sh` each drive that fallback through a real non-zero exit and assert the full shape, so a gauge that could not be RUN reads exactly like a gauge that could not be READ.
 
 ## A build below the floor is refused, not read

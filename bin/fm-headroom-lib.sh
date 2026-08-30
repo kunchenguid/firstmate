@@ -7,10 +7,12 @@
 # the gauge, and bin/fm-fleet-view.sh and bin/fm-session-start.sh when they could
 # not run that command at all. Written out per caller, the copies drifted - one
 # said "treat it as unproven", the others "treat every provider as unproven" -
-# and the two fallbacks emitted two of the four lines, so a reader scanning for
-# `HEADROOM_SUMMARY: verdict=` found no verdict on exactly the paths where the
-# gauge could not be read. A bounded-read failure and a gauge failure are the
-# same fact to a reader, so they get the same four lines from one owner here.
+# and the two fallbacks emitted only the reason and the note, so a reader
+# scanning for `HEADROOM_SUMMARY: verdict=` found no verdict on exactly the
+# paths where the gauge could not be read. A bounded-read failure and a gauge
+# failure are the same fact to a reader, so they get the same lines from one
+# owner here. Deliberately not stated as a COUNT: the shape has gained a line
+# twice already, and each time a count written down elsewhere went stale.
 #
 #   fm_headroom_build_note <build-state>
 #       The build label carried by the summary line. Four states, kept apart:

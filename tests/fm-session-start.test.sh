@@ -1662,8 +1662,8 @@ EOF
   assert_contains "$out" "UNMEASURED, not healthy" \
     "the unknown keeps the note that it is unmeasured rather than fine"
   # A gauge that could not be RUN must read exactly like a gauge that could not
-  # be READ. The fallback used to emit two of the four lines, so a reader or
-  # consumer scanning for the summary verdict found none on exactly the paths
+  # be READ. The fallback used to emit only the reason and the note, so a reader
+  # or consumer scanning for the summary verdict found none on exactly the paths
   # where the gauge failed. bin/fm-headroom-lib.sh now owns the shape.
   assert_contains "$out" "HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1" \
     "the fallback carries the same summary verdict every real unmeasurable reading carries"

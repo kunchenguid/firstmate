@@ -877,8 +877,8 @@ if [ "$SESSION_START_HEADROOM_RC" -ne 0 ]; then
   # Same fallback as bin/fm-fleet-view.sh, from the same two owners: only 124 is
   # a timeout, and an unknown that names a reason which can be false is worse
   # than one that names the real exit, while bin/fm-headroom-lib.sh owns the
-  # four-line shape so a gauge that could not be RUN reads exactly like a gauge
-  # that could not be READ. `build=unknown` because the version was never read.
+  # shape so a gauge that could not be RUN reads exactly like a gauge that could
+  # not be READ. `build=unknown` because the version was never read.
   fm_headroom_unmeasurable_text \
     "$(fm_run_timed_reason "$SESSION_START_HEADROOM_RC" "$SESSION_START_HEADROOM_TIMEOUT" 'headroom read')" \
     'treat every provider as unproven when deciding what to dispatch' unknown unknown

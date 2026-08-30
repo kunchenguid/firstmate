@@ -910,6 +910,98 @@ assert_not_contains "$OUT" 'reasons=' \
   'with no reasons list, because no row was declined'
 pass 'headroom publishes the row ledger on unmeasurable readings as well'
 
+# --- headroom: EVERY exit publishes the ledger ------------------------------
+#
+# The claim is that `HEADROOM_ROWS` is published on every reading, so it is
+# asserted over every exit this command has rather than over the ones a
+# shape-specific case happened to drive. Each stub below lands on a different
+# `headroom_unmeasurable` call site or on the reading path; a new exit added
+# without a ledger fails here rather than shipping as a silent gap in a claim
+# the script header makes unconditionally.
+LEDGER_CASE_DIR="$TMP_ROOT/hr-every-exit"; mkdir -p "$LEDGER_CASE_DIR"
+
+# absent: no gauge on PATH at all.
+mkdir -p "$LEDGER_CASE_DIR/absent"
+# below-floor: refused before the report is parsed.
+mkdir -p "$LEDGER_CASE_DIR/floor"
+cat > "$LEDGER_CASE_DIR/floor/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '0.0.1
+'; exit 0; fi
+printf 'bin: /fake
+'
+SH
+# slow-version: the shared budget is spent before the report can be asked for.
+mkdir -p "$LEDGER_CASE_DIR/slowversion"
+cat > "$LEDGER_CASE_DIR/slowversion/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then sleep 3; printf '0.1.40
+'; exit 0; fi
+printf 'bin: /fake
+'
+SH
+# hang: the report call itself hits the bound.
+mkdir -p "$LEDGER_CASE_DIR/hang"
+cat > "$LEDGER_CASE_DIR/hang/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '0.1.40
+'; exit 0; fi
+sleep 30
+SH
+# failing: a non-zero exit with no readable report.
+mkdir -p "$LEDGER_CASE_DIR/failing"
+cat > "$LEDGER_CASE_DIR/failing/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '0.1.40
+'; exit 0; fi
+printf 'boom
+' >&2; exit 3
+SH
+# notables: neither quota nor attention, but exhaustion rows the gauge emitted.
+mkdir -p "$LEDGER_CASE_DIR/notables"
+cat > "$LEDGER_CASE_DIR/notables/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '0.1.40
+'; exit 0; fi
+printf 'bin: /fake
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,10,five_hour
+'
+SH
+chmod +x "$LEDGER_CASE_DIR"/*/quota-axi
+# unnamed and healthy come from the shared fixtures, so they stay in step with
+# the layout the rest of this suite pins.
+fake_quota "$LEDGER_CASE_DIR/unnamed" all-rows-unnamed
+fake_quota "$LEDGER_CASE_DIR/healthy" healthy
+
+for EXIT_CASE in absent floor slowversion hang failing notables unnamed healthy; do
+  case "$EXIT_CASE" in
+    slowversion) LEDGER_BOUND=1 ;;
+    hang) LEDGER_BOUND=2 ;;
+    *) LEDGER_BOUND=10 ;;
+  esac
+  OUT=$( PATH="$LEDGER_CASE_DIR/$EXIT_CASE:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_USAGE_WALL_QUOTA_TIMEOUT="$LEDGER_BOUND" "$WALL" headroom 2>&1 )
+  LEDGER=$(printf '%s\n' "$OUT" | grep '^HEADROOM_ROWS: ' || true)
+  [ -n "$LEDGER" ] \
+    || fail "every exit must publish the row ledger, and $EXIT_CASE did not: $OUT"
+  EMITTED=$(printf '%s\n' "$LEDGER" | sed -n 's/.*emitted=\([0-9]*\).*/\1/p')
+  READ_ROWS=$(printf '%s\n' "$LEDGER" | sed -n 's/.*read=\([0-9]*\).*/\1/p')
+  DECLINED=$(printf '%s\n' "$LEDGER" | sed -n 's/.*declined=\([0-9]*\).*/\1/p')
+  [ "$((READ_ROWS + DECLINED))" = "$EMITTED" ] \
+    || fail "the identity must hold on every exit, and $EXIT_CASE gave $LEDGER"
+done
+# A reading that never saw a report accounts for nothing; one that saw rows it
+# could not read accounts for them. Both are ledgers, which is why the identity
+# above is checked rather than the mere presence of the line.
+OUT=$( PATH="$LEDGER_CASE_DIR/notables:/usr/bin:/bin:/usr/sbin:/sbin" "$WALL" headroom 2>&1 )
+assert_contains "$OUT" 'HEADROOM_ROWS: emitted=1 read=0 declined=1 reasons=no-readable-table=1' \
+  'a table the reading never got to read is declined, not omitted from the count'
+OUT=$( PATH="$LEDGER_CASE_DIR/absent:/usr/bin:/bin:/usr/sbin:/sbin" "$WALL" headroom 2>&1 )
+assert_contains "$OUT" 'HEADROOM_ROWS: emitted=0 read=0 declined=0' \
+  'a reading that never saw a report accounts for nothing, and says so'
+pass 'headroom publishes the row ledger on every exit it has'
+
 # --- headroom: an empty cell is not a singular-window gauge ------------------
 #
 # The singular-window fallback fired on `toon_block`'s `-`, which means three
