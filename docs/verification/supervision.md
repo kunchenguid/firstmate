@@ -459,6 +459,18 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
+### Current Pi live-check environment limitation
+
+On 2026-08-30, Pi 0.84.4 stopped in the unrelated Ahoy preflight before watcher coverage on both the change branch and an untouched `52b59a1` default-branch fixture.
+The change branch failed with `not ok - Pi Ahoy legacy-start case did not take Bearings: Unable to take the helm: no SESSION START digest is visible, and this environment has no shell-execution tool to run bin/fm-session-start.sh. /ahoy cannot proceed safely.`
+The untouched baseline failed with `not ok - Pi Ahoy ascii-only near miss was treated as operational: AHOY_BEARINGS_BRANCH`.
+Neither run loaded or exercised the changed watcher extension, so this opt-in command cannot currently refresh watcher evidence until its Ahoy preflight is deterministic.
+The deterministic watcher, arm, recovery, and lint checks remain usable and do not relax the requirement for a future successful live Pi refresh.
+
+```sh
+FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+```
+
 Pi same-process session-transition ownership was verified on 2026-07-27 against the tracked extension with a faithful in-process factory rebind (module cache retained, real arm children):
 
 ```sh
