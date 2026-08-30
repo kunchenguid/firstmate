@@ -29,9 +29,9 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
-   The outer pipeline must collect every generated review, document, and CI-fix commit before it performs the final `git push no-mistakes` and completes the new gate run.
-   Never use an ordinary remote push for those commits because it cannot refresh the head-bound pipeline attestation.
-   Only that successful run replaces the stale attestation with one bound to the new head.
+   The no-mistakes pipeline must collect every generated review, documentation, and CI-fix commit before its authenticated publication.
+   If any such commit is created afterward, return it to a new no-mistakes validation run instead of using an ordinary remote push, which cannot refresh the head-bound pipeline attestation.
+   Only the successful replacement run updates the PR with an attestation bound to the new head.
    Never repair the attestation by editing the PR body manually.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
