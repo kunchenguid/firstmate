@@ -499,6 +499,7 @@ cmd_read() {
     close $fh;
     $want = 0 unless defined $want;
     my @parsed;
+    my $malformed = 0;
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
@@ -520,13 +521,17 @@ cmd_read() {
           splice @vals, $preserve, 0, join(",", @parts);
         }
       }
+      if (@vals != @fields) {
+        $malformed++;
+        next;
+      }
       s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
       push @parsed, \%f;
     }
     my $presented = scalar @parsed;
-    my $complete = ($presented == $want) ? "yes" : "no";
+    my $complete = ($presented == $want && !$malformed) ? "yes" : "no";
     my @messages;
     my @annotations;
     for my $f (@parsed) {
@@ -563,6 +568,7 @@ cmd_read() {
     print "\n";
     print "declared_items: $want\n";
     print "presented_items: $presented\n";
+    print "malformed_items: $malformed\n";
     print "complete: $complete\n";
     print "lifecycle: $lifecycle\n";
     print "session_ended: ", (length $session_ended ? $session_ended : "(unset)"), "\n";

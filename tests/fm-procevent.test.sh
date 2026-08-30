@@ -1533,6 +1533,26 @@ session:
   status: feedback
   session_ended: true
   ended_by: user
+prompts[2]{uid,prompt,selector,tag,text}:
+  "el-a","Complete annotation","section#call",note,"Complete annotation"
+  "el-b","Missing text field","section#other",note
+EOF
+out=$(read_out) || fail "read failed on a capture containing a malformed item"
+assert_contains "$out" "declared_items: 2" "a malformed capture lost its declared count"
+assert_contains "$out" "presented_items: 1" \
+  "a row missing declared fields was certified as presented"
+assert_contains "$out" "malformed_items: 1" "a malformed row was not reported"
+assert_contains "$out" "complete: no" "a malformed row was certified as complete"
+assert_contains "$out" "| Complete annotation" \
+  "a valid annotation beside a malformed row was not presented"
+pass "read never certifies rows missing declared fields as complete"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
 prompts[3]{uid,prompt,selector,tag,text}:
   "el-a","Membership gold-only callout","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
   "el-b","Headline pick","section#call > h1",note,"Headline pick"
