@@ -14,6 +14,8 @@ Each file also starts with a short header comment.
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when the primary checkout is tangled, when queued wakes are pending, or when a stale or missing watcher needs a prominent banner |
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
+| `fm-intake.sh`           | The Wardroom gate between a filled ship brief and its spawn: foreign deep lens, then two thinker lenses under a severity bar where only a blocking defect holds the spawn and everything else rides along as a note; records `proceed:`/`revise:`/`escalate:` in `state/<id>.intake` and warns when its own proceed rate is structurally zero |
+| `fm-intake-lib.sh`       | Shared intake channel grammar, strict PANEL verdict parsing, template-echo detection, and the `fm_intake_require_proceed` gate that `fm-spawn.sh` consumes |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`, as a `<project>-<work>` herdr tab in that project's workspace (`--name <work>` chooses the work half); stops and escalates when no herdr server is reachable; ship/scout spawns require an isolated treehouse worktree; secondmate spawns locally sync the home before launch |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |

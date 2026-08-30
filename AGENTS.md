@@ -324,18 +324,40 @@ Write the brief per section 11.
 
 A filled ship brief goes to the intake council, not straight to a crewmate. Run
 `bin/fm-intake.sh <id> <project-dir>`: a foreign deep lens (Fugu ultra ->
-codex -> none, degrading loudly) roasts the brief, then two thinker lenses
+codex -> none, degrading loudly) reads the brief, then two thinker lenses
 (architecture: right seam, provable DoD, right gates; risk: gaps, hazards,
 YAGNI) each end in a PANEL verdict. The decision lands in `state/<id>.intake`
 (append-only: `proceed:` / `revise:` / `escalate:` decisions, `panel:` evidence).
 
-- `proceed:` - spawn normally. `fm-spawn.sh` structurally refuses a ship spawn
+**Only a blocking defect holds a spawn.** A finding blocks only if the crewmate,
+running the brief as written, would FAIL (cannot do it, or cannot prove it is
+done), DO HARM (a destructive, irreversible, or shared-state action the brief has
+not bounded), or BUILD THE WRONG THING (contradicts a tracked spec, solves a
+different problem, or generalises a rule that misfires on the ordinary case).
+Everything else - a cleaner seam, a better name, scope you would have trimmed -
+is a NOTE, and the council says so with the verdict `proceed-with-notes`. Notes
+are recorded on the `proceed:` line in `state/<id>.intake` and in
+`data/<id>/intake-review.md`. They do not veto, and no code path delivers them:
+firstmate reads them and folds what is worth folding into the brief before
+spawning. A brief does not have to be excellent to proceed; it has to be safe,
+provable, and aimed at the right target.
+
+- `proceed:` - fold in any notes it carries, then spawn.
+  `fm-spawn.sh` structurally refuses a ship spawn
   without a trailing proceed (captain bypass: `FM_INTAKE_OVERRIDE=1`, loud and
   logged). Scouts and secondmates are exempt.
-- `revise:` - amend the brief per `data/<id>/intake-review.md` and re-run
-  fm-intake. Two revises auto-escalate.
+- `revise:` - a real blocker. Amend the brief per `data/<id>/intake-review.md`
+  and re-run fm-intake. Two revises auto-escalate. One lens is enough to block:
+  unanimity on genuine blockers is deliberate.
 - `escalate:` - the captain decides. Thinker infrastructure failures land here
-  too: the stage fails closed, never open.
+  too - a missing or malformed PANEL line, a dead thinker, an unreadable review:
+  the stage fails closed, never open.
+
+If intake warns that the council's proceed rate is structurally zero across its
+most recent decisions, that is a fault in the bar, not evidence that every brief
+was bad - the council once ran 96 verdicts without a single proceed. Read it as a
+defect report on intake itself. The rate is read over a rolling window, so the
+warning stays live: it fires again whenever the bar drifts back to zero.
 
 For new captain-initiated work, run the grill-me interview upstream of the
 brief - the depth of intake sets the ceiling for everything after it. Spec:

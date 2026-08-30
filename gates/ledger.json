@@ -16,7 +16,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-g2-busy-guard",
@@ -33,7 +33,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-g3-rehydrate",
@@ -50,7 +50,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-g4-e2e",
@@ -70,7 +70,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-g5-inject-cap",
@@ -87,7 +87,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-06-25T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-q1-verdict-grammar",
@@ -104,7 +104,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-q2-merge-refuses-unverified",
@@ -123,7 +123,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-q3-prcheck-refuses-unverified",
@@ -142,7 +142,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-q4-reject-roundtrip",
@@ -161,7 +161,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-q5-attempt-cap",
@@ -180,7 +180,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-q6-lens-degrade",
@@ -199,7 +199,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-q7-fail-closed",
@@ -218,7 +218,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-01T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-i1-intake-grammar",
@@ -235,7 +235,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-i2-spawn-refuses-unvetted",
@@ -254,7 +254,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-i3-panel-roundtrip",
@@ -273,7 +273,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-i4-revise-cap-fail-closed",
@@ -292,7 +292,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-i5-intake-lens-degrade",
@@ -311,7 +311,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-l1-drain-instrumented",
@@ -328,7 +328,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-l2-loop-audit-level",
@@ -347,7 +347,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-07-03T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "g-boot-digest",
@@ -359,12 +359,12 @@
       "test_ref": "bash tests/fm-captain-bootstrap-digest.test.sh",
       "baseline_ref": null,
       "first_observed_red": "2026-07-08T21:00:30.169Z",
-      "mutation_verified": "2026-08-29T00:54:15.299Z",
+      "mutation_verified": "2026-08-30T01:13:07.869Z",
       "status": "frozen",
       "vacuous": false,
       "regression": false,
       "created": "2026-07-08T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "m0-ledger-shape",
@@ -376,12 +376,12 @@
       "test_ref": "bash tests/fm-boot-m0.test.sh",
       "baseline_ref": null,
       "first_observed_red": "2026-08-28T05:01:42.000Z",
-      "mutation_verified": "2026-08-29T00:53:43.196Z",
+      "mutation_verified": "2026-08-30T01:13:11.991Z",
       "status": "frozen",
       "vacuous": false,
       "regression": false,
       "created": "2026-08-27T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "m1-hook-registered",
@@ -398,7 +398,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-27T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "m2-boot-emitter-is-read-only",
@@ -410,12 +410,12 @@
       "test_ref": "bash tests/fm-boot-m2.test.sh",
       "baseline_ref": null,
       "first_observed_red": "2026-08-28T05:03:07.053Z",
-      "mutation_verified": "2026-08-29T00:53:43.416Z",
+      "mutation_verified": "2026-08-30T01:13:12.207Z",
       "status": "frozen",
       "vacuous": false,
       "regression": false,
       "created": "2026-08-27T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "m4-boot-budget-hostile",
@@ -427,12 +427,12 @@
       "test_ref": "bash tests/fm-boot-m4.test.sh",
       "baseline_ref": null,
       "first_observed_red": "2026-08-28T05:03:07.053Z",
-      "mutation_verified": "2026-08-29T00:53:43.873Z",
+      "mutation_verified": "2026-08-30T01:13:12.733Z",
       "status": "frozen",
       "vacuous": false,
       "regression": false,
       "created": "2026-08-27T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "m5-digest-never-silent",
@@ -444,12 +444,12 @@
       "test_ref": "bash tests/fm-boot-m5.test.sh",
       "baseline_ref": null,
       "first_observed_red": "2026-08-28T05:03:07.053Z",
-      "mutation_verified": "2026-08-29T00:54:13.585Z",
+      "mutation_verified": "2026-08-30T01:13:43.206Z",
       "status": "frozen",
       "vacuous": false,
       "regression": false,
       "created": "2026-08-27T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-ci-declared-red",
@@ -461,12 +461,12 @@
       "test_ref": "bash tests/fm-ci-declared-red.test.sh",
       "baseline_ref": null,
       "first_observed_red": "2026-08-28T05:43:52.000Z",
-      "mutation_verified": "2026-08-29T00:53:39.652Z",
+      "mutation_verified": "2026-08-30T01:13:46.167Z",
       "status": "frozen",
       "vacuous": false,
       "regression": false,
       "created": "2026-08-27T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-status-verb",
@@ -478,12 +478,12 @@
       "test_ref": "bash tests/fm-status-verb.test.sh",
       "baseline_ref": null,
       "first_observed_red": "2026-08-28T15:11:29.000Z",
-      "mutation_verified": "2026-08-29T00:53:39.391Z",
+      "mutation_verified": "2026-08-30T01:13:50.624Z",
       "status": "frozen",
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-29T00:53:15.591Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h2-mux-workspace-scoping",
@@ -500,7 +500,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h3-spawn-named-herdr-tab",
@@ -517,7 +517,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h4-send-peek-routed-by-meta",
@@ -534,7 +534,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h5-herdr-live-roundtrip",
@@ -551,7 +551,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h1-herdr-only-surface",
@@ -568,7 +568,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h6-drain-open-nothing-new-on-tmux",
@@ -585,7 +585,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h7-drain-live-roundtrip",
@@ -602,7 +602,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h8-teardown-closes-the-pane",
@@ -619,7 +619,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h9-startup-reports-unusable-herdr",
@@ -636,7 +636,7 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
     },
     {
       "id": "gate-h10-busy-agent-acknowledgment",
@@ -653,7 +653,46 @@
       "vacuous": false,
       "regression": false,
       "created": "2026-08-28T00:00:00Z",
-      "last_verified": "2026-08-28T00:00:00Z"
+      "last_verified": "2026-08-30T01:11:42.398Z"
+    },
+    {
+      "id": "gate-t1-severity-proceeds",
+      "title": "Intake severity bar: non-blocking findings proceed with notes; a blocker, an escalate or a malformed verdict still stops the spawn",
+      "observable": "with stubbed thinkers driving synthesis directly: two proceed-with-notes verdicts exit 0 with a 'proceed:' line carrying the notes and no revise; a single revise from either lens exits 2 with the revise count and no proceed; a single escalate exits 3; a missing, malformed or hedged PANEL line exits 3 recording 'thinker infrastructure failure' and never a proceed; fm_intake_verdict maps only the four verdict words, each as a whole word followed by nothing or ' - reason', and yields 'invalid' for everything else including 'proceed/revise', 'proceed?' and 'proceed_with_notes'; fm_intake_is_placeholder recognises every line of the prompt's own grammar template by shape and no real verdict; and when a thinker emits several 'PANEL: ' lines the template echoes and non-verdict footnotes are discarded and the LAST real verdict decides, so a trailing template echo cannot downgrade a revise into a proceed, echoing the whole grammar menu after a sound verdict cannot invent a blocker, a trailing non-verdict 'PANEL: ' line cannot escalate a sound verdict, and output whose only PANEL lines are invalid or templates still exits 3 recording 'thinker infrastructure failure'",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-07-03-wardroom-intake.md",
+      "blocked_by": [
+        "gate-i1-intake-grammar",
+        "gate-i3-panel-roundtrip"
+      ],
+      "test_ref": "bash tests/fm-wardroom-t1-severity.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-08-29T19:53:34.084139Z",
+      "mutation_verified": "2026-08-29T19:55:57.906928Z",
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-08-29T00:00:00Z",
+      "last_verified": "2026-08-30T01:11:42.398Z"
+    },
+    {
+      "id": "gate-t1-proceed-rate-nonzero",
+      "title": "The council reports its own proceed rate: a structurally zero rate over a meaningful sample is a fault, not strictness",
+      "observable": "fm_intake_health returns 1 and prints 'proceed=0 ... proceed-rate=0%' for a 12-decision corpus with no proceed; returns 0 once one proceed exists; returns 0 for a 3-decision corpus and for an empty one, but returns 1 for that same 3-decision corpus when the sample floor is lowered to 3; the rate is read over a rolling window, so a corpus whose only proceed is older than FM_INTAKE_HEALTH_WINDOW decisions still returns 1 and only returns 0 once the window is widened to include it; neither FM_INTAKE_HEALTH_MIN nor FM_INTAKE_HEALTH_WINDOW can switch the detector off with an empty, non-numeric, zero or negative value, each falling back to its default; a live fm-intake run over a zero-proceed state dir emits the rate and the 'never once proceeded' warning on stderr",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-07-03-wardroom-intake.md",
+      "blocked_by": [
+        "gate-i1-intake-grammar"
+      ],
+      "test_ref": "bash tests/fm-wardroom-t1-health.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-08-29T19:53:34.084139Z",
+      "mutation_verified": "2026-08-29T19:55:57.906928Z",
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-08-29T00:00:00Z",
+      "last_verified": "2026-08-30T01:11:42.398Z"
     }
   ]
 }

@@ -46,3 +46,5 @@
 | gate-h8-teardown-closes-the-pane | green | Teardown closes the pane on the surface that created it, and reports a close it could not do |
 | gate-h9-startup-reports-unusable-herdr | green | Startup says the fleet cannot dispatch: herdr is a bootstrap tool, and a stopped server is its own problem line |
 | gate-h10-busy-agent-acknowledgment | green | Acknowledgment is real for a BUSY agent, or it is reported as unconfirmed rather than claimed |
+| gate-t1-severity-proceeds | green | Intake severity bar: non-blocking findings proceed with notes; a blocker, an escalate or a malformed verdict still stops the spawn |
+| gate-t1-proceed-rate-nonzero | green | The council reports its own proceed rate: a structurally zero rate over a meaningful sample is a fault, not strictness |

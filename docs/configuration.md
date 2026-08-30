@@ -102,6 +102,13 @@ FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
+# intake council (bin/fm-intake.sh); the Wardroom gate a ship brief passes before it spawns
+FM_INTAKE_CMD='claude -p --permission-mode bypassPermissions'   # thinker command; prompt as $1, cwd = project dir, stdout must end with one "PANEL: proceed|proceed-with-notes|revise|escalate - reason" line
+FM_LENS_CMD=             # custom foreign lens, ahead of Fugu then codex then a loud degrade to none
+FM_INTAKE_MAX_REVISES=2  # revises before intake stops re-running the panel and escalates to the captain
+FM_INTAKE_OVERRIDE=      # set to 1 for the captain's loud, logged bypass of the spawn gate
+FM_INTAKE_HEALTH_MIN=10  # decisions required before a 0% proceed rate reads as a fault in the severity bar
+FM_INTAKE_HEALTH_WINDOW=20   # most recent decisions that rate is read over; a rolling window, so the first proceed cannot disarm the detector for good
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

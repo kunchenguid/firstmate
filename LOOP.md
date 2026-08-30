@@ -43,6 +43,12 @@ Wardroom at intake (`bin/fm-intake.sh` — a brief cannot spawn without a
 merge/pr-check refuse without an `approve:`). Both fail closed. Escalation
 after bounded retries (3 rejects / 2 revises) — no infinite fix loops.
 
+Only a blocking defect holds a spawn: everything else is a note carried on the
+proceed (`proceed-with-notes`). A gate that can never pass is indistinguishable
+from one that is broken, so intake reads its own record on every decision and
+warns when the proceed rate is zero over the most recent decisions — a fault in
+the bar, not proof the briefs were bad.
+
 ## Budget
 
 The watcher itself spends zero tokens; the budget is wake discipline. Tokens
