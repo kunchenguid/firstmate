@@ -185,6 +185,18 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# Publishing the record and moving this home's backlog item to In flight are one
+# step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
+# script performs the transition under the task's own meta lock before it reports
+# success. A ship or scout dispatch therefore REFUSES up front, before any
+# endpoint, worktree, or record exists, when the home's backlog has no item for
+# the id or already records it as finished, and a transition that fails after
+# publication removes the record it just wrote rather than leaving a worker the
+# backlog does not own. A relaunch re-reads the row instead of re-running the
+# transition, so an already In-flight item is left untouched. The transition is
+# skipped entirely for --secondmate spawns (persistent agents are not work
+# items), on a config/backlog-backend=manual home, without a compatible
+# tasks-axi, and in a home that keeps no data/backlog.md.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -221,8 +233,18 @@ esac
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+
 resolve_directory_input() {
-  local name=$1 path=$2 resolved
+  local name=$1 path=$2 resolved raw_bytes
+  raw_bytes=$(printf '%s' "$path" | LC_ALL=C od -An -t u1) || return 1
+  if ! fm_backlog_control_bytes_valid 0 "$raw_bytes"; then
+    echo "error: $name directory contains an invalid control byte" >&2
+    return 1
+  fi
   case "$path" in
     /*) printf '%s\n' "$path"; return 0 ;;
   esac
@@ -673,6 +695,7 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+SPAWN_FRESH_COMMIT_PENDING=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -682,6 +705,16 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+
+spawn_fresh_commit_rollback() {
+  if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
+      "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
+    SPAWN_FRESH_COMMIT_PENDING=0
+    return 0
+  fi
+  echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  return 1
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -751,10 +784,19 @@ spawn_abort_cleanup() {
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+          if ! spawn_fresh_commit_rollback; then
+            status=1
+          fi
+          SPAWN_FRESH_COMMIT_PENDING=0
+        fi
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
+          SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
           {
             echo "window=$W"
+            echo "endpoint_task_id=$ID"
+            echo "cleanup_recovery=orca"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
@@ -767,7 +809,9 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+          } > "$SPAWN_META_TMP" 2>/dev/null \
+            && fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" \
+            || true
         fi
       fi
     fi
@@ -775,6 +819,11 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+    if ! spawn_fresh_commit_rollback; then
+      status=1
+    fi
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -1666,7 +1715,7 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-[ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+[ -f "$BRIEF" ] || { echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2; exit 1; }
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -1914,6 +1963,38 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+# Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
+# become the sole owner of the row's In-flight transition, so prove the row is
+# transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
+# costs nothing to unwind, while the same refusal after publication would strand
+# a live pane. The authoritative mutation still runs under the meta lock below.
+BACKLOG_TRANSITION=0
+BACKLOG_ROW_STATE=
+if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
+  BACKLOG_TRANSITION=1
+  if fm_backlog_row_probe "$DATA" "$ID"; then
+    BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
+  elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (tasks-axi add $ID '<title>' --kind $KIND) and re-run" >&2
+    exit 1
+  else
+    echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
+    exit 1
+  fi
+  case "$BACKLOG_ROW_STATE" in
+    done\ *)
+      echo "error: this home's backlog records $ID as finished; refusing to dispatch onto a closed item (reopen it with tasks-axi reopen $ID, or use a new task id)" >&2
+      exit 1
+      ;;
+  esac
+else
+  BACKLOG_GATE_STATUS=$?
+  if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then
+    echo "error: task $ID cannot be dispatched because its backlog data directory is inaccessible: $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+fi
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -2692,13 +2773,16 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
+SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+fm_lock_acquire_wait "$SPAWN_META_LOCK"
+SPAWN_META_LOCK_HELD=1
 if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
-  SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
-  SPAWN_META_PATH=$SPAWN_META_TMP
+else
+  SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+  SPAWN_FRESH_COMMIT_PENDING=1
 fi
+SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
@@ -2756,16 +2840,44 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+} > "$SPAWN_META_PATH" || {
+  echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
+  exit 1
+}
+if [ "$RELAUNCH" -eq 0 ]; then
+  if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record"; then
+    echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+  SPAWN_META_TMP=
+fi
+
+# Fuse the backlog In-flight transition into the publication that just created
+# the record (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
+# this task's own meta lock, so a steer or teardown racing the same id stays
+# serialized exactly as before. The call itself is deferred to the final commit
+# point below so every earlier launch-delivery failure remains unwindable.
+spawn_commit_backlog_transition() {
+  [ "$BACKLOG_TRANSITION" = 1 ] || return 0
+  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID"
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
-  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record"; then
+    echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
-  fm_lock_release "$SPAWN_META_LOCK"
-  SPAWN_META_LOCK_HELD=0
 fi
+# A dispatch or relaunch keeps the per-task meta lock through launch delivery.
+# The backlog mutation is deliberately the final fallible commit below, so
+# teardown cannot remove a relaunched record while its replacement worker is
+# still being delivered, cannot observe or complete a fresh provisional record
+# between its state check and `tasks-axi start`, and a delivery failure cannot
+# follow a committed In-flight transition.
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
   # enumerates and locks per task. The set lock is only needed across that
@@ -2837,21 +2949,28 @@ if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
 fi
 
 spawn_record_traceparent() {
-  local meta="$STATE/$ID.meta" tmp status=0
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
-  SPAWN_META_LOCK_HELD=1
+  local meta="$STATE/$ID.meta" status=0 acquired=0
+  # Fresh publication still owns the lock. Relaunch deliberately uses a short
+  # independent critical section so other metadata interfaces can serialize.
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+    acquired=1
+  fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
      || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
      || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
-     || ! mv -f "$SPAWN_META_TMP" "$meta"; then
+     || ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
   fi
   SPAWN_META_TMP=
-  fm_lock_release "$SPAWN_META_LOCK" || status=1
-  SPAWN_META_LOCK_HELD=0
+  if [ "$acquired" = 1 ]; then
+    fm_lock_release "$SPAWN_META_LOCK" || status=1
+    SPAWN_META_LOCK_HELD=0
+  fi
   return "$status"
 }
 
@@ -2883,29 +3002,41 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+SPAWN_DEFERRED_SIGNAL=
+if [ "$BACKLOG_TRANSITION" = 1 ]; then
+  trap 'SPAWN_DEFERRED_SIGNAL=HUP' HUP
+  trap 'SPAWN_DEFERRED_SIGNAL=INT' INT
+  trap 'SPAWN_DEFERRED_SIGNAL=TERM' TERM
+fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
+  KIMI_DELIVERY_FAILED=0
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
-    exit 1
+    [ -n "$SPAWN_DEFERRED_SIGNAL" ] || exit 1
+    KIMI_DELIVERY_FAILED=1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
-  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
-  KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
-  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
-  KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
-    "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
-    exit 1
-  }
-  if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
-    exit 1
+  if [ "$KIMI_DELIVERY_FAILED" = 0 ]; then
+    KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+    KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
+    KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
+    KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+    if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+        "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
+        "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
+      kimi_spawn_fail "kimi brief pointer could not be submitted"
+      [ -n "$SPAWN_DEFERRED_SIGNAL" ] || exit 1
+      KIMI_DELIVERY_FAILED=1
+    fi
   fi
-  if ! kimi_wait_for_delivery; then
+  if [ "$KIMI_DELIVERY_FAILED" = 0 ] && [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
+    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    [ -n "$SPAWN_DEFERRED_SIGNAL" ] || exit 1
+    KIMI_DELIVERY_FAILED=1
+  fi
+  if [ "$KIMI_DELIVERY_FAILED" = 0 ] && ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
-    exit 1
+    [ -n "$SPAWN_DEFERRED_SIGNAL" ] || exit 1
   fi
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
@@ -2916,6 +3047,51 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+
+# This is the commit point: all endpoint and harness delivery that can reject
+# the spawn has succeeded. Re-read and transition while holding the same
+# per-task lock as metadata publication, then and only then report success.
+if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
+fi
+SPAWN_BACKLOG_COMMIT_STATUS=0
+if spawn_commit_backlog_transition; then
+  SPAWN_FRESH_COMMIT_PENDING=0
+else
+  SPAWN_BACKLOG_COMMIT_STATUS=$?
+  if spawn_commit_backlog_transition; then
+    SPAWN_BACKLOG_COMMIT_STATUS=0
+    SPAWN_FRESH_COMMIT_PENDING=0
+  fi
+fi
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
+  if [ "$RELAUNCH" -eq 0 ]; then
+    if spawn_fresh_commit_rollback; then
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+    else
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
+    fi
+  else
+    echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
+  fi
+fi
+trap - HUP INT TERM
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
+  exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+fm_lock_release "$SPAWN_META_LOCK"
+SPAWN_META_LOCK_HELD=0
+if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
+  case "$SPAWN_DEFERRED_SIGNAL" in
+    HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;
+    INT) SPAWN_DEFERRED_SIGNAL_STATUS=130 ;;
+    TERM) SPAWN_DEFERRED_SIGNAL_STATUS=143 ;;
+  esac
+  echo "error: spawn of $ID was interrupted after launch delivery began; its paired task record and In-flight backlog state were preserved" >&2
+  exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
 
 SPAWN_DELIVERY=
