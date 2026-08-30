@@ -2496,8 +2496,10 @@ claude_trust_dialog_clear() {
     verification_due=0
     if pane=$(claude_capture_visible) && [ -n "$pane" ]; then
       state=$(fm_composer_claude_trust_dialog_state "$pane")
-      case "$state" in
-        trust-focused)
+      case "$accept_attempted:$state" in
+        1:trust-focused|1:trust-unfocused)
+          ;;
+        *:trust-focused)
           [ "$clear_i" -lt "$clear_max" ] || return 1
           if [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ]; then
             claude_spawn_trust_authority_required
@@ -2507,7 +2509,7 @@ claude_trust_dialog_clear() {
           accept_attempted=1
           verification_due=1
           ;;
-        trust-unfocused)
+        *:trust-unfocused)
           [ "$clear_i" -lt "$clear_max" ] || return 1
           if [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ]; then
             claude_spawn_trust_authority_required
@@ -2520,7 +2522,7 @@ claude_trust_dialog_clear() {
           spawn_send_key "$T" Down || return 1
           verification_due=1
           ;;
-        absent)
+        *:absent)
           [ "$accept_attempted" = 1 ] || return 4
           busy=$(fm_rendered_busy_footer_state "$pane" claude)
           [ "$busy" != busy ] || return 0

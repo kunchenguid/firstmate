@@ -54,7 +54,7 @@ fake_screen() {
     trust-no)
       printf ' Accessing workspace:\n\n %s\n\n Quick safety check: is this yours?\n\n \xe2\x9d\xaf No, exit\n   Yes, I trust this folder\n\n Enter to confirm . Esc to cancel\n' "${FM_FAKE_PANE_PATH:-}"
       ;;
-    trust-yes)
+    trust-yes|trust-yes-stale)
       printf ' Accessing workspace:\n\n %s\n\n Quick safety check: is this yours?\n\n   No, exit\n \xe2\x9d\xaf Yes, I trust this folder\n\n Enter to confirm . Esc to cancel\n' "${FM_FAKE_PANE_PATH:-}"
       ;;
     processing)
@@ -135,6 +135,7 @@ case "${1:-}" in
           trust-yes)
             case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
               no-processing) printf 'gone-stuck\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              slow-accept-repaint) printf 'trust-yes-stale\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               stale-no-processing) printf 'gone-stale\n' > "$FM_FAKE_CLAUDE_STATE" ;;
               *) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
             esac
@@ -161,6 +162,11 @@ case "${1:-}" in
     esac
     if [ "${FM_FAKE_CLAUDE_MODE:-trusted}" = stale-dialog ] && [[ " $* " = *' -S '* ]]; then
       printf ' Accessing workspace:\n\n /old/repo\n\n \xe2\x9d\xaf No, exit\n   Yes, I trust this folder\n\n Enter to confirm . Esc to cancel\nThinking... (esc to interrupt)\n'
+      exit 0
+    fi
+    if [ "$state" = trust-yes-stale ]; then
+      fake_screen
+      printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE"
       exit 0
     fi
     fake_screen
@@ -417,6 +423,23 @@ test_claude_focused_trust_dialog_accepts_without_navigation() {
   pass "fm-spawn: an authorized focused trust choice accepts without unnecessary navigation"
 }
 
+test_claude_slow_accept_repaint_never_receives_a_second_enter() {
+  local id rec out rc bare_keys
+  id="claude-slow-accept-repaint-z5b-$$"
+  rec=$(make_spawn_case slow-accept-repaint "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=slow-accept-repaint run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a stale post-accept frame should remain in verification-only polling"
+  bare_keys=$(awk 'NF == 4 {print $4}' "$CASE_DIR/keys.log")
+  [ "$bare_keys" = "$(printf 'Enter\nDown\nEnter')" ] \
+    || fail "a stale post-accept frame received another Enter: $bare_keys"
+  [ "$(cat "$CASE_DIR/claude.state")" = processing ] \
+    || fail "the slow trust-dialog repaint did not settle into brief processing"
+  pass "fm-spawn: post-accept polling never sends another key"
+}
+
 test_claude_stuck_dialog_fails_loudly() {
   local id rec out rc
   id="claude-stuck-z3-$$"
@@ -643,6 +666,7 @@ test_claude_focused_trust_choice_still_requires_authority
 test_claude_already_trusted_spawn_never_touches_the_dialog
 test_claude_trust_dialog_is_navigated_never_a_blind_enter
 test_claude_focused_trust_dialog_accepts_without_navigation
+test_claude_slow_accept_repaint_never_receives_a_second_enter
 test_claude_stuck_dialog_fails_loudly
 test_claude_accept_without_processing_fails_loudly
 test_claude_dialog_disappearance_before_acceptance_is_unconfirmed
