@@ -130,10 +130,10 @@ expect_rejected_read() {
   assert_contains "$out" "$expected" "unsafe budget rejection was not specific"
 }
 
-expect_rejected_report() {
-  local home=$1 expected=$2 out rc
+expect_rejected_report() {  # <home> <expected> [mid-measurement swap path]
+  local home=$1 expected=$2 swap=${3:-} out rc
   set +e
-  out=$(FM_HOME="$home" "$BUDGET" report 2>&1)
+  out=$(FM_HOME="$home" FM_STARTUP_MEMORY_MEASURE_TEST_SWAP="$swap" "$BUDGET" report 2>&1)
   rc=$?
   set -e
   expect_code 2 "$rc" "unsafe memory input should fail the accounting command"
@@ -288,6 +288,57 @@ test_budget_accounting_rejects_unsafe_memory_targets() {
   pass "budget accounting rejects broken links, loops, directories, FIFOs, devices, sockets, and unreadable targets"
 }
 
+test_budget_accounting_rejects_targets_replaced_mid_measurement() {
+  local home outside swap out
+  home="$TMP_ROOT/accounting-race-home"
+  mkdir -p "$home/config" "$home/data"
+  printf '10\n' > "$home/config/startup-memory-budget"
+  outside="$TMP_ROOT/accounting-race-outside"
+  swap="$TMP_ROOT/accounting-race-swap"
+  printf 'outside\n' > "$outside"
+  ln -s "$outside" "$home/data/captain.md"
+
+  printf 'replaced\n' > "$swap"
+  expect_rejected_report "$home" 'memory file target changed while being measured' "$swap"
+  [ "$(<"$outside")" = replaced ] || fail "mid-measurement swap did not replace the resolved target"
+
+  mkfifo "$swap"
+  expect_rejected_report "$home" 'memory file target changed to a FIFO while being measured' "$swap"
+  [ -p "$outside" ] || fail "mid-measurement swap did not retype the resolved target"
+
+  rm -f "$outside"
+  printf 'outside\n' > "$outside"
+  out=$(FM_HOME="$home" "$BUDGET" report)
+  assert_contains "$out" 'file=data/captain.md bytes=8 estimated_tokens=3 status=present' \
+    "a stable symlink target was not measured once no swap was requested"
+  pass "budget accounting rejects targets replaced or retyped between inspection and read"
+}
+
+test_budget_accounting_separates_diagnostics_from_byte_counts() {
+  local home fakebin out rc
+  home="$TMP_ROOT/accounting-diagnostics-home"
+  mkdir -p "$home/config" "$home/data"
+  printf '10\n' > "$home/config/startup-memory-budget"
+  printf 'abc\n' > "$home/data/captain.md"
+
+  out=$(LC_ALL=xx_XX.UTF-8 FM_HOME="$home" "$BUDGET" report 2>/dev/null) \
+    || fail "an unsupported locale broke measurement of a valid memory file"
+  assert_contains "$out" 'file=data/captain.md bytes=4 estimated_tokens=2 status=present' \
+    "locale diagnostics were mixed into the measured byte count"
+
+  fakebin=$(fm_fakebin "$TMP_ROOT/accounting-diagnostics")
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$fakebin/perl"
+  chmod +x "$fakebin/perl"
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BUDGET" report 2>&1)
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "a silent measurement tool failure should fail the accounting command"
+  assert_contains "$out" "memory file could not be measured: $home/data/captain.md" \
+    "a silent measurement tool failure did not name the memory file"
+  pass "budget accounting keeps diagnostics out of byte counts and names silent measurement failures"
+}
+
 new_propagation_world() {
   local world=$1 root="$1/root" home="$1/home" sm="$1/sm" head
   mkdir -p "$home/config" "$home/data" "$home/state" "$root/bin"
@@ -413,6 +464,8 @@ test_primary_bootstrap_materializes_visible_default
 test_safe_parser_rejects_ambiguous_and_unsafe_values
 test_budget_accounting_reports_all_three_files_and_safe_failure
 test_budget_accounting_rejects_unsafe_memory_targets
+test_budget_accounting_rejects_targets_replaced_mid_measurement
+test_budget_accounting_separates_diagnostics_from_byte_counts
 test_primary_budget_converges_with_exact_reread_and_safe_failures
 
 echo '# all fm-startup-memory-budget tests passed'

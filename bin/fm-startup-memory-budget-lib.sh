@@ -164,7 +164,10 @@ fm_startup_memory_estimated_tokens_for_bytes() {
 # Prints "<bytes> <estimated-tokens> <present|absent>".  Memory files must
 # resolve to ordinary readable regular files when present, so an intentional
 # symlink is measured from its resolved target while every special target type
-# is rejected before content is read.
+# is rejected before content is read.  Tests may set
+# FM_STARTUP_MEMORY_MEASURE_TEST_SWAP=<path> to rename <path> over the resolved
+# target between inspection and open, exercising the identity re-check without
+# a timing race.
 fm_startup_memory_measure_file() {
   local path=$1 bytes tokens
   FM_STARTUP_MEMORY_MEASURE_BYTES=""
@@ -177,7 +180,7 @@ fm_startup_memory_measure_file() {
     printf '0 0 absent\n'
     return 0
   fi
-  bytes=$(perl - "$path" <<'PERL' 2>&1
+  bytes=$(LC_ALL=C perl - "$path" <<'PERL'
 use strict;
 use warnings;
 use Cwd qw(realpath);
@@ -186,7 +189,7 @@ use Fcntl qw(:DEFAULT :mode);
 my $path = shift @ARGV;
 
 sub fail {
-  print STDERR $_[0], "\n";
+  print $_[0], "\n";
   exit 1;
 }
 
@@ -219,6 +222,12 @@ if (!S_ISREG($target_stat[2])) {
   fail("memory file target is " . kind_for_mode($target_stat[2]) . ", not an ordinary readable regular file: $path");
 }
 
+my $swap = $ENV{FM_STARTUP_MEMORY_MEASURE_TEST_SWAP};
+if (defined $swap && length $swap) {
+  rename($swap, $resolved)
+    or fail("memory file test swap could not replace the target: $path");
+}
+
 sysopen(my $fh, $resolved, O_RDONLY | O_NONBLOCK)
   or fail("memory file target could not be read: $path");
 my @fh_stat = stat($fh);
@@ -244,7 +253,7 @@ while (1) {
 print $bytes, "\n";
 PERL
   ) || {
-    fm_startup_memory_budget_fail "$bytes"
+    fm_startup_memory_budget_fail "${bytes:-memory file could not be measured: $path}"
     return 1
   }
   case "$bytes" in
