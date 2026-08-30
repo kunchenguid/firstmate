@@ -422,15 +422,15 @@ inbox_steer_check() {  # <window> <task>
 # Within the bound, an ordinary crew that stops renders nothing more, its pane
 # hash stops moving, and the staleness backbone surfaces it within a couple of
 # polls; any captain-relevant status verb still surfaces immediately through
-# signal_reason_is_actionable. That is why this widens the proof instead of
+# signal_files_actionable. That is why this widens the proof instead of
 # bounding the wake rate, which would have suppressed genuinely stopped workers.
 #
 # Every negative outcome returns 1, so absence of evidence surfaces exactly as
-# before: a secondmate without authoritative proof, an unresolvable task, a task
+# before: any batch that references a secondmate, an unresolvable task, a task
 # with no uniquely attributable recorded endpoint, no previous hash to compare
 # against (nothing has been polled yet), a capture that fails or comes back empty,
-# an exhausted deferral bound, and of course an unchanged pane. A .status file
-# without authoritative proof also returns 1: an authored append is content the
+# an exhausted deferral bound, and of course an unchanged pane. Any .status file
+# also returns 1: an authored append is content the
 # supervisor may need to read, so only the mechanical turn-end marker gets the
 # fallback.
 #
@@ -1165,8 +1165,9 @@ run_check_capture() {
 # hiding the `needs-decision`, `blocked`, `failed`, or `done` event that arrived
 # just before it: the .seen-* marker advances either way, so an event absorbed
 # here is never re-read. Non-.status arguments (.turn-ended markers, which carry
-# no verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal is
-# only benign when the crew is also provably working (signal_crew_provably_working).
+# no verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal
+# still needs the authoritative working proof or the eligible opt-in bare
+# turn-end pane-churn proof before it is benign.
 signal_files_actionable() {  # <status-file> ...
   local f task record rest endpoint ident rc found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
