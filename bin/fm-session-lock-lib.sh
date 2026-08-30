@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Shared session-lock harness identity.
+# Shared verified-harness executable and session-lock identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# ONE owner of selected-harness executable matching and of the "which
+# verified-harness process holds this home's session lock, and does the current
+# process descend from that same harness?" decision.
+# Backend replacement-start probes use the selected-executable matchers;
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
