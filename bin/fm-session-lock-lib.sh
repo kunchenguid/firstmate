@@ -282,6 +282,20 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+fm_codex_launcher_path_matches() {  # <path>
+  local base
+  [ -n "$1" ] || return 1
+  base=$(basename -- "$1")
+  [ "$base" = codex ]
+}
+
+fm_codex_script_path_matches() {  # <path>
+  case "$1" in
+    */codex/bin/codex.js) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -306,9 +320,15 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
   FM_HARNESS_MATCH_REASON=
   FM_HARNESS_MATCH_NAME=
   base=$(basename -- "$comm")
+  argv0=${3:-${args%% *}}
+  if fm_codex_launcher_path_matches "$comm" || fm_codex_launcher_path_matches "$argv0"; then
+    FM_HARNESS_MATCH_NAME=codex
+    FM_HARNESS_MATCH_REASON="accept:exact-codex-launcher observed-basename=$base"
+    return 0
+  fi
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in
-      codex|-codex) name=codex ;;
+      -codex) FM_HARNESS_MATCH_REASON='reject:cosmetic-login-codex-without-exact-launcher'; return 1 ;;
       *codex*) FM_HARNESS_MATCH_REASON="reject:non-exact-codex-basename=$base"; return 1 ;;
       *claude*) name=claude ;;
       *opencode*) name=opencode ;;
@@ -323,12 +343,13 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
     FM_HARNESS_MATCH_REASON="accept:basename=$base"
     return 0
   fi
-  argv0=${3:-${args%% *}}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
-    [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
-    FM_HARNESS_MATCH_NAME=$name
-    FM_HARNESS_MATCH_REASON="accept:path-component=$name"
-    return 0
+    if [ "$name" != codex ]; then
+      [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+      FM_HARNESS_MATCH_NAME=$name
+      FM_HARNESS_MATCH_REASON="accept:path-component=$name"
+      return 0
+    fi
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
@@ -338,7 +359,11 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
         token=${words[1]:-}
         case "$token" in ''|-*) ;;
           *)
-            if name=$(fm_harness_path_name "$token"); then
+            if fm_codex_script_path_matches "$token"; then
+              FM_HARNESS_MATCH_NAME=codex
+              FM_HARNESS_MATCH_REASON='accept:exact-codex-script'
+              return 0
+            elif name=$(fm_harness_path_name "$token") && [ "$name" != codex ]; then
               [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
               FM_HARNESS_MATCH_NAME=$name
               FM_HARNESS_MATCH_REASON="accept:interpreter-script-component=$name"

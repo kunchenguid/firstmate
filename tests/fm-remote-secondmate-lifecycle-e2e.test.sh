@@ -787,6 +787,11 @@ if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh key ios E
 fi
 assert_grep 'lacks a matching launch-complete receipt' "$TMP_ROOT/incomplete-key.out" \
   "incomplete remote Codex key refusal did not name its missing completion evidence"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios \
+  2>"$TMP_ROOT/incomplete-observe.err")" = unknown ] \
+  || fail "incomplete remote Codex endpoint returned a delivery-confirmation observation"
+assert_grep 'lacks a matching launch-complete receipt' "$TMP_ROOT/incomplete-observe.err" \
+  "incomplete remote Codex observation did not name its missing completion evidence"
 
 set +e
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \

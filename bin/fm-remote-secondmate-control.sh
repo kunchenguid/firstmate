@@ -302,13 +302,29 @@ cmd_capture() {
 }
 
 cmd_observe() {
-  local id=$1 harness
+  local id=$1 harness meta meta_lock observation status=0
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  meta=$(meta_path "$id")
+  meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
+  fm_task_inbox_lock_acquire "$meta_lock" \
+    || die "remote secondmate endpoint metadata could not be locked for final observation validation"
+  if ! remote_endpoint_load "$id"; then
+    fm_lock_release "$meta_lock"
+    die "$REMOTE_ENDPOINT_ERROR"
+  fi
+  if ! remote_endpoint_launch_complete; then
+    fm_lock_release "$meta_lock"
+    printf 'error: remote Codex endpoint lacks a matching launch-complete receipt\n' >&2
+    printf 'unknown\n'
+    return 0
+  fi
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
-  fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
-  printf '\n'
+  observation=$(fm_pending_reply_backend_observation \
+    "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness") || status=$?
+  fm_lock_release "$meta_lock" || status=1
+  [ "$status" -eq 0 ] || return "$status"
+  printf '%s\n' "$observation"
 }
 
 cmd_sync() {
