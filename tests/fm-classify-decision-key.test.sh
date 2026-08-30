@@ -330,6 +330,35 @@ test_declared_wait_signature_is_stable_across_unrelated_appends() {
   [ "$second_sig" != "$grown_sig" ] \
     || fail "a newly opened decision left the declared-wait signature unchanged"
 
+  # A decision resolved and then reopened under the same key - even to a
+  # byte-identical needs-decision line - is a NEW gate the captain is owed: the
+  # folded open set alone folds back to the same bytes, so without an open
+  # generation the reopen would reuse the earlier declaration's one-shot marker
+  # and hide behind the long recheck cadence. The identity must move on reopen,
+  # and a DIFFERENT key's open/close churn must NOT move it - otherwise a
+  # bystander decision's churn would buy a still-open gate another bare stale
+  # wake, the very leak the open-decision identity exists to close.
+  local reopen_before reopen_after churn_before churn_after
+  printf 'needs-decision [key=reopen-me]: which region\n' >> "$f"
+  reopen_before=$(status_declared_wait_signature "$f")
+  printf 'resolved [key=reopen-me]: answered: us-east\n' >> "$f"
+  printf 'needs-decision [key=reopen-me]: which region\n' >> "$f"
+  reopen_after=$(status_declared_wait_signature "$f")
+  [ "$reopen_after" != "$reopen_before" ] \
+    || fail "a decision resolved and reopened under the same key reused the declared-wait signature: '$reopen_before'"
+
+  # api-shape, store and reopen-me are all open now; open then close a bystander
+  # key and the identity of the surviving open set must be byte-identical.
+  churn_before=$(status_declared_wait_signature "$f")
+  printf 'needs-decision [key=bystander]: transient question\n' >> "$f"
+  printf 'resolved [key=bystander]: answered: never mind\n' >> "$f"
+  churn_after=$(status_declared_wait_signature "$f")
+  [ "$churn_after" = "$churn_before" ] \
+    || fail "a bystander decision's open/close churn moved the surviving declared-wait signature: '$churn_before' -> '$churn_after'"
+
+  # Answer the reopened gate so only the two originals remain to be cleared below.
+  printf 'resolved [key=reopen-me]: answered: us-east\n' >> "$f"
+
   # Answering both leaves no wait, so the identity is empty.
   printf 'resolved [key=api-shape]: answered: REST\n' >> "$f"
   printf 'resolved [key=store]: answered: postgres\n' >> "$f"

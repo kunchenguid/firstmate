@@ -550,17 +550,95 @@ status_declared_wait_kind() {  # <status-file> -> captain-held|paused|decision|<
 # leave byte-for-byte unchanged: keying that case on the whole-file signature is
 # exactly the leak where a worker's progress line, appended while the captain
 # still owes the decision, bought another bare stale wake for the same unanswered
-# gate. Output is a single line so a marker file holds it as one token.
+# gate. But the open set carries no history, so a decision resolved and then
+# reopened under the same key - even to a byte-identical needs-decision line -
+# folds back to the same bytes; on its own that would let a reopened gate hide
+# behind the earlier surface's one-shot marker until the long recheck cadence,
+# silently demoting a new gate the captain is owed. So the decision identity also
+# carries each still-open key's OPEN GENERATION (_fm_decision_open_generations):
+# a reopen bumps the key's generation and changes the identity, while an unrelated
+# append - which opens nothing - leaves every generation untouched. Output is a
+# single line so a marker file holds it as one token.
 status_declared_wait_signature() {  # <status-file> -> stable id of the declared wait, empty when none
   local f=$1 kind payload encoded
   kind=$(status_declared_wait_kind "$f") || return 1
   [ -n "$kind" ] || return 0
   case "$kind" in
-    decision) payload=$(status_open_decisions "$f") ;;
-    *)        payload=$(last_status_line "$f") ;;
+    decision)
+      # Two payload fields: the durable open set names WHICH decisions are open,
+      # the generations name WHICH incarnation of each, so a close+identical-reopen
+      # (same open-set bytes, higher generation) is a new wait. Both fold through
+      # the one _fm_decision_fold_line owner, so neither can disagree with the
+      # open/closed rule status_open_decisions applies.
+      encoded=$(printf '%s\0%s\0%s' "$kind" "$(status_open_decisions "$f")" \
+        "$(_fm_decision_open_generations "$f")" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+      ;;
+    *)
+      payload=$(last_status_line "$f")
+      encoded=$(printf '%s\0%s' "$kind" "$payload" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+      ;;
   esac
-  encoded=$(printf '%s\0%s' "$kind" "$payload" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
   printf 'dw1:%s' "$encoded"
+}
+
+# For each decision key still open in <status-file>, how many times it has gone
+# from closed to open across the whole stream - its OPEN GENERATION. A key opened
+# once has generation 1; a key resolved and then reopened (even to a byte-identical
+# needs-decision line) has generation 2. This is the history the folded open set
+# throws away, and it is exactly what status_declared_wait_signature needs to tell
+# a still-open decision from a resolved-then-reopened one whose open-set bytes are
+# identical: without it a reopen would reuse the earlier declaration's one-shot
+# marker and stay on the bounded cadence instead of surfacing the new gate once.
+#
+# Whether a line is an opening transition, and for which key, is answered by the
+# one _fm_decision_fold_line owner - a line opens key K exactly when folding that
+# line alone onto an empty set yields K - so this can never diverge from
+# status_open_decisions on what counts as opening a decision. Only a genuine
+# closed->open transition bumps a generation: a needs-decision restated while its
+# key is already open updates the note but is not a new gate, and a resolution or
+# an unrelated progress line opens nothing at all. Prints "<key>\t<gen>" per
+# still-open key in fold order; nothing when none are open.
+_fm_decision_open_generations() {  # <status-file>
+  local f=$1 line resolve held open='' single k gens='' out='' gline gk
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    single=$(_fm_decision_fold_line "" "$line" "$resolve" "$held")
+    if [ -n "$single" ] && ! _fm_open_set_has "$open" "${single%%$'\t'*}"; then
+      k=${single%%$'\t'*}
+      gens=$(_fm_gen_bump "$gens" "$k")
+    fi
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+  done < "$f"
+  # A key opened and then closed carries no live wait, so drop its generation:
+  # only keys still in the final open set name a declared wait.
+  while IFS= read -r gline; do
+    [ -n "$gline" ] || continue
+    gk=${gline%%$'\t'*}
+    _fm_open_set_has "$open" "$gk" && out="${out}${gline}"$'\n'
+  done <<EOF
+$gens
+EOF
+  printf '%s' "$out"
+}
+
+# Increment (or start at 1) the "<key>\t<count>" generation record for <key> in a
+# newline-terminated generation set. Portable (no associative arrays) so it runs
+# on bash 3.2, like _fm_decision_drop, whose same drop-then-reappend shape it uses
+# to keep one record per key.
+_fm_gen_bump() {  # <gen-set> <key>
+  local set=$1 key=$2 line n=0
+  while IFS= read -r line; do
+    case "$line" in
+      "$key"$'\t'*) n=${line#*$'\t'}; n=${n%%$'\t'*} ;;
+    esac
+  done <<EOF
+$set
+EOF
+  set=$(_fm_decision_drop "$set" "$key")
+  [ -n "$set" ] && set="${set}"$'\n'
+  printf '%s%s\t%s\n' "$set" "$key" "$((n + 1))"
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
