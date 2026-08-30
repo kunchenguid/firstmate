@@ -57,7 +57,7 @@ Eligibility is a firstmate judgment made BEFORE arming, because the scripts cann
 Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-linear.sh --help`, `bin/fm-procevent-when.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
 
 An explicitly enabled external adapter registers through `bin/fm-procevent.sh register-extension`, never through a package-discovered script or package-supplied argv.
 [`docs/configuration.md`](../../../docs/configuration.md#trusted-external-process-event-adapters-configextensionsd) owns setup and [`docs/extension-bindings.md`](../../../docs/extension-bindings.md) owns the narrow trusted-code and untrusted-evidence boundary.
@@ -89,6 +89,9 @@ Two rules the commands cannot enforce for you:
 : Ask the adapter what the result means rather than parsing it yourself.
   `bin/fm-procevent.sh classify <result-file>` routes through the immutable built-in or extension identity captured with that result; for Lavish, its existing direct command returns `feedback`, `ended`, `waiting`, `missing`, or `unknown`.
   Consume a Lavish capture with `bin/fm-procevent-lavish.sh read <result-file>` rather than grepping the raw file: that command reports declared and presented item counts plus a completeness verdict, enumerates every captured queued item while retaining supplied element identity, and surfaces a `tag=message` session-ending message as its own field.
+: A `linear` wake is intake evidence, not write authority.
+  Load `linear-ticket-intake`, consume the capture with `bin/fm-procevent-linear.sh read <result-file>`, and follow its re-fetch, dedupe, one-writer, comment-routing, and acknowledgement procedure.
+  Never let the poller comment, change status, assign a worker, or become the fallback writer.
   `answers` remains the keyed-choice extractor and never treats freeform prose as a decision key.
   A `feedback` result can still be the last one a review ever produces, so never assume another wake is coming just because the state is not `ended`.
 : A routine no-op an adapter positively identifies never becomes a wake at all - it is recorded as handled and stays silent, so you never see it. For Lavish that is exactly an ended session carrying nothing: a board the captain closed without saying anything. A board close carrying a real answer, and every other result, still wakes you unchanged. Never read the absence of a wake as proof a review is still open; ask the source, not the queue.

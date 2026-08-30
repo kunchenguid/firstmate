@@ -209,6 +209,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/linear-ticket-intake/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -314,6 +318,10 @@
     },
     {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/linear-poll.json",
       "audience": "operator-example"
     },
     {

@@ -730,6 +730,52 @@ The published `lavish-axi poll` clears feedback destructively before returning i
 Never describe this path as at-least-once, no-loss, or lossless.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+### Linear Todo and comment polling
+
+`bin/fm-procevent-linear.sh` is a built-in read-only Linear GraphQL adapter.
+It runs named GraphQL `query` operations every 30 seconds, emits eligible mapped Todos and newly observed comments, and stays silent when its private snapshot is unchanged.
+It has no mutation command and never comments, changes status, assigns a worker, creates a Workpad, or edits Firstmate's backlog.
+
+Copy [`docs/examples/linear-poll.json`](examples/linear-poll.json) to the gitignored `config/linear-poll.json`, then replace each example mapping with the Linear project slug, display name, and matching Firstmate project name.
+`activeStates` controls which issues remain visible for comment detection.
+An empty or omitted `allowIssues` watches every mapped issue; a non-empty list limits detection during a rollout or focused proof.
+The poller obtains the canonical ticket URL from Linear's API response and carries those exact bytes into the captured event.
+
+Export a personal Linear API key as `LINEAR_API_KEY` in the environment that runs Firstmate.
+The adapter sends it only in the `Authorization` header to `https://api.linear.app/graphql`; it never stores the value in config, argv, snapshots, results, task briefs, or Git.
+Arm and retire the source through the adapter:
+
+```sh
+bin/fm-procevent-linear.sh arm config/linear-poll.json
+bin/fm-procevent-linear.sh retire config/linear-poll.json
+```
+
+The source's stable id is derived from the physical config path, so one config has one machine-wide process-event owner.
+Existing comments are baselined on first observation and do not create historical-comment wakes.
+A currently eligible Todo is emitted on first observation, while a blocker relation whose blocking issue is not completed or canceled suppresses Todo intake.
+The detector snapshot under `state/linear-poll/` is observation state only and grants no ticket authority.
+
+On a `procevent linear ...` wake, `linear-ticket-intake` owns Linear MCP re-fetch, project and blocker validation, local duplicate checks, assignment, comment routing, and handled acknowledgement.
+Firstmate creates exactly one lease with `bin/fm-linear-ticket-writer.sh assign`, gives the persistent Luna implementation worker the owner brief, and gives a Sol planner or reviewer the no-write brief.
+The lease record has this fixed current-state shape:
+
+```text
+issue=HAN-28
+task=<firstmate-task-id>
+writer=<agent-id>
+issue_id=<immutable-linear-id>
+url=<api-provided-canonical-url>
+generation=<positive-integer>
+```
+
+Only the assigned task and writer pass `assert-writer` and `assert-target`, and the target assertion refuses any identifier other than the leased issue.
+An exact repeated assignment is idempotent, while a different task or writer is refused, preventing repeat poll events from creating duplicate local ownership.
+Writer replacement requires `transfer <identifier> <expected-old-writer> <new-writer>`, increments the generation, updates the current lease, and appends an immutable transfer row to the issue history before the replacement owner brief is refreshed.
+
+Luna is the sole Linear writer: it moves the issue to In Progress, maintains exactly one `## Firstmate Workpad`, records plan, progress, blockers, PR and review state, moves to Human Review only after delivery gates, and marks Done only after verifying the PR merged.
+Sol reports planning and review findings through Firstmate and performs no Linear mutation.
+Firstmate may read Linear to reconcile but does not duplicate Luna's ticket writes, and the poller never inherits writer authority when Linear MCP is unavailable to Luna.
+
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
