@@ -10,7 +10,11 @@ The durable marker and tmux flash remain as additional signals.
 Away-mode delivery requires an idle primary and an affirmatively empty composer.
 `pane_is_busy` refuses a primary mid-turn, and `fm_backend_composer_state` refuses any composer verdict other than `empty`, so a digest cannot merge into active or uncertain input.
 If the primary remains continuously busy, buffered delivery starves by design rather than interrupting that turn.
-On Claude/Herdr, the native tracked-background launch also keeps the target's native agent state busy even while the captain is absent.
+The overnight Claude/Herdr native-path incident recorded 2,063 consecutive `inject deferred: supervisor pane busy (agent mid-turn)` deferrals, one composer deferral, zero deliveries, and roughly eight hours of starvation while the primary was genuinely idle.
+Target resolution was correct: with `HERDR_SESSION` unset, supervisor discovery composed `default:<HERDR_PANE_ID>` as designed.
+Claude Stop auto-arm was not the source because it exits while `state/.afk` exists.
+The busy guard queries Herdr native agent state before its harness-scoped rendered-footer fallback, and the observed `3 shells still running` idle screen is not a Claude delivery busy signature.
+The native background job itself holds the target's native agent state `working` for its lifetime, so same-target native hosting cannot deliver by construction.
 That is a hosting limitation, not a reason to weaken the guard: launch through `bin/fm-afk-launch.sh start` so the daemon runs in its own non-visible workspace with an explicit target.
 `FM_MAX_DEFER_SECS` bounds how long that deferral can remain silent: once the threshold is reached, it raises this alarm and preserves the buffered escalation.
 Treat the alarm as a visible delivery failure, not as permission to override either guard.
