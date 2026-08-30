@@ -454,12 +454,13 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
-// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
-// extension file rather than separate ones so no extra Pi -e flag is needed at
-// launch - the primary already loads this file for the turn-end guard, and
-// pi.on("tool_call", ...) can block (verified 2026-07-09 against pi 0.80.5:
-// returning {block: true} prevents the bash command from running). Each owner
-// script owns its own decision and is inert outside the real primary checkout.
+// bin/fm-cd-pretool-check.sh, docs/cd-guard.md;
+// bin/fm-selfdo-pretool-check.sh - Jala self-do guard). All piggyback on this
+// same extension file so no extra Pi -e flag is needed at launch - the primary
+// already loads this file for the turn-end guard, and pi.on("tool_call", ...)
+// can block (verified 2026-07-09 against pi 0.80.5: returning {block: true}
+// prevents the bash command from running). Each owner script owns its own
+// decision and is inert outside the real primary checkout.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/${script}`, ["--command", command], {
@@ -480,6 +481,45 @@ function runPretoolCheck(command: string): Promise<{ code: number; stderr: strin
 
 function runCdCheck(command: string): Promise<{ code: number; stderr: string }> {
   return runChecker("fm-cd-pretool-check.sh", command);
+}
+
+function runSelfdoPathCheck(targetPath: string): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-selfdo-pretool-check.sh`, ["--path", targetPath], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  });
+}
+
+function runSelfdoCommandCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-selfdo-pretool-check.sh`, ["--command", command], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  });
+}
+
+function extractPathFromInput(input: unknown): string {
+  if (!input || typeof input !== "object") return "";
+  const obj = input as Record<string, unknown>;
+  for (const key of ["path", "file_path", "filePath", "file", "filename", "filepath"]) {
+    const v = obj[key];
+    if (typeof v === "string" && v) return v;
+  }
+  // bash tool also has no path, handle separately
+  return "";
 }
 
 export default function (pi: ExtensionAPI) {
@@ -562,16 +602,34 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event) => {
-    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
-    const command = String((event.input as { command?: unknown })?.command ?? "");
-    if (!command) return {};
-    const cdResult = await runCdCheck(command);
-    if (cdResult.code === 2) {
-      return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
+    if (event.type !== "tool_call") return {};
+    // Self-do guard: block direct project writes via edit/write and bash in primary.
+    // Must run before other checks so the delegate message is shown for project writes.
+    const targetPath = extractPathFromInput(event.input);
+    if (targetPath) {
+      const selfdoPathResult = await runSelfdoPathCheck(targetPath);
+      if (selfdoPathResult.code === 2) {
+        return { block: true, reason: selfdoPathResult.stderr.trim() || "denied by the selfdo-guard: delegate project work" };
+      }
     }
-    const result = await runPretoolCheck(command);
-    if (result.code !== 2) return {};
-    return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
+    if (event.toolName === "bash") {
+      const command = String((event.input as { command?: unknown })?.command ?? "");
+      if (command) {
+        const selfdoCmdResult = await runSelfdoCommandCheck(command);
+        if (selfdoCmdResult.code === 2) {
+          return { block: true, reason: selfdoCmdResult.stderr.trim() || "denied by the selfdo-guard: delegate project work" };
+        }
+        const cdResult = await runCdCheck(command);
+        if (cdResult.code === 2) {
+          return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
+        }
+        const result = await runPretoolCheck(command);
+        if (result.code === 2) {
+          return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
+        }
+      }
+    }
+    return {};
   });
 
   pi.on("agent_settled", async () => {
