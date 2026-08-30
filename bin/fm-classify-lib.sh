@@ -1628,6 +1628,27 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# 0 if crew <id>'s authoritative current state is DONE, reported through the
+# no-mistakes run-step source (fm-crew-state.sh's "state: done · source:
+# run-step · ..." line) rather than a possibly-stale status-log fallback. This
+# is deliberately narrower than crew_absorb_class: that helper never surfaces a
+# `done` verdict at all (it only distinguishes working/paused/none), because
+# `done` is not evidence of ongoing work - the opposite case this predicate
+# exists to name. A crew this reports done for has nothing left to do; the
+# caller still owns deciding whether that idle wait is itself expected (e.g. a
+# task only waiting on its own armed merge poll) before treating a stale pane
+# as safe to absorb.
+crew_is_terminal_done() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = "done" ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ]
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git
