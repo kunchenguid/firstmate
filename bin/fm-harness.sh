@@ -18,8 +18,8 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers, process ancestry, then a
-# required remote Codex session binding.
+# Detection layers: a required remote Codex session binding when present,
+# otherwise verified environment markers and process ancestry.
 # Record each newly verified env marker here.
 set -u
 
@@ -34,6 +34,18 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 detect_own() {
+  local pid=$$ comm args argv0 state
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
+  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_requirement_present "$state"; then
+    if fm_codex_home_binding_pid "$state" >/dev/null; then
+      echo codex
+      return
+    fi
+    echo "diagnostic: required remote Codex session binding rejected; observed evidence follows" >&2
+    fm_harness_ancestry_diagnostic >&2
+    echo unknown
+    return
+  fi
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
   # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
@@ -76,7 +88,6 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args argv0 state
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
@@ -114,11 +125,6 @@ detect_own() {
       break
     fi
   done
-  state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
-  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_pid "$state" >/dev/null; then
-    echo codex
-    return
-  fi
   echo "diagnostic: no verified harness marker or ancestry match; inspected process evidence follows" >&2
   fm_harness_ancestry_diagnostic >&2
   echo unknown

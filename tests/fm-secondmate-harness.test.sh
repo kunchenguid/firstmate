@@ -148,6 +148,67 @@ SH
   pass "fm-harness: unknown output carries observed process evidence on stderr"
 }
 
+test_required_codex_binding_precedes_markers_and_ancestry() {
+  local dir home fakebin session other out err
+  dir="$TMP_ROOT/required-codex-binding"
+  home="$dir/home"
+  fakebin=$(fm_fakebin "$dir")
+  session=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54
+  other=16b9797f-12d9-4645-b3af-0d0f6c2e8b8a
+  mkdir -p "$home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'comm='*) printf '%s\n' codex ;;
+  *'args='*) printf '%s\n' codex ;;
+  *'ppid='*) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  cat > "$home/state/.fm-codex-session-binding-required" <<EOF
+harness=codex
+home=$home
+spawn_gen=s1.2.3
+EOF
+  chmod 600 "$home/state/.fm-codex-session-binding-required"
+
+  err="$dir/missing-binding.err"
+  out=$(env -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_HOME="$home" CODEX_SESSION_ID="$session" CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-harness.sh" 2>"$err")
+  [ "$out" = unknown ] \
+    || fail "required missing Codex binding fell through to environment marker as '$out'"
+  assert_contains "$(cat "$err")" 'result=required-codex-binding-rejected' \
+    "missing required Codex binding reports the authoritative rejection"
+  assert_contains "$(cat "$err")" 'reject:missing-codex-home-binding' \
+    "missing required Codex binding reports the observed record failure"
+
+  cat > "$home/state/.fm-codex-session-binding" <<EOF
+harness=codex
+home=$home
+spawn_gen=s1.2.3
+agent_pid=4242
+codex_session_id=$session
+EOF
+  chmod 600 "$home/state/.fm-codex-session-binding"
+  err="$dir/mismatched-binding.err"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_HOME="$home" CODEX_SESSION_ID="$other" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-harness.sh" 2>"$err")
+  [ "$out" = unknown ] \
+    || fail "required mismatched Codex binding fell through to visible ancestry as '$out'"
+  assert_contains "$(cat "$err")" 'reject:codex-home-binding-mismatch' \
+    "mismatched required Codex binding reports the observed identity failure"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_HOME="$home" CODEX_SESSION_ID="$session" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-harness.sh" 2>"$dir/matching-binding.err")
+  [ "$out" = codex ] || fail "matching required Codex binding resolved '$out', expected codex"
+  [ ! -s "$dir/matching-binding.err" ] \
+    || fail "matching required Codex binding emitted a refusal diagnostic"
+  pass "fm-harness: required Codex binding is authoritative before markers and ancestry"
+}
+
 # ===========================================================================
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
 # ===========================================================================
@@ -267,11 +328,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$pid:$field" in
-  4242:comm=) printf '%s\n' '/opt/test/bin/codex' ;;
-  4242:args=) printf '%s\n' 'codex' ;;
+  4242:comm=) printf '%s\n' '/opt/test/bin/claude' ;;
+  4242:args=) printf '%s\n' 'claude' ;;
   4242:ppid=) printf '%s\n' 1 ;;
-  5252:comm=) printf '%s\n' '-codex' ;;
-  5252:args=) printf '%s\n' '-codex' ;;
+  5252:comm=) printf '%s\n' '-claude' ;;
+  5252:args=) printf '%s\n' '-claude' ;;
   5252:ppid=) printf '%s\n' 1 ;;
   *:comm=) printf '%s\n' '-zsh' ;;
   *:args=) printf '%s\n' '-zsh' ;;
@@ -283,7 +344,7 @@ SH
   err="$dir/fm-harness.err"
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" 2>"$err")
-  [ "$got" = codex ] || fail "dash-leading shell ancestry resolved '$got', expected codex"
+  [ "$got" = claude ] || fail "dash-leading shell ancestry resolved '$got', expected claude"
   [ ! -s "$err" ] || fail "fm-harness wrote basename option noise for literal -zsh: $(cat "$err")"
 
   err="$dir/fm-session-lock-ancestry.err"
@@ -296,8 +357,8 @@ SH
   PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 5252' \
     "$ROOT" 2>"$err"; status=$?
-  expect_code 0 "$status" "session-lock liveness should accept literal -codex as a harness process name"
-  [ ! -s "$err" ] || fail "session-lock liveness wrote basename option noise for literal -codex: $(cat "$err")"
+  expect_code 0 "$status" "session-lock liveness should accept literal -claude as a harness process name"
+  [ ! -s "$err" ] || fail "session-lock liveness wrote basename option noise for literal -claude: $(cat "$err")"
 
   pass "harness identity: dash-leading ps command names are basename operands, not options"
 }
@@ -2577,6 +2638,7 @@ SH
 test_harness_resolution
 test_cursor_marker_detection
 test_unknown_harness_prints_observed_evidence
+test_required_codex_binding_precedes_markers_and_ancestry
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
