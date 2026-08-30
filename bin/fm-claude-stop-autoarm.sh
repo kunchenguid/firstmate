@@ -107,6 +107,23 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # its turn boundary, so stand down on a Cursor-delivered payload.
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
+# pi-code (Pi's Claude-hook compatibility extension, verified through 1.0.14)
+# also loads the tracked Claude settings and has no asyncRewake: it awaits every
+# Stop hook, so this arm runs SYNCHRONOUSLY inside Pi's turn end and holds that
+# turn open for the declared multi-hour timeout - the same wedge as Cursor
+# above, observed live 2026-08-30 (issue #3343). Pi's native Firstmate
+# extensions own Pi supervision, so stand down on a Pi-delivered payload. The
+# signal is again the PAYLOAD: pi-code stamps every hook payload's
+# transcript_path with Pi's own session file under .pi/, while a Claude
+# transcript never has a .pi path component. Fail direction matches the guard
+# above: no payload, no jq, or no transcript_path means the hook RUNS, because
+# a skipped run under a genuine Claude primary is the worse failure.
+if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+  printf '%s' "$PAYLOAD" | jq -e '
+    (.transcript_path // "") | contains("/.pi/")
+  ' >/dev/null 2>&1 && exit 0
+fi
+
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 

@@ -305,6 +305,46 @@ test_inert_when_afk() {
   pass "auto-arm: inert while AFK owns supervision"
 }
 
+# pi-code (Pi's Claude-hook compatibility extension) delivers a Claude-shaped
+# Stop payload but awaits the hook with no asyncRewake support, so the hook
+# must stand down or it wedges Pi's turn for the declared timeout (issue #3343).
+# The discriminator is the payload's transcript_path: pi-code stamps Pi's own
+# session file under .pi/, which a Claude transcript path never contains.
+test_stands_down_on_pi_code_delivered_payload() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/picode")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(printf '%s\n' '{"session_id":"sess-pi","stop_hook_active":false,"transcript_path":"/home/user/.pi/agent/sessions/--tmp--/2026-08-30T00-00-00-000Z_x.jsonl"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expect_code 0 "$status" "hook must stand down silently on a pi-code-delivered payload"
+  [ -z "$out" ] || fail "pi-code stand-down printed output: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed on a pi-code-delivered payload"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch on a pi-code-delivered payload"
+  pass "auto-arm: stands down on a pi-code-delivered payload (transcript under .pi/)"
+}
+
+# The stand-down must not overmatch: a genuine Claude transcript_path keeps the
+# full arm-and-rewake path, so losing the discriminator can only fail toward
+# running (the documented fail direction).
+test_claude_transcript_path_still_arms() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/claude-transcript")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(printf '%s\n' '{"session_id":"sess-claude","stop_hook_active":false,"transcript_path":"/home/user/.claude/projects/-home-user-proj/uuid.jsonl"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expect_code 2 "$status" "actionable close must still rewake when the payload carries a Claude transcript_path"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm with a Claude transcript_path present"
+  pass "auto-arm: a Claude transcript_path still arms and rewakes"
+}
+
 test_stale_lock_recovery_preserves_afk_and_need_gates() {
   local afk_dir idle_dir out status
   afk_dir=$(make_primary_dir "$TMP_ROOT/stale-afk")
@@ -1154,6 +1194,8 @@ test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
+test_stands_down_on_pi_code_delivered_payload
+test_claude_transcript_path_still_arms
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
