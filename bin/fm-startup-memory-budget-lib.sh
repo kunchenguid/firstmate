@@ -180,7 +180,6 @@ fm_startup_memory_measure_file() {
   bytes=$(LC_ALL=C perl - "$path" <<'PERL'
 use strict;
 use warnings;
-use Cwd qw(realpath);
 use Fcntl qw(:DEFAULT :mode);
 
 my $path = shift @ARGV;
@@ -204,15 +203,17 @@ sub kind_for_mode {
 my @link_stat = lstat($path);
 @link_stat or fail("memory file could not be inspected: $path");
 my $is_symlink = S_ISLNK($link_stat[2]);
-my $resolved = realpath($path);
-if (!defined $resolved) {
-  fail("memory file symlink target could not be resolved, possibly due to a loop: $path") if $is_symlink;
-  fail("memory file could not be resolved: $path");
-}
 
-my @target_stat = stat($resolved);
+# stat() follows the link, so the kernel classifies each failure class and a
+# dangling target is never reported as a loop.
+$! = 0;
+my @target_stat = stat($path);
 if (!@target_stat) {
-  fail("memory file symlink target does not exist: $path") if $is_symlink;
+  if ($is_symlink) {
+    fail("memory file symlink loop: $path") if $!{ELOOP};
+    fail("memory file symlink target does not exist: $path") if $!{ENOENT} || $!{ENOTDIR};
+    fail("memory file symlink target could not be resolved ($!): $path");
+  }
   fail("memory file target could not be inspected: $path");
 }
 if (!S_ISREG($target_stat[2])) {
@@ -222,7 +223,7 @@ if (!S_ISREG($target_stat[2])) {
 # The target can be replaced between the stat above and the open, so open
 # without blocking (a swapped-in FIFO must not hang the measurement), then
 # re-check type and dev/ino on the open descriptor before any byte is read.
-sysopen(my $fh, $resolved, O_RDONLY | O_NONBLOCK)
+sysopen(my $fh, $path, O_RDONLY | O_NONBLOCK)
   or fail("memory file target could not be read: $path");
 my @fh_stat = stat($fh);
 @fh_stat or fail("memory file target could not be inspected after open: $path");

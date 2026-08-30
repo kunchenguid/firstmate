@@ -251,8 +251,17 @@ test_budget_accounting_rejects_unsafe_memory_targets() {
   expect_rejected_report "$home" 'memory file symlink target does not exist'
 
   rm -f "$home/data/captain.md"
+  ln -s "$TMP_ROOT/missing-memory-dir/captain.md" "$home/data/captain.md"
+  expect_rejected_report "$home" 'memory file symlink target does not exist'
+
+  rm -f "$home/data/captain.md"
+  printf 'not a directory\n' > "$TMP_ROOT/accounting-target-notdir"
+  ln -s "$TMP_ROOT/accounting-target-notdir/captain.md" "$home/data/captain.md"
+  expect_rejected_report "$home" 'memory file symlink target does not exist'
+
+  rm -f "$home/data/captain.md"
   ln -s captain.md "$home/data/captain.md"
-  expect_rejected_report "$home" 'memory file symlink target could not be resolved'
+  expect_rejected_report "$home" 'memory file symlink loop'
 
   rm -f "$home/data/captain.md"
   target="$TMP_ROOT/accounting-target-dir"
@@ -291,7 +300,7 @@ test_budget_accounting_rejects_unsafe_memory_targets() {
     chmod 600 "$target"
   fi
 
-  pass "budget accounting rejects broken links, loops, directories, FIFOs, devices, sockets, and unreadable targets"
+  pass "budget accounting names dangling links, loops, directories, FIFOs, devices, sockets, and unreadable targets apart"
 }
 
 test_budget_accounting_rejects_targets_replaced_mid_measurement() {

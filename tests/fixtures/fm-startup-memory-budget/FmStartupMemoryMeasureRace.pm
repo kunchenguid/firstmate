@@ -4,11 +4,11 @@ package FmStartupMemoryMeasureRace;
 # One bin/fm-startup-memory-budget.sh report run loads it through PERL5OPT:
 #   PERL5OPT="-I<repo>/tests/fixtures/fm-startup-memory-budget \
 #             -MFmStartupMemoryMeasureRace=<fixture-root>,<replacement>"
-# The measurement's first sysopen then renames <replacement> over the file it
-# is about to open, reproducing a target replaced between inspection and open.
-# Activation is confined to a tests/lib.sh fixture root: <fixture-root> must
-# carry the .fm-test-fixture marker, and the opened file and <replacement>
-# must both resolve beneath it on its device.  Every other call dies before
+# The measurement's first sysopen then renames <replacement> over the regular
+# file that open resolves to, reproducing a target replaced between inspection
+# and open.  Activation is confined to a tests/lib.sh fixture root:
+# <fixture-root> must carry the .fm-test-fixture marker, and the resolved
+# target and <replacement> must both sit beneath it on its device.  Every other call dies before
 # touching the filesystem, so a real home or memory target is never replaced.
 use strict;
 use warnings;
