@@ -363,6 +363,7 @@ assert_absent "$ORPHAN_FINISH" "a job abandoned by a signal-less disconnect ran 
 pass "a signal-less caller disconnect cancels the abandoned job through the parent probe"
 
 STAGING_EFFECT="$TMP_ROOT/staging-disconnect-effect"
+# shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
 env FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
@@ -392,7 +393,7 @@ RACE_EFFECT="$TMP_ROOT/post-publish-race-effect"
 set +e
 (
   JOB_ID=
-  JOB_COMPLETED=0
+  # shellcheck disable=SC2154 # The trap runs after staging populates the sourced global.
   trap 'cancel_id=${JOB_ID:-${FM_REMOTE_JOB_ID:-}}; [ -n "$cancel_id" ] && fm_remote_job_cancel "$ACCOUNT_HOME" "$cancel_id"; exit 143' TERM
   FM_REMOTE_JOB_DISCONNECT_PROBE=post_publish_disconnect_probe
   fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" fm-touch-job.sh "$RACE_EFFECT" < /dev/null > /dev/null

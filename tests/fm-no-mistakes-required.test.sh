@@ -5,7 +5,6 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-no-mistakes-required)
 VERIFY="$ROOT/tests/fixtures/no-mistakes-required-verifier.py"
 OLD_SHA=1111111111111111111111111111111111111111
 NEW_SHA=2222222222222222222222222222222222222222

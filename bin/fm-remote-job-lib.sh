@@ -670,6 +670,7 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   fm_remote_job_safe_id "$id" || { rm -rf -- "$stage"; return 1; }
   destination="$FM_REMOTE_JOB_JOBS/$id"
   [ ! -e "$destination" ] && [ ! -L "$destination" ] || { rm -rf -- "$stage"; return 1; }
+  # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
   FM_REMOTE_JOB_ID=$id
   if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
     ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
