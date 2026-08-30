@@ -35,11 +35,14 @@
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
 # optional --origin records provenance in the new task's body and supplies the
-# default repo from that origin's metadata). Prefer holding the work item the
-# question gates over minting a new row. Repeating `hold` with the same id is
-# idempotent; a task already closed is refused rather than reopened. `--until`
-# records the captain's own deferral date through `tasks-axi hold --until`, so
-# a "revisit later" answer is stored as a date instead of a live card.
+# default repo from that origin's metadata). It also links a distinct held task
+# to live origin metadata before attempting the hold under the shared publication
+# lock; a failed attempt keeps the link only when the captain hold actually
+# landed. Prefer holding the work item the question gates over minting a new
+# row. Repeating `hold` with the same id is idempotent; a task already closed is
+# refused rather than reopened. `--until` records the captain's own deferral date
+# through `tasks-axi hold --until`, so a "revisit later" answer is stored as a
+# date instead of a live card.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes,

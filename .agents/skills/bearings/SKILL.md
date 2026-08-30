@@ -41,6 +41,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
    Keep the default local-only read unless the captain asks to include PRs.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
+   Keep every `validation_pending` or `validation_conflict` row in Underway and preserve its `doing` text.
+   When an attributed pipeline state remains primary, preserve the unacknowledged validation instruction as secondary detail in that same row.
    A decision is simply a task held for the captain (`captain-hold-lifecycle`); every due, unblocked captain-held task appears under `decisions_open`, whatever its kind.
    A captain hold deferred by date sits under `gates` with its `until <date>:` reason until it is due, and a hold whose reason or body carries an explicit deferred/superseded marker is suppressed from the default view with an `omitted` disclosure.
    Do not scrape reports, visual-review artifacts, raw status-event tails, or visible conversation history to supplement current state.
@@ -73,7 +75,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
    - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
-   - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
+   - **Underway** - each live direct report making progress or carrying a durable validation-continuation state, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
    - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with each item's blocker, date, or integrity reason.
    After writing the file, return the concise four-section chat digest and include the report path or link without adding a fifth section.
    For a richer review surface, offer `/bearings lavish` when the report has enough structure to deserve one, but only after the required digest is ready.
@@ -125,7 +127,7 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
    Empty-state: "Nothing needs your action right now."
 2. **Recently Landed** - the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
    Empty-state: "No recent completions are in the current baseline."
-3. **Underway** - live work progressing on its own, one line of current state per direct report.
+3. **Underway** - live work progressing on its own or carrying a durable validation-continuation state, one line of current state per direct report.
    Empty-state: "Nothing is underway."
 4. **Charted Next** - queued or gated work waiting on the fleet or a date, plus action-free fleet-integrity warnings, never on the captain.
    Empty-state: "Nothing is queued."
@@ -135,8 +137,8 @@ Rules that keep the contract unambiguous:
 - Every section ALWAYS renders, even when empty, with its short empty-state sentence; never omit a section.
 - Every chat digest and file-mode report is a complete current snapshot, never a delta against a prior report.
 - Recently Landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
-- The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
-- The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
+- The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing or carrying a durable validation-continuation state is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
+- The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a `validation_pending` or `validation_conflict` continuation, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
 - A secondmate's own row appears Underway only for `active_child_work`; `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown` or its `invalidity` reports an inventory mismatch.
 - Include the required direct address to the captain inside one item or empty-state sentence.

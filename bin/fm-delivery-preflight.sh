@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Bind one unread Pi wake snapshot to deterministic delivery-continuation results.
+# Reconcile one Pi wake snapshot and durable committed-ready task state with
+# deterministic delivery-continuation results.
+# Queue-backed results stay bound to the inspected sequence numbers, durable-only
+# retries are requeued, and pending captain inbox notes defer continuation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

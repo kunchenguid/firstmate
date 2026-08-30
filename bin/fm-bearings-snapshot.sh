@@ -35,6 +35,12 @@
 # gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
 # chat cannot claim an empty fleet while main current state is broken.
 #
+# A durable validation continuation keeps its task in in_flight. An attributed
+# pipeline state stays primary and carries the unacknowledged instruction as
+# secondary detail; otherwise a pending record reports validation_pending with
+# any unverified activity source, and an exact-head mismatch reports
+# validation_conflict.
+#
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by

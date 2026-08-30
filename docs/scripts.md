@@ -104,10 +104,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-wake-grant.sh`       | Serialize Pi supervision-branch wake-row claim activation, publication, release, and deactivation |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
 | `fm-classify-lib.sh`     | Shared wake-classification vocabulary, durable keyed-decision folds and scans, and unread informational status-line selection |
+| `fm-status-append.sh`    | Append one worker status event under the shared status-publication lock               |
 | `fm-send.sh`             | Steer a task via a durable inbox record plus doorbell, or send a supported key or typed harness invocation through the recorded backend |
 | `fm-delivery-continuation-lib.sh` | Own the committed-receipt and durable validation-continuation record contracts |
 | `fm-delivery-continue.sh` | Deliver the exact-once committed-ready no-mistakes validation instruction under the task lease |
-| `fm-delivery-preflight.sh` | Bind unread Pi wake rows to their deterministic delivery-continuation results |
+| `fm-delivery-preflight.sh` | Reconcile Pi wake rows and durable committed-ready tasks with deterministic continuation results |
 | `fm-branch-prompt.sh`    | Emit the Pi supervision branch's byte-stable system prompt ([pi-supervision-branch.md](pi-supervision-branch.md)) |
 | `fm-branch-outcome.sh`   | Own the supervision branch's append-only outcome store, read cursor, and session-start replay |
 | `fm-lease.sh`            | Claim, release, inspect, and sweep per-task supervision leases                       |
