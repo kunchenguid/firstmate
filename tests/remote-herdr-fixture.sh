@@ -28,14 +28,17 @@
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
-  local codex_script="$1/lib/node_modules/@openai/codex/bin/codex.js"
-  mkdir -p "$remote_root/bin" "$(dirname "$codex_script")"
+  local codex_root="$1/.nvm/versions/node/v24.19.0"
+  local codex_script="$codex_root/lib/node_modules/@openai/codex/bin/codex.js"
+  local codex_launcher="$codex_root/bin/codex"
+  mkdir -p "$remote_root/bin" "$codex_root/bin" "$(dirname "$codex_script")"
   command -v node >/dev/null 2>&1 || return 1
   cat > "$codex_script" <<'JS'
 #!/usr/bin/env node
 setInterval(() => {}, 1000);
 JS
   chmod +x "$codex_script"
+  ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$codex_launcher"
   cat > "$script" <<SH
 #!/usr/bin/env bash
 set -u
@@ -43,7 +46,7 @@ STATE='$state'
 LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
-CODEX_BIN='$codex_script'
+CODEX_BIN='$codex_launcher'
 NODE_BIN='$(command -v node)'
 PROCESS_MODE_FILE='$state.process-mode'
 SH

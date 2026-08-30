@@ -12,11 +12,16 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 export FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/fixture-proc-unavailable"
 
 test_remote_harness_diagnostic_reports_herdr_foreground_ancestry() {
-  local dir home fakebin out
+  local dir home fakebin out codex_root codex_script
   dir="$TMP_ROOT/foreground"
   home="$dir/home"
+  codex_root="$home/.nvm/versions/node/v24.19.0"
+  codex_script="$codex_root/lib/node_modules/@openai/codex/bin/codex.js"
   fakebin=$(fm_fakebin "$dir")
-  mkdir -p "$home/state/parent-route"
+  mkdir -p "$home/state/parent-route" "$codex_root/bin" "$(dirname "$codex_script")"
+  printf '#!/usr/bin/env node\n' > "$codex_script"
+  chmod +x "$codex_script"
+  ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$codex_root/bin/codex"
   cat > "$home/state/parent-route/alienware-ml.meta" <<'EOF'
 window=fm-remote:w3:p2
 endpoint_task_id=alienware-ml
@@ -54,7 +59,7 @@ case "$pid:$field" in
   701:args=) printf '%s\n' 'bash -l' ;;
   701:ppid=) printf '%s\n' 1 ;;
   702:comm=) printf '%s\n' node ;;
-  702:args=) printf '%s\n' 'node /opt/openai/node_modules/@openai/codex/bin/codex.js' ;;
+  702:args=) printf 'node %s\n' "$FM_TEST_CODEX_SCRIPT" ;;
   702:ppid=) printf '%s\n' 701 ;;
   *) exit 1 ;;
 esac
@@ -66,7 +71,8 @@ home=$home
 spawn_gen=s1.2.3
 EOF
 
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+  out=$(HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_CODEX_SCRIPT="$codex_script" PATH="$fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-remote-harness-diagnostic.sh" alienware-ml) \
     || fail "read-only remote diagnostic could not inspect a valid Herdr endpoint"
   assert_contains "$out" 'schema=fm-remote-harness-diagnostic.v1' \
@@ -79,7 +85,7 @@ EOF
     "diagnostic retains the observed kernel command name"
   assert_contains "$out" 'args=redacted' \
     "diagnostic redacts the observed process arguments"
-  assert_not_contains "$out" 'node\ /opt/openai/node_modules/@openai/codex/bin/codex.js' \
+  assert_not_contains "$out" "node $codex_script" \
     "diagnostic does not expose the fixture command line"
   assert_contains "$out" 'result=verified-harness-found' \
     "diagnostic delegates classification to the shared matcher"

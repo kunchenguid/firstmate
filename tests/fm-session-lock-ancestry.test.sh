@@ -283,20 +283,34 @@ SH
 }
 
 test_remote_codex_session_binding_claims_only_the_matching_session() {
-  local dir fakebin proc home session other out binding mode codex_exe copied_exe
+  local dir fakebin proc home session other out binding mode codex_root codex_script codex_launcher codex_exe
+  local copied_script copied_exe vscode_exe chatgpt_exe HOME
   dir="$TMP_ROOT/remote-codex-binding"
   fakebin=$(fm_fakebin "$dir")
   proc="$dir/proc"
   home="$dir/home"
+  HOME=$home
   session=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54
   other=16b9797f-12d9-4645-b3af-0d0f6c2e8b8a
-  codex_exe="$dir/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+  codex_root="$home/.nvm/versions/node/v24.19.0"
+  codex_script="$codex_root/lib/node_modules/@openai/codex/bin/codex.js"
+  codex_launcher="$codex_root/bin/codex"
+  codex_exe="$codex_root/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+  copied_script="$dir/copied/node_modules/@openai/codex/bin/codex.js"
   copied_exe="$dir/copied/codex"
-  mkdir -p "$proc/4242" "$home/state" "$(dirname "$codex_exe")" "$(dirname "$copied_exe")"
+  vscode_exe="$home/.vscode/extensions/openai.chatgpt-26.825.31414-darwin-arm64/bin/macos-aarch64/codex"
+  chatgpt_exe="$home/Applications/ChatGPT.app/Contents/Resources/codex"
+  mkdir -p "$proc/4242" "$home/state" "$codex_root/bin" "$(dirname "$codex_script")" \
+    "$(dirname "$codex_exe")" "$(dirname "$copied_script")" "$(dirname "$copied_exe")" \
+    "$(dirname "$vscode_exe")" "$(dirname "$chatgpt_exe")"
+  printf '#!/usr/bin/env node\n' > "$codex_script"
+  printf '#!/usr/bin/env node\n' > "$copied_script"
   : > "$codex_exe"
   : > "$copied_exe"
-  chmod +x "$codex_exe"
-  chmod +x "$copied_exe"
+  : > "$vscode_exe"
+  : > "$chatgpt_exe"
+  chmod +x "$codex_script" "$copied_script" "$codex_exe" "$copied_exe" "$vscode_exe" "$chatgpt_exe"
+  ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$codex_launcher"
   ln -s "$(command -v node)" "$proc/4242/exe"
   printf 'CODEX_SESSION_ID=%s\0PATH=/usr/bin\0' "$session" > "$proc/4242/environ"
   cat > "$fakebin/ps" <<'SH'
@@ -315,6 +329,8 @@ case "$pid:$field" in
     case "${FM_TEST_CODEX_SHAPE:-exact}" in
       decoy) printf '%s\n' node ;;
       helper-script) printf '%s\n' node ;;
+      copied-script) printf '%s\n' node ;;
+      launcher) printf '%s\n' node ;;
       script) printf '%s\n' node ;;
       helper) printf '%s\n' codex-helper ;;
       login) printf '%s\n' -codex ;;
@@ -326,7 +342,9 @@ case "$pid:$field" in
     case "${FM_TEST_CODEX_SHAPE:-exact}" in
       decoy) printf '%s\n' 'node -e noop /tmp/codex/data' ;;
       helper-script) printf '%s\n' 'node /tmp/codex/helper.js' ;;
-      script) printf '%s\n' 'node /opt/openai/node_modules/@openai/codex/bin/codex.js' ;;
+      copied-script) printf 'node %s\n' "$FM_TEST_COPIED_SCRIPT" ;;
+      launcher) printf 'node %s\n' "$FM_TEST_CODEX_LAUNCHER" ;;
+      script) printf 'node %s\n' "$FM_TEST_CODEX_SCRIPT" ;;
       helper) printf '%s\n' 'codex-helper --serve' ;;
       login) printf '%s\n' '-codex --interactive' ;;
       double-login) printf '%s\n' '--codex --interactive' ;;
@@ -340,6 +358,11 @@ case "$pid:$field" in
 esac
 SH
   chmod +x "$fakebin/ps"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_PLATFORM:-Linux}"
+SH
+  chmod +x "$fakebin/uname"
   if FM_TEST_CODEX_SHAPE=decoy FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"
@@ -361,6 +384,17 @@ SH
   fi
   [ ! -e "$home/state/.fm-codex-session-binding" ] \
     || fail "rejected Codex-directory helper evidence published a binding"
+  if FM_TEST_CODEX_SHAPE=copied-script FM_TEST_COPIED_SCRIPT="$copied_script" \
+    FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a copied Codex package tree became binding authority"
+  fi
+  [ ! -e "$home/state/.fm-codex-session-binding" ] \
+    || fail "rejected copied Codex script evidence published a binding"
   if FM_TEST_CODEX_SHAPE=helper FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"
@@ -408,9 +442,24 @@ SH
   fi
   rm -f "$proc/4242/exe"
   ln -s "$(command -v node)" "$proc/4242/exe"
-  FM_TEST_CODEX_SHAPE=script FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+  FM_TEST_CODEX_SHAPE=script FM_TEST_CODEX_SCRIPT="$codex_script" \
+    FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
     || fail "the installed Codex script entrypoint was not recognized"
+  FM_TEST_CODEX_SHAPE=launcher FM_TEST_CODEX_LAUNCHER="$codex_launcher" \
+    FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
+    || fail "the installed NVM Codex launcher was not recognized"
+  rm -f "$proc/4242/exe"
+  ln -s "$vscode_exe" "$proc/4242/exe"
+  FM_TEST_PLATFORM=Darwin FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
+    || fail "the installed VS Code Codex executable was not recognized"
+  rm -f "$proc/4242/exe"
+  ln -s "$chatgpt_exe" "$proc/4242/exe"
+  FM_TEST_PLATFORM=Darwin FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
+    || fail "the installed ChatGPT Codex executable was not recognized"
   rm -f "$proc/4242/exe"
   ln -s "$codex_exe" "$proc/4242/exe"
   FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \

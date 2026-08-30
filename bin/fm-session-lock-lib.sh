@@ -283,17 +283,57 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+fm_codex_nvm_node_root_for_path() {  # <path>
+  local path=$1 prefix rest version normalized major minor patch extra
+  case "$path" in /*/.nvm/versions/node/*/*) ;; *) return 1 ;; esac
+  prefix=${path%%/.nvm/versions/node/*}
+  rest=${path#"$prefix/.nvm/versions/node/"}
+  version=${rest%%/*}
+  normalized=${version#v}
+  IFS=. read -r major minor patch extra <<< "$normalized"
+  case "$major:$minor:$patch:$extra" in *[!0-9:]*) return 1 ;; esac
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  printf '%s\n' "$prefix/.nvm/versions/node/$version"
+}
+
+fm_codex_nvm_install_matches() {  # <path>
+  local path=$1 node_root script launcher target
+  node_root=$(fm_codex_nvm_node_root_for_path "$path") || return 1
+  script="$node_root/lib/node_modules/@openai/codex/bin/codex.js"
+  launcher="$node_root/bin/codex"
+  [ -f "$script" ] && [ ! -L "$script" ] && [ -x "$script" ] || return 1
+  [ -L "$launcher" ] || return 1
+  target=$(readlink "$launcher" 2>/dev/null) || return 1
+  case "$target" in
+    ../lib/node_modules/@openai/codex/bin/codex.js|"$script") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_codex_script_path_matches() {  # <path>
-  case "$1" in
-    */node_modules/@openai/codex/bin/codex.js) return 0 ;;
+  local path=$1 node_root
+  node_root=$(fm_codex_nvm_node_root_for_path "$path") || return 1
+  case "$path" in
+    "$node_root/bin/codex"|"$node_root/lib/node_modules/@openai/codex/bin/codex.js")
+      fm_codex_nvm_install_matches "$path" ;;
     *) return 1 ;;
   esac
 }
 
 fm_codex_installed_executable_path_matches() {  # <path>
-  case "$1" in
-    */node_modules/@openai/codex/vendor/*/bin/codex) return 0 ;;
-    */node_modules/@openai/codex-*/vendor/*/bin/codex) return 0 ;;
+  local path=$1 node_root user_home=${HOME:-/__fm_no_home__}
+  if node_root=$(fm_codex_nvm_node_root_for_path "$path"); then
+    fm_codex_nvm_install_matches "$path" || return 1
+    case "$path" in
+      "$node_root"/lib/node_modules/@openai/codex/vendor/*/bin/codex) return 0 ;;
+      "$node_root"/lib/node_modules/@openai/codex/node_modules/@openai/codex-*/vendor/*/bin/codex) return 0 ;;
+    esac
+  fi
+  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+  case "$path" in
+    "$user_home"/.vscode/extensions/openai.chatgpt-*-darwin-*/bin/macos-*/codex) return 0 ;;
+    /Applications/ChatGPT.app/Contents/Resources/codex) return 0 ;;
+    "$user_home"/Applications/ChatGPT.app/Contents/Resources/codex) return 0 ;;
     *) return 1 ;;
   esac
 }
