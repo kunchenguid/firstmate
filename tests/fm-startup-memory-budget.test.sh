@@ -130,6 +130,16 @@ expect_rejected_read() {
   assert_contains "$out" "$expected" "unsafe budget rejection was not specific"
 }
 
+expect_rejected_report() {
+  local home=$1 expected=$2 out rc
+  set +e
+  out=$(FM_HOME="$home" "$BUDGET" report 2>&1)
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "unsafe memory input should fail the accounting command"
+  assert_contains "$out" "$expected" "accounting rejection was not specific"
+}
+
 test_safe_parser_rejects_ambiguous_and_unsafe_values() {
   local home outside
   home="$TMP_ROOT/parser-home"
@@ -166,7 +176,7 @@ test_safe_parser_rejects_ambiguous_and_unsafe_values() {
 }
 
 test_budget_accounting_reports_all_three_files_and_safe_failure() {
-  local home out rc outside
+  local home out outside
   home="$TMP_ROOT/accounting-home"
   mkdir -p "$home/config" "$home/data"
   printf '10\n' > "$home/config/startup-memory-budget"
@@ -191,17 +201,91 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
 
   outside="$TMP_ROOT/accounting-outside"
   printf 'outside\n' > "$outside"
-  rm -f "$home/data/captain.md"
+  rm -f "$home/data/captain.md" "$home/data/learnings.md"
   ln -s "$outside" "$home/data/captain.md"
-  set +e
-  out=$(FM_HOME="$home" "$BUDGET" report 2>&1)
-  rc=$?
-  set -e
-  expect_code 2 "$rc" "unsafe memory input should fail the accounting command"
-  assert_contains "$out" 'memory file is not an ordinary regular file' \
-    "accounting failure did not identify the unsafe memory file"
-  [ "$(<"$outside")" = outside ] || fail "accounting failure changed a symlink target"
-  pass "budget accounting sums the three startup files and reports safe failures"
+  out=$(FM_HOME="$home" "$BUDGET" report)
+  assert_contains "$out" 'file=data/captain.md bytes=8 estimated_tokens=3 status=present' \
+    "accounting did not measure the resolved symlink target bytes"
+  assert_contains "$out" 'total_estimated_tokens=6' \
+    "accounting did not include the resolved symlink target in the total"
+  [ "$(<"$outside")" = outside ] || fail "accounting changed a symlink target"
+  pass "budget accounting sums regular files, absent files, and valid external symlink targets"
+}
+
+make_unix_socket() {
+  local path=$1 ready=$2
+  perl -MSocket=PF_UNIX,SOCK_STREAM,sockaddr_un -e '
+    my ($path, $ready) = @ARGV;
+    socket(my $sock, PF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+    bind($sock, sockaddr_un($path)) or die "bind: $!";
+    open(my $fh, ">", $ready) or die "ready: $!";
+    close($fh) or die "ready close: $!";
+    sleep 30;
+  ' "$path" "$ready" &
+  FM_TEST_SOCKET_PID=$!
+}
+
+wait_for_socket_ready() {
+  local ready=$1 attempts=0
+  while [ "$attempts" -lt 10 ]; do
+    [ -e "$ready" ] && return 0
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
+test_budget_accounting_rejects_unsafe_memory_targets() {
+  local home target ready socket_pid
+  home="$TMP_ROOT/accounting-unsafe-home"
+  mkdir -p "$home/config" "$home/data"
+  printf '10\n' > "$home/config/startup-memory-budget"
+
+  ln -s "$TMP_ROOT/missing-memory-target" "$home/data/captain.md"
+  expect_rejected_report "$home" 'memory file symlink target does not exist'
+
+  rm -f "$home/data/captain.md"
+  ln -s captain.md "$home/data/captain.md"
+  expect_rejected_report "$home" 'memory file symlink target could not be resolved'
+
+  rm -f "$home/data/captain.md"
+  target="$TMP_ROOT/accounting-target-dir"
+  mkdir -p "$target"
+  ln -s "$target" "$home/data/captain.md"
+  expect_rejected_report "$home" 'memory file target is a directory'
+
+  rm -f "$home/data/captain.md"
+  target="$TMP_ROOT/accounting-target-fifo"
+  mkfifo "$target"
+  ln -s "$target" "$home/data/captain.md"
+  expect_rejected_report "$home" 'memory file target is a FIFO'
+
+  rm -f "$home/data/captain.md"
+  ln -s /dev/null "$home/data/captain.md"
+  expect_rejected_report "$home" 'memory file target is a character device'
+
+  rm -f "$home/data/captain.md"
+  target="$TMP_ROOT/accounting-target-socket"
+  ready="$TMP_ROOT/accounting-target-socket.ready"
+  make_unix_socket "$target" "$ready" || fail "could not create unix socket fixture"
+  socket_pid=$FM_TEST_SOCKET_PID
+  wait_for_socket_ready "$ready" || fail "unix socket fixture did not become ready"
+  ln -s "$target" "$home/data/captain.md"
+  expect_rejected_report "$home" 'memory file target is a socket'
+  kill "$socket_pid" 2>/dev/null || true
+  wait "$socket_pid" 2>/dev/null || true
+
+  if [ "$(id -u)" != 0 ]; then
+    rm -f "$home/data/captain.md"
+    target="$TMP_ROOT/accounting-target-unreadable"
+    printf 'secret\n' > "$target"
+    chmod 000 "$target"
+    ln -s "$target" "$home/data/captain.md"
+    expect_rejected_report "$home" 'memory file target could not be read'
+    chmod 600 "$target"
+  fi
+
+  pass "budget accounting rejects broken links, loops, directories, FIFOs, devices, sockets, and unreadable targets"
 }
 
 new_propagation_world() {
@@ -328,6 +412,7 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
 test_primary_bootstrap_materializes_visible_default
 test_safe_parser_rejects_ambiguous_and_unsafe_values
 test_budget_accounting_reports_all_three_files_and_safe_failure
+test_budget_accounting_rejects_unsafe_memory_targets
 test_primary_budget_converges_with_exact_reread_and_safe_failures
 
 echo '# all fm-startup-memory-budget tests passed'
