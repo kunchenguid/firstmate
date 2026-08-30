@@ -340,6 +340,7 @@ def atomic_create(path: Path, data: bytes) -> str:
         existing = path.read_bytes()
         if existing != data:
             raise HandoffError("CREATE_ONLY_MISMATCH", "a stable record ID already binds different bytes")
+        fsync_directory(path.parent)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -926,6 +927,25 @@ def read_envelope(layout: StateLayout, record_id: str, config: Mapping[str, Any]
     return value, sha256_bytes(data)
 
 
+def recover_orphan_queues_from_claims(layout: StateLayout, config: Mapping[str, Any]) -> None:
+    record_claims: dict[str, set[str]] = {}
+    for path in sorted(layout.claims.glob("candidate-*.json")):
+        value = read_json_file(path, max_bytes=4096)
+        record_id = value.get("record_id") if isinstance(value, dict) else None
+        candidate_id = value.get("candidate_id") if isinstance(value, dict) else None
+        if not isinstance(record_id, str) or not RECORD_ID.fullmatch(record_id) or candidate_id != path.stem:
+            raise HandoffError("CLAIM_RECORD", "candidate claim record is invalid")
+        if not queue_path(layout, record_id).exists():
+            record_claims.setdefault(record_id, set()).add(candidate_id)
+    for record_id, candidate_ids in sorted(record_claims.items()):
+        fsync_directory(layout.records)
+        envelope, digest = read_envelope(layout, record_id, config)
+        if not candidate_ids.issubset({item["item_id"] for item in envelope["items"]}):
+            raise HandoffError("CLAIM_RECORD", "candidate claim does not belong to its sealed record")
+        update_queue(layout, record_id, envelope_sha256=digest)
+        write_receipt(layout, "seal-recovery", "recovered", "claimed-record-queue-recovered", record_id=record_id, envelope_sha256=digest)
+
+
 def recover_unclaimed_records(layout: StateLayout, config: Mapping[str, Any], candidates: Mapping[str, dict[str, Any]]) -> dict[str, str]:
     recovered: dict[str, str] = {}
     wanted = set(candidates)
@@ -934,6 +954,8 @@ def recover_unclaimed_records(layout: StateLayout, config: Mapping[str, Any], ca
     for path in sorted(layout.records.glob("handoff-*.json")):
         envelope, envelope_sha = read_envelope(layout, path.stem, config)
         matched = wanted & {item["item_id"] for item in envelope["items"]}
+        if matched:
+            fsync_directory(layout.records)
         for candidate_id in matched:
             claim = {
                 "schema": "firstmate.context-handoff.claim.v1",
@@ -971,6 +993,7 @@ def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger:
     assert config is not None
     layout = StateLayout(home)
     with state_lock(layout):
+        recover_orphan_queues_from_claims(layout, config)
         claimed = claimed_candidate_ids(layout)
         matching: dict[str, dict[str, Any]] = {}
         for path in sorted(layout.candidates.glob("candidate-*.json")):
@@ -1016,6 +1039,7 @@ def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger:
         validate_envelope(envelope, config)
         try:
             digest = atomic_create(record_file(layout, envelope["record_id"]), data)
+            update_queue(layout, envelope["record_id"], envelope_sha256=digest)
             for candidate_id in sorted(matching):
                 claim = {
                     "schema": "firstmate.context-handoff.claim.v1",
@@ -1025,7 +1049,6 @@ def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger:
                     "claimed_at": envelope["created_at"],
                 }
                 atomic_create(layout.claims / f"{candidate_id}.json", canonical_json(claim))
-            update_queue(layout, envelope["record_id"], envelope_sha256=digest)
             write_receipt(layout, "seal", "sealed", "durable-before-compaction", record_id=envelope["record_id"], envelope_sha256=digest, source_harness=source_harness, trigger=trigger, item_count=len(items), envelope_bytes=len(data))
         except BaseException as exc:
             reason = "atomic-seal-failed"
@@ -1069,6 +1092,18 @@ def matching_candidate_present(layout: StateLayout, source_harness: str, session
     return False
 
 
+def seal_with_failure_receipt(home: Path, source_harness: str, session_hash: str, trigger: str) -> dict[str, Any]:
+    try:
+        return seal_candidates(home, source_harness, session_hash, trigger)
+    except HandoffError as exc:
+        layout = StateLayout(home)
+        if not matching_candidate_present(layout, source_harness, session_hash):
+            raise
+        with state_lock(layout):
+            write_receipt(layout, "seal", "failed", "registered-candidate-validation-failed", source_harness=source_harness, trigger=trigger, failure_code=exc.code)
+        return {"status": "seal-failed", "had_candidates": True, "reason": "registered-candidate-validation-failed"}
+
+
 def command_seal(args: argparse.Namespace) -> dict[str, Any]:
     if args.source_harness not in SOURCE_HARNESSES or args.trigger not in TRIGGERS:
         raise HandoffError("SEAL_ENUM", "seal source or trigger is invalid")
@@ -1090,15 +1125,7 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
             return {"status": "recipient-mismatch"}
     else:
         session_hash = source_session_hash(config, "pi", supplied)
-    try:
-        result = seal_candidates(home, args.source_harness, session_hash, args.trigger)
-    except HandoffError as exc:
-        layout = StateLayout(home)
-        if not matching_candidate_present(layout, args.source_harness, session_hash):
-            raise
-        with state_lock(layout):
-            write_receipt(layout, "seal", "failed", "registered-candidate-validation-failed", source_harness=args.source_harness, trigger=args.trigger, failure_code=exc.code)
-        result = {"status": "seal-failed", "had_candidates": True, "reason": "registered-candidate-validation-failed"}
+    result = seal_with_failure_receipt(home, args.source_harness, session_hash, args.trigger)
     if args.standalone and result.get("status") in {"sealed", "already-sealed"}:
         mark_compaction(home, str(result["record_id"]), str(result["envelope_sha256"]), True, args.trigger, "standalone-manual-seal")
         deliver_pending(home)
@@ -1399,7 +1426,7 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
         if not config_enabled(config, "sealing_enabled") or not bind_claude_session(home, config, payload):
             return None
         trigger = "manual" if payload.get("trigger") == "manual" else "threshold"
-        result = seal_candidates(home, "claude", config["recipient"]["agent_session_sha256"], trigger)
+        result = seal_with_failure_receipt(home, "claude", config["recipient"]["agent_session_sha256"], trigger)
         if result.get("status") == "seal-failed" and result.get("had_candidates"):
             return {"decision": "block", "reason": "Already-curated handoff candidates could not be sealed durably; compaction was stopped."}
         return None
@@ -1439,26 +1466,36 @@ def approval_records(layout: StateLayout, record_id: str) -> list[Path]:
     return sorted(directory.glob("*.json"))
 
 
-def valid_approval_for_command(layout: StateLayout, config: Mapping[str, Any], bundle: Path, approval_sha: str) -> bool:
+def _valid_approval_for_command_locked(home: Path, layout: StateLayout, config: Mapping[str, Any], bundle: Path, approval_sha: str) -> bool:
     try:
         bundle_canonical = bundle.resolve(strict=True)
         if path_has_symlink(bundle) or not within(bundle_canonical, [str(layout.bundles)]):
             return False
+        record_id = bundle_canonical.parent.name
+        approval = load_approval(layout, record_id, approval_sha)
         bundle_sha = sha256_file(bundle_canonical, max_bytes=MAX_TRANSACTION_BUNDLE_BYTES)
-        for path in approval_records(layout, bundle_canonical.parent.name):
-            value = read_json_file(path, max_bytes=64 * 1024)
-            if (
-                isinstance(value, dict)
-                and value.get("schema") == APPROVAL_SCHEMA
-                and value.get("bundle_path") == str(bundle_canonical)
-                and value.get("bundle_file_sha256") == bundle_sha
-                and value.get("approval_sha256") == approval_sha
-                and value.get("vault_path") == str(validate_vault_binding(config))
-            ):
-                return True
+        if (
+            approval.get("bundle_path") != str(bundle_canonical)
+            or approval.get("bundle_file_sha256") != bundle_sha
+            or approval.get("vault_path") != str(validate_vault_binding(config))
+            or approval.get("operation_id") != deterministic_operation_id(record_id)
+            or approval.get("core_path") != config["transaction"]["core_path"]
+            or approval.get("core_sha256") != config["transaction"]["core_sha256"]
+            or approval.get("module_path") != config["transaction"]["module_path"]
+            or approval.get("module_sha256") != config["transaction"]["module_sha256"]
+        ):
+            return False
+        _envelope, queue, _digest = consumer_record(home, config, record_id)
+        require_active_save_authority(layout, record_id, queue, approval)
+        return True
     except (HandoffError, OSError):
         return False
     return False
+
+
+def valid_approval_for_command(home: Path, layout: StateLayout, config: Mapping[str, Any], bundle: Path, approval_sha: str) -> bool:
+    with state_lock(layout):
+        return _valid_approval_for_command_locked(home, layout, config, bundle, approval_sha)
 
 
 def exact_apply_command(home: Path, config: Mapping[str, Any], command: str) -> bool:
@@ -1481,7 +1518,8 @@ def exact_apply_command(home: Path, config: Mapping[str, Any], command: str) -> 
         validate_transaction_core(config)
     except HandoffError:
         return False
-    return valid_approval_for_command(StateLayout(home), config, Path(words[4]), words[8])
+    layout = StateLayout(home)
+    return valid_approval_for_command(home, layout, config, Path(words[4]), words[8])
 
 
 def guard_deny(reason: str) -> dict[str, Any]:
@@ -1492,6 +1530,11 @@ def guard_deny(reason: str) -> dict[str, Any]:
             "permissionDecisionReason": reason,
         }
     }
+
+
+def hook_session_matches(config: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    session_id = payload.get("session_id")
+    return isinstance(session_id, str) and hash_session("claude", session_id) == config["recipient"]["agent_session_sha256"]
 
 
 def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1505,7 +1548,7 @@ def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, 
         return guard_deny("Direct file mutation is disabled for this Vault curator; use the bounded handoff transaction consumer.")
     if tool_name in {"Bash", "PowerShell"}:
         command = tool_input.get("command")
-        if tool_name == "Bash" and isinstance(command, str) and exact_apply_command(home, config, command):
+        if tool_name == "Bash" and isinstance(command, str) and hook_session_matches(config, payload) and exact_apply_command(home, config, command):
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -1667,6 +1710,37 @@ def consumer_record(home: Path, config: Mapping[str, Any], record_id: str) -> tu
     return envelope, queue, digest
 
 
+def ack_path_for(layout: StateLayout, record_id: str) -> Path:
+    if not RECORD_ID.fullmatch(record_id):
+        raise HandoffError("RECORD_ID", "record ID is invalid")
+    return layout.acks / f"{record_id}.json"
+
+
+def disposition_path_for(layout: StateLayout, record_id: str) -> Path:
+    if not RECORD_ID.fullmatch(record_id):
+        raise HandoffError("RECORD_ID", "record ID is invalid")
+    return layout.quarantine / f"disposition-{record_id}.json"
+
+
+def require_active_save_authority(
+    layout: StateLayout,
+    record_id: str,
+    queue: Mapping[str, Any],
+    approval: Mapping[str, Any] | None = None,
+) -> None:
+    if queue.get("status") not in {"pending", "notified"} or queue.get("compaction") != "succeeded":
+        raise HandoffError("SAVE_AUTHORITY_REVOKED", "record is not active for automatic Save")
+    if ack_path_for(layout, record_id).exists() or disposition_path_for(layout, record_id).exists():
+        raise HandoffError("SAVE_AUTHORITY_REVOKED", "a terminal acknowledgement or disposition revoked automatic Save authority")
+    if approval is not None:
+        if (
+            approval.get("record_id") != record_id
+            or approval.get("operation_id") != deterministic_operation_id(record_id)
+            or queue.get("active_bundle_sha256") != approval.get("bundle_file_sha256")
+        ):
+            raise HandoffError("SAVE_AUTHORITY_REVOKED", "reviewed Save plan is not the active record authority")
+
+
 def verify_completed_transaction(home: Path, config: Mapping[str, Any], record_id: str, approval: Mapping[str, Any]) -> dict[str, Any]:
     vault = validate_vault_binding(config)
     operation_id = deterministic_operation_id(record_id)
@@ -1707,7 +1781,7 @@ def verify_completed_transaction(home: Path, config: Mapping[str, Any], record_i
         raise HandoffError("TRANSACTION_LOCK", "transaction mutation lock remains held")
     result_sha = sha256_file(result_path)
     layout = StateLayout(home)
-    ack_path = layout.acks / f"{record_id}.json"
+    ack_path = ack_path_for(layout, record_id)
     if ack_path.exists():
         existing_ack = read_json_file(ack_path, max_bytes=64 * 1024)
         if (
@@ -1720,7 +1794,10 @@ def verify_completed_transaction(home: Path, config: Mapping[str, Any], record_i
             or existing_ack.get("changed_path_hashes") != {key: hashes[key] for key in sorted(hashes)}
         ):
             raise HandoffError("ACK_MISMATCH", "existing source acknowledgement does not match the verified transaction")
+        queue_before = read_queue(layout, record_id)
         update_queue(layout, record_id, status="acknowledged", reason="transaction-verified-and-acked", operation_id=operation_id, ack_sha256=sha256_bytes(canonical_json(existing_ack)))
+        if queue_before.get("status") != "acknowledged":
+            write_receipt(layout, "consumer", "acknowledged", "transaction-ack-recovered", record_id=record_id, operation_id=operation_id, result_sha256=result_sha)
         return existing_ack
     ack = {
         "schema": ACK_SCHEMA,
@@ -1733,6 +1810,7 @@ def verify_completed_transaction(home: Path, config: Mapping[str, Any], record_i
         "acknowledged_at": now_utc(),
     }
     atomic_create(ack_path, canonical_json(ack))
+    failpoint("after-ack-before-queue")
     update_queue(layout, record_id, status="acknowledged", reason="transaction-verified-and-acked", operation_id=operation_id, ack_sha256=sha256_bytes(canonical_json(ack)))
     write_receipt(layout, "consumer", "acknowledged", "transaction-verified", record_id=record_id, operation_id=operation_id, result_sha256=result_sha)
     return ack
@@ -1761,9 +1839,35 @@ def find_completed_approval(home: Path, config: Mapping[str, Any], record_id: st
         raise
 
 
-def mcp_next(home: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+def recover_terminal_disposition_ack(layout: StateLayout, record_id: str) -> bool:
+    path = ack_path_for(layout, record_id)
+    disposition_path = disposition_path_for(layout, record_id)
+    disposition_record: dict[str, Any] | None = None
+    if disposition_path.exists():
+        value = read_json_file(disposition_path, max_bytes=16 * 1024)
+        if not isinstance(value, dict) or value.get("schema") != "firstmate.context-handoff.disposition.v1" or value.get("record_id") != record_id or value.get("disposition") not in DISPOSITIONS or not isinstance(value.get("recorded_at"), str):
+            raise HandoffError("DISPOSITION_RECORD", "durable curation disposition is invalid")
+        disposition_record = value
+        if not path.exists():
+            atomic_create(path, canonical_json({"schema": ACK_SCHEMA, "record_id": record_id, "disposition": value["disposition"], "acknowledged_at": value["recorded_at"]}))
+    if not path.exists():
+        return False
+    ack = read_json_file(path, max_bytes=64 * 1024)
+    disposition = ack.get("disposition") if isinstance(ack, dict) else None
+    if not isinstance(ack, dict) or ack.get("schema") != ACK_SCHEMA or ack.get("record_id") != record_id or disposition not in DISPOSITIONS:
+        return False
+    if disposition_record is not None and disposition_record.get("disposition") != disposition:
+        raise HandoffError("ACK_MISMATCH", "durable disposition and acknowledgement do not match")
+    status = "quarantined" if disposition == "needs-captain" else "acknowledged"
+    queue_before = read_queue(layout, record_id)
+    update_queue(layout, record_id, status=status, reason=f"curation-{disposition}")
+    if queue_before.get("status") != status:
+        write_receipt(layout, "consumer", status, f"curation-{disposition}-ack-recovered", record_id=record_id)
+    return True
+
+
+def _mcp_next_locked(home: Path, config: Mapping[str, Any], layout: StateLayout) -> dict[str, Any]:
     require_consumer_binding(home, config)
-    layout = StateLayout(home)
     for ack_path in sorted(layout.acks.glob("handoff-*.json")):
         validate_private_file(ack_path)
     candidates: list[tuple[str, str]] = []
@@ -1772,9 +1876,15 @@ def mcp_next(home: Path, config: Mapping[str, Any]) -> dict[str, Any]:
         if queue.get("status") in {"pending", "notified"} and queue.get("compaction") == "succeeded":
             candidates.append((str(queue.get("created_at", "")), path.stem))
     for _, record_id in sorted(candidates):
+        if recover_terminal_disposition_ack(layout, record_id):
+            continue
         healed = find_completed_approval(home, config, record_id)
         if healed:
             continue
+        if ack_path_for(layout, record_id).exists():
+            quarantine(layout, record_id, "acknowledgement-recovery-incomplete")
+            update_queue(layout, record_id, status="quarantined", reason="acknowledgement-recovery-incomplete")
+            raise HandoffError("ACK_INCOMPLETE", "durable acknowledgement could not be reconciled with its terminal result")
         envelope, queue, digest = consumer_record(home, config, record_id)
         return {
             "status": "ready",
@@ -1790,15 +1900,20 @@ def mcp_next(home: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     return {"status": "empty"}
 
 
-def mcp_disposition(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+def mcp_next(home: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        return _mcp_next_locked(home, config, layout)
+
+
+def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any], layout: StateLayout) -> dict[str, Any]:
     record_id = arguments.get("record_id")
     disposition = arguments.get("disposition")
     rationale = arguments.get("rationale")
     if not isinstance(record_id, str) or disposition not in DISPOSITIONS or not isinstance(rationale, str) or not 1 <= len(rationale) <= 500:
         raise HandoffError("DISPOSITION_INPUT", "consumer disposition input is invalid")
     validate_statement(rationale)
-    consumer_record(home, config, record_id)
-    layout = StateLayout(home)
+    _envelope, queue_before, _digest = consumer_record(home, config, record_id)
     value = {
         "schema": "firstmate.context-handoff.disposition.v1",
         "record_id": record_id,
@@ -1822,8 +1937,8 @@ def mcp_disposition(home: Path, config: Mapping[str, Any], arguments: Mapping[st
     else:
         atomic_create(path, canonical_json(value))
     status = "quarantined" if disposition == "needs-captain" else "acknowledged"
-    update_queue(layout, record_id, status=status, reason=f"curation-{disposition}")
-    ack_path = layout.acks / f"{record_id}.json"
+    ack_path = ack_path_for(layout, record_id)
+    created_ack = False
     if ack_path.exists():
         ack = read_json_file(ack_path, max_bytes=16 * 1024)
         if not isinstance(ack, dict) or ack.get("schema") != ACK_SCHEMA or ack.get("record_id") != record_id or ack.get("disposition") != disposition:
@@ -1836,18 +1951,30 @@ def mcp_disposition(home: Path, config: Mapping[str, Any], arguments: Mapping[st
             "acknowledged_at": now_utc(),
         }
         atomic_create(ack_path, canonical_json(ack))
+        created_ack = True
+    failpoint("after-ack-before-queue")
+    update_queue(layout, record_id, status=status, reason=f"curation-{disposition}")
+    if created_ack:
         write_receipt(layout, "consumer", status, f"curation-{disposition}", record_id=record_id)
+    elif queue_before.get("status") != status:
+        write_receipt(layout, "consumer", status, f"curation-{disposition}-ack-recovered", record_id=record_id)
     return {"status": status, "record_id": record_id, "disposition": disposition}
 
 
-def mcp_prepare_save(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+def mcp_disposition(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        return _mcp_disposition_locked(home, config, arguments, layout)
+
+
+def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any], layout: StateLayout) -> dict[str, Any]:
     record_id = arguments.get("record_id")
     bundle = arguments.get("bundle")
     duplicate_check = arguments.get("duplicate_check")
     if not isinstance(record_id, str):
         raise HandoffError("PREPARE_INPUT", "Save preparation input is invalid")
-    consumer_record(home, config, record_id)
-    layout = StateLayout(home)
+    _envelope, queue, _digest = consumer_record(home, config, record_id)
+    require_active_save_authority(layout, record_id, queue)
     try:
         if not isinstance(duplicate_check, dict):
             raise HandoffError("DUPLICATE_CHECK", "Save requires a bounded no-match duplicate search disposition")
@@ -1919,6 +2046,12 @@ def mcp_prepare_save(home: Path, config: Mapping[str, Any], arguments: Mapping[s
     }
 
 
+def mcp_prepare_save(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        return _mcp_prepare_save_locked(home, config, arguments, layout)
+
+
 def load_approval(layout: StateLayout, record_id: str, approval_sha: str) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
     for path in approval_records(layout, record_id):
@@ -1930,14 +2063,21 @@ def load_approval(layout: StateLayout, record_id: str, approval_sha: str) -> dic
     return matches[0]
 
 
-def mcp_commit_save(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any], layout: StateLayout) -> dict[str, Any]:
     record_id = arguments.get("record_id")
     approval_sha = arguments.get("approval_sha256")
     if not isinstance(record_id, str) or not isinstance(approval_sha, str) or not HEX64.fullmatch(approval_sha):
         raise HandoffError("COMMIT_INPUT", "Save commit input is invalid")
-    consumer_record(home, config, record_id)
-    layout = StateLayout(home)
+    _envelope, queue, _digest = consumer_record(home, config, record_id)
     approval = load_approval(layout, record_id, approval_sha)
+    ack_path = ack_path_for(layout, record_id)
+    if ack_path.exists():
+        ack = read_json_file(ack_path, max_bytes=64 * 1024)
+        if not isinstance(ack, dict) or ack.get("schema") != ACK_SCHEMA or ack.get("disposition") != "saved" or ack.get("approval_sha256") != approval_sha:
+            raise HandoffError("SAVE_AUTHORITY_REVOKED", "terminal acknowledgement revoked automatic Save authority")
+        verified = verify_completed_transaction(home, config, record_id, approval)
+        return {"status": "acknowledged", "record_id": record_id, "operation_id": verified["operation_id"], "changed_path_hashes": verified["changed_path_hashes"]}
+    require_active_save_authority(layout, record_id, queue, approval)
     python_path, core, _module = validate_transaction_core(config)
     vault = validate_vault_binding(config)
     bundle_path = Path(approval["bundle_path"])
@@ -1959,6 +2099,12 @@ def mcp_commit_save(home: Path, config: Mapping[str, Any], arguments: Mapping[st
         raise HandoffError("TRANSACTION_APPLY", "transaction core did not return a complete result")
     ack = verify_completed_transaction(home, config, record_id, approval)
     return {"status": "acknowledged", "record_id": record_id, "operation_id": ack["operation_id"], "changed_path_hashes": ack["changed_path_hashes"]}
+
+
+def mcp_commit_save(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        return _mcp_commit_save_locked(home, config, arguments, layout)
 
 
 def mcp_register(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
