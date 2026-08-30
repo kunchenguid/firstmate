@@ -197,6 +197,72 @@ test_alarm_concurrent_cooldown_fires_at_most_once() {
   pass "concurrent invocations racing an expired cooldown fire at most one active alert"
 }
 
+# A caller that cannot get the append lock still appends unlocked so a
+# failure is never dropped just because the lock is momentarily contended.
+# That unlocked write races any lock holder's concurrent trim: a bare
+# `tail | mv` snapshot-and-swap discards anything that lands between its read
+# and its swap. Hammer the record with raw unlocked appends (functionally
+# identical to the alarm's own unlocked fallback branch) for the full
+# duration of many trim-triggering alarm calls and assert every one survives.
+test_alarm_unlocked_append_survives_concurrent_trim() {
+  local dir state i j missing writer_count=6 writes_per_writer=80 rounds=15
+  local -a wpids=()
+  dir=$(make_delivery_case alarm-unlocked-trim)
+  state="$dir/home/state"
+  mkdir -p "$state"
+  : > "$state/.wake-delivery-failures"
+  for i in $(seq 1 "$writer_count"); do
+    (
+      for j in $(seq 1 "$writes_per_writer"); do
+        printf '%s\tunlocked-%s-%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$i" "$j" \
+          >> "$state/.wake-delivery-failures"
+      done
+    ) &
+    wpids+=("$!")
+  done
+  for i in $(seq 1 "$rounds"); do
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_WAKE_DELIVERY_ALARM_COOLDOWN_SECS=0 \
+      FM_WAKE_DELIVERY_MAX_BYTES=1 FM_WAKE_DELIVERY_KEEP_LINES=100000 \
+      "$ALARM" --summary "trim-round-$i" >/dev/null
+  done
+  for i in "${wpids[@]}"; do
+    wait "$i" || fail "an unlocked writer exited non-zero"
+  done
+  missing=0
+  for i in $(seq 1 "$writer_count"); do
+    for j in $(seq 1 "$writes_per_writer"); do
+      grep -qF "unlocked-$i-$j" "$state/.wake-delivery-failures" || missing=$((missing + 1))
+    done
+  done
+  [ "$missing" -eq 0 ] || fail "$missing unlocked appends were silently dropped by a concurrent trim"
+  pass "unlocked appends racing a concurrent trim are never dropped"
+}
+
+# The lock library stamps a pid into the lock dir right after mkdir succeeds
+# so a later caller can tell a dead holder from a live one. If the holder
+# crashes between the mkdir and that pid write, the lock directory exists but
+# never gets a pid - and without an age-only fallback, no later caller could
+# ever tell that lock apart from one that is about to finish, so it would
+# silence every future append/trim/archive forever.
+test_lock_lib_reaps_abandoned_pidless_lock_once_stale() {
+  local dir lockdir
+  dir="$TMP_ROOT/lock-pidless"
+  mkdir -p "$dir"
+  lockdir="$dir/.lock"
+  # shellcheck source=bin/fm-wake-delivery-lock-lib.sh
+  . "$ROOT/bin/fm-wake-delivery-lock-lib.sh"
+  mkdir "$lockdir"
+  fm_wake_delivery_acquire_lock "$lockdir" 2 0.01 30
+  expect_code 1 "$?" "a fresh pidless lock must not be reaped"
+  [ -d "$lockdir" ] || fail "a fresh pidless lock was removed before it went stale"
+  touch -t 200001010000 "$lockdir"
+  fm_wake_delivery_acquire_lock "$lockdir" 2 0.01 30
+  expect_code 0 "$?" "a stale pidless lock must be reaped and re-acquired"
+  [ -f "$lockdir/pid" ] || fail "the re-acquired lock did not stamp a fresh pid"
+  fm_wake_delivery_release_lock "$lockdir"
+  pass "an abandoned pidless lock is reaped once stale, never while fresh"
+}
+
 # --- plugin-driven delivery through the real lib -----------------------------
 
 wait_for_file() {  # <file> <label>
@@ -542,6 +608,8 @@ test_alarm_off_channel_still_records
 test_alarm_trims_the_record_bounded
 test_alarm_concurrent_appends_survive_trim
 test_alarm_concurrent_cooldown_fires_at_most_once
+test_alarm_unlocked_append_survives_concurrent_trim
+test_lock_lib_reaps_abandoned_pidless_lock_once_stale
 test_guard_delivery_failure_is_recorded_and_alarmed
 test_guard_delivery_success_stays_silent_and_single
 test_hanging_prompt_is_declared_by_timeout

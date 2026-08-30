@@ -1199,6 +1199,48 @@ test_wake_delivery_record_readonly_leaves_record() {
   pass "read-only bootstrap reports wake-delivery failures without archiving"
 }
 
+# The same unlocked-fallback append that fm-wake-delivery-alarm.sh takes when
+# it cannot get the record lock races bootstrap's own archive: the archive
+# reads the count/newest under the lock and then moves the file to .surfaced,
+# so an unlocked append landing between that read and the move would be
+# carried into .surfaced unseen by any diagnostic. Hammer the record with raw
+# unlocked appends (functionally identical to that fallback branch) for the
+# duration of a real bootstrap run and confirm every one survives somewhere -
+# archived alongside the rest, or left behind in the record for next time.
+test_wake_delivery_archive_survives_concurrent_unlocked_append() {
+  local case_dir fakebin home record out i j missing writer_count=6 writes_per_writer=60
+  local -a wpids=()
+  case_dir="$TMP_ROOT/wake-delivery-archive-race"
+  mkdir -p "$case_dir/home/state"
+  home="$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  record="$home/state/.wake-delivery-failures"
+  printf '2026-08-30T09:00:00-0400\tseed failure\n' > "$record"
+  for i in $(seq 1 "$writer_count"); do
+    (
+      for j in $(seq 1 "$writes_per_writer"); do
+        printf '%s\tunlocked-%s-%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$i" "$j" >> "$record"
+      done
+    ) &
+    wpids+=("$!")
+  done
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  for i in "${wpids[@]}"; do
+    wait "$i" || fail "an unlocked writer exited non-zero"
+  done
+  missing=0
+  for i in $(seq 1 "$writer_count"); do
+    for j in $(seq 1 "$writes_per_writer"); do
+      { [ -e "$record" ] && grep -qF "unlocked-$i-$j" "$record"; } \
+        || { [ -e "$record.surfaced" ] && grep -qF "unlocked-$i-$j" "$record.surfaced"; } \
+        || missing=$((missing + 1))
+    done
+  done
+  [ "$missing" -eq 0 ] || fail "$missing unlocked appends were silently dropped by bootstrap's archive: out=$out"
+  pass "bootstrap archive never drops an unlocked append racing the archive move"
+}
+
 test_wake_delivery_absent_record_stays_silent() {
   local case_dir fakebin home out
   case_dir="$TMP_ROOT/wake-delivery-absent"
@@ -1244,4 +1286,5 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_wake_delivery_record_surfacing
 test_wake_delivery_record_readonly_leaves_record
+test_wake_delivery_archive_survives_concurrent_unlocked_append
 test_wake_delivery_absent_record_stays_silent

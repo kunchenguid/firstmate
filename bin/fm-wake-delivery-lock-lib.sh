@@ -37,21 +37,30 @@ fm_wake_delivery_acquire_lock() {  # <lock-dir> <max-attempts> <sleep-seconds> <
       printf '%s\n' "$$" > "$dir/pid" 2>/dev/null || true
       return 0
     fi
+    pid=
     if [ -f "$dir/pid" ]; then
-      pid=
       { IFS= read -r pid < "$dir/pid"; } 2>/dev/null || true
-      case "$pid" in
-        ''|*[!0-9]*) ;;
-        *)
-          if ! kill -0 "$pid" 2>/dev/null; then
-            age=$(fm_wake_delivery_lock_age "$dir") || age=
-            if [ -n "$age" ] && [ "$age" -ge "$stale" ]; then
-              rm -rf "$dir" 2>/dev/null || true
-            fi
-          fi
-          ;;
-      esac
     fi
+    case "$pid" in
+      ''|*[!0-9]*)
+        # No usable pid on disk: either the holder crashed between mkdir and
+        # the pid write, or that write is still in flight. Liveness can't be
+        # checked without a pid, so age alone decides abandonment - a lock
+        # this old with no pid ever recorded did not just start.
+        age=$(fm_wake_delivery_lock_age "$dir") || age=
+        if [ -n "$age" ] && [ "$age" -ge "$stale" ]; then
+          rm -rf "$dir" 2>/dev/null || true
+        fi
+        ;;
+      *)
+        if ! kill -0 "$pid" 2>/dev/null; then
+          age=$(fm_wake_delivery_lock_age "$dir") || age=
+          if [ -n "$age" ] && [ "$age" -ge "$stale" ]; then
+            rm -rf "$dir" 2>/dev/null || true
+          fi
+        fi
+        ;;
+    esac
     i=$((i + 1))
     sleep "$delay" 2>/dev/null || true
   done

@@ -1470,13 +1470,18 @@ detect_local_config() {
 # and that line would move into .surfaced unseen by this or any later
 # diagnostic. If the lock cannot be acquired within its bound, this session
 # skips the diagnostic entirely rather than risk that race - the record is
-# untouched, so the next session start still surfaces it.
+# untouched, so the next session start still surfaces it. Even under the lock,
+# a caller that itself could not get the lock still appends unlocked (see
+# fm-wake-delivery-alarm.sh) - so the size is re-checked immediately before
+# the mv, and the archive is skipped if it changed, rather than silently
+# moving that unseen append into .surfaced.
 detect_wake_delivery_failures() {
-  local record="$STATE/.wake-delivery-failures" lock count newest
+  local record="$STATE/.wake-delivery-failures" lock count newest size size_now
   [ -f "$record" ] && [ -r "$record" ] && [ ! -L "$record" ] || return 0
   [ -s "$record" ] || return 0
   lock="$STATE/.wake-delivery-failures.lock"
   fm_wake_delivery_acquire_lock "$lock" 40 0.05 30 || return 0
+  size=$(wc -c < "$record" 2>/dev/null | tr -d '[:space:]')
   count=$(wc -l < "$record" 2>/dev/null | tr -d '[:space:]')
   case "$count" in ''|*[!0-9]*) fm_wake_delivery_release_lock "$lock"; return 0 ;; esac
   newest=$(tail -n 1 "$record" 2>/dev/null | LC_ALL=C cut -f2- | cut -c1-200)
@@ -1485,7 +1490,10 @@ detect_wake_delivery_failures() {
     fm_wake_delivery_release_lock "$lock"
     return 0
   fi
-  mv -f "$record" "$record.surfaced" 2>/dev/null || true
+  size_now=$(wc -c < "$record" 2>/dev/null | tr -d '[:space:]')
+  if [ "$size_now" = "$size" ]; then
+    mv -f "$record" "$record.surfaced" 2>/dev/null || true
+  fi
   fm_wake_delivery_release_lock "$lock"
 }
 

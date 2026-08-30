@@ -14,14 +14,18 @@
 #    the file passes FM_WAKE_DELIVERY_MAX_BYTES (default 131072). The append
 #    and any resulting trim share the sibling .lock mkdir lock (bin/
 #    fm-wake-delivery-lock-lib.sh; bounded, not indefinite, and self-healing -
-#    an abandoned lock is reaped once its stamped pid is dead and it has aged
-#    past the stale threshold) so a concurrent invocation's append can never be
-#    excluded from a trim's replacement snapshot; a caller that cannot get the
-#    lock within the bound still appends unlocked rather than drop the
-#    failure. bin/fm-bootstrap.sh surfaces the record as one actionable
-#    WAKE_DELIVERY diagnostic at the next session start and archives it to
-#    .wake-delivery-failures.surfaced under the SAME lock, so a concurrent
-#    append can never be silently swallowed by the archive.
+#    an abandoned lock is reaped once its stamped pid is dead, or once no pid
+#    was ever recorded, and it has aged past the stale threshold either way)
+#    so a concurrent invocation's append can never be excluded from a trim's
+#    replacement snapshot; a caller that cannot get the lock within the bound
+#    still appends unlocked rather than drop the failure, and the trim
+#    re-checks the file's size immediately before swapping in its snapshot so
+#    that unlocked append can never be discarded by the swap. bin/
+#    fm-bootstrap.sh surfaces the record as one actionable WAKE_DELIVERY
+#    diagnostic at the next session start and archives it to
+#    .wake-delivery-failures.surfaced under the SAME lock with the same
+#    size-recheck, so a concurrent append can never be silently swallowed by
+#    the archive either.
 # 2. The active-notification cooldown marker $STATE/.wake-delivery-alarm: the
 #    epoch second of the last fired active alert, gated by its own bounded,
 #    self-healing mkdir lock so concurrent invocations racing an expired
@@ -91,14 +95,15 @@ case "$keep_lines" in ''|*[!0-9]*|0) keep_lines=200 ;; esac
 case "$max_bytes" in ''|*[!0-9]*|0) max_bytes=131072 ;; esac
 
 # The append is the load-bearing half: it must land no matter what, so a
-# caller that cannot get the lock within the bound still appends unlocked. But
-# a trim that runs concurrently with an unlocked append can read its snapshot
-# before the append lands and then overwrite the file, silently dropping that
-# append's line for good (a bare `tail | mv` swap is not additive). So the
-# common path takes the same lock for the append and any resulting trim,
-# closing that window; only a stuck holder falls back to the old unlocked
-# append, and in that case the trim is skipped for this call - the next
-# failure's lock holder retries it.
+# caller that cannot get the lock within the bound still appends unlocked -
+# and a stuck holder makes that unlocked fallback race any trim/archive that
+# IS holding the lock at that moment. A trim's `tail | mv` snapshot-and-swap
+# reads the file, then replaces it outright; if the fallback append lands
+# between that read and the swap, the swap discards it for good even though
+# the append itself landed. So the trim re-checks the file's size immediately
+# before the swap and skips the swap if it moved - proof some other write
+# landed after the snapshot was taken - leaving the (still slightly oversized)
+# record untouched for the next trim to retry rather than lose the line.
 line=$(printf '%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$summary")
 if fm_wake_delivery_acquire_lock "$lock" 40 0.05 "$LOCK_STALE_SECS"; then
   printf '%s\n' "$line" >> "$record" 2>/dev/null || { fm_wake_delivery_release_lock "$lock"; exit 0; }
@@ -108,7 +113,10 @@ if fm_wake_delivery_acquire_lock "$lock" 40 0.05 "$LOCK_STALE_SECS"; then
   esac
   if [ "$size" -gt "$max_bytes" ]; then
     if tail -n "$keep_lines" "$record" > "$record.tmp" 2>/dev/null && [ -s "$record.tmp" ]; then
-      mv "$record.tmp" "$record" 2>/dev/null || true
+      size_now=$(wc -c < "$record" 2>/dev/null | tr -d '[:space:]')
+      if [ "$size_now" = "$size" ]; then
+        mv "$record.tmp" "$record" 2>/dev/null || true
+      fi
     fi
     rm -f "$record.tmp" 2>/dev/null || true
   fi
