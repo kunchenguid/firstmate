@@ -62,9 +62,8 @@
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
-# owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a fixed
-# partition of that exact set, not a rebalance of the current measured durations
-# (see docs/fm-test-portable-shards.md).
+# owned by bin/fm-test-isolation-proof.sh; portable parallel shards are
+# duration-balanced orders of that exact set (see docs/fm-test-portable-shards.md).
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never

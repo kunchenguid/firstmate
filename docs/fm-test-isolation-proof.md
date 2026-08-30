@@ -18,7 +18,7 @@ This record is the concurrent isolation proof for the portable parallel candidat
 | concurrency | 4 |
 | candidates | 25 |
 | failed | 0 |
-| wall duration | 189201 ms |
+| wall duration | 928563 ms |
 
 ## Candidate set
 

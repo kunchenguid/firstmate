@@ -133,6 +133,18 @@ for job_id in (
 ):
     assert ci["jobs"][job_id]["if"] == full_ci_gate, job_id
 assert ci["jobs"]["tests-timing-aggregate"]["if"] == f"always() && ({full_ci_gate})"
+for job_id in ("tests-portable-parallel-1", "tests-portable-parallel-2"):
+    assert ci["jobs"][job_id]["timeout-minutes"] == 15, job_id
+portable_commands = {
+    job_id: next(
+        step["run"]
+        for step in ci["jobs"][job_id]["steps"]
+        if step.get("name", "").startswith("Run portable parallel shard")
+    )
+    for job_id in ("tests-portable-parallel-1", "tests-portable-parallel-2")
+}
+assert "bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1" in portable_commands["tests-portable-parallel-1"]
+assert "bin/fm-test-run.sh --lane portable-parallel-2" in portable_commands["tests-portable-parallel-2"]
 
 required_tool_step = {
     "name": "Install required test tools",

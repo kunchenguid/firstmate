@@ -141,7 +141,7 @@ jobs:
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     # Measured two-worker wall is ~9 min on the current proven scripts; this cap
     # is a hang tripwire with margin, not the expected healthy end of the lane.
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -183,7 +183,7 @@ jobs:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:

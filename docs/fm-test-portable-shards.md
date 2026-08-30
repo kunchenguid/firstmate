@@ -45,7 +45,7 @@ The 2026-08-30 archive refresh records the current candidate set after replacing
 | Lane | Script count | Serial sum | Estimated `--jobs 2` wall |
 |---|---:|---:|---:|
 | `portable-parallel-1` | 12 | 1091581 ms | 546416 ms (~546.4 s) |
-| `portable-parallel-2` | 13 | 547931 ms | 275047 ms (~275.0 s) |
+| `portable-parallel-2` | 13 | 547931 ms | 321922 ms (~321.9 s) |
 
 `bin/fm-test-run.sh` contains the exact ordered memberships in `list_portable_parallel_1` and `list_portable_parallel_2`.
 Water 7 invokes `--jobs 2` only for `portable-parallel-1`; `portable-parallel-2` remains serial because its concurrency oracle was rejected.
