@@ -60,7 +60,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, Cursor Agent CLI, or Antigravity CLI (`agy`).
-- Git, plus the authenticated forge CLI required by each registered GitHub or GitLab project; GitHub projects use `gh auth login`.
+- Git, plus the authenticated forge CLI required by each registered non-local GitHub or GitLab project; GitHub projects use `gh auth login`, and GitLab projects use `glab auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects supported missing or outdated tools and offers their install or upgrade after you approve.
