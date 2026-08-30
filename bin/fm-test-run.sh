@@ -178,7 +178,7 @@ family_for_basename() {
     fm-quota-utilization.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
-    fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
+    fm-supervision-fault.test.sh|fm-supervision-instructions.test.sh|fm-supervision-oracle.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|fm-unadvanceable-work.test.sh|\
     fm-record-contradictions-lib.test.sh|fm-worktree-unique-content.test.sh|\

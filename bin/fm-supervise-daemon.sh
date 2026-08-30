@@ -346,12 +346,24 @@ classify_signal() {  # <reason-after-colon> <state>
     [ -n "$last" ] || continue
     distilled="${distilled}$(basename "$f"): ${last} | "
     status_is_captain_relevant "$last" || continue
+    task=$(basename "$f"); task="${task%.status}"
+    # fm-watch and classify_stale already override a stale captain-relevant line
+    # when crew_is_provably_working; the signal path must match, including legacy
+    # free-text captain lines that lack a standard terminal verb.
+    if crew_is_provably_working "$task"; then
+      continue
+    fi
+    # classify_stale and the catch-all scan already defer a captain-relevant line
+    # when the worktree was written since the status file; the signal path must
+    # match before trusting a leftover done:/failed: line from before validation.
+    if crew_worktree_written_since "$task" "$state" "$f"; then
+      continue
+    fi
     rel=1
     # Dedupe against the catch-all scan: if this status was already escalated
     # (seen marker matches), skip escalating again. The seen marker is the
     # single source of truth shared between the per-wake signal path and the
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
-    task=$(basename "$f"); task="${task%.status}"
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
@@ -398,6 +410,22 @@ classify_stale() {  # <window> <state>
           return
           ;;
       esac
+    fi
+    # fm-watch.sh already overrides a captain-relevant terminal status line when
+    # fm-crew-state reports an active run-step or busy pane. Away-mode stale wakes
+    # enqueue without that triage, so classify_stale must apply the same contract
+    # here before trusting a leftover done:/failed: line from before validation.
+    if crew_is_provably_working "$task"; then
+      printf 'self|stale + terminal overridden by active run: %s' "$last"
+      return
+    fi
+    # fm-watch defers first-sight terminal stale when the worktree was written
+    # since the idle pane hash; away-mode stale wakes must honor the same
+    # contract before trusting a leftover captain-relevant line.
+    key=${win//:/_}; key=${key//\//_}; key=${key//./_}
+    if crew_worktree_written_since "$task" "$state" "$state/.hash-$key"; then
+      printf 'self|stale + terminal deferred by worktree writes: %s' "$last"
+      return
     fi
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
@@ -448,6 +476,29 @@ stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
+}
+
+# Defer ONE persistence-recheck wedge escalation for a pane that went quiet while
+# its own task worktree is demonstrably still being written
+# (crew_worktree_written_since in fm-classify-lib.sh). fm-watch.sh already
+# applies the same contract in wedge_timer_check; away-mode housekeeping must
+# match it so a quiet pane with an idle composer does not wedge-escalate a crew
+# that is still producing work behind a static-looking pane.
+stale_persist_defer_writing() {  # <window> <state> <marker> <task> <idle-age>
+  local win=$1 state=$2 marker=$3 task=$4 age=$5 key watcher_key wsf wage pause_secs throttle
+  key=$(_stale_key "$task")
+  watcher_key=$(_stale_key "$win")
+  wsf="$state/.writing-since-$watcher_key"
+  [ -e "$wsf" ] || _now > "$wsf"
+  wage=$(_file_age "$wsf")
+  _now > "$marker"
+  pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  throttle="$state/.writing-resurfaced-$watcher_key"
+  [ "$wage" -ge "$pause_secs" ] || return 0
+  [ "$(_file_age "$throttle")" -ge "$pause_secs" ] || return 0
+  escalate_add "$state" "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
+  _now > "$throttle"
+  log "self-handle (writing deferral): $win idle ${age}s, worktree written since idle window"
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
@@ -624,16 +675,23 @@ task_window_harness() {  # <window> <state>
 
 # stale_window_is_busy: 0 when the task is PROVABLY working through the
 # semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is not, and 2
-# when the endpoint could not be read at all. Only an exact busy verdict is
-# working: unknown semantic state never becomes busy and never becomes a
-# silent idle, so a stale pane whose state cannot be proven surfaces.
+# when the endpoint could not be read at all and is not confidently gone.
+# Only an exact busy verdict is working: unknown semantic state never becomes
+# busy and never becomes a silent idle, so a stale pane whose state cannot be
+# proven surfaces. When capture fails, a live endpoint defers (2) so a transient
+# tmux glitch cannot wedge-escalate; any non-alive verdict is treated as not
+# busy (1), matching fm-watch's triage_unreadable_endpoint_window contract.
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend harness label task tail40 verdict
+  local win=$1 state=$2 backend harness label task tail40 verdict agent_alive
   backend=$(task_window_backend "$win" "$state")
   harness=$(task_window_harness "$win" "$state")
   task=$(window_to_task "$win" "$state")
   label="fm-$task"
-  tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
+  tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || {
+    agent_alive=$(fm_backend_agent_alive "$backend" "$win" 2>/dev/null) || agent_alive=unknown
+    [ "$agent_alive" = alive ] && return 2
+    return 1
+  }
   verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
   [ "${verdict%% *}" = busy ]
 }
@@ -1017,12 +1075,25 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
+    # classify_stale and the catch-all scan already override a stale captain-relevant
+    # line when crew_is_provably_working; the persistence recheck must not
+    # re-escalate it once the wedge marker ages past STALE_ESCALATE_SECS.
+    if [ -n "$last" ] && status_is_captain_relevant "$last" && crew_is_provably_working "$task"; then
+      continue
+    fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    if crew_worktree_written_since "$task" "$state" "$marker"; then
+      stale_persist_defer_writing "$win" "$state" "$marker" "$task" "$age"
+      continue
+    fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+      # A live endpoint whose pane cannot be read yet is not proof the wedge
+      # cleared; defer the recheck instead of dropping the marker, or a genuine
+      # stale crew rots invisibly during capture glitches.
+      2) continue ;;
       *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
          stale_marker_remove "$win" "$state" ;;
     esac
@@ -1056,7 +1127,10 @@ housekeeping() {  # <state>
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+      # A live endpoint whose pane cannot be read yet is not proof the declared
+      # wait ended; defer the recheck instead of dropping the marker, or a
+      # forgotten pause or captain hold rots invisibly during capture glitches.
+      2) continue ;;
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
@@ -1083,6 +1157,14 @@ housekeeping() {  # <state>
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
+      # classify_stale and fm-watch already absorb captain-relevant status when
+      # crew_is_provably_working; the catch-all must not re-fire it.
+      if crew_is_provably_working "$task"; then
+        continue
+      fi
+      if crew_worktree_written_since "$task" "$state" "$f"; then
+        continue
+      fi
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
@@ -1229,9 +1311,21 @@ handle_wake() {  # <reason> <state>
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
               decision=$(classify_stale "$arg" "$state")
+              # fm-watch's wedge_timer_check enqueues enriched stale wakes so the
+              # daemon cannot re-absorb a genuine wedge on replay. That override
+              # must not bypass classify_stale's provably-working terminal guard
+              # for ordinary escalations 1-2: a validating crew's leftover done:
+              # line still outranks an idle pane hash until demand-deep-inspection.
               case "$stale_detail" in
-                idle\ *s,\ possible\ wedge,\ escalation\ *)
+                *demand-deep-inspection:*)
                   decision="escalate|${reason#stale: }" ;;
+                idle\ *s,\ possible\ wedge,\ escalation\ *)
+                  case "$decision" in
+                    self\|stale\ +\ terminal\ overridden*) ;;
+                    self\|stale\ +\ terminal\ deferred*) ;;
+                    *) decision="escalate|${reason#stale: }" ;;
+                  esac
+                  ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
@@ -1275,7 +1369,13 @@ handle_wake() {  # <reason> <state>
         _clear_wedge=0
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
           if status_is_terminal_verb "$last"; then
-            _clear_wedge=1
+            if crew_is_provably_working "$task"; then
+              _clear_wedge=0
+            elif case "$distilled" in *deferred\ by\ worktree\ writes*) true ;; *) false ;; esac; then
+              _clear_wedge=0
+            else
+              _clear_wedge=1
+            fi
           else
             case "$(status_line_verb "$last")" in
               working|resolved|captain-held) _clear_wedge=0 ;;

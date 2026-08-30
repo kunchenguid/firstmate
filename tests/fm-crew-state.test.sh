@@ -195,6 +195,21 @@ run:
 EOF
 }
 
+run_running_stalled_review_gate() {  # <branch> <duration-ms>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,$2
+EOF
+}
+
 run_fixing() {  # <branch>
   cat <<EOF
 run:
@@ -1346,6 +1361,48 @@ EOF
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
 
+# Regression (2026-08-29): a review gate that timed out with zero findings can
+# leave axi status at top-level running while the review step row shows
+# review,running,0,<long-ms>. Reporting that as working made
+# crew_is_provably_working absorb stale captain-relevant status.
+test_review_gate_zero_findings_stall_not_working() {
+  reset_fakes
+  local d out
+  d=$(new_case gate-stall)
+  make_repo_on_branch "$d/wt" fm/feat-stall
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stall.meta" "window=fm:fm-feat-stall" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_stalled_review_gate fm/feat-stall 1800000)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-stall
+  out=$(run_crew_state "$d" feat-stall)
+  assert_contains "$out" "state: unknown" "stalled review gate -> unknown, not working"
+  assert_contains "$out" "review gate stalled with zero findings" "stalled gate names the failure mode"
+  assert_not_contains "$out" "state: working" "stalled review gate must not read as working"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_BIN="$CREW_STATE" \
+    bash -c '. "$1"; crew_is_provably_working feat-stall && printf yes || printf no' \
+    _ "$ROOT/bin/fm-classify-lib.sh" | grep -qx no \
+    || fail "stalled review gate was still provably working"
+  pass "review gate stalled with zero findings is not working or provably working"
+}
+
+test_review_gate_short_zero_findings_run_remains_working() {
+  reset_fakes
+  local d out
+  d=$(new_case gate-stall-short)
+  make_repo_on_branch "$d/wt" fm/feat-stall-short
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stall-short.meta" "window=fm:fm-feat-stall-short" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_stalled_review_gate fm/feat-stall-short 60000)"
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-stall-short)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-stall-short busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" feat-stall-short)
+  assert_contains "$out" "state: working" "short review gate run still reports working"
+  pass "review gate with zero findings but short duration remains working"
+}
+
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -1429,6 +1486,120 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+test_recycled_slot_custody_lost_for_stale_task() {
+  reset_fakes
+  local d fb wt json out repo
+  d=$(new_case slot-recycle-stale)
+  fb=$(make_fakebin "$d")
+  repo="$d/project.git"
+  wt="$d/wt"
+  fm_git_worktree "$repo" "$wt" main
+  fm_write_meta "$d/state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" \
+    "endpoint_task_id=stale-task" \
+    "worktree=$wt" \
+    "project=$d" \
+    "kind=ship" \
+    "treehouse_slot=slot-1" \
+    "treehouse_lease=lease-old"
+  fm_write_meta "$d/state/new-task.meta" \
+    "window=firstmate:fm-new-task" \
+    "endpoint_task_id=new-task" \
+    "worktree=$wt" \
+    "project=$d" \
+    "kind=ship" \
+    "treehouse_slot=slot-1" \
+    "treehouse_lease=lease-new"
+  printf 'failed: pooled slot recycled under me\n' > "$d/state/stale-task.status"
+  printf 'working: active holder\n' > "$d/state/new-task.status"
+  json=$(jq -n --arg path "$wt" --arg lease lease-new --arg holder new-task --arg slot slot-1 \
+    '[{name:$slot,path:$path,status:"leased",lease_id:$lease,lease_holder:$holder}]')
+  out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CLASSIFY_TREEHOUSE_STATUS_JSON="$json" \
+    "$CREW_STATE" stale-task)
+  assert_contains "$out" "worktree custody lost" \
+    "stale metadata must not trust a worktree leased to another task"
+  assert_contains "$out" "source: metadata" "custody loss is reported as metadata unknown"
+  out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CLASSIFY_TREEHOUSE_STATUS_JSON="$json" \
+    "$CREW_STATE" new-task)
+  assert_not_contains "$out" "worktree custody lost" \
+    "the current lease holder may still observe its worktree"
+  pass "recycled pooled slot custody blocks stale metadata from reading another task's worktree"
+}
+
+test_recycled_slot_worker_liveness_reports_absent_endpoint() {
+  reset_fakes
+  local d fb wt json out repo
+  d=$(new_case slot-recycle-liveness-absent)
+  fb=$(make_fakebin "$d")
+  repo="$d/project.git"
+  wt="$d/wt"
+  fm_git_worktree "$repo" "$wt" main
+  fm_write_meta "$d/state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" \
+    "endpoint_task_id=stale-task" \
+    "worktree=$wt" \
+    "project=$d" \
+    "kind=ship" \
+    "harness=codex" \
+    "treehouse_slot=slot-1" \
+    "treehouse_lease=lease-old"
+  fm_write_meta "$d/state/new-task.meta" \
+    "window=firstmate:fm-new-task" \
+    "endpoint_task_id=new-task" \
+    "worktree=$wt" \
+    "project=$d" \
+    "kind=ship" \
+    "treehouse_slot=slot-1" \
+    "treehouse_lease=lease-new"
+  json=$(jq -n --arg path "$wt" --arg lease lease-new --arg holder new-task --arg slot slot-1 \
+    '[{name:$slot,path:$path,status:"leased",lease_id:$lease,lease_holder:$holder}]')
+  FM_FAKE_TMUX_MISSING=1
+  out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CLASSIFY_TREEHOUSE_STATUS_JSON="$json" \
+    "$CREW_STATE" --worker-liveness stale-task)
+  assert_contains "$out" "liveness: absent" \
+    "custody loss must not mask a structurally absent endpoint"
+  assert_contains "$out" "endpoint absent" \
+    "custody-lost liveness should explain endpoint absence"
+  pass "worker-liveness reports absent when a displaced task lost custody and its endpoint is gone"
+}
+
+test_recycled_slot_worker_liveness_reports_live_endpoint() {
+  reset_fakes
+  local d fb wt json out repo
+  d=$(new_case slot-recycle-liveness-live)
+  fb=$(make_fakebin "$d")
+  repo="$d/project.git"
+  wt="$d/wt"
+  fm_git_worktree "$repo" "$wt" main
+  fm_write_meta "$d/state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" \
+    "endpoint_task_id=stale-task" \
+    "worktree=$wt" \
+    "project=$d" \
+    "kind=ship" \
+    "harness=codex" \
+    "treehouse_slot=slot-1" \
+    "treehouse_lease=lease-old"
+  fm_write_meta "$d/state/new-task.meta" \
+    "window=firstmate:fm-new-task" \
+    "endpoint_task_id=new-task" \
+    "worktree=$wt" \
+    "project=$d" \
+    "kind=ship" \
+    "treehouse_slot=slot-1" \
+    "treehouse_lease=lease-new"
+  json=$(jq -n --arg path "$wt" --arg lease lease-new --arg holder new-task --arg slot slot-1 \
+    '[{name:$slot,path:$path,status:"leased",lease_id:$lease,lease_holder:$holder}]')
+  FM_FAKE_TMUX_MISSING=0
+  out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CLASSIFY_TREEHOUSE_STATUS_JSON="$json" \
+    "$CREW_STATE" --worker-liveness stale-task)
+  assert_contains "$out" "liveness: live" \
+    "custody loss must not report unknown when the displaced endpoint is still readable"
+  assert_contains "$out" "endpoint still live" \
+    "custody-lost liveness should note the live endpoint"
+  pass "worker-liveness reports live when a displaced task lost custody but its endpoint is still readable"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1498,10 +1669,15 @@ test_missing_meta
 test_worker_liveness_structural_absence
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
+test_review_gate_zero_findings_stall_not_working
+test_review_gate_short_zero_findings_run_remains_working
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
+test_recycled_slot_custody_lost_for_stale_task
+test_recycled_slot_worker_liveness_reports_absent_endpoint
+test_recycled_slot_worker_liveness_reports_live_endpoint
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"

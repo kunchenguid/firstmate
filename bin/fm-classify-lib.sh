@@ -1176,13 +1176,27 @@ window_to_task() {
 # no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
 # also provably working (signal_crew_provably_working below); otherwise it surfaces.
 signal_reason_is_actionable() {  # <file> ...
-  local f last
+  local f last base dir task
   for f in "$@"; do
     [ -e "$f" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
-    status_is_captain_relevant "$last" && return 0
+    status_is_captain_relevant "$last" || continue
+    # classify_signal and the stale/heartbeat paths already override a stale
+    # captain-relevant line when crew_is_provably_working; the direct fm-watch
+    # signal triage must not treat that line as actionable on its own, including
+    # legacy free-text captain lines that lack a standard terminal verb.
+    base=${f##*/}
+    dir=${f%/*}
+    [ "$dir" != "$f" ] || dir=.
+    task=${base%.status}
+    crew_is_provably_working "$task" && continue
+    # classify_signal and the stale/heartbeat paths already defer a captain-relevant
+    # line when the worktree was written since the status file; direct fm-watch
+    # signal triage must match before trusting a leftover done:/failed: line.
+    crew_worktree_written_since "$task" "$dir" "$f" && continue
+    return 0
   done
   return 1
 }
@@ -1302,6 +1316,116 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # a hung mount costs the escalation nothing but the bound. -xdev holds that walk to the
 # worktree's own filesystem rather than descending into a nested network or container
 # mount, so a write that lands only under such a mount is one more negative outcome.
+crew_worktree_abs() {  # <path>
+  local target=$1 parent
+  [ -n "$target" ] || return 1
+  if [ -d "$target" ]; then
+    ( CDPATH='' cd -- "$target" && pwd -P )
+    return 0
+  fi
+  parent=$(dirname -- "$target")
+  if [ -d "$parent" ]; then
+    printf '%s/%s\n' "$(CDPATH='' cd -- "$parent" && pwd -P)" "${target##*/}"
+    return 0
+  fi
+  printf '%s\n' "$target"
+}
+
+crew_worktree_claimants() {  # <state> <abs>
+  local state=$1 abs=$2 meta other_id other_wt other_abs
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    other_wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$other_wt" ] || continue
+    other_abs=$(crew_worktree_abs "$other_wt") || continue
+    [ "$other_abs" = "$abs" ] || continue
+    printf '%s\n' "$other_id"
+  done
+}
+
+crew_treehouse_status_json() {  # <project-dir>
+  local project=$1
+  if [ -n "${FM_CLASSIFY_TREEHOUSE_STATUS_JSON:-}" ]; then
+    printf '%s\n' "$FM_CLASSIFY_TREEHOUSE_STATUS_JSON"
+    return 0
+  fi
+  command -v treehouse >/dev/null 2>&1 || return 1
+  CDPATH='' cd -- "$project" && treehouse status --json 2>/dev/null
+}
+
+crew_treehouse_holder_for_worktree() {  # <project> <abs> <raw-wt>
+  local project=$1 abs=$2 raw=$3 json count holder
+  json=$(crew_treehouse_status_json "$project") || return 1
+  [ -n "$json" ] || json='[]'
+  printf '%s\n' "$json" | jq -e 'type=="array"' >/dev/null 2>&1 || return 1
+  count=$(printf '%s\n' "$json" | jq -r --arg path "$abs" --arg raw "$raw" \
+    '[.[] | select((.path|tostring)==$path or (.path|tostring)==$raw)] | length') || return 1
+  [ "$count" -eq 1 ] || return 1
+  holder=$(printf '%s\n' "$json" | jq -r --arg path "$abs" --arg raw "$raw" \
+    '[.[] | select((.path|tostring)==$path or (.path|tostring)==$raw)][0].lease_holder // empty') || return 1
+  printf '%s\n' "$holder"
+}
+
+crew_worktree_custody_canonical_id() {  # <state> <abs>
+  local state=$1 abs=$2 id holder best_id best_lease lease proj wt
+  holder=
+  for id in $(crew_worktree_claimants "$state" "$abs"); do
+    wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    proj=$(grep '^project=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ -z "$holder" ] && [ -n "$proj" ] && [ -n "$wt" ]; then
+      holder=$(crew_treehouse_holder_for_worktree "$proj" "$abs" "$wt" 2>/dev/null || true)
+    fi
+    lease=$(grep '^treehouse_lease=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ -n "$lease" ]; then
+      if [ -z "$best_lease" ] || [[ "$lease" > "$best_lease" ]]; then
+        best_lease=$lease
+        best_id=$id
+      fi
+    fi
+  done
+  if [ -n "$holder" ]; then
+    printf '%s\n' "$holder"
+    return 0
+  fi
+  [ -n "$best_id" ] || return 1
+  printf '%s\n' "$best_id"
+}
+
+# 0 when this task must not trust its recorded worktree: another task holds the
+# pooled slot, duplicate metadata claims the same path, or treehouse occupancy
+# names a different lease holder. Supervision readers call this before attributing
+# run-step, pane, or status-log state from the worktree path.
+crew_worktree_custody_lost() {  # <id> <state>
+  local id=$1 state=$2 meta wt abs kind access proj claimants holder canonical
+  meta="$state/$id.meta"
+  [ -f "$meta" ] || return 1
+  kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$kind" != secondmate ] || return 1
+  access=$(grep '^access=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$access" != reader ] || return 1
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] || return 1
+  abs=$(crew_worktree_abs "$wt") || abs=$wt
+  claimants=$(crew_worktree_claimants "$state" "$abs")
+  [ -n "$claimants" ] || return 1
+  proj=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -n "$proj" ]; then
+    holder=$(crew_treehouse_holder_for_worktree "$proj" "$abs" "$wt" 2>/dev/null || true)
+    if [ -n "$holder" ]; then
+      [ "$holder" = "$id" ] || return 0
+      return 1
+    fi
+  fi
+  case "$(printf '%s\n' "$claimants" | wc -l | tr -d ' ')" in
+    1) return 1 ;;
+  esac
+  canonical=$(crew_worktree_custody_canonical_id "$state" "$abs" 2>/dev/null || true)
+  [ -n "$canonical" ] || return 0
+  [ "$canonical" = "$id" ] || return 0
+  return 1
+}
+
 crew_worktree_written_since() {  # <id> <state> <anchor-file>
   local id=$1 state=$2 anchor=$3 wt kind name hit bound
   local -a names=() prune=()
@@ -1309,6 +1433,9 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
   [ -f "$anchor" ] || return 1
   wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  # A recycled pooled slot can leave stale metadata on a worktree another task now
+  # leases. Never treat that holder's writes as evidence this displaced task is live.
+  crew_worktree_custody_lost "$id" "$state" && return 1
   kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ "$kind" != secondmate ] || return 1
   if [ -e "$wt/.fm-secondmate-home" ] || [ -L "$wt/.fm-secondmate-home" ]; then

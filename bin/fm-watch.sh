@@ -307,9 +307,10 @@ window_key() {  # <window>
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
-# policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
-# delivery attempt, and a spent attempt budget surfaces as an ordinary stale
+# policy owner) reports a due action, a busy pane just waits until
+# BUSY_TURN_MAX_SECS without a completed turn, then delivery proceeds like an
+# idle pane - the record is durable and the worker will reach a turn boundary -
+# an idle pane gets one delivery attempt, and a spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery. If the attempt's ladder write fails while
 # its record remains unhandled, that unwritable state surfaces through the same
 # stale path instead of silently re-ringing forever; acknowledgement or teardown
@@ -319,10 +320,9 @@ window_key() {  # <window>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc dir base
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
-  [ "$verb" != quiet ] || return 0
   rec=${action#* }
   count=
   case "$verb" in
@@ -330,10 +330,37 @@ inbox_steer_check() {  # <window> <task>
       count=${rec##* }
       rec=${rec% *}
       ;;
+    quiet)
+      rec=$(fm_task_inbox_oldest_unhandled "$STATE" "$task" 2>/dev/null) || return 0
+      ;;
   esac
   tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+  # Capture failure when the endpoint is not affirmatively alive means doorbell
+  # delivery is impossible; surface the unread steer immediately instead of
+  # spending the ring ladder's grace and attempt budget (triage_unreadable_endpoint
+  # contract). Alive alone is excluded so a transient capture glitch cannot false-
+  # escalate while send may still succeed.
+  if [ -z "$tail40" ] \
+     && [ "$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null || printf unknown)" != alive ]; then
+    dir=$(fm_task_inbox_dir "$STATE" "$task")
+    base=${rec##*/}
+    [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ] && return 0
+    count=$(fm_task_inbox_ring_max)
+    verb=escalate
+  else
+    [ "$verb" != quiet ] || return 0
+  fi
   if window_is_busy "$w" "$tail40"; then
-    return 0
+    # Mirror the stale path's BUSY_TURN_MAX_SECS contract: a pane that stays
+    # provably busy without completing a turn cannot defer the steering inbox
+    # forever, or an unread steer never rings and never spends its ladder budget.
+    if busy_turn_over_age "$task" \
+       && [ "$WINDOW_BUSY_VERDICT" != 'busy claude-hook' ] \
+       && ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+      triage_log "steer-inbox busy bound crossed; attempting delivery despite busy pane: $task"
+    else
+      return 0
+    fi
   fi
   case "$verb" in
     ring)
@@ -727,6 +754,128 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# Continue aging an already-recorded stale suppressor when pane capture cannot
+# run. Used for unreadable endpoints and for transient capture glitches on live
+# endpoints so an in-progress wedge timer cannot stall invisibly.
+triage_stale_wedge_followup() {  # <window>
+  local w=$1 kind task key h sf ssf ewf pf last
+  key=$(window_key "$w")
+  kind=$(window_kind "$w")
+  task=$(window_to_task "$w" "$STATE")
+  [ -n "$task" ] || return 0
+  ssf="$STATE/.stale-since-$key"
+  [ -e "$ssf" ] || return 0
+  sf="$STATE/.stale-$key"
+  h=$(cat "$sf" 2>/dev/null || true)
+  [ -n "$h" ] || return 0
+  ewf="$STATE/.wedge-escalations-$key"
+  pf="$STATE/.paused-$key"
+  last=$(last_status_line "$STATE/$task.status")
+  if [ "$kind" = secondmate ]; then
+    case "$(pause_state_class "$w" "$task")" in
+      paused) handle_paused_stale "$w" "$task" "$h" ;;
+    esac
+    return 0
+  fi
+  if afk_present; then
+    return 0
+  fi
+  if stale_is_terminal "$w" "$STATE"; then
+    wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+    return 0
+  fi
+  if [ -e "$pf" ] || status_is_paused_or_captain_held "$last"; then
+    case "$(pause_state_class "$w" "$task")" in
+      paused) handle_paused_stale "$w" "$task" "$h" ;;
+      working)
+        wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
+        ;;
+      *) handle_paused_stale "$w" "$task" "$h" ;;
+    esac
+    return 0
+  fi
+  wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+}
+
+# When capture fails because the endpoint is confidently gone, the pane-hash
+# stale path cannot run at all. Route the same first-sight / wedge follow-up
+# decisions through a stable sentinel hash instead of skipping the window.
+triage_unreadable_endpoint_window() {  # <window>
+  local w=$1 kind task key h sf ssf ewf hf pf last
+  key=$(window_key "$w")
+  kind=$(window_kind "$w")
+  task=$(window_to_task "$w" "$STATE")
+  [ -n "$task" ] || return 0
+  h='endpoint-gone'
+  hf="$STATE/.hash-$key"
+  sf="$STATE/.stale-$key"
+  ssf="$STATE/.stale-since-$key"
+  ewf="$STATE/.wedge-escalations-$key"
+  pf="$STATE/.paused-$key"
+  last=$(last_status_line "$STATE/$task.status")
+  if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
+    return 0
+  fi
+  if [ "$(cat "$sf" 2>/dev/null || true)" = "$h" ]; then
+    triage_stale_wedge_followup "$w"
+    return 0
+  fi
+  if [ "$kind" = secondmate ]; then
+    case "$(pause_state_class "$w" "$task")" in
+      paused) handle_paused_stale "$w" "$task" "$h" ;;
+    esac
+    return 0
+  fi
+  if afk_present; then
+    fm_wake_append stale "$w" "stale: $w" || exit 1
+    printf '%s' "$h" > "$sf"
+    wake "stale: $w"
+    return 0
+  fi
+  if stale_is_terminal "$w" "$STATE"; then
+    if crew_is_provably_working "$task"; then
+      printf '%s' "$h" > "$sf"
+      date +%s > "$ssf"
+      clear_write_tracking "$key"
+      triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+    elif crew_worktree_written_since "$task" "$STATE" "$hf"; then
+      clear_pause_tracking "$key"
+      printf '%s' "$h" > "$sf"
+      date +%s > "$ssf"
+      triage_log "absorbed stale (worktree written since idle, overriding a stale captain-relevant status): $w"
+    else
+      fm_wake_append stale "$w" "stale: $w" || exit 1
+      printf '%s' "$h" > "$sf"
+      rm -f "$ssf"
+      clear_write_tracking "$key"
+      mark_surfaced "$STATE/$task.status"
+      wake "stale: $w"
+    fi
+    return 0
+  fi
+  case "$(pause_state_class "$w" "$task")" in
+    working)
+      clear_pause_tracking "$key"
+      printf '%s' "$h" > "$sf"
+      date +%s > "$ssf"
+      triage_log "absorbed non-terminal stale (provably working): $w"
+      ;;
+    paused)
+      handle_paused_stale "$w" "$task" "$h"
+      ;;
+    *)
+      if crew_worktree_written_since "$task" "$STATE" "$hf"; then
+        clear_pause_tracking "$key"
+        printf '%s' "$h" > "$sf"
+        date +%s > "$ssf"
+        triage_log "absorbed non-terminal stale (worktree written since idle): $w"
+      else
+        surface_nonterminal_stale "$w" "$h"
+      fi
+      ;;
+  esac
+}
+
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last
   key=$(window_key "$win")
@@ -971,6 +1120,18 @@ heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    # classify_stale and the daemon catch-all already absorb captain-relevant
+    # status when crew_is_provably_working; the heartbeat backstop must not
+    # re-fire it after a stale override left it unsurfaced.
+    if crew_is_provably_working "$task"; then
+      continue
+    fi
+    # classify_stale and the daemon catch-all already defer captain-relevant status
+    # when the worktree was written since the status file; the heartbeat backstop
+    # must not re-fire it after a stale override left it unsurfaced.
+    if crew_worktree_written_since "$task" "$STATE" "$f"; then
+      continue
+    fi
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
@@ -1416,7 +1577,17 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || {
+      if [ "$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null || printf unknown)" != alive ]; then
+        triage_unreadable_endpoint_window "$w"
+      else
+        # A live endpoint whose pane cannot be read yet is not proof the wedge
+        # cleared; keep aging an already-recorded suppressor instead of stalling
+        # recovery during transient capture glitches.
+        triage_stale_wedge_followup "$w"
+      fi
+      continue
+    }
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -1465,24 +1636,30 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            task=$(window_to_task "$w" "$STATE")
+            if crew_is_provably_working "$task"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif crew_worktree_written_since "$task" "$STATE" "$hf"; then
+              clear_pause_tracking "$key"
+              printf '%s' "$h" > "$sf"
+              date +%s > "$ssf"
+              triage_log "absorbed stale (worktree written since idle, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              mark_surfaced "$STATE/$task.status"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
-            # This exact hash was already overridden as provably-working (a
-            # wedge timer is running for it) - keep treating it that way
-            # without re-reading the crew state every poll, and without
-            # letting the still-captain-relevant log line re-surface it.
+            # This exact hash was already overridden (provably-working or
+            # worktree-write deferral; a wedge timer is running for it) - keep
+            # treating it that way without re-reading the crew state every poll,
+            # and without letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
@@ -1502,7 +1679,10 @@ EOF
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
-          #     wait out the timer.
+          #     wait out the timer - unless the task worktree was written since the
+          #     idle pane hash was recorded, in which case absorb and start the
+          #     wedge timer exactly like a provably-working crew (crew state can be
+          #     inconclusive while the worktree still shows real progress).
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
@@ -1516,7 +1696,14 @@ EOF
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
               *)
-                surface_nonterminal_stale "$w" "$h"
+                if crew_worktree_written_since "$task" "$STATE" "$hf"; then
+                  clear_pause_tracking "$key"
+                  printf '%s' "$h" > "$sf"
+                  date +%s > "$ssf"
+                  triage_log "absorbed non-terminal stale (worktree written since idle): $w"
+                else
+                  surface_nonterminal_stale "$w" "$h"
+                fi
                 ;;
             esac
           else
