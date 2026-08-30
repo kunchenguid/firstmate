@@ -743,10 +743,11 @@ test_extra_field_row_cannot_be_granted_or_consumed() {
   before="$dir/before"
   cp "$state/.wake-queue" "$before"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
-    || fail "drain rejected an otherwise recoverable malformed queue fixture"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "drain accepted a row with an extra durable field"
   cmp -s "$before" "$state/.wake-queue" \
-    || fail "drain consumed a row with an extra durable field"
+    || fail "drain changed a row with an extra durable field"
 
   FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" extra-field || fail "branch owner activation failed"
   out="$dir/grant.out"
@@ -761,29 +762,29 @@ test_extra_field_row_cannot_be_granted_or_consumed() {
 }
 
 test_extra_field_inactive_outcome_cannot_be_acknowledged() {
-  local dir state out err sequence generation fingerprint
+  local dir state out err before fingerprint rc
   dir=$(make_case extra-field-inactive-outcome)
   state="$dir/state"
   out="$dir/drain.out"
   err="$dir/drain.err"
+  before="$dir/before"
   fingerprint=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
   mkdir -p "$state/terminal-outcomes"
   printf '%s\n' 'schema=fm-terminal-outcome.v1' 'phase=presentation' > "$state/terminal-outcomes/$fingerprint.pending"
   printf '1700000000\t1\tsignal\ttask-a.status\tsignal: task-a.status\n1700000001\t1\tcheck\tinactive-outcome:%s\tterminal outcome\textra\n' \
     "$fingerprint" > "$state/.wake-queue"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
-    || fail "drain rejected the mixed valid and malformed queue fixture"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  [ "$sequence" = 1 ] && [ -n "$generation" ] || fail "mixed queue fixture omitted its acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
-    || fail "mixed queue acknowledgement failed"
+  cp "$state/.wake-queue" "$before"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "drain accepted mixed valid and malformed wake rows"
+  ! grep -Fq 'WAKE_ACK_REQUIRED:' "$err" \
+    || fail "malformed queue produced an acknowledgement boundary"
   [ -f "$state/terminal-outcomes/$fingerprint.pending" ] \
-    || fail "an extra-field inactive outcome was acknowledged before queue consumption"
+    || fail "an extra-field inactive outcome was acknowledged"
   [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] \
     || fail "an extra-field inactive outcome created a presented receipt"
-  grep -Fq $'\tcheck\tinactive-outcome:' "$state/.wake-queue" \
-    || fail "the malformed inactive outcome row was not retained"
+  cmp -s "$before" "$state/.wake-queue" \
+    || fail "malformed mixed queue changed before repair"
   pass "extra-field inactive outcome rows cannot trigger acknowledgement"
 }
 
