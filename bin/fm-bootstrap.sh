@@ -1611,13 +1611,13 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     if [ -n "$fleet_sync_out" ]; then
       (
         __fm_timing_stamp=$(fm_timing_now_ms)
-        FM_FLEET_SYNC_SKIP_UNKNOWN=1 fleet_sync
+        fleet_sync
         fm_timing_record phase fleet-sync "$__fm_timing_stamp"
       ) >"$fleet_sync_out" 2>&1 &
       fleet_sync_pid=$!
     else
       __fm_timing_stamp=$(fm_timing_now_ms)
-      FM_FLEET_SYNC_SKIP_UNKNOWN=1 fleet_sync
+      fleet_sync
       fm_timing_record phase fleet-sync "$__fm_timing_stamp"
     fi
   fi

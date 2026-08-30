@@ -341,8 +341,10 @@ sync_project() {
     echo "$label: skipped: no origin remote"
     return 0
   fi
-  if [ "${FM_FLEET_SYNC_SKIP_UNKNOWN:-0}" = 1 ] \
-    && [ "$(fm_forge_detect_provider "$PROJ")" = unknown ]; then
+  # Fleet sync is a network mutation, so an origin outside the supported forge
+  # boundary must be left untouched regardless of whether this script was
+  # launched by bootstrap or invoked directly.
+  if [ "$(fm_forge_detect_provider "$PROJ")" = unknown ]; then
     return 0
   fi
 
