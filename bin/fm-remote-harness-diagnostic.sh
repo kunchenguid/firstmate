@@ -41,6 +41,8 @@ PANE=$FM_BACKEND_HERDR_PANE
 
 INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE" 2>/dev/null) \
   || die "could not read Herdr process information for pane $PANE in session $SESSION"
+fm_backend_herdr_pane_process_info_envelope_valid "$INFO" "$PANE" \
+  || die "Herdr process information envelope did not match pane $PANE"
 SHELL_PID=$(printf '%s' "$INFO" | jq -er \
   '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) \
   || die "Herdr did not report a valid pane shell PID"

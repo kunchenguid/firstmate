@@ -182,6 +182,12 @@ When deduplication finds that the worker already moved the matching record into 
 The remote host runs no doorbell re-ring ladder of its own; a swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation, whose recovery request rings the doorbell again when it is enqueued.
 `fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
+The remote harness diagnostic is an instrument for inspecting the recorded Herdr pane's process ancestry, not a fix for session-lock refusal, and it preserves the existing fail-closed behavior.
+It becomes remotely invocable only after merge and the ordinary remote code-root update deploys the merged code to that host.
+
+```sh
+FM_HOME=<primary-home> bin/fm-on.sh <secondmate-id> fm-remote-harness-diagnostic.sh <secondmate-id>
+```
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
