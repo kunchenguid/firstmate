@@ -153,7 +153,6 @@ init_changed_fixture_repo() {
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
     fm-bearings-board-render.test.sh \
-    fm-no-mistakes-required.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-backend-orca.test.sh \
@@ -184,11 +183,6 @@ init_changed_fixture_repo() {
   mkdir -p "$repo/tests/assets"
   : >"$repo/tests/assets/board-render-harness.mjs"
   printf '# tests/assets/board-render-harness.mjs\n' >>"$repo/tests/fm-bearings-board-render.test.sh"
-  : >"$repo/bin/fm-no-mistakes-required-verifier.py"
-  printf '# bin/fm-no-mistakes-required-verifier.py\n' >>"$repo/tests/fm-no-mistakes-required.test.sh"
-  mkdir -p "$repo/tests/fixtures/vendor/pyyaml-6.0.2"
-  : >"$repo/tests/fixtures/vendor/pyyaml-6.0.2/LICENSE"
-  printf '# tests/fixtures/vendor/pyyaml-6.0.2\n' >>"$repo/tests/fm-no-mistakes-required.test.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-launch-axis-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
@@ -378,27 +372,6 @@ test_changed_dependency_selection_and_unmapped_failure() {
     "the board-render harness selects its consuming render suite"
   git -C "$repo" add tests/assets/board-render-harness.mjs
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm board-render-harness-change
-
-  printf '\n' >>"$repo/bin/fm-no-mistakes-required-verifier.py"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-no-mistakes-required.test.sh" \
-    "the verifier fixture selects its consuming contract suite"
-  git -C "$repo" add bin/fm-no-mistakes-required-verifier.py
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm verifier-fixture-change
-
-  printf '\n' >>"$repo/tests/fixtures/vendor/pyyaml-6.0.2/LICENSE"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-no-mistakes-required.test.sh" \
-    "a nested fixture selects a suite naming its fixture ancestor"
-  git -C "$repo" add tests/fixtures/vendor/pyyaml-6.0.2/LICENSE
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm nested-fixture-change
-
-  rm "$repo/tests/fixtures/vendor/pyyaml-6.0.2/LICENSE"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-no-mistakes-required.test.sh" \
-    "a deleted nested fixture selects its suite through the existing parent"
-  git -C "$repo" add -u -- tests/fixtures/vendor/pyyaml-6.0.2/LICENSE
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm deleted-nested-fixture-change
 
   mkdir -p "$repo/rejected"
   printf 'night report\n' >"$repo/gnhf-night-report.md"

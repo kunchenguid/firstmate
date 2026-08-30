@@ -555,7 +555,6 @@ tests/fm-muse-signals-live-e2e.test.sh 205
 tests/fm-nm-home-isolation.test.sh 59
 tests/fm-nm-prepare-home.test.sh 228
 tests/fm-nm-run-lib.test.sh 62
-tests/fm-no-mistakes-required.test.sh 72
 tests/fm-on.test.sh 504
 tests/fm-opencode-primary-live-e2e.test.sh 357
 tests/fm-operational-input.test.sh 164

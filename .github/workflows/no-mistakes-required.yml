@@ -29,12 +29,6 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      - name: Check out the base verifier
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          sparse-checkout: bin/fm-no-mistakes-required-verifier.py
-          persist-credentials: false
       - name: Verify no-mistakes signature in PR body
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -65,8 +59,118 @@ jobs:
           fi
           if grep -qF -- "$marker" "$body_file"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+            if ! command -v jq >/dev/null 2>&1; then
+              echo "::error::This check requires jq to parse no-mistakes pipeline step attestation, but jq was not found on the runner." >&2
+              exit 1
+            fi
+            prefix='<!-- no-mistakes-pipeline-attestation:v1 '
+            suffix=' -->'
             body=$(cat "$body_file")
-            PR_BODY="$body" python3 bin/fm-no-mistakes-required-verifier.py
+            json=''
+            parse_ok=0
+            case "$body" in
+              *"$prefix"*)
+                rest="${body#*"$prefix"}"
+                case "$rest" in
+                  *"$suffix"*)
+                    json="${rest%%"$suffix"*}"
+                    if printf '%s' "$json" | jq -e . >/dev/null 2>&1; then
+                      parse_ok=1
+                    fi
+                    ;;
+                esac
+                ;;
+            esac
+            if [ "$parse_ok" -ne 1 ]; then
+              {
+                echo "::error::This repository requires no-mistakes >= 1.46.0; structured pipeline step attestation is missing or unparseable."
+                echo
+                echo "The no-mistakes signature was found, but this check also requires one"
+                echo "HTML comment in the PR body:"
+                echo
+                echo '    <!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"...","steps":[...]} -->'
+                echo
+                echo "That comment is emitted by no-mistakes >= 1.46.0 (the release that started"
+                echo "emitting structured step attestation; see https://github.com/kunchenguid/no-mistakes/pull/670)."
+                echo "An older no-mistakes that writes only the signature line is not enough."
+                echo
+                echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0."
+                echo "See CONTRIBUTING.md for setup and the full workflow."
+                echo
+                echo "PR author: ${PR_AUTHOR}"
+              } >&2
+              exit 1
+            fi
+            attestation_head=$(printf '%s' "$json" | jq -er 'if (.head_sha | type) == "string" then .head_sha else empty end' 2>/dev/null) || attestation_head=''
+            if [ -z "$attestation_head" ] || [ "$attestation_head" != "$PR_HEAD_SHA" ]; then
+              {
+                echo "::error::The no-mistakes pipeline attestation is not bound to this pull request head."
+                echo
+                echo "The attestation's head_sha (${attestation_head:-missing}) must exactly match the"
+                echo "pull request head (${PR_HEAD_SHA}). An attestation produced for an earlier"
+                echo "commit does not prove this head passed review, test, and document."
+                echo
+                echo "Re-run the pipeline with 'git push no-mistakes' at the current head."
+                echo "See CONTRIBUTING.md for setup and the full workflow."
+                echo
+                echo "PR author: ${PR_AUTHOR}"
+              } >&2
+              exit 1
+            fi
+            echo "Attestation is bound to pull request head ${PR_HEAD_SHA}."
+            malformed_steps=$(printf '%s' "$json" | jq -r '
+              if (.steps | type) != "array" then
+                "steps"
+              elif any(.steps[]; (type != "object") or
+                ((.step | type) != "string") or (.step == "") or
+                ((.status | type) != "string")) then
+                "steps"
+              else
+                empty
+              end
+            ' 2>/dev/null) || malformed_steps='invalid'
+            if [ -n "$malformed_steps" ]; then
+              echo "::error::The no-mistakes pipeline attestation contains a malformed steps member." >&2
+              exit 1
+            fi
+            duplicate_steps=$(printf '%s' "$json" | jq -r '
+              if (.steps | type) == "array" then
+                ([.steps[] | select(type == "object") | .step] | group_by(.)[] | select(length > 1) | .[0])
+              else
+                empty
+              end
+            ' 2>/dev/null) || duplicate_steps='invalid'
+            if [ -n "$duplicate_steps" ]; then
+              echo "::error::The no-mistakes pipeline attestation contains duplicate step names: ${duplicate_steps}." >&2
+              exit 1
+            fi
+            incomplete=''
+            for required in review test document; do
+              status=$(printf '%s' "$json" | jq -r --arg step "$required" \
+                '([(.steps | arrays | .[]) | select(.step == $step) | .status] | first // empty | select(. != "")) // "missing"')
+              if [ "$status" != "completed" ]; then
+                if [ -n "$incomplete" ]; then
+                  incomplete="${incomplete}, "
+                fi
+                incomplete="${incomplete}${required}=${status}"
+              fi
+            done
+            if [ -n "$incomplete" ]; then
+              {
+                echo "::error::Required no-mistakes pipeline steps are not completed: ${incomplete}."
+                echo
+                echo "This repository requires review, test, and document to each have status"
+                echo "exactly 'completed'. Quota skips and agent skips are not compliant."
+                echo
+                echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0"
+                echo "so those required steps complete rather than skip."
+                echo "See CONTRIBUTING.md for setup and the full workflow."
+                echo
+                echo "PR author: ${PR_AUTHOR}"
+              } >&2
+              exit 1
+            fi
+            echo "Pipeline step attestation is valid: review, test, and document are completed."
             exit 0
           fi
           {

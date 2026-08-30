@@ -59,16 +59,6 @@ fallback_job = fallback["jobs"]["suite"]
 required_job = required["jobs"]["check"]
 hosted_label = "ubuntu-slim"
 required_timeout = 15
-checkout_steps = [
-    step for step in required_job["steps"]
-    if step.get("uses") == "actions/checkout@v4"
-]
-assert len(checkout_steps) == 1
-assert checkout_steps[0]["with"] == {
-    "ref": "${{ github.event.pull_request.base.sha }}",
-    "sparse-checkout": "bin/fm-no-mistakes-required-verifier.py",
-    "persist-credentials": False,
-}
 
 primary_names = {
     "lint": "Lint",
@@ -260,9 +250,9 @@ assert len(required_runs) == 1
 assert "${{" not in required_runs[0]
 assert "Updates from [git push no-mistakes]" in required_runs[0]
 
-# The hosted body-compliance lane checks out only its base-owned verifier.
+# The hosted body-compliance lane stays checkout-free and independent.
 required_uses = [step.get("uses") for step in required_job["steps"] if "uses" in step]
-assert required_uses == ["actions/checkout@v4"], required_uses
+assert required_uses == [], required_uses
 fallback_uses = [step.get("uses") for step in fallback_job["steps"] if "uses" in step]
 assert fallback_uses == ["actions/checkout@v6"], fallback_uses
 
@@ -278,8 +268,7 @@ for step in fallback_job["steps"]:
             assert forbidden not in text, forbidden
 for step in required_job["steps"]:
     assert step.get("continue-on-error") is None
-    if "uses" in step:
-        assert step["uses"] == "actions/checkout@v4", step["uses"]
+    assert "uses" not in step
     delivered = [step.get("run", "")]
     delivered.extend(str(value) for value in (step.get("env") or {}).values())
     for text in delivered:
@@ -391,7 +380,7 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
   rc=0
   out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=45 PR_HEAD_SHA=2222 bash -c "$script" 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "workflow accepted a numeric head_sha matching the textual PR head: rc=$rc out=$out"
-  assert_contains "$out" "structured pipeline step attestation" \
+  assert_contains "$out" "not bound to this pull request head" \
     "workflow non-string head_sha failure was not explicit"
 
   marker='## Pipeline
@@ -402,7 +391,7 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
   rc=0
   out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=43 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "workflow accepted duplicate attestation steps: rc=$rc out=$out"
-  assert_contains "$out" "duplicate step review" \
+  assert_contains "$out" "duplicate step names" \
     "workflow duplicate-step failure was not explicit"
 
   marker='## Pipeline
@@ -413,7 +402,7 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
   rc=0
   out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=44 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "workflow accepted a malformed attestation step: rc=$rc out=$out"
-  assert_contains "$out" "structured pipeline step attestation" \
+  assert_contains "$out" "malformed steps member" \
     "workflow malformed-step failure was not explicit"
 
   tmp=$(fm_test_tmproot fm-ci-water7-unsigned)
