@@ -57,6 +57,20 @@ FM_BACKLOG_ROW_ERROR=
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
 
+# Emit each byte of a value as a decimal number, locale-independently.
+# Deliberately perl rather than od: the spawn and teardown lifecycle runs under a
+# curated PATH (tests/fm-teardown.test.sh make_path_without_lsof pins that set)
+# that excludes od, and a validator that cannot run must never wedge dispatch or
+# cleanup. perl is already in that curated set and is already used elsewhere in
+# this repo for the same portability reason.
+fm_backlog_bytes_of_string() {  # <string>
+  perl -e 'print join(" ", unpack("C*", $ARGV[0])), "\n"' -- "$1"
+}
+
+fm_backlog_bytes_of_file() {  # <path>
+  perl -e 'open(my $f, "<", $ARGV[0]) or exit 1; binmode $f; local $/; my $c = <$f>; $c = "" unless defined $c; print join(" ", unpack("C*", $c)), "\n"' -- "$1"
+}
+
 fm_backlog_control_bytes_valid() {  # <allow-newline: 0|1> <od-bytes>
   printf '%s\n' "$2" | awk -v allow_newline="$1" '
     { for (i = 1; i <= NF; i++) if (($i < 32 && !(allow_newline && $i == 10)) || $i == 127) exit 1 }
@@ -76,7 +90,7 @@ fm_backlog_directory_present() {
 
 fm_backlog_data_absolute() {
   local data=$1 raw_bytes check
-  raw_bytes=$(printf '%s' "$data" | LC_ALL=C od -An -t u1) || return 1
+  raw_bytes=$(fm_backlog_bytes_of_string "$data") || return 1
   if ! fm_backlog_control_bytes_valid 0 "$raw_bytes"; then
     printf 'error: data directory contains an invalid control byte\n' >&2
     return 2
@@ -474,7 +488,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=0
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
   fm_backlog_record_present "$marker" "pending-close record" "$state" || return 1
-  raw_bytes=$(LC_ALL=C od -An -t u1 "$marker" 2>/dev/null) || {
+  raw_bytes=$(fm_backlog_bytes_of_file "$marker" 2>/dev/null) || {
     FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
     return 1
   }

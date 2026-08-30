@@ -241,7 +241,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved raw_bytes
-  raw_bytes=$(printf '%s' "$path" | LC_ALL=C od -An -t u1) || return 1
+  raw_bytes=$(fm_backlog_bytes_of_string "$path") || return 1
   if ! fm_backlog_control_bytes_valid 0 "$raw_bytes"; then
     echo "error: $name directory contains an invalid control byte" >&2
     return 1
