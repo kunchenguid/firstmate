@@ -65,6 +65,7 @@ class Environment:
         self.herdr_mode = self.root / "herdr-mode"
         self.herdr_mode.write_text("ready\n", encoding="utf-8")
         self.herdr_log = self.root / "herdr-log.jsonl"
+        self.herdr_pid = self.root / "herdr-pid"
         self.fake_herdr = self.root / "fake-herdr.py"
         self.fake_herdr.write_text(
             """#!/usr/bin/env python3
@@ -74,6 +75,9 @@ args=sys.argv[1:]
 log=Path(os.environ['FAKE_HERDR_LOG'])
 with log.open('a', encoding='utf-8') as h: h.write(json.dumps(args,separators=(',',':'))+'\\n')
 mode=Path(os.environ['FAKE_HERDR_MODE_FILE']).read_text().strip()
+if mode == 'flood':
+    Path(os.environ['FAKE_HERDR_PID']).write_text(str(os.getpid()))
+    while True: os.write(1, b'x' * 65536)
 if args[:2] == ['agent','get']:
     session_value=os.environ['FAKE_CLAUDE_SESSION'] if mode != 'mismatch' else 'other-session'
     status='working' if mode == 'busy' else 'idle'
@@ -119,6 +123,7 @@ else:
                 "FM_HANDOFF_TEST_NOW": FIXED_NOW,
                 "FM_HANDOFF_TEST_PROCESS_CAPABILITY": "claude-process-generation-1",
                 "FAKE_HERDR_LOG": str(self.herdr_log),
+                "FAKE_HERDR_PID": str(self.herdr_pid),
                 "FAKE_HERDR_MODE_FILE": str(self.herdr_mode),
                 "FAKE_CLAUDE_SESSION": self.claude_session,
                 "FAKE_VAULT": str(self.vault),
@@ -257,12 +262,14 @@ else:
         return self.run("seal", "--source-harness", "pi", "--trigger", trigger, input_value={"session_id": session}, expect=expect, extra_env=extra_env)
 
     def complete(self, seal, outcome: str = "success"):
+        bindings = seal.get("bindings") or [
+            {"record_id": seal["record_id"], "envelope_sha256": seal["envelope_sha256"]}
+        ]
         return self.run(
             "compaction-outcome",
             outcome,
             input_value={
-                "record_id": seal["record_id"],
-                "envelope_sha256": seal["envelope_sha256"],
+                "bindings": bindings,
                 "trigger": "threshold",
                 "reason": "synthetic-compaction-result",
             },
@@ -422,6 +429,17 @@ def test_registration_sealing_and_rejections(tmp: Path) -> None:
     status = env.run("status")
     check(status["counts"]["pending"] == 1, "successful compaction did not leave a queue-first pending record")
 
+    retry_env = Environment(tmp, "pi-multi-record-retry")
+    retry_env.register("Retain the first sealed record across a provider failure.")
+    first = retry_env.seal_pi()
+    retry_env.complete(first, "failure")
+    retry_env.register("Bind a new candidate into the same retry attempt.")
+    retry = retry_env.seal_pi()
+    check(len(retry["bindings"]) == 2, "Pi retry did not bind failed and newly sealed records together")
+    retry_env.complete(retry)
+    queues = [json.loads(path.read_text()) for path in (retry_env.home / "state" / "context-handoff" / "queue").glob("*.json")]
+    check(len(queues) == 2 and all(queue["compaction"] == "succeeded" for queue in queues), "Pi retry stranded a failed record when a new candidate arrived")
+
 
 def test_caps_atomicity_and_failure_receipts(tmp: Path) -> None:
     overlap_env = Environment(tmp, "state-vault-overlap")
@@ -480,6 +498,28 @@ def test_caps_atomicity_and_failure_receipts(tmp: Path) -> None:
     check(state_chain_failure["status"] == "seal-failed", "new state directory fsync failure did not stop sealing")
     state_chain_retry = state_chain_env.seal_pi()
     check(state_chain_retry["status"] == "sealed", "state directory fsync recovery did not permit a later durable seal")
+    state_chain_env.run("status", extra_env={"FM_HANDOFF_TEST_FAILPOINT": "before-repaired-directory-fsync"})
+    state_chain_records.chmod(0o755)
+    state_chain_env.run("status", expect=2, extra_env={"FM_HANDOFF_TEST_FAILPOINT": "before-repaired-directory-fsync"})
+    check(stat.S_IMODE(state_chain_records.stat().st_mode) == 0o755, "failed directory mode repair did not restore the prior mode")
+    state_chain_env.run("status")
+    check(stat.S_IMODE(state_chain_records.stat().st_mode) == 0o700, "directory mode repair did not restore private permissions")
+
+    frame_env = Environment(tmp, "mcp-frame-cap")
+    ping = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}, separators=(",", ":")).encode() + b"\n"
+    framed = subprocess.run(
+        [str(CLI), "mcp-server"],
+        input=(b"x" * (1024 * 1024 + 1)) + b"\n" + ping,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=frame_env.vault,
+        env=frame_env.base_env(),
+        check=False,
+        timeout=45,
+    )
+    check(framed.returncode == 0 and framed.stderr == b"", "MCP server failed while draining an oversized frame")
+    responses = [json.loads(line) for line in framed.stdout.splitlines()]
+    check(len(responses) == 1 and responses[0].get("id") == 2 and responses[0].get("result") == {}, "oversized MCP frame consumed or blocked the next valid frame")
 
 
 def test_exact_delivery_and_no_launch(tmp: Path) -> None:
@@ -521,6 +561,15 @@ def test_exact_delivery_and_no_launch(tmp: Path) -> None:
     multi.mcp("record_curation_disposition", {"record_id": first_record_id, "disposition": "duplicate", "rationale": "The first durable fact already exists."})
     second_delivery = multi.run("deliver")
     check(second_delivery["status"] == "pending", "second queued record escaped the unsupported atomic delivery hold")
+
+    flood = Environment(tmp, "delivery-output-cap")
+    flood.enable(consumer_enabled=True)
+    flood.make_ready_record("Terminate an adapter before excess output can accumulate.")
+    flood.enable(delivery_enabled=True)
+    flood.herdr_mode.write_text("flood\n")
+    flood.run("deliver", expect=2)
+    flood_pid = int(flood.herdr_pid.read_text())
+    check(not Path(f"/proc/{flood_pid}").exists(), "output-capped adapter remained alive after rejection")
 
 
 def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
@@ -627,10 +676,13 @@ def test_claude_hooks_guard_and_compaction(tmp: Path) -> None:
     retry_queue_path = next((retry_env.home / "state" / "context-handoff" / "queue").glob("handoff-*.json"))
     check(retry_env.hook({"hook_event_name": "StopFailure"}) is None, "Claude provider failure hook emitted content")
     check(json.loads(retry_queue_path.read_text())["compaction"] == "failed", "Claude provider failure did not bind the exact PreCompact seal")
+    retry_env.register("A new Claude candidate must join every earlier failed record on retry.", harness="claude")
     check(retry_env.hook({"hook_event_name": "PreCompact", "trigger": "auto"}) is None, "Claude provider retry did not rebind its durable seal")
+    retry_queue_paths = list((retry_env.home / "state" / "context-handoff" / "queue").glob("handoff-*.json"))
+    check(len(retry_queue_paths) == 2, "Claude retry did not seal the new candidate separately")
     check(retry_env.hook({"hook_event_name": "PostCompact", "trigger": "auto"}) is None, "Claude retry PostCompact emitted content")
-    retry_queue = json.loads(retry_queue_path.read_text())
-    check(retry_queue["compaction"] == "succeeded" and retry_queue["status"] == "pending", "successful Claude retry remained stuck after its earlier provider failure")
+    retry_queues = [json.loads(path.read_text()) for path in retry_queue_paths]
+    check(all(queue["compaction"] == "succeeded" and queue["status"] == "pending" for queue in retry_queues), "successful Claude retry stranded an earlier or newly sealed record")
 
     capability_env = Environment(tmp, "consumer-process-capability")
     capability_env.enable(consumer_enabled=True)
@@ -701,14 +753,8 @@ def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
     check(not ack_path.exists(), "source was acknowledged before apply completed")
     bundle_path = env.home / "state" / "context-handoff" / "bundles" / seal["record_id"] / f"{prepared['bundle_sha256']}.json"
     exact_command = f"{env.python} {env.core} transaction apply {bundle_path} --vault {env.vault} --approved-plan-sha256 {prepared['approval_sha256']}"
-    wrong_session_allow = env.hook({"hook_event_name": "PreToolUse", "session_id": "replacement-claude-session", "tool_name": "Bash", "tool_input": {"command": exact_command}})
-    check(wrong_session_allow["hookSpecificOutput"]["permissionDecision"] == "deny", "replacement Claude session inherited stale Save authority")
-    env.herdr_mode.write_text("mismatch\n")
-    stale_recipient_allow = env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": exact_command}})
-    check(stale_recipient_allow["hookSpecificOutput"]["permissionDecision"] == "deny", "stale live recipient inherited Save authority")
-    env.herdr_mode.write_text("ready\n")
-    allow = env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": exact_command}})
-    check(allow["hookSpecificOutput"]["permissionDecision"] == "allow", "exact reviewed live transaction command was not allowed")
+    shell_apply = env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": exact_command}})
+    check(shell_apply["hookSpecificOutput"]["permissionDecision"] == "deny", "direct shell retained transaction mutation authority")
     committed, error = env.commit(seal["record_id"], prepared["approval_sha256"])
     check(not error and committed["status"] == "acknowledged" and ack_path.is_file(), "transaction did not verify and acknowledge")
     check(not (env.vault / ".vault-meta" / "mutation.lock").exists(), "transaction lock remained after acknowledgement")
@@ -726,23 +772,17 @@ def test_transaction_apply_replay_conflict_and_ack(tmp: Path) -> None:
     source_guard_seal = source_guard_env.make_ready_record("Revalidate source bytes before guard authorization.")
     source_guard_env.bind_claude()
     source_guard_prepared = source_guard_env.prepare(source_guard_seal["record_id"])
-    source_guard_bundle = source_guard_env.home / "state" / "context-handoff" / "bundles" / source_guard_seal["record_id"] / f"{source_guard_prepared['bundle_sha256']}.json"
-    source_guard_command = f"{source_guard_env.python} {source_guard_env.core} transaction apply {source_guard_bundle} --vault {source_guard_env.vault} --approved-plan-sha256 {source_guard_prepared['approval_sha256']}"
     source_guard_env.source_file.write_text("Changed after review.\n", encoding="utf-8")
-    source_guard_denied = source_guard_env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": source_guard_command}})
-    check(source_guard_denied["hookSpecificOutput"]["permissionDecision"] == "deny", "guard allowed Save after source bytes changed")
-    check(not (source_guard_env.vault / "wiki" / "concepts" / "Bounded retry.md").exists(), "source mismatch guard test mutated the Vault")
+    source_guard_commit, source_guard_error = source_guard_env.commit(source_guard_seal["record_id"], source_guard_prepared["approval_sha256"])
+    check(source_guard_error and source_guard_commit["code"] == "SOURCE_HASH_MISMATCH", "serialized commit allowed Save after source bytes changed")
+    check(not (source_guard_env.vault / "wiki" / "concepts" / "Bounded retry.md").exists(), "source mismatch commit test mutated the Vault")
 
     terminal_env = Environment(tmp, "terminal-save-authority")
     terminal_env.enable(consumer_enabled=True)
     terminal_seal = terminal_env.make_ready_record("Terminal disposition revokes prepared Save authority.")
     terminal_env.bind_claude()
     terminal_prepared = terminal_env.prepare(terminal_seal["record_id"])
-    terminal_bundle = terminal_env.home / "state" / "context-handoff" / "bundles" / terminal_seal["record_id"] / f"{terminal_prepared['bundle_sha256']}.json"
-    terminal_command = f"{terminal_env.python} {terminal_env.core} transaction apply {terminal_bundle} --vault {terminal_env.vault} --approved-plan-sha256 {terminal_prepared['approval_sha256']}"
     terminal_env.mcp("record_curation_disposition", {"record_id": terminal_seal["record_id"], "disposition": "duplicate", "rationale": "The durable fact already exists."})
-    terminal_guard = terminal_env.hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": terminal_command}})
-    check(terminal_guard["hookSpecificOutput"]["permissionDecision"] == "deny", "terminal disposition left guard Save authority active")
     terminal_commit, terminal_error = terminal_env.commit(terminal_seal["record_id"], terminal_prepared["approval_sha256"])
     check(terminal_error and terminal_commit["code"] == "SAVE_AUTHORITY_REVOKED", "terminal disposition remained commit-capable")
     check(not (terminal_env.vault / "wiki" / "concepts" / "Bounded retry.md").exists(), "terminal Save authority test mutated the Vault")
@@ -1055,7 +1095,7 @@ if (result?.cancel) throw new Error("explicit disabled result cancelled compacti
     disabled_completed = subprocess.run(["node", "--input-type=module"], input=disabled_script, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env=disabled_env, check=False, timeout=45)
     check(disabled_completed.returncode == 0 and disabled_completed.stdout == "", f"Pi disabled adapter contract failed: {disabled_completed.stderr}")
     hook_manifest = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())
-    expected_events = {"SessionStart", "PreCompact", "PostCompact", "StopFailure", "PreToolUse", "PostToolUse"}
+    expected_events = {"SessionStart", "PreCompact", "PostCompact", "StopFailure", "PreToolUse"}
     check(set(hook_manifest.get("hooks", {})) == expected_events, "Claude plugin lifecycle event contract is incomplete")
     expected_command = 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py" claude-hook'
     for registrations in hook_manifest["hooks"].values():
