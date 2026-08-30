@@ -538,6 +538,29 @@ test_bare_relative_data_dispatches_and_completes() {
   pass "bare relative data addresses one backlog through dispatch and completion"
 }
 
+test_dispatch_refuses_a_symlinked_backlog_without_crossing_homes() {
+  local case_dir foreign_case id local_backlog foreign_backlog out rc=0
+  id=atomic-dispatch-symlink-backlog-b2
+  case_dir=$(make_home dispatch-symlink-backlog "$id")
+  foreign_case=$(make_home dispatch-symlink-backlog-foreign)
+  add_item "$foreign_case" "$id"
+  local_backlog=$(backlog_of "$case_dir")
+  foreign_backlog=$(backlog_of "$foreign_case")
+  rm -f "$local_backlog"
+  ln -s "$foreign_backlog" "$local_backlog"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted a symlinked backlog"
+  assert_contains "$out" "backlog file is not a regular non-symlink file" \
+    "spawn did not identify the unsafe backlog boundary"
+  [ -L "$local_backlog" ] || fail "spawn replaced the local backlog symlink"
+  [ "$(row_state "$foreign_case" "$id")" = queued ] \
+    || fail "spawn mutated the foreign backlog row"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "unsafe backlog dispatch published a local task record"
+  pass "dispatch refuses symlinked backlogs without crossing homes"
+}
+
 test_dispatch_refuses_an_unresolvable_data_directory() {
   local case_dir id saved out rc=0
   id=atomic-dispatch-missing-data-b2
@@ -1085,6 +1108,33 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
   pass "restart recovers closes recorded before destructive cleanup"
 }
 
+test_completion_refuses_a_close_target_symlinked_to_a_directory() {
+  local case_dir home id marker external out rc=0
+  id=atomic-close-target-directory-symlink-b8
+  case_dir=$(make_home close-target-directory-symlink)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-target-symlink"
+  marker="$home/state/$id.backlog-close"
+  external="$case_dir/external-directory"
+  mkdir -p "$external"
+  ln -s "$external" "$marker"
+
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown published through a directory symlink"
+  assert_contains "$out" "pending-close record target is not a regular non-symlink file" \
+    "teardown did not report the unsafe publication target"
+  [ -L "$marker" ] || fail "teardown replaced the unsafe close target"
+  [ -z "$(find "$external" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || fail "teardown wrote a staged close outside the home"
+  assert_present "$home/state/$id.meta" \
+    "unsafe close publication removed the task record"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "unsafe close publication changed the backlog row"
+  pass "completion refuses directory-symlink close targets"
+}
+
 test_completion_fails_when_its_close_marker_cannot_be_removed() {
   local case_dir id marker out rc=0
   id=atomic-close-marker-remove-failure-b8
@@ -1221,6 +1271,8 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
     "the replayed close dropped the completion link the cleanup had recorded"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "a replayed close left its record behind"
+  assert_not_contains "$out" "endpoint or local copy may remain" \
+    "recovery claimed incomplete cleanup without task metadata"
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
@@ -1270,7 +1322,7 @@ test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
   pass "session start preserves a pending close across a transient backlog read failure"
 }
 
-test_recovery_retry_preserves_incomplete_cleanup_warning() {
+test_recovery_retry_without_metadata_avoids_incomplete_cleanup_warning() {
   local case_dir home id marker out
   id=atomic-heal-retry-warning-b10
   case_dir=$(make_home heal-retry-warning)
@@ -1292,10 +1344,10 @@ test_recovery_retry_preserves_incomplete_cleanup_warning() {
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = done ] \
     || fail "retried recovery left the item In flight: $out"
-  assert_contains "$out" "endpoint or local copy may remain" \
-    "retry lost the incomplete physical-cleanup warning"
+  assert_not_contains "$out" "endpoint or local copy may remain" \
+    "retry claimed incomplete cleanup after metadata was already removed"
   assert_absent "$marker" "retried recovery retained its applied marker"
-  pass "recovery retries preserve incomplete-cleanup warnings"
+  pass "recovery without metadata avoids incomplete-cleanup warnings"
 }
 
 test_recovery_finishes_a_close_for_the_same_meta_incarnation() {
@@ -1794,6 +1846,7 @@ test_recovery_uses_the_parent_of_a_trailing_slash_data_record
 test_completion_targets_a_nested_relative_data_directory
 test_immediate_child_absolute_data_dispatches_and_completes
 test_bare_relative_data_dispatches_and_completes
+test_dispatch_refuses_a_symlinked_backlog_without_crossing_homes
 test_dispatch_refuses_an_unresolvable_data_directory
 test_completion_refuses_an_unresolvable_data_directory
 test_dispatch_refuses_an_id_this_home_has_no_item_for
@@ -1819,6 +1872,7 @@ test_control_character_data_path_is_refused_before_cleanup
 test_completion_preserves_records_when_meta_removal_fails
 test_completion_fails_loudly_and_records_the_close_it_still_owes
 test_interrupted_destructive_cleanup_leaves_a_recoverable_close
+test_completion_refuses_a_close_target_symlinked_to_a_directory
 test_completion_fails_when_its_close_marker_cannot_be_removed
 test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
@@ -1828,7 +1882,7 @@ test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
-test_recovery_retry_preserves_incomplete_cleanup_warning
+test_recovery_retry_without_metadata_avoids_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata
 test_recovery_preserves_both_records_when_meta_removal_fails

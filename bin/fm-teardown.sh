@@ -2696,7 +2696,7 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
   fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
     "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" \
-    || { echo "error: the pending backlog close for $ID could not be recorded; retaining every durable task record" >&2; exit 1; }
+    || { echo "error: the pending backlog close for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2; exit 1; }
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
