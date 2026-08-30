@@ -198,8 +198,12 @@ family_for_basename() {
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
+    fm-capacity.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
+    fm-land-behind-main.test.sh|\
+    fm-ship-self-test-status.test.sh|\
+    fm-work-loop.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
@@ -374,6 +378,7 @@ tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
+tests/fm-work-loop.test.sh
 tests/fm-x-mode.test.sh
 EOF
 }
@@ -588,6 +593,10 @@ tests/fm-sessionstart-nudge.test.sh 26684
 tests/fm-shared-captain-inheritance.test.sh 10672
 tests/fm-spawn-dispatch-profile.test.sh 57765
 tests/fm-spawn-pool-base-freshen.test.sh 13257
+tests/fm-capacity.test.sh 45000
+tests/fm-work-loop.test.sh 2300
+tests/fm-land-behind-main.test.sh 12000
+tests/fm-ship-self-test-status.test.sh 8000
 tests/fm-spawn-worktree-settle.test.sh 4828
 tests/fm-startup-memory-budget.test.sh 6550
 tests/fm-startup-network.test.sh 48888
@@ -1212,6 +1221,7 @@ families_for_changed_path() {
     bin/fm-captain-hold.sh|bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-vendor-auth-probe.sh|\
+    bin/fm-work-loop.sh|bin/fm-capacity-lib.sh|bin/fm-land-lib.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit

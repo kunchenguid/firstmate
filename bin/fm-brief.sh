@@ -397,7 +397,7 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+When it is implemented and committed, append \`done: ready in branch fm/$ID · Tests N/0\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -432,6 +432,11 @@ esac
 # $(...) command substitution used to strip. Drop that one newline so generated
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
+
+SHIP_SELF_TEST_SECTION='# Self-test before done
+Before your terminal \`done:\` status, run this project'\''s test command yourself (for example \`./tests/...\` or the project'\''s documented test entrypoint). Firstmate does not run your tests for you.
+Include the pass/fail count in your terminal status as \`Tests N/0\` (passed/failed), for example \`done: ready in branch fm/'"$ID"' · Tests 42/0\`. A terminal \`done:\` without a self-test report is refused at local-only landing time.
+'
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -475,6 +480,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$SHIP_SELF_TEST_SECTION
 
 $INBOX_SECTION
 

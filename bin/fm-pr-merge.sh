@@ -75,6 +75,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-land-lib.sh
+. "$SCRIPT_DIR/fm-land-lib.sh"
 # Role partition: merging is MAIN-owned; the Pi supervision branch reports the
 # green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
 # without a branch actor).
@@ -623,10 +625,51 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+fm_pr_merge_refuse_if_too_far_behind() {
+  local behind max json
+  max=$(fm_land_max_behind_main)
+  case "$PROVIDER" in
+    github)
+      if ! behind=$(gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+        --json behindBy -q .behindBy 2>/dev/null); then
+        echo "REFUSED: could not read how far $URL is behind its base branch" >&2
+        return 1
+      fi
+      ;;
+    gitlab)
+      if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
+        -R "$PROJECT_URL" -F json 2>/dev/null) || [ -z "$json" ]; then
+        echo "REFUSED: could not read how far $URL is behind its target branch" >&2
+        return 1
+      fi
+      if ! behind=$(printf '%s' "$json" | jq -r '
+          if type == "object" and (.diverged_commits_count | type == "number") then
+            (.diverged_commits_count | floor | tostring)
+          else
+            error("missing diverged_commits_count")
+          end' 2>/dev/null); then
+        echo "REFUSED: could not read how far $URL is behind its target branch" >&2
+        return 1
+      fi
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  case "$behind" in ''|*[!0-9]*) behind=0 ;; esac
+  if [ "$behind" -ge "$max" ]; then
+    echo "REFUSED: $URL is $behind commits behind its base (>= $max); not merging to main; keep the branch and rebase later." >&2
+    return 1
+  fi
+  return 0
+}
+
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 record_pr_metadata || exit 1
+
+fm_pr_merge_refuse_if_too_far_behind || exit 1
 
 case "$PROVIDER" in
   github)

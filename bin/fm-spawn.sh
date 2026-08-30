@@ -132,6 +132,17 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   A fresh ship or scout spawn consults bin/fm-capacity-lib.sh and refuses when
+#   this host has no free measured worker slot, when this task id already has a
+#   LIVE worker, or when it belongs to a record that is not an independent
+#   worker - a live secondmate's above all - which a launch would overwrite.
+#   A ship or scout record whose worker is positively gone releases its id, so
+#   a task whose pane died is restartable through an ordinary fresh spawn.
+#   The gate never interrupts another task's running worker.
+#   Relaunch and --secondmate skip the slot budget: replacement is sequential,
+#   and a persistent secondmate is not an independent worker slot. Host-bound
+#   routing is a separate probe (bin/fm-capacity.sh route) and does not move
+#   the agent pane off this supervisor host.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
@@ -269,6 +280,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$SCRIPT_DIR/fm-capacity-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -645,7 +658,6 @@ spawn_remote_secondmate() {
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
   fm_lock_release "$SPAWN_TASK_LOCK" || true
-  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
@@ -1700,6 +1712,13 @@ if [ "$KIND" = ship ]; then
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+fi
+
+# Resource-aware slot gate: measured local capacity, never a fixed agent count.
+# Relaunch is sequential replacement and is exempt; --secondmate is persistent
+# and is exempt. Refusing here leaves every other running worker untouched.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  fm_capacity_allow_new_worker "$STATE" "$ID" "$KIND" 0 "$FM_HOME" || exit 1
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
@@ -2773,7 +2792,6 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
-"$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

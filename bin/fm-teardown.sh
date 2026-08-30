@@ -158,6 +158,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-land-lib.sh
+. "$SCRIPT_DIR/fm-land-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -1114,7 +1116,7 @@ backlog_refresh_reminder() {
         fi
         ;;
     esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then bin/fm-work-loop.sh plan and spawn every listed item until free worker slots are full or the plan is empty."
   else
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
@@ -1334,6 +1336,17 @@ teardown_treehouse_return() {
   return 1
 }
 
+# A ship that finished with clean Tests N/0 but is too far behind the default
+# branch is intentionally not landed; teardown may remove the pane while the
+# branch ref remains in git.
+worktree_kept_for_behind_main_deferral() {
+  local default
+  [ -d "$WT" ] || return 1
+  status_log_self_test_clean_before_done "$STATE/$ID.status" || return 1
+  default=$(default_branch) || return 1
+  fm_land_branch_too_far_behind_default "$WT" HEAD "$default"
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1374,6 +1387,9 @@ validate_worktree_teardown_safety() {
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+      if [ -z "$dirty" ] && worktree_kept_for_behind_main_deferral; then
+        return 0
+      fi
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
@@ -1392,6 +1408,9 @@ validate_worktree_teardown_safety() {
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
+      if worktree_kept_for_behind_main_deferral; then
+        return 0
+      fi
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2

@@ -1,0 +1,8 @@
+# Fixed Bauleitung dispatch order for bin/fm-work-loop.sh plan.
+# One task id per line. Blank lines and # comments are ignored.
+# Copy to gitignored config/work-loop-list when this home should refill empty
+# worker slots from a predetermined sequence instead of tasks-axi ready order.
+#
+# example-task-alpha
+# example-task-beta
+# example-task-gamma	demo	Example gamma task	ship
