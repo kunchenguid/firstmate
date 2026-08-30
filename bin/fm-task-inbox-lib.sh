@@ -162,18 +162,13 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
     printf -- '--\n'
     printf '%s' "$text"
   } > "$tmp" || status=1
+  # This is the final guarded-state check before publication.
+  # After mv succeeds a consumer may claim the record, so no later check may
+  # retract it or turn the durable delivery into a retryable failure.
   if [ "$status" -eq 0 ] && command -v fm_task_inbox_publish_guard >/dev/null 2>&1; then
     fm_task_inbox_publish_guard || status=1
   fi
   [ "$status" -ne 0 ] || mv "$tmp" "$rec" || status=1
-  # Recheck immediately after the rename so a guarded state change racing the
-  # pre-rename check retracts the record instead of leaving stale authority.
-  if [ "$status" -eq 0 ] && command -v fm_task_inbox_publish_guard >/dev/null 2>&1; then
-    if ! fm_task_inbox_publish_guard; then
-      rm -f -- "$rec" || return 1
-      status=1
-    fi
-  fi
   [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
   printf '%s' "$rec"
 }

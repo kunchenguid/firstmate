@@ -26,8 +26,11 @@
 #      validation and record publication, so a concurrent commit cannot race
 #      a stale head-bound instruction into the durable inbox, and an exact
 #      replay remains one durable record without retaining the transaction.
-#  11. A worktree write that races the record's atomic publication is observed
-#      by the post-publication guard and leaves no authoritative record.
+#  11. A worktree write that lands while the durable record is staged is
+#      observed by the publication guard and leaves no authoritative record.
+#  12. Once the atomic rename makes a record visible, a concurrent consumer
+#      may claim it immediately and the sender cannot retract it or report
+#      failure afterward.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -436,8 +439,42 @@ SH
 }
 
 test_expected_head_enqueue_refuses_concurrent_dirty_worktree() {
-  local dir err wt expected real_mv rc records
+  local dir err wt expected real_mktemp rc records
   dir=$(setup_case expected-head-dirty-race); err="$dir/send.err"
+  wt="$dir/worktree"
+  fm_git_init_commit "$wt"
+  expected=$(git -C "$wt" rev-parse HEAD)
+  printf 'worktree=%s\n' "$wt" >> "$dir/home/state/t1.meta"
+  real_mktemp=$(command -v mktemp)
+  cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$*" in
+  *'/t1.inbox/.staging.'*)
+    printf 'concurrent write\n' > "${FM_EXPECTED_DIRTY_RACE_WORKTREE:?}/uncommitted.txt"
+    ;;
+esac
+exec "${FM_REAL_MKTEMP:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mktemp"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_WORKTREE_HEAD="$expected" \
+    FM_REAL_MKTEMP="$real_mktemp" \
+    FM_EXPECTED_DIRTY_RACE_WORKTREE="$wt" \
+    -- t1 "validate exact clean head $expected"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a worktree dirtied during publication received validation authority"
+  records=("$dir/home/state/t1.inbox"/*.msg)
+  [ ! -e "${records[0]}" ] || fail "the dirty-race send published ${records[0]}"
+  assert_contains "$(cat "$err")" "inbox record could not be written" \
+    "the dirty-race refusal should report the failed durable publication"
+  pass "fm-send inbox: publication refuses a concurrent dirty worktree"
+}
+
+test_visible_record_is_not_retracted_after_consumer_claim() {
+  local dir err wt expected real_mv body
+  dir=$(setup_case visible-record-consumer-race); err="$dir/send.err"
   wt="$dir/worktree"
   fm_git_init_commit "$wt"
   expected=$(git -C "$wt" rev-parse HEAD)
@@ -451,6 +488,7 @@ last=
 for arg in "$@"; do last=$arg; done
 case "$last" in
   *'/t1.inbox/'[0-9][0-9][0-9].msg)
+    "${FM_REAL_MV:?}" "$last" "${last%/*}/handled/${last##*/}"
     printf 'concurrent write\n' > "${FM_EXPECTED_DIRTY_RACE_WORKTREE:?}/uncommitted.txt"
     ;;
 esac
@@ -461,14 +499,16 @@ SH
     FM_SEND_EXPECTED_WORKTREE_HEAD="$expected" \
     FM_REAL_MV="$real_mv" \
     FM_EXPECTED_DIRTY_RACE_WORKTREE="$wt" \
-    -- t1 "validate exact clean head $expected"
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "a worktree dirtied during publication received validation authority"
-  records=("$dir/home/state/t1.inbox"/*.msg)
-  [ ! -e "${records[0]}" ] || fail "the dirty-race send published ${records[0]}"
-  assert_contains "$(cat "$err")" "inbox record could not be written" \
-    "the dirty-race refusal should report the failed durable publication"
-  pass "fm-send inbox: publication refuses a concurrent dirty worktree"
+    -- t1 "validate exact clean head $expected" \
+    || fail "a record claimed at publication was reported undelivered: $(cat "$err")"
+  [ ! -f "$dir/home/state/t1.inbox/001.msg" ] \
+    || fail "the consumer fixture did not claim the published record"
+  [ -f "$dir/home/state/t1.inbox/handled/001.msg" ] \
+    || fail "the claimed record was retracted after becoming visible"
+  body=$(record_body _ "$dir/home/state/t1.inbox/handled/001.msg")
+  [ "$body" = "validate exact clean head $expected" ] \
+    || fail "the consumer did not retain the exact published instruction: $body"
+  pass "fm-send inbox: publication is final once a consumer can claim the record"
 }
 
 test_expected_status_signature_is_revalidated_at_publication() {
@@ -766,6 +806,7 @@ test_meta_lock_contention_fails_bounded
 test_expected_worktree_head_is_revalidated_before_enqueue
 test_expected_head_enqueue_excludes_concurrent_commit
 test_expected_head_enqueue_refuses_concurrent_dirty_worktree
+test_visible_record_is_not_retracted_after_consumer_claim
 test_expected_status_signature_is_revalidated_at_publication
 test_status_append_is_linearized_with_publication
 test_captain_hold_is_linearized_with_publication

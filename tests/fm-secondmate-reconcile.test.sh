@@ -284,11 +284,11 @@ test_the_window_is_four_hours() {
   snap="$home/snapshot.json"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
   run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null || fail "the first ask failed"
-  # One second short of four hours is still inside; one second past is not.
-  age_cooldown "$home/state" mate 14399
+  # Keep enough margin that process startup cannot cross either boundary.
+  age_cooldown "$home/state" mate 14300
   out=$(run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "cooldown: mate" "the window was shorter than four hours: $out"
-  age_cooldown "$home/state" mate 14401
+  age_cooldown "$home/state" mate 14500
   out=$(run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "sent: mate" "the window was longer than four hours: $out"
   pass "the cooldown window is four hours"
