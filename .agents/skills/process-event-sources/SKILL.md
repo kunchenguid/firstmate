@@ -38,7 +38,8 @@ bin/fm-captain-hold.sh bind <source-id>
 ```
 
 The runner then passes each captured result to that source's own adapter `answers` command and pipes the keyed answers it prints into the one keyed-answer intake, which owns every rule about what they mean; the keys are captain-held task ids.
-This is generic: any adapter with an `answers` command works, and the runner still wakes you to act on the result.
+This is generic across built-in adapters with an `answers` command, and the runner still wakes you to act on the result.
+External process-event bindings intentionally expose no answer operation and cannot feed the captain-answer intake.
 `captain-hold-lifecycle` owns when a binding is required and what the keys must be.
 
 A configured remote secondmate reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
@@ -57,6 +58,10 @@ Never bind an action that is destructive, irreversible, or security-sensitive, a
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
 
 `bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+
+An explicitly enabled external adapter registers through `bin/fm-procevent.sh register-extension`, never through a package-discovered script or package-supplied argv.
+[`docs/configuration.md`](../../../docs/configuration.md#trusted-external-process-event-adapters-configextensionsd) owns setup and [`docs/extension-bindings.md`](../../../docs/extension-bindings.md) owns the narrow trusted-code and untrusted-evidence boundary.
+Use the owner-matched retirement command registration prints, so an older package generation cannot retire its replacement.
 
 Two rules the commands cannot enforce for you:
 
@@ -81,7 +86,7 @@ Two rules the commands cannot enforce for you:
   bin/fm-procevent.sh handled <source-id> <sequence>
   ```
   This call is atomically deduplicated by the exact source and sequence: it prints `handled: <id> <seq>` only the first time and `already-handled: <id> <seq>` on every repeat, so a paired effect gated on that distinction is never authorized twice. Reading the event line or the result file is not handling - only this call durably retires the wake, so call it every time, including on a repeat wake for a sequence you already acted on.
-: Ask the adapter what the result means rather than parsing it yourself - for Lavish, `bin/fm-procevent-lavish.sh classify <result-file>` returns `feedback`, `ended`, `waiting`, `missing`, or `unknown`. A `feedback` result can still be the last one a review ever produces, so never assume another wake is coming just because the state is not `ended`.
+: Ask the adapter what the result means rather than parsing it yourself. `bin/fm-procevent.sh classify <result-file>` routes through the immutable built-in or extension identity captured with that result; for Lavish, its existing direct command returns `feedback`, `ended`, `waiting`, `missing`, or `unknown`. A `feedback` result can still be the last one a review ever produces, so never assume another wake is coming just because the state is not `ended`.
 : A routine no-op an adapter positively identifies never becomes a wake at all - it is recorded as handled and stays silent, so you never see it. For Lavish that is exactly an ended session carrying nothing: a board the captain closed without saying anything. A board close carrying a real answer, and every other result, still wakes you unchanged. Never read the absence of a wake as proof a review is still open; ask the source, not the queue.
 : A Lavish wake whose source id matches `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"` is a bearings board result; load the `bearings` skill's board-wake handling regardless of which answer kinds the result contains.
 : A `when` wake carries the watch's one terminal captured outcome and may be re-announced until handled: `bin/fm-procevent-when.sh classify <result-file>` returns `fired` (relay the success and its output); `action-failed` (relay the captured error and decide recovery); `condition-error`, `never-true`, or `rejected` (the watch stopped safely without acting - report why and decide whether to re-arm); or `ambiguous` (the action was claimed but its outcome was never captured - verify its effect manually before anything else). Every `when` outcome is terminal and the action is never retried automatically, so after handling and the generic acknowledgement above, run `bin/fm-procevent-when.sh retire <name>` to clean the watch's private records before any re-arm.

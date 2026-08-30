@@ -991,9 +991,6 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
   make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
   write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
-  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
   FM_HOME="$home" "$CHECK" arm >/dev/null || fail "could not arm the watched tool check"
 
   out="$home/out.txt"

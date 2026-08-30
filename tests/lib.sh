@@ -8,18 +8,19 @@
 # It provides the boilerplate every test file used to re-roll: ok/not-ok
 # reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
 # git identity and fixture builders, state/<id>.meta writers, and the common
-# string/exit-code/file assertions. It deliberately does NOT bundle the
-# behavior-specific fake tmux/treehouse/no-mistakes mocks: those encode terminal
-# and lifecycle assumptions that differ per suite and belong with the tests that
-# own them.
+# string/exit-code/file assertions. Shared fake-toolchain and spawn-world
+# builders live in tests/fixtures.sh; wake-queue mocks in wake-helpers.sh;
+# secondmate-lifecycle mocks in secondmate-helpers.sh. Suite-specific fakes
+# that encode a single test's terminal or lifecycle assumptions still belong
+# with the tests that own them.
 #
 # ROOT is exported as the firstmate repo root (this file lives in tests/), so a
 # sourcing test can use "$ROOT/bin/..." without recomputing it.
 
 # Idempotent guard: behavior-area helper files (secondmate-helpers.sh,
-# wake-helpers.sh) source this library for ROOT/fail/pass, and the test that
-# includes them may also source it directly. Re-sourcing must not wipe the
-# registered-cleanup array or reset state.
+# wake-helpers.sh, fixtures.sh) source this library for ROOT/fail/pass, and the
+# test that includes them may also source it directly. Re-sourcing must not wipe
+# the registered-cleanup array or reset state.
 if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
   return 0
 fi
@@ -138,11 +139,19 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
+    if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+      find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    fi
     rm -rf "$dir"
   done
 }
 
-fm_test_reap_orphans
+# A parent coordinator can reap once before it starts isolated child sections.
+# Those children use their own EXIT cleanup and must not spend their bounded
+# execution window repeating the same global stale-fixture scan.
+if [ "${FM_TEST_SKIP_ORPHAN_REAP:-0}" != 1 ]; then
+  fm_test_reap_orphans
+fi
 
 # --- fakebin / PATH shims ---------------------------------------------------
 #
