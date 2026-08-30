@@ -47,6 +47,22 @@ function exactBindings(result: HandoffResult): RecordBinding[] | null {
   return bindings;
 }
 
+function exactSealResult(result: HandoffResult): RecordBinding[] | null {
+  const bindings = exactBindings(result);
+  if (!bindings) return null;
+  const keys = Object.keys(result).sort();
+  const expected = bindings.length === 1
+    ? ["bindings", "envelope_sha256", "record_id", "status"]
+    : ["bindings", "status"];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null;
+  if (bindings.length === 1 && (result.record_id !== bindings[0].record_id || result.envelope_sha256 !== bindings[0].envelope_sha256)) return null;
+  return bindings;
+}
+
+function exactNoopResult(result: HandoffResult): boolean {
+  return (result.status === "empty" || result.status === "disabled") && Object.keys(result).length === 1;
+}
+
 function runHandoff(
   root: string,
   fmHome: string,
@@ -143,7 +159,7 @@ export function registerContextHandoff(
       ["seal", "--source-harness", "pi", "--trigger", event.reason],
       { session_id: sessionId(ctx) },
     );
-    const bindings = exactBindings(result);
+    const bindings = exactSealResult(result);
     if ((result.status === "sealed" || result.status === "already-sealed") && bindings) {
       pendingSeal = {
         bindings,
@@ -151,12 +167,8 @@ export function registerContextHandoff(
       };
       return;
     }
-    if (result.status === "seal-failed" && result.had_candidates === true) {
-      return { cancel: true };
-    }
-    if (result.status === "adapter-failed") {
-      return { cancel: true };
-    }
+    if (exactNoopResult(result)) return;
+    return { cancel: true };
   });
 
   pi.on("session_compact", async (event) => {
