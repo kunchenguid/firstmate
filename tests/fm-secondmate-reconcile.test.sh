@@ -165,8 +165,11 @@ age_cooldown() {  # <state-dir> <mate-id> <seconds-ago>
 run_notify() {  # <home> <fakebin> <name> <snapshot> [extra args...]
   local home=$1 fakebin=$2 name=$3 snap=$4
   shift 4
+  # Forward the optional pinned clock so a caller can make a boundary assertion
+  # deterministic; empty (the default) leaves reconcile on the real wall clock.
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" \
+    FM_RECONCILE_NOW_OVERRIDE="${FM_RECONCILE_NOW_OVERRIDE:-}" \
     FM_FAKE_TMUX_WINDOW="firstmate:fm-mate" \
     FM_FAKE_TMUX_LOG="$TMP_ROOT/$name-tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/$name-fake/pane.txt" \
@@ -284,22 +287,18 @@ test_the_window_is_four_hours() {
   snap="$home/snapshot.json"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
   run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null || fail "the first ask failed"
-  now=$(date +%s)
-  cat > "$fakebin/date" <<'SH'
-#!/usr/bin/env bash
-if [ -n "${FM_TEST_DATE_NOW:-}" ] && [ "${1:-}" = +%s ]; then
-  printf '%s\n' "$FM_TEST_DATE_NOW"
-  exit 0
-fi
-exec /bin/date "$@"
-SH
-  chmod +x "$fakebin/date"
+  # Pin the reconcile clock to a fixed second (FM_RECONCILE_NOW_OVERRIDE) so the
+  # boundary is exact to the second, rather than racing the real wall clock: with
+  # a live clock a loaded runner could take over a second between writing the
+  # aged record and reading it back, turning a "one second short" record into a
+  # "one second past" one and flaking the assertion.
+  now=1700000000
   # One second short of four hours is still inside; one second past is not.
   printf '%s\n' "$((now - 14399))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  out=$(FM_RECONCILE_NOW_OVERRIDE="$now" run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "cooldown: mate" "the window was shorter than four hours: $out"
   printf '%s\n' "$((now - 14401))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  out=$(FM_RECONCILE_NOW_OVERRIDE="$now" run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "sent: mate" "the window was longer than four hours: $out"
   pass "the cooldown window is four hours"
 }

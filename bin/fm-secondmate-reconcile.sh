@@ -83,6 +83,16 @@ case "$FM_RECONCILE_COOLDOWN_SECONDS" in
   ''|*[!0-9]*) echo "fm-secondmate-reconcile: FM_RECONCILE_COOLDOWN_SECONDS must be a whole number of seconds" >&2; exit 2 ;;
 esac
 
+# Single owner of "now" for the cooldown arithmetic. FM_RECONCILE_NOW_OVERRIDE
+# lets a test pin the reference second so a boundary assertion (aged exactly one
+# second inside vs. one past the window) is deterministic instead of racing the
+# real wall clock between writing the record and reading it back on a loaded
+# runner. Mirrors FMX_NOW_OVERRIDE in fm-x-lib.sh; unset in production.
+reconcile_now() { printf '%s\n' "${FM_RECONCILE_NOW_OVERRIDE:-$(date +%s)}"; }
+case "${FM_RECONCILE_NOW_OVERRIDE:-}" in
+  ''|*[!0-9]*) [ -z "${FM_RECONCILE_NOW_OVERRIDE:-}" ] || { echo "fm-secondmate-reconcile: FM_RECONCILE_NOW_OVERRIDE must be a whole number of seconds" >&2; exit 2; } ;;
+esac
+
 ACTIVE_RECONCILE_LOCK=
 ACTIVE_CONTROL_LOCK=
 ACTIVE_META_LOCK=
@@ -255,7 +265,7 @@ cmd_notify() {
       continue
     fi
     ACTIVE_RECONCILE_LOCK=$reconcile_lock
-    now=$(date +%s)
+    now=$(reconcile_now)
     last=
     if [ -f "$path" ] && [ ! -L "$path" ]; then last=$(cat "$path" 2>/dev/null || true); fi
     case "$last" in ''|*[!0-9]*) last= ;; esac
@@ -318,7 +328,7 @@ cmd_notify() {
       rc=1
       continue
     fi
-    delivered_at=$(date +%s)
+    delivered_at=$(reconcile_now)
     if ! fm_lock_try_acquire "$reconcile_lock"; then
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1
