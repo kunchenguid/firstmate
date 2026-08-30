@@ -491,6 +491,25 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
+test_harness_switch_preserves_claude_trust_authority() {
+  local dir out rc
+  dir=$(new_case trust-switch rl36)
+  add_ship_task "$dir" rl36 claude
+  printf '%s\n' 'claude_trust=accept' >> "$dir/home/state/rl36.meta"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl36 relaunch --harness codex --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a Claude-to-Codex relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl36 claude_trust)" = accept ] \
+    || fail "switching away from Claude dropped the task's durable trust authority"
+
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl36 relaunch --harness claude --note "returning to Claude"); rc=$?
+  expect_code 0 "$rc" "a Codex-to-Claude relaunch should reuse the recorded trust authority"$'\n'"$out"
+  [ "$(meta_field "$dir" rl36 claude_trust)" = accept ] \
+    || fail "switching back to Claude did not retain the task's durable trust authority"
+  pass "fm-control relaunch: harness switches preserve Claude trust authority"
+}
+
 test_harness_switch_does_not_carry_the_old_profile_axes() {
   local dir out rc
   dir=$(new_case profile rl5)
@@ -1520,6 +1539,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_harness_switch_preserves_claude_trust_authority
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

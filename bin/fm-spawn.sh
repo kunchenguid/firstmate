@@ -2532,9 +2532,10 @@ claude_trust_dialog_clear() {
       sleep "$interval"
     fi
   done
-  if [ "$accept_attempted" = 1 ] || [ "$dialog_absent_seen" = 1 ]; then
+  if [ "$accept_attempted" = 1 ]; then
     return 2
   fi
+  [ "$dialog_absent_seen" != 1 ] || return 4
   return 1
 }
 
@@ -3021,7 +3022,10 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
-  [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ] || echo "claude_trust=accept"
+  if [ "$CLAUDE_TRUST_ACCEPT" -eq 1 ] \
+     || [ "$CLAUDE_TRUST_RECORDED" -eq 1 ]; then
+    echo "claude_trust=accept"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -3251,6 +3255,7 @@ case "$HARNESS" in
       case $? in
         1) claude_spawn_fail "claude's workspace-trust dialog could not be cleared" ;;
         2) claude_spawn_fail "claude accepted the workspace-trust dialog but never confirmed it started processing the launch brief" ;;
+        4) claude_spawn_fail "claude's workspace-trust dialog disappeared before acceptance was attempted" ;;
         *) claude_spawn_fail "claude's launch state could not be confirmed within the settle window - a trust dialog may still be pending" ;;
       esac
       exit 1

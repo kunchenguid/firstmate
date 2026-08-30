@@ -109,8 +109,12 @@ case "${1:-}" in
     printf '%s\n' "$*" >> "$FM_FAKE_KEY_LOG"
     case " $* " in
       *' Down '*)
-        if [ "$state" = trust-no ] && [ "${FM_FAKE_CLAUDE_MODE:-trusted}" != stuck-dialog ]; then
-          printf 'trust-yes\n' > "$FM_FAKE_CLAUDE_STATE"
+        if [ "$state" = trust-no ]; then
+          case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
+            disappears-after-down) printf 'gone-stuck\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+            stuck-dialog) ;;
+            *) printf 'trust-yes\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+          esac
         fi
         ;;
       *' Enter '*)
@@ -445,6 +449,28 @@ test_claude_accept_without_processing_fails_loudly() {
   pass "fm-spawn: accepting the dialog is not proof of delivery - an unconfirmed resume still fails loudly"
 }
 
+test_claude_dialog_disappearance_before_acceptance_is_unconfirmed() {
+  local id rec out rc bare_keys
+  id="claude-disappears-before-accept-z6a-$$"
+  rec=$(make_spawn_case disappears-before-accept "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=disappears-after-down run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dialog that disappears before acceptance must fail the spawn"
+  assert_contains "$out" "claude's workspace-trust dialog disappeared before acceptance was attempted" \
+    "dialog disappearance before acceptance was misreported as accepted trust"
+  assert_grep "failed: claude's workspace-trust dialog disappeared before acceptance was attempted" \
+    "$HOME_DIR/state/$id.status" \
+    "dialog disappearance before acceptance lacked its distinct failure record"
+  assert_not_contains "$out" "claude accepted the workspace-trust dialog" \
+    "dialog disappearance before acceptance was falsely recorded as accepted trust"
+  bare_keys=$(awk 'NF == 4 {print $4}' "$CASE_DIR/keys.log")
+  [ "$bare_keys" = "$(printf 'Enter\nDown')" ] \
+    || fail "the disappearing dialog received an acceptance Enter: $bare_keys"
+  pass "fm-spawn: dialog disappearance before acceptance remains unconfirmed"
+}
+
 test_claude_delayed_trust_dialog_is_not_missed() {
   local id rec out rc
   id="claude-delayed-z5-$$"
@@ -599,6 +625,7 @@ test_claude_trust_dialog_is_navigated_never_a_blind_enter
 test_claude_focused_trust_dialog_accepts_without_navigation
 test_claude_stuck_dialog_fails_loudly
 test_claude_accept_without_processing_fails_loudly
+test_claude_dialog_disappearance_before_acceptance_is_unconfirmed
 test_claude_delayed_trust_dialog_is_not_missed
 test_claude_stale_busy_scrollback_cannot_confirm_processing
 test_claude_already_trusted_idle_spawn_has_no_processing_requirement
