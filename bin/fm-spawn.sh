@@ -748,6 +748,7 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
 SPAWN_REMOTE_CODEX_CUSTODY_PUBLISHED=0
+SPAWN_FRESH_COMMIT_CLEANUP_RESULT=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -765,6 +766,23 @@ spawn_fresh_commit_rollback() {
     return 0
   fi
   echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  return 1
+}
+
+spawn_fresh_commit_cleanup() {
+  SPAWN_FRESH_COMMIT_CLEANUP_RESULT=
+  if [ "$SPAWN_REMOTE_CODEX_CUSTODY_PUBLISHED" = 1 ] \
+     && ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+    SPAWN_FRESH_COMMIT_PENDING=0
+    SPAWN_FRESH_COMMIT_CLEANUP_RESULT=preserved
+    echo "warning: preserving incomplete remote Codex endpoint record for $ID because endpoint $T was not confirmed gone" >&2
+    return 0
+  fi
+  if spawn_fresh_commit_rollback; then
+    SPAWN_FRESH_COMMIT_CLEANUP_RESULT=removed
+    return 0
+  fi
+  SPAWN_FRESH_COMMIT_CLEANUP_RESULT=incomplete
   return 1
 }
 
@@ -873,14 +891,8 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-    if [ "$SPAWN_REMOTE_CODEX_CUSTODY_PUBLISHED" = 1 ] \
-       && ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
-      SPAWN_FRESH_COMMIT_PENDING=0
-      echo "warning: preserving incomplete remote Codex endpoint record for $ID because endpoint $T was not confirmed gone" >&2
-    else
-      if ! spawn_fresh_commit_rollback; then
-        status=1
-      fi
+    if ! spawn_fresh_commit_cleanup; then
+      status=1
     fi
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
@@ -3350,8 +3362,12 @@ else
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
-    if spawn_fresh_commit_rollback; then
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+    if spawn_fresh_commit_cleanup; then
+      if [ "$SPAWN_FRESH_COMMIT_CLEANUP_RESULT" = preserved ]; then
+        echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was preserved because endpoint $T was not confirmed gone - retire that exact endpoint through the canonical backend and prove it is gone before removing the record or retrying" >&2
+      else
+        echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+      fi
     else
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
     fi
