@@ -23,17 +23,18 @@
 # durably sent (recorded); nonzero = nothing was confirmed delivered and a
 # resend is appropriate (unresolvable target, an endpoint that cannot be
 # locked and revalidated or that retired or changed, an unwritable record, a
-# failed or lost remote transport) or the answered decision's closure could not
-# be recorded after delivery (the error then carries the exact manual close). The remote enqueue
-# is idempotent: the remote leg deduplicates an exact re-run of the same
-# request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
-# transport (ssh exit 255, completion unknown) fm-send retries the same leg
-# once itself. For an ordinary reply-bearing request, a later re-run is
-# idempotent only through the printed FM_PENDING_REPLY_EXISTING_CORR=<corr>
-# command: it preserves the same correlation, body, and record, while a plain
-# re-run mints a new correlation and delivers a separate record. An explicit
-# fire-and-forget request instead retries with its same caller-supplied delivery
-# id. A still-unconfirmed reply-bearing request keeps its reply expectation
+# failed or lost remote transport) or the answered decision's closure could
+# not be recorded after delivery (the error then carries the exact manual
+# close). The remote enqueue is idempotent: the remote leg deduplicates an
+# exact re-run of the same request onto the existing record
+# (bin/fm-task-inbox-lib.sh), so after a lost transport (ssh exit 255,
+# completion unknown) fm-send retries the same leg once itself. For an
+# ordinary reply-bearing request, a later re-run is idempotent only through
+# the printed FM_PENDING_REPLY_EXISTING_CORR=<corr> command: it preserves the
+# same correlation, body, and record, while a plain re-run mints a new
+# correlation and delivers a separate record. An explicit fire-and-forget
+# request instead retries with its same caller-supplied delivery id. A
+# still-unconfirmed reply-bearing request keeps its reply expectation
 # preserved for the record that may have landed.
 # Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
 # nonzero: with the recovery marker stored the watcher reconciles it silently,

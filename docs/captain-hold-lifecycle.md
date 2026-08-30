@@ -28,7 +28,7 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 `verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
-## Answer-time closure
+## Keyed-answer closure
 
 "A keyed answer closes its matching captain-held task" is one capability with one owner.
 `answers` is its channel-agnostic entry point: it reads `<task-id>\t<answer>\t<label>[\t<mode>]` lines and closes each named task through the same `answer` path, so every guard applies identically no matter which channel the answer arrived on.
