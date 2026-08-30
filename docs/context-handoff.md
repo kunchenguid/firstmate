@@ -7,14 +7,14 @@ It is not transcript capture, a compaction-summary archive, or an alternate memo
 ## Safety boundary
 
 Only `decision`, `preference`, `gotcha`, `project-fact`, `next-step`, and `pointer` items can enter the register.
-Each item carries one bounded plain-text statement, an approved no-symlink source path, the source file's exact SHA-256, confidence, sphere, destination provider class, and explicit supersession IDs.
+Each item carries one bounded plain-text statement, an approved no-symlink source path, the source file's exact SHA-256, confidence, sphere, destination provider class, explicit supersession IDs, and the SHA-256 of an exact reviewed registration eligibility contract.
 The register rejects raw chat, transcripts, generated compact summaries, model reasoning, tool streams, reports copied wholesale, terminal output, credentials, financial data, customer or order records, addresses, email or message bodies, sensitive material, and local-only material.
 The producer proposes a handoff candidate only after the fact has been written to its ordinary durable owner.
 Claude remains the sole final relevance, duplicate, and Vault-routing authority.
 
 [`claude-obsidian.handoff.v1.schema.json`](../schemas/claude-obsidian.handoff.v1.schema.json) is the authoritative envelope schema.
-[`fm-context-handoff.py`](../bin/fm-context-handoff.py) is the single mechanics owner for candidate records, sealing, receipts, queue states, delivery, hook handling, approval bindings, transaction verification, and source acknowledgements.
-Its header and `--help` own exact commands and paths.
+[`libexec/fm-context-handoff.py`](../libexec/fm-context-handoff.py) is the single mechanics owner for candidate records, sealing, receipts, queue states, delivery, hook handling, approval bindings, transaction verification, and source acknowledgements.
+The supported Bash entrypoint [`bin/fm-context-handoff.py`](../bin/fm-context-handoff.py) exposes its commands, and the entrypoint plus engine `--help` own exact command and path mechanics.
 
 ## Durable lifecycle
 
@@ -64,7 +64,8 @@ The installed transaction core remains the primary confinement and recovery boun
 Copy [`examples/context-handoff.json`](examples/context-handoff.json) to local `config/context-handoff.json` only after replacing every placeholder with reviewed local metadata.
 The four independent booleans are `registration_enabled`, `sealing_enabled`, `delivery_enabled`, and `consumer_enabled`.
 The example keeps all four false.
-The configuration stores no credential and must identify the exact approved source roots, provider classes, Vault path/device/inode, Herdr endpoint and session hash, Python executable, transaction entrypoint and module hashes, create prefixes, coupled replacement paths, and required coupled paths.
+The configuration stores no credential and must identify exact approved source roots, source/statement/classification eligibility contracts, provider classes, Vault path/device/inode, Herdr endpoint and session hash, Python executable, transaction entrypoint and module hashes, create prefixes, coupled replacement paths, and required coupled paths.
+Registration is a closed allowlist: every contract binds the canonical source path and hash, statement hash, kind, confidence, sphere, provider class, and supersession set before the CLI can accept the candidate.
 
 Do not enable the real Vault as part of installation.
 A later local activation must complete this checklist in order:
@@ -76,7 +77,7 @@ A later local activation must complete this checklist in order:
 5. Record fresh SHA-256 values for Herdr, the transaction entrypoint, and its transaction module.
 6. Run the focused synthetic suite and the model-free Pi and Claude hook smokes on the landed bytes.
 7. Load the plugin explicitly from its landed directory with a Vault-scoped Claude configuration.
-8. Start with registration only, then sealing, then the consumer guard, and enable delivery last.
+8. Record reviewed exact eligibility contracts, start with registration only, then sealing, then the consumer guard, and enable delivery last.
 9. Re-run hook discovery, exact endpoint probing, guard deny/allow checks, and a synthetic transaction readback before any real record is admitted.
 10. Keep the first real record pending for manual inspection before granting the approved standing Save authority.
 
