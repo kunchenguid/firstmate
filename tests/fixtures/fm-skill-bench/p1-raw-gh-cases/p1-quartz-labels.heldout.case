@@ -1,0 +1,7 @@
+TASK="Search repository labels through the hosting CLI and print matches."
+ALWAYS_ON_FILE="README.md"
+ALWAYS_ON_RULE="Prefer gh for GitHub API tasks."
+TOOLS="gh gh-axi"
+EXPECT_SKILL="gh-axi-instead"
+CHECK="$ROOT/tests/fixtures/fm-skill-bench/checks/expect-gh-axi-only.sh"
+FIXTURE="$ROOT/tests/fixtures/fm-skill-bench/fixtures/quartz-metrics"

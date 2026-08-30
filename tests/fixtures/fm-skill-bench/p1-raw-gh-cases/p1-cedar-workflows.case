@@ -1,0 +1,7 @@
+TASK="Check the latest workflow run outcomes for this project with a terminal command."
+ALWAYS_ON_FILE="README.md"
+ALWAYS_ON_RULE="GitHub CLI access should use gh."
+TOOLS="gh gh-axi"
+EXPECT_SKILL="gh-axi-instead"
+CHECK="$ROOT/tests/fixtures/fm-skill-bench/checks/expect-gh-axi-only.sh"
+FIXTURE="$ROOT/tests/fixtures/fm-skill-bench/fixtures/cedar-analytics"

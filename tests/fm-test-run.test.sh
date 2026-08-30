@@ -320,6 +320,18 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add tests/fixtures/flat-orphan.golden
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm flat-orphan-change
 
+  mkdir -p "$repo/rejected"
+  printf 'night report\n' >"$repo/gnhf-night-report.md"
+  printf 'rejected candidate\n' >"$repo/rejected/1-candidate.md"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "tracked autonomous-run artifacts must select no family instead of failing closed: $(cat "$tmp/err")"
+  git -C "$repo" add gnhf-night-report.md rejected
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm run-artifact-change
+
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e
   (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
