@@ -233,7 +233,7 @@ test_orca_composite_endpoint_refusals_precede_runtime_calls() {
   dir=$(make_case orca-control-character)
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "worktree=$dir/worktree"$'\033' "project=$dir/project" "backend=orca" \
     "orca_worktree_id=$uuid::$dir/worktree"$'\033'
   assert_refused_without_mutation "$dir" "$id" "Orca composite id with control character"
 
