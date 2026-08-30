@@ -184,8 +184,8 @@ init_changed_fixture_repo() {
   mkdir -p "$repo/tests/assets"
   : >"$repo/tests/assets/board-render-harness.mjs"
   printf '# tests/assets/board-render-harness.mjs\n' >>"$repo/tests/fm-bearings-board-render.test.sh"
-  : >"$repo/tests/fixtures/no-mistakes-required-verifier.py"
-  printf '# tests/fixtures/no-mistakes-required-verifier.py\n' >>"$repo/tests/fm-no-mistakes-required.test.sh"
+  : >"$repo/bin/fm-no-mistakes-required-verifier.py"
+  printf '# bin/fm-no-mistakes-required-verifier.py\n' >>"$repo/tests/fm-no-mistakes-required.test.sh"
   mkdir -p "$repo/tests/fixtures/vendor/pyyaml-6.0.2"
   : >"$repo/tests/fixtures/vendor/pyyaml-6.0.2/LICENSE"
   printf '# tests/fixtures/vendor/pyyaml-6.0.2\n' >>"$repo/tests/fm-no-mistakes-required.test.sh"
@@ -379,11 +379,11 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add tests/assets/board-render-harness.mjs
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm board-render-harness-change
 
-  printf '\n' >>"$repo/tests/fixtures/no-mistakes-required-verifier.py"
+  printf '\n' >>"$repo/bin/fm-no-mistakes-required-verifier.py"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-no-mistakes-required.test.sh" \
     "the verifier fixture selects its consuming contract suite"
-  git -C "$repo" add tests/fixtures/no-mistakes-required-verifier.py
+  git -C "$repo" add bin/fm-no-mistakes-required-verifier.py
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm verifier-fixture-change
 
   printf '\n' >>"$repo/tests/fixtures/vendor/pyyaml-6.0.2/LICENSE"

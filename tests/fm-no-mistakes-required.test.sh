@@ -5,7 +5,7 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-VERIFY="$ROOT/tests/fixtures/no-mistakes-required-verifier.py"
+VERIFY="$ROOT/bin/fm-no-mistakes-required-verifier.py"
 OLD_SHA=1111111111111111111111111111111111111111
 NEW_SHA=2222222222222222222222222222222222222222
 SIGNATURE='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'

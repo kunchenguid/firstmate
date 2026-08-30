@@ -518,7 +518,7 @@ worker_read_text() { # <job-dir> <field> <max>
 worker_valid_home() { # <home>
   local home=$1 canonical
   [ -n "$home" ] || return 1
-  canonical=$(fm_remote_job_canonical_home "$home" 2>/dev/null) || return 1
+  canonical=$(fm_remote_job_canonical_existing_dir "$home" 2>/dev/null) || return 1
   [ "$canonical" = "$home" ]
 }
 

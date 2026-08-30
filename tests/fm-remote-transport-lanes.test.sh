@@ -521,6 +521,37 @@ test_failed_reclamation_with_unknown_home_blocks_all_lanes() {
 
 test_failed_reclamation_with_unknown_home_blocks_all_lanes
 
+test_failed_reclamation_with_absent_home_leaf_blocks_all_lanes() {
+  local home_parent="$TMP_ROOT/home-absent-parent"
+  local running="$STATE_ROOT/jobs/job-absent-home-running"
+  local queued="$STATE_ROOT/jobs/job-absent-home-queued"
+  local effect="$TMP_ROOT/absent-home-effect"
+  local deadline
+  mkdir -p "$home_parent" "$running/.claim" "$queued"
+  chmod 700 "$home_parent" "$running" "$running/.claim" "$queued"
+  deadline=$(( $(date +%s) + 60 ))
+  printf 'running\n' > "$running/state"
+  printf '%s\n' "$home_parent/missing-leaf" > "$running/home"
+  ln -s "$TMP_ROOT/missing-supervisor" "$running/.claim/supervisor"
+  printf 'queued\n' > "$queued/state"
+  printf '%s\n' "$REMOTE_ROOT" > "$queued/root"
+  printf '%s\n' "$HOME_B" > "$queued/home"
+  printf '%s\n' "$deadline" > "$queued/queue_deadline"
+  printf '5\n' > "$queued/timeout"
+  printf '%s\0%s\0' fm-touch-job.sh "$effect" > "$queued/argv"
+  : > "$queued/stdin"
+  : > "$queued/stdout"
+  : > "$queued/stderr"
+  chmod 600 "$running/state" "$running/home" "$queued"/*
+  sleep 1
+  [ ! -e "$effect" ] || fail "a queued job ran while running-job custody had an absent home leaf"
+  [ "$(job_state "${queued##*/}")" = queued ] \
+    || fail "an absent running-job home leaf did not block scheduling globally"
+  pass "failed reclamation with an absent home leaf blocks every new lane"
+}
+
+test_failed_reclamation_with_absent_home_leaf_blocks_all_lanes
+
 test_pid_reuse_keeps_live_group_lane_reserved() {
   local home="$TMP_ROOT/home-pid-reuse"
   local running="$STATE_ROOT/jobs/job-pid-reuse-running"
