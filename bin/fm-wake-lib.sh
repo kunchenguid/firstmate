@@ -491,7 +491,7 @@ FM_RECOVERY_MARKER_ACTION='none'
 fm_recovery_marker_read() {
   local marker=$1 line count generation
   FM_RECOVERY_MARKER_TOKEN=
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] && [ -r "$marker" ] || return 1
   count=$(wc -l < "$marker" 2>/dev/null | tr -d '[:space:]') || return 1
   [ "$count" = 1 ] || return 1
   IFS= read -r line < "$marker" || return 1

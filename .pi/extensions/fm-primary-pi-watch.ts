@@ -145,7 +145,7 @@ function positiveInteger(name: string, fallback: number): number {
 
 function recoveryFollowUpIsSettled(): boolean {
   try {
-    const result = spawnSync("bash", ["-lc", settledRecoveryProbe], {
+    const result = spawnSync("bash", ["-c", settledRecoveryProbe], {
       cwd: fmRoot,
       encoding: "utf8",
       timeout: 1500,
