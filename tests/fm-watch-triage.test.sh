@@ -2067,50 +2067,71 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 # on the pane hash, exactly as the away-mode busy hand-off already is.
 #
 # Drives real fm-watch.sh rounds over a pane whose content changes every round
-# and counts what actually reached the durable queue.
+# and counts what actually reached the durable queue. Each round runs TWO
+# watcher launches, because real churn produces two distinct poll shapes and
+# the wipe defect lived in the first one: a transition poll that observes the
+# content change (h != prev - the branch that used to clear the
+# declaration-keyed one-shot), then a stabilized poll over the unchanged
+# content that crosses the stale threshold and runs the triage under test.
+# Pre-priming .hash to the current content, as this helper first did, skips
+# the transition poll entirely and cannot detect the flood recurring.
 #
-# Every queued record is accumulated into <state>/.churn-wakes BEFORE the round
-# acknowledges it, because a watcher that queues a wake exits on it and the next
-# round needs a clean queue: counting the queue at the end would only ever see
-# the last round's record and report a flood as a single wake.
+# Every queued record is accumulated into <state>/.churn-wakes BEFORE the
+# launch acknowledges it, because a watcher that queues a wake exits on it and
+# the next launch needs a clean queue: counting the queue at the end would only
+# ever see the last round's record and report a flood as a single wake.
+#
+# Each launch also acknowledges its watcher's stop, wake-exiting or reaped
+# alike: any watcher exit publishes a pending downtime episode, and until a
+# drain acknowledges it the next bare-relaunched watcher only re-announces
+# recovery (check: rearm-resurface) and never reaches the stale triage, so
+# later rounds would pass every count vacuously. This is the per-turn
+# acknowledgement production firstmate performs after each handled wake; the
+# rearm-resurface guard after the round loop catches the vacuity if the ack
+# ever stops working.
+declared_wait_churn_launch() {  # <state> <fakebin> <capture-file> <out> [env...]
+  local state=$1 fakebin=$2 capture_file=$3 out=$4 pid
+  shift 4
+  # `env` and not a bare assignment prefix: the caller's extra assignments
+  # arrive through "$@", and a word that only LOOKS like an assignment after
+  # expansion is a command name to the shell, not an assignment - which would
+  # launch nothing and pass every count in this file vacuously.
+  env PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" >> "$out" &
+  pid=$!
+  if wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+  else
+    wait "$pid" 2>/dev/null || true
+  fi
+  if [ -s "$state/.wake-queue" ]; then
+    cat "$state/.wake-queue" >> "$state/.churn-wakes"
+  fi
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+}
+
 declared_wait_churn_rounds() {  # <state> <fakebin> <window> <capture-file> <out> <rounds> [env...]
   local state=$1 fakebin=$2 window=$3 capture_file=$4 out=$5 rounds=$6
   shift 6
-  local key round pid text
+  local key round text
   key=$(printf '%s' "$window" | tr ':/.' '___')
   round=1
   while [ "$round" -le "$rounds" ]; do
-    # A new pane hash every round: the harness footer redrawing, nothing more.
+    # New pane content: the harness footer redrawing, nothing more. The
+    # persisted .hash still holds the PREVIOUS content's hash (or nothing on
+    # the very first round), so this launch observes the transition itself.
     text="idle, awaiting the captain (tokens $round)"
     printf '%s' "$text" > "$capture_file"
-    printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
+    declared_wait_churn_launch "$state" "$fakebin" "$capture_file" "$out" \
+      FM_FAKE_TMUX_WINDOW="$window" "$@"
+    # Stabilized poll over the unchanged content: the transition launch wrote
+    # the new .hash and reset the count, so priming the count here makes this
+    # launch cross the stale threshold on its first poll and run the triage.
     printf '1\n' > "$state/.count-$key"
-    # `env` and not a bare assignment prefix: the caller's extra assignments
-    # arrive through "$@", and a word that only LOOKS like an assignment after
-    # expansion is a command name to the shell, not an assignment - which would
-    # launch nothing and pass every count in this file vacuously.
-    env PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-      FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" >> "$out" &
-    pid=$!
-    if wait_poll_cycle "$state" "$pid"; then
-      reap "$pid"
-    else
-      wait "$pid" 2>/dev/null || true
-    fi
-    if [ -s "$state/.wake-queue" ]; then
-      cat "$state/.wake-queue" >> "$state/.churn-wakes"
-    fi
-    # Acknowledge EVERY round, not only wake-exiting ones: any watcher exit -
-    # a reaped absorb round included - publishes a pending downtime episode,
-    # and until a drain acknowledges it the next bare-relaunched watcher only
-    # re-announces recovery (check: rearm-resurface) and never reaches the
-    # stale triage, so later rounds would pass every count vacuously. This is
-    # the per-turn acknowledgement production firstmate performs after each
-    # handled wake; the rearm-resurface guard after this loop catches the
-    # vacuity if this ack ever stops working.
-    ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+    declared_wait_churn_launch "$state" "$fakebin" "$capture_file" "$out" \
+      FM_FAKE_TMUX_WINDOW="$window" "$@"
     round=$((round + 1))
   done
   # A round that only re-announced recovery never ran the triage under test;

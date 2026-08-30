@@ -1945,7 +1945,12 @@ EOF
         # is cleared - but not in the same poll the declared-pause cadence just
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        # The not-yet-stale leg consults the same status_declared_wait_kind owner
+        # every other triage site uses, never the narrow last-line predicate: an
+        # open decision keeps its last line un-declared, and clearing here wiped
+        # the declaration-keyed one-shot while the pane settled after a redraw.
+        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] \
+          && { [ "$n" -ge 2 ] || [ -z "$(status_declared_wait_kind "$STATE/$(window_to_task "$w" "$STATE").status")" ]; }; then
           clear_pause_tracking "$key"
         fi
       fi
@@ -1960,10 +1965,24 @@ EOF
         clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+      # Declared-wait triage on a pane-content change, gated by the same
+      # status_declared_wait_kind owner the top-of-loop clear and the stale arms
+      # use, never the narrow last-line predicate. An open-decision crew keeps
+      # an un-declared last line, so the old predicate was false here and every
+      # footer redraw fell through to the clear below, wiping the
+      # declaration-keyed one-shot and buying the next stable sighting another
+      # bare wake - one bare wake per pane-content change, the 2026-08-29 flood.
+      # The class cases mirror the first-sight arm of the non-terminal stale
+      # triage: a provably-working crew clears its pause bookkeeping, an
+      # admitted declared pause stays on the bounded cadence, and anything else
+      # runs the shared one-shot absorb-or-surface, so a live gate is still
+      # served exactly once even on a pane that never holds still.
+      if ! afk_present && [ "$busy_now" -ne 0 ] \
+        && { [ -e "$pf" ] || [ -n "$(status_declared_wait_kind "$STATE/$task.status")" ]; }; then
         case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$key" ;;
+          paused)  handle_paused_stale "$w" "$task" "$h" ;;
+          working) clear_pause_tracking "$key" ;;
+          *)       surface_nonterminal_stale "$w" "$h" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
