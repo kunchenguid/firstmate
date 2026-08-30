@@ -30,6 +30,8 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 #   dialog        a never-trusted repository shows the dialog, cancel-focused
 #                 by default; Down then Enter accepts it and claude resumes
 #                 processing the launch brief.
+#   focused-dialog the same dialog already has the trust option focused;
+#                 Enter accepts it without an unnecessary Down key.
 #   stuck-dialog  Down never moves the highlight off "No, exit" (simulates a
 #                 future rendering drift) - the dialog can never be cleared.
 #   no-processing accepting the dialog clears it, but claude never shows a
@@ -391,6 +393,25 @@ test_claude_trust_dialog_is_navigated_never_a_blind_enter() {
   pass "fm-spawn: claude's trust dialog is navigated to \"Yes\" before Enter, never a blind Enter"
 }
 
+test_claude_focused_trust_dialog_accepts_without_navigation() {
+  local id rec out rc bare_keys
+  id="claude-focused-authorized-z5a-$$"
+  rec=$(make_spawn_case focused-authorized "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=focused-dialog run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "an authorized focused trust choice should be accepted"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "the focused trust choice did not complete the spawn"
+  bare_keys=$(awk 'NF == 4 {print $4}' "$CASE_DIR/keys.log")
+  [ "$bare_keys" = "$(printf 'Enter\nEnter')" ] \
+    || fail "the focused trust choice should receive only launch Enter then accept Enter - got: $bare_keys"
+  [ "$(cat "$CASE_DIR/claude.state")" = processing ] \
+    || fail "the focused trust choice did not resume processing the launch brief"
+  pass "fm-spawn: an authorized focused trust choice accepts without unnecessary navigation"
+}
+
 test_claude_stuck_dialog_fails_loudly() {
   local id rec out rc
   id="claude-stuck-z3-$$"
@@ -575,6 +596,7 @@ test_claude_trust_authority_is_refused_for_other_harnesses
 test_claude_focused_trust_choice_still_requires_authority
 test_claude_already_trusted_spawn_never_touches_the_dialog
 test_claude_trust_dialog_is_navigated_never_a_blind_enter
+test_claude_focused_trust_dialog_accepts_without_navigation
 test_claude_stuck_dialog_fails_loudly
 test_claude_accept_without_processing_fails_loudly
 test_claude_delayed_trust_dialog_is_not_missed
