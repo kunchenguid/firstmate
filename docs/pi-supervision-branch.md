@@ -60,7 +60,7 @@ This self-description lets main distinguish a new supervision outcome from its o
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event-ownership and conversational-treatment instructions for merged outcomes.
 If envelope encoding fails, the captain-facing note degrades to the same runtime instruction as plain text rather than losing the outcome or opening another turn.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
-The branch prompt owns the verdict criteria, including its unconditional explicit-request rule and its surface-once escalation when a captain-requested operation unexpectedly gains a new multi-minute phase; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
+The branch prompt owns the verdict criteria, including its unconditional explicit-request rule and its surface-once escalation on the next routine supervision pass that observes a captain-requested operation's unexpected new multi-minute phase; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
 ## Heartbeat routing

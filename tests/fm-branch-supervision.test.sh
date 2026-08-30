@@ -546,7 +546,7 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
 # the phase is unexpected, and whether an estimate already went out - is absent
 # from the status stream it reads.
 test_branch_prompt_carries_new_phase_escalation_rule() {
-  local out uncond_pair uncond phase quiet resurface
+  local out uncond_pair uncond failure credential security phase quiet resurface
 
   out=$("$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
 
@@ -556,8 +556,9 @@ test_branch_prompt_carries_new_phase_escalation_rule() {
   assert_contains "$out" \
     "- an explicit captain-requested operation that unexpectedly gains a new multi-minute phase - name the condition and the revised rough duration in the summary." \
     "branch prompt lost the unexpected-new-phase escalation trigger"
-  assert_contains "$out" "report it the moment the new phase appears, once per new phase." \
-    "new-phase escalation lost its immediate, surface-once-per-phase contract"
+  assert_contains "$out" \
+    "report it once per new phase, on the next routine supervision pass on which you observe the new phase, not the instant the phase appears." \
+    "new-phase escalation lost its next-pass, surface-once-per-phase contract"
 
   # The NON-escalation cases: the expected wait itself, its background work, its
   # ordinary progress, and a repeat of an estimate already reported all stay
@@ -598,13 +599,18 @@ This rule is unconditional: do not qualify it by whether the result is healthy, 
   # and every standing escalation are stated BEFORE the new trigger, so the new
   # trigger reads as one more entry rather than as a filter over them.
   uncond=$(printf '%s\n' "$out" | grep -n "This rule is unconditional" | head -1 | cut -d: -f1)
+  failure=$(printf '%s\n' "$out" | grep -n -- "- a real blocker or failure" | head -1 | cut -d: -f1)
+  credential=$(printf '%s\n' "$out" | grep -n -- "- a needed credential or login" | head -1 | cut -d: -f1)
+  security=$(printf '%s\n' "$out" | grep -n -- "- anything destructive, irreversible, or security-sensitive" | head -1 | cut -d: -f1)
   phase=$(printf '%s\n' "$out" | grep -n "unexpectedly gains a new multi-minute phase" | head -1 | cut -d: -f1)
   quiet=$(printf '%s\n' "$out" | grep -n "Then stay verdict routine for the wait itself" | head -1 | cut -d: -f1)
   resurface=$(printf '%s\n' "$out" | grep -n "Escalate the same operation again only when" | head -1 | cut -d: -f1)
-  [ -n "$uncond" ] && [ -n "$phase" ] && [ -n "$quiet" ] && [ -n "$resurface" ] \
+  [ -n "$uncond" ] && [ -n "$failure" ] && [ -n "$credential" ] && [ -n "$security" ] \
+    && [ -n "$phase" ] && [ -n "$quiet" ] && [ -n "$resurface" ] \
     || fail "could not locate the verdict rules in the generated prompt"
-  [ "$uncond" -lt "$phase" ] \
-    || fail "the new-phase trigger now precedes the unconditional explicit-request rule"
+  { [ "$uncond" -lt "$phase" ] && [ "$failure" -lt "$phase" ] \
+    && [ "$credential" -lt "$phase" ] && [ "$security" -lt "$phase" ]; } \
+    || fail "the new-phase trigger now precedes an unconditional or standing escalation rule"
   { [ "$phase" -lt "$quiet" ] && [ "$quiet" -lt "$resurface" ]; } \
     || fail "the new-phase trigger, its silence cases, and its re-surface cases are out of order"
 
