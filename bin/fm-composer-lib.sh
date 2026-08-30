@@ -1314,12 +1314,9 @@ EOF
 
 # --- Claude's workspace-trust dialog -----------------------------------------
 #
-# Verified live (task fm-claude-trust-dialog-autoaccept, 2026-08-29, Claude Code
-# 2.1.251, real launch through bin/fm-spawn.sh into a never-trusted git
-# worktree): a fresh worktree of a repository firstmate has never trusted shows
-# this box BEFORE any composer exists, and --dangerously-skip-permissions does
-# NOT suppress it (that flag bypasses PERMISSION checks; workspace trust is a
-# separate gate). The rendered box, plain text, no dim/ghost styling:
+# A never-trusted repository can show this box before any composer exists, and
+# --dangerously-skip-permissions does not suppress the separate workspace-trust
+# gate. The rendered box, plain text, no dim/ghost styling:
 #
 #   Accessing workspace:
 #
@@ -1336,24 +1333,13 @@ EOF
 #
 #   Enter to confirm . Esc to cancel
 #
-# THE LANDMINE: the option list is cancel-first and CANCEL-FOCUSED by default
-# (Claude Code's own TrustDialog component passes cancelFirst:true,
-# focus:"cancel"). A bare Enter therefore selects "No, exit" and the process
-# quits immediately - verified live: sending a bare Enter here kills claude and
-# drops the pane back to a bare shell prompt. This retires the harness-adapters
-# claude reference's old "accept with --key Enter" advice, which would have
-# silently exited every never-trusted worker it touched. Accepting trust
-# requires moving the highlight down to "Yes, I trust this folder" FIRST, then
-# Enter; bin/fm-spawn.sh drives that sequence through the existing key-delivery
-# path, never a hand-rolled key send.
+# The option list is cancel-first and cancel-focused by default, so a bare Enter
+# selects "No, exit" and quits Claude. Accepting trust requires moving the
+# highlight to "Yes, I trust this folder" before Enter; bin/fm-spawn.sh drives
+# that sequence through the existing key-delivery path.
 #
-# PERSISTENCE (verified live, same session): accepting this dialog for a git
-# worktree records hasTrustDialogAccepted under the REPOSITORY's own checkout
-# path in ~/.claude.json, never under the worktree's own absolute path - a
-# second worktree of the same now-trusted repository launched with zero
-# dialog and no new entry. So this is a one-time cost per repository, not a
-# per-worktree or per-task cost, and firstmate must never write that file
-# itself (it is claude's own managed trust store).
+# docs/verification/runtime-backends.md owns the dated live evidence and trust
+# persistence result for this vendor surface.
 #
 # Detection is anchored on the dialog's own literal, stable strings rather than
 # box-drawing geometry, and requires its title, trust option, and confirmation

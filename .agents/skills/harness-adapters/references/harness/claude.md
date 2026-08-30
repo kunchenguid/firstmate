@@ -15,7 +15,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 
 The first launch into any worktree of a never-trusted repository may show a workspace-trust dialog because `--dangerously-skip-permissions` bypasses permission checks only, not that separate gate.
 For an authorized Claude crewmate or scout launch, pass `--accept-claude-trust` to `../../../bin/fm-spawn.sh`; this is the task's explicit project-scoped grant to accept the dialog automatically if it appears.
-The grant is retained in that task's metadata for relaunches, and without it an observed dialog is left untouched with a supervisor-visible blocker.
+The grant is retained in that task's metadata across same-harness relaunches and harness switches, and without it an observed dialog is left untouched with a supervisor-visible blocker.
 With that grant, `../../../bin/fm-spawn.sh` handles the dialog on launches and relaunches, but a backend must support Down when the trust option is not already focused.
 After accepting, it requires both a cleared dialog and evidence that Claude resumed processing the launch brief.
 The dialog is cancel-focused by default, so a bare Enter selects "No, exit" and quits Claude; never accept it with a plain `--key Enter`.
