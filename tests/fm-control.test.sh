@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -52,6 +52,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    omp) printf '/exit\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -266,7 +267,7 @@ test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
-      cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
+      cursor-agent:cursor muse:muse muse-bin-0.1.0:muse omp:omp pi:pi \
       pi-signed:pi-signed; do
     recorded=${pair%%:*}
     want=${pair#*:}
@@ -361,8 +362,8 @@ test_backend_key_capability_matrix() {
 }
 
 # A verified adapter is not automatically verified for every task kind, and the
-# check has to sit on the pre-stop side of a relaunch: muse has no primary
-# supervision protocol, so bin/fm-spawn.sh refuses it for a secondmate, and
+# check has to sit on the pre-stop side of a relaunch: muse and omp have no
+# primary supervision protocol, so bin/fm-spawn.sh refuses either for a secondmate, and
 # discovering that only after the running agent was stopped would strand the
 # secondmate with no agent at all.
 test_harness_kind_capability() {
@@ -375,6 +376,8 @@ test_harness_kind_capability() {
   done
   fm_control_harness_supports_kind muse secondmate \
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
+  fm_control_harness_supports_kind omp secondmate \
+    && fail "omp has no primary supervision protocol and must not claim a secondmate"
   for harness in claude codex opencode pi pi-signed grok kimi; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
@@ -441,6 +444,20 @@ test_state_verified_backends_are_exactly_tmux_and_herdr() {
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
   pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
+}
+
+test_omp_herdr_exit_uses_only_its_verified_idle_shell_proof() {
+  local pair harness backend
+  fm_control_exit_uses_herdr_idle_shell_proof omp herdr \
+    || fail "OMP's stale Herdr registration needs the measured idle-shell exit proof"
+  for pair in omp:tmux pi:herdr muse:herdr someagent:herdr; do
+    harness=${pair%%:*}
+    backend=${pair#*:}
+    if fm_control_exit_uses_herdr_idle_shell_proof "$harness" "$backend"; then
+      fail "$harness on $backend must not borrow OMP's Herdr exit proof"
+    fi
+  done
+  pass "fm-control-lib: only OMP on Herdr uses the measured idle-shell exit proof"
 }
 
 # --- 3. exact-id scoping ----------------------------------------------------
@@ -884,6 +901,7 @@ test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
+test_omp_herdr_exit_uses_only_its_verified_idle_shell_proof
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

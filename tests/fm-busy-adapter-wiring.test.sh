@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi omp opencode claude codex)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -145,6 +145,83 @@ test_pi_extension_stale_incarnation_rejected() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale extension event must not change state, got '$out'"
   pass "pi extension events from a superseded incarnation are rejected as stale"
+}
+
+# drive_omp_ext <ext-path> <mode>: OMP's extension API shares Pi's registration
+# shape but emits agent_end rather than agent_settled.
+drive_omp_ext() {
+  EXT_PATH="$1" MODE="$2" FM_OMP_IDLE_DEBOUNCE_MS=10 FM_OMP_RETRY_GRACE_MS=20 \
+    node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+const ctx = { hasUI: true };
+await handlers["session_start"]({}, ctx);
+switch (process.env.MODE) {
+  case "agent-start": await handlers["agent_start"]({}, ctx); break;
+  case "agent-end-idle":
+    await handlers["agent_start"]({}, ctx);
+    await handlers["agent_end"]({}, ctx);
+    break;
+  case "end-then-start":
+    await handlers["agent_start"]({}, ctx);
+    await handlers["agent_end"]({}, ctx);
+    await handlers["agent_start"]({}, ctx);
+    break;
+  case "retry-expired":
+    await handlers["agent_start"]({}, ctx);
+    await handlers["agent_end"]({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "HTTP 429 retry delay" }] }, ctx);
+    break;
+  case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  default: throw new Error("unknown mode " + process.env.MODE);
+}
+if (process.env.MODE === "turn-end" || process.env.MODE === "agent-end-idle" || process.env.MODE === "retry-expired") {
+  await new Promise((resolve) => setTimeout(resolve, 200));
+}
+EOF
+}
+
+test_omp_extension_semantic_lifecycle() {
+  local rec id=busy-omp-1 out state ext
+  rec=$(make_spawn_case omp-lifecycle omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  assert_present "$ext" "omp spawn did not write the per-task extension"
+
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "OMP turn_end no longer touches the notification marker"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "OMP turn_end must stay a notification, got '$out'"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "initial agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext', got '$out'"
+
+  out=$(drive_omp_ext "$ext" agent-end-idle) || fail "agent_end idle drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a settled agent_end must classify 'idle omp-ext', got '$out'"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext', got '$out'"
+
+  out=$(drive_omp_ext "$ext" end-then-start) || fail "following agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "an agent_start inside OMP's idle debounce must stay busy, got '$out'"
+
+  out=$(drive_omp_ext "$ext" retry-expired) || fail "retry expiration drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "unknown omp-ext" ] || fail "an expired OMP retry must be unknown, not idle, got '$out'"
+
+  pass "omp extension reports agent_start/agent_end state, preserves retry safety, and keeps turn_end a notification"
 }
 
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
@@ -315,6 +392,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
+test_omp_extension_semantic_lifecycle
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle

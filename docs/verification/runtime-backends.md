@@ -302,6 +302,17 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### OMP worker adapter
+
+OMP `18.0.11` was verified on 2026-08-30 through a real `fm-spawn.sh` crewmate launch in a guarded non-default Herdr 0.7.3 lab.
+The spawned worker read and completed its one-command brief, printed `OMP_CODE_LIVE_THREE_READY`, and touched the generated `turn_end` marker.
+The generated extension moved Firstmate busy state from `busy omp-ext` to `idle omp-ext` after the normal turn.
+Single Escape during a `sleep 30` Bash tool call produced `Command aborted` and left the OMP composer available; `fm-control.sh` reported `interrupt-delivered ... verified=agent-alive cancel=unconfirmed`.
+`/exit` printed `Closing session…` plus `Resume this session with omp --resume <id>` and returned the pane to its lone shell.
+OMP's installed Herdr integration retained an idle agent registration after exit, so the control plane accepts only that exact lone-idle-shell proof for OMP on Herdr; no other adapter or backend inherits it.
+The direct worker proof covers crewmate and scout dispatch only.
+OMP secondmates and primary integration remain unsupported because no primary supervision or primary-hook protocol was verified.
+
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.

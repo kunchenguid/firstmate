@@ -661,6 +661,20 @@ test_queued_enter_verdict_does_not_convert_other_states() {
   pass "fm_composer_queued_enter_verdict: only proven pending is converted"
 }
 
+test_omp_busy_footer_is_adapter_scoped() {
+  local busy='⠹ 3s  · 󰪟 DeepSeek V4 Flash' idle='❯'
+  printf '%s' "$busy" | fm_busy_lines_match omp \
+    || fail "the observed OMP braille elapsed footer must acknowledge an OMP delivery"
+  if printf '%s' "$idle" | fm_busy_lines_match omp; then
+    fail "an idle OMP composer must not match OMP's busy footer"
+  fi
+  if printf '%s' "$busy" | fm_busy_lines_match pi; then
+    fail "OMP's busy footer must not be borrowed by Pi's delivery guard"
+  fi
+  pass "fm_busy_lines_match: OMP's observed elapsed footer is busy only for OMP"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+test_omp_busy_footer_is_adapter_scoped

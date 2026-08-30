@@ -104,10 +104,10 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters. For pi, pi-signed, and omp, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -161,6 +161,8 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
+#     __OMPBIN__   quoted concrete OMP executable path resolved from PATH
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (OMP worker extension)
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
@@ -483,6 +485,12 @@ spawn_remote_secondmate() {
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    omp)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: omp is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+      return 1
+      ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1166,7 +1174,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1205,6 +1213,10 @@ resolve_pi_executable() {
       printf '%s/%s\n' "$dir" "$(basename "$candidate")"
       ;;
   esac
+}
+
+resolve_omp_executable() {
+  resolve_pi_executable omp
 }
 
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
@@ -1248,6 +1260,7 @@ launch_template() {
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_OMP_HARNESS=omp __OMPBIN__ --auto-approve __MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -1336,15 +1349,17 @@ case "$ARG3" in
     ;;
 esac
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
+# muse and omp are verified as CREWMATE/SCOUT adapters only. A secondmate is a
+# firstmate instance, so it needs a primary supervision protocol. Refusing here
+# keeps that gap loud instead of standing up a secondmate whose supervision cycle
+# could never be armed.
+if [ "$KIND" = secondmate ]; then
+  case "$HARNESS" in
+    muse|omp)
+      echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 case "$HARNESS" in
@@ -1359,6 +1374,12 @@ case "$HARNESS" in
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+  omp)
+    OMP_BIN=$(resolve_omp_executable) || {
+      echo "error: omp executable not found on PATH; install it or select a different verified harness" >&2
+      exit 1
+    }
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
@@ -1484,6 +1505,9 @@ model_flag_for_harness() {
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
+    omp)
+      printf -- '--model=%s ' "$(shell_quote "$model")"
+      ;;
   esac
 }
 
@@ -1514,10 +1538,17 @@ effort_flag_for_harness() {
       esac
       ;;
     pi|pi-signed)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
+      # Pi accepts the full shared effort vocabulary, including max, through its
+      # --thinking flag. The fallback policy never selects max.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    omp)
+      # OMP advertises --thinking=<value> and accepts the full shared effort
+      # vocabulary, including max. The fallback policy never selects max.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--thinking=%s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     muse)
@@ -2528,7 +2559,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|omp)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2650,6 +2681,87 @@ export default function (pi: any) {
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
+  });
+  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+}
+EOF
+      ;;
+    omp)
+      # OMP's extension lifecycle matches Pi's shape but not its settled event:
+      # OMP emits agent_start and agent_end. The per-task extension lives outside
+      # the worktree so no project-trust decision is needed. Its semantic state
+      # goes through the Firstmate busy contract. Herdr's installed OMP
+      # integration separately owns native pane registration and status.
+      cat > "$STATE/$ID.omp-ext.ts" <<EOF
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// OMP emits "agent_start" when a low-level run begins and "agent_end" when it
+// ends. A short debounce lets a following agent_start retain busy. Retryable
+// end events stay busy through OMP's retry grace and become unknown if no retry
+// starts, rather than falsely claiming idle. Herdr's installed OMP integration
+// owns its independent native pane registration.
+import { execFile } from "node:child_process";
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
+const idleDebounceMs = Number.parseInt(process.env.FM_OMP_IDLE_DEBOUNCE_MS || "250", 10);
+const retryGraceMs = Number.parseInt(process.env.FM_OMP_RETRY_GRACE_MS || "2500", 10);
+const retryableErrorPattern =
+  /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
+const retryableError = (event: any) => {
+  const messages = Array.isArray(event?.messages) ? event.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
+    return message.stopReason === "error"
+      && retryableErrorPattern.test(String(message.errorMessage ?? ""));
+  }
+  return false;
+};
+export default function (pi: any) {
+  let rootSession = false;
+  let agentActive = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearTimers = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (retryTimer) clearTimeout(retryTimer);
+    idleTimer = undefined;
+    retryTimer = undefined;
+  };
+  const rootUI = (ctx: any) => {
+    if (ctx && ctx.hasUI === true) rootSession = true;
+    return rootSession;
+  };
+  pi.on("session_start", (_event: any, ctx: any) => { rootUI(ctx); });
+  pi.on("agent_start", (_event: any, ctx: any) => {
+    if (!rootUI(ctx)) return;
+    clearTimers();
+    agentActive = true;
+    return busyEvent("busy", "agent-start");
+  });
+  pi.on("agent_end", (event: any) => {
+    if (!rootSession || !agentActive) return;
+    agentActive = false;
+    if (retryableError(event)) {
+      clearTimers();
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        if (!agentActive) void busyEvent("unknown", "agent-end-retry-grace-expired");
+      }, Number.isFinite(retryGraceMs) && retryGraceMs >= 0 ? retryGraceMs : 2500);
+      retryTimer.unref?.();
+      return;
+    }
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      if (agentActive) return;
+      void busyEvent("idle", "agent-end");
+    }, Number.isFinite(idleDebounceMs) && idleDebounceMs >= 0 ? idleDebounceMs : 250);
+    idleTimer.unref?.();
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
@@ -2951,6 +3063,7 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -2962,16 +3075,18 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
+  omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|muse|omp)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac

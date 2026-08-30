@@ -30,6 +30,16 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+make_spawn_omp_probe() {
+  local fakebin=$1
+  cat > "$fakebin/omp" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '%s\n' 'omp/18.0.11'; fi
+exit 0
+SH
+  chmod +x "$fakebin/omp"
+}
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
@@ -49,6 +59,7 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  make_spawn_omp_probe "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -631,6 +642,69 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 
+test_omp_threads_model_effort_autonomy_and_worker_extension() {
+  local rec id out status launch ext gen
+  id=profile-omp-z8c
+  rec=$(make_spawn_case profile-omp omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model deepseek-v4-pro --effort max)
+  status=$?
+  expect_code 0 "$status" "OMP spawn with model and max effort should succeed"
+  assert_contains "$out" "spawned $id harness=omp" "OMP spawn did not preserve its visible identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp deepseek-v4-pro max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_OMP_HARNESS=omp '$FAKEBIN_DIR/omp' --auto-approve --model='deepseek-v4-pro' --thinking='max' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+    "OMP launch did not thread autonomy, model, effort, and its worker extension"
+  assert_not_contains "$launch" "FM_PI_HARNESS=pi" \
+    "OMP launch must not identify itself as Pi"
+  assert_not_contains "$launch" "--tui-mode" \
+    "OMP launch must not borrow Pi's version-sensitive TUI flag"
+  ext="$HOME_DIR/state/$id.omp-ext.ts"
+  assert_present "$ext" "OMP launch did not install its turn and semantic-state extension"
+  assert_present "$HOME_DIR/state/$id.busy-gen" "OMP spawn did not arm the busy-state contract"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=fm-spawn" \
+    "OMP spawn did not seed the busy-state record from the launch brief"
+  gen=$(cat "$HOME_DIR/state/$id.busy-gen")
+  assert_contains "$(cat "$ext")" 'pi.on("agent_start"' \
+    "OMP extension lost the semantic agent_start busy edge"
+  assert_contains "$(cat "$ext")" 'pi.on("agent_end"' \
+    "OMP extension lost the semantic agent_end idle edge"
+  assert_contains "$(cat "$ext")" '"--source", "omp-ext"' \
+    "OMP extension does not attribute its semantic source"
+  assert_contains "$(cat "$ext")" "\"--gen\", \"$gen\"" \
+    "OMP extension does not carry the armed incarnation gen"
+  assert_not_contains "$(cat "$ext")" 'pane.report_agent' \
+    "OMP worker state wiring must not compete with Herdr's installed OMP integration"
+  assert_contains "$(cat "$ext")" 'pi.on("turn_end"' \
+    "OMP extension lost the turn-end notification touch"
+  pass "OMP receives model and max thinking, auto-approves tools, and installs state wiring"
+}
+
+test_omp_missing_binary_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-omp-missing-z8d
+  rec=$(make_spawn_case profile-omp-missing omp "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/omp"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a missing OMP executable should refuse the spawn"
+  assert_contains "$out" "omp executable not found on PATH" \
+    "missing OMP refusal did not name the actionable requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing OMP refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing OMP refusal typed a launch command"
+  pass "OMP refuses safely and actionably when its executable is unavailable"
+}
+
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   local harness version rec id out status launch
   for harness in pi pi-signed; do
@@ -704,6 +778,25 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
+}
+
+test_omp_secondmate_refuses_before_endpoint_or_metadata() {
+  local rec id sm out status
+  id=profile-omp-secondmate-z8e
+  rec=$(make_spawn_case profile-omp-secondmate claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' omp > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "OMP secondmate spawn should refuse"
+  assert_contains "$out" "omp is a verified crewmate/scout adapter only" \
+    "OMP secondmate refusal did not name the unsupported primary boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "OMP secondmate refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "OMP secondmate refusal typed a launch command"
+  pass "OMP's unverified primary protocol refuses secondmate dispatch before endpoint creation"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -816,8 +909,11 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
+test_omp_threads_model_effort_autonomy_and_worker_extension
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
+test_omp_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_omp_secondmate_refuses_before_endpoint_or_metadata
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset

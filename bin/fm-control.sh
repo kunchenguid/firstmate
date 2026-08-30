@@ -30,6 +30,8 @@
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
+#              OMP on Herdr instead proves the exact pane returned to one lone
+#              idle shell because its installed Herdr registration persists.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
@@ -342,6 +344,34 @@ wait_agent_state() {  # <timeout> <wanted>...
   return 1
 }
 
+# wait_exit_postcondition: accept only the normal dead-agent transition, plus
+# OMP's verified Herdr exception. OMP's installed Herdr integration leaves an
+# idle registration after `/exit`, so the exact pane must instead prove one lone
+# idle shell. This cannot generalize from harness=omp or backend=herdr alone:
+# fm-control-lib.sh owns the closed empirical pair.
+wait_exit_postcondition() {  # <timeout> -> dead|shell (success), final state (failure)
+  local timeout=$1 state elapsed=0
+  while :; do
+    state=$(agent_state)
+    if [ "$state" = dead ]; then
+      printf 'dead'
+      return 0
+    fi
+    if fm_control_exit_uses_herdr_idle_shell_proof "$HARNESS" "$BACKEND"; then
+      if fm_backend_herdr_parse_target "$T" \
+        && fm_backend_herdr_pane_idle_shell_pid "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null; then
+        printf 'shell'
+        return 0
+      fi
+    fi
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "$state"
+  return 1
+}
+
 require_state_verified_backend() {  # <verb>
   fm_control_backend_state_verified "$BACKEND" && return 0
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
@@ -485,7 +515,7 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+  state=$(wait_exit_postcondition "$EXIT_WAIT") || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
   # The incarnation is over: retire its busy wiring so no stale record or
