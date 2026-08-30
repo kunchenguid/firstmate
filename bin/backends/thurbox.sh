@@ -650,12 +650,11 @@ fm_backend_thurbox_send_text_line() {  # <target> <text> [expected-label]
 # captures: those trim because their fetch is unbounded, whereas `--lines N`
 # already bounds thurbox's fetch the exact way `capture-pane -p -S -N` bounds
 # tmux's - N rows of scrollback ahead of the WHOLE visible screen. `.output` is
-# therefore already the reference adapter's answer, and a local `tail -n N`
-# would not shorten a scrollback overrun, it would cut the SCREEN: the visible
-# pane carries one row per pane line including the trailing blanks below the
-# content, so the bottom N rows of a partially-filled pane are blank. Trimming
-# handed fm-peek and the watcher's tail an empty capture, exit 0, for any pane
-# whose output does not reach the bottom of the screen.
+# therefore already the reference adapter's answer, and a local `tail -n N` on
+# top of it is a SECOND, tighter bound that the reference adapter does not
+# apply: it caps the result at N rows of content, so it discards the scrollback
+# `--lines N` just fetched and then eats into the top of the screen, where
+# `capture-pane -p -S -N` returns the scrollback AND the screen entire.
 fm_backend_thurbox_capture() {  # <target> <lines> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${3:-}" || return 1
   local lines=${2:-200} out

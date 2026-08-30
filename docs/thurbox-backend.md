@@ -35,8 +35,8 @@ So `cursor_row` indexes `.output` only at `--lines 0`; any positive count shifts
 See [`verification/runtime-backends.md`](verification/runtime-backends.md) for the measurement.
 
 The same property is why the human-facing capture returns thurbox's response **whole** rather than trimming it to the caller's line count, unlike herdr's and cmux's "fetch generous, trim locally" captures.
-`--lines N` already bounds the fetch the exact way `capture-pane -p -S -N` bounds tmux's, so a local `tail -n N` could not shorten a scrollback overrun - it would cut the *screen*, whose trailing rows below the content are blank.
-That trim handed `fm-peek` and the watcher's tail an empty capture, exit 0, for any pane whose output did not reach the bottom of the screen.
+`--lines N` already bounds the fetch the exact way `capture-pane -p -S -N` bounds tmux's, so `.output` *is* the reference adapter's answer and a local `tail -n N` is a second, tighter bound applied on top of it.
+That trim capped the result at N rows of content, which threw away the N rows of scrollback `--lines N` had just fetched and then ate into the top of the screen - where `capture-pane -p -S -N` returns the scrollback and the whole screen.
 
 thurbox is the **only non-tmux backend at the default backend's composer fidelity** - `styled=1` *and* `cursor=1`, where zellij manages styled-only and cmux and Orca have neither - and the second backend after herdr **wired to a native busy primitive** rather than a pane regex.
 That wiring is real but currently unfed: nothing in a default firstmate-spawned session writes `hook_state`, so the verdict is `unknown` until an operator supplies the signal.

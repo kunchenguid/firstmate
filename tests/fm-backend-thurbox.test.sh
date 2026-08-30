@@ -292,7 +292,7 @@ UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
 test_version_check_accepts_verified_build() {
   reset_world
-  fm_backend_thurbox_version_check || fail "version check rejected the verified 2.9.2 build"
+  fm_backend_thurbox_version_check || fail "version check rejected the verified 2.10.1 build"
   pass "version_check accepts the verified build"
 }
 
@@ -674,22 +674,20 @@ test_send_key_refuses_dead_target() {
 test_capture_returns_the_whole_screen_not_its_bottom_rows() {
   reset_world
   add_row "$UUID" "$TITLE" "%20" local-tmux -
-  # A visible pane is one row per screen line: content at the top and blank
-  # rows below it, which `session capture` returns exactly as
-  # `capture-pane -p` does. A bottom-N trim of that screen therefore hands the
-  # caller nothing but blanks whenever the content stops short of the last row
-  # - a silent empty pane for fm-peek and the watcher's tail, exit 0.
-  printf 'l1\nl2\nl3\n\n\n\n\n\n' > "$FM_TB_CAPTURE"
+  # `--lines N` is a scrollback count, so thurbox has already applied the
+  # caller's bound: `.output` is N rows of history ahead of the WHOLE visible
+  # screen, exactly what `capture-pane -p -S -N` returns. A local `tail -n N`
+  # on top of that is a second, tighter bound the reference adapter does not
+  # apply - it caps the answer at N rows of content and eats the top of the
+  # screen. Here the screen alone is taller than the requested count.
+  printf 'l1\nl2\nl3\nl4\nl5\n' > "$FM_TB_CAPTURE"
   local out
   out=$(fm_backend_thurbox_capture "$UUID:%20" 2 fm-t1) || fail "capture failed"
-  case "$out" in
-    *l1*l2*l3*) : ;;
-    *) fail "capture dropped a partially-filled pane's content: '$out'" ;;
-  esac
+  [ "$out" = $'l1\nl2\nl3\nl4\nl5' ] \
+    || fail "capture cut the top off the visible screen: '$out'"
 
-  # `--lines N` is still the bound, passed to thurbox rather than applied
-  # locally: it is a SCROLLBACK count, so N rows of history arrive ahead of the
-  # screen exactly the way `capture-pane -p -S -N` delivers them.
+  # And the same second bound would have discarded the scrollback the first
+  # bound just paid to fetch.
   reset_world
   add_row "$UUID" "$TITLE" "%20" local-tmux -
   printf 'old1\nold2\nold3\n' > "$TMP_ROOT/scrollback"
@@ -698,7 +696,7 @@ test_capture_returns_the_whole_screen_not_its_bottom_rows() {
   out=$(fm_backend_thurbox_capture "$UUID:%20" 2 fm-t1) || fail "capture failed"
   [ "$out" = $'old2\nold3\nscreen1\nscreen2' ] \
     || fail "capture did not bound scrollback through --lines: '$out'"
-  pass "capture returns thurbox's bounded response whole, blanks and scrollback included"
+  pass "capture returns thurbox's already-bounded response whole, scrollback and screen"
 }
 
 test_capture_is_plain_text_composer_is_styled() {
