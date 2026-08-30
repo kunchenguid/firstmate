@@ -52,6 +52,9 @@ The optional `+yolo` posture changes merge authority only and does not change th
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the merge-authority contract.
 
+The optional `+unsynced` flag is independent of posture and of `+yolo`: it tells fleet sync to leave that clone entirely alone - no fetch, no drift check, no report - for a checkout the captain edits and pulls outside firstmate.
+Default it off, and add it only on the captain's explicit instruction; `bin/fm-project-mode.sh`'s header owns the token grammar.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
