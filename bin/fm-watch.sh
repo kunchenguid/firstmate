@@ -1960,12 +1960,17 @@ EOF
         # is cleared - but not in the same poll the declared-pause cadence just
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
-        # The not-yet-stale leg consults the same status_declared_wait_kind owner
-        # every other triage site uses, never the narrow last-line predicate: an
-        # open decision keeps its last line un-declared, and clearing here wiped
-        # the declaration-keyed one-shot while the pane settled after a redraw.
+        # The clear consults the same status_declared_wait_kind owner every other
+        # triage site uses, and ONLY that owner: while any declared wait is still
+        # open (a live paused declaration, or an open decision whose answer the
+        # captain owes) the one-shot must survive, so a busy pane below the
+        # busy-turn max keeps it. The old `n >= 2` shortcut - clear once the same
+        # busy hash was seen twice - defeated exactly that: an open-decision crew
+        # keeps its harness alive, so its busy pane settled on one hash and wiped
+        # the declaration-keyed one-shot, buying the next idle sighting another
+        # bare wake.
         if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] \
-          && { [ "$n" -ge 2 ] || [ -z "$(status_declared_wait_kind "$STATE/$(window_to_task "$w" "$STATE").status")" ]; }; then
+          && [ -z "$(status_declared_wait_kind "$STATE/$task.status")" ]; then
           clear_pause_tracking "$key"
         fi
       fi
@@ -1999,9 +2004,15 @@ EOF
           working) clear_pause_tracking "$key" ;;
           *)       surface_nonterminal_stale "$w" "$h" ;;
         esac
-      elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
-        # Same rule as the stable-hash branch: never clear pause bookkeeping the
-        # declared-pause cadence recorded on this very poll.
+      elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] \
+        && [ -z "$(status_declared_wait_kind "$STATE/$task.status")" ]; then
+        # Same rule as the stable-hash branch: never clear pause bookkeeping while
+        # a declared wait the shared owner still recognizes is open (a live paused
+        # declaration, or an open decision whose answer the captain owes), and
+        # never in the same poll the declared-pause cadence recorded it. A busy
+        # decision-waiting pane reaches here on every footer redraw; clearing
+        # unconditionally wiped the declaration-keyed one-shot and bought the next
+        # idle sighting another bare wake.
         clear_pause_tracking "$key"
       fi
     fi

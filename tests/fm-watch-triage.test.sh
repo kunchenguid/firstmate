@@ -2141,6 +2141,38 @@ declared_wait_churn_rounds() {  # <state> <fakebin> <window> <capture-file> <out
   fi
 }
 
+# Like declared_wait_churn_rounds, but the harness footer renders a BUSY
+# signature (the default Grok busy regex) instead of an idle tail, so every poll
+# reads window_is_busy true. A busy pane never enters the stale block, so these
+# rounds queue nothing themselves; they exist only to exercise the bookkeeping
+# clears that run on a busy pane - the transition (pane-content-change) clear and
+# the not-yet-stale repeat-hash clear - which must not wipe the declaration-keyed
+# one-shot out from under a still-open declared wait. The transition launch takes
+# the changed-hash branch; the stabilized launch, count primed to 1, takes the
+# repeat-hash branch on a pane still below the busy-turn max.
+declared_wait_busy_churn_rounds() {  # <state> <fakebin> <window> <capture-file> <out> <rounds> [env...]
+  local state=$1 fakebin=$2 window=$3 capture_file=$4 out=$5 rounds=$6
+  shift 6
+  local key round text
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  round=1
+  while [ "$round" -le "$rounds" ]; do
+    # A busy footer, redrawing its own token counter: the "Ctrl+c:cancel" busy
+    # signature keeps window_is_busy true while the tail changes every round.
+    text="Ctrl+c:cancel  working the branch (tokens $round)"
+    printf '%s' "$text" > "$capture_file"
+    declared_wait_churn_launch "$state" "$fakebin" "$capture_file" "$out" \
+      FM_FAKE_TMUX_WINDOW="$window" "$@"
+    printf '1\n' > "$state/.count-$key"
+    declared_wait_churn_launch "$state" "$fakebin" "$capture_file" "$out" \
+      FM_FAKE_TMUX_WINDOW="$window" "$@"
+    round=$((round + 1))
+  done
+  if grep -F 'rearm-resurface' "$out" >/dev/null 2>&1; then
+    fail "a busy churn round re-announced recovery instead of polling; the rounds did not exercise the busy-pane clears"
+  fi
+}
+
 # Count the stale wakes <window> queued across every round: total, and the BARE
 # un-annotated ones a supervision turn learns nothing from.
 count_stale_wakes() {  # <state> <window> -> "<total> <bare>"
@@ -2290,6 +2322,65 @@ test_open_decision_survives_unrelated_status_appends() {
   [ "$total" -le 1 ] \
     || fail "an open decision queued $total stale wakes across unrelated status growth"
   pass "an open decision keeps one identity across unrelated status appends, buying no further bare wake"
+}
+
+# The declaration-keyed one-shot must also survive a BUSY interlude. A crew that
+# declared a wait often keeps its harness alive, so the pane reads busy (a
+# spinner, a "Ctrl+c:cancel" footer) for a stretch before falling idle again.
+# A busy pane never enters the stale block, but it still runs the two
+# bookkeeping clears - the pane-content-change clear and the not-yet-stale
+# repeat-hash clear. Both used to clear pause tracking on a busy pane without
+# consulting the shared declared-wait owner (the repeat-hash leg even forced the
+# clear once the same busy hash was seen twice), wiping the declaration-keyed
+# .paused-surfaced marker for a crew whose open decision the captain still owed.
+# When the pane later fell idle and stale, the unchanged decision was treated as
+# a first sight again and queued another bare stale wake - one full supervision
+# turn per busy/idle cycle, the same 2026-08-29 flood one step removed. This
+# drives the real watcher: surface the one-shot on an idle churn, run a busy
+# churn that must not wipe it, then churn idle again - the still-open decision
+# must buy no further bare wake.
+test_open_decision_busy_pane_keeps_one_shot() {
+  local dir state fakebin out capture_file statusf window key sig counts total bare before
+  dir=$(make_case decision-busy-pane); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-gate"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'needs-decision: playtest-suite + physics design committed for review [key=w25-design]\n' \
+    > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+
+  # Establish the one-shot on an idle churn: it surfaces once, then absorbs.
+  declared_wait_churn_rounds "$state" "$fakebin" "$window" "$capture_file" "$out" 3 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  counts=$(count_stale_wakes "$state" "$window")
+  before=${counts##* }
+  [ "$before" -le 1 ] \
+    || fail "an open decision on an idle churn queued $before bare stale wakes before the busy interlude"
+  [ -e "$state/.paused-surfaced-$key" ] \
+    || fail "the declared-wait one-shot marker was not recorded on the idle churn"
+
+  # The busy interlude: the pane reads busy for several rounds. Neither clear may
+  # wipe the still-open decision's one-shot.
+  declared_wait_busy_churn_rounds "$state" "$fakebin" "$window" "$capture_file" "$out" 3 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  [ -e "$state/.paused-surfaced-$key" ] \
+    || fail "a busy interlude wiped the declaration-keyed one-shot for a still-open decision"
+
+  # Idle again: a wiped one-shot would re-surface the unchanged decision as a
+  # fresh bare stale wake. Compared against the pre-interlude count so the
+  # original surface cannot satisfy the assertion on its own.
+  declared_wait_churn_rounds "$state" "$fakebin" "$window" "$capture_file" "$out" 3 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  counts=$(count_stale_wakes "$state" "$window")
+  total=${counts%% *}; bare=${counts##* }
+  [ "$bare" -le "$before" ] \
+    || fail "a busy interlude bought $bare bare stale wakes for the same unanswered decision (was $before)"
+  [ "$total" -le 1 ] \
+    || fail "an open decision queued $total stale wakes across a busy interlude"
+  pass "an open decision keeps its one-shot across a busy interlude, buying no further bare wake"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -4101,6 +4192,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_declared_pause_churning_pane_surfaces_once_per_declaration
 test_open_decision_churning_pane_surfaces_once_per_declaration
 test_open_decision_survives_unrelated_status_appends
+test_open_decision_busy_pane_keeps_one_shot
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
