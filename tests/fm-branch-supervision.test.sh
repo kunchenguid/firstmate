@@ -536,6 +536,82 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
   pass "the branch cannot force a teardown or bypass fm-control for a relaunch"
 }
 
+# --- verdict rule: an unexpected new multi-minute phase ----------------------
+
+# The branch prompt (bin/fm-branch-prompt.sh) is the owner of the verdict
+# criteria, so its generated stdout is the interface this rule is pinned
+# through. The mechanical classifier deliberately cannot own this rule: it
+# decides on the leading status verb alone, and every one of the rule's
+# predicates - whether the captain explicitly asked for the operation, whether
+# the phase is unexpected, and whether an estimate already went out - is absent
+# from the status stream it reads.
+test_branch_prompt_carries_new_phase_escalation_rule() {
+  local out uncond_pair uncond phase quiet resurface
+
+  out=$("$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
+
+  # The ONE-TIME escalation: an explicit captain-requested operation that
+  # unexpectedly grows a new multi-minute phase surfaces exactly one outcome,
+  # and that outcome must name both the condition and the revised duration.
+  assert_contains "$out" \
+    "- an explicit captain-requested operation that unexpectedly gains a new multi-minute phase - name the condition and the revised rough duration in the summary." \
+    "branch prompt lost the unexpected-new-phase escalation trigger"
+  assert_contains "$out" "report it the moment the new phase appears, once per new phase." \
+    "new-phase escalation lost its immediate, surface-once-per-phase contract"
+
+  # The NON-escalation cases: the expected wait itself, its background work, its
+  # ordinary progress, and a repeat of an estimate already reported all stay
+  # routine. A repeated unchanged estimate re-surfacing would defeat the rule.
+  assert_contains "$out" \
+    "Then stay verdict routine for the wait itself, its background work, its ordinary progress, and any later repeat of an estimate you already reported." \
+    "new-phase rule lost its expected-wait, background-work, ordinary-progress, or repeated-estimate silence"
+
+  # The RE-surface cases: a materially changed estimate, a failure, and a needed
+  # captain decision each still escalate after the one-time report.
+  assert_contains "$out" \
+    "Escalate the same operation again only when the estimate changes materially, it fails, or it needs a captain decision" \
+    "new-phase rule lost its material-change, failure, or decision re-surface conditions"
+
+  # PRESERVED: the unconditional explicit-request rule survives intact and
+  # contiguous, and the new rule declares that it qualifies nothing above it.
+  # An edit that turns the new rule into a qualification of the unconditional
+  # one is the regression this pins.
+  uncond_pair="Report verdict captain for any outcome that directly answers an explicit captain request.
+This rule is unconditional: do not qualify it by whether the result is healthy, routine, measured, actionable, or requires a decision."
+  assert_contains "$out" "$uncond_pair" \
+    "the unconditional explicit-request rule was altered, split, or qualified"
+  assert_contains "$out" "That phase rule adds a trigger and qualifies none of the rules above it" \
+    "new-phase rule stopped declaring itself additive to the rules above it"
+
+  # PRESERVED: the failure, credential, and security escalations still fire on
+  # their own terms and were not made conditional on the new rule.
+  assert_contains "$out" "- a real blocker or failure after the playbook is exhausted;" \
+    "the failure escalation was weakened"
+  assert_contains "$out" "- a needed credential or login;" \
+    "the credential escalation was weakened"
+  assert_contains "$out" "- anything destructive, irreversible, or security-sensitive;" \
+    "the destructive and security-sensitive escalation was weakened"
+  assert_contains "$out" "the failure, credential, and security rules above still fire on their own terms." \
+    "new-phase rule stopped preserving the failure, credential, and security escalations"
+
+  # Ordering proves the addition is genuinely additive: the unconditional rule
+  # and every standing escalation are stated BEFORE the new trigger, so the new
+  # trigger reads as one more entry rather than as a filter over them.
+  uncond=$(printf '%s\n' "$out" | grep -n "This rule is unconditional" | head -1 | cut -d: -f1)
+  phase=$(printf '%s\n' "$out" | grep -n "unexpectedly gains a new multi-minute phase" | head -1 | cut -d: -f1)
+  quiet=$(printf '%s\n' "$out" | grep -n "Then stay verdict routine for the wait itself" | head -1 | cut -d: -f1)
+  resurface=$(printf '%s\n' "$out" | grep -n "Escalate the same operation again only when" | head -1 | cut -d: -f1)
+  [ -n "$uncond" ] && [ -n "$phase" ] && [ -n "$quiet" ] && [ -n "$resurface" ] \
+    || fail "could not locate the verdict rules in the generated prompt"
+  [ "$uncond" -lt "$phase" ] \
+    || fail "the new-phase trigger now precedes the unconditional explicit-request rule"
+  { [ "$phase" -lt "$quiet" ] && [ "$quiet" -lt "$resurface" ]; } \
+    || fail "the new-phase trigger, its silence cases, and its re-surface cases are out of order"
+
+  pass "branch prompt escalates an unexpected new multi-minute phase once, stays quiet otherwise, and preserves the standing rules"
+}
+
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -550,3 +626,4 @@ test_guard_holds_exclusivity_through_mutation
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
 test_branch_cannot_force_teardown_or_directly_relaunch
+test_branch_prompt_carries_new_phase_escalation_rule
