@@ -25,7 +25,7 @@ A Pi adapter launch, nonzero-exit, malformed-output, output-cap, or ten-second t
 Empty and disabled registers do not stop compaction when the adapter completes successfully.
 The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the exact sealed record and never infer success from the success event alone.
 
-The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
+The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, durable creation and fsync of every new state-directory entry, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
 A retry recovers valid orphan envelopes, missing queues for claimed records, and incomplete claim sets without resealing different bytes.
 Sealed envelopes, queue state, receipts, approval records, transaction bundle staging, quarantine records, and acknowledgements remain below `state/context-handoff/` in the effective Firstmate home and never enter the Vault.
 Disabling the feature leaves every one of those records intact.
@@ -36,14 +36,15 @@ It additionally verifies the selected Vault's canonical path and directory objec
 A cwd match alone never selects a recipient.
 Unavailable, busy, dead, changed, or ambiguous recipients leave the record pending with a reason.
 The bridge never starts, restarts, substitutes, discovers, or inspects a Claude process.
-A successful notification submits only the constant `/firstmate-context-handoff:consume`, never a record ID or record content.
+A notification may submit only the constant `/firstmate-context-handoff:consume`, never a record ID or record content, through a Herdr operation that atomically rejects a changed agent-session generation.
+When the installed Herdr protocol exposes no such precondition, delivery retains the record pending without submitting a prompt.
 
 ## Claude consumer
 
 [`integrations/claude-context-handoff`](../integrations/claude-context-handoff/) is the versioned Claude plugin artifact.
 It supplies `PreCompact`, `PostCompact`, `SessionStart`, `StopFailure`, `PreToolUse`, and exact-apply `PostToolUse` handlers, one disabled-by-default consume skill, and one local stdio MCP server.
 The lifecycle adapter ignores `transcript_path` and `compact_summary`.
-Claude `PreCompact` seals only the separately registered Claude candidates for the configured session generation and calls no model.
+Claude `PreCompact` seals only the separately registered Claude candidates for the configured session generation, durably binds that exact attempt across hook processes and retries, and calls no model.
 Post-compact and session-start reporting exposes only bounded counts and generic next action, not record contents.
 
 The consumer revalidates the canonical envelope, item and byte caps, source hashes, source allowlist, provider class, sensitive categories, exact Vault object, queue hash, exact Herdr environment, and Claude session binding before showing one record to Claude.
@@ -54,11 +55,11 @@ Deletion, move, canonical note replacement, merge, `.obsidian`, Git, GitHub, exe
 The consumer deterministically maps the handoff record ID to one transaction operation ID.
 It stages canonical bundle bytes privately, runs the exact byte-pinned installed transaction core's `inspect`, and stores the returned Vault-bound approval SHA-256.
 Commit accepts only the currently active bundle and approval while the record is pending or notified, invokes `claude-obsidian.transaction.v1` once, verifies the complete mode-0600 journal and result, every changed-path hash, complete journal state, exact bundle and approval correlation, and the absent mutation lock, and only then writes the source acknowledgement before transitioning the queue terminal.
-An identical retry is idempotent, changed handoff payload bytes quarantine, terminal dispositions revoke every prepared Save, and apply-complete-before-ack or acknowledgement-before-queue crashes heal from the verified transaction result or durable acknowledgement.
+An identical retry is idempotent, changed handoff payload bytes quarantine, terminal dispositions revoke every prepared Save, and apply-complete-before-ack or acknowledgement-before-queue crashes heal from the verified transaction result or durable acknowledgement before any conflicting disposition can publish.
 Exit 75 leaves the record pending for a fresh read, rebuild, and inspect.
 
 The `PreToolUse` guard denies direct Write, Edit, NotebookEdit, shell mutation, unrelated MCP mutation, delete, move, Git, GitHub, installation, and credential tools in the curator session.
-Its only Bash mutation exception is the exact configured transaction core apply command with the canonical Vault, the current hook session, the exact live Herdr generation, revalidated source bytes, a pending or notified queue record, no terminal acknowledgement or disposition, the active privately staged bundle, and its matching approval record.
+Its only Bash mutation exception is the exact configured transaction core apply command with the canonical Vault, the current hook session's process capability, the exact live Herdr generation, revalidated source bytes, a pending or notified queue record, no terminal acknowledgement or disposition, the active privately staged bundle, and its matching approval record.
 The installed transaction core remains the primary confinement and recovery boundary because Claude command hooks cannot make their own startup or timeout infallible.
 
 ## Default-off configuration
