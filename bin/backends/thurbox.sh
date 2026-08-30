@@ -659,8 +659,8 @@ fm_backend_thurbox_capture() {  # <target> <lines> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${3:-}" || return 1
   local lines=${2:-200} out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
-  out=$(fm_backend_thurbox_pane_state "$lines" false | jq -r '.output // empty' 2>/dev/null) || return 1
-  printf '%s' "$out"
+  out=$(fm_backend_thurbox_pane_state "$lines" false) || return 1
+  printf '%s' "$out" | jq -r '.output // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_composer_capture: the composer screen WITH ANSI styling.
@@ -676,13 +676,17 @@ fm_backend_thurbox_capture() {  # <target> <lines> [expected-label]
 # indexes. composer_caps says the same thing with rows=0.
 fm_backend_thurbox_composer_capture() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || return 1
-  fm_backend_thurbox_pane_state "$FM_BACKEND_THURBOX_SCREEN_ONLY" true | jq -r '.output // empty' 2>/dev/null
+  local raw
+  raw=$(fm_backend_thurbox_pane_state "$FM_BACKEND_THURBOX_SCREEN_ONLY" true) || return 1
+  printf '%s' "$raw" | jq -r '.output // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_composer_cursor_row: the pane's zero-based cursor row.
 fm_backend_thurbox_composer_cursor_row() {  # <target> [expected-label]
   fm_backend_thurbox_target_ready "$1" "${2:-}" || return 1
-  fm_backend_thurbox_pane_state "$FM_BACKEND_THURBOX_SCREEN_ONLY" false | jq -r '.cursor_row // empty' 2>/dev/null
+  local raw
+  raw=$(fm_backend_thurbox_pane_state "$FM_BACKEND_THURBOX_SCREEN_ONLY" false) || return 1
+  printf '%s' "$raw" | jq -r '.cursor_row // empty' 2>/dev/null
 }
 
 # fm_backend_thurbox_composer_caps: static capability facts, not logic (see the

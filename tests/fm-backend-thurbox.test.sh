@@ -163,6 +163,14 @@ case "${2:-}" in
     # so at any positive --lines the cursor row no longer indexes .output.
     # $FM_TB_SCROLLBACK is a case's fake history; --lines 0 never reaches it.
     case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+    # $FM_TB_CAPTURE_EXIT fails the CONTENT reads while target_ready's
+    # `--lines 1` liveness probe still answers - the pane dying, or thurbox's
+    # database locking, in the milliseconds between the probe and the read it
+    # gates. The real CLI exits nonzero with nothing on stdout for both.
+    if [ -n "${FM_TB_CAPTURE_EXIT:-}" ] && [ "$lines" != 1 ]; then
+      echo "capture failed" >&2
+      exit "$FM_TB_CAPTURE_EXIT"
+    fi
     trimmed=''
     if [ "$lines" -gt 0 ] && [ -s "${FM_TB_SCROLLBACK:-/dev/null}" ]; then
       trimmed=$(mktemp)
@@ -238,7 +246,7 @@ reset_world() {
         FM_TB_CREATE_EXIT FM_TB_AGENTS_TOML FM_TB_CURSOR_ROW FM_TB_PANE_PATH \
         FM_TB_SENDKEYS_EXIT FM_TB_FAKE_VERSION_EXIT \
         FM_TB_CURSOR_ROW FM_TB_FG_PROCESS FM_TB_FG_COMMAND FM_TB_FG_CWD \
-        FM_TB_SEND_EXIT FM_TB_KEY_EXIT FM_TB_SCROLLBACK \
+        FM_TB_SEND_EXIT FM_TB_KEY_EXIT FM_TB_SCROLLBACK FM_TB_CAPTURE_EXIT \
         FM_TB_LIST_EXIT 2>/dev/null || true
   FM_BACKEND_THURBOX_SOCKET_CACHE=''
   # The adapter's own RESOLUTION output, not fixture state: target_ready and
@@ -697,6 +705,44 @@ test_capture_returns_the_whole_screen_not_its_bottom_rows() {
   [ "$out" = $'old2\nold3\nscreen1\nscreen2' ] \
     || fail "capture did not bound scrollback through --lines: '$out'"
   pass "capture returns thurbox's already-bounded response whole, scrollback and screen"
+}
+
+test_capture_fails_loudly_when_the_pane_read_fails() {
+  reset_world
+  add_row "$UUID" "$TITLE" "%20" local-tmux -
+  printf 'harness output line\n' > "$FM_TB_CAPTURE"
+  export FM_TB_CAPTURE_EXIT=1
+
+  # Every consumer of a bounded capture guards on its EXIT STATUS and degrades
+  # on failure - fm_busy_classify's Grok arm to `unknown capture-failed`, the
+  # watcher and the supervisor to skipping the task. A read that answers 0 with
+  # an empty screen defeats all of them: a running Grok turn whose tail cannot
+  # be read is reported `idle`, and fm-peek prints nothing and succeeds.
+  local out status
+  out=$(fm_backend_thurbox_capture "$UUID:%20" 40 fm-t1) && status=0 || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "capture reported success on a failed pane read, returning '$out'"
+
+  # The composer reads carry the same contract: bin/fm-tmux-lib.sh's
+  # equivalents are consumed as `|| { printf 'unknown'; return 0; }`, so a
+  # swallowed failure there classifies a screen that was never read.
+  fm_backend_thurbox_composer_capture "$UUID:%20" fm-t1 >/dev/null 2>&1 \
+    && fail "composer capture reported success on a failed pane read"
+  fm_backend_thurbox_composer_cursor_row "$UUID:%20" fm-t1 >/dev/null 2>&1 \
+    && fail "composer cursor row reported success on a failed pane read"
+
+  # And the operator-visible end of it: fm-peek must fail rather than print an
+  # empty pane, the way it does for every other backend.
+  local state id
+  id=t1
+  state="$TMP_ROOT/capfail-state"; mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=$UUID:%20" "endpoint_task_id=$id" "backend=thurbox" \
+    "thurbox_session_id=$UUID" "thurbox_pane_id=%20" \
+    "worktree=$TMP_ROOT" "project=$TMP_ROOT" "harness=claude" "kind=scout"
+  out=$( FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-peek.sh" "fm-$id" 10 2>&1 ) \
+    && fail "fm-peek printed an empty pane and exited 0 on a failed capture: '$out'"
+  pass "a failed pane read is reported as a failure, not as an empty capture"
 }
 
 test_capture_is_plain_text_composer_is_styled() {
@@ -1263,6 +1309,7 @@ test_send_literal_types_without_submitting
 test_send_key_normalizes_to_thurbox_names
 test_send_key_refuses_dead_target
 test_capture_returns_the_whole_screen_not_its_bottom_rows
+test_capture_fails_loudly_when_the_pane_read_fails
 test_capture_is_plain_text_composer_is_styled
 test_composer_caps_claim_styled_and_cursor
 test_composer_state_unknown_when_pane_unreadable
