@@ -11,12 +11,18 @@
 # 1. The durable failure record $STATE/.wake-delivery-failures: one appended
 #    line per declared failure, `<iso8601-stamp>\t<single-line summary>`,
 #    trimmed to the last FM_WAKE_DELIVERY_KEEP_LINES lines (default 200) once
-#    the file passes FM_WAKE_DELIVERY_MAX_BYTES (default 131072) under the
-#    sibling .lock mkdir lock, best-effort. bin/fm-bootstrap.sh surfaces the
-#    record as one actionable WAKE_DELIVERY diagnostic at the next session
-#    start and then archives it to .wake-delivery-failures.surfaced.
+#    the file passes FM_WAKE_DELIVERY_MAX_BYTES (default 131072). The append
+#    and any resulting trim share the sibling .lock mkdir lock (bounded, not
+#    indefinite) so a concurrent invocation's append can never be excluded
+#    from a trim's replacement snapshot; a caller that cannot get the lock
+#    within the bound still appends unlocked rather than drop the failure.
+#    bin/fm-bootstrap.sh surfaces the record as one actionable WAKE_DELIVERY
+#    diagnostic at the next session start and then archives it to
+#    .wake-delivery-failures.surfaced.
 # 2. The active-notification cooldown marker $STATE/.wake-delivery-alarm: the
-#    epoch second of the last fired active alert. At most one active alert per
+#    epoch second of the last fired active alert, gated by its own bounded
+#    mkdir lock so concurrent invocations racing an expired cooldown cannot
+#    all decide to fire. At most one active alert per
 #    FM_WAKE_DELIVERY_ALARM_COOLDOWN_SECS (default 600) fires so a persistently
 #    broken build records every failure without spamming the captain; the
 #    durable record above is always written. 0 disables the cooldown.
@@ -43,6 +49,22 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 usage() {
   printf 'usage: %s --summary <one-line summary>\n' "${0##*/}" >&2
+}
+
+# A bounded mkdir-lock acquire: mkdir is atomic on every POSIX filesystem, so
+# whichever caller creates the directory first holds exclusive access. Bounded
+# (not indefinite) so a crashed holder can never wedge a later caller forever;
+# real critical sections here are microseconds of file I/O, so the bound only
+# ever bites a genuinely stuck holder, and the caller falls back to unlocked
+# work rather than dropping a failure on the floor.
+acquire_lock() {  # <lock-dir> <max-attempts> <sleep-seconds>
+  local dir=$1 attempts=$2 delay=$3 i=0
+  while [ "$i" -lt "$attempts" ]; do
+    mkdir "$dir" 2>/dev/null && return 0
+    i=$((i + 1))
+    sleep "$delay" 2>/dev/null || true
+  done
+  return 1
 }
 
 summary=""
@@ -77,37 +99,59 @@ max_bytes=${FM_WAKE_DELIVERY_MAX_BYTES:-131072}
 case "$keep_lines" in ''|*[!0-9]*|0) keep_lines=200 ;; esac
 case "$max_bytes" in ''|*[!0-9]*|0) max_bytes=131072 ;; esac
 
-# The append is the load-bearing half: it must land even when trimming or the
-# active alert cannot run, so it happens first and outside the lock.
-printf '%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$summary" >> "$record" 2>/dev/null || exit 0
-
-size=$(wc -c < "$record" 2>/dev/null | tr -d '[:space:]') || exit 0
-case "$size" in ''|*[!0-9]*) exit 0 ;; esac
-if [ "$size" -gt "$max_bytes" ]; then
-  # Contention skips the trim rather than blocking a failure path; the next
-  # failure retries it. The lock is a directory so a crashed holder self-heals
-  # through rmdir below and stale locks age out of the way.
-  if mkdir "$lock" 2>/dev/null; then
+# The append is the load-bearing half: it must land no matter what, so a
+# caller that cannot get the lock within the bound still appends unlocked. But
+# a trim that runs concurrently with an unlocked append can read its snapshot
+# before the append lands and then overwrite the file, silently dropping that
+# append's line for good (a bare `tail | mv` swap is not additive). So the
+# common path takes the same lock for the append and any resulting trim,
+# closing that window; only a stuck holder falls back to the old unlocked
+# append, and in that case the trim is skipped for this call - the next
+# failure's lock holder retries it.
+line=$(printf '%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$summary")
+if acquire_lock "$lock" 40 0.05; then
+  printf '%s\n' "$line" >> "$record" 2>/dev/null || { rmdir "$lock" 2>/dev/null || true; exit 0; }
+  size=$(wc -c < "$record" 2>/dev/null | tr -d '[:space:]')
+  case "$size" in
+    ''|*[!0-9]*) rmdir "$lock" 2>/dev/null || true; exit 0 ;;
+  esac
+  if [ "$size" -gt "$max_bytes" ]; then
     if tail -n "$keep_lines" "$record" > "$record.tmp" 2>/dev/null && [ -s "$record.tmp" ]; then
       mv "$record.tmp" "$record" 2>/dev/null || true
     fi
     rm -f "$record.tmp" 2>/dev/null || true
-    rmdir "$lock" 2>/dev/null || true
   fi
+  rmdir "$lock" 2>/dev/null || true
+else
+  printf '%s\n' "$line" >> "$record" 2>/dev/null || exit 0
 fi
 
 cooldown=${FM_WAKE_DELIVERY_ALARM_COOLDOWN_SECS:-600}
 case "$cooldown" in ''|*[!0-9]*) cooldown=600 ;; esac
 
 marker="$STATE/.wake-delivery-alarm"
+marker_lock="$STATE/.wake-delivery-alarm.lock"
 now=$(date +%s)
-last=0
-[ -r "$marker" ] && read -r last < "$marker" 2>/dev/null || true
-case "$last" in ''|*[!0-9]*) last=0 ;; esac
-if [ "$cooldown" -gt 0 ] && [ $((now - last)) -lt "$cooldown" ]; then
-  exit 0
+
+# The cooldown check (is the window still active?) and set (claim it) must be
+# one atomic step: reading the marker and then writing it as two separate
+# operations lets every concurrent caller past an expired cooldown see it as
+# expired before any of them records the claim, so all of them fire the active
+# alert. Only the lock holder evaluates and claims the window; a caller that
+# cannot acquire it within the bound treats the window as already claimed and
+# stays quiet rather than risk a duplicate captain notification.
+should_notify=0
+if acquire_lock "$marker_lock" 40 0.05; then
+  last=0
+  [ -r "$marker" ] && read -r last < "$marker" 2>/dev/null || true
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ "$cooldown" -eq 0 ] || [ $((now - last)) -ge "$cooldown" ]; then
+    printf '%s\n' "$now" > "$marker" 2>/dev/null || true
+    should_notify=1
+  fi
+  rmdir "$marker_lock" 2>/dev/null || true
 fi
-printf '%s\n' "$now" > "$marker" 2>/dev/null || true
+[ "$should_notify" -eq 1 ] || exit 0
 
 wedge_alarm_notify \
   "firstmate: OpenCode wake delivery FAILED - $summary (see $record)" \

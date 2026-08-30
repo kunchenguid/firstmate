@@ -133,6 +133,69 @@ test_alarm_trims_the_record_bounded() {
   pass "alarm record stays bounded and keeps the newest lines"
 }
 
+# A bare `tail | mv` trim reads a snapshot of the record and then swaps the
+# file for that snapshot; a concurrent invocation's append that lands between
+# the read and the swap is silently excluded from the swapped-in file and
+# lost for good. Force every one of several truly concurrent invocations to
+# attempt a trim (MAX_BYTES=1) with a keep-lines cap generous enough that
+# none of them should be legitimately dropped, and assert every one of their
+# distinct summaries survives.
+test_alarm_concurrent_appends_survive_trim() {
+  local dir state i count=20
+  local -a pids=()
+  dir=$(make_delivery_case alarm-concurrent-trim)
+  state="$dir/home/state"
+  for i in $(seq 1 "$count"); do
+    (
+      FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_WAKE_DELIVERY_ALARM_COOLDOWN_SECS=0 \
+        FM_WAKE_DELIVERY_MAX_BYTES=1 FM_WAKE_DELIVERY_KEEP_LINES=100 \
+        "$ALARM" --summary "concurrent-$i"
+    ) &
+    pids+=("$!")
+  done
+  for i in "${pids[@]}"; do
+    wait "$i" || fail "a concurrent alarm invocation exited non-zero"
+  done
+  [ -s "$state/.wake-delivery-failures" ] || fail "concurrent trim dropped the record entirely"
+  for i in $(seq 1 "$count"); do
+    grep -qF "concurrent-$i" "$state/.wake-delivery-failures" \
+      || fail "concurrent trim silently dropped failure concurrent-$i: $(cat "$state/.wake-delivery-failures")"
+  done
+  pass "concurrent invocations racing a forced trim never lose an appended failure"
+}
+
+# Reading the cooldown marker and then writing it are two separate steps; if
+# they are not atomic, every concurrent invocation racing an already-expired
+# cooldown can see it as expired before any of them records the claim, so all
+# of them fire the active alert. Seed the marker far in the past (cooldown
+# obviously expired) and race several truly concurrent invocations: exactly
+# one active alert must fire while every durable record still lands.
+test_alarm_concurrent_cooldown_fires_at_most_once() {
+  local dir state log i n count=20
+  local -a pids=()
+  dir=$(make_delivery_case alarm-concurrent-cooldown)
+  state="$dir/home/state"
+  log="$dir/alert.log"
+  : > "$log"
+  printf '0\n' > "$state/.wake-delivery-alarm"
+  for i in $(seq 1 "$count"); do
+    (
+      FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_WEDGE_ALARM_LOG="$log" \
+        FM_WAKE_DELIVERY_ALARM_COOLDOWN_SECS=600 \
+        "$ALARM" --summary "race-$i"
+    ) &
+    pids+=("$!")
+  done
+  for i in "${pids[@]}"; do
+    wait "$i" || fail "a concurrent alarm invocation exited non-zero"
+  done
+  n=$(wc -l < "$state/.wake-delivery-failures")
+  [ "$n" -eq "$count" ] || fail "concurrent cooldown race lost a durable record: $n lines, expected $count"
+  n=$(grep -c . "$log")
+  [ "$n" -eq 1 ] || fail "concurrent cooldown race fired $n active alerts, expected exactly 1"
+  pass "concurrent invocations racing an expired cooldown fire at most one active alert"
+}
+
 # --- plugin-driven delivery through the real lib -----------------------------
 
 wait_for_file() {  # <file> <label>
@@ -476,6 +539,8 @@ test_alarm_records_one_sanitized_line_and_fires_channel
 test_alarm_cooldown_limits_active_alerts_not_records
 test_alarm_off_channel_still_records
 test_alarm_trims_the_record_bounded
+test_alarm_concurrent_appends_survive_trim
+test_alarm_concurrent_cooldown_fires_at_most_once
 test_guard_delivery_failure_is_recorded_and_alarmed
 test_guard_delivery_success_stays_silent_and_single
 test_hanging_prompt_is_declared_by_timeout
