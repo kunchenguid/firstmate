@@ -183,6 +183,9 @@ fm_backend_zellij_tab_exists() {  # <session> <label>
   local session=$1 label=$2 tabs
   [ -n "$session" ] && [ -n "$label" ] || return 1
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 2
+  # Zellij actions can return status 0 while printing a non-JSON missing-session
+  # response. An unreadable inventory cannot prove this task's tab is gone.
+  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
   [ -n "$(fm_backend_zellij_tab_id_in_list "$tabs" "$(fm_backend_zellij_scoped_title "$label")")" ]
 }
 
