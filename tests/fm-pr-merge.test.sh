@@ -2152,7 +2152,7 @@ test_distinct_merged_prs_keep_distinct_wakes() {
 }
 
 test_uncommitted_marker_retry_is_never_silent() {
-  local case_dir url count
+  local case_dir url count rc
   url=https://github.com/example/repo/pull/67
   case_dir=$(make_home_case uncommitted-wake-retry)
   add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -2173,9 +2173,12 @@ SH
   export FM_TEST_REAL_MV
   FM_TEST_REAL_MV=$(command -v mv)
 
+  set +e
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
-    >"$case_dir/stdout-1" 2>"$case_dir/stderr-1" \
-    || fail "uncommitted-wake-retry: landed merge was reported as failed"
+    >"$case_dir/stdout-1" 2>"$case_dir/stderr-1"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "uncommitted-wake-retry: outcome publication failure should propagate"
   assert_grep 'could not record the outcome' "$case_dir/stderr-1" \
     "uncommitted-wake-retry: failed marker commit was not loud"
   [ -f "$case_dir/state/task-x1.check.sh" ] \
@@ -2214,7 +2217,7 @@ test_secondmate_without_parent_binding_is_loud() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "unbound-secondmate: the merge itself landed and must not be reported as failed"
+  expect_code 3 "$rc" "unbound-secondmate: outcome publication failure should propagate"
   assert_grep 'could not report it upward' "$case_dir/stderr" \
     "unbound-secondmate: a merge that could not be reported upward said nothing about it"
   assert_absent "$case_dir/state/.wake-queue" \
