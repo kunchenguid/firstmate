@@ -283,9 +283,11 @@ SH
 }
 
 test_remote_codex_session_binding_claims_only_the_matching_session() {
-  local dir fakebin proc home session other out binding mode codex_root codex_script codex_launcher codex_exe
+  local dir fakebin proc home session other out mode codex_root codex_script codex_launcher codex_exe
   local copied_script copied_exe copied_nvm_root copied_nvm_script copied_nvm_launcher copied_nvm_exe
-  local vscode_exe chatgpt_exe system_home actual_system_home real_system_home real_lib codex_lib node_bin HOME
+  local standalone_release standalone_unlinked_release standalone_current standalone_launcher
+  local copied_standalone_release vscode_exe chatgpt_exe system_home actual_system_home real_system_home
+  local real_lib codex_lib node_bin binding HOME
   dir="$TMP_ROOT/remote-codex-binding"
   fakebin=$(fm_fakebin "$dir")
   proc="$dir/proc"
@@ -304,11 +306,18 @@ test_remote_codex_session_binding_claims_only_the_matching_session() {
   copied_nvm_script="$copied_nvm_root/lib/node_modules/@openai/codex/bin/codex.js"
   copied_nvm_launcher="$copied_nvm_root/bin/codex"
   copied_nvm_exe="$copied_nvm_root/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+  standalone_release="$home/.codex/packages/standalone/releases/0.146.0/bin/codex"
+  standalone_unlinked_release="$home/.codex/packages/standalone/releases/0.145.0/bin/codex"
+  standalone_current="$home/.codex/packages/standalone/current"
+  standalone_launcher="$home/.local/bin/codex"
+  copied_standalone_release="$dir/copied-standalone/.codex/packages/standalone/releases/0.146.0/bin/codex"
   vscode_exe="$home/.vscode/extensions/openai.chatgpt-26.825.31414-darwin-arm64/bin/macos-aarch64/codex"
   chatgpt_exe="$home/Applications/ChatGPT.app/Contents/Resources/codex"
   mkdir -p "$proc/4242" "$home/state" "$codex_root/bin" "$(dirname "$codex_script")" \
     "$(dirname "$codex_exe")" "$(dirname "$copied_script")" "$(dirname "$copied_exe")" \
     "$copied_nvm_root/bin" "$(dirname "$copied_nvm_script")" "$(dirname "$copied_nvm_exe")" \
+    "$(dirname "$standalone_release")" "$(dirname "$standalone_unlinked_release")" \
+    "$(dirname "$standalone_launcher")" "$(dirname "$copied_standalone_release")" \
     "$(dirname "$vscode_exe")" "$(dirname "$chatgpt_exe")"
   system_home=$(CDPATH='' cd -P -- "$home" && pwd -P)
   real_lib=$LIB
@@ -329,14 +338,23 @@ test_remote_codex_session_binding_claims_only_the_matching_session() {
   : > "$codex_exe"
   : > "$copied_exe"
   : > "$copied_nvm_exe"
+  : > "$standalone_release"
+  : > "$standalone_unlinked_release"
+  : > "$copied_standalone_release"
   : > "$vscode_exe"
   : > "$chatgpt_exe"
   chmod +x "$codex_script" "$copied_script" "$copied_nvm_script" "$codex_exe" "$copied_exe" \
-    "$copied_nvm_exe" "$vscode_exe" "$chatgpt_exe"
+    "$copied_nvm_exe" "$standalone_release" "$standalone_unlinked_release" \
+    "$copied_standalone_release" "$vscode_exe" "$chatgpt_exe"
   ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$codex_launcher"
   ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$copied_nvm_launcher"
+  ln -s releases/0.146.0 "$standalone_current"
+  ln -s "$standalone_current/bin/codex" "$standalone_launcher"
   ln -s "$node_bin" "$proc/4242/exe"
+  mkdir -p "$proc/4343"
+  ln -s "$standalone_release" "$proc/4343/exe"
   printf 'CODEX_SESSION_ID=%s\0PATH=/usr/bin\0' "$session" > "$proc/4242/environ"
+  printf 'CODEX_SESSION_ID=%s\0PATH=/usr/bin\0' "$session" > "$proc/4343/environ"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -357,6 +375,7 @@ case "$pid:$field" in
       copied-nvm-script) printf '%s\n' node ;;
       launcher) printf '%s\n' "$FM_TEST_NODE_BIN" ;;
       script) printf '%s\n' node ;;
+      vendor-name) printf '%s\n' codex-aarch64-a ;;
       helper) printf '%s\n' codex-helper ;;
       login) printf '%s\n' -codex ;;
       double-login) printf '%s\n' --codex ;;
@@ -378,6 +397,14 @@ case "$pid:$field" in
     esac
     ;;
   4242:ppid=) printf '%s\n' 1 ;;
+  4343:comm=) printf '%s\n' codex-linux-x64 ;;
+  4343:args=) printf '%s\n' 'codex --interactive' ;;
+  4343:ppid=)
+    case "${FM_TEST_CODEX_PAIR:-related}" in
+      related) printf '%s\n' 4242 ;;
+      *) printf '%s\n' 1 ;;
+    esac
+    ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash /workspace/bin/fm-lock.sh' ;;
   *:ppid=) printf '%s\n' 4242 ;;
@@ -481,10 +508,35 @@ SH
   [ ! -e "$home/state/.fm-codex-session-binding" ] \
     || fail "rejected copied NVM-shaped executable evidence published a binding"
   rm -f "$proc/4242/exe"
+  ln -s "$copied_standalone_release" "$proc/4242/exe"
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a copied standalone Codex release tree became binding authority"
+  fi
+  [ ! -e "$home/state/.fm-codex-session-binding" ] \
+    || fail "rejected copied standalone evidence published a binding"
+  rm -f "$proc/4242/exe"
+  ln -s "$standalone_unlinked_release" "$proc/4242/exe"
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB"; then
+    fail "an unrelated installed standalone release became binding authority"
+  fi
+  rm -f "$proc/4242/exe"
+  ln -s "$standalone_release" "$proc/4242/exe"
+  FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
+    || fail "the active home standalone Codex release was not recognized"
+  rm -f "$proc/4242/exe"
   ln -s "$codex_exe" "$proc/4242/exe"
   FM_TEST_CODEX_SHAPE=login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
     || fail "a login-style process backed by a verified Codex executable lost its supported identity"
+  rm -f "$proc/4242/exe"
+  ln -s "$node_bin" "$proc/4242/exe"
   if FM_TEST_CODEX_SHAPE=double-login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB"; then
     fail "more than one leading dash became Codex identity authority"
@@ -504,13 +556,51 @@ SH
   FM_TEST_PLATFORM=Darwin FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
     || fail "the installed VS Code Codex executable was not recognized"
+  FM_TEST_CODEX_SHAPE=vendor-name FM_TEST_PLATFORM=Darwin FM_PROC_ROOT_OVERRIDE="$proc" \
+    PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
+    || fail "a verified Darwin Codex executable was rejected for its vendor-controlled process name"
   rm -f "$proc/4242/exe"
   ln -s "$chatgpt_exe" "$proc/4242/exe"
   FM_TEST_PLATFORM=Darwin FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
     || fail "the installed ChatGPT Codex executable was not recognized"
   rm -f "$proc/4242/exe"
-  ln -s "$codex_exe" "$proc/4242/exe"
+  ln -s "$node_bin" "$proc/4242/exe"
+  out=$(FM_TEST_CODEX_SHAPE=launcher FM_TEST_NODE_BIN="$node_bin" \
+    FM_TEST_CODEX_LAUNCHER="$codex_launcher" FM_PROC_ROOT_OVERRIDE="$proc" \
+    PATH="$fakebin:$PATH" FM_HOME="$home" bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_host_agent_owner_for_pids 4242 4343 || exit 1
+      printf "%s:%s:%s\n" "$FM_CODEX_HOST_OWNER_PID" \
+        "$FM_CODEX_HOST_OWNER_VERIFIED_COUNT" "$FM_CODEX_HOST_OWNER_CANONICAL_COUNT"
+    ' _ "$LIB") || fail "a related Codex launcher and native child were treated as ambiguous"
+  [ "$out" = 4343:2:1 ] \
+    || fail "canonical Codex process selection returned '$out', expected 4343:2:1"
+  if FM_TEST_CODEX_PAIR=unrelated FM_TEST_CODEX_SHAPE=launcher FM_TEST_NODE_BIN="$node_bin" \
+    FM_TEST_CODEX_LAUNCHER="$codex_launcher" FM_PROC_ROOT_OVERRIDE="$proc" \
+    PATH="$fakebin:$PATH" FM_HOME="$home" bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_host_agent_owner_for_pids 4242 4343
+    ' _ "$LIB"; then
+    fail "unrelated installed Codex processes collapsed to one canonical owner"
+  fi
+  rm -f "$proc/4242/exe"
+  ln -s "$standalone_release" "$proc/4242/exe"
+  binding="$home/state/.fm-codex-session-binding"
+  mkdir "$binding"
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a directory at the binding pathname was reported as a successful publication"
+  fi
+  [ -d "$binding" ] || fail "rejected binding publication replaced its non-regular destination"
+  rmdir "$binding"
   FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"
@@ -526,7 +616,6 @@ SH
       CODEX_SESSION_ID="$2" fm_harness_ancestry_pid
     ' _ "$LIB" "$session") || fail "namespace-local Codex session did not consume its session binding"
   [ "$out" = 4242 ] || fail "remote Codex binding resolved '$out', expected host agent pid 4242"
-  binding="$home/state/.fm-codex-session-binding"
   [ -f "$binding" ] && [ ! -L "$binding" ] || fail "remote Codex binding record was not published"
   mode=$(stat -f '%Lp' "$binding" 2>/dev/null || stat -c '%a' "$binding")
   [ "$mode" = 600 ] || fail "remote Codex binding record mode was $mode, not 600"

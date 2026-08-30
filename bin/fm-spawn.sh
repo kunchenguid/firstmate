@@ -2353,12 +2353,13 @@ spawn_send_key() {  # <target> <key>
 # stable CODEX_SESSION_ID.  The binding writer and process classifier remain in
 # fm-session-lock-lib.sh; this is only the backend observation loop.
 spawn_bind_remote_codex_session() {
-  local info pids pid session matches match_pid='' match_session='' attempt cli envelope result
-  local observed_count reported_count pid_preview candidate_evidence structural identity publish_status pid_evidence
+  local info pids pid matches match_pid='' match_session='' attempt cli envelope result owners owner_reason
+  local observed_count reported_count pid_preview candidate_evidence publish_status pid_evidence
   local final_attempt=0 final_cli=not-run final_envelope=invalid final_result=missing
   local final_observed_count=0 final_pid_preview=none final_reported_count=0
   local final_matches=uninspected final_publish_status=not-attempted final_candidate_evidence=
-  local final_pid_evidence=unavailable-uninspected
+  local final_pid_evidence=unavailable-uninspected final_owners=uninspected final_owner_reason=not-inspected
+  local -a owner_pids=()
   for attempt in $(seq 1 "${FM_CODEX_REMOTE_BIND_POLLS:-80}"); do
     if info=$(fm_backend_herdr_cli "$HERDR_SES" pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null); then
       cli=ok
@@ -2380,18 +2381,22 @@ spawn_bind_remote_codex_session() {
       | select(type == "number" and . > 1 and . == floor)
     ' 2>/dev/null || true)
     matches=uninspected
+    owners=uninspected
+    owner_reason=not-inspected
     match_pid=
     match_session=
     observed_count=0
     reported_count=0
     pid_preview=
     candidate_evidence=
+    owner_pids=()
     publish_status=not-attempted
     pid_evidence=unavailable-uninspected
     if printf '%s' "$info" | jq -e '.result.process_info.foreground_processes | type == "array"' >/dev/null 2>&1; then
       pid_evidence=untrusted-uninspected
       while IFS= read -r pid; do
         case "$pid" in ''|*[!0-9]*|0|1) continue ;; esac
+        owner_pids+=("$pid")
         observed_count=$((observed_count + 1))
         if [ "$reported_count" -lt 16 ]; then
           [ -z "$pid_preview" ] || pid_preview="$pid_preview,"
@@ -2405,7 +2410,6 @@ EOF
     if fm_backend_herdr_pane_process_info_envelope_valid "$info" "$HERDR_PANE_ID"; then
       envelope=valid
       pid_evidence=trusted-inspected
-      matches=0
       observed_count=0
       reported_count=0
       pid_preview=
@@ -2415,36 +2419,29 @@ EOF
         if [ "$reported_count" -lt 16 ]; then
           [ -z "$pid_preview" ] || pid_preview="$pid_preview,"
           pid_preview="$pid_preview$pid"
-        fi
-        identity=not-read
-        if fm_codex_host_agent_matches "$pid"; then
-          structural=$FM_CODEX_HOST_MATCH_REASON
-          session=$(fm_codex_session_id_for_pid "$pid" 2>/dev/null || true)
-          if [ -n "$session" ]; then
-            identity=valid
-            matches=$((matches + 1))
-            match_pid=$pid
-            match_session=$session
-          else
-            identity=missing-or-invalid
-          fi
-        else
-          structural=${FM_CODEX_HOST_MATCH_REASON:-reject:unknown}
-        fi
-        if [ "$reported_count" -lt 16 ]; then
-          candidate_evidence="${candidate_evidence}diagnostic-candidate pid=$pid structural=$structural session_identity=$identity
-"
           reported_count=$((reported_count + 1))
         fi
       done <<EOF
 $pids
 EOF
-      if [ "$matches" -eq 1 ] \
+      if fm_codex_host_agent_owner_for_pids "${owner_pids[@]}"; then
+        matches=$FM_CODEX_HOST_OWNER_VERIFIED_COUNT
+        owners=$FM_CODEX_HOST_OWNER_CANONICAL_COUNT
+        owner_reason=$FM_CODEX_HOST_OWNER_REASON
+        match_pid=$FM_CODEX_HOST_OWNER_PID
+        match_session=$FM_CODEX_HOST_OWNER_SESSION
+      else
+        matches=$FM_CODEX_HOST_OWNER_VERIFIED_COUNT
+        owners=$FM_CODEX_HOST_OWNER_CANONICAL_COUNT
+        owner_reason=$FM_CODEX_HOST_OWNER_REASON
+      fi
+      candidate_evidence=$FM_CODEX_HOST_OWNER_EVIDENCE
+      if [ "$owners" -eq 1 ] \
         && fm_codex_home_binding_publish "$PROJ_ABS/state" "$PROJ_ABS" \
           "$SPAWN_GEN" "$match_pid" "$match_session"; then
         return 0
       fi
-      [ "$matches" -ne 1 ] || publish_status=rejected
+      [ "$owners" -ne 1 ] || publish_status=rejected
     fi
     final_attempt=$attempt
     final_cli=$cli
@@ -2454,17 +2451,19 @@ EOF
     final_pid_preview=${pid_preview:-none}
     final_reported_count=$reported_count
     final_matches=$matches
+    final_owners=$owners
+    final_owner_reason=$owner_reason
     final_publish_status=$publish_status
     final_candidate_evidence=$candidate_evidence
     final_pid_evidence=$pid_evidence
     sleep 0.1
   done
-  echo "error: remote Codex launch did not expose one verified host-side CODEX_SESSION_ID; startup brief was not delivered" >&2
-  printf 'diagnostic: schema=fm-remote-codex-binding.v1 attempt=%s cli=%s envelope=%s result=%s foreground_pid_evidence=%s foreground_pid_count=%s foreground_pids=%s foreground_pids_truncated=%s verified_candidate_count=%s binding_publish=%s\n' \
+  echo "error: remote Codex launch did not expose one canonical verified host-side CODEX_SESSION_ID owner; startup brief was not delivered" >&2
+  printf 'diagnostic: schema=fm-remote-codex-binding.v1 attempt=%s cli=%s envelope=%s result=%s foreground_pid_evidence=%s foreground_pid_count=%s foreground_pids=%s foreground_pids_truncated=%s verified_candidate_count=%s canonical_owner_count=%s owner_reason=%s binding_publish=%s\n' \
     "$final_attempt" "$final_cli" "$final_envelope" "$final_result" \
     "$final_pid_evidence" "$final_observed_count" "$final_pid_preview" \
     "$([ "$final_observed_count" -gt "$final_reported_count" ] && printf yes || printf no)" \
-    "$final_matches" "$final_publish_status" >&2
+    "$final_matches" "$final_owners" "$final_owner_reason" "$final_publish_status" >&2
   [ -z "$final_candidate_evidence" ] || printf '%s' "$final_candidate_evidence" >&2
   return 1
 }

@@ -31,8 +31,12 @@ install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <sock
   local codex_root="$1/.nvm/versions/node/v24.19.0"
   local codex_script="$codex_root/lib/node_modules/@openai/codex/bin/codex.js"
   local codex_launcher="$codex_root/bin/codex"
+  local standalone_release="$1/.codex/packages/standalone/releases/0.146.0/bin/codex"
+  local standalone_current="$1/.codex/packages/standalone/current"
+  local standalone_launcher="$1/.local/bin/codex"
   local lock_lib="$1/bin/fm-session-lock-lib.sh" quoted_remote_root
-  mkdir -p "$remote_root/bin" "$codex_root/bin" "$(dirname "$codex_script")"
+  mkdir -p "$remote_root/bin" "$codex_root/bin" "$(dirname "$codex_script")" \
+    "$(dirname "$standalone_release")" "$(dirname "$standalone_launcher")"
   command -v node >/dev/null 2>&1 || return 1
   [ -f "$lock_lib" ] || return 1
   printf -v quoted_remote_root '%q' "$remote_root"
@@ -43,6 +47,10 @@ setInterval(() => {}, 1000);
 JS
   chmod +x "$codex_script"
   ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$codex_launcher"
+  cp "$(command -v node)" "$standalone_release"
+  chmod +x "$standalone_release"
+  ln -s releases/0.146.0 "$standalone_current"
+  ln -s "$standalone_current/bin/codex" "$standalone_launcher"
   cat > "$script" <<SH
 #!/usr/bin/env bash
 set -u
@@ -50,7 +58,7 @@ STATE='$state'
 LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
-CODEX_BIN='$codex_launcher'
+CODEX_BIN='$standalone_launcher'
 NODE_BIN='$(command -v node)'
 PROCESS_MODE_FILE='$state.process-mode'
 SH

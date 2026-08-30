@@ -736,6 +736,8 @@ assert_grep 'foreground_pid_count=1 foreground_pids=[0-9]' "$TMP_ROOT/spawn-wron
   "wrong-pane refusal omitted its safely typed raw foreground PID"
 assert_grep 'verified_candidate_count=uninspected' "$TMP_ROOT/spawn-wrong-pane-codex.out" \
   "wrong-pane refusal misstated uninspected evidence as zero verified candidates"
+assert_grep 'canonical_owner_count=uninspected' "$TMP_ROOT/spawn-wrong-pane-codex.out" \
+  "wrong-pane refusal claimed a canonical owner from untrusted process evidence"
 assert_no_grep '^diagnostic-candidate ' "$TMP_ROOT/spawn-wrong-pane-codex.out" \
   "wrong-pane refusal inspected an untrusted foreground PID"
 remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null \
@@ -756,6 +758,9 @@ assert_grep 'foreground_pid_count=1' "$TMP_ROOT/spawn-unrecognized-codex.out" \
   "remote Codex refusal omitted the observed foreground PID count"
 assert_grep 'verified_candidate_count=0' "$TMP_ROOT/spawn-unrecognized-codex.out" \
   "remote Codex refusal omitted the verified candidate count"
+assert_grep 'canonical_owner_count=0 owner_reason=reject:no-verified-codex-process' \
+  "$TMP_ROOT/spawn-unrecognized-codex.out" \
+  "remote Codex refusal omitted the canonical-owner decision"
 assert_grep 'structural=reject:basename,path-component,interpreter-args,cursor-structural' \
   "$TMP_ROOT/spawn-unrecognized-codex.out" \
   "remote Codex refusal omitted the shared matcher rejection"

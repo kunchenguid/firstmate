@@ -34,6 +34,21 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 FM_CODEX_HOME_BINDING_FILE=.fm-codex-session-binding
 FM_CODEX_HOME_BINDING_REQUIREMENT_FILE=.fm-codex-session-binding-required
 
+fm_codex_private_record_replace() { # <temporary-file> <destination>
+  local tmp=$1 file=$2
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  fi
+  mv -f -- "$tmp" "$file" || return 1
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] && [ -f "$file" ] && [ ! -L "$file" ]
+}
+
+fm_codex_private_record_mode_valid() { # <file>
+  local mode
+  mode=$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null) || return 1
+  [ "$mode" = 600 ]
+}
+
 fm_codex_spawn_generation_valid() { # <spawn-gen>
   local gen=$1 first second third rest
   first=${gen%%.*}
@@ -63,10 +78,15 @@ fm_codex_home_binding_requirement_publish() { # <state-dir> <home> <spawn-gen>
     printf 'harness=codex\n'
     printf 'home=%s\n' "$home"
     printf 'spawn_gen=%s\n' "$spawn_gen"
-  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$file"; then
+  } > "$tmp" || ! chmod 600 "$tmp" || ! fm_codex_private_record_replace "$tmp" "$file"; then
     rm -f -- "$tmp"
     return 1
   fi
+  fm_codex_home_binding_requirement_read "$state" \
+    && fm_codex_private_record_mode_valid "$file" \
+    && [ "$FM_CODEX_REQUIREMENT_HARNESS" = codex ] \
+    && [ "$FM_CODEX_REQUIREMENT_HOME" = "$home" ] \
+    && [ "$FM_CODEX_REQUIREMENT_SPAWN_GEN" = "$spawn_gen" ]
 }
 
 fm_codex_home_binding_requirement_read() { # <state-dir>
@@ -135,6 +155,7 @@ fm_codex_session_id_for_pid() { # <pid>; prints the one exported Codex session i
 fm_codex_host_agent_matches() { # <pid>; prove the host-side process is Codex, never a bare interpreter
   local pid=$1 comm args argv0
   FM_CODEX_HOST_MATCH_REASON=
+  FM_CODEX_HOST_MATCH_KIND=
   case "$pid" in *[!0-9]*|''|0|1) FM_CODEX_HOST_MATCH_REASON='reject:invalid-pid'; return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || { FM_CODEX_HOST_MATCH_REASON='reject:not-live'; return 1; }
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) \
@@ -150,8 +171,105 @@ fm_codex_host_agent_matches() { # <pid>; prove the host-side process is Codex, n
     FM_CODEX_HOST_MATCH_REASON="reject:harness-family=${FM_HARNESS_MATCH_NAME:-unknown}"
     return 1
   fi
-  FM_CODEX_HOST_MATCH_REASON='accept:harness-family=codex'
+  FM_CODEX_HOST_MATCH_KIND=$FM_HARNESS_MATCH_KIND
+  FM_CODEX_HOST_MATCH_REASON=$FM_HARNESS_MATCH_REASON
   return 0
+}
+
+fm_codex_pid_descends_from() { # <pid> <ancestor-pid>
+  local pid=$1 ancestor=$2 parent
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ancestor" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] && [ "$ancestor" -gt 1 ] && [ "$pid" != "$ancestor" ] || return 1
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
+    case "$parent" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    [ "$parent" = "$ancestor" ] && return 0
+    [ "$parent" != "$pid" ] || return 1
+    pid=$parent
+  done
+  return 1
+}
+
+FM_CODEX_HOST_OWNER_PID=
+FM_CODEX_HOST_OWNER_SESSION=
+FM_CODEX_HOST_OWNER_VERIFIED_COUNT=0
+FM_CODEX_HOST_OWNER_CANONICAL_COUNT=0
+FM_CODEX_HOST_OWNER_REASON=
+FM_CODEX_HOST_OWNER_EVIDENCE=
+fm_codex_host_agent_owner_for_pids() { # <pid>...
+  local pid session kind structural identity records= seen=' ' first_session=
+  local executable_pid= executable_count=0 script_count=0 reported=0
+  FM_CODEX_HOST_OWNER_PID=
+  FM_CODEX_HOST_OWNER_SESSION=
+  FM_CODEX_HOST_OWNER_VERIFIED_COUNT=0
+  FM_CODEX_HOST_OWNER_CANONICAL_COUNT=0
+  FM_CODEX_HOST_OWNER_REASON='reject:no-verified-codex-process'
+  FM_CODEX_HOST_OWNER_EVIDENCE=
+  for pid in "$@"; do
+    case "$pid" in ''|*[!0-9]*|0|1) continue ;; esac
+    case " $seen " in *" $pid "*) continue ;; esac
+    seen="$seen$pid "
+    identity=not-read
+    if fm_codex_host_agent_matches "$pid"; then
+      structural=$FM_CODEX_HOST_MATCH_REASON
+      kind=$FM_CODEX_HOST_MATCH_KIND
+      session=$(fm_codex_session_id_for_pid "$pid" 2>/dev/null || true)
+      if [ -n "$session" ]; then
+        identity=valid
+        FM_CODEX_HOST_OWNER_VERIFIED_COUNT=$((FM_CODEX_HOST_OWNER_VERIFIED_COUNT + 1))
+        records="${records}${pid} ${kind} ${session}
+"
+      else
+        identity=missing-or-invalid
+      fi
+    else
+      structural=${FM_CODEX_HOST_MATCH_REASON:-reject:unknown}
+    fi
+    if [ "$reported" -lt 16 ]; then
+      FM_CODEX_HOST_OWNER_EVIDENCE="${FM_CODEX_HOST_OWNER_EVIDENCE}diagnostic-candidate pid=$pid structural=$structural session_identity=$identity
+"
+      reported=$((reported + 1))
+    fi
+  done
+  [ "$FM_CODEX_HOST_OWNER_VERIFIED_COUNT" -gt 0 ] || return 1
+  while read -r pid kind session; do
+    [ -n "$pid" ] || continue
+    if [ -z "$first_session" ]; then
+      first_session=$session
+    elif [ "$session" != "$first_session" ]; then
+      FM_CODEX_HOST_OWNER_REASON='reject:multiple-codex-session-identities'
+      return 1
+    fi
+    case "$kind" in
+      installed-executable) executable_count=$((executable_count + 1)); executable_pid=$pid ;;
+      installed-script) script_count=$((script_count + 1)) ;;
+      *) FM_CODEX_HOST_OWNER_REASON='reject:unknown-codex-process-kind'; return 1 ;;
+    esac
+  done <<EOF
+$records
+EOF
+  if [ "$FM_CODEX_HOST_OWNER_VERIFIED_COUNT" -eq 1 ]; then
+    FM_CODEX_HOST_OWNER_PID=${records%% *}
+  elif [ "$executable_count" -eq 1 ] \
+    && [ "$script_count" -eq $((FM_CODEX_HOST_OWNER_VERIFIED_COUNT - 1)) ]; then
+    while read -r pid kind session; do
+      [ -n "$pid" ] || continue
+      [ "$kind" != installed-script ] || fm_codex_pid_descends_from "$executable_pid" "$pid" || {
+        FM_CODEX_HOST_OWNER_REASON='reject:unrelated-codex-processes'
+        return 1
+      }
+    done <<EOF
+$records
+EOF
+    FM_CODEX_HOST_OWNER_PID=$executable_pid
+  else
+    FM_CODEX_HOST_OWNER_REASON='reject:ambiguous-codex-processes'
+    return 1
+  fi
+  FM_CODEX_HOST_OWNER_SESSION=$first_session
+  FM_CODEX_HOST_OWNER_CANONICAL_COUNT=1
+  FM_CODEX_HOST_OWNER_REASON='accept:canonical-codex-process-owner'
 }
 
 fm_codex_home_binding_publish() { # <state-dir> <home> <spawn-gen> <agent-pid> <codex-session-id>
@@ -177,10 +295,17 @@ fm_codex_home_binding_publish() { # <state-dir> <home> <spawn-gen> <agent-pid> <
     printf 'spawn_gen=%s\n' "$spawn_gen"
     printf 'agent_pid=%s\n' "$pid"
     printf 'codex_session_id=%s\n' "$session"
-  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$file"; then
+  } > "$tmp" || ! chmod 600 "$tmp" || ! fm_codex_private_record_replace "$tmp" "$file"; then
     rm -f -- "$tmp"
     return 1
   fi
+  fm_codex_home_binding_read "$state" \
+    && fm_codex_private_record_mode_valid "$file" \
+    && [ "$FM_CODEX_BINDING_HARNESS" = codex ] \
+    && [ "$FM_CODEX_BINDING_HOME" = "$home" ] \
+    && [ "$FM_CODEX_BINDING_SPAWN_GEN" = "$spawn_gen" ] \
+    && [ "$FM_CODEX_BINDING_PID" = "$pid" ] \
+    && [ "$FM_CODEX_BINDING_SESSION" = "$session" ]
 }
 
 fm_codex_home_binding_read() { # <state-dir>; parses one complete private binding into FM_CODEX_BINDING_*
@@ -300,6 +425,24 @@ fm_codex_canonical_leaf_path() {  # <path>
   printf '%s/%s\n' "$canonical_directory" "$leaf"
 }
 
+fm_codex_resolved_existing_path() {  # <path>
+  local path=$1 target
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    path=$(fm_codex_canonical_leaf_path "$path") || return 1
+    if [ ! -L "$path" ]; then
+      [ -e "$path" ] || return 1
+      printf '%s\n' "$path"
+      return 0
+    fi
+    target=$(readlink "$path" 2>/dev/null) || return 1
+    case "$target" in
+      /*) path=$target ;;
+      *) path=${path%/*}/$target ;;
+    esac
+  done
+  return 1
+}
+
 fm_codex_nvm_node_root_for_path() {  # <path>
   local path system_home rest version normalized major minor patch extra
   path=$(fm_codex_canonical_leaf_path "$1") || return 1
@@ -340,9 +483,28 @@ fm_codex_script_path_matches() {  # <path>
   esac
 }
 
+fm_codex_standalone_install_matches() {  # <path>
+  local path=$1 system_home rest version launcher resolved_launcher
+  path=$(fm_codex_resolved_existing_path "$path") || return 1
+  system_home=$(fm_codex_system_home) || return 1
+  case "$path" in "$system_home"/.codex/packages/standalone/releases/*/bin/codex) ;; *) return 1 ;; esac
+  rest=${path#"$system_home/.codex/packages/standalone/releases/"}
+  version=${rest%%/*}
+  [ -n "$version" ] && [ "$rest" = "$version/bin/codex" ] || return 1
+  case "$version" in .|..|*$'\n'*|*$'\r'*) return 1 ;; esac
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -x "$path" ] || return 1
+  launcher="$system_home/.local/bin/codex"
+  [ -L "$launcher" ] || return 1
+  resolved_launcher=$(fm_codex_resolved_existing_path "$launcher") || return 1
+  [ "$resolved_launcher" = "$path" ]
+}
+
 fm_codex_installed_executable_path_matches() {  # <path>
   local path=$1 node_root system_home
-  path=$(fm_codex_canonical_leaf_path "$path") || return 1
+  path=$(fm_codex_resolved_existing_path "$path") || return 1
+  if fm_codex_standalone_install_matches "$path"; then
+    return 0
+  fi
   if node_root=$(fm_codex_nvm_node_root_for_path "$path"); then
     fm_codex_nvm_install_matches "$path" || return 1
     case "$path" in
@@ -360,22 +522,21 @@ fm_codex_installed_executable_path_matches() {  # <path>
   esac
 }
 
-fm_codex_executable_identity_matches() {  # <pid> <comm>
-  local pid=$1 comm=$2 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} executable= base
+fm_codex_executable_identity_matches() {  # <pid> <comm> [argv0]
+  local pid=$1 comm=$2 argv0=${3:-} proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} executable
   case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
-  base=$(basename -- "$comm")
-  case "$base" in codex|-codex) ;; *) return 1 ;; esac
   if [ -L "$proc_root/$pid/exe" ]; then
     executable=$(readlink "$proc_root/$pid/exe" 2>/dev/null) || return 1
     fm_codex_installed_executable_path_matches "$executable"
     return
   fi
   [ "$proc_root" = /proc ] && [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
-  case "$comm" in
-    /*) [ -f "$comm" ] && [ ! -L "$comm" ] && [ -x "$comm" ] \
-      && fm_codex_installed_executable_path_matches "$comm" ;;
-    *) return 1 ;;
-  esac
+  for executable in "$comm" "$argv0"; do
+    case "$executable" in
+      /*) fm_codex_installed_executable_path_matches "$executable" && return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # True when the process described by command name $1 and full argument string $2
@@ -395,21 +556,24 @@ FM_HARNESS_IS_CLAUDE=0
 # a refusal diagnostic; it is deliberately not lock or dispatch authority.
 FM_HARNESS_MATCH_REASON=
 FM_HARNESS_MATCH_NAME=
+FM_HARNESS_MATCH_KIND=
 fm_harness_process_matches() {  # <comm> <args> [argv0] [pid]
   local comm=$1 args=$2 base argv0 name token pid=${4:-}
   local -a words
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_MATCH_REASON=
   FM_HARNESS_MATCH_NAME=
+  FM_HARNESS_MATCH_KIND=
   base=$(basename -- "$comm")
   argv0=${3:-${args%% *}}
+  if fm_codex_executable_identity_matches "$pid" "$comm" "$argv0"; then
+    FM_HARNESS_MATCH_NAME=codex
+    FM_HARNESS_MATCH_KIND=installed-executable
+    FM_HARNESS_MATCH_REASON="accept:verified-codex-executable observed-basename=$base"
+    return 0
+  fi
   case "$base" in
     codex|-codex)
-      if fm_codex_executable_identity_matches "$pid" "$comm"; then
-        FM_HARNESS_MATCH_NAME=codex
-        FM_HARNESS_MATCH_REASON="accept:verified-codex-executable observed-basename=$base"
-        return 0
-      fi
       FM_HARNESS_MATCH_REASON="reject:unverified-codex-launcher observed-basename=$base"
       return 1
       ;;
@@ -448,6 +612,7 @@ fm_harness_process_matches() {  # <comm> <args> [argv0] [pid]
           *)
             if fm_codex_script_path_matches "$token"; then
               FM_HARNESS_MATCH_NAME=codex
+              FM_HARNESS_MATCH_KIND=installed-script
               FM_HARNESS_MATCH_REASON='accept:exact-codex-script'
               return 0
             elif name=$(fm_harness_path_name "$token") && [ "$name" != codex ]; then
