@@ -356,12 +356,13 @@ test_declared_wait_signature_is_stable_across_unrelated_appends() {
   [ "$churn_after" = "$churn_before" ] \
     || fail "a bystander decision's open/close churn moved the surviving declared-wait signature: '$churn_before' -> '$churn_after'"
 
-  # Answer the reopened gate so only the two originals remain to be cleared below.
-  printf 'resolved [key=reopen-me]: answered: us-east\n' >> "$f"
-
-  # Answering both leaves no wait, so the identity is empty.
-  printf 'resolved [key=api-shape]: answered: REST\n' >> "$f"
-  printf 'resolved [key=store]: answered: postgres\n' >> "$f"
+  # Answer the reopened gate so only the two originals remain, then answer both;
+  # answering all leaves no wait, so the identity is empty.
+  {
+    printf 'resolved [key=reopen-me]: answered: us-east\n'
+    printf 'resolved [key=api-shape]: answered: REST\n'
+    printf 'resolved [key=store]: answered: postgres\n'
+  } >> "$f"
   answered_sig=$(status_declared_wait_signature "$f")
   [ -z "$answered_sig" ] \
     || fail "an answered decision still carried a declared-wait signature: '$answered_sig'"
