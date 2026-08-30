@@ -11,7 +11,7 @@ Same-pane away-mode delivery requires an idle primary and an affirmatively empty
 `pane_is_busy` refuses a primary mid-turn, and `fm_backend_composer_state` refuses any composer verdict other than `empty`, so a digest cannot merge into active or uncertain input.
 If the primary remains continuously busy, buffered delivery starves by design rather than interrupting that turn.
 The expected example is a captain who continues interacting with Firstmate after entering away mode, which keeps the same primary busy instead of creating an idle absence.
-`FM_MAX_DEFER_SECS` bounds that wait and raises this alarm while preserving the buffered escalation.
+`FM_MAX_DEFER_SECS` bounds how long that deferral can remain silent: once the threshold is reached, it raises this alarm and preserves the buffered escalation.
 Treat the alarm as a visible delivery limitation, not as permission to override either guard or proof that idle away-mode delivery failed.
 
 ## Channels
