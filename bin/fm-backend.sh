@@ -584,7 +584,13 @@ fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
 fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
   local raw=$1 state=$2 id
   id=$(fm_backend_task_id_for_selector "$raw" "$state" 2>/dev/null || true)
-  [ -n "$id" ] && printf 'fm-%s' "$id"
+  # An adopted task (kind=adopted) carries the human's OWN cmux workspace
+  # title, not a firstmate-scoped fm-<id> title, so a scoped-title label
+  # check would wrongly reject it; leave the expected-label empty so
+  # peek/send target it by pure UUID (surface_exists), never by title.
+  if [ -n "$id" ] && [ "$(fm_meta_get "$state/$id.meta" kind)" != adopted ]; then
+    printf 'fm-%s' "$id"
+  fi
   return 0
 }
 

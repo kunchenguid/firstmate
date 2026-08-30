@@ -141,6 +141,7 @@ state/               runtime records and signals; gitignored
 
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory.
+`state/<id>.meta` records `kind=adopted` for a task registered by `bin/fm-adopt.sh` instead of spawned (section 7); see that script's header for its exact fields.
 
 ## 3. Session start (run once at every session start)
 
@@ -226,6 +227,7 @@ Reconcile only this home's recorded direct reports and their recorded backend in
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.
 For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home.
 Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
+For a dead `kind=adopted` direct report, there is no worktree or branch to reconcile; re-run `bin/fm-adopt.sh` against the workspace's new id to re-register it, or tear the task down to un-register it.
 
 If away mode is present, load `/afk` and let its daemon own supervision rather than arming another cycle.
 Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
@@ -384,6 +386,14 @@ Before treating the investigation or any visual review as complete, load `captai
 When a scout's deliverable is a visual artifact the captain will iterate on, prefer keeping that scout alive to host its own Lavish loop rather than tearing it down and mediating from firstmate, so the scout keeps its investigation context and the captain iterates in one continuous session.
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
 The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
+
+### Adopt (existing session)
+
+Adopt registers an already-running cmux workspace - one a human started, not a firstmate spawn - as a supervised task, so peek, send, current-state reads, and the watcher work on it without a firstmate worktree or branch.
+Run `bin/fm-adopt.sh <id> --workspace <ws-uuid> [--surface <surf-uuid>]`; it is cmux-only and experimental, and the task is supervise-only, with no delivery mode, no validation, and no PR.
+Teardown un-registers the task without ever closing the human's workspace, and the watcher exempts it from stale-pane wakes.
+As with a spawn, the orchestrator adds the `data/backlog.md` In flight line, so record the task there after adopting.
+See the script's header comment for the full mechanics.
 
 ## 8. Supervision protocol
 

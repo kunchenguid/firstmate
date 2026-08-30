@@ -112,6 +112,52 @@ Firstmate does not attempt to close the macOS window because cmux's socket canno
 Real tests share the captain's running app rather than creating an isolated cmux session.
 `tests/cmux-test-safety.sh` permits cleanup only for an exact currently listed `fm-test-` workspace and never enumerates and closes unrelated workspaces or relaunches the app.
 
+## Adopting an existing workspace (fm-adopt)
+
+`bin/fm-adopt.sh <id> --workspace <ws-uuid> [--surface <surf-uuid>]` registers an ALREADY-RUNNING cmux workspace - one a human started, not a firstmate spawn - as a supervised task.
+It creates no treehouse worktree and no branch: it records `kind=adopted`, `mode=adopted`, `backend=cmux`, `window=<ws>:<surface>`, `cmux_workspace_id=`/`cmux_surface_id=`, and a `worktree=` that points at the workspace's own live `current_directory` (falling back to `$HOME` with a loud notice when cmux reports no usable cwd), so `fm-peek.sh`, `fm-send.sh`, `fm-crew-state.sh`, and the watcher all operate on the workspace.
+It never renames the human's workspace: peek and send target the surface by pure UUID because `kind=adopted` makes `fm_backend_expected_label_of_selector` return an empty expected-label, so `fm_backend_cmux_target_ready` verifies liveness with `surface_exists` alone and never applies the scoped-title check that would reject the human's own title.
+`bin/fm-teardown.sh` on a `kind=adopted` task un-registers it (removes its `state/<id>.meta`) but NEVER runs `close-workspace` and NEVER runs `treehouse return`, so the human's workspace and its shell are left exactly as they were.
+`bin/fm-watch.sh` exempts `kind=adopted` windows from stale-pane wakes, exactly like a secondmate, because a human-driven or idle session being quiet is healthy rather than stuck.
+
+KNOWN LIMITATION - adopted tasks are session-scoped and do not survive a cmux relaunch.
+Workspace ids do not survive an app relaunch, and an adopted workspace keeps the human's own title rather than a firstmate `fm-<home-label>-<id>` title, so title-based recovery (`fm_backend_cmux_list_live`) cannot re-find it after a relaunch the way it re-finds a spawned task.
+After a cmux relaunch, re-run `fm-adopt` against the workspace's new UUID to re-register it.
+
+Empirical verification (2026-07-05, real cmux 0.64.17, macOS aarch64), touching only an `fm-test-`-prefixed throwaway workspace and closing only what this pass itself created:
+
+```
+$ cmux new-workspace --name fm-test-adopt-probe --focus false --id-format uuids
+OK workspace:14
+$ cmux workspace list --json --id-format uuids | jq -r '.workspaces[]|select(.title=="fm-test-adopt-probe")|"\(.id)\t\(.current_directory)"'
+1BC9DFBA-067B-4596-A2C7-DD46197D1597	/home/dev/example-project
+
+# Adopt it by UUID (surface auto-resolved), into a scratch FM_HOME/state:
+$ bin/fm-adopt.sh probe-live --workspace 1BC9DFBA-067B-4596-A2C7-DD46197D1597
+adopted probe-live backend=cmux window=1BC9DFBA-067B-4596-A2C7-DD46197D1597:57F297C6-94CA-46A1-A7A2-3292F6B03CC5 worktree=/home/dev/example-project
+# state/probe-live.meta recorded kind=adopted, mode=adopted, backend=cmux,
+# worktree=/home/dev/example-project, and both cmux ids.
+
+# Steer and read it by pure UUID (empty expected-label, human title preserved):
+$ bin/fm-send.sh fm-probe-live "echo adopted-probe-ok"     # rc 0; text landed at the composer
+$ bin/fm-peek.sh fm-probe-live 12                          # rc 0; showed the live human surface
+
+# Teardown un-registers WITHOUT closing the workspace:
+$ bin/fm-teardown.sh probe-live
+teardown probe-live complete (window 1BC9DFBA-...:57F297C6-..., worktree /home/dev/example-project)
+Backlog: adopted task probe-live released - its cmux workspace was left running (never closed) ...
+# state/probe-live.meta removed; the workspace was still listed afterward:
+$ cmux workspace list --json --id-format uuids | jq -r '.workspaces[]|select(.id=="1BC9DFBA-067B-4596-A2C7-DD46197D1597")|.title'
+fm-test-adopt-probe
+
+# Cleanup performed by this verification pass itself (never firstmate teardown):
+$ cmux close-workspace --workspace 1BC9DFBA-067B-4596-A2C7-DD46197D1597
+OK workspace:14
+```
+
+The `send`/`peek` steps confirm the empty-expected-label path against the REAL app: the workspace's human title (`fm-test-adopt-probe`) is not a firstmate-scoped title, so a title check would have rejected it, yet both operations reached the surface by pure UUID.
+The teardown step confirms the never-closes guarantee live: `state/probe-live.meta` was removed while `cmux workspace list` still reported the workspace present.
+
 ## Active limits
 
 - cmux is experimental, macOS-only, GUI-first, and requires the app running.

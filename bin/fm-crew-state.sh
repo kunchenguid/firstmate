@@ -188,10 +188,16 @@ fi
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
-EXPECTED_LABEL="fm-$ID"
+EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "fm-$ID" "$STATE")
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    # cmux liveness is a STRUCTURAL existence check (list-panes), never a content
+    # read: cmux read-screen fails on a genuinely fresh surface that has never
+    # been written to (docs/cmux-backend.md), so an adopted task's untouched
+    # surface would otherwise be misread as "backend target gone". EXPECTED_LABEL
+    # is empty for kind=adopted, so this targets by pure uuid.
+    cmux) fm_backend_target_exists cmux "$1" "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }

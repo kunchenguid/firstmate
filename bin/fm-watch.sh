@@ -1512,6 +1512,13 @@ EOF
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
     kind=$(window_kind "$w")
+    # An adopted human-driven or idle session being quiet is healthy - it is
+    # not a stuck crewmate. Its parent supervises through status writes and
+    # heartbeats, not pane-idle staleness, and it has no declared-pause
+    # concept, so it is exempt unconditionally.
+    if [ "$kind" = adopted ]; then
+      continue
+    fi
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
