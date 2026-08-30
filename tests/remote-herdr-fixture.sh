@@ -61,18 +61,20 @@ SOCKET='$socket'
 CODEX_BIN='$standalone_launcher'
 NODE_BIN='$(command -v node)'
 PROCESS_MODE_FILE='$state.process-mode'
+PROC_ROOT='$state.proc'
 SH
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
-ws=""; label=""; cwd=""
+ws=""; label=""; cwd=""; pane=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
     --label) label=${args[$((i+1))]:-} ;;
     --cwd) cwd=${args[$((i+1))]:-} ;;
+    --pane) pane=${args[$((i+1))]:-} ;;
   esac
 done
 case "${1:-} ${2:-}" in
@@ -126,7 +128,8 @@ case "${1:-} ${2:-}" in
       send_fail_mode=$(cat "$SEND_FAIL" 2>/dev/null || true)
       case "$send_fail_mode" in
         startup-brief)
-          [ "$(jq_state -r --arg p "${3:-}" '.typed[$p] // false')" != true ] || exit 1
+          agent_pid=$(cat "$STATE.agent-pid" 2>/dev/null || true)
+          ! kill -0 "$agent_pid" 2>/dev/null || exit 1
           ;;
         *) exit 1 ;;
       esac
@@ -144,6 +147,9 @@ case "${1:-} ${2:-}" in
         "$CODEX_BIN" -e 'setInterval(() => {}, 1000)' >/dev/null 2>&1 &
       agent_pid=$!
       printf '%s\n' "$agent_pid" > "$agent_pid_file"
+      mkdir -p "$PROC_ROOT/$agent_pid"
+      printf 'CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54\0' > "$PROC_ROOT/$agent_pid/environ"
+      ln -s "$CODEX_BIN" "$PROC_ROOT/$agent_pid/exe"
     fi
     helper_pid_file="$STATE.helper-pid"
     helper_pid=$(cat "$helper_pid_file" 2>/dev/null || true)
@@ -154,13 +160,16 @@ case "${1:-} ${2:-}" in
             "$NODE_BIN" -e 'setInterval(() => {}, 1000)' codex-helper >/dev/null 2>&1 &
           helper_pid=$!
           printf '%s\n' "$helper_pid" > "$helper_pid_file"
+          mkdir -p "$PROC_ROOT/$helper_pid"
+          printf 'CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54\0' > "$PROC_ROOT/$helper_pid/environ"
+          ln -s "$NODE_BIN" "$PROC_ROOT/$helper_pid/exe"
         fi
         ;;
     esac
     jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
   "pane read") printf '\n' ;;
   "pane process-info")
-    pane=${3:-}
+    pane=${pane:-${3:-}}
     process_mode=$(cat "$PROCESS_MODE_FILE" 2>/dev/null || true)
     agent_pid=$(cat "$STATE.agent-pid" 2>/dev/null || true)
     helper_pid=$(cat "$STATE.helper-pid" 2>/dev/null || true)

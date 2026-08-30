@@ -747,6 +747,7 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+SPAWN_REMOTE_CODEX_ENDPOINT_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -872,8 +873,14 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-    if ! spawn_fresh_commit_rollback; then
-      status=1
+    if [ "$SPAWN_REMOTE_CODEX_ENDPOINT_STARTED" = 1 ] \
+       && ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+      SPAWN_FRESH_COMMIT_PENDING=0
+      echo "warning: preserving incomplete remote Codex endpoint record for $ID because endpoint $T was not confirmed gone" >&2
+    else
+      if ! spawn_fresh_commit_rollback; then
+        status=1
+      fi
     fi
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
@@ -3257,6 +3264,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
+  SPAWN_REMOTE_CODEX_ENDPOINT_STARTED=1
   if ! spawn_bind_remote_codex_session; then
     exit 1
   fi

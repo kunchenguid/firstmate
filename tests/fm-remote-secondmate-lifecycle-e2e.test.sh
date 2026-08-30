@@ -318,6 +318,38 @@ seed_env() {
   "$@"
 }
 
+remote_lifecycle_control() {
+  if [ "${FM_TEST_INCOMPLETE_CODEX_ONLY:-0}" = 1 ]; then
+    (
+      cd "$TMP_ROOT" || exit 1
+      /usr/bin/env -i PATH="$REMOTE_ROOT/bin:$PATH" \
+        HOME="$REMOTE_ROOT" FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+        FM_REMOTE_JOB_ACTIVE=1 FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+        FM_PROC_ROOT_OVERRIDE="$HERDR_STATE.proc" \
+        "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" "$@"
+    )
+  else
+    remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh "$@"
+  fi
+}
+
+remote_lifecycle_launch() {
+  if [ "${FM_TEST_INCOMPLETE_CODEX_ONLY:-0}" = 1 ]; then
+    remote_lifecycle_control launch ios codex - - herdr
+  else
+    remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate
+  fi
+}
+
+remote_lifecycle_migrate() {
+  if [ "${FM_TEST_INCOMPLETE_CODEX_ONLY:-0}" = 1 ]; then
+    remote_lifecycle_control migrate ios codex - - herdr
+  else
+    remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --migrate-legacy
+  fi
+}
+
+if [ "${FM_TEST_INCOMPLETE_CODEX_ONLY:-0}" != 1 ]; then
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH
 #!/usr/bin/env bash
@@ -651,6 +683,7 @@ rm -f "$REMOTE_ROOT/bin/git"
 [ -z "$(git -C "$REMOTE_ROOT" status --porcelain)" ] \
   || fail "the fixture origin resolver was left behind in the remote code root"
 pass "seeding carries bitbucket, self-hosted, and scp-like origins through to the remote clone"
+fi
 
 # Provision and register the remote route from the captain-facing primary.
 out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
@@ -710,6 +743,7 @@ pass "mixed local and remote routes validate without migration"
 # Launch on the remote home's own configured backend. Parent metadata records
 # host placement separately from that backend and arms the reply source.
 printf 'pi\n' > "$PARENT/config/crew-harness"
+if [ "${FM_TEST_INCOMPLETE_CODEX_ONLY:-0}" != 1 ]; then
 launches_before_inherit=0
 [ ! -f "$HERDR_LOG" ] || launches_before_inherit=$(grep -c '^tab create' "$HERDR_LOG" || true)
 if FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
@@ -742,16 +776,20 @@ assert_no_grep '^diagnostic-candidate ' "$TMP_ROOT/spawn-wrong-pane-codex.out" \
   "wrong-pane refusal inspected an untrusted foreground PID"
 remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null \
   || fail "wrong-pane remote Codex endpoint could not be retired for recovery"
+fi
 
 printf 'generic-only\n' > "$HERDR_STATE.process-mode"
 set +e
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+remote_lifecycle_launch \
   > "$TMP_ROOT/spawn-unrecognized-codex.out" 2>&1
 unrecognized_codex_rc=$?
 set -e
 [ "$unrecognized_codex_rc" -ne 0 ] || fail "remote spawn accepted a generic node helper as Codex"
 assert_absent "$PARENT/state/ios.meta" "failed remote Codex identity published parent metadata"
-assert_present "$REMOTE_HOME/state/parent-route/ios.meta" "failed remote Codex identity omitted endpoint evidence"
+if [ ! -e "$REMOTE_HOME/state/parent-route/ios.meta" ]; then
+  sed 's/^/# launch: /' "$TMP_ROOT/spawn-unrecognized-codex.out" >&2
+  fail "failed remote Codex identity omitted endpoint evidence"
+fi
 assert_grep 'envelope=valid result=pane-process-info' "$TMP_ROOT/spawn-unrecognized-codex.out" \
   "remote Codex refusal omitted the final process-info envelope"
 assert_grep 'foreground_pid_count=1' "$TMP_ROOT/spawn-unrecognized-codex.out" \
@@ -766,19 +804,19 @@ assert_grep 'structural=reject:basename,path-component,interpreter-args,cursor-s
   "remote Codex refusal omitted the shared matcher rejection"
 assert_no_grep '^launch_complete_spawn_gen=' "$REMOTE_HOME/state/parent-route/ios.meta" \
   "failed remote Codex launch published a completion receipt"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>"$TMP_ROOT/incomplete-state.err")" = unverified ] \
+[ "$(remote_lifecycle_control state ios 2>"$TMP_ROOT/incomplete-state.err")" = unverified ] \
   || fail "incomplete remote Codex endpoint was reported healthy"
 assert_grep 'lacks matching launch-complete and startup-brief receipts' "$TMP_ROOT/incomplete-state.err" \
   "incomplete remote Codex state did not name its missing completion evidence"
-if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios \
+if remote_lifecycle_control route ios \
   > "$TMP_ROOT/incomplete-route.out" 2>&1; then
   fail "incomplete remote Codex endpoint exposed an accepted route"
 fi
 assert_grep 'lacks matching launch-complete and startup-brief receipts' "$TMP_ROOT/incomplete-route.out" \
   "incomplete remote Codex route refusal did not name its missing completion evidence"
-remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh capture ios 1 >/dev/null \
+remote_lifecycle_control capture ios 1 >/dev/null \
   || fail "incomplete remote Codex endpoint lost bounded diagnostic access"
-if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh send ios probe \
+if remote_lifecycle_control send ios probe \
   > "$TMP_ROOT/incomplete-send.out" 2>&1; then
   fail "incomplete remote Codex endpoint accepted a steer"
 fi
@@ -786,28 +824,32 @@ assert_grep 'lacks matching launch-complete and startup-brief receipts' "$TMP_RO
   "incomplete remote Codex send refusal did not name its missing completion evidence"
 assert_absent "$REMOTE_HOME/state/parent-route/ios.inbox" \
   "incomplete remote Codex send wrote a steering record"
-if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh key ios Enter \
+if remote_lifecycle_control key ios Enter \
   > "$TMP_ROOT/incomplete-key.out" 2>&1; then
   fail "incomplete remote Codex endpoint accepted a key"
 fi
 assert_grep 'lacks matching launch-complete and startup-brief receipts' "$TMP_ROOT/incomplete-key.out" \
   "incomplete remote Codex key refusal did not name its missing completion evidence"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios \
+[ "$(remote_lifecycle_control observe ios \
   2>"$TMP_ROOT/incomplete-observe.err")" = unknown ] \
   || fail "incomplete remote Codex endpoint returned a delivery-confirmation observation"
 assert_grep 'lacks matching launch-complete and startup-brief receipts' "$TMP_ROOT/incomplete-observe.err" \
   "incomplete remote Codex observation did not name its missing completion evidence"
 
 set +e
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+launches_before_incomplete_retry=$(grep -c '^tab create' "$HERDR_LOG" || true)
+remote_lifecycle_launch \
   > "$TMP_ROOT/spawn-incomplete-codex-retry.out" 2>&1
 incomplete_codex_retry_rc=$?
 set -e
 [ "$incomplete_codex_retry_rc" -ne 0 ] || fail "remote spawn reused an incomplete alive Codex endpoint"
 assert_grep 'alive without matching launch-complete and startup-brief receipts' "$TMP_ROOT/spawn-incomplete-codex-retry.out" \
   "remote Codex retry did not name the missing completion receipt"
+launches_after_incomplete_retry=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_incomplete_retry" -eq "$launches_after_incomplete_retry" ] \
+  || fail "remote Codex retry created a duplicate endpoint after losing incomplete launch custody"
 set +e
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --migrate-legacy \
+remote_lifecycle_migrate \
   > "$TMP_ROOT/migrate-incomplete-codex.out" 2>&1
 migrate_incomplete_rc=$?
 set -e
@@ -815,35 +857,47 @@ set -e
   || fail "legacy migration replaced a post-protocol incomplete Codex endpoint"
 assert_grep 'not an eligible pre-receipt legacy record' "$TMP_ROOT/migrate-incomplete-codex.out" \
   "legacy migration did not distinguish a post-protocol incomplete endpoint"
-remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null \
-  || fail "incomplete remote Codex endpoint could not be retired for recovery"
+incomplete_target=$(sed -n 's/^window=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+incomplete_pane=${incomplete_target#*:}
+HERDR_SESSION=fm-remote "$REMOTE_ROOT/bin/herdr" pane close "$incomplete_pane" \
+  --session fm-remote >/dev/null \
+  || fail "incomplete remote Codex endpoint could not be closed for recovery"
+rm -f -- "$REMOTE_HOME/state/parent-route/ios.meta"
 
 printf 'startup-brief\n' > "$TMP_ROOT/herdr-send-fail"
 printf 'with-helper\n' > "$HERDR_STATE.process-mode"
 set +e
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+remote_lifecycle_launch \
   > "$TMP_ROOT/spawn-undelivered-brief.out" 2>&1
 undelivered_brief_rc=$?
 set -e
 [ "$undelivered_brief_rc" -ne 0 ] || fail "remote Codex launch accepted an undelivered startup brief"
-assert_grep 'launch completion was recorded, but its startup brief could not be delivered' \
-  "$TMP_ROOT/spawn-undelivered-brief.out" \
-  "startup-brief failure did not preserve the completion-before-delivery boundary"
+if ! grep -q 'launch completion was recorded, but its startup brief could not be delivered' \
+  "$TMP_ROOT/spawn-undelivered-brief.out"; then
+  sed 's/^/# launch: /' "$TMP_ROOT/spawn-undelivered-brief.out" >&2
+  fail "startup-brief failure did not preserve the completion-before-delivery boundary"
+fi
 remote_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
 remote_required_gen=$(sed -n 's/^startup_brief_required_spawn_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
 remote_complete_gen=$(sed -n 's/^launch_complete_spawn_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
 remote_delivered_gen=$(sed -n 's/^startup_brief_delivered_spawn_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
-[ -n "$remote_spawn_gen" ] && [ "$remote_required_gen" = "$remote_spawn_gen" ] \
-  && [ "$remote_complete_gen" = "$remote_spawn_gen" ] && [ -z "$remote_delivered_gen" ] \
-  || fail "failed startup-brief delivery did not expose its ordered protocol receipts"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+if [ -z "$remote_spawn_gen" ] || [ "$remote_required_gen" != "$remote_spawn_gen" ] \
+  || [ "$remote_complete_gen" != "$remote_spawn_gen" ] || [ -n "$remote_delivered_gen" ]; then
+  sed 's/^/# meta: /' "$REMOTE_HOME/state/parent-route/ios.meta" >&2
+  fail "failed startup-brief delivery did not expose its ordered protocol receipts"
+fi
+[ "$(remote_lifecycle_control state ios \
   2>"$TMP_ROOT/undelivered-brief-state.err")" = unverified ] \
   || fail "remote Codex endpoint without a brief-delivery receipt was reported healthy"
 assert_grep 'lacks matching launch-complete and startup-brief receipts' "$TMP_ROOT/undelivered-brief-state.err" \
   "undelivered startup brief did not preserve endpoint reuse protection"
-remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null \
+remote_lifecycle_control retire ios --force >/dev/null \
   || fail "undelivered-brief remote Codex endpoint could not be retired for recovery"
 rm -f "$TMP_ROOT/herdr-send-fail"
+if [ "${FM_TEST_INCOMPLETE_CODEX_ONLY:-0}" = 1 ]; then
+  echo "# focused incomplete remote Codex lifecycle tests passed"
+  exit 0
+fi
 
 printf 'with-helper\n' > "$HERDR_STATE.process-mode"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
