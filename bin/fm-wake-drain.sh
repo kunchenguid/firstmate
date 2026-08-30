@@ -255,9 +255,10 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    # fm-classify-lib.sh's status_decision_render owns how a decision is named
+    # to a supervisor, so this section cannot show one under a name that will
+    # not answer it; this caller only adds the task id and the byte cap.
+    line="$task $(status_decision_render "$key" "$verb" "$note")"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
@@ -286,7 +287,7 @@ EOF
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>' - the key is the one bracketed above, never one inside a summary\n" || return 1
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records

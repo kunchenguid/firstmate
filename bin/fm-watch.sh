@@ -811,11 +811,13 @@ busy_turn_over_age() {  # <task>
 # above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
 # the stale suppressor to <hash> and flags the key paused.
 #
-# The recheck names WHICH human the declared wait is on, because that is the whole
-# point of a recheck the captain reads: an external dependency for paused:, and the
-# captain themself for a verified hold. Only the captain-held verb takes the second
-# wording; a caller that reached the bounded cadence off pause tracking alone, with
-# no declaring verb left on the log, keeps the external-wait wording it always had.
+# The recheck names WHO the declared wait is on, because that is the whole point
+# of a recheck the supervisor reads: an external dependency for paused:, the
+# captain themself for a verified hold, and firstmate itself for a decision the
+# durable fold still holds open. fm-classify-lib.sh's status_declared_wait_kind
+# is the single owner of which of the three this is; a caller that reached the
+# bounded cadence off pause tracking alone, with no declared wait left on the
+# log, falls to the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age detail reason
   key=$(window_key "$win")
@@ -827,13 +829,20 @@ handle_paused_stale() {  # <window> <task> <hash>
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
-  if status_is_captain_held "$(last_status_line "$statusf")"; then
-    detail="captain-held, awaiting the captain"
-    reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
-  else
-    detail="paused, awaiting external"
-    reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
-  fi
+  case "$(status_declared_wait_kind "$statusf")" in
+    captain-held)
+      detail="captain-held, awaiting the captain"
+      reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+      ;;
+    decision)
+      detail="open decision, awaiting firstmate"
+      reason="open decision ${age}s, awaiting firstmate's own answer - rechecked on a long cadence not a wedge; answer it or close it"
+      ;;
+    *)
+      detail="paused, awaiting external"
+      reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+      ;;
+  esac
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
@@ -897,7 +906,8 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
 
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" \
+    "$STATE/.paused-resurfaced-$key" "$STATE/.paused-surfaced-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
@@ -967,22 +977,58 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# The ONE declared-wait triage a normal-mode stale sighting passes before it may
+# queue a bare wake, so no stale-emission path answers "is this quiet endpoint
+# expected?" on its own. fm-classify-lib.sh's status_declared_wait_kind owns the
+# vocabulary (a declared pause, a verified captain-held transfer, or a decision
+# the durable fold still holds open); this owns what the watcher does with it.
+#
+# A declared wait still surfaces ONCE, so a live gate is never hidden behind the
+# bounded cadence - but that one-shot is keyed on the DECLARATION, the status
+# log's own signature, never on the pane hash. A crew that declared a wait
+# usually leaves a live harness rendering a spinner, a token counter or a clock,
+# so its pane hash changes every few minutes; a hash-keyed one-shot therefore
+# re-fires for the whole wait, and each re-fire costs a full supervision turn.
+# That is the 2026-08-29 flood of bare stale wakes for a crew awaiting the
+# captain, interleaved with its own correct long-cadence rechecks. Keying on the
+# declaration is the same fix busy_turn_bound_check's away-mode arm already
+# applies, for the same reason. Away mode itself is excluded by the callers on
+# purpose: the daemon owns triage there and classifies the plain identity.
+#
+# Pause tracking is set here on the one-shot surface and cleared here when there
+# is no declared wait, so a caller cannot surface without the bookkeeping that
+# puts the NEXT sighting on the bounded cadence.
+# 0 when the declared wait absorbed this sighting; 1 when the caller must surface.
+stale_declared_wait_absorb() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 statusf key marker declared
+  statusf="$STATE/$task.status"
+  key=$(window_key "$win")
+  if [ -z "$(status_declared_wait_kind "$statusf")" ]; then
+    clear_pause_state "$key"
+    return 1
+  fi
+  marker="$STATE/.paused-surfaced-$key"
+  declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$declared" ]; then
+    handle_paused_stale "$win" "$task" "$h"
+    return 0
+  fi
+  printf '%s' "$declared" > "$marker"
+  : > "$STATE/.paused-$key"
+  date +%s > "$STATE/.paused-rechecked-$key"
+  date +%s > "$STATE/.paused-resurfaced-$key"
+  return 1
+}
+
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task
+  task=$(window_to_task "$win" "$STATE")
+  stale_declared_wait_absorb "$win" "$task" "$h" && return 0
   key=$(window_key "$win")
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
-  task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
-  if status_is_paused_or_captain_held "$last"; then
-    : > "$STATE/.paused-$key"
-    date +%s > "$STATE/.paused-rechecked-$key"
-    date +%s > "$STATE/.paused-resurfaced-$key"
-  else
-    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
-  fi
   wake "stale: $win"
 }
 
@@ -1735,7 +1781,12 @@ EOF
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+    # Same declared-wait owner the stale triage below uses, so tracking is never
+    # cleared out from under a wait one of them still recognizes. Ordered so the
+    # fold inside status_declared_wait_kind runs only for a window that actually
+    # carries tracking to reconcile, never once per window per poll.
+    if [ -e "$STATE/.paused-$key" ] \
+      && [ -z "$(status_declared_wait_kind "$STATE/$task.status")" ]; then
       clear_pause_tracking "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
@@ -1802,6 +1853,11 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif stale_declared_wait_absorb "$w" "$task" "$h"; then
+              # An open decision behind that captain-relevant line is a declared
+              # wait: firstmate owes the answer, so the worker is not wedged and
+              # a new pane hash must not buy another bare wake.
+              triage_log "absorbed stale (declared wait behind a captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
@@ -1859,7 +1915,7 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+            if [ -e "$pf" ] || [ -n "$(status_declared_wait_kind "$STATE/$task.status")" ]; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"

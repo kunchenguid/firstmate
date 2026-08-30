@@ -11,7 +11,10 @@
 # verb, regardless of order or count. These tests drive the REAL
 # status_line_verb / status_open_decisions / status_open_decisions_incremental
 # functions over crafted status files and assert their folded output, never the
-# fold's own source text. Also covers status_key_closing_verb, which reports how
+# fold's own source text. Also covers status_decision_render, the single owner of
+# how a still-open decision is NAMED to a supervisor, because a decision shown
+# under a name that cannot answer it is the same defect seen from the other end.
+# Also covers status_key_closing_verb, which reports how
 # the status side currently reads one key so a consumer can tell a settled key
 # from one handed to a durable captain-held task (bin/fm-captain-hold.sh
 # diverged). Cross-drain cursor persistence and the incremental
@@ -239,6 +242,68 @@ test_blocked_and_resolved_are_tag_order_independent() {
   pass "blocked/resolved parse their bare verb with any bracket-tag order preceding the colon"
 }
 
+# The 2026-08 "--resolve-key refuses a key the drain lists as open" incident.
+# A worker opened its decision with the token LAST
+# (needs-decision: <summary> [key=w2-design]), which the grammar reads as prose,
+# so the decision is genuinely named "default". That reading is deliberate and
+# must not drift: the same trailing position is also where a resolution mentions
+# ANOTHER decision's key, and reading it as a stated key would let prose close a
+# decision the captain is owed. The fix for the incident is that every surface
+# names the answerable key (status_decision_render), not that the fold guesses.
+test_note_tail_token_stays_prose() {
+  local dir f
+  dir=$(case_dir tail-prose)
+  printf 'needs-decision: wave-2 design committed for captain review [key=w2-design]\n' \
+    > "$dir/open.status"
+  assert_fold "$dir/open.status" \
+    "$(printf 'default\tneeds-decision\twave-2 design committed for captain review [key=w2-design]\n')" \
+    "trailing token on an opening line"
+
+  # The disconfirming half: a resolution whose note ENDS by naming another
+  # decision's key must not close that decision.
+  f="$dir/close.status"
+  printf 'needs-decision [key=w2-design]: pick the drag model\n' > "$f"
+  printf 'resolved: superseded by [key=w2-design]\n' >> "$f"
+  assert_fold "$f" "$(printf 'w2-design\tneeds-decision\tpick the drag model\n')" \
+    "a trailing token in a resolution's prose never closes that key"
+  pass "a [key=x] at the end of a note is prose in both directions: it opens nothing and closes nothing"
+}
+
+# status_decision_render is the ONE way a still-open decision is named to a
+# supervisor. Both halves of the incident are pinned here: a `default` decision
+# must show a key at all, and a summary carrying a foreign key-shaped token must
+# say which of the two answers it.
+test_decision_render_always_names_the_answerable_key() {
+  local line
+  line=$(status_decision_render default needs-decision "pick REST or RPC")
+  [ "$line" = "[key=default] needs-decision: pick REST or RPC" ] \
+    || fail "an unkeyed decision was rendered without its answerable key: '$line'"
+
+  line=$(status_decision_render api-shape needs-decision "pick REST or RPC")
+  [ "$line" = "[key=api-shape] needs-decision: pick REST or RPC" ] \
+    || fail "a keyed decision was not rendered under its own key: '$line'"
+
+  # The incident line: the only token a reader could see is the one that refuses.
+  line=$(status_decision_render default needs-decision \
+    "wave-2 design committed for captain review [key=w2-design]")
+  case "$line" in
+    "[key=default] "*) ;;
+    *) fail "the answerable key was not front-loaded: '$line'" ;;
+  esac
+  case "$line" in
+    *prose*) ;;
+    *) fail "a foreign key-shaped token in the summary was not called out: '$line'" ;;
+  esac
+
+  # No correction when the summary's token IS this decision's key: a worker that
+  # states its key in a documented position often keeps it visible in the note.
+  line=$(status_decision_render w2-design needs-decision "see [key=w2-design] in the design doc")
+  case "$line" in
+    *prose*) fail "a decision's own key was called out as prose: '$line'" ;;
+  esac
+  pass "status_decision_render always names the answerable key and flags a foreign token as prose"
+}
+
 test_incremental_agrees_with_full_fold_across_appends() {
   local dir f expected
   dir=$(case_dir incremental)
@@ -275,6 +340,8 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+test_note_tail_token_stays_prose
+test_decision_render_always_names_the_answerable_key
 
 # status_key_closing_verb reports HOW the status side currently reads one key,
 # which is what lets a consumer tell a settled key from a key handed to a

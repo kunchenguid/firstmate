@@ -584,7 +584,14 @@ if [ -n "$RESOLVE_KEYS" ]; then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    # Name what this log WOULD answer to. A refusal is the safe outcome, but a
+    # refusal that only says "not that one" is a dead end: the key a supervisor
+    # read may have been a prose token inside a decision's summary, which is
+    # never that decision's key (bin/fm-classify-lib.sh's decision key grammar).
+    # Listing the open keys here turns that into one corrected resend.
+    resolve_open_keys=$(printf '%s' "$resolve_open_set" \
+      | awk -F '\t' 'NF { printf "%s%s", sep, $1; sep = ", " }')
+    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). ${resolve_open_keys:+Open decision keys in that log right now: $resolve_open_keys. }A [key=...] token inside a decision's summary is prose, not its key. Resend with the key the OPEN DECISIONS listing brackets, or without that key; nothing was sent." >&2
     exit 1
   done
 fi

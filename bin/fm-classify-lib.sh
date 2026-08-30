@@ -213,7 +213,15 @@ status_is_paused_or_captain_held() {  # <status-line>
 # note-head token is key metadata, stripped from the note); when both positions
 # carry a token, the documented before-colon one wins and the note-head token
 # stays note text. A token deeper inside the note is prose, never a stated key,
-# so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
+# so a summary merely MENTIONING "[key=x]" cannot open or close that decision -
+# including a token at the very END of the note, which is the position a worker
+# most often uses for both meanings at once ("needs-decision: <summary>
+# [key=w2-design]" states a key, "resolved: superseded by [key=w2-design]" does
+# not) and which therefore cannot be read as a key without letting prose close a
+# decision the captain is owed. Refusing to guess leaves that decision open and
+# the answer refused, which is recoverable; guessing loses it silently, which is
+# not. status_decision_render below is what keeps that refusal from becoming a
+# dead end, by naming the answerable key wherever a decision is shown.
 # A line with no token in either position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
@@ -469,6 +477,62 @@ status_open_decisions() {  # <status-file>
     open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
   done < "$f"
   printf '%s' "$open"
+}
+
+# The ONE way a still-open decision is NAMED to a supervisor, so no surface can
+# show a decision under a name that cannot answer it.
+#
+# Two facts make that easy to get wrong, and together they are how a decision
+# the fold lists as open gets answered with a key bin/fm-send.sh must refuse.
+# The key token is optional, so a decision opened without one is genuinely named
+# `default` - and a surface that printed the key only when it was NOT `default`
+# left the most common decision in the fleet with no visible name at all. And a
+# summary may carry a key-shaped token that is prose rather than this decision's
+# key (see the decision key grammar above), so the only token a reader could see
+# was sometimes the one that refuses.
+#
+# So this always prints the answerable key, and front-loads a short correction -
+# never a trailing one a byte cap could cut off - when the note carries a
+# different key-shaped token. Pure text transform, no file I/O; callers add
+# their own task-id prefix and apply their own byte cap.
+status_decision_render() {  # <key> <verb> <note> -> supervisor-facing line
+  local key=$1 verb=$2 note=$3 named
+  named="[key=$key]"
+  case "$note" in
+    *\[key=*\]*)
+      case "$note" in
+        *"[key=$key]"*) ;;
+        *) named="$named (the summary's own [key=...] is prose)" ;;
+      esac
+      ;;
+  esac
+  printf '%s %s: %s' "$named" "$verb" "$note"
+}
+
+# The kind of declared wait a task's status log carries, or nothing when it
+# carries none. This is the ONE triage a supervisor consults before it may treat
+# an idle endpoint as a possible wedge, so the several stale-emission paths
+# cannot each answer "is this quiet endpoint expected?" their own way:
+#   captain-held - the latest line is the verified captain-held transfer;
+#   paused       - the latest line declares an external-wait pause;
+#   decision     - neither, but the durable fold still holds an open decision,
+#                  so the supervisor itself owes the answer.
+# That third case is the one a last-line read alone cannot see: a needs-decision
+# or blocked line stays open under later unrelated appends, and while it is open
+# the worker is waiting on its supervisor rather than wedged - the same reason a
+# declared pause is absorbed rather than escalated. It is deliberately the
+# fold's whole open set rather than a narrower verb list, because "what this
+# task is still owed" already has an owner above and re-deriving a second,
+# narrower version of it here is exactly the drift this function removes.
+# Ordering is cost as well as precedence: both verb reads are pure last-line
+# reads, and the fold runs only when neither declared verb is present.
+status_declared_wait_kind() {  # <status-file> -> captain-held|paused|decision|<empty>
+  local f=$1 last
+  last=$(last_status_line "$f")
+  if status_is_captain_held "$last"; then printf 'captain-held'; return 0; fi
+  if status_is_paused "$last"; then printf 'paused'; return 0; fi
+  [ -n "$(status_open_decisions "$f")" ] && printf 'decision'
+  return 0
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
