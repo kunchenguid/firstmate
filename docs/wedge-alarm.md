@@ -5,6 +5,15 @@ When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_a
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
 
+## When a delivery stays buffered
+
+Same-pane away-mode delivery requires an idle primary and an affirmatively empty composer.
+`pane_is_busy` refuses a primary mid-turn, and `fm_backend_composer_state` refuses any composer verdict other than `empty`, so a digest cannot merge into active or uncertain input.
+If the primary remains continuously busy, buffered delivery starves by design rather than interrupting that turn.
+The expected example is a captain who continues interacting with Firstmate after entering away mode, which keeps the same primary busy instead of creating an idle absence.
+`FM_MAX_DEFER_SECS` bounds that wait and raises this alarm while preserving the buffered escalation.
+Treat the alarm as a visible delivery limitation, not as permission to override either guard or proof that idle away-mode delivery failed.
+
 ## Channels
 
 `config/wedge-alarm` is local and gitignored.
