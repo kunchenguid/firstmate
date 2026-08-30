@@ -562,6 +562,39 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+# Build the teardown test's executable search path without docker (lsof kept),
+# so the docker-absent container-warning case stays hermetic even on a host
+# that has a real docker installed.
+make_path_without_docker() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-docker" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln lsof \
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
+# Override fakebin/docker with a hermetic stub: `ps --filter ...` answers with
+# the space-separated names in FM_FAKE_DOCKER_PS_NAMES, and every invocation is
+# logged to FM_FAKE_DOCKER_LOG when set, so a test can prove teardown never
+# issues a mutating docker call (rm/stop/kill).
+add_docker_stub() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/docker" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_DOCKER_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_DOCKER_LOG"
+if [ "${1:-}" = ps ] && [ "${2:-}" = --filter ]; then
+  # shellcheck disable=SC2086  # names are a deliberate word-split list
+  [ -n "${FM_FAKE_DOCKER_PS_NAMES:-}" ] && printf '%s\n' ${FM_FAKE_DOCKER_PS_NAMES}
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/docker"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -2596,7 +2629,65 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_leaked_task_container_warns_without_blocking_or_mutating() {
+  local case_dir rc log
+  case_dir=$(make_case leaked-container-warning)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  add_docker_stub "$case_dir"
+  log="$case_dir/docker-calls.log"
+  rc=0
+  FM_FAKE_DOCKER_LOG="$log" FM_FAKE_DOCKER_PS_NAMES="fm-task-x1-pg" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "leaked-container-warning: teardown should still succeed"
+  assert_grep "warning: task task-x1 left running container" "$case_dir/stderr" \
+    "leaked-container-warning: teardown did not warn about the leaked container"
+  assert_grep "fm-task-x1-pg" "$case_dir/stderr" \
+    "leaked-container-warning: warning did not name the leaked container"
+  grep -Eq '^(rm|stop|kill) ' "$log" \
+    && fail "leaked-container-warning: teardown issued a mutating docker call: $(cat "$log")"
+  pass "teardown warns about a leaked task container without blocking or removing it"
+}
+
+test_clean_task_container_prints_no_warning() {
+  local case_dir rc
+  case_dir=$(make_case no-leaked-container)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  add_docker_stub "$case_dir"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "no-leaked-container: teardown should succeed"
+  assert_no_grep "left running container" "$case_dir/stderr" \
+    "no-leaked-container: teardown printed a container warning with no leaked container"
+  pass "teardown prints no container warning when the worker cleaned up"
+}
+
+test_docker_absent_skips_container_warning_silently() {
+  local case_dir rc path_without_docker
+  case_dir=$(make_case docker-absent-container-warning)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_docker=$(make_path_without_docker "$case_dir")
+  PATH="$path_without_docker" command -v docker >/dev/null 2>&1 \
+    && fail "docker-absent-container-warning: fixture path unexpectedly exposes docker"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_docker" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "docker-absent-container-warning: teardown should still succeed"
+  assert_no_grep "left running container" "$case_dir/stderr" \
+    "docker-absent-container-warning: teardown printed a container warning without docker"
+  pass "teardown skips the container warning silently when docker is absent"
+}
+
 test_local_only_fork_remote_allows
+test_leaked_task_container_warns_without_blocking_or_mutating
+test_clean_task_container_prints_no_warning
+test_docker_absent_skips_container_warning_silently
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses

@@ -137,6 +137,13 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+# Post-teardown container warning (non-blocking): the brief scaffold's container
+# clause tells workers to name task-started containers fm-<task-id>-* and stop
+# and remove them before reporting done. After a successful teardown, teardown
+# lists still-running containers whose name starts with fm-<task-id>- and prints
+# a warning naming each one. It never stops or removes a container itself
+# (removal authority stays with the captain) and stays silent when docker is
+# absent or unusable.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1158,6 +1165,22 @@ backlog_refresh_reminder() {
   else
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
+}
+
+# Non-blocking container-cleanup warning (header: "Post-teardown container
+# warning"). A worker that followed the brief scaffold's container clause
+# (bin/fm-brief.sh) named its containers fm-<task-id>-* and removed them before
+# reporting done, so a survivor here means that clause was skipped. Teardown
+# never stops or removes a container itself - removal authority stays with the
+# captain - and a missing or unusable docker stays silent.
+warn_leaked_task_containers() {
+  local id=$1 prefix names
+  command -v docker >/dev/null 2>&1 || return 0
+  prefix="fm-$id-"
+  names=$(docker ps --filter "name=^/$prefix" --format '{{.Names}}' 2>/dev/null) || return 0
+  [ -n "$names" ] || return 0
+  echo "warning: task $id left running container(s) it should have stopped and removed (brief container clause); firstmate never removes containers, so stop and remove them manually if unwanted:" >&2
+  printf '%s\n' "$names" | sed 's/^/warning:   /' >&2
 }
 
 path_is_ancestor_of() {
@@ -2836,4 +2859,5 @@ if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+warn_leaked_task_containers "$ID"
 backlog_refresh_reminder
