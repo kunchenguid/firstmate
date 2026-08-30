@@ -182,7 +182,9 @@ When deduplication finds that the worker already moved the matching record into 
 The remote host runs no doorbell re-ring ladder of its own; a swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation, whose recovery request rings the doorbell again when it is enqueued.
 `fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
-The remote harness diagnostic is an instrument for inspecting the recorded Herdr pane's process ancestry, not a fix for session-lock refusal, and it preserves the existing fail-closed behavior.
+For a remote Codex secondmate, launch starts the agent without a startup brief, identifies its one host-side process through Herdr, and atomically publishes a mode-0600 binding to its exported `CODEX_SESSION_ID` before delivering that brief.
+The session lock accepts that binding only when the caller and the still-live host process export the recorded session id, while a missing, malformed, stale, or ambiguous binding still refuses.
+The remote harness diagnostic remains the read-only instrument for inspecting the recorded Herdr pane's process ancestry and preserves fail-closed behavior.
 It becomes remotely invocable only after merge and the ordinary remote code-root update deploys the merged code to that host.
 
 ```sh

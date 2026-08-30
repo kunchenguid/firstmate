@@ -25,6 +25,137 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
+# A Codex tool command can execute in a private PID namespace whose ancestry
+# ends at that namespace's init.  On hosts where Codex exports its own stable
+# session id into that namespace, fm-spawn records the host-side Codex agent
+# that was launched for this exact home/incarnation in this private file.
+# This is an additional identity route, never an ancestry fallback: absence or
+# any malformed field leaves the caller unverified.
+FM_CODEX_HOME_BINDING_FILE=.fm-codex-session-binding
+
+fm_codex_session_id_valid() { # <uuid>
+  case "$1" in
+    [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_codex_session_id_for_pid() { # <pid>; prints the one exported Codex session id
+  local pid=$1 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} file entry session=
+  case "$pid" in *[!0-9]*|''|0|1) return 1 ;; esac
+  file="$proc_root/$pid/environ"
+  [ -r "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r -d '' entry; do
+    case "$entry" in
+      CODEX_SESSION_ID=*)
+        [ -z "$session" ] || return 1
+        session=${entry#CODEX_SESSION_ID=}
+        ;;
+    esac
+  done < "$file"
+  fm_codex_session_id_valid "$session" || return 1
+  printf '%s\n' "$session"
+}
+
+fm_codex_host_agent_matches() { # <pid>; prove the host-side process is Codex, never a bare interpreter
+  local pid=$1 comm args argv0
+  case "$pid" in *[!0-9]*|''|0|1) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
+  fm_harness_process_matches "$comm" "$args" "$argv0" || return 1
+  case "$(basename -- "$comm"):$argv0:$args" in
+    *codex*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_codex_home_binding_publish() { # <state-dir> <home> <spawn-gen> <agent-pid> <codex-session-id>
+  local state=$1 home=$2 spawn_gen=$3 pid=$4 session=$5 observed file tmp old_umask
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  case "$home" in /*) ;; *) return 1 ;; esac
+  case "$home$spawn_gen" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  fm_codex_session_id_valid "$session" || return 1
+  fm_codex_host_agent_matches "$pid" || return 1
+  observed=$(fm_codex_session_id_for_pid "$pid") || return 1
+  [ "$observed" = "$session" ] || return 1
+  file="$state/$FM_CODEX_HOME_BINDING_FILE"
+  old_umask=$(umask)
+  umask 077
+  tmp=$(mktemp "$state/.fm-codex-session-binding.XXXXXXXX") || { umask "$old_umask"; return 1; }
+  umask "$old_umask"
+  if ! {
+    printf 'harness=codex\n'
+    printf 'home=%s\n' "$home"
+    printf 'spawn_gen=%s\n' "$spawn_gen"
+    printf 'agent_pid=%s\n' "$pid"
+    printf 'codex_session_id=%s\n' "$session"
+  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_codex_home_binding_read() { # <state-dir>; parses one complete private binding into FM_CODEX_BINDING_*
+  local state=$1 file line key value seen=' '
+  FM_CODEX_BINDING_HARNESS=
+  FM_CODEX_BINDING_HOME=
+  FM_CODEX_BINDING_SPAWN_GEN=
+  FM_CODEX_BINDING_PID=
+  FM_CODEX_BINDING_SESSION=
+  file="$state/$FM_CODEX_HOME_BINDING_FILE"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*}; value=${line#*=}
+    [ "$key" != "$line" ] || return 1
+    case " $seen " in *" $key "*) return 1 ;; esac
+    seen="$seen$key "
+    case "$key" in
+      harness) FM_CODEX_BINDING_HARNESS=$value ;;
+      home) FM_CODEX_BINDING_HOME=$value ;;
+      spawn_gen) FM_CODEX_BINDING_SPAWN_GEN=$value ;;
+      agent_pid) FM_CODEX_BINDING_PID=$value ;;
+      codex_session_id) FM_CODEX_BINDING_SESSION=$value ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+}
+
+fm_codex_home_binding_pid() { # <state-dir>; prints host agent pid when this tool proves the recorded binding
+  local state=$1 file session observed
+  FM_CODEX_BINDING_REASON=
+  session=${CODEX_SESSION_ID:-}
+  if ! fm_codex_session_id_valid "$session"; then
+    FM_CODEX_BINDING_REASON='reject:no-codex-session-identity-in-environment'
+    return 1
+  fi
+  file="$state/$FM_CODEX_HOME_BINDING_FILE"
+  [ -f "$file" ] && [ ! -L "$file" ] || { FM_CODEX_BINDING_REASON='reject:missing-codex-home-binding'; return 1; }
+  fm_codex_home_binding_read "$state" || { FM_CODEX_BINDING_REASON='reject:malformed-codex-home-binding'; return 1; }
+  [ "$FM_CODEX_BINDING_HARNESS" = codex ] && [ "$FM_CODEX_BINDING_HOME" = "${FM_HOME:-}" ] \
+    && [ -n "$FM_CODEX_BINDING_SPAWN_GEN" ] && [ "$FM_CODEX_BINDING_SESSION" = "$session" ] \
+    && fm_codex_host_agent_matches "$FM_CODEX_BINDING_PID" \
+    && observed=$(fm_codex_session_id_for_pid "$FM_CODEX_BINDING_PID") \
+    && [ "$observed" = "$FM_CODEX_BINDING_SESSION" ] || {
+      FM_CODEX_BINDING_REASON='reject:codex-home-binding-mismatch'; return 1; }
+  # shellcheck disable=SC2034 # Read by lock callers that need the refusal evidence.
+  FM_CODEX_BINDING_REASON='accept:codex-session-home-binding'
+  printf '%s\n' "$FM_CODEX_BINDING_PID"
+}
+
+fm_codex_home_binding_pid_alive() { # <state-dir> <pid>; liveness for a binding another session must respect
+  local state=$1 expected_pid=$2 observed
+  case "$expected_pid" in *[!0-9]*|''|0|1) return 1 ;; esac
+  fm_codex_home_binding_read "$state" || return 1
+  [ "$FM_CODEX_BINDING_HARNESS" = codex ] && [ "$FM_CODEX_BINDING_HOME" = "${FM_HOME:-}" ] \
+    && [ -n "$FM_CODEX_BINDING_SPAWN_GEN" ] && [ "$FM_CODEX_BINDING_PID" = "$expected_pid" ] \
+    && fm_codex_session_id_valid "$FM_CODEX_BINDING_SESSION" \
+    && fm_codex_host_agent_matches "$FM_CODEX_BINDING_PID" \
+    && observed=$(fm_codex_session_id_for_pid "$FM_CODEX_BINDING_PID") \
+    && [ "$observed" = "$FM_CODEX_BINDING_SESSION" ]
+}
+
 # Print the process argv[0] when Linux exposes it, otherwise use the first
 # token from ps args.  The fallback intentionally differs from Cursor's
 # argv0 helper: a session-lock matcher has ps args in hand and must preserve
@@ -196,7 +327,12 @@ fm_harness_ancestry_pids() {
 # is still running. Every non-Claude harness reports a single pid, so this is its
 # innermost match unchanged.
 fm_harness_ancestry_pid() {
-  local pids pid outermost=''
+  local pids pid outermost='' state
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
+  if [ -n "${FM_HOME:-}" ] && pid=$(fm_codex_home_binding_pid "$state"); then
+    printf '%s\n' "$pid"
+    return 0
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ -n "$pid" ] && outermost=$pid
@@ -209,7 +345,11 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args argv0
+  local pid=$1 comm args argv0 state
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
+  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_pid_alive "$state" "$pid"; then
+    return 0
+  fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -226,11 +366,14 @@ fm_harness_pid_alive() {
 # lock, a malformed lock, a lock held by a harness outside this ancestry, or an
 # ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid bound_pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  if bound_pid=$(fm_codex_home_binding_pid "$state") && [ "$bound_pid" = "$lock_pid" ]; then
+    return 0
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0

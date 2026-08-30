@@ -29,6 +29,8 @@
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
   mkdir -p "$remote_root/bin"
+  command -v node >/dev/null 2>&1 || return 1
+  ln -sf "$(command -v node)" "$remote_root/bin/codex"
   cat > "$script" <<SH
 #!/usr/bin/env bash
 set -u
@@ -36,6 +38,7 @@ STATE='$state'
 LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
+CODEX_BIN='$remote_root/bin/codex'
 SH
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
@@ -95,9 +98,26 @@ case "${1:-} ${2:-}" in
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
+    agent_pid_file="$STATE.agent-pid"
+    agent_pid=$(cat "$agent_pid_file" 2>/dev/null || true)
+    if ! kill -0 "$agent_pid" 2>/dev/null; then
+      CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54 \
+        "$CODEX_BIN" -e 'setInterval(() => {}, 1000)' >/dev/null 2>&1 &
+      agent_pid=$!
+      printf '%s\n' "$agent_pid" > "$agent_pid_file"
+    fi
     jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
   "pane read") printf '\n' ;;
-  "pane process-info") printf '{"result":{"process":{"name":"codex"}}}\n' ;;
+  "pane process-info")
+    pane=${3:-}
+    agent_pid=$(cat "$STATE.agent-pid" 2>/dev/null || true)
+    if kill -0 "$agent_pid" 2>/dev/null; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"argv":["%s","-e"],"name":"node","pid":%s}]}}}\n' \
+        "$pane" "$agent_pid" "$agent_pid" "$CODEX_BIN" "$agent_pid"
+    else
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":2,"foreground_process_group_id":2,"foreground_processes":[]}}}\n' "$pane"
+    fi
+    ;;
   "agent get")
     pane=${3:-}
     if [ "$(jq_state -r --arg p "$pane" '.working[$p] // false')" = true ]; then

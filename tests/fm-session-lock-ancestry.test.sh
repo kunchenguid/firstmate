@@ -281,6 +281,60 @@ SH
   pass "session-lock: unrecognized process ancestry refuses loudly with observed matcher evidence"
 }
 
+test_remote_codex_session_binding_claims_only_the_matching_session() {
+  local dir fakebin proc home session other out binding mode
+  dir="$TMP_ROOT/remote-codex-binding"
+  fakebin=$(fm_fakebin "$dir")
+  proc="$dir/proc"
+  home="$dir/home"
+  session=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54
+  other=16b9797f-12d9-4645-b3af-0d0f6c2e8b8a
+  mkdir -p "$proc/4242" "$home/state"
+  printf 'CODEX_SESSION_ID=%s\0PATH=/usr/bin\0' "$session" > "$proc/4242/environ"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' node ;;
+  4242:args=) printf '%s\n' '/opt/openai/codex/bin/main.js --interactive' ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /workspace/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" spawn-remote-1 4242 "$2"
+      CODEX_SESSION_ID="$2" fm_harness_ancestry_pid
+    ' _ "$LIB" "$session") || fail "remote Codex binding did not identify the host-side agent"
+  [ "$out" = 4242 ] || fail "remote Codex binding resolved '$out', expected host agent pid 4242"
+  binding="$home/state/.fm-codex-session-binding"
+  [ -f "$binding" ] && [ ! -L "$binding" ] || fail "remote Codex binding record was not published"
+  mode=$(stat -f '%Lp' "$binding" 2>/dev/null || stat -c '%a' "$binding")
+  [ "$mode" = 600 ] || fail "remote Codex binding record mode was $mode, not 600"
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" CODEX_SESSION_ID="$other" \
+    bash -c '. "$1"; kill() { return 0; }; fm_harness_ancestry_pid' _ "$LIB" >/dev/null 2>&1; then
+    fail "a different Codex session claimed the remote home through the binding"
+  fi
+  printf '4242\n' > "$home/state/.lock"
+  FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" CODEX_SESSION_ID="$session" \
+    bash -c '. "$1"; kill() { return 0; }; fm_session_lock_owned_by_self "$FM_HOME/state"' _ "$LIB" \
+    || fail "the matching remote Codex session did not recognize its published lock"
+  pass "session-lock: remote Codex binds a host agent only to its matching session identity"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -422,6 +476,7 @@ test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_unrecognized_ancestry_refuses_with_observed_evidence
+test_remote_codex_session_binding_claims_only_the_matching_session
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

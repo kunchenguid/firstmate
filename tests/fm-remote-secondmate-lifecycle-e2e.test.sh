@@ -26,7 +26,7 @@ TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
-  local worker_pid='' wait_attempt=0
+  local worker_pid='' agent_pid='' wait_attempt=0
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
@@ -38,6 +38,10 @@ cleanup() {
       wait_attempt=$((wait_attempt + 1))
       sleep 0.05
     done
+  fi
+  if [ -f "$HERDR_STATE.agent-pid" ]; then
+    agent_pid=$(cat "$HERDR_STATE.agent-pid")
+    kill "$agent_pid" 2>/dev/null || true
   fi
   rm -rf -- "$TMP_ROOT"
 }

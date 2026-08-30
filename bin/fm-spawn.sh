@@ -297,6 +297,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -1234,7 +1236,7 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __CODEX_INITIAL_PROMPT__'
       else
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
@@ -2345,6 +2347,42 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
+# A remote Herdr Codex tool process lives in a private PID namespace.  Its
+# session-start tool cannot see the host-side Codex ancestor, so before it
+# receives any startup work we bind the one host process that exports the same
+# stable CODEX_SESSION_ID.  The binding writer and process classifier remain in
+# fm-session-lock-lib.sh; this is only the backend observation loop.
+spawn_bind_remote_codex_session() {
+  local info pids pid session matches match_pid='' match_session='' attempt
+  for attempt in $(seq 1 "${FM_CODEX_REMOTE_BIND_POLLS:-80}"); do
+    info=$(fm_backend_herdr_cli "$HERDR_SES" pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null || true)
+    if fm_backend_herdr_pane_process_info_envelope_valid "$info" "$HERDR_PANE_ID"; then
+      pids=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[].pid' 2>/dev/null || true)
+      matches=0
+      match_pid=
+      match_session=
+      while IFS= read -r pid; do
+        case "$pid" in ''|*[!0-9]*|0|1) continue ;; esac
+        session=$(fm_codex_session_id_for_pid "$pid" 2>/dev/null || true)
+        [ -n "$session" ] || continue
+        matches=$((matches + 1))
+        match_pid=$pid
+        match_session=$session
+      done <<EOF
+$pids
+EOF
+      if [ "$matches" -eq 1 ] \
+        && fm_codex_home_binding_publish "$PROJ_ABS/state" "$PROJ_ABS" \
+          "$SPAWN_GEN" "$match_pid" "$match_session"; then
+        return 0
+      fi
+    fi
+    sleep 0.1
+  done
+  echo "error: remote Codex launch did not expose one verified host-side CODEX_SESSION_ID; startup brief was not delivered" >&2
+  return 1
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -2955,10 +2993,26 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+CODEX_REMOTE_BINDING_REQUIRED=0
+CODEX_INITIAL_PROMPT=
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = codex ] && [ "$BACKEND" = herdr ] \
+  && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ]; then
+  CODEX_REMOTE_BINDING_REQUIRED=1
+  CODEX_INITIAL_PROMPT=$("$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief < "$BRIEF") || {
+    echo "error: could not encode remote Codex startup brief" >&2
+    exit 1
+  }
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
+  LAUNCH=${LAUNCH//__CODEX_INITIAL_PROMPT__/}
+else
+  # shellcheck disable=SC2016 # Expanded in the target pane after placeholder substitution.
+  LAUNCH=${LAUNCH//__CODEX_INITIAL_PROMPT__/'"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'}
+fi
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
@@ -3063,6 +3117,15 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
+  if ! spawn_bind_remote_codex_session; then
+    exit 1
+  fi
+  if ! spawn_send_literal "$T" "$CODEX_INITIAL_PROMPT" || ! spawn_send_key "$T" Enter; then
+    echo "error: remote Codex session binding was published, but its startup brief could not be delivered" >&2
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
