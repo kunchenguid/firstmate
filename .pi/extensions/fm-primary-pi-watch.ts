@@ -268,10 +268,14 @@ function generationIsLive(generation: SessionGeneration): boolean {
   return activeGeneration === generation && !generation.stopping;
 }
 
-function stopGeneration(generation: SessionGeneration): void {
-  generation.stopping = true;
+function cancelRetry(generation: SessionGeneration): void {
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   generation.retryTimer = null;
+}
+
+function stopGeneration(generation: SessionGeneration): void {
+  generation.stopping = true;
+  cancelRetry(generation);
   if (generation.demandHintTimer) clearTimeout(generation.demandHintTimer);
   generation.demandHintTimer = null;
   for (const watcher of generation.demandWatchers.splice(0)) watcher.close();
@@ -583,11 +587,13 @@ export default function (pi: ExtensionAPI) {
       releaseChild();
       if (!generationIsLive(owner)) return;
       const classification = classifyClose(stdout, stderr, code, signal);
-      if (intentionalIdleRetirements.has(armChild) && classification.kind === "failure") {
+      const intentionalRetirement = intentionalIdleRetirements.has(armChild);
+      if (intentionalRetirement && classification.kind === "failure") {
         intentionalIdleRetirements.delete(armChild);
         void queueDemandReconciliation(owner);
         return;
       }
+      if (intentionalRetirement) intentionalIdleRetirements.delete(armChild);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         if (owner.restoring) return;
@@ -638,14 +644,18 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner)) return;
     const demand = owner.demandHintsReliable ? observedDemand : "uncertain";
     if (demand !== "idle") {
-      startArm(owner);
+      const result = startArm(owner);
+      if (!result.ok) return;
+      const armChild = owner.child;
+      if (armChild) await waitForReadiness(armChild);
       return;
     }
+    cancelRetry(owner);
+    owner.retryFailures = 0;
     const armChild = owner.child;
     if (!armChild) return;
     intentionalIdleRetirements.add(armChild);
-    const retired = await retireArm(armChild);
-    if (!retired) intentionalIdleRetirements.delete(armChild);
+    await retireArm(armChild);
     if (!generationIsLive(owner)) return;
     const observedAfterRetirement = await readSupervisionDemand();
     if (!generationIsLive(owner)) return;
@@ -707,7 +717,7 @@ export default function (pi: ExtensionAPI) {
     owner.demandHintsReliable = true;
     watchDemandDirectory(owner, state, (filename) => {
       if (filename === null) return true;
-      if (filename === ".wake-queue" || filename === "x-watch.check.sh" || filename === "procevent") return true;
+      if (filename === ".wake-queue" || filename === "x-watch.check.sh" || filename === "procevent" || filename === ".lock") return true;
       return !filename.startsWith(".") && filename.endsWith(".meta");
     });
     const procevent = `${state}/procevent`;
