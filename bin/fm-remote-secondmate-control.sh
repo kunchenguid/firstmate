@@ -123,13 +123,30 @@ print_route() { # <id>
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
+remote_spawn_generation_valid() {
+  local gen=$1 first second third rest
+  first=${gen%%.*}
+  rest=${gen#*.}
+  [ "$rest" != "$gen" ] || return 1
+  second=${rest%%.*}
+  third=${rest#*.}
+  [ "$third" != "$rest" ] && [ "${third#*.}" = "$third" ] || return 1
+  case "$first" in s*) first=${first#s} ;; *) return 1 ;; esac
+  case "$first" in ''|*[!0-9]*) return 1 ;; esac
+  case "$second" in ''|*[!0-9]*) return 1 ;; esac
+  case "$third" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 remote_endpoint_launch_complete() {
   local harness spawn_gen complete_gen
-  harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  harness=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" harness 2>/dev/null) || return 1
+  case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;; *) return 1 ;; esac
   [ "$harness" = codex ] || return 0
-  spawn_gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" spawn_gen)
-  complete_gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" launch_complete_spawn_gen)
-  [ -n "$spawn_gen" ] && [ "$complete_gen" = "$spawn_gen" ]
+  spawn_gen=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" spawn_gen 2>/dev/null) || return 1
+  complete_gen=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" launch_complete_spawn_gen 2>/dev/null) || return 1
+  remote_spawn_generation_valid "$spawn_gen" \
+    && remote_spawn_generation_valid "$complete_gen" \
+    && [ "$complete_gen" = "$spawn_gen" ]
 }
 
 cmd_route() {

@@ -722,6 +722,25 @@ launches_after_inherit=0
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
 
+printf 'wrong-pane\n' > "$HERDR_STATE.process-mode"
+set +e
+FM_CODEX_REMOTE_BIND_POLLS=1 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-wrong-pane-codex.out" 2>&1
+wrong_pane_codex_rc=$?
+set -e
+[ "$wrong_pane_codex_rc" -ne 0 ] || fail "remote spawn trusted process evidence for the wrong pane"
+assert_grep 'envelope=invalid result=pane-process-info foreground_pid_evidence=untrusted-uninspected' \
+  "$TMP_ROOT/spawn-wrong-pane-codex.out" \
+  "wrong-pane refusal did not label raw process evidence untrusted and uninspected"
+assert_grep 'foreground_pid_count=1 foreground_pids=[0-9]' "$TMP_ROOT/spawn-wrong-pane-codex.out" \
+  "wrong-pane refusal omitted its safely typed raw foreground PID"
+assert_grep 'verified_candidate_count=uninspected' "$TMP_ROOT/spawn-wrong-pane-codex.out" \
+  "wrong-pane refusal misstated uninspected evidence as zero verified candidates"
+assert_no_grep '^diagnostic-candidate ' "$TMP_ROOT/spawn-wrong-pane-codex.out" \
+  "wrong-pane refusal inspected an untrusted foreground PID"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null \
+  || fail "wrong-pane remote Codex endpoint could not be retired for recovery"
+
 printf 'generic-only\n' > "$HERDR_STATE.process-mode"
 set +e
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
@@ -766,6 +785,25 @@ remote_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$REMOTE_HOME/state/parent-route/io
 remote_complete_gen=$(sed -n 's/^launch_complete_spawn_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
 [ -n "$remote_spawn_gen" ] && [ "$remote_complete_gen" = "$remote_spawn_gen" ] \
   || fail "successful remote Codex launch did not bind completion to its spawn generation"
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-complete.meta"
+for duplicate_field in harness spawn_gen launch_complete_spawn_gen; do
+  case "$duplicate_field" in
+    harness) duplicate_value=codex ;;
+    *) duplicate_value=$remote_spawn_gen ;;
+  esac
+  printf '%s=%s\n' "$duplicate_field" "$duplicate_value" >> "$remote_route_meta"
+  set +e
+  remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr \
+    > "$TMP_ROOT/duplicate-$duplicate_field.out" 2>&1
+  duplicate_complete_rc=$?
+  set -e
+  [ "$duplicate_complete_rc" -ne 0 ] \
+    || fail "alive remote Codex endpoint accepted duplicate $duplicate_field metadata"
+  assert_grep 'alive without a matching launch-complete receipt' "$TMP_ROOT/duplicate-$duplicate_field.out" \
+    "duplicate $duplicate_field refusal did not name incomplete launch evidence"
+  cp "$TMP_ROOT/remote-ios-complete.meta" "$remote_route_meta"
+done
 rm -f "$HERDR_STATE.process-mode"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"

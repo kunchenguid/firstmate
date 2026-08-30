@@ -32,6 +32,81 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 # This is an additional identity route, never an ancestry fallback: absence or
 # any malformed field leaves the caller unverified.
 FM_CODEX_HOME_BINDING_FILE=.fm-codex-session-binding
+FM_CODEX_HOME_BINDING_REQUIREMENT_FILE=.fm-codex-session-binding-required
+
+fm_codex_spawn_generation_valid() { # <spawn-gen>
+  local gen=$1 first second third rest
+  first=${gen%%.*}
+  rest=${gen#*.}
+  [ "$rest" != "$gen" ] || return 1
+  second=${rest%%.*}
+  third=${rest#*.}
+  [ "$third" != "$rest" ] && [ "${third#*.}" = "$third" ] || return 1
+  case "$first" in s*) first=${first#s} ;; *) return 1 ;; esac
+  case "$first" in ''|*[!0-9]*) return 1 ;; esac
+  case "$second" in ''|*[!0-9]*) return 1 ;; esac
+  case "$third" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+fm_codex_home_binding_requirement_publish() { # <state-dir> <home> <spawn-gen>
+  local state=$1 home=$2 spawn_gen=$3 file tmp old_umask
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  case "$home" in /*) ;; *) return 1 ;; esac
+  case "$home" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  fm_codex_spawn_generation_valid "$spawn_gen" || return 1
+  file="$state/$FM_CODEX_HOME_BINDING_REQUIREMENT_FILE"
+  old_umask=$(umask)
+  umask 077
+  tmp=$(mktemp "$state/.fm-codex-session-binding-required.XXXXXXXX") || { umask "$old_umask"; return 1; }
+  umask "$old_umask"
+  if ! {
+    printf 'harness=codex\n'
+    printf 'home=%s\n' "$home"
+    printf 'spawn_gen=%s\n' "$spawn_gen"
+  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_codex_home_binding_requirement_read() { # <state-dir>
+  local state=$1 file line key value seen=' '
+  FM_CODEX_REQUIREMENT_HARNESS=
+  FM_CODEX_REQUIREMENT_HOME=
+  FM_CODEX_REQUIREMENT_SPAWN_GEN=
+  file="$state/$FM_CODEX_HOME_BINDING_REQUIREMENT_FILE"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*}; value=${line#*=}
+    [ "$key" != "$line" ] || return 1
+    case " $seen " in *" $key "*) return 1 ;; esac
+    seen="$seen$key "
+    case "$key" in
+      harness) FM_CODEX_REQUIREMENT_HARNESS=$value ;;
+      home) FM_CODEX_REQUIREMENT_HOME=$value ;;
+      spawn_gen) FM_CODEX_REQUIREMENT_SPAWN_GEN=$value ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+  [ "$FM_CODEX_REQUIREMENT_HARNESS" = codex ] \
+    && case "$FM_CODEX_REQUIREMENT_HOME" in /*) true ;; *) false ;; esac \
+    && case "$FM_CODEX_REQUIREMENT_HOME" in *$'\n'*|*$'\r'*) false ;; *) true ;; esac \
+    && fm_codex_spawn_generation_valid "$FM_CODEX_REQUIREMENT_SPAWN_GEN"
+}
+
+fm_codex_home_binding_requirement_present() { # <state-dir>
+  [ -e "$1/$FM_CODEX_HOME_BINDING_REQUIREMENT_FILE" ] \
+    || [ -L "$1/$FM_CODEX_HOME_BINDING_REQUIREMENT_FILE" ] \
+    || [ -e "$1/$FM_CODEX_HOME_BINDING_FILE" ] \
+    || [ -L "$1/$FM_CODEX_HOME_BINDING_FILE" ]
+}
+
+fm_codex_home_binding_requirement_clear() { # <state-dir>
+  local state=$1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  rm -f -- "$state/$FM_CODEX_HOME_BINDING_REQUIREMENT_FILE" \
+    "$state/$FM_CODEX_HOME_BINDING_FILE"
+}
 
 fm_codex_session_id_valid() { # <uuid>
   case "$1" in
@@ -84,6 +159,9 @@ fm_codex_home_binding_publish() { # <state-dir> <home> <spawn-gen> <agent-pid> <
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   case "$home" in /*) ;; *) return 1 ;; esac
   case "$home$spawn_gen" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  fm_codex_home_binding_requirement_read "$state" \
+    && [ "$FM_CODEX_REQUIREMENT_HOME" = "$home" ] \
+    && [ "$FM_CODEX_REQUIREMENT_SPAWN_GEN" = "$spawn_gen" ] || return 1
   fm_codex_session_id_valid "$session" || return 1
   fm_codex_host_agent_matches "$pid" || return 1
   observed=$(fm_codex_session_id_for_pid "$pid") || return 1
@@ -138,11 +216,16 @@ fm_codex_home_binding_pid() { # <state-dir>; prints host agent pid when this too
     FM_CODEX_BINDING_REASON='reject:no-codex-session-identity-in-environment'
     return 1
   fi
+  fm_codex_home_binding_requirement_read "$state" \
+    || { FM_CODEX_BINDING_REASON='reject:malformed-codex-binding-requirement'; return 1; }
+  [ "$FM_CODEX_REQUIREMENT_HOME" = "${FM_HOME:-}" ] \
+    || { FM_CODEX_BINDING_REASON='reject:codex-binding-requirement-home-mismatch'; return 1; }
   file="$state/$FM_CODEX_HOME_BINDING_FILE"
   [ -f "$file" ] && [ ! -L "$file" ] || { FM_CODEX_BINDING_REASON='reject:missing-codex-home-binding'; return 1; }
   fm_codex_home_binding_read "$state" || { FM_CODEX_BINDING_REASON='reject:malformed-codex-home-binding'; return 1; }
   [ "$FM_CODEX_BINDING_HARNESS" = codex ] && [ "$FM_CODEX_BINDING_HOME" = "${FM_HOME:-}" ] \
-    && [ -n "$FM_CODEX_BINDING_SPAWN_GEN" ] && [ "$FM_CODEX_BINDING_SESSION" = "$session" ] \
+    && [ "$FM_CODEX_BINDING_SPAWN_GEN" = "$FM_CODEX_REQUIREMENT_SPAWN_GEN" ] \
+    && [ "$FM_CODEX_BINDING_SESSION" = "$session" ] \
     && fm_codex_host_agent_matches "$FM_CODEX_BINDING_PID" \
     && observed=$(fm_codex_session_id_for_pid "$FM_CODEX_BINDING_PID") \
     && [ "$observed" = "$FM_CODEX_BINDING_SESSION" ] || {
@@ -155,9 +238,12 @@ fm_codex_home_binding_pid() { # <state-dir>; prints host agent pid when this too
 fm_codex_home_binding_pid_alive() { # <state-dir> <pid>; liveness for a binding another session must respect
   local state=$1 expected_pid=$2 observed
   case "$expected_pid" in *[!0-9]*|''|0|1) return 1 ;; esac
+  fm_codex_home_binding_requirement_read "$state" || return 1
+  [ "$FM_CODEX_REQUIREMENT_HOME" = "${FM_HOME:-}" ] || return 1
   fm_codex_home_binding_read "$state" || return 1
   [ "$FM_CODEX_BINDING_HARNESS" = codex ] && [ "$FM_CODEX_BINDING_HOME" = "${FM_HOME:-}" ] \
-    && [ -n "$FM_CODEX_BINDING_SPAWN_GEN" ] && [ "$FM_CODEX_BINDING_PID" = "$expected_pid" ] \
+    && [ "$FM_CODEX_BINDING_SPAWN_GEN" = "$FM_CODEX_REQUIREMENT_SPAWN_GEN" ] \
+    && [ "$FM_CODEX_BINDING_PID" = "$expected_pid" ] \
     && fm_codex_session_id_valid "$FM_CODEX_BINDING_SESSION" \
     && fm_codex_host_agent_matches "$FM_CODEX_BINDING_PID" \
     && observed=$(fm_codex_session_id_for_pid "$FM_CODEX_BINDING_PID") \
@@ -278,8 +364,16 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
 # A successful diagnostic means the inspection completed; result=none remains
 # a fail-closed absence of verified harness evidence.
 fm_harness_ancestry_diagnostic() {  # [pid]
-  local pid=${1:-$$} comm args ppid hop=0 matched=0 extending=0 argv0
+  local pid=${1:-$$} comm args ppid hop=0 matched=0 extending=0 argv0 state
   case "$pid" in ''|*[!0-9]*|0|1) printf 'result=invalid-start-pid pid=%q\n' "$pid"; return 1 ;; esac
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
+  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_requirement_present "$state"; then
+    if ! fm_codex_home_binding_pid "$state" >/dev/null; then
+      printf 'schema=fm-harness-ancestry-diagnostic.v1 start_pid=%s max_hops=0\n' "$pid"
+      printf 'result=required-codex-binding-rejected reason=%q\n' "${FM_CODEX_BINDING_REASON:-reject:unknown-codex-binding}"
+      return 0
+    fi
+  fi
   printf 'schema=fm-harness-ancestry-diagnostic.v1 start_pid=%s max_hops=16\n' "$pid"
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     hop=$((hop + 1))
@@ -291,14 +385,14 @@ fm_harness_ancestry_diagnostic() {  # [pid]
     argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if fm_harness_process_matches "$comm" "$args" "$argv0"; then
-      printf 'hop=%s pid=%s ppid=%q comm=%q argv0=%q args=%q match=%q\n' \
-        "$hop" "$pid" "$ppid" "$comm" "$argv0" "$args" "$FM_HARNESS_MATCH_REASON"
+      printf 'hop=%s pid=%s ppid=%q comm=%q argv0=%q args=redacted match=%q\n' \
+        "$hop" "$pid" "$ppid" "$comm" "$argv0" "$FM_HARNESS_MATCH_REASON"
       matched=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
     else
-      printf 'hop=%s pid=%s ppid=%q comm=%q argv0=%q args=%q match=%q\n' \
-        "$hop" "$pid" "$ppid" "$comm" "$argv0" "$args" "$FM_HARNESS_MATCH_REASON"
+      printf 'hop=%s pid=%s ppid=%q comm=%q argv0=%q args=redacted match=%q\n' \
+        "$hop" "$pid" "$ppid" "$comm" "$argv0" "$FM_HARNESS_MATCH_REASON"
       [ "$extending" -eq 0 ] || break
     fi
     case "$ppid" in ''|*[!0-9]*|0|1) break ;; esac
@@ -363,6 +457,9 @@ fm_harness_ancestry_pid() {
     printf '%s\n' "$pid"
     return 0
   fi
+  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_requirement_present "$state"; then
+    return 1
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ -n "$pid" ] && outermost=$pid
@@ -379,6 +476,9 @@ fm_harness_pid_alive() {
   state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
   if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_pid_alive "$state" "$pid"; then
     return 0
+  fi
+  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_requirement_present "$state"; then
+    return 1
   fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
@@ -403,6 +503,9 @@ fm_session_lock_owned_by_self() {
   esac
   if bound_pid=$(fm_codex_home_binding_pid "$state") && [ "$bound_pid" = "$lock_pid" ]; then
     return 0
+  fi
+  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_requirement_present "$state"; then
+    return 1
   fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do

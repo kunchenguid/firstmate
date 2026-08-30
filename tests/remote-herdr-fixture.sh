@@ -128,7 +128,10 @@ case "${1:-} ${2:-}" in
     process_mode=$(cat "$PROCESS_MODE_FILE" 2>/dev/null || true)
     agent_pid=$(cat "$STATE.agent-pid" 2>/dev/null || true)
     helper_pid=$(cat "$STATE.helper-pid" 2>/dev/null || true)
-    if [ "$process_mode" = with-helper ] \
+    if [ "$process_mode" = wrong-pane ] && kill -0 "$agent_pid" 2>/dev/null; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"wrong-pane","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"argv":["%s","-e"],"name":"node","pid":%s}]}}}\n' \
+        "$agent_pid" "$agent_pid" "$CODEX_BIN" "$agent_pid"
+    elif [ "$process_mode" = with-helper ] \
       && kill -0 "$agent_pid" 2>/dev/null \
       && kill -0 "$helper_pid" 2>/dev/null; then
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"argv":["%s","-e"],"name":"node","pid":%s},{"argv":["%s","-e"],"name":"node","pid":%s}]}}}\n' \

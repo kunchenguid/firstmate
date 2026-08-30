@@ -263,7 +263,8 @@ SH
     || fail "the read-only ancestry diagnostic failed"
   assert_contains "$out" 'pid=701' "diagnostic names the inspected pid"
   assert_contains "$out" 'comm=herdr-worker' "diagnostic names the observed command"
-  assert_contains "$out" 'args=herdr\ worker\ --lane\ remote' "diagnostic names the observed arguments"
+  assert_contains "$out" 'args=redacted' "diagnostic redacts the observed arguments"
+  assert_not_contains "$out" 'herdr\ worker\ --lane\ remote' "diagnostic does not expose process arguments"
   assert_contains "$out" 'match=reject:basename\,path-component\,interpreter-args\,cursor-structural' \
     "diagnostic names every rejected shared-matcher check"
   assert_contains "$out" 'result=no-verified-harness' "diagnostic preserves fail-closed absence of identity"
@@ -308,7 +309,7 @@ case "$pid:$field" in
   4242:ppid=) printf '%s\n' 1 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash /workspace/bin/fm-lock.sh' ;;
-  *:ppid=) printf '%s\n' 1 ;;
+  *:ppid=) printf '%s\n' 4242 ;;
 esac
 SH
   chmod +x "$fakebin/ps"
@@ -316,7 +317,8 @@ SH
     bash -c '
       . "$1"
       kill() { return 0; }
-      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" spawn-remote-1 4242 "$2"
+      fm_codex_home_binding_requirement_publish "$FM_HOME/state" "$FM_HOME" s1.2.3
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
       CODEX_SESSION_ID="$2" fm_harness_ancestry_pid
     ' _ "$LIB" "$session") || fail "remote Codex binding did not identify the host-side agent"
   [ "$out" = 4242 ] || fail "remote Codex binding resolved '$out', expected host agent pid 4242"
@@ -324,6 +326,14 @@ SH
   [ -f "$binding" ] && [ ! -L "$binding" ] || fail "remote Codex binding record was not published"
   mode=$(stat -f '%Lp' "$binding" 2>/dev/null || stat -c '%a' "$binding")
   [ "$mode" = 600 ] || fail "remote Codex binding record mode was $mode, not 600"
+  printf 'harness=codex\nhome=%s\nspawn_gen=s9.9.9\n' "$home" \
+    > "$home/state/.fm-codex-session-binding-required"
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" CODEX_SESSION_ID="$session" \
+    bash -c '. "$1"; kill() { return 0; }; fm_harness_ancestry_pid' _ "$LIB" >/dev/null 2>&1; then
+    fail "a stale remote Codex binding fell back to visible Codex ancestry"
+  fi
+  printf 'harness=codex\nhome=%s\nspawn_gen=s1.2.3\n' "$home" \
+    > "$home/state/.fm-codex-session-binding-required"
   if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" CODEX_SESSION_ID="$other" \
     bash -c '. "$1"; kill() { return 0; }; fm_harness_ancestry_pid' _ "$LIB" >/dev/null 2>&1; then
     fail "a different Codex session claimed the remote home through the binding"
@@ -332,6 +342,11 @@ SH
   FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" CODEX_SESSION_ID="$session" \
     bash -c '. "$1"; kill() { return 0; }; fm_session_lock_owned_by_self "$FM_HOME/state"' _ "$LIB" \
     || fail "the matching remote Codex session did not recognize its published lock"
+  rm -f "$home/state/.fm-codex-session-binding-required" "$home/state/.fm-codex-session-binding"
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_harness_ancestry_pid' _ "$LIB") \
+    || fail "ordinary ancestry stopped working without a remote binding requirement"
+  [ "$out" = 4242 ] || fail "ordinary ancestry resolved '$out', expected visible Codex pid 4242"
   pass "session-lock: remote Codex binds a host agent only to its matching session identity"
 }
 

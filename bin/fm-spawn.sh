@@ -2354,10 +2354,11 @@ spawn_send_key() {  # <target> <key>
 # fm-session-lock-lib.sh; this is only the backend observation loop.
 spawn_bind_remote_codex_session() {
   local info pids pid session matches match_pid='' match_session='' attempt cli envelope result
-  local observed_count reported_count pid_preview candidate_evidence structural identity publish_status
+  local observed_count reported_count pid_preview candidate_evidence structural identity publish_status pid_evidence
   local final_attempt=0 final_cli=not-run final_envelope=invalid final_result=missing
   local final_observed_count=0 final_pid_preview=none final_reported_count=0
-  local final_matches=0 final_publish_status=not-attempted final_candidate_evidence=
+  local final_matches=uninspected final_publish_status=not-attempted final_candidate_evidence=
+  local final_pid_evidence=unavailable-uninspected
   for attempt in $(seq 1 "${FM_CODEX_REMOTE_BIND_POLLS:-80}"); do
     if info=$(fm_backend_herdr_cli "$HERDR_SES" pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null); then
       cli=ok
@@ -2372,8 +2373,13 @@ spawn_bind_remote_codex_session() {
       end
     ' 2>/dev/null || printf 'malformed-json')
     envelope=invalid
-    pids=
-    matches=0
+    pids=$(printf '%s' "$info" | jq -r '
+      .result.process_info.foreground_processes
+      | select(type == "array")
+      | .[].pid
+      | select(type == "number" and . > 1 and . == floor)
+    ' 2>/dev/null || true)
+    matches=uninspected
     match_pid=
     match_session=
     observed_count=0
@@ -2381,9 +2387,28 @@ spawn_bind_remote_codex_session() {
     pid_preview=
     candidate_evidence=
     publish_status=not-attempted
+    pid_evidence=unavailable-uninspected
+    if printf '%s' "$info" | jq -e '.result.process_info.foreground_processes | type == "array"' >/dev/null 2>&1; then
+      pid_evidence=untrusted-uninspected
+      while IFS= read -r pid; do
+        case "$pid" in ''|*[!0-9]*|0|1) continue ;; esac
+        observed_count=$((observed_count + 1))
+        if [ "$reported_count" -lt 16 ]; then
+          [ -z "$pid_preview" ] || pid_preview="$pid_preview,"
+          pid_preview="$pid_preview$pid"
+          reported_count=$((reported_count + 1))
+        fi
+      done <<EOF
+$pids
+EOF
+    fi
     if fm_backend_herdr_pane_process_info_envelope_valid "$info" "$HERDR_PANE_ID"; then
       envelope=valid
-      pids=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[].pid' 2>/dev/null || true)
+      pid_evidence=trusted-inspected
+      matches=0
+      observed_count=0
+      reported_count=0
+      pid_preview=
       while IFS= read -r pid; do
         case "$pid" in ''|*[!0-9]*|0|1) continue ;; esac
         observed_count=$((observed_count + 1))
@@ -2431,12 +2456,13 @@ EOF
     final_matches=$matches
     final_publish_status=$publish_status
     final_candidate_evidence=$candidate_evidence
+    final_pid_evidence=$pid_evidence
     sleep 0.1
   done
   echo "error: remote Codex launch did not expose one verified host-side CODEX_SESSION_ID; startup brief was not delivered" >&2
-  printf 'diagnostic: schema=fm-remote-codex-binding.v1 attempt=%s cli=%s envelope=%s result=%s foreground_pid_count=%s foreground_pids=%s foreground_pids_truncated=%s verified_candidate_count=%s binding_publish=%s\n' \
+  printf 'diagnostic: schema=fm-remote-codex-binding.v1 attempt=%s cli=%s envelope=%s result=%s foreground_pid_evidence=%s foreground_pid_count=%s foreground_pids=%s foreground_pids_truncated=%s verified_candidate_count=%s binding_publish=%s\n' \
     "$final_attempt" "$final_cli" "$final_envelope" "$final_result" \
-    "$final_observed_count" "$final_pid_preview" \
+    "$final_pid_evidence" "$final_observed_count" "$final_pid_preview" \
     "$([ "$final_observed_count" -gt "$final_reported_count" ] && printf yes || printf no)" \
     "$final_matches" "$final_publish_status" >&2
   [ -z "$final_candidate_evidence" ] || printf '%s' "$final_candidate_evidence" >&2
@@ -3069,7 +3095,18 @@ LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
   LAUNCH=${LAUNCH//__CODEX_INITIAL_PROMPT__/}
+  if ! fm_codex_home_binding_requirement_publish "$PROJ_ABS/state" "$PROJ_ABS" "$SPAWN_GEN"; then
+    echo "error: remote Codex binding requirement could not be published; refusing launch" >&2
+    exit 1
+  fi
 else
+  if [ "$KIND" = secondmate ] && [ "$BACKEND" = herdr ] \
+    && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ]; then
+    fm_codex_home_binding_requirement_clear "$PROJ_ABS/state" || {
+      echo "error: stale remote Codex binding requirement could not be cleared; refusing launch" >&2
+      exit 1
+    }
+  fi
   # shellcheck disable=SC2016 # Expanded in the target pane after placeholder substitution.
   LAUNCH=${LAUNCH//__CODEX_INITIAL_PROMPT__/'"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'}
 fi
