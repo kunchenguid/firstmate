@@ -471,6 +471,16 @@ export default function (pi: ExtensionAPI) {
     return forceRetireArm(armChild);
   }
 
+  async function awaitArmReadiness(owner: SessionGeneration, armChild: ChildProcess): Promise<boolean> {
+    const ready = await waitForReadiness(armChild);
+    if (ready) return owner.child === armChild;
+    if (generationIsLive(owner) && owner.child === armChild) {
+      unreadyArms.add(armChild);
+      await retireUnreadyArm(armChild);
+    }
+    return false;
+  }
+
   async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<{
     failure: string;
     recovery?: { generation: string; watcherPid: string };
@@ -544,14 +554,16 @@ export default function (pi: ExtensionAPI) {
         finishRetry(false);
         return;
       }
-      void waitForReadiness(retryChild).then(finishRetry);
+      void (async () => {
+        const ready = await awaitArmReadiness(owner, retryChild);
+        finishRetry(ready);
+      })();
     }, retryDelay(owner.retryFailures));
     timer.unref();
     owner.retryTimer = timer;
   }
 
-  function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
-    if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+  function lockFailure(): ArmResult | null {
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -560,6 +572,13 @@ export default function (pi: ExtensionAPI) {
         message: "watcher: not armed - no live session holds the lock; run bin/fm-session-start.sh to reclaim it, then call fm_watch_arm_pi to re-arm",
       };
     }
+    return null;
+  }
+
+  function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
+    if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+    const lockResult = lockFailure();
+    if (lockResult) return lockResult;
     markLoaded();
     if (owner.child && intentionalIdleRetirements.has(owner.child)) {
       return {
@@ -723,11 +742,8 @@ export default function (pi: ExtensionAPI) {
       if (!result.ok) return;
       const armChild = owner.child;
       if (armChild) {
-        const ready = await waitForReadiness(armChild);
-        if (!ready && generationIsLive(owner) && owner.child === armChild) {
-          unreadyArms.add(armChild);
-          await retireUnreadyArm(armChild);
-        }
+        const ready = await awaitArmReadiness(owner, armChild);
+        if (!ready || owner.child !== armChild) await waitForPendingRetry(owner);
       } else {
         await waitForPendingRetry(owner);
       }
@@ -810,6 +826,61 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function repairArm(owner: SessionGeneration): Promise<ArmResult> {
+    const observedDemand = await readSupervisionDemand();
+    if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+    if (observedDemand !== "idle") {
+      const lockResult = lockFailure();
+      if (lockResult) return lockResult;
+    }
+    if (observedDemand !== "idle" && owner.retryTimer) {
+      return {
+        ok: true,
+        message: `watcher: unchanged - Pi extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
+      };
+    }
+    const sequenceBefore = owner.seq;
+    await queueDemandReconciliation(owner);
+    if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+    if (owner.child && intentionalIdleRetirements.has(owner.child)) {
+      return {
+        ok: false,
+        message: "watcher: not armed - the prior idle retirement is still exiting; demand reconciliation will retry after it closes",
+      };
+    }
+    if (owner.child && unreadyArms.has(owner.child)) {
+      return {
+        ok: false,
+        message: "watcher: not armed - the previous arm failed readiness and is still exiting; demand reconciliation will retry after it closes",
+      };
+    }
+    if (owner.child) {
+      if (owner.seq > sequenceBefore) {
+        return {
+          ok: true,
+          message: `watcher: started Pi extension arm child ${owner.seq}; future ordinary re-arms are automatic; ${repairOnlyHint}`,
+        };
+      }
+      return {
+        ok: true,
+        message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
+      };
+    }
+    if (owner.retryTimer) {
+      return {
+        ok: true,
+        message: `watcher: unchanged - Pi extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
+      };
+    }
+    if (observedDemand === "idle") {
+      return { ok: true, message: "watcher: unchanged - no supervision demand; Pi monitoring remains idle" };
+    }
+    return {
+      ok: false,
+      message: "watcher: FAILED - demand reconciliation did not establish a ready watcher arm",
+    };
+  }
+
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
@@ -832,7 +903,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand?.("fm-watch-arm-pi", {
     description: "Explicitly repair firstmate watcher supervision through the Pi extension.",
     handler: async (_args, ctx) => {
-      const result = startArm(generation);
+      const result = await repairArm(generation);
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
   });
@@ -869,7 +940,7 @@ export default function (pi: ExtensionAPI) {
       return new Container();
     },
     execute: async () => {
-      const result = startArm(generation);
+      const result = await repairArm(generation);
       return {
         content: [{ type: "text", text: result.message }],
         details: result,

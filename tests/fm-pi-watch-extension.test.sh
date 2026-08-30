@@ -336,6 +336,173 @@ EOF
   pass "Pi pending retry reconciliation waits for watcher readiness"
 }
 
+test_pi_explicit_repair_respects_idle_demand() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-explicit-repair-idle-root"
+  home="$TMP_ROOT/pi-explicit-repair-idle-home"
+  log="$TMP_ROOT/pi-explicit-repair-idle.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let modelTurns = 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const result = await tool.execute("idle-repair", {}, undefined, undefined, {});
+if (result.details?.ok !== true) throw new Error(`idle repair was not a no-op: ${JSON.stringify(result.details)}`);
+if (!result.content[0]?.text.includes("no supervision demand")) throw new Error(`idle repair omitted its demand guard: ${result.content[0]?.text}`);
+await new Promise((resolve) => setTimeout(resolve, 120));
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("idle explicit repair started a watcher arm");
+if (modelTurns !== 0) throw new Error(`idle explicit repair used ${modelTurns} model turns`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "explicit Pi repair must remain idle without supervision demand: $out"
+  [ -z "$out" ] || fail "Pi idle explicit-repair test printed output: $out"
+  pass "Pi explicit repair respects idle supervision demand"
+}
+
+test_pi_retry_readiness_failure_rearms() {
+  local repo home plugin log ready out status
+  repo="$TMP_ROOT/pi-retry-readiness-root"
+  home="$TMP_ROOT/pi-retry-readiness-home"
+  log="$TMP_ROOT/pi-retry-readiness.log"
+  ready="$TMP_ROOT/pi-retry-readiness.ready"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  trap 'exit 0' TERM INT
+  while :; do sleep 0.01; done
+fi
+printf 'ready\n' > "${FM_READY_FILE:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 0.01; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_READY_FILE="$ready" FM_PI_ARM_READY_TIMEOUT_MS=2000 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=200 FM_WATCH_REARM_RETRY_BASE_MS=10 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let modelTurns = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "published task\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const keepalive = setInterval(() => {}, 10);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+clearInterval(keepalive);
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+if (rows.length !== 3) throw new Error(`readiness failure did not rearm: ${rows.length} arm cycles`);
+if (!existsSync(process.env.FM_READY_FILE)) throw new Error("rearmed retry never established readiness");
+if (modelTurns !== 0) throw new Error(`retry readiness recovery used ${modelTurns} model turns`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a retry readiness timeout must retire and rearm the demanded watcher: $out"
+  [ -z "$out" ] || fail "Pi retry-readiness test printed output: $out"
+  pass "Pi retry readiness timeout re-arms demanded monitoring"
+}
+
+test_pi_close_before_readiness_waits_for_retry() {
+  local repo home plugin log ready out status
+  repo="$TMP_ROOT/pi-close-before-readiness-root"
+  home="$TMP_ROOT/pi-close-before-readiness-home"
+  log="$TMP_ROOT/pi-close-before-readiness.log"
+  ready="$TMP_ROOT/pi-close-before-readiness.ready"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then exit 0; fi
+printf 'ready\n' > "${FM_READY_FILE:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 0.01; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_READY_FILE="$ready" FM_PI_ARM_READY_TIMEOUT_MS=500 FM_WATCH_REARM_RETRY_BASE_MS=10 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let modelTurns = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "published task\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const keepalive = setInterval(() => {}, 10);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+clearInterval(keepalive);
+if (!existsSync(process.env.FM_READY_FILE)) throw new Error("session_start returned before its retry became ready");
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean);
+if (rows.length !== 2) throw new Error(`close-before-readiness launched ${rows.length} arm cycles`);
+if (modelTurns !== 0) throw new Error(`close-before-readiness used ${modelTurns} model turns`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "close before readiness must be reconciled through the pending retry: $out"
+  [ -z "$out" ] || fail "Pi close-before-readiness test printed output: $out"
+  pass "Pi close-before-readiness waits for its retry"
+}
+
 test_pi_retirement_timeout_restarts_returning_demand() {
   local repo home plugin log first_pid returning overlap out status
   repo="$TMP_ROOT/pi-demand-retirement-race-root"
@@ -457,7 +624,9 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "published task\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+const keepalive = setInterval(() => {}, 10);
 await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+clearInterval(keepalive);
 for (let i = 0; i < 300 && rows().length < 2; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -774,9 +943,11 @@ test_pi_extension_reports_external_healthy_watcher() {
   home="$TMP_ROOT/pi-external-healthy-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
@@ -852,10 +1023,13 @@ test_pi_tool_returns_agent_tool_result() {
   home="$TMP_ROOT/pi-tool-result-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-exit 0
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
@@ -863,8 +1037,11 @@ import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
+const handlers = new Map();
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
@@ -897,6 +1074,7 @@ if (!result.content[0].text.includes("only after a later notification says the c
 if (result.details?.ok !== true || result.details?.message !== result.content[0].text) {
   throw new Error(`invalid tool details: ${JSON.stringify(result.details)}`);
 }
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
 EOF
 )
   status=$?
@@ -913,6 +1091,7 @@ test_pi_redundant_tool_call_is_owned_noop() {
   stop="$TMP_ROOT/pi-redundant-tool.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -975,10 +1154,12 @@ test_pi_scheduled_retry_call_is_owned_noop() {
   log="$TMP_ROOT/pi-scheduled-retry.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 exit 0
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
@@ -998,6 +1179,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+const keepalive = setInterval(() => {}, 10);
 await tool.execute("tool-call-first", {}, undefined, undefined, {});
 let redundant = null;
 for (let i = 0; i < 100; i += 1) {
@@ -1017,6 +1199,7 @@ if (!redundant.content[0]?.text.includes("only after a later notification says t
 await new Promise((resolve) => setTimeout(resolve, 100));
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 1) throw new Error(`scheduled retry call spawned ${rows.length} arm children`);
+clearInterval(keepalive);
 EOF
 )
   status=$?
@@ -1033,6 +1216,7 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   stop="$TMP_ROOT/pi-continuous-rearm.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1124,6 +1308,7 @@ test_pi_branch_offer_owns_actionable_wake() {
   stop="$TMP_ROOT/pi-branch-offer.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1236,6 +1421,7 @@ test_pi_branch_offer_flags_heartbeat() {
   stop="$TMP_ROOT/pi-branch-heartbeat.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1321,6 +1507,7 @@ test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check() {
   stop="$TMP_ROOT/pi-heartbeat-mixed-queue.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1413,6 +1600,7 @@ test_pi_main_only_check_classes_stay_on_main() {
   home="$TMP_ROOT/pi-main-only-check-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1509,6 +1697,7 @@ test_pi_heartbeat_restoration_failure_stays_on_main() {
   log="$TMP_ROOT/pi-heartbeat-restoration-failure.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1585,9 +1774,11 @@ test_pi_watcher_failure_never_offered_to_branch() {
   home="$TMP_ROOT/pi-watcher-failure-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
@@ -1657,6 +1848,7 @@ test_pi_handling_delivery_failure_is_typed_once() {
   stop="$TMP_ROOT/pi-handling-fail.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1729,6 +1921,7 @@ test_pi_hung_successor_falls_back_to_typed_wake() {
   log="$TMP_ROOT/pi-hung-successor.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1798,6 +1991,7 @@ test_pi_unretired_successor_falls_back_without_retry() {
   release="$TMP_ROOT/pi-unretired-successor.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1873,6 +2067,7 @@ test_pi_late_unretired_close_resumes_supervision() {
     stop="$TMP_ROOT/pi-late-$kind.stop"
     mkdir -p "$repo/bin" "$home/state" "$home/config"
     install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
     plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1966,6 +2161,7 @@ test_pi_empty_close_retries_instead_of_disappearing() {
   stop="$TMP_ROOT/pi-empty-close.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1996,6 +2192,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+const keepalive = setInterval(() => {}, 10);
 await tool.execute("tool-call-empty", {}, undefined, undefined, {});
 for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
@@ -2024,6 +2221,7 @@ test_pi_established_empty_close_honors_retry_limit() {
   log="$TMP_ROOT/pi-established-empty-close.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -2076,10 +2274,12 @@ test_pi_actionable_close_rechecks_session_lock() {
   release="$TMP_ROOT/pi-close-lock.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
 printf 'signal: lock handoff\n'
 SH
@@ -2134,10 +2334,12 @@ test_pi_arm_distinguishes_session_lock_ownership() {
   log="$TMP_ROOT/pi-lock-ownership.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
@@ -2218,6 +2420,7 @@ test_pi_session_transition_generation_owner() {
   arm_log="$TMP_ROOT/pi-session-transition-arm.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -2446,9 +2649,11 @@ test_pi_process_exit_cleanup_stops_arm_child() {
   pid_file="$TMP_ROOT/pi-process-exit-child.pid"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  printf 'published tool demand\n' > "$home/state/task.meta"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'printf "%s\n" "$$" >> "$FM_CLEANUP_LOG"; exit 0' TERM
 printf '%s\n' "$$" > "$FM_CHILD_PID_FILE"
 while :; do sleep 1; done
@@ -3487,6 +3692,9 @@ test_pi_session_start_arms_only_with_supervision_demand
 test_pi_session_start_waits_for_arm_readiness
 test_pi_idle_demand_cancels_pending_retry
 test_pi_pending_retry_reconciliation_waits_for_ready_arm
+test_pi_explicit_repair_respects_idle_demand
+test_pi_retry_readiness_failure_rearms
+test_pi_close_before_readiness_waits_for_retry
 test_pi_retirement_timeout_restarts_returning_demand
 test_pi_readiness_timeout_retires_hung_arm
 test_pi_idle_retirement_timeout_suppresses_late_failure
