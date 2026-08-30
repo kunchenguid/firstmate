@@ -283,17 +283,20 @@ SH
 }
 
 test_remote_codex_session_binding_claims_only_the_matching_session() {
-  local dir fakebin proc home session other out binding mode codex_exe
+  local dir fakebin proc home session other out binding mode codex_exe copied_exe
   dir="$TMP_ROOT/remote-codex-binding"
   fakebin=$(fm_fakebin "$dir")
   proc="$dir/proc"
   home="$dir/home"
   session=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54
   other=16b9797f-12d9-4645-b3af-0d0f6c2e8b8a
-  codex_exe="$dir/verified/codex"
-  mkdir -p "$proc/4242" "$home/state" "$(dirname "$codex_exe")"
+  codex_exe="$dir/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+  copied_exe="$dir/copied/codex"
+  mkdir -p "$proc/4242" "$home/state" "$(dirname "$codex_exe")" "$(dirname "$copied_exe")"
   : > "$codex_exe"
+  : > "$copied_exe"
   chmod +x "$codex_exe"
+  chmod +x "$copied_exe"
   ln -s "$(command -v node)" "$proc/4242/exe"
   printf 'CODEX_SESSION_ID=%s\0PATH=/usr/bin\0' "$session" > "$proc/4242/environ"
   cat > "$fakebin/ps" <<'SH'
@@ -383,6 +386,18 @@ SH
   [ ! -e "$home/state/.fm-codex-session-binding" ] \
     || fail "rejected Node symlink evidence published a Codex binding"
   rm -f "$proc/4242/exe"
+  ln -s "$copied_exe" "$proc/4242/exe"
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a copied executable named Codex outside the supported install layout became binding authority"
+  fi
+  [ ! -e "$home/state/.fm-codex-session-binding" ] \
+    || fail "rejected copied executable evidence published a Codex binding"
+  rm -f "$proc/4242/exe"
   ln -s "$codex_exe" "$proc/4242/exe"
   FM_TEST_CODEX_SHAPE=login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
@@ -398,14 +413,20 @@ SH
     || fail "the installed Codex script entrypoint was not recognized"
   rm -f "$proc/4242/exe"
   ln -s "$codex_exe" "$proc/4242/exe"
-  out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+  FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"
       kill() { return 0; }
       fm_codex_home_binding_requirement_publish "$FM_HOME/state" "$FM_HOME" s1.2.3
       fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session" || fail "verified host-side Codex evidence did not publish the binding"
+  rm -f "$proc/4242/exe" "$proc/4242/environ"
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 1; }
       CODEX_SESSION_ID="$2" fm_harness_ancestry_pid
-    ' _ "$LIB" "$session") || fail "remote Codex binding did not identify the host-side agent"
+    ' _ "$LIB" "$session") || fail "namespace-local Codex session did not consume its session binding"
   [ "$out" = 4242 ] || fail "remote Codex binding resolved '$out', expected host agent pid 4242"
   binding="$home/state/.fm-codex-session-binding"
   [ -f "$binding" ] && [ ! -L "$binding" ] || fail "remote Codex binding record was not published"
@@ -428,6 +449,8 @@ SH
     bash -c '. "$1"; kill() { return 0; }; fm_session_lock_owned_by_self "$FM_HOME/state"' _ "$LIB" \
     || fail "the matching remote Codex session did not recognize its published lock"
   rm -f "$home/state/.fm-codex-session-binding-required" "$home/state/.fm-codex-session-binding"
+  ln -s "$codex_exe" "$proc/4242/exe"
+  printf 'CODEX_SESSION_ID=%s\0PATH=/usr/bin\0' "$session" > "$proc/4242/environ"
   out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_harness_ancestry_pid' _ "$LIB") \
     || fail "ordinary ancestry stopped working without a remote binding requirement"

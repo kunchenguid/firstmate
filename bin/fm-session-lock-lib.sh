@@ -209,7 +209,7 @@ fm_codex_home_binding_read() { # <state-dir>; parses one complete private bindin
 }
 
 fm_codex_home_binding_pid() { # <state-dir>; prints host agent pid when this tool proves the recorded binding
-  local state=$1 file session observed
+  local state=$1 file session
   FM_CODEX_BINDING_REASON=
   session=${CODEX_SESSION_ID:-}
   if ! fm_codex_session_id_valid "$session"; then
@@ -223,12 +223,13 @@ fm_codex_home_binding_pid() { # <state-dir>; prints host agent pid when this too
   file="$state/$FM_CODEX_HOME_BINDING_FILE"
   [ -f "$file" ] && [ ! -L "$file" ] || { FM_CODEX_BINDING_REASON='reject:missing-codex-home-binding'; return 1; }
   fm_codex_home_binding_read "$state" || { FM_CODEX_BINDING_REASON='reject:malformed-codex-home-binding'; return 1; }
+  case "$FM_CODEX_BINDING_PID" in
+    *[!0-9]*|''|0|1) FM_CODEX_BINDING_REASON='reject:codex-home-binding-mismatch'; return 1 ;;
+  esac
   [ "$FM_CODEX_BINDING_HARNESS" = codex ] && [ "$FM_CODEX_BINDING_HOME" = "${FM_HOME:-}" ] \
     && [ "$FM_CODEX_BINDING_SPAWN_GEN" = "$FM_CODEX_REQUIREMENT_SPAWN_GEN" ] \
     && [ "$FM_CODEX_BINDING_SESSION" = "$session" ] \
-    && fm_codex_host_agent_matches "$FM_CODEX_BINDING_PID" \
-    && observed=$(fm_codex_session_id_for_pid "$FM_CODEX_BINDING_PID") \
-    && [ "$observed" = "$FM_CODEX_BINDING_SESSION" ] || {
+    && fm_codex_session_id_valid "$FM_CODEX_BINDING_SESSION" || {
       FM_CODEX_BINDING_REASON='reject:codex-home-binding-mismatch'; return 1; }
   # shellcheck disable=SC2034 # Read by lock callers that need the refusal evidence.
   FM_CODEX_BINDING_REASON='accept:codex-session-home-binding'
@@ -289,6 +290,14 @@ fm_codex_script_path_matches() {  # <path>
   esac
 }
 
+fm_codex_installed_executable_path_matches() {  # <path>
+  case "$1" in
+    */node_modules/@openai/codex/vendor/*/bin/codex) return 0 ;;
+    */node_modules/@openai/codex-*/vendor/*/bin/codex) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_codex_executable_identity_matches() {  # <pid> <comm>
   local pid=$1 comm=$2 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} executable= base
   case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
@@ -296,12 +305,13 @@ fm_codex_executable_identity_matches() {  # <pid> <comm>
   case "$base" in codex|-codex) ;; *) return 1 ;; esac
   if [ -L "$proc_root/$pid/exe" ]; then
     executable=$(readlink "$proc_root/$pid/exe" 2>/dev/null) || return 1
-    [ "$(basename -- "$executable")" = codex ]
+    fm_codex_installed_executable_path_matches "$executable"
     return
   fi
   [ "$proc_root" = /proc ] && [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
   case "$comm" in
-    /*) [ "$base" = codex ] && [ -f "$comm" ] && [ ! -L "$comm" ] && [ -x "$comm" ] ;;
+    /*) [ -f "$comm" ] && [ ! -L "$comm" ] && [ -x "$comm" ] \
+      && fm_codex_installed_executable_path_matches "$comm" ;;
     *) return 1 ;;
   esac
 }
