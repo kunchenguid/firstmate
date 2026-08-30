@@ -19,6 +19,7 @@
 #      agent exited.
 #   7. Relaunch success requires a foreground agent, not a surviving shell with
 #      a stale agent-shaped terminal title.
+#   8. A generated replacement launch is not reparsed by a C shell.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -107,11 +108,11 @@ case "${1:-}" in
       esac
       case "$payload" in
         *'/pane-shell.'*|*'/traceparent-cleared.'*)
-          TRACEPARENT=stale fish -c "$payload" >/dev/null 2>&1 || true
+          TRACEPARENT=stale "${FM_FAKE_PANE_SHELL_EXEC:-fish}" -c "$payload" >/dev/null 2>&1 || true
           ;;
         Enter)
           if [ -f "$D/pending-launch" ]; then
-            TRACEPARENT=stale fish -c "$(cat "$D/pending-launch")" >/dev/null 2>&1 || true
+            TRACEPARENT=stale "${FM_FAKE_PANE_SHELL_EXEC:-fish}" -c "$(cat "$D/pending-launch")" >/dev/null 2>&1 || true
             rm -f "$D/pending-launch"
           fi
           ;;
@@ -148,6 +149,10 @@ fi
 if [ "${1:-}" = -p ] && [ "${2:-}" = 4242 ] && [ "${3:-}" = -o ] && [ "${4:-}" = args= ]; then
   cat "$FM_FAKE_DIR/foreground"
   printf '\n'
+  exit 0
+fi
+if [ -n "${FM_FAKE_PANE_SHELL:-}" ] && [ "${1:-}" = -p ] && [ "${3:-}" = -o ] && [ "${4:-}" = comm= ]; then
+  printf '%s\n' "$FM_FAKE_PANE_SHELL"
   exit 0
 fi
 exec /bin/ps "$@"
@@ -212,6 +217,8 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
     FM_FAKE_STALE_LAUNCH_TITLE="${FM_FAKE_STALE_LAUNCH_TITLE:-}" \
+    FM_FAKE_PANE_SHELL="${FM_FAKE_PANE_SHELL:-}" \
+    FM_FAKE_PANE_SHELL_EXEC="${FM_FAKE_PANE_SHELL_EXEC:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -425,6 +432,43 @@ SH
   [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
     || fail "the real fish launch retained stale TRACEPARENT"
   pass "fm-control relaunch: disabling tracing clears metadata and the replacement environment in fish"
+}
+
+test_generated_relaunch_is_not_reparsed_by_a_c_shell() {
+  local dir out rc result
+  dir=$(new_case c-shell rl37)
+  add_ship_task "$dir" rl37 claude
+  result="$dir/fake/c-shell-launch"
+  cat > "$dir/fakebin/csh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -c ] || exit 64
+command=${2:-}
+printf '%s\n' "$command" >> "$FM_FAKE_DIR/c-shell-commands"
+case "$command" in
+  /bin/sh\ -c\ *|env\ -u\ TRACEPARENT\ /bin/sh\ -c\ *) exec /bin/sh -c "$command" ;;
+  *) : > "$FM_FAKE_DIR/c-shell-reparsed-launch"; exit 64 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/csh"
+  cat > "$dir/fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s' "${TRACEPARENT-unset}" "$*" > "$FM_FAKE_DIR/c-shell-launch"
+SH
+  chmod +x "$dir/fakebin/claude"
+
+  out=$(FM_FAKE_PANE_SHELL=csh FM_FAKE_PANE_SHELL_EXEC="$dir/fakebin/csh" \
+    run_control "$dir" rl37 relaunch --model model-csh --effort high --note "cross-shell replacement"); rc=$?
+  expect_code 0 "$rc" "a generated relaunch from a C-shell pane should succeed"$'\n'"$out"
+  [ -s "$dir/fake/c-shell-commands" ] \
+    || fail "the C-shell fixture did not parse the submitted launch"
+  [ ! -e "$dir/fake/c-shell-reparsed-launch" ] \
+    || fail "the generated replacement command was reparsed by the C shell"
+  [ -s "$result" ] || fail "the replacement agent never started"
+  assert_contains "$(cat "$result")" "unset|" \
+    "the C-shell relaunch must clear TRACEPARENT from the replacement environment"
+  assert_contains "$(cat "$result")" "--model model-csh --effort high" \
+    "the shell-neutral relaunch must preserve model and effort flags"
+  pass "fm-control relaunch: a generated launch crosses a C-shell pane without C-shell reparsing"
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
@@ -1389,6 +1433,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
+test_generated_relaunch_is_not_reparsed_by_a_c_shell
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring

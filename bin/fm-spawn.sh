@@ -2188,14 +2188,20 @@ spawn_bind_tracefree_launch() {
   local command pane_shell pane_shell_name i=0
   SPAWN_TRACEPARENT_PROOF=
   rm -f "$probe" "$proof"
-  command="/bin/sh -c 'name=\$(ps -p \"\$PPID\" -o comm= | tr -d \"[:space:]\") || exit; name=\${name##*/}; name=\${name#-}; command -v \"\$name\" > \"\$1\"' sh $(shell_quote "$probe")"
-  spawn_send_text_line "$T" "$command" || { rm -f "$probe" "$proof"; return 1; }
-  while [ ! -s "$probe" ] && [ "$i" -lt 20 ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  [ -s "$probe" ] || { rm -f "$probe" "$proof"; return 1; }
-  IFS= read -r pane_shell < "$probe" || { rm -f "$probe" "$proof"; return 1; }
+  if [ "$RELAUNCH" -eq 1 ]; then
+    # Relaunches always use a generated POSIX launch template, independent of
+    # the interactive shell that happens to own the reused pane.
+    pane_shell=/bin/sh
+  else
+    command="/bin/sh -c 'name=\$(ps -p \"\$PPID\" -o comm= | tr -d \"[:space:]\") || exit; name=\${name##*/}; name=\${name#-}; command -v \"\$name\" > \"\$1\"' sh $(shell_quote "$probe")"
+    spawn_send_text_line "$T" "$command" || { rm -f "$probe" "$proof"; return 1; }
+    while [ ! -s "$probe" ] && [ "$i" -lt 20 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ -s "$probe" ] || { rm -f "$probe" "$proof"; return 1; }
+    IFS= read -r pane_shell < "$probe" || { rm -f "$probe" "$proof"; return 1; }
+  fi
   pane_shell_name=${pane_shell##*/}
   case "$pane_shell_name" in
     sh|bash|zsh|dash|ash|ksh|mksh|fish|csh|tcsh) : ;;
