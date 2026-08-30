@@ -7,12 +7,13 @@ The durable marker and tmux flash remain as additional signals.
 
 ## When a delivery stays buffered
 
-Same-pane away-mode delivery requires an idle primary and an affirmatively empty composer.
+Away-mode delivery requires an idle primary and an affirmatively empty composer.
 `pane_is_busy` refuses a primary mid-turn, and `fm_backend_composer_state` refuses any composer verdict other than `empty`, so a digest cannot merge into active or uncertain input.
 If the primary remains continuously busy, buffered delivery starves by design rather than interrupting that turn.
-The expected example is a captain who continues interacting with Firstmate after entering away mode, which keeps the same primary busy instead of creating an idle absence.
+On Claude/Herdr, the native tracked-background launch also keeps the target's native agent state busy even while the captain is absent.
+That is a hosting limitation, not a reason to weaken the guard: launch through `bin/fm-afk-launch.sh start` so the daemon runs in its own non-visible workspace with an explicit target.
 `FM_MAX_DEFER_SECS` bounds how long that deferral can remain silent: once the threshold is reached, it raises this alarm and preserves the buffered escalation.
-Treat the alarm as a visible delivery limitation, not as permission to override either guard or proof that idle away-mode delivery failed.
+Treat the alarm as a visible delivery failure, not as permission to override either guard.
 
 ## Channels
 

@@ -26,8 +26,16 @@ batched digest rather than per-wake injections.
 2. **Ensure the sub-supervisor daemon is running as a tracked background process.**
    Its hosting differs by harness.
    Pick the right path:
-   - **Harness WITH a native in-pane tracked-background tool** (e.g. claude's
-     background bash, grok's background tool): first run
+   - **Claude on Herdr:** run `bin/fm-afk-launch.sh start`, not the Claude
+     native background Bash path.
+     The native job keeps the supervised Claude pane's Herdr agent state
+     `working` for the daemon's lifetime, so the busy guard correctly defers
+     every injection.
+     The terminal-backed launcher captures the captain target before creating
+     its separate non-visible workspace and passes that target explicitly to
+     the daemon.
+   - **Other harnesses WITH a native in-pane tracked-background tool** (for
+     example, Grok's background tool): first run
      `bin/fm-afk-launch.sh start-native`, then run
      `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.

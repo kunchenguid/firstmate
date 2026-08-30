@@ -291,9 +291,12 @@ It refuses Zellij, Orca, and cmux as supervisor backends rather than applying th
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
-Harnesses with native tracked background execution can run the daemon in their terminal.
-Pi has no such mechanism.
-`bin/fm-afk-launch.sh` therefore creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
+Claude's native tracked background Bash cannot host the away daemon on Herdr because it leaves the supervised Claude pane's native agent state `working` for the daemon's lifetime.
+The busy guard must defer in that shape, so native same-pane hosting cannot deliver an away digest for a Claude/Herdr primary.
+Run `bin/fm-afk-launch.sh start` from that primary instead.
+It captures the captain pane first, creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
+Pi uses the same terminal-backed route because it has no native tracked background mechanism.
+Other native background mechanisms remain eligible only when they do not retain their supervisor target in a busy state.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 
