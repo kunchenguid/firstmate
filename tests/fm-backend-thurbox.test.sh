@@ -1141,7 +1141,7 @@ test_spawn_creates_the_task_end_to_end() {
   # two return values, and the thurbox_session_id/thurbox_pane_id meta fields
   # every later operation re-resolves the pane from. This drives the real
   # command and reads back exactly what an operator would.
-  local proj wt data state config id out meta title
+  local proj wt data state config home id out meta title
   id=spawne2e1
   proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1157,7 +1157,8 @@ test_spawn_creates_the_task_end_to_end() {
   # FM_ROOT_OVERRIDE points at the real repo so fm-spawn finds its sibling
   # scripts; FM_HOME stays the fixture home, which is what the scoped session
   # title is tagged with.
-  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FM_ROOT_OVERRIDE" \
+  home=$FM_ROOT_OVERRIDE
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/spawn-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off \
