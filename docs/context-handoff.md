@@ -21,11 +21,12 @@ The supported Bash entrypoint [`bin/fm-context-handoff.py`](../bin/fm-context-ha
 A Pi `session_before_compact` handler seals only candidates already in the register for the current Pi session.
 The handler never reads or serializes Pi branch entries, messages, summaries, reasoning, or tool output and never calls a model.
 A producer response that identifies a non-empty register that could not be sealed durably stops compaction and leaves a failure receipt.
-A Pi adapter launch, nonzero-exit, malformed-output, or output-cap failure also stops compaction even when no receipt can be written.
+A Pi adapter launch, nonzero-exit, malformed-output, output-cap, or ten-second timeout failure also terminates the child and stops compaction even when no receipt can be written.
 Empty and disabled registers do not stop compaction when the adapter completes successfully.
 The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the exact sealed record and never infer success from the success event alone.
 
-The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, directory fsync, a 32-item cap, and a 32-KiB envelope cap.
+The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
+A retry recovers valid orphan envelopes, missing queues for claimed records, and incomplete claim sets without resealing different bytes.
 Sealed envelopes, queue state, receipts, approval records, transaction bundle staging, quarantine records, and acknowledgements remain below `state/context-handoff/` in the effective Firstmate home and never enter the Vault.
 Disabling the feature leaves every one of those records intact.
 
@@ -52,12 +53,12 @@ Deletion, move, canonical note replacement, merge, `.obsidian`, Git, GitHub, exe
 
 The consumer deterministically maps the handoff record ID to one transaction operation ID.
 It stages canonical bundle bytes privately, runs the exact byte-pinned installed transaction core's `inspect`, and stores the returned Vault-bound approval SHA-256.
-Commit accepts only that exact bundle and approval, invokes `claude-obsidian.transaction.v1` once, verifies the complete mode-0600 journal and result, every changed-path hash, complete journal state, exact bundle and approval correlation, and the absent mutation lock, and only then writes the source acknowledgement.
-An identical retry is idempotent, changed handoff payload bytes quarantine, and an apply-complete-before-ack crash heals from the verified transaction result.
+Commit accepts only the currently active bundle and approval while the record is pending or notified, invokes `claude-obsidian.transaction.v1` once, verifies the complete mode-0600 journal and result, every changed-path hash, complete journal state, exact bundle and approval correlation, and the absent mutation lock, and only then writes the source acknowledgement before transitioning the queue terminal.
+An identical retry is idempotent, changed handoff payload bytes quarantine, terminal dispositions revoke every prepared Save, and apply-complete-before-ack or acknowledgement-before-queue crashes heal from the verified transaction result or durable acknowledgement.
 Exit 75 leaves the record pending for a fresh read, rebuild, and inspect.
 
 The `PreToolUse` guard denies direct Write, Edit, NotebookEdit, shell mutation, unrelated MCP mutation, delete, move, Git, GitHub, installation, and credential tools in the curator session.
-Its only Bash mutation exception is the exact configured transaction core apply command with the canonical Vault, a privately staged bundle, and a matching approval record.
+Its only Bash mutation exception is the exact configured transaction core apply command with the canonical Vault, the current hook session, the exact live Herdr generation, revalidated source bytes, a pending or notified queue record, no terminal acknowledgement or disposition, the active privately staged bundle, and its matching approval record.
 The installed transaction core remains the primary confinement and recovery boundary because Claude command hooks cannot make their own startup or timeout infallible.
 
 ## Default-off configuration

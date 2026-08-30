@@ -41,7 +41,7 @@ The installed clean `claude-obsidian` transaction entrypoint SHA-256 was `34f303
 The installed clean transaction module SHA-256 was `e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2`.
 The cache and clean checkout had the same two hashes.
 The exact module was used against synthetic Vaults for inspect, apply, conflict, result, journal, hash, mode, lock-removal, idempotent replay, and apply-complete-before-ack evidence.
-The byte-identified fallback fixture is [`context-handoff-transaction-core.py`](../../test-support/fixtures/context-handoff-transaction-core.py) and covers the same public CLI shape when the installed product is unavailable in portable CI.
+The byte-identified fallback fixture is [`context-handoff-transaction-core.py`](../../tests/fixtures/context-handoff-transaction-core.py) and covers the same public CLI shape when the installed product is unavailable in portable CI.
 
 ## Deterministic focused suite
 
@@ -64,9 +64,21 @@ ok - test_pi_extension_handlers_and_model_free_discovery
 ```
 
 The suite uses isolated temporary Firstmate homes, source roots, Vaults, Herdr adapters, Pi extension APIs, Claude hook payloads, MCP requests, and transaction state.
-It covers positive registration, closed exact eligibility contracts, raw-content and sensitive rejection, provider refusal, exact source hashes, source path and symlink refusal, registration-only state/Vault overlap refusal, item and byte caps, mode 0600, canonical IDs and hashes, empty registers, fsync failure, durable failure receipts, crash after envelope publication, manual and automatic Claude compaction, fail-closed Pi adapter errors, threshold and overflow outcomes, compaction failure and retry, exact-recipient identity, busy and unavailable delivery, one-record constant-content notifications, no launch or restart, replay, payload mismatch quarantine, traversal and symlink refusal, Claude exit-2 empty-stdout guard denial and exact allow, duplicate disposition, expected-hash conflict, held lock, rolled-back transaction retry, result-selected apply-complete-before-ack healing, disable, and re-enable.
+It covers positive registration, closed exact eligibility contracts, raw-content and sensitive rejection, provider refusal, exact source hashes, source path and symlink refusal, registration-only state/Vault overlap refusal, item and byte caps, mode 0600, canonical IDs and hashes, empty registers, file and directory fsync failure, durable failure receipts, orphan record and queue recovery, manual and automatic Claude compaction, shared Claude candidate-validation receipts, fail-closed and bounded Pi adapter errors, threshold and overflow outcomes, compaction failure and retry, exact-recipient identity, busy and unavailable delivery, one-record constant-content notifications, no launch or restart, replay, payload mismatch quarantine, traversal and symlink refusal, Claude exit-2 empty-stdout guard denial, exact live allow, stale-session/source/approval denial, terminal Save revocation, duplicate disposition, expected-hash conflict, held lock, rolled-back transaction retry, result-selected apply-complete-before-ack healing, acknowledgement-before-queue crash recovery, disable, and re-enable.
 No test reads or mutates the real Vault, a live Claude session, a live Herdr process, credentials, auth state, transcripts, or provider data.
 No test invokes a model.
+
+The exact installed transaction-core gate was run separately so a portable fallback cannot satisfy the installed-byte claim:
+
+```sh
+FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE=1 tests/fm-context-handoff.test.sh
+```
+
+Its distinguishing final line was:
+
+```text
+ok - exact-installed-transaction-core core=34f3030da4a0ebc223a5dfba7f7180638d08dffa3d044be33fa72234866900c2 module=e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2
+```
 
 ## Fresh-process model-free smokes
 
@@ -75,8 +87,11 @@ The Pi discovery command was:
 ```sh
 evidence_root=$(mktemp -d)
 mkdir -p "$evidence_root/home" "$evidence_root/fm-home" "$evidence_root/pi"
+set +e
 HOME="$evidence_root/home" FM_HOME="$evidence_root/fm-home" PI_CODING_AGENT_DIR="$evidence_root/pi" PI_OFFLINE=1 pi --offline --no-session --no-context-files --no-skills --no-prompt-templates --no-extensions -e "$PWD/.pi/extensions/fm-primary-turnend-guard.ts" --list-models >"$evidence_root/pi.stdout" 2>"$evidence_root/pi.stderr"
-printf 'exit=%s\nstdout-lines=%s\nstdout-sha256=%s\nstderr-bytes=%s\n' "$?" "$(wc -l <"$evidence_root/pi.stdout" | tr -d ' ')" "$(sha256sum "$evidence_root/pi.stdout" | cut -d' ' -f1)" "$(wc -c <"$evidence_root/pi.stderr" | tr -d ' ')"
+status=$?
+set -e
+printf 'exit=%s\nstdout-lines=%s\nstdout-sha256=%s\nstderr-bytes=%s\n' "$status" "$(wc -l <"$evidence_root/pi.stdout" | tr -d ' ')" "$(sha256sum "$evidence_root/pi.stdout" | cut -d' ' -f1)" "$(wc -c <"$evidence_root/pi.stderr" | tr -d ' ')"
 ```
 
 It produced this bounded exact result:
@@ -93,7 +108,12 @@ The Claude plugin validation command was:
 ```sh
 evidence_root=$(mktemp -d)
 mkdir -p "$evidence_root/home"
-HOME="$evidence_root/home" claude plugin validate --strict "$PWD/integrations/claude-context-handoff" 2>&1 | sed "s|$PWD|<worktree>|g"
+set +e
+HOME="$evidence_root/home" claude plugin validate --strict "$PWD/integrations/claude-context-handoff" >"$evidence_root/claude-plugin.out" 2>&1
+status=$?
+set -e
+sed "s|$PWD|<worktree>|g" "$evidence_root/claude-plugin.out"
+printf 'exit=%s\n' "$status"
 ```
 
 It exited 0 with:
@@ -102,6 +122,7 @@ It exited 0 with:
 Validating plugin manifest: <worktree>/integrations/claude-context-handoff/.claude-plugin/plugin.json
 
 ✔ Validation passed
+exit=0
 ```
 
 The Claude lifecycle discovery command was:
