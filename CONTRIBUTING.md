@@ -114,6 +114,14 @@ Where a case's assertion is not about the timeout itself, give that window headr
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
+## Upstream sync ritual
+
+Fetch `kunchenguid/firstmate` without changing the fork's `origin`, merge upstream `main` with a merge commit, and keep ordinary non-conflicting changes.
+Resolve semantic conflicts in favor of the fork's existing security and local-runtime owners, and describe any intentionally retained conflict in the sync pull request instead of guessing.
+Keep the fork's focused pull-request checks in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) instead of copying upstream's broad sharded suite onto every pull request, while [`.github/workflows/ci-water7-fallback.yml`](.github/workflows/ci-water7-fallback.yml) remains a failure/manual fallback.
+Run focused RED/GREEN coverage, `bin/fm-doc-audience-check.sh`, lint, and no-mistakes, with the hosted GitHub shard results as acceptance.
+Keep the upstream head in merge ancestry so the next sync starts from Git history rather than a prose ledger.
+
 ## Questions
 
 Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).
