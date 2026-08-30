@@ -111,6 +111,7 @@ case "${1:-}" in
       *' Down '*)
         if [ "$state" = trust-no ]; then
           case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
+            busy-after-down) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
             disappears-after-down) printf 'gone-stuck\n' > "$FM_FAKE_CLAUDE_STATE" ;;
             stuck-dialog) ;;
             *) printf 'trust-yes\n' > "$FM_FAKE_CLAUDE_STATE" ;;
@@ -471,6 +472,25 @@ test_claude_dialog_disappearance_before_acceptance_is_unconfirmed() {
   pass "fm-spawn: dialog disappearance before acceptance remains unconfirmed"
 }
 
+test_claude_busy_after_down_before_acceptance_is_unconfirmed() {
+  local id rec out rc bare_keys
+  id="claude-busy-before-accept-z6b-$$"
+  rec=$(make_spawn_case busy-before-accept "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=busy-after-down run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a busy footer before acceptance must not satisfy the trust postcondition"
+  assert_contains "$out" "claude's workspace-trust dialog disappeared before acceptance was attempted" \
+    "a pre-accept busy footer bypassed the distinct disappearance failure"
+  assert_not_contains "$out" "spawned $id harness=claude" \
+    "a pre-accept busy footer falsely completed the spawn"
+  bare_keys=$(awk 'NF == 4 {print $4}' "$CASE_DIR/keys.log")
+  [ "$bare_keys" = "$(printf 'Enter\nDown')" ] \
+    || fail "the pre-accept busy case received an acceptance Enter: $bare_keys"
+  pass "fm-spawn: a busy footer cannot replace an acceptance attempt"
+}
+
 test_claude_delayed_trust_dialog_is_not_missed() {
   local id rec out rc
   id="claude-delayed-z5-$$"
@@ -626,6 +646,7 @@ test_claude_focused_trust_dialog_accepts_without_navigation
 test_claude_stuck_dialog_fails_loudly
 test_claude_accept_without_processing_fails_loudly
 test_claude_dialog_disappearance_before_acceptance_is_unconfirmed
+test_claude_busy_after_down_before_acceptance_is_unconfirmed
 test_claude_delayed_trust_dialog_is_not_missed
 test_claude_stale_busy_scrollback_cannot_confirm_processing
 test_claude_already_trusted_idle_spawn_has_no_processing_requirement

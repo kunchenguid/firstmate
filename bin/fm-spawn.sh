@@ -2470,7 +2470,7 @@ claude_trust_dialog_clear() {
   local detect_max=${FM_CLAUDE_TRUST_POLLS:-40}
   local clear_max=${FM_CLAUDE_TRUST_CLEAR_POLLS:-$detect_max}
   local interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
-  local accept_attempted=0 dialog_absent_seen=0
+  local accept_attempted=0
   while [ "$detect_i" -lt "$detect_max" ]; do
     if pane=$(claude_capture_visible) && [ -n "$pane" ]; then
       state=$(fm_composer_claude_trust_dialog_state "$pane")
@@ -2521,7 +2521,7 @@ claude_trust_dialog_clear() {
           verification_due=1
           ;;
         absent)
-          dialog_absent_seen=1
+          [ "$accept_attempted" = 1 ] || return 4
           busy=$(fm_rendered_busy_footer_state "$pane" claude)
           [ "$busy" != busy ] || return 0
           ;;
@@ -2535,7 +2535,6 @@ claude_trust_dialog_clear() {
   if [ "$accept_attempted" = 1 ]; then
     return 2
   fi
-  [ "$dialog_absent_seen" != 1 ] || return 4
   return 1
 }
 
