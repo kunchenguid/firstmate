@@ -328,7 +328,7 @@ export default function registerCrosscheckTools(pi) {
 		return accepted("repo_read_batch", args, result);
 	});
 
-	register(pi, "report_finding", "Report one provisional actionable finding with exact-head citations. The returned provisional_id can be retracted before finalization.", {
+	register(pi, "report_finding", "Report one provisional actionable finding with exact-head citations using the supplied finding-field policy. The returned provisional_id can be retracted before finalization.", {
 		type: "object", additionalProperties: false, required: ["severity", "merge_disposition", "title", "citations", "explanation"], properties: {
 			severity: finding.properties.severity, title: finding.properties.title, citations: finding.properties.citations,
 			merge_disposition: finding.properties.merge_disposition,

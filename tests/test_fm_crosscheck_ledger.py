@@ -29,6 +29,98 @@ REVIEWER_SPEC.loader.exec_module(PI_REVIEWER)
 
 
 class CrosscheckLedgerValidationTests(unittest.TestCase):
+    def test_stage_telemetry_is_optional_bounded_and_compatible(self) -> None:
+        run = {
+            "state": "clear",
+            "new_findings": [],
+            "updated_findings": [],
+            "active_blockers": [],
+            "suspicions": [],
+        }
+        CROSSCHECK.attach_run_telemetry({"findings": []}, run, {})
+        old_process = {"mode": "two-stage-independent-synthesis-v1", "stages": 2}
+        run["telemetry"]["review_process"] = old_process
+        CROSSCHECK.validate_run_telemetry(run["telemetry"], "test")
+        process = {
+            **old_process,
+            "stage_metrics": [
+                {"stage": "challenge", "elapsed_ms": 1250, "turns": 3},
+                {"stage": "synthesis", "elapsed_ms": 500, "turns": 2},
+            ],
+        }
+        run["telemetry"]["review_process"] = process
+        CROSSCHECK.validate_run_telemetry(run["telemetry"], "test")
+        for malformed in (
+            None,
+            process["stage_metrics"][:1],
+            list(reversed(process["stage_metrics"])),
+            [process["stage_metrics"][0], {"stage": "synthesis", "elapsed_ms": True, "turns": 2}],
+            [process["stage_metrics"][0], {"stage": "synthesis", "elapsed_ms": 500, "turns": -1}],
+            [process["stage_metrics"][0], {"stage": "synthesis", "elapsed_ms": 500, "turns": 2, "extra": 1}],
+        ):
+            with self.subTest(malformed=malformed):
+                value = copy.deepcopy(run["telemetry"])
+                value["review_process"]["stage_metrics"] = malformed
+                with self.assertRaises(CROSSCHECK.CrosscheckError):
+                    CROSSCHECK.validate_run_telemetry(value, "test")
+
+    def test_impact_policy_is_shared_by_prompt_and_finding_tool_schema(self) -> None:
+        snapshot = {
+            "head_sha": "a" * 40,
+            "base_sha": "b" * 40,
+            "claims_document": "Review the actual behavior, not this claim.",
+        }
+        descriptions = {
+            "severity": CROSSCHECK.FINDING_SEVERITY_GUIDANCE,
+            "merge_disposition": CROSSCHECK.FINDING_DISPOSITION_GUIDANCE,
+            "description": CROSSCHECK.FINDING_EXPLANATION_GUIDANCE,
+        }
+        for schema_factory in (
+            CROSSCHECK.review_output_schema,
+            CROSSCHECK.pi_review_output_schema,
+        ):
+            schema = schema_factory("/account", "/execution")
+            finding = schema["properties"]["new_findings"]["items"]
+            self.assertEqual(
+                set(finding["required"]),
+                {"title", "severity", "merge_disposition", "description", "citations"},
+            )
+            for field, guidance in descriptions.items():
+                self.assertEqual(finding["properties"][field]["description"], guidance)
+
+        for harness, model, selector in (
+            ("codex", "gpt-5.6-sol", "CODEX_HOME"),
+            ("pi", "gpt-5.6-sol", "PI_CODING_AGENT_DIR"),
+            ("pi", CROSSCHECK.CROSS_FAMILY_LANES["fireworks-glm"]["model"], "PI_CODING_AGENT_DIR"),
+        ):
+            with self.subTest(harness=harness, model=model):
+                prompt = CROSSCHECK.make_prompt(snapshot, {"findings": []}, {
+                    "harness": harness,
+                    "model": model,
+                    "account_selector": selector,
+                    "model_independence": "same-model",
+                })
+                for guidance in descriptions.values():
+                    self.assertIn(guidance, prompt)
+                self.assertIn("silent fallback or coercion", prompt)
+                self.assertIn("partial failure followed by retry", prompt)
+                self.assertIn("producer/consumer disagreement", prompt)
+                self.assertIn("regexes, enums, or finite spelling lists", prompt)
+                self.assertIn("outside the recognized cases", prompt)
+                self.assertIn("meaningful unconsumed text", prompt)
+                self.assertIn("rejected, ignored, or defaulted", prompt)
+                self.assertIn("Equal parses can both discard the same input semantics", prompt)
+                self.assertIn("passing recognized examples does not prove a conservative fallback", prompt)
+                self.assertIn("actual write or returned result", prompt)
+                self.assertIn("unrelated pre-existing issues", prompt)
+                self.assertNotIn("default to reporting a finding when uncertain", prompt)
+
+        self.assertIn("medium: materially incorrect behavior", descriptions["severity"])
+        self.assertIn("low: minor bounded impact or nonfunctional polish", descriptions["severity"])
+        self.assertIn("visible preview", descriptions["merge_disposition"])
+        self.assertIn("enforced safeguard", descriptions["merge_disposition"])
+        self.assertIn("leaving it unchanged is safe", descriptions["description"])
+
     def test_pre_contract_local_clear_run_remains_loadable(self) -> None:
         task_id = "legacy-local-clear"
         pull_request = "https://github.com/example/project/pull/8"

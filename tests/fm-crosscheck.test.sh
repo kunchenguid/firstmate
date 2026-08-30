@@ -4964,28 +4964,34 @@ test_pi_provisional_retraction_and_advisory_gating() {
   mkdir -p "$case_dir/repository"
   printf 'review line\n' > "$case_dir/repository/review.txt"
 
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$case_dir/schema.json" <<'PY' \
+    || fail "the Pi finding tool policy schema could not be generated"
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("crosscheck_finding_schema", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+Path(sys.argv[2]).write_text(
+    json.dumps(module.pi_review_output_schema("/account", "/execution")),
+    encoding="utf-8",
+)
+PY
+
   node --input-type=module - "$ROOT/bin/fm-crosscheck-pi-verdict-extension.mjs" "$case_dir" <<'JS' \
     || fail "the Pi extension did not preserve provisional review-item semantics"
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const extensionPath = process.argv[2];
 const root = process.argv[3];
 const schema = `${root}/schema.json`;
-const citation = { type: "array", items: { type: "object" } };
-writeFileSync(schema, JSON.stringify({ properties: {
-  summary: { type: "string" },
-  citations: citation,
-  new_findings: { items: { properties: {
-    severity: {}, merge_disposition: {}, title: {}, citations: citation, description: {},
-  } } },
-  suspicions: { items: { properties: { description: {}, citations: citation } } },
-  finding_updates: { items: { properties: {
-    id: {}, status: {}, note: {}, equivalent_to: {},
-  } } },
-} }));
+const findingSchema = JSON.parse(readFileSync(schema, "utf8")).properties.new_findings.items;
 Object.assign(process.env, {
   FM_CROSSCHECK_REVIEW_SCHEMA: schema,
   FM_CROSSCHECK_REPOSITORY: `${root}/repository`,
@@ -5027,6 +5033,9 @@ function validateLog(log, expectedResults) {
 const citationValue = [{ path: "review.txt", line: 1 }];
 
 const batched = await session("batched");
+assert.deepEqual(batched.tools.report_finding.parameters.properties.severity, findingSchema.properties.severity);
+assert.deepEqual(batched.tools.report_finding.parameters.properties.merge_disposition, findingSchema.properties.merge_disposition);
+assert.deepEqual(batched.tools.report_finding.parameters.properties.explanation, findingSchema.properties.description);
 const searches = payload(await batched.tools.repo_search_batch.execute("searches", {
   searches: [{ query: "review" }, { query: "missing" }],
 }));
@@ -5088,6 +5097,27 @@ payload(await blocking.tools.report_finding.execute("finding", {
 payload(await blocking.tools.finish_review.execute("finish", {
   verdict: "BLOCKING", summary: "release blocker remains", citations: citationValue,
 }));
+
+for (const [name, severity, disposition, explanation] of [
+  ["silent-write", "medium", "must-fix", "A valid explicit timezone is silently stored as recipient-local; a later manual edit does not prevent the wrong schedule."],
+  ["cosmetic", "low", "advisory", "Cosmetic wording only; leaving it unchanged has no behavioral consequence."],
+  ["minor-defect", "low", "must-fix", "A bounded but definite incorrect result for a supported input."],
+]) {
+  const calibrated = await session(name);
+  payload(await calibrated.tools.report_finding.execute("finding", {
+    severity, merge_disposition: disposition, title: name, citations: citationValue, explanation,
+  }));
+  if (disposition === "must-fix") {
+    const refused = await calibrated.tools.finish_review.execute("premature-clear", {
+      verdict: "CLEAR", summary: "incorrectly ignoring surviving finding", citations: citationValue,
+    });
+    assert.deepEqual(refused.details, { accepted: false, correctable: true });
+  }
+  payload(await calibrated.tools.finish_review.execute("finish", {
+    verdict: disposition === "must-fix" ? "BLOCKING" : "CLEAR",
+    summary: explanation, citations: citationValue,
+  }));
+}
 JS
 
   "$CROSSCHECK_PYTHON" - "$ROOT/bin/fm-crosscheck-pi-reviewer.py" \
@@ -5144,6 +5174,15 @@ assert advisory["new_findings"] == [{
 
 blocking = replay("blocking")["verdict"]
 assert blocking["new_findings"][0]["merge_disposition"] == "must-fix"
+
+for name, severity, disposition in (
+    ("silent-write", "medium", "must-fix"),
+    ("cosmetic", "low", "advisory"),
+    ("minor-defect", "low", "must-fix"),
+):
+    finding = replay(name)["verdict"]["new_findings"][0]
+    assert finding["severity"] == severity, finding
+    assert finding["merge_disposition"] == disposition, finding
 
 prior_advisory = {
     "findings": [{
@@ -6268,9 +6307,12 @@ assert costs["provider_reported"] is None
 assert costs["pi_calculated"] == 0.0004784
 assert costs["declared"] == 0.0004784
 assert source["telemetry"]["turns"] == 2
-assert source["telemetry"]["review_process"] == {
-    "mode": "two-stage-independent-synthesis-v1", "stages": 2,
-}
+process = source["telemetry"]["review_process"]
+assert process["mode"] == "two-stage-independent-synthesis-v1"
+assert process["stages"] == 2
+assert [row["stage"] for row in process["stage_metrics"]] == ["challenge", "synthesis"]
+assert [row["turns"] for row in process["stage_metrics"]] == [1, 1]
+assert all(row["elapsed_ms"] >= 0 for row in process["stage_metrics"])
 assert source["telemetry"]["reviewer_latency_ms"] >= 0
 config = dict(source["reviewer"])
 snapshot = {"head_sha": head, "base_sha": source["base_sha"],

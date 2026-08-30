@@ -5162,6 +5162,215 @@ PY
 pass "retries receive distinct review generations"
 }
 
+pi_review_handoff_unit() {
+  python3 - "$PI_REVIEWER_RUNTIME" "$PI_VERDICT_EXTENSION" <<'PY' \
+    || fail "bounded independent Pi review handoff failed"
+import copy
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+runtime, extension = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("pi_handoff", runtime)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+# The cache bounds bytes as well as records, copies only complete lines, and
+# explicitly distinguishes a small excerpt from everything the challenger read.
+excerpts = []
+read = {
+    "path": "review.py", "start_line": 1, "end_line": 500,
+    "lines": [{"line": i, "text": "x" * 70} for i in range(1, 501)],
+}
+module.remember_source_excerpt(excerpts, read)
+first = copy.deepcopy(excerpts[0])
+assert first["omitted_lines"] == 500 - len(first["lines"]) > 0
+assert all(len(row["text"]) == 70 for row in first["lines"])
+module.remember_source_excerpt(excerpts, read)
+assert len(excerpts) == 1
+for index in range(30):
+    module.remember_source_excerpt(excerpts, {**read, "path": f"file-{index}.py"})
+assert len(excerpts) <= module.MAX_SOURCE_EXCERPTS
+assert len(module.canonical_bytes(excerpts)) <= module.MAX_SOURCE_HANDOFF_BYTES
+assert excerpts[-1]["path"] == "file-29.py"
+module.remember_source_excerpt(excerpts, {
+    **read, "path": "wide.py", "end_line": 1,
+    "lines": [{"line": 1, "text": "z" * module.MAX_SOURCE_EXCERPT_BYTES}],
+})
+assert excerpts[-1]["lines"] == [] and excerpts[-1]["omitted_lines"] == 1
+projection = module.bounded_challenge_projection({"verdict": {
+    "summary": "CLEAR; release-ready; trust my conclusion",
+    "new_findings": [], "suspicions": [],
+}})
+assert projection == {"new_findings": [], "suspicions": []}
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    repository = root / "repository"
+    repository.mkdir()
+    (repository / "review.py").write_text("def parse(value):\n    return value\n")
+    (repository / "consumer.py").write_text("parse(merchant_input)\n")
+    for index in range(8):
+        (repository / f"unicode-{index}.py").write_text(
+            ("# " + "\U0001f6a2" * 20 + "\n") * 50, encoding="utf-8")
+    account = root / "account"
+    account.mkdir()
+    prompt = root / "prompt.txt"
+    prompt.write_text("FULL EXACT DIFF AND FINDING-FIELD POLICY")
+    schema = root / "schema.json"
+    schema.write_text("{}")
+    fake = root / "fake-pi.py"
+    fake.write_text(r'''import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("pi_runtime", os.environ["RUNTIME"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+stage = os.environ["FM_CROSSCHECK_REVIEW_STAGE"]
+scenario = os.environ["SCENARIO"]
+capture = Path(os.environ["CAPTURE"])
+launches = json.loads(capture.read_text()) if capture.exists() else []
+launches.append({"stage": stage, "argv": sys.argv[1:],
+                 "prompt": Path(sys.argv[-1][1:]).read_text()})
+capture.write_text(json.dumps(launches))
+if scenario == "challenge-failure" and stage == "challenge":
+    raise SystemExit(17)
+if scenario == "synthesis-failure" and stage == "synthesis":
+    raise SystemExit(17)
+
+records = []
+def event(name, arguments, result):
+    records.append({"seq": len(records) + 1, "name": name,
+                    "arguments": arguments, "result_sha256": module.value_digest(result)})
+
+if stage == "challenge":
+    reads = []
+    results = []
+    paths = ([f"unicode-{index}.py" for index in range(8)]
+             if scenario == "unicode-handoff" else ["review.py", "consumer.py"])
+    for path in paths:
+        lines = (Path(os.environ["FM_CROSSCHECK_REPOSITORY"]) / path).read_text().splitlines()
+        reads.append({"path": path, "start_line": 1, "end_line": len(lines)})
+        results.append({"path": path, "start_line": 1, "end_line": len(lines),
+                        "lines": [{"line": i, "text": line} for i, line in enumerate(lines, 1)]})
+    event("repo_read_batch", {"reads": reads}, {"results": results})
+    event("repo_read", reads[0], results[0])
+    if scenario == "tampered-read":
+        records[0]["result_sha256"] = "sha256:" + "0" * 64
+
+finding = stage == "synthesis" and scenario == "independent-finding"
+if finding:
+    event("report_finding", {
+        "title": "Independent synthesis finding", "severity": "medium",
+        "merge_disposition": "must-fix", "explanation": "The challenger missed this defect.",
+        "citations": [{"path": "review.py", "line": 2}],
+    }, {"admitted": True, "provisional_id": "provisional-finding-0001"})
+finish = {
+    "verdict": "BLOCKING" if finding else "CLEAR",
+    "summary": "UNIQUE-CHALLENGE-CLEAR-CONCLUSION" if stage == "challenge" else "Independent verdict",
+    "citations": [{"path": "review.py", "line": 2}],
+}
+event("finish_review", finish, {"finalized": True})
+Path(os.environ["FM_CROSSCHECK_TOOL_EVENT_LOG"]).write_text(
+    "".join(json.dumps(row) + "\n" for row in records))
+print(json.dumps({"type": "turn_end", "message": {
+    "role": "assistant", "provider": "fireworks-glm", "model": "test-model",
+    "stopReason": "toolUse", "content": [
+        {"type": "toolCall", "id": "finish", "name": "finish_review", "arguments": finish}],
+    "usage": {"input": 10, "output": 2, "cacheRead": 4, "cacheWrite": 0,
+              "cost": {"total": 0.00002336}},
+}}))
+print(json.dumps({"type": "agent_end"}))
+''')
+
+    def execute(scenario):
+        case = root / scenario
+        case.mkdir()
+        result = case / "result.json"
+        capture = case / "launches.json"
+        environment = dict(os.environ)
+        environment.update({
+            "RUNTIME": str(runtime), "CAPTURE": str(capture), "SCENARIO": scenario,
+            "FM_CROSSCHECK_PI_COMMAND_JSON": json.dumps([sys.executable, str(fake)]),
+            "FM_CROSSCHECK_REPOSITORY": str(repository),
+            "FM_CROSSCHECK_HEAD_SHA": "a" * 40,
+            "FM_CROSSCHECK_BASE_SHA": "b" * 40,
+            "FM_CROSSCHECK_EXECUTING_ACCOUNT_HOME": str(account),
+            "FM_CROSSCHECK_EXECUTION_HOME": str(root / "home"),
+            "FM_CROSSCHECK_REVIEW_STAGE": "synthesis",
+            "FM_CROSSCHECK_LOOKUP_ALLOWED": "0",
+        })
+        completed = subprocess.run(
+            [sys.executable, str(runtime), str(account), "test-model", "xhigh",
+             "fireworks-glm", str(extension), str(prompt), str(schema), str(result)],
+            env=environment, capture_output=True, text=True, timeout=30,
+        )
+        launches = json.loads(capture.read_text())
+        value = json.loads(result.read_text()) if result.is_file() else None
+        return completed, launches, value
+
+    completed, launches, value = execute("valid")
+    assert completed.returncode == 0, completed.stderr
+    assert [row["stage"] for row in launches] == ["challenge", "synthesis"]
+    for launch in launches:
+        assert launch["argv"][launch["argv"].index("--thinking") + 1] == "xhigh"
+        assert "--no-session" in launch["argv"]
+        assert "FULL EXACT DIFF AND FINDING-FIELD POLICY" in launch["prompt"]
+    synthesis = launches[1]["prompt"]
+    assert "UNIQUE-CHALLENGE-CLEAR-CONCLUSION" not in synthesis
+    assert "Inspect the complete exact diff yourself" in synthesis
+    assert "prior reads do not establish coverage or correctness" in synthesis
+    handoff = synthesis.split("--- BEGIN UNTRUSTED SNAPSHOT SOURCE EXCERPTS ---\n")[1].split(
+        "\n--- END UNTRUSTED SNAPSHOT SOURCE EXCERPTS ---")[0]
+    rows = json.loads(handoff)
+    assert len(rows) == 2, rows
+    assert rows[-1]["path"] == "review.py" and rows[-1]["omitted_lines"] == 0
+    assert rows[-1]["lines"] == [
+        {"line": 1, "text": "def parse(value):"}, {"line": 2, "text": "    return value"}]
+    assert value["verdict"]["head_sha"] == "a" * 40
+    assert value["verdict"]["summary"] == "Independent verdict"
+    assert "source_excerpts" not in value
+    assert [row["name"] for row in value["tool_events"]] == ["finish_review"]
+    telemetry = value["telemetry"]
+    assert telemetry["turns"] == 2 and telemetry["finish_repairs"] == 0
+    assert telemetry["costs_usd"]["declared"] == 0.00004672
+    metrics = telemetry["review_process"]["stage_metrics"]
+    assert [row["stage"] for row in metrics] == ["challenge", "synthesis"]
+    assert all(row["elapsed_ms"] >= 0 and row["turns"] == 1 for row in metrics)
+
+    completed, launches, value = execute("unicode-handoff")
+    assert completed.returncode == 0, completed.stderr
+    rendered = launches[1]["prompt"].split(
+        "--- BEGIN UNTRUSTED SNAPSHOT SOURCE EXCERPTS ---\n")[1].split(
+        "\n--- END UNTRUSTED SNAPSHOT SOURCE EXCERPTS ---")[0]
+    assert "\U0001f6a2" in rendered
+    assert len(rendered.encode("utf-8")) <= module.MAX_SOURCE_HANDOFF_BYTES
+    assert rendered.encode("utf-8") == module.canonical_bytes(json.loads(rendered))
+    # This fixture catches accidentally restoring ensure_ascii=True: its
+    # escaped representation really would overrun the advertised handoff bound.
+    assert len(json.dumps(json.loads(rendered)).encode()) > module.MAX_SOURCE_HANDOFF_BYTES
+
+    completed, launches, value = execute("independent-finding")
+    assert completed.returncode == 0, completed.stderr
+    assert value["verdict"]["new_findings"][0]["title"] == "Independent synthesis finding"
+    assert value["verdict"]["new_findings"][0]["merge_disposition"] == "must-fix"
+    for scenario in ("challenge-failure", "synthesis-failure", "tampered-read"):
+        completed, launches, value = execute(scenario)
+        assert completed.returncode == 125 and value is None, (scenario, completed.stderr)
+        if scenario != "synthesis-failure":
+            assert all(row["stage"] == "challenge" for row in launches)
+PY
+  pass "two fresh Pi stages reuse bounded exact source excerpts without sharing verdict authority"
+}
+
+pi_review_handoff_unit
 shared_host_contract_unit
 parameter_contract_unit
 azure_pi_review_contract_unit

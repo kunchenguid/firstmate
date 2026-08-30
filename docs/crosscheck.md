@@ -105,11 +105,10 @@ The reviewer must:
 
 `report_finding` and `report_suspicion` return stable provisional IDs for the current review.
 `retract_review_item` removes a disproved item from the final verdict without discarding its append-only report and retraction events.
-Severity describes impact (`high`, `medium`, or `low`) independently from merge
-disposition. A definite correctness, security, data-loss, runtime,
-compatibility, or contract defect is `must-fix`; an issue is `advisory` only
-when it is demonstrably safe to defer. Historical severity-`blocking` findings
-remain loadable and are interpreted as `must-fix`.
+Severity describes impact (`high`, `medium`, or `low`) independently from merge disposition (`must-fix` or `advisory`).
+The `FINDING_*_GUIDANCE` constants in `bin/fm-crosscheck.py` own calibration for both the reviewer prompt and the Pi finding-tool fields.
+The reviewer judges reachable consequences, not fix size: a later correction option does not make a silently wrong schedule or stored value safe to defer, while harmless cosmetic polish remains advisory.
+Historical severity-`blocking` findings remain loadable and are interpreted as `must-fix`.
 
 The controller independently replays the accepted structured tool log. A
 missing, multiple, malformed, or contradictory final verdict gets one bounded
@@ -165,11 +164,11 @@ single and batched snapshot search/read, finding/suspicion/update reporting,
 one optional lookup request, and finalization. Batch calls reduce model turns
 without widening repository or network access.
 
-The Pi runtime performs both review stages inside the same isolated Azure
-generation, so stronger recall does not add another provisioning or staging
-cycle. Only the synthesis event log becomes ledger authority; challenge output
-is bounded and injected as untrusted hypotheses. Telemetry combines both
-stages and identifies the two-stage review process.
+The Pi runtime performs both review stages inside the same isolated Azure generation, without another provisioning or staging cycle.
+Only the synthesis event log becomes ledger authority; challenge output is bounded and injected as untrusted hypotheses.
+The synthesis also receives a small cache of exact source excerpts copied only from successfully replayed snapshot reads, with omitted lines explicitly marked.
+It still inspects the complete diff and independently verifies findings, using ordinary batched reads for missing context; the challenge's summary or `CLEAR` conclusion is not handed forward.
+Telemetry combines both stages and identifies the two-stage review process.
 
 ## Ketch lookup
 
@@ -228,10 +227,10 @@ burst, show that capacity is the bottleneck.
 
 ## Economics and reuse
 
-Each run records available Pi tokens, declared model cost, queue wait, snapshot
-build time, reviewer latency, review-process mode, outcome, finding disposition,
-lookup use, and phase timings. Provider-reported cost remains separate from
-locally calculated cost.
+Each run records available Pi tokens, declared model cost, queue wait, snapshot build time, reviewer latency, review-process mode, outcome, finding disposition, lookup use, and phase timings.
+When available, the ledger's optional `telemetry.review_process.stage_metrics` records challenge and synthesis elapsed time and turn counts; historical records and lookup-followup runs without these fields remain readable.
+These measurements support before/after comparisons on real reviews; they do not establish a speed improvement by themselves.
+Provider-reported cost remains separate from locally calculated cost.
 
 An accepted clear review can be reused without another model request only when
 the head SHA, reviewed merge base, stable claims digest, reviewer identity, and
