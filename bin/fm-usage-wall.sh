@@ -75,11 +75,14 @@
 # line: measured when an account-scoped row was read, unknown with its reason
 # otherwise. That is swept from the report's own names rather than enumerated
 # shape by shape, because enumerating kept leaving one more way to be missed.
-# A row carrying no provider at all has no name to be swept by, so it is counted
-# where it is dropped and reported as one `unattributable-row` line - a rule
-# about names alone let exactly such a row vanish under a summary reading
-# `measured=1 unknown=0`. No emitted row is discarded unaccounted for, which is
-# what makes `unknown=0` mean everything the gauge reported was read.
+# A row carrying no provider at all has no name to be swept by, so ONE accounting
+# pass over every table the reading consults counts what the name sweep cannot
+# reach and reports it as a single `unattributable-row` line. That pass, rather
+# than a guard per table, is what makes the rule hold: a rule about names alone
+# let such a row vanish under a summary reading `measured=1 unknown=0`, and a
+# guard written per table left `exhaustion` - which no loop enumerates - doing
+# the same. No emitted row is discarded unaccounted for, which is what makes
+# `unknown=0` mean everything the gauge reported was read.
 #
 # It never prompts. `quota-axi` returns auth_required and unknown headroom until
 # the operator approves keychain access once, and the command that does that
@@ -559,7 +562,18 @@ cmd_headroom() {
   # and must never let a provider read as healthy on evidence nobody produced.
   # `quota` lists only providers with a measurable window; every other provider
   # appears in `attention` alone, which is where its reason and remedy live.
+  #
+  # `headroom_tables` names every table this reading consults, in ONE place, and
+  # the accounting pass below reads that list rather than the tables by hand. A
+  # table joins the reading by joining this list, and is accounted for by
+  # construction from that moment - which is the point. `exhaustion` was
+  # consulted only by per-provider lookups and by a name sweep that silently
+  # discarded rows carrying no name, so a row reporting zero usable runway was
+  # thrown away under a `verdict=ok ... unknown=0` summary. That was the third
+  # table to lose the same invariant, each time because the guard was written
+  # per table instead of once over all of them.
   local quota exhaustion attention
+  local -a headroom_tables=(quota exhaustion attention)
   quota=$(printf '%s\n' "$out" | toon_block quota \
     'provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt')
   exhaustion=$(printf '%s\n' "$out" | toon_block exhaustion \
@@ -574,21 +588,10 @@ cmd_headroom() {
   local measured=0 tight=0 wall=0 unknown=0 unattributable=0 rows='' summary_verdict
   while IFS="$(printf '\t')" read -r provider scope pct runway conf win resets; do
     # A row nobody can attribute is not a reading: `- ok pct=84` is a healthy
-    # dispatch gauge for a provider no one can act on. But it is still a row the
-    # gauge EMITTED, so it is counted rather than discarded. The invariant the
-    # sweep below enforces is phrased in terms of provider NAMES, and a row
-    # carrying no name slips underneath it - which is how a report mixing named
-    # rows with one empty `provider` cell read `verdict=ok measured=1 unknown=0`
-    # over a row at 3% that was thrown away. Nothing the report emits may be
-    # dropped without being accounted for, named or not.
-    #
-    # An empty TABLE is not an emitted row: `toon_block` prints nothing for a
-    # sparse block, and the here-doc below then yields one blank line whose
-    # every field is empty. A real row always carries a field for each name
-    # asked for, `-` at worst, so the blank line is told apart by all of them
-    # being empty rather than by the provider alone.
-    if [ -z "$provider$scope$pct$runway$conf$win$resets" ]; then continue; fi
-    case "$provider" in ''|'-') unattributable=$((unattributable + 1)); continue ;; esac
+    # dispatch gauge for a provider no one can act on. This loop only declines
+    # to READ it; the accounting pass below is what makes sure it was not
+    # silently dropped, for this table and every other one at once.
+    case "$provider" in ''|'-') continue ;; esac
     # One account-level reading per provider. A model-scoped row bounds only that
     # model (quota-axi owns that relationship) and is not the dispatch gauge.
     case "$scope" in
@@ -692,17 +695,20 @@ EOF
   # flagged had no line at all. Ordering account scope first keeps the
   # account-level reason the one that gets printed when both exist.
   while IFS="$(printf '\t')" read -r provider scope kind reason remedy; do
-    if [ -z "$provider$scope$kind$reason$remedy" ]; then continue; fi
-    case "$provider" in ''|'-') unattributable=$((unattributable + 1)); continue ;; esac
+    case "$provider" in ''|'-') continue ;; esac
     printf '%s\n' "$rows" | awk -F'\t' -v p="$provider" '$1 == p { found = 1 } END { exit !found }' && continue
     local ahint='' areason ascope=''
     unknown=$((unknown + 1))
     areason=$(headroom_unknown_reason "$scope" "$kind")
     case "$scope" in all|all_models|unresolved) ;; *) ascope=" scope=$scope" ;; esac
+    # Both, never one instead of the other. The remedy is the gauge's own
+    # advice and the keychain command is the action this surface owes the
+    # operator - the only thing that unblocks the reading at all - so an
+    # upstream string appearing in `remedy` must not be able to displace it.
     case "$kind" in
       auth_required) ahint=" - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read" ;;
     esac
-    case "$remedy" in ''|'-'|none) ;; *) ahint=" - $remedy" ;; esac
+    case "$remedy" in ''|'-'|none) ;; *) ahint="$ahint - $remedy" ;; esac
     rows="$rows$provider	unknown	reason=$areason status=$kind$ascope detail=$reason$ahint"$'\n'
   done <<EOF
 $(printf '%s\n' "$attention" | awk -F'\t' '
@@ -711,29 +717,39 @@ $(printf '%s\n' "$attention" | awk -F'\t' '
     END { printf "%s", rest }')
 EOF
 
-  # THE INVARIANT, enforced here rather than case by case: a provider the report
-  # names ANYWHERE - `quota` at any scope, `exhaustion`, `attention` - gets a
-  # line in the reading. Measured when an account-scoped row was actually read,
-  # unknown with its reason otherwise.
+  # THE INVARIANT: every ROW the gauge emitted, in every table this reading
+  # consults, is either reported or accounted for as unreported with a reason -
+  # and if any row was discarded, the reading may not describe itself as fully
+  # measured. That is what makes `unknown=0` mean everything the gauge reported
+  # was read.
   #
-  # Every previous attempt enumerated the ways a provider could be missed, and
-  # each one left another: filtering attention to account scope missed a
-  # provider flagged at model scope, and deduping against emitted rows still
-  # missed a provider whose only quota row is model-scoped and which attention
-  # never names at all - it fell through both loops while the summary read
-  # `verdict=ok measured=1 unknown=0` with a provider at 3% invisible. So this
-  # sweeps the report's own names instead of enumerating shapes, and a new table
-  # or scope upstream cannot reopen the class.
+  # It is enforced by ONE accounting pass over `headroom_tables` rather than by
+  # a guard per table, because a guard per table is what kept reopening this.
+  # Each round closed the table in front of it and left the next one open:
+  # attention filtered to account scope missed a provider flagged at model
+  # scope; deduping by name missed a provider whose only quota row is
+  # model-scoped; a name-shaped rule missed a quota row carrying no name at all;
+  # and `exhaustion`, which no loop enumerates, kept losing rows to a sweep that
+  # dropped unnamed ones silently. Here every row from every listed table is
+  # sorted into exactly one of two piles - named, and therefore swept below by
+  # name, or unattributable, and therefore counted - so a table added upstream
+  # is covered the moment it joins `headroom_tables`, with nothing else to
+  # remember.
   #
-  # `-` is not a name, so an unattributable row cannot be swept by name. It is
-  # accounted for separately below, from the count the two loops kept.
-  local mentioned mprovider mscopes msources mreason
+  # An empty TABLE is not an emitted row: `toon_block` prints nothing for a
+  # sparse block, and `printf` then yields one blank line. A real row always
+  # carries one field per name asked for - four at the fewest - so `NF > 1`
+  # tells a row from that blank line without knowing which table it came from.
+  local table_rows mentioned mprovider mscopes msources mreason tname
+  table_rows=$(
+    for tname in "${headroom_tables[@]}"; do
+      printf '%s\n' "${!tname}" | awk -F'\t' -v t="$tname" 'NF > 1 { print $1 "\t" $2 "\t" t }'
+    done
+  )
+  unattributable=$(printf '%s\n' "$table_rows" |
+    awk -F'\t' 'NF > 1 && ($1 == "" || $1 == "-") { n++ } END { print n + 0 }')
   mentioned=$(
-    {
-      printf '%s\n' "$quota" | awk -F'\t' '$1 != "" && $1 != "-" { print $1 "\t" $2 "\tquota" }'
-      printf '%s\n' "$exhaustion" | awk -F'\t' '$1 != "" && $1 != "-" { print $1 "\t" $2 "\texhaustion" }'
-      printf '%s\n' "$attention" | awk -F'\t' '$1 != "" && $1 != "-" { print $1 "\t" $2 "\tattention" }'
-    } | awk -F'\t' '
+    printf '%s\n' "$table_rows" | awk -F'\t' 'NF > 1 && $1 != "" && $1 != "-"' | awk -F'\t' '
       { if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1 }
         if (!(($1 SUBSEP $2) in scope_seen)) {
           scope_seen[$1 SUBSEP $2] = 1
@@ -1024,6 +1040,11 @@ attributed_run() {  # <worktree>
 head_binding() {  # <worktree> <run-head>
   local wt=$1 run_head=$2 local_full
   [ -n "$run_head" ] && [ "$run_head" != '-' ] || { printf 'unknown'; return 0; }
+  # An unreadable copy fails the lookup below exactly as a copy missing the
+  # commit does, so without this gate it would read `pipeline-only` - a definite
+  # claim that the run holds commits this copy does not have, about a copy
+  # nobody could read, carrying a warning not to rebuild from its head.
+  worktree_git_readable "$wt" || { printf 'unknown'; return 0; }
   if ! git -C "$wt" rev-parse --verify --quiet "${run_head}^{commit}" >/dev/null 2>&1; then
     printf 'pipeline-only'
     return 0
@@ -1273,8 +1294,28 @@ branch_sync_field() {  # <axi-status-toon> <key>
   '
 }
 
-git_fact() {  # <worktree> <branch|head|dirty|unpushed>
+# worktree_git_readable: can git read this directory as a repository at all?
+#
+# The one gate in front of every git read of a local copy, because the failure
+# is silent in both directions otherwise: `git status --porcelain` prints
+# nothing for a directory git cannot read, and the count of nothing is `0` - a
+# clean, measured, FALSE answer about a repository nobody could read. A copy
+# whose directory exists but whose git metadata is gone (pruned, relocated) is
+# exactly the half-state a post-wall recovery walks into, so it is the state
+# this record most has to get right. One gate rather than a check per fact, for
+# the same reason the headroom accounting is one pass rather than one guard per
+# table: a fact added later is covered without anyone remembering to add it.
+worktree_git_readable() {  # <worktree>
+  git -C "$1" rev-parse --git-dir >/dev/null 2>&1
+}
+
+git_fact() {  # <worktree> <readable|branch|head|dirty|unpushed>
   local wt=$1 v
+  if [ "$2" = readable ]; then
+    worktree_git_readable "$wt" && printf 'yes' || printf 'no'
+    return 0
+  fi
+  worktree_git_readable "$wt" || { printf 'unknown'; return 0; }
   case "$2" in
     branch)
       v=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || v=
@@ -1447,18 +1488,27 @@ resume_task() {  # <snapshot-json> <task-id>
   printf -- '- endpoint: %s (%s)\n' "$target" "$endpoint"
 
   if [ "$wt_present" = present ]; then
-    local branch head dirty unpushed
-    branch=$(git_fact "$wt" branch)
-    head=$(git_fact "$wt" head)
-    dirty=$(git_fact "$wt" dirty)
-    unpushed=$(git_fact "$wt" unpushed)
     printf -- '- local copy: %s\n' "$wt"
     if printf '%s\n' "${RESUME_DUP_WORKTREES:-}" | grep -Fqx -- "$wt"; then
       printf -- '  - SHARED: another task in this home records the same local copy; resolve which one owns it before resuming either\n'
     fi
-    printf -- '- branch: %s head: %s uncommitted: %s unpushed commits: %s\n' \
-      "$branch" "$head" "$dirty" "$unpushed"
-    resume_pipeline_line "$wt"
+    # The directory being there is not the same fact as git being able to read
+    # it. Saying so once beats printing four unknowns and leaving a reader to
+    # work out which failure produced them.
+    if [ "$(git_fact "$wt" readable)" = yes ]; then
+      local branch head dirty unpushed
+      branch=$(git_fact "$wt" branch)
+      head=$(git_fact "$wt" head)
+      dirty=$(git_fact "$wt" dirty)
+      unpushed=$(git_fact "$wt" unpushed)
+      printf -- '- branch: %s head: %s uncommitted: %s unpushed commits: %s\n' \
+        "$branch" "$head" "$dirty" "$unpushed"
+      resume_pipeline_line "$wt"
+    else
+      printf -- '- branch: unknown head: unknown uncommitted: unknown unpushed commits: unknown\n'
+      printf -- '  - the directory is present but git cannot read it as a repository, so nothing about its contents was measured; it may have been pruned or moved\n'
+      printf -- '- pipeline: not read (the local copy is not a readable repository)\n'
+    fi
   else
     printf -- '- local copy: %s (absent)\n' "$wt"
     printf -- '- pipeline: not read (no local copy to read it from)\n'

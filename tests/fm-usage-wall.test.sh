@@ -73,7 +73,7 @@ fm_git_identity
 # carrying `spendPriority`, an `exhaustion[N]` block, and a sparse `attention[N]`
 # block - so the parser is pinned against the emitted shape rather than a tidied
 # one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider|unattributable-row|exhaustion-only>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider|unattributable-in-quota|unattributable-in-exhaustion|unattributable-in-attention|unattributable-every-table|exhaustion-only|auth-with-remedy>
   # The FLOOR-COMPLIANT layout, as quota-axi 0.1.29 and newer emit it and as
   # verified live against 0.1.34 on this host: quota[], exhaustion[] and
   # attention[]. The pre-floor effective[]/providers[]/windows[] shape is not
@@ -218,15 +218,45 @@ quota[3]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidenc
 EOF
       return 0
       ;;
-    unattributable-row)
-      # Named rows beside one whose `provider` cell is declared but EMPTY. The
-      # gauge emitted that row; nothing downstream can attribute it, and a rule
-      # phrased in terms of provider names cannot sweep a row that carries none.
+    unattributable-in-quota|unattributable-in-exhaustion|unattributable-in-attention|\
+    unattributable-every-table)
+      # One healthy named row, plus a row whose `provider` cell is declared but
+      # EMPTY in one table - or in every table at once. The gauge emitted those
+      # rows; nothing downstream can attribute them, and a rule phrased in terms
+      # of provider names cannot sweep a row that carries none. Parameterised by
+      # TABLE rather than written out per shape, because a fixture per shape is
+      # what let the same defect reappear one table at a time.
+      local want=$1 qrows=1
+      case "$want" in unattributable-in-quota|unattributable-every-table) qrows=2 ;; esac
+      printf 'bin: /fake/quota-axi\n'
+      printf 'quota[%s]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n' "$qrows"
+      printf '  claude,all_models,84,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"\n'
+      case "$want" in
+        unattributable-in-quota|unattributable-every-table)
+          printf '  ,all_models,3,1.0,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"\n' ;;
+      esac
+      case "$want" in
+        unattributable-in-exhaustion|unattributable-every-table)
+          printf 'exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:\n'
+          printf '  ,all_models,0,five_hour\n' ;;
+      esac
+      case "$want" in
+        unattributable-in-attention|unattributable-every-table)
+          printf 'attention[1]{provider,scope,kind,detail,remedy}:\n'
+          printf '  ,all,error,quota read failed,none\n' ;;
+      esac
+      return 0
+      ;;
+    auth-with-remedy)
+      # An `auth_required` row that ALSO carries a remedy. The remedy is the
+      # gauge's own advice; the keychain command is the action this surface owes
+      # the operator, and is the only thing that unblocks the reading at all.
       cat <<'EOF'
 bin: /fake/quota-axi
-quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
   claude,all_models,84,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
-  ,all_models,3,1.0,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+attention[1]{provider,scope,kind,detail,remedy}:
+  cursor,all,auth_required,Cursor sign-in required,"sign in at cursor.com/settings"
 EOF
       return 0
       ;;
@@ -601,7 +631,7 @@ pass 'headroom reads a repeated block through its own header even across a spars
 # deduping against emitted rows still missed one whose only quota row is
 # model-scoped and which attention never names - it vanished while the summary
 # read `verdict=ok measured=1 unknown=0` with a provider at 3% invisible.
-for FIXTURE in healthy auth model-scoped-attention model-scoped-orphan sparse-repeated-block divergent exhaustion-only unattributable-row; do
+for FIXTURE in healthy auth model-scoped-attention model-scoped-orphan sparse-repeated-block divergent exhaustion-only unattributable-every-table auth-with-remedy; do
   CASE="$TMP_ROOT/hr-invariant-$FIXTURE"; mkdir -p "$CASE"
   fake_quota "$CASE/fakebin" "$FIXTURE"
   OUT=$(run_headroom "$CASE/fakebin")
@@ -677,29 +707,62 @@ pass 'headroom applies the tight threshold to the whole value, not its integer p
 
 # --- headroom: no emitted row is dropped unaccounted for ---------------------
 #
-# The fourth appearance of one defect class, and the reason the previous guard
-# missed it: the invariant was phrased as "every provider NAMED anywhere appears
-# in the output", and a row whose `provider` cell is empty carries no name, so it
-# slipped underneath the rule. It was dropped by the quota loop, excluded from
-# the name sweep, and never reached the row-less exit because another row had
-# been emitted - leaving `HEADROOM_SUMMARY: verdict=ok measured=1 tight=0 wall=0
-# unknown=0` and no note at all, over a report carrying a row at 3% that was
-# thrown away. The rule is now about ROWS, not names.
-CASE="$TMP_ROOT/hr-unattributable"; mkdir -p "$CASE"
-fake_quota "$CASE/fakebin" unattributable-row
+# THE INVARIANT ITSELF, asserted over every table the reading consults rather
+# than over the shapes that have turned up so far. A test per shape is exactly
+# what let this defect reappear one table at a time: the guard was closed for
+# `quota[]`, then for `attention[]`, and `exhaustion[]` - which no loop
+# enumerates - kept losing rows to a name sweep that dropped unnamed ones
+# silently, leaving `HEADROOM_SUMMARY: verdict=ok measured=1 tight=0 wall=0
+# unknown=0` and no note at all over an emitted row reporting zero usable
+# runway. The loop below is one assertion body per table, so a table added to
+# the reading is covered by adding a fixture line rather than a test.
+for TABLE in quota exhaustion attention; do
+  CASE="$TMP_ROOT/hr-unattr-$TABLE"; mkdir -p "$CASE"
+  fake_quota "$CASE/fakebin" "unattributable-in-$TABLE"
+  OUT=$(run_headroom "$CASE/fakebin")
+  assert_contains "$OUT" 'HEADROOM: claude ok pct=84' \
+    "the attributable row still reads normally ($TABLE)"
+  assert_contains "$OUT" 'HEADROOM: (unattributable rows) unknown reason=unattributable-row' \
+    "a row the gauge emitted with no provider is surfaced, whichever table it came from ($TABLE)"
+  assert_contains "$OUT" '1 row(s) in the report carried no provider' \
+    "and the line says how many rows could not be attributed ($TABLE)"
+  assert_not_contains "$OUT" 'verdict=ok' \
+    "a reading that discarded a row must never describe itself as fully measured ($TABLE)"
+  assert_contains "$OUT" 'verdict=partial measured=1 tight=0 wall=0 unknown=1' \
+    "the discarded row is counted as unknown, so unknown=0 keeps meaning nothing was dropped ($TABLE)"
+  assert_contains "$OUT" 'UNMEASURED, not healthy' \
+    "and the unmeasured note is carried ($TABLE)"
+done
+
+# All three at once, which is the assertion that no table is silently exempt:
+# the count has to reach three, so a table dropping its rows shows up as an
+# undercount rather than as a still-passing per-shape case.
+CASE="$TMP_ROOT/hr-unattr-all"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" unattributable-every-table
 OUT=$(run_headroom "$CASE/fakebin")
-assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'the attributable row still reads normally'
-assert_contains "$OUT" 'HEADROOM: (unattributable rows) unknown reason=unattributable-row' \
-  'a row the gauge emitted with no provider is surfaced rather than discarded'
-assert_contains "$OUT" '1 row(s) in the report carried no provider' \
-  'and the line says how many rows could not be attributed'
-assert_not_contains "$OUT" 'verdict=ok' \
-  'a reading that threw a row away must never describe itself as fully measured'
+assert_contains "$OUT" '3 row(s) in the report carried no provider' \
+  'every table this reading consults contributes to the count'
 assert_contains "$OUT" 'verdict=partial measured=1 tight=0 wall=0 unknown=1' \
-  'the discarded row is counted as unknown, so unknown=0 keeps meaning nothing was dropped'
-assert_contains "$OUT" 'UNMEASURED, not healthy' 'and the unmeasured note is carried'
+  'and one aggregate line accounts for all of them'
 assert_not_contains "$OUT" 'pct=3' 'an unattributable percentage is never presented as a reading'
-pass 'headroom accounts for a row it cannot attribute instead of dropping it'
+pass 'headroom accounts for an unattributable row in every table it consults'
+
+# --- headroom: the operator command survives an upstream remedy --------------
+#
+# The remedy line used to overwrite the auth hint outright, so an `auth_required`
+# row carrying any remedy lost `quota-axi --allow-keychain-prompt` - the one-time
+# action this surface owes the operator, and the only thing that unblocks the
+# reading. The gauge's advice and this command's own do not replace each other.
+CASE="$TMP_ROOT/hr-auth-remedy"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" auth-with-remedy
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'quota-axi --allow-keychain-prompt' \
+  'an upstream remedy must not displace the one-time operator command'
+assert_contains "$OUT" 'sign in at cursor.com/settings' \
+  'and the gauge own remedy is still carried'
+assert_contains "$OUT" 'HEADROOM: cursor unknown reason=auth-required' \
+  'the row still reads as an auth-required unknown'
+pass 'headroom keeps both the keychain command and the remedy on an auth row'
 
 # --- headroom: an unknown's reason is true of the provider it names ----------
 #
@@ -1747,6 +1810,43 @@ run_wall "$CASE/home" "$CASE/fakebin" resume >/dev/null
 assert_grep 'No task metadata is present' "$CASE/home/state/resume-record.md" \
   'an empty home produces a record that says so rather than an empty file'
 pass 'resume records an empty home explicitly'
+
+# --- resume: a present directory is not a readable repository ----------------
+#
+# `git status --porcelain` prints nothing for a directory git cannot read, and
+# the count of nothing is `0`, so the record reported `branch: (detached) ...
+# uncommitted: 0` - clean, measured and false - about a copy nobody could read.
+# `head_binding` failed the same way, reporting `pipeline-only` and warning
+# against rebuilding from a head it never read. A worktree whose directory
+# survives but whose git metadata is gone (pruned, relocated) is exactly the
+# half-state this record exists to describe.
+CASE="$TMP_ROOT/rs-unreadable"; mkdir -p "$CASE"
+make_task "$CASE" prunedcrew
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-prunedcrew "$CASE/capture.txt"
+fake_nm "$CASE_FB" "fm/prunedcrew" RUNPRUNE failed \
+  '    review,failed,0,120' "$CASE/review.log"
+printf 'nothing to see\n' > "$CASE/review.log"
+# The directory stays; only what makes it a repository is taken away, which is
+# the state a pruned or relocated worktree actually leaves behind.
+rm -f "$CASE_WT/.git"
+rm -rf "$CASE_WT/.git"
+[ -d "$CASE_WT" ] || fail 'the local copy directory must still be present for this case to mean anything'
+run_wall "$CASE_HOME" "$CASE_FB" resume >/dev/null
+BACK=$( cat "$CASE_HOME/state/resume-record.md" )
+assert_contains "$BACK" 'uncommitted: unknown' \
+  'a repository nobody could read is never reported as having no uncommitted work'
+assert_contains "$BACK" 'branch: unknown' \
+  'and its branch is unknown rather than guessed as detached'
+assert_not_contains "$BACK" 'uncommitted: 0' \
+  'a clean count is a measurement, and nothing here was measured'
+assert_not_contains "$BACK" '(detached)' \
+  'detached is a fact about a repository that was read'
+assert_contains "$BACK" 'git cannot read it as a repository' \
+  'the record says why nothing about the copy was measured'
+assert_not_contains "$BACK" 'commits this local copy does not have' \
+  'and never claims the pipeline is ahead of a copy it could not read'
+pass 'resume reports an unreadable local copy as unknown rather than as clean'
 
 # --- resume: two tasks recording one local copy -----------------------------
 

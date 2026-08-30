@@ -36,8 +36,11 @@ So `headroom` has three provider verdicts that mean a reading was taken (`ok`, `
 Absent, erroring, hanging, unparseable, unresolved, and unauthenticated all land on `unknown` with the concrete reason attached, and the one-time operator command is named on the line that needs it.
 Nothing the report emits is ever dropped from the reading: after the account-level reading and the flagged-provider reading, every name appearing anywhere in `quota[]` at any scope, `exhaustion[]`, or `attention[]` is swept and given its own line - measured when an account-scoped row was read, unknown with its reason otherwise.
 That is swept from the report's own names rather than enumerated shape by shape, because each earlier attempt closed one way a provider could be missed and left another open.
-A rule about names has one gap of its own, and it is the last way this class reappeared: a row whose `provider` cell is empty carries no name to sweep by, so it is counted where it is dropped and reported as a single `unattributable-row` line.
-The invariant is therefore about ROWS - no row the gauge emitted is discarded unaccounted for - which is what lets `unknown=0` mean everything the gauge reported was actually read.
+A rule about names has one gap of its own: a row whose `provider` cell is empty carries no name to sweep by.
+The invariant is therefore about ROWS - every row the gauge emitted, in every table the reading consults, is either reported or accounted for as unreported with a reason - and rows the sweep cannot reach are reported as a single `unattributable-row` line.
+It is enforced by one accounting pass over a single list of the tables consulted, not by a guard per table, because a guard per table is what kept reopening this: each round closed the table in front of it, and `exhaustion[]` - which no loop enumerates - went on losing rows to a sweep that dropped unnamed ones silently.
+A table added upstream joins the reading by joining that list, and is accounted for from that moment.
+That is what lets `unknown=0` mean everything the gauge reported was actually read.
 Every unknown also carries a reason that is true of the provider it names: a provider known only through `exhaustion[]` is missing a quota row, not a measurable window, and saying otherwise would contradict the detail printed beside it.
 A provider that quietly disappears is worse than one reported unknown, because the summary above it then reads as if everything measurable had been measured.
 
@@ -99,7 +102,13 @@ The stranded shape is specific: `branch_sync.state` reads `pipeline_owned` and t
 [`bin/fm-nm-run-lib.sh`](../bin/fm-nm-run-lib.sh) owns the shared rule for binding a run to a worktree, and that rule requires the run head to be resolvable locally - which, in exactly this case, it is not.
 Discarding the run there would hide the state a recovery most needs.
 
-So `resume` and `diagnose` attribute on the run's branch and report the head relationship as evidence beside it: `equal`, `pipeline-ahead`, `pipeline-only`, or `diverged`.
+So `resume` and `diagnose` attribute on the run's branch and report the head relationship as evidence beside it: `equal`, `pipeline-ahead`, `pipeline-only`, `diverged`, or `unknown`.
+
+Every one of those readings is gated on git being able to read the local copy at all, in one place rather than per fact.
+A directory that exists is not the same fact as a repository that can be read, and the difference is silent in both directions: `git status --porcelain` prints nothing for a copy git cannot read, and the count of nothing is `0`.
+Ungated, a worktree whose directory survived but whose git metadata is gone - pruned or relocated, exactly the half-state a post-wall recovery walks into - reported `branch: (detached) head: - uncommitted: 0`, two definite claims about a repository nobody could read.
+The head relationship takes the same gate as a precondition, because its lookup fails identically for a copy missing the commit and a copy git cannot read, and `pipeline-only` asserts the first.
+The record now says the copy could not be read, and reports nothing about its contents as measured.
 They read the bare `no-mistakes axi` overview rather than `axi status`, because the overview is scoped to the invoking worktree's own run while `axi status` reports the repository's active-or-most-recent run - routinely another task's, on a repository with several worktrees validating at once.
 This surface reports rather than acts, so naming the run and the relationship is the honest answer; acting on custody stays with the worker that owns the branch, under `AGENTS.md` section 7.
 

@@ -108,7 +108,7 @@ The distinction holds in both directions: the unmodified live report on the same
 
 ## An unmeasured provider never reads as healthy
 
-Seven ways a reading can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
+Nine ways a reading can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
 
 A percentage that is not a number.
 `toon_block` resolves fields by name and yields `-` for one the header never declared, so an upstream rename of `effectivePercentRemaining` leaves every row unreadable at once.
@@ -193,12 +193,30 @@ HEADROOM_SUMMARY: verdict=ok measured=1 tight=0 wall=0 unknown=0 source=quota-ax
 ```
 
 `toon_block` yields `-` for a field the header never declared AND for a declared field whose cell is empty, which is why this row looked like a layout change rather than an incomplete row; that ambiguity is now stated in `toon_block`'s own header rather than left to be rediscovered.
-The invariant is restated about ROWS - no row the gauge emitted is discarded unaccounted for - so the count reaches the reading and the summary can no longer describe itself as complete:
+The invariant is restated about ROWS - every row the gauge emitted, in every table the reading consults, is either reported or accounted for - so the count reaches the reading and the summary can no longer describe itself as complete:
 
 ```
 HEADROOM: claude ok pct=84 bound=five_hour resets=2026-08-27T02:19:59Z runway=unknown(-) confidence=-
 HEADROOM: (unattributable rows) unknown reason=unattributable-row status=unattributable_row detail=1 row(s) in the report carried no provider, so no reading could be attributed to them
 HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
+```
+
+Closing that per table left `exhaustion[]` open, because no loop enumerates it: it is consulted by per-provider lookups and by a sweep that dropped unnamed rows silently, so a row reporting zero usable runway was discarded under `verdict=ok measured=1 tight=0 wall=0 unknown=0`.
+That was the third table to lose the same invariant, each time because the guard was written per table.
+It is now one accounting pass over a single list of the tables consulted, and `tests/fm-usage-wall.test.sh` asserts the invariant per table from one assertion body plus a case carrying an unattributable row in all three at once - so a table that starts dropping rows shows up as an undercount rather than as a still-passing per-shape test:
+
+```
+HEADROOM: claude ok pct=84 bound=five_hour resets=2026-08-27T02:19:59Z runway=unknown(projected_exhaustion) confidence=early
+HEADROOM: (unattributable rows) unknown reason=unattributable-row status=unattributable_row detail=3 row(s) in the report carried no provider, so no reading could be attributed to them
+HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=1 source=quota-axi/0.1.40
+```
+
+An upstream remedy displacing the one-time operator command.
+The `auth_required` hint was overwritten rather than extended, so an `attention[]` row carrying any remedy lost `quota-axi --allow-keychain-prompt` - the only thing that unblocks the reading at all.
+Every live-captured row on this host carries `remedy=none`, so this is CONSTRUCTED; both now survive, the gauge's advice after this command's own:
+
+```
+HEADROOM: cursor unknown reason=auth-required status=auth_required detail=Cursor sign-in required - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read - sign in at cursor.com/settings
 ```
 
 A report whose rows are ALL unattributable still leaves through the single unmeasurable exit as `(all providers) unknown reason=no-named-provider-row`, because then no reading came back at all.
@@ -353,6 +371,29 @@ Neither line is inferred from an incident write-up; both are computed from task 
 
 The remaining four tasks are elided for length.
 `tests/fm-usage-wall.test.sh` pins the same behaviors portably, including that the record survives the process that wrote it, that regeneration replaces rather than accumulates, that a shared local copy is named on both rows, and that a broken record never replaces a good one.
+
+## A present directory is not a readable repository
+
+Every git reading of a local copy passes one readability gate, because the failure is silent in both directions: `git status --porcelain` prints nothing for a directory git cannot read, and the count of nothing is `0`.
+
+CONSTRUCTED, not observed - a worktree whose directory is intact but whose git metadata has been removed, which is what a pruned or relocated worktree leaves behind and exactly the half-state a post-wall recovery walks into.
+Ungated, the record made two definite claims about a repository nobody could read - `(detached)` and no uncommitted work - with only `head: -` hinting at the failure:
+
+```
+- branch: (detached) head: - uncommitted: 0 unpushed commits: (branch not on origin)
+- pipeline: no run is attributed to this local copy
+```
+
+The gate is one probe in front of every fact rather than a check per fact, for the same reason the headroom accounting is one pass rather than one guard per table; `head_binding` takes it as a precondition too, since its lookup fails identically for a copy missing the commit and a copy git cannot read.
+The record now reports nothing about the copy's contents as measured, and says why:
+
+```
+- branch: unknown head: unknown uncommitted: unknown unpushed commits: unknown
+  - the directory is present but git cannot read it as a repository, so nothing about its contents was measured; it may have been pruned or moved
+- pipeline: not read (the local copy is not a readable repository)
+```
+
+`tests/fm-usage-wall.test.sh` drives this by generating a record against a task whose local copy has had its git metadata removed and the directory left in place.
 
 ## The record tracks state changing under it
 
