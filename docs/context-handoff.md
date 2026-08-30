@@ -27,6 +27,7 @@ The paired `session_compact` and `session_compact_failed` handlers bind the term
 
 The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, durable creation and fsync of every new state-directory entry, durable repair of non-private directory modes without repeatedly syncing unchanged directories, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
 A retry recovers valid orphan envelopes, missing queues for claimed records, and incomplete claim sets without resealing different bytes.
+Registration applies bounded backpressure before the retry set or unsealed candidate set can exceed one recoverable compaction attempt, so draining the existing attempt always remains reachable.
 Sealed envelopes, queue state, receipts, approval records, transaction bundle staging, quarantine records, and acknowledgements remain below `state/context-handoff/` in the effective Firstmate home and never enter the Vault.
 Disabling the feature leaves every one of those records intact.
 
@@ -59,6 +60,7 @@ An identical retry is idempotent, changed handoff payload bytes quarantine, term
 Exit 75 leaves the record pending for a fresh read, rebuild, and inspect.
 
 The `PreToolUse` guard denies direct Write, Edit, NotebookEdit, shell mutation, unrelated MCP mutation, delete, move, Git, GitHub, installation, and credential tools in the curator session.
+Only the five exact tools exported by the bundled `firstmate-context-handoff` MCP server pass that MCP guard boundary.
 Save mutation is available only through the serialized MCP commit path, which holds the consumer state lock while revalidating the current hook session's process capability, exact live Herdr generation, source bytes, queue state, active private bundle, approval, and terminal state.
 The installed transaction core remains the primary confinement and recovery boundary because Claude command hooks cannot make their own startup or timeout infallible.
 
@@ -95,7 +97,7 @@ Never stop or restart Herdr, Pi, Claude, or Obsidian as a handoff rollback actio
 
 ## Verification
 
-Run `tests/fm-context-handoff.test.sh` for deterministic registration, sealing, delivery, hook, guard, transaction, replay, recovery, and rollback coverage.
+Run `tests/fm-context-handoff.test.sh` for deterministic registration, sealing, delivery, guard, transaction recovery, backpressure, durability, and bounded-transport coverage.
 Run `tests/fm-pi-primary-types.test.sh` for the installed Pi extension type contract.
 Run `claude plugin validate integrations/claude-context-handoff` for model-free plugin discovery validation.
 [`verification/context-handoff.md`](verification/context-handoff.md) records the current installed-version and official-document evidence.

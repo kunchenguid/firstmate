@@ -108,12 +108,24 @@ SENSITIVE_PATTERNS = [
         r"\b(email body|message body|chat body|inbox message)\b",
         r"\b(local-only|strictly private|do not share)\b",
         r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        r"\b\d{3}-\d{2}-\d{4}\b",
+        r"\baccount balance\b",
     )
 ]
 MUTATING_TOOL_NAMES = re.compile(
     r"(write|edit|delete|remove|move|rename|git|github|install|credential|secret|notebookedit)",
     re.IGNORECASE,
 )
+HANDOFF_MCP_TOOLS = {
+    f"mcp__firstmate-context-handoff__{name}"
+    for name in (
+        "register_curated_candidate",
+        "next_curated_handoff",
+        "record_curation_disposition",
+        "prepare_handoff_save",
+        "commit_handoff_save",
+    )
+}
 
 
 class HandoffError(RuntimeError):
@@ -861,9 +873,7 @@ def read_candidate(path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     return {**value, "item": item}
 
 
-def command_register(args: argparse.Namespace) -> dict[str, Any]:
-    home = resolve_home(args.fm_home)
-    config = load_config(home)
+def _register_locked(home: Path, config: Mapping[str, Any] | None, args: argparse.Namespace, layout: StateLayout) -> dict[str, Any]:
     if not config_enabled(config, "registration_enabled"):
         raise HandoffError("REGISTRATION_DISABLED", "curated handoff registration is disabled")
     assert config is not None
@@ -909,28 +919,50 @@ def command_register(args: argparse.Namespace) -> dict[str, Any]:
         "registered_at": now_utc(),
         "item": item,
     }
+    candidate_path = layout.candidates / f"{candidate_id}.json"
+    if candidate_path.exists():
+        existing = read_candidate(candidate_path, config)
+        if (
+            existing.get("candidate_id") != candidate_id
+            or existing.get("source_harness") != args.source_harness
+            or existing.get("source_session_hash") != session_hash
+            or existing.get("item") != item
+        ):
+            quarantine(layout, candidate_id, "candidate-id-payload-mismatch")
+            raise HandoffError("CREATE_ONLY_MISMATCH", "a stable candidate ID already binds different bytes")
+        return {"status": "registered", "candidate_id": candidate_id}
+    recover_orphan_queues_from_claims(layout, config)
+    retryable_count = len(retryable_records(layout, args.source_harness, session_hash, config))
+    if retryable_count >= MAX_COMPACTION_RECORDS:
+        raise HandoffError("COMPACTION_BACKPRESSURE", "retryable compaction records must drain before another candidate can register")
+    claimed = claimed_candidate_ids(layout)
+    pending_count = 0
+    for path in layout.candidates.glob("candidate-*.json"):
+        if path.stem in claimed:
+            continue
+        pending_candidate = read_candidate(path, config)
+        if pending_candidate["source_harness"] == args.source_harness and pending_candidate["source_session_hash"] == session_hash:
+            pending_count += 1
+    if pending_count >= MAX_ITEMS:
+        raise HandoffError("CANDIDATE_BACKPRESSURE", "the bounded candidate register must seal before accepting another item")
+    if load_config(home) != config:
+        raise HandoffError("CONFIG_CHANGED", "handoff configuration changed during candidate registration")
+    validate_source_path(config, args.source_record, args.source_sha256)
+    try:
+        atomic_create(candidate_path, canonical_json(value))
+    except HandoffError as exc:
+        if exc.code == "CREATE_ONLY_MISMATCH":
+            quarantine(layout, candidate_id, "candidate-id-payload-mismatch")
+        raise
+    write_receipt(layout, "candidate-register", "registered", "curated-item-accepted", candidate_id=candidate_id)
+    return {"status": "registered", "candidate_id": candidate_id}
+
+
+def command_register(args: argparse.Namespace) -> dict[str, Any]:
+    home = resolve_home(args.fm_home)
     layout = StateLayout(home)
     with state_lock(layout):
-        candidate_path = layout.candidates / f"{candidate_id}.json"
-        if candidate_path.exists():
-            existing = read_candidate(candidate_path, config)
-            if (
-                existing.get("candidate_id") != candidate_id
-                or existing.get("source_harness") != args.source_harness
-                or existing.get("source_session_hash") != session_hash
-                or existing.get("item") != item
-            ):
-                quarantine(layout, candidate_id, "candidate-id-payload-mismatch")
-                raise HandoffError("CREATE_ONLY_MISMATCH", "a stable candidate ID already binds different bytes")
-            return {"status": "registered", "candidate_id": candidate_id}
-        try:
-            atomic_create(candidate_path, canonical_json(value))
-        except HandoffError as exc:
-            if exc.code == "CREATE_ONLY_MISMATCH":
-                quarantine(layout, candidate_id, "candidate-id-payload-mismatch")
-            raise
-        write_receipt(layout, "candidate-register", "registered", "curated-item-accepted", candidate_id=candidate_id)
-    return {"status": "registered", "candidate_id": candidate_id}
+        return _register_locked(home, load_config(home), args, layout)
 
 
 def claimed_candidate_ids(layout: StateLayout) -> set[str]:
@@ -995,6 +1027,8 @@ def recover_unclaimed_records(layout: StateLayout, config: Mapping[str, Any], ca
         matched = wanted & {item["item_id"] for item in envelope["items"]}
         if matched:
             fsync_directory(layout.records)
+            update_queue(layout, envelope["record_id"], envelope_sha256=envelope_sha)
+            failpoint("after-recovery-queue-before-claims")
         for candidate_id in matched:
             claim = {
                 "schema": "firstmate.context-handoff.claim.v1",
@@ -1005,8 +1039,6 @@ def recover_unclaimed_records(layout: StateLayout, config: Mapping[str, Any], ca
             }
             atomic_create(layout.claims / f"{candidate_id}.json", canonical_json(claim))
             recovered[candidate_id] = envelope["record_id"]
-        if matched:
-            update_queue(layout, envelope["record_id"], envelope_sha256=envelope_sha)
     return recovered
 
 
@@ -1698,7 +1730,7 @@ def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, 
     lowered = tool_name.lower()
     if MUTATING_TOOL_NAMES.search(tool_name):
         return guard_deny("Delete, move, Git, installation, credential, and other mutation tools are not authorized for this Vault curator.")
-    if lowered.startswith("mcp__") and "firstmate-context-handoff" not in lowered.replace("_", "-"):
+    if lowered.startswith("mcp__") and lowered not in HANDOFF_MCP_TOOLS:
         return guard_deny("Unrelated MCP tools are not authorized to mutate this Vault or outside paths.")
     return None
 
@@ -2051,7 +2083,7 @@ def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Ma
     if not isinstance(record_id, str) or disposition not in DISPOSITIONS or not isinstance(rationale, str) or not 1 <= len(rationale) <= 500:
         raise HandoffError("DISPOSITION_INPUT", "consumer disposition input is invalid")
     validate_statement(rationale)
-    _envelope, queue_before, _digest = consumer_record(home, config, record_id)
+    require_consumer_binding(home, config)
     completed = find_completed_approval(home, config, record_id)
     if completed is not None:
         return {
@@ -2060,6 +2092,7 @@ def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Ma
             "disposition": "saved",
             "operation_id": completed["operation_id"],
         }
+    _envelope, queue_before, _digest = consumer_record(home, config, record_id)
     value = {
         "schema": "firstmate.context-handoff.disposition.v1",
         "record_id": record_id,
@@ -2117,6 +2150,10 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
     duplicate_check = arguments.get("duplicate_check")
     if not isinstance(record_id, str):
         raise HandoffError("PREPARE_INPUT", "Save preparation input is invalid")
+    require_consumer_binding(home, config)
+    completed = find_completed_approval(home, config, record_id)
+    if completed is not None:
+        return {"status": "acknowledged", "record_id": record_id, "operation_id": completed["operation_id"], "changed_path_hashes": completed["changed_path_hashes"]}
     _envelope, queue, _digest = consumer_record(home, config, record_id)
     require_active_save_authority(layout, record_id, queue)
     try:
@@ -2212,6 +2249,10 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
     approval_sha = arguments.get("approval_sha256")
     if not isinstance(record_id, str) or not isinstance(approval_sha, str) or not HEX64.fullmatch(approval_sha):
         raise HandoffError("COMMIT_INPUT", "Save commit input is invalid")
+    require_consumer_binding(home, config)
+    completed = find_completed_approval(home, config, record_id)
+    if completed is not None:
+        return {"status": "acknowledged", "record_id": record_id, "operation_id": completed["operation_id"], "changed_path_hashes": completed["changed_path_hashes"]}
     _envelope, queue, _digest = consumer_record(home, config, record_id)
     approval = load_approval(layout, record_id, approval_sha)
     ack_path = ack_path_for(layout, record_id)
@@ -2234,9 +2275,9 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
         expected_codes={0, 75},
     )
     if code == 75:
-        update_queue(layout, record_id, status="pending", reason="vault-conflict-or-held-lock")
-        write_receipt(layout, "consumer", "pending", "vault-conflict-or-held-lock", record_id=record_id, operation_id=approval["operation_id"])
-        return {"status": "pending", "reason": "vault-conflict-or-held-lock", "record_id": record_id}
+        update_queue(layout, record_id, status="pending", reason="fresh-inspect-required", active_bundle_sha256=None)
+        write_receipt(layout, "consumer", "pending", "fresh-inspect-required", record_id=record_id, operation_id=approval["operation_id"])
+        return {"status": "pending", "reason": "fresh-inspect-required", "record_id": record_id}
     if result is None or result.get("schema") != TRANSACTION_RESULT_SCHEMA or result.get("status") != "complete":
         update_queue(layout, record_id, status="pending", reason="transaction-apply-failed")
         write_receipt(layout, "consumer", "failed", "transaction-apply-failed", record_id=record_id, operation_id=approval["operation_id"])
@@ -2264,8 +2305,13 @@ def mcp_register(home: Path, config: Mapping[str, Any], arguments: Mapping[str, 
         provider_class=arguments.get("provider_class"),
         supersedes=arguments.get("supersedes") or [],
     )
-    require_consumer_binding(home, config)
-    return command_register(namespace)
+    layout = StateLayout(home)
+    with state_lock(layout):
+        current_config = load_config(home)
+        if current_config is None or not config_enabled(current_config, "consumer_enabled"):
+            raise HandoffError("CONSUMER_DISABLED", "the Claude handoff consumer is disabled")
+        require_consumer_binding(home, current_config)
+        return _register_locked(home, current_config, namespace, layout)
 
 
 def mcp_tool_schemas() -> list[dict[str, Any]]:
