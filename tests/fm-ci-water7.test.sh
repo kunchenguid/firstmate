@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_ensure_pyyaml || fail "python3 PyYAML is required to parse workflow policy"
+
 test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback() {
   if ! python3 - "$ROOT" <<'PY'
 import pathlib

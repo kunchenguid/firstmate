@@ -183,6 +183,15 @@ seed_repro_commitment() {   # <home> <obligation> <request> <work-home> <work-id
     --work-id "$work_id" --generation 1 >/dev/null || fail "register failed"
 }
 
+# seed_repro_commitment pins followup_expires_at to 2026-08-28; keep rechain
+# calls inside that window when the host clock has moved past the fixture date.
+repro_commitment_now_ok() {
+  local exp
+  exp=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-08-28T01:12:00Z' +%s 2>/dev/null) \
+    || exp=$(date -u -d '2026-08-28T01:12:00Z' +%s)
+  echo $((exp - 3600))
+}
+
 emit_terminal() {  # <child-run-dir> <owning-home> <obligation> <work-home> <work-id> [pr-url] [outcome]
   local owning=$2 obligation=$3 work_home=$4 work_id=$5
   local pr=${6:-https://github.com/example/repo/pull/7} outcome=${7:-pr-merged}
@@ -640,14 +649,18 @@ test_secondmate_teardown_requires_parent_binding() {
   local parent child registry_before marker_before
   parent=$(make_home teardown-parent)
   child=$(make_home teardown-child)
+  parent=$(cd "$parent" && pwd -P)
+  child=$(cd "$child" && pwd -P)
+  fm_git_init_commit "$child/projects/worktree"
   printf '%s\n' mate > "$child/.fm-secondmate-home"
   seed_commitment "$parent" pf-teardown req-teardown x secondmate:mate work-child
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "kind=ship" "mode=local-only"
 
-  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+  FMX_PAIRING_TOKEN=test-token PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     expect_failure "marked child teardown without a parent must refuse cleanup" \
     "$TEARDOWN" work-child
@@ -658,6 +671,9 @@ test_secondmate_teardown_requires_parent_binding() {
 
   parent=$(make_home teardown-valid-parent)
   child=$(make_home teardown-valid-child)
+  parent=$(cd "$parent" && pwd -P)
+  child=$(cd "$child" && pwd -P)
+  fm_git_init_commit "$child/projects/worktree"
   printf '%s\n' mate > "$child/.fm-secondmate-home"
   printf -- '- mate - synthetic (id is legacy); preserve this (home: %s; scope: synthetic (child); semicolon remains meaningful; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
@@ -669,11 +685,12 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "kind=ship" "mode=local-only"
   assert_absent "$child/.fm-secondmate-parent" \
     "the legacy env-only binding case must not gain a durable parent record"
 
-  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+  FMX_PAIRING_TOKEN=test-token PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
     expect_failure "marked child teardown with a valid parent must enforce the parent commitment" \
@@ -1075,6 +1092,9 @@ test_secondmate_parent_binding_matches_literal_id() {
   local parent child
   parent=$(make_home teardown-literal-parent)
   child=$(make_home teardown-literal-child)
+  parent=$(cd "$parent" && pwd -P)
+  child=$(cd "$child" && pwd -P)
+  fm_git_init_commit "$child/projects/worktree"
   printf '%s\n' 'mate.id' > "$child/.fm-secondmate-home"
   printf -- '- mateXid - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
@@ -1082,9 +1102,10 @@ test_secondmate_parent_binding_matches_literal_id() {
   fm_write_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-literal.meta" \
     "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "kind=ship" "mode=local-only"
 
-  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+  FMX_PAIRING_TOKEN=test-token PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     FM_CONFIG_OVERRIDE="$child/config" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
     expect_failure "a near-match registry id must not satisfy a dotted parent binding" \
@@ -1466,7 +1487,8 @@ test_control_registered_followon_is_guarded() {
 }
 
 test_rechain_delivers_second_post_on_same_thread() {
-  local parent log out posts command command_log
+  local parent log out posts command command_log now_ok
+  now_ok=$(repro_commitment_now_ok)
   parent=$(make_home rechain-parent)
   log="$parent/curl.log"; : > "$log"
   seed_repro_commitment "$parent" public-final-a req-rechain main scout-a
@@ -1478,7 +1500,7 @@ test_rechain_delivers_second_post_on_same_thread() {
   FAKE_CURL_LOG="$log" run_pf "$parent" deliver public-final-a >/dev/null || fail "deliver failed"
   [ "$(followup_posts "$log")" = 1 ] || fail "expected the investigation post"
 
-  out=$(FAKE_CURL_LOG="$log" run_pf "$parent" rechain public-final-b --from public-final-a \
+  out=$(FMX_NOW_OVERRIDE="$now_ok" FAKE_CURL_LOG="$log" run_pf "$parent" rechain public-final-b --from public-final-a \
     --work-home main --work-id ship-b --expected pr-merged) \
     || fail "rechain failed: $out"
   assert_contains "$out" "retired public-final-a reason=handed on to public-final-b" \
@@ -1527,7 +1549,8 @@ SH
 }
 
 test_rechain_resumes_after_partial_add() {
-  local home log real_tasks marker out count
+  local home log real_tasks marker out count now_ok
+  now_ok=$(repro_commitment_now_ok)
   home=$(make_home rechain-resume)
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" public-final-resume-a req-resume main scout-resume
@@ -1552,10 +1575,12 @@ exec "$REAL_TASKS_AXI" "$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
 
+  export FMX_NOW_OVERRIDE="$now_ok"
   REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" \
     expect_failure "rechain must expose a resumable partial add" \
     run_pf "$home" rechain public-final-resume-b --from public-final-resume-a \
       --work-home main --work-id ship-resume --expected pr-merged
+  unset FMX_NOW_OVERRIDE
   assert_contains "$EXPECT_OUT" "retry this same rechain command" \
     "a partial add must direct the caller to the resumable path"
   count=$(tasks_in "$home" public-followup list --json \
@@ -1566,7 +1591,7 @@ SH
   assert_absent "$home/state/public-followup/registry/public-final-resume-b" \
     "a failed bind must not publish a registration"
 
-  out=$(REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" \
+  out=$(REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" FMX_NOW_OVERRIDE="$now_ok" \
     run_pf "$home" rechain public-final-resume-b --from public-final-resume-a \
       --work-home main --work-id ship-resume --expected pr-merged) \
     || fail "retrying the same rechain command must resume: $out"
@@ -1619,7 +1644,8 @@ test_rechain_claims_delivered_source_once() {
 }
 
 test_failed_rechain_retirement_keeps_source_claimed() {
-  local home log registry_file out
+  local home log registry_file out now_ok
+  now_ok=$(repro_commitment_now_ok)
   home=$(make_home rechain-retire-failure)
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" public-final-retire-a req-retire-failure main scout-retire
@@ -1640,22 +1666,26 @@ done
 exec /bin/rm "\$@"
 EOF
   chmod +x "$home/fakebin/rm"
+  export FMX_NOW_OVERRIDE="$now_ok"
   expect_failure "rechain must surface a failed source retirement" \
     run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
       --work-home main --work-id ship-retire-b --expected pr-merged
+  unset FMX_NOW_OVERRIDE
   assert_contains "$EXPECT_OUT" "public loop remains open" \
     "failed retirement must report that the source remains open"
 
+  export FMX_NOW_OVERRIDE="$now_ok"
   expect_failure "a failed retirement must not leave the source claimable by another destination" \
     run_pf "$home" rechain public-final-retire-c --from public-final-retire-a \
       --work-home main --work-id ship-retire-c --expected pr-merged
+  unset FMX_NOW_OVERRIDE
   assert_contains "$EXPECT_OUT" "already claimed by rechain destination 'public-final-retire-b'" \
     "a second destination must be refused after the first destination is published"
   assert_absent "$home/state/public-followup/registry/public-final-retire-c" \
     "a refused competing destination must not be registered"
 
   /bin/rm "$home/fakebin/rm"
-  out=$(run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
+  out=$(FMX_NOW_OVERRIDE="$now_ok" run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
     --work-home main --work-id ship-retire-b --expected pr-merged) \
     || fail "the claimed destination must remain resumable: $out"
   assert_contains "$out" "retired public-final-retire-a" \
@@ -1846,7 +1876,8 @@ test_retire_refuses_reassigned_secondmate_home() {
 }
 
 test_rechain_refuses_unclaimed_existing_destination() {
-  local home log out
+  local home log out now_ok
+  now_ok=$(repro_commitment_now_ok)
   home=$(make_home rechain-existing-destination)
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" public-final-existing-a req-existing main scout-existing
@@ -1865,9 +1896,11 @@ test_rechain_refuses_unclaimed_existing_destination() {
     --expected-final-file "$home/collision-expected.json" \
     --expires-at 2026-08-28T01:12:00Z >/dev/null || fail "could not seed destination collision"
 
+  export FMX_NOW_OVERRIDE="$now_ok"
   expect_failure "a first rechain must not adopt an unrelated existing obligation" \
     run_pf "$home" rechain public-final-existing-b --from public-final-existing-a \
       --work-home main --work-id ship-existing --expected pr-merged
+  unset FMX_NOW_OVERRIDE
   assert_contains "$EXPECT_OUT" "was not created by this rechain" \
     "the collision refusal must identify the unclaimed destination"
   out=$(cat "$home/state/public-followup/registry/public-final-existing-a")

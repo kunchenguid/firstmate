@@ -10,10 +10,52 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_ensure_pyyaml || fail "python3 PyYAML is required to parse workflow policy"
+
 RUNNER="$ROOT/bin/fm-test-run.sh"
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
+
+test_pyyaml_vendor_is_offline_without_package_commands() {
+  local vendor="$ROOT/tests/fixtures/vendor/pyyaml-6.0.2" tmp fakebin
+  [ -f "$vendor/LICENSE" ] || fail "vendored PyYAML is missing upstream LICENSE"
+  [ -f "$vendor/UPSTREAM" ] || fail "vendored PyYAML is missing digest provenance"
+  assert_grep 'sdist_sha256=' "$vendor/UPSTREAM" \
+    "vendored PyYAML must record the upstream sdist digest"
+  if grep -Eq 'pip install|pip3 install' "$ROOT/tests/lib.sh"; then
+    fail "fm_ensure_pyyaml must not invoke a package installer during tests"
+  fi
+  PYTHONNOUSERSITE=1 PYTHONPATH="$vendor" python3 - <<'PY' \
+    || fail "hermetic PyYAML vendor could not parse workflow YAML offline"
+import sys
+
+import yaml
+
+assert any("fixtures/vendor/pyyaml-6.0.2" in p for p in sys.path)
+assert yaml.safe_load("jobs:\n  lint:\n    runs-on: ubuntu-latest\n") == {
+    "jobs": {"lint": {"runs-on": "ubuntu-latest"}}
+}
+PY
+  tmp=$(fm_test_tmproot fm-pyyaml-offline)
+  fakebin=$(fm_fakebin "$tmp")
+  for tool in pip pip3; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+printf 'package installer must not run during fm_ensure_pyyaml\n' >&2
+exit 99
+SH
+    chmod +x "$fakebin/$tool"
+  done
+  PATH="$fakebin:$PATH" PYTHONNOUSERSITE=1 PYTHONPATH= \
+    bash -c '
+      ROOT="'"$ROOT"'"
+      # shellcheck source=tests/lib.sh
+      . "$ROOT/tests/lib.sh"
+      fm_ensure_pyyaml
+    ' || fail "fm_ensure_pyyaml must succeed from the pinned vendor without package commands"
+  pass "workflow-policy tests use pinned offline PyYAML with upstream provenance"
+}
 
 test_list_all_exact_suite_coverage() {
   local listed expected missing extra f
@@ -1073,6 +1115,7 @@ test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_unwritable_timing_artifact_keeps_the_suite_verdict
 test_lane_selection_grammar_is_the_published_lane_label
+test_pyyaml_vendor_is_offline_without_package_commands
 test_aggregate_json_contains_an_unusable_input
 test_aggregate_exit_behavior
 test_serial_runner_sanitizes_firstmate_overrides

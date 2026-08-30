@@ -10,8 +10,14 @@ TMP_ROOT=$(fm_test_tmproot fm-harness)
 CONFIG="$TMP_ROOT/config"
 mkdir -p "$CONFIG"
 
+# A suite run from inside Cursor (or another verified harness) inherits ambient
+# markers that outrank the markers each case sets. Scrub them so detection
+# assertions depend only on the case's explicit environment.
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+
 run_harness() {
-  FM_CONFIG_OVERRIDE="$CONFIG" "$HARNESS" "$@"
+  env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$HARNESS" "$@"
 }
 
 test_verified_marker_precedes_other_markers() {
