@@ -25,6 +25,16 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+set_mtime() {  # <epoch> <file>
+  local epoch=$1 f=$2 stamp
+  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$f"
+  else
+    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$f"
+  fi
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -293,6 +303,38 @@ test_stale_terminal_escalates() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "default:w1:p2" "$state")
   case "$out" in escalate\|*) ;; *) fail "terminal herdr stale did not escalate through metadata: $out" ;; esac
   pass "stale + terminal status escalates immediately"
+}
+
+# Regression for the 2026-08 stale-alarm incidents: a crew validating under
+# no-mistakes keeps a pre-validation done: status line for the run's entire
+# duration. fm-watch already absorbs that when crew_is_provably_working; away
+# mode must not escalate it immediately through classify_stale.
+test_stale_terminal_overridden_by_active_run() {
+  local dir state fakebin out key win
+  dir=$(make_supercase stale-terminal-override)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-validating"
+  fm_write_meta "$state/validating.meta" "window=$win" "kind=ship"
+  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  out=$(PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in
+    self\|*overridden*) ;;
+    escalate\|*) fail "validating crew with stale done: status escalated immediately: $out" ;;
+    *) fail "unexpected classify_stale verdict: $out" ;;
+  esac
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  key=$(printf '%s' "validating" | tr ':/.' '___')
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "overridden terminal stale did not record a wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "overridden terminal stale escalated immediately"
+  unset FM_FAKE_CREW_STATE
+  pass "stale + terminal status is overridden when crew is provably working"
 }
 
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
@@ -703,6 +745,116 @@ test_housekeeping_persistent_stale_escalates() {
   pass "persistent stale escalates after threshold and clears its marker"
 }
 
+# When capture fails because the endpoint is confidently gone, persistence
+# recheck must escalate instead of silently dropping the wedge marker.
+test_housekeeping_persistent_stale_escalates_when_endpoint_gone() {
+  local dir state fakebin win key
+  dir=$(make_supercase stale-endpoint-gone)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="firstmate:fm-gone-endpoint"
+  fm_write_meta "$state/gone-endpoint.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=codex"
+  printf 'working: implementing feature\n' > "$state/gone-endpoint.status"
+  key=$(printf '%s' "gone-endpoint" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf "can't find session: firstmate\n" >&2; exit 1 ;;
+  capture-pane|display-message) exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "persistent stale was not escalated when endpoint is gone and capture fails"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "stale marker not cleared after gone-endpoint escalation"
+  pass "persistent stale escalates when endpoint is gone and capture fails"
+}
+
+# When capture fails and agent liveness is unreadable (not affirmatively alive),
+# persistence recheck must escalate instead of silently dropping the wedge marker.
+# When capture fails on a live endpoint, pause recheck must defer instead of
+# silently dropping the marker, or a declared wait can rot invisibly.
+test_housekeeping_paused_defers_when_capture_unreadable_on_live_endpoint() {
+  local dir state win key
+  dir=$(make_supercase paused-capture-live-defer)
+  state="$dir/state"
+  win="sess:fm-held-live"
+  printf 'window=%s\nkind=ship\nworktree=%s/wt\nharness=codex\n' "$win" "$dir/wt" > "$state/held-live.meta"
+  mkdir -p "$dir/wt"
+  printf 'paused: holding for the upstream release\n' > "$state/held-live.status"
+  key=$(printf '%s' "held-live" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  (
+    fm_backend_capture() { return 1; }
+    fm_backend_agent_alive() { printf 'alive'; }
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  ) || fail "housekeeping subshell failed for live-endpoint capture deferral"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "declared pause escalated during a transient capture failure on a live endpoint"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "pause marker was dropped instead of deferred when capture failed on a live endpoint"
+  pass "pause recheck defers when capture fails on a live endpoint"
+}
+
+# When capture fails on a live endpoint, persistence recheck must defer instead of
+# silently dropping the wedge marker, or a genuine stale crew rots invisibly.
+test_housekeeping_persistent_stale_defers_when_capture_unreadable_on_live_endpoint() {
+  local dir state win key
+  dir=$(make_supercase stale-capture-live-defer)
+  state="$dir/state"
+  win="sess:fm-pers-live"
+  printf 'window=%s\nkind=ship\nworktree=%s/wt\nharness=codex\n' "$win" "$dir/wt" > "$state/pers-live.meta"
+  mkdir -p "$dir/wt"
+  printf 'working: still wedged\n' > "$state/pers-live.status"
+  key=$(printf '%s' "pers-live" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_capture() { return 1; }
+    fm_backend_agent_alive() { printf 'alive'; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "housekeeping subshell failed for live-endpoint persistence deferral"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "persistent stale escalated during a transient capture failure on a live endpoint"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "stale marker was dropped instead of deferred when capture failed on a live endpoint"
+  pass "persistence recheck defers when capture fails on a live endpoint"
+}
+
+test_housekeeping_persistent_stale_escalates_when_capture_unreadable() {
+  local dir state fakebin win key
+  dir=$(make_supercase stale-capture-unreadable)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="firstmate:fm-unreadable-endpoint"
+  fm_write_meta "$state/unreadable-endpoint.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=codex"
+  printf 'working: implementing feature\n' > "$state/unreadable-endpoint.status"
+  key=$(printf '%s' "unreadable-endpoint" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf 'fm-unreadable-endpoint\n'; exit 0 ;;
+  capture-pane|display-message) exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "persistent stale was not escalated when capture is unreadable"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "stale marker not cleared after unreadable-capture escalation"
+  pass "persistent stale escalates when capture fails and liveness is unreadable"
+}
+
 test_housekeeping_resumed_stale_cleared() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-resumed)
@@ -906,6 +1058,267 @@ test_heartbeat_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] && fail "catch-all scan re-escalated the same terminal (dedup failed)"
   pass "catch-all scan escalates a missed terminal once, not twice"
+}
+
+# Regression for the 2026-08 stale-alarm incidents: away-mode's catch-all heartbeat
+# scan must honor crew_is_provably_working before trusting a leftover done: line.
+test_heartbeat_scan_skips_provably_working_terminal() {
+  local dir state fakebin
+  dir=$(make_supercase scan-validating)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  rm -f "$state/.subsuper-last-scan"
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "catch-all scan escalated a validating crew with stale done: status"
+  unset FM_FAKE_CREW_STATE
+  pass "catch-all scan skips terminal status when crew is provably working"
+}
+
+test_heartbeat_scan_skips_provably_working_legacy_captain_relevant() {
+  local dir state fakebin
+  dir=$(make_supercase scan-legacy-validating)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  printf 'PR ready https://example.com/pull/1\n' > "$state/validating.status"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  rm -f "$state/.subsuper-last-scan"
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "catch-all scan escalated a validating crew with legacy PR ready status"
+  unset FM_FAKE_CREW_STATE
+  pass "catch-all scan skips legacy captain-relevant status when crew is provably working"
+}
+
+# Regression: away-mode classify_stale must defer a stale done: line when the
+# worktree was written since the idle pane hash and crew state is inconclusive.
+test_classify_stale_defers_terminal_when_worktree_written() {
+  local dir state fakebin out win key wt back watcher_key
+  dir=$(make_supercase classify-stale-writing)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-writing-term"
+  wt="$dir/wt"
+  mkdir -p "$wt/src"
+  fm_write_meta "$state/writing-term.meta" "window=$win" "worktree=$wt" "kind=ship" "harness=claude"
+  printf 'done: implementation complete, ready to validate\n' > "$state/writing-term.status"
+  watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+  back=$(( $(date +%s) - 120 ))
+  echo "$back" > "$state/.hash-$watcher_key"
+  set_mtime "$back" "$state/.hash-$watcher_key"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · inconclusive pane'
+  out=$(PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in
+    self\|stale\ +\ terminal\ deferred\ by\ worktree\ writes:*) ;;
+    escalate\|*) fail "classify_stale escalated a writing crew with stale done: status: $out" ;;
+    *) fail "unexpected classify_stale verdict: $out" ;;
+  esac
+  unset FM_FAKE_CREW_STATE
+  pass "classify_stale defers terminal status when the worktree was written since idle"
+}
+
+# Regression: away-mode catch-all must skip a stale done: line when the worktree
+# was written after the status file and crew state is inconclusive.
+test_heartbeat_scan_skips_terminal_when_worktree_written() {
+  local dir state fakebin wt back
+  dir=$(make_supercase scan-writing-term)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  wt="$dir/wt"
+  mkdir -p "$wt/src"
+  fm_write_meta "$state/writing-term.meta" "window=sess:fm-writing-term" "worktree=$wt" "kind=ship" "harness=claude"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/writing-term.status"
+  printf 'done: implementation complete, ready to validate\n' > "$state/writing-term.status"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · inconclusive pane'
+  rm -f "$state/.subsuper-last-scan"
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "catch-all scan escalated a writing crew with stale done: status"
+  unset FM_FAKE_CREW_STATE
+  pass "catch-all scan skips terminal status when the worktree was written since the status file"
+}
+
+# Regression for the 2026-08 stale-alarm incidents: away-mode's persistence
+# recheck must honor crew_is_provably_working before escalating a wedge marker
+# recorded for a stale captain-relevant terminal line.
+# Regression for the 2026-08 stale-alarm incidents: away-mode handle_wake must
+# not force-escalate an enriched fm-watch wedge wake while no-mistakes
+# validation is still running. classify_stale already absorbs that case;
+# demand-deep-inspection must still bypass the guard.
+test_handle_wake_wedge_skips_provably_working_terminal() {
+  local dir state fakebin win key reason
+  dir=$(make_supercase handle-wedge-validating)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-validating"
+  reason="stale: $win (idle 500s, possible wedge, escalation 1)"
+  fm_write_meta "$state/validating.meta" "window=$win" "kind=ship"
+  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "handle_wake force-escalated a validating crew from an enriched wedge wake"
+  key=$(printf '%s' "validating" | tr ':/.' '___')
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "enriched wedge wake did not record a wedge marker for a validating crew"
+  reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone)"
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "demand-deep-inspection wedge wake did not escalate a validating crew"
+  unset FM_FAKE_CREW_STATE
+  pass "handle_wake honors provably-working terminal override on enriched wedge wakes unless demand-deep-inspection"
+}
+
+test_housekeeping_persistent_stale_skips_provably_working_terminal() {
+  local dir state fakebin win key
+  dir=$(make_supercase stale-persistent-validating)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-validating"
+  fm_write_meta "$state/validating.meta" "window=$win" "kind=ship"
+  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  key=$(printf '%s' "validating" | tr ':/.' '___')
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "overridden terminal stale did not record a wedge marker"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "persistence recheck escalated a validating crew with stale done: status"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "persistence recheck cleared the wedge marker while the crew is still validating"
+  unset FM_FAKE_CREW_STATE
+  pass "persistence recheck skips terminal status when crew is provably working"
+}
+
+# 2026-08 incident: away-mode persistence recheck wedge-escalated a quiet pane
+# while the crew was still writing its worktree. fm-watch already defers on
+# crew_worktree_written_since; housekeeping must match it.
+test_housekeeping_persistent_stale_defers_while_worktree_is_written() {
+  local dir state fakebin win pane key wt back watcher_key
+  dir=$(make_supercase stale-persistent-writing)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-writing"
+  pane="$dir/pane.txt"
+  wt="$dir/wt"
+  mkdir -p "$wt/src"
+  fm_write_meta "$state/writing.meta" "window=$win" "worktree=$wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$state/writing.status"
+  printf 'idle building output\n' > "$pane"
+  key=$(printf '%s' "writing" | tr ':/.' '___')
+  watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.subsuper-stale-$key"
+  set_mtime "$back" "$state/.subsuper-stale-$key"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "persistence recheck wedge-escalated a quiet pane whose worktree was being written"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "write deferral cleared the wedge marker instead of restarting its timer"
+  [ -e "$state/.writing-since-$watcher_key" ] \
+    || fail "write deferral did not record the deferral chain marker"
+  [ "$(cat "$state/.subsuper-stale-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
+    || fail "write deferral did not restart the idle timer"
+
+  set_mtime "$(( $(date +%s) - 900 ))" "$wt/src/main.c"
+  echo "$back" > "$state/.subsuper-stale-$key"
+  set_mtime "$back" "$state/.subsuper-stale-$key"
+  rm -f "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "a stalled crew that wrote nothing was not wedge-escalated on the existing schedule"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the stalled-crew escalation did not flag a possible wedge"
+  pass "persistence recheck defers a quiet writing worktree and still escalates a stalled crew"
+}
+
+test_classify_signal_skips_provably_working_terminal() {
+  local dir state fakebin out
+  dir=$(make_supercase signal-validating)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  out=$(PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" classify_signal "$state/validating.status" "$state")
+  case "$out" in
+    self\|*) ;;
+    escalate\|*) fail "classify_signal escalated validating crew with stale done: status: $out" ;;
+    *) fail "unexpected classify_signal verdict: $out" ;;
+  esac
+  unset FM_FAKE_CREW_STATE
+  pass "classify_signal skips terminal status when crew is provably working"
+}
+
+test_classify_signal_skips_provably_working_legacy_captain_relevant() {
+  local dir state fakebin out
+  dir=$(make_supercase signal-legacy-validating)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  printf 'PR ready https://example.com/pull/1\n' > "$state/validating.status"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  out=$(PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" classify_signal "$state/validating.status" "$state")
+  case "$out" in
+    self\|*) ;;
+    escalate\|*) fail "classify_signal escalated validating crew with legacy PR ready status: $out" ;;
+    *) fail "unexpected classify_signal verdict: $out" ;;
+  esac
+  unset FM_FAKE_CREW_STATE
+  pass "classify_signal skips legacy captain-relevant status when crew is provably working"
+}
+
+# Regression: away-mode classify_signal must defer a stale done: line when the
+# worktree was written after the status file and crew state is inconclusive.
+test_classify_signal_defers_terminal_when_worktree_written() {
+  local dir state fakebin out wt back
+  dir=$(make_supercase signal-writing-term)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  wt="$dir/wt"
+  mkdir -p "$wt/src"
+  fm_write_meta "$state/writing-term.meta" "window=sess:fm-writing-term" "worktree=$wt" "kind=ship" "harness=claude"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/writing-term.status"
+  printf 'done: implementation complete, ready to validate\n' > "$state/writing-term.status"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · inconclusive pane'
+  out=$(PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" classify_signal "$state/writing-term.status" "$state")
+  case "$out" in
+    self\|*) ;;
+    escalate\|*) fail "classify_signal escalated a writing crew with stale done: status: $out" ;;
+    *) fail "unexpected classify_signal verdict: $out" ;;
+  esac
+  unset FM_FAKE_CREW_STATE
+  pass "classify_signal defers terminal status when the worktree was written since the status file"
 }
 
 test_handle_wake_routes_self_and_escalate() {
@@ -2139,6 +2552,7 @@ test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
+test_stale_terminal_overridden_by_active_run
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
@@ -2148,6 +2562,10 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_persistent_stale_escalates_when_endpoint_gone
+test_housekeeping_persistent_stale_escalates_when_capture_unreadable
+test_housekeeping_paused_defers_when_capture_unreadable_on_live_endpoint
+test_housekeeping_persistent_stale_defers_when_capture_unreadable_on_live_endpoint
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
@@ -2165,6 +2583,16 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
+test_heartbeat_scan_skips_provably_working_terminal
+test_heartbeat_scan_skips_provably_working_legacy_captain_relevant
+test_classify_stale_defers_terminal_when_worktree_written
+test_heartbeat_scan_skips_terminal_when_worktree_written
+test_handle_wake_wedge_skips_provably_working_terminal
+test_housekeeping_persistent_stale_skips_provably_working_terminal
+test_housekeeping_persistent_stale_defers_while_worktree_is_written
+test_classify_signal_skips_provably_working_terminal
+test_classify_signal_skips_provably_working_legacy_captain_relevant
+test_classify_signal_defers_terminal_when_worktree_written
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout

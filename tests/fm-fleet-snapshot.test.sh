@@ -51,9 +51,22 @@ test_large_snapshot_assembly_does_not_use_argv() {
   payload_bytes=$((arg_max + 262144))
   report_count=$(((payload_bytes / 1800) + 1))
   data_path="$home/data"
+  segment='aaaaaaaaaaaaaaaaaaaa'
+  seg_len=$(( ${#segment} + 1 ))
+  path_max=$(getconf PATH_MAX 2>/dev/null || true)
+  [ -n "$path_max" ] || path_max=1024
+  if [ "$(uname -s)" = Darwin ] && [ "$path_max" -gt 1024 ]; then
+    path_max=1024
+  fi
+  max_segments=70
+  while [ "$max_segments" -gt 0 ] \
+    && [ $(( ${#data_path} + max_segments * seg_len + 220 )) -gt "$path_max" ]; do
+    max_segments=$((max_segments - 1))
+  done
+  [ "$max_segments" -gt 0 ] || fail "could not fit snapshot path depth under PATH_MAX"
   i=0
-  while [ "$i" -lt 70 ]; do
-    data_path="$data_path/aaaaaaaaaaaaaaaaaaaa"
+  while [ "$i" -lt "$max_segments" ]; do
+    data_path="$data_path/$segment"
     i=$((i + 1))
   done
   mkdir -p "$data_path"

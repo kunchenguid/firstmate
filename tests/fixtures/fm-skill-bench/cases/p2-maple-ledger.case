@@ -1,0 +1,7 @@
+TASK="Write a file named status.txt containing the word ready."
+ALWAYS_ON_FILE="README.md"
+ALWAYS_ON_RULE=""
+TOOLS="fm-session-start git"
+EXPECT_SKILL="repo-boot-order"
+CHECK="$ROOT/tests/fixtures/fm-skill-bench/checks/expect-session-start.sh"
+FIXTURE="$ROOT/tests/fixtures/fm-skill-bench/fixtures/maple-ledger"

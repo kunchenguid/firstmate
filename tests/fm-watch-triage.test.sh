@@ -200,6 +200,59 @@ test_signal_reason_is_actionable_classifier() {
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
+test_signal_reason_skips_provably_working_terminal() {
+  local dir state fakebin
+  dir=$(make_case signal-terminal-validating); state="$dir/state"; fakebin="$dir/fakebin"
+  printf 'done: implementation complete, ready to validate\n' > "$state/crew.status"
+  : > "$state/crew.turn-ended"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    signal_reason_is_actionable "$state/crew.status" \
+    && fail "terminal done: classified actionable while crew is validating"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    signal_reason_is_actionable "$state/crew.status" "$state/crew.turn-ended" \
+    && fail "coalesced terminal signal classified actionable while crew is validating"
+  unset FM_FAKE_CREW_STATE
+  pass "signal_reason_is_actionable skips terminal status when crew is provably working"
+}
+
+test_signal_reason_defers_terminal_when_worktree_written() {
+  local dir state fakebin wt back
+  dir=$(make_case signal-writing-term); state="$dir/state"; fakebin="$dir/fakebin"
+  wt="$dir/wt"
+  mkdir -p "$wt/src"
+  fm_write_meta "$state/writing-term.meta" "window=sess:fm-writing-term" "worktree=$wt" "kind=ship" "harness=claude"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/writing-term.status"
+  printf 'done: implementation complete, ready to validate\n' > "$state/writing-term.status"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · inconclusive pane'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    signal_reason_is_actionable "$state/writing-term.status" \
+    && fail "terminal done: classified actionable while worktree was written since status"
+  unset FM_FAKE_CREW_STATE
+  pass "signal_reason_is_actionable defers terminal status when the worktree was written since the status file"
+}
+
+test_signal_reason_skips_provably_working_legacy_captain_relevant() {
+  local dir state fakebin
+  dir=$(make_case signal-legacy-validating); state="$dir/state"; fakebin="$dir/fakebin"
+  printf 'PR ready https://example.com/pull/1\n' > "$state/crew.status"
+  : > "$state/crew.turn-ended"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    signal_reason_is_actionable "$state/crew.status" \
+    && fail "legacy PR ready classified actionable while crew is validating"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    signal_reason_is_actionable "$state/crew.status" "$state/crew.turn-ended" \
+    && fail "coalesced legacy captain signal classified actionable while crew is validating"
+  unset FM_FAKE_CREW_STATE
+  pass "signal_reason_is_actionable skips legacy captain-relevant status when crew is provably working"
+}
+
 test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
@@ -459,6 +512,41 @@ test_crew_worktree_written_since_classifier() {
   pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees, .git churn and a mate's own home are not"
 }
 
+# A recycled pooled slot can leave stale metadata on a worktree another task now
+# leases. The new holder's writes must not defer supervision for the displaced task.
+test_crew_worktree_written_since_ignores_recycled_slot_writes() {
+  local dir state anchor wt json repo
+  dir=$(make_case classify-recycled-slot-writes); state="$dir/state"
+  anchor="$state/anchor"; repo="$dir/project.git"; wt="$dir/wt"
+  fm_git_worktree "$repo" "$wt" main
+  : > "$anchor"
+  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  fm_write_meta "$state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" \
+    "endpoint_task_id=stale-task" \
+    "worktree=$wt" \
+    "project=$dir" \
+    "kind=ship" \
+    "treehouse_slot=slot-1" \
+    "treehouse_lease=lease-old"
+  fm_write_meta "$state/new-task.meta" \
+    "window=firstmate:fm-new-task" \
+    "endpoint_task_id=new-task" \
+    "worktree=$wt" \
+    "project=$dir" \
+    "kind=ship" \
+    "treehouse_slot=slot-1" \
+    "treehouse_lease=lease-new"
+  printf 'new holder write\n' > "$wt/src/active.c"
+  json=$(jq -n --arg path "$wt" --arg lease lease-new --arg holder new-task --arg slot slot-1 \
+    '[{name:$slot,path:$path,status:"leased",lease_id:$lease,lease_holder:$holder}]')
+  ! FM_CLASSIFY_TREEHOUSE_STATUS_JSON="$json" crew_worktree_written_since stale-task "$state" "$anchor" \
+    || fail "recycled slot made the displaced task defer on the new holder's writes"
+  FM_CLASSIFY_TREEHOUSE_STATUS_JSON="$json" crew_worktree_written_since new-task "$state" "$anchor" \
+    || fail "the current lease holder must still observe its own writes"
+  pass "crew_worktree_written_since ignores writes on a recycled pooled slot for displaced metadata"
+}
+
 # FM_WORKTREE_WRITE_PRUNE is a skip list, so clearing it skips nothing and is the
 # obvious way to widen the probe to the whole depth-bounded tree. An empty list must
 # therefore widen the walk rather than report no evidence at all, which would
@@ -651,6 +739,29 @@ test_turn_ended_provably_working_absorbed() {
   [ ! -s "$state/.wake-queue" ] || fail "provably-working turn-end enqueued a durable wake record"
   reap "$pid"
   pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
+}
+
+# Regression for the 2026-08 stale-alarm incidents: a status write and the same
+# turn's turn-end coalesce into one signal batch. signal_reason_is_actionable must
+# not treat a leftover done: line as actionable while no-mistakes validation is
+# still running, or fm-watch short-circuits past signal_crew_provably_working.
+test_coalesced_signal_skips_provably_working_terminal() {
+  local dir state fakebin out pid status_file
+  dir=$(make_case coalesced-signal-validating); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/crew.status"
+  printf 'done: implementation complete, ready to validate\n' > "$status_file"
+  : > "$state/crew.turn-ended"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for coalesced signal with stale done: during validation: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "coalesced signal printed a wake during validation: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "coalesced signal enqueued a wake during validation"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "coalesced signal skips terminal status when crew is provably working"
 }
 
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
@@ -939,6 +1050,195 @@ test_nonterminal_stale_not_working_surfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
+}
+
+# When crew state is inconclusive but the worktree was written since the idle
+# pane hash was recorded, first-sight non-terminal stale must defer to the wedge
+# timer instead of surfacing immediately - the same contract as
+# wedge_timer_check, which only runs on repeat polls today.
+test_nonterminal_stale_worktree_write_defers_without_provably_working() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wt back
+  dir=$(make_case nonterminal-stale-writing); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-writing-none"; wt="$dir/wt"
+  mkdir -p "$wt/src"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/writing-none.meta"
+  printf 'working: implementing\n' > "$state/writing-none.status"
+  sig=$(seen_sig "$state/writing-none.status"); printf '%s' "$sig" > "$state/.seen-writing-none_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  back=$(( $(date +%s) - 120 ))
+  set_mtime "$back" "$state/.hash-$key"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher surfaced a quiet writing crew with inconclusive state: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "worktree-write deferral printed a wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "worktree-write deferral enqueued a wake"; }
+  [ -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "worktree-write deferral did not start the wedge timer"; }
+  reap "$pid"
+  pass "inconclusive crew state defers first-sight non-terminal stale when the worktree was written since idle"
+}
+
+# When capture fails because the endpoint is confidently gone, the pane-hash
+# stale path must still surface inconclusive non-terminal work instead of
+# skipping the window entirely.
+test_nonterminal_stale_surfaces_when_endpoint_gone() {
+  local dir state fakebin out window key sig pid wt
+  dir=$(make_case endpoint-gone-nonterminal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; window="test:fm-gone-none"; wt="$dir/wt"
+  mkdir -p "$wt"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/gone-none.meta"
+  printf 'working: implementing\n' > "$state/gone-none.status"
+  sig=$(seen_sig "$state/gone-none.status"); printf '%s' "$sig" > "$state/.seen-gone-none_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf "can't find session: test\n" >&2; exit 1 ;;
+  display-message|capture-pane) exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a gone endpoint with non-terminal status: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "gone endpoint did not print a stale wake: $(cat "$out")"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = endpoint-gone ] \
+    || fail "gone endpoint did not record the endpoint-gone stale suppressor"
+  unset FM_FAKE_CREW_STATE
+  pass "a gone endpoint surfaces first-sight non-terminal stale without pane capture"
+}
+
+# When capture fails and agent liveness is unreadable (session inventory succeeds
+# but pane reads fail), the pane-hash stale path must surface inconclusive work
+# instead of skipping the window entirely.
+test_nonterminal_stale_surfaces_when_capture_unreadable() {
+  local dir state fakebin out window key sig pid wt
+  dir=$(make_case endpoint-unreadable-nonterminal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; window="test:fm-unreadable-none"; wt="$dir/wt"
+  mkdir -p "$wt"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/unreadable-none.meta"
+  printf 'working: implementing\n' > "$state/unreadable-none.status"
+  sig=$(seen_sig "$state/unreadable-none.status"); printf '%s' "$sig" > "$state/.seen-unreadable-none_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target unreadable'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf 'fm-unreadable-none\n'; exit 0 ;;
+  display-message|capture-pane) exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface an unreadable endpoint with non-terminal status: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "unreadable endpoint did not print a stale wake: $(cat "$out")"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = endpoint-gone ] \
+    || fail "unreadable endpoint did not record the endpoint-gone stale suppressor"
+  unset FM_FAKE_CREW_STATE
+  pass "an unreadable endpoint surfaces first-sight non-terminal stale without pane capture"
+}
+
+# When capture fails on a live endpoint, an already-aging wedge suppressor must
+# keep escalating instead of stalling until capture recovers.
+test_wedge_followup_continues_when_capture_unreadable_on_live_endpoint() {
+  local dir state fakebin out window key pane_hash sig pid
+  dir=$(make_case wedge-capture-live-defer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; window="test:fm-wedge-capture-live"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-capture-live.meta"
+  printf 'working: still wedged\n' > "$state/wedge-capture-live.status"
+  sig=$(seen_sig "$state/wedge-capture-live.status"); printf '%s' "$sig" > "$state/.seen-wedge-capture-live_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf 'fm-wedge-capture-live\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'codex\n'; exit 0 ;;
+    esac
+    printf '%%1\n'; exit 0 ;;
+  capture-pane) exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not escalate wedge during live-endpoint capture failure: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "wedge escalation missing from capture-failure follow-up: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "wedge follow-up continues when capture fails on a live endpoint"
+}
+
+# When crew state is inconclusive but the worktree was written since the idle
+# pane hash was recorded, first-sight terminal stale must defer to the wedge
+# timer instead of surfacing immediately - the same contract iteration 13 added
+# for non-terminal stale.
+test_terminal_stale_worktree_write_defers_without_provably_working() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wt back
+  dir=$(make_case terminal-stale-writing); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-writing-term"; wt="$dir/wt"
+  mkdir -p "$wt/src"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/writing-term.meta"
+  printf 'done: implementation complete, ready to validate\n' > "$state/writing-term.status"
+  sig=$(seen_sig "$state/writing-term.status"); printf '%s' "$sig" > "$state/.seen-writing-term_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  back=$(( $(date +%s) - 120 ))
+  set_mtime "$back" "$state/.hash-$key"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher surfaced a quiet writing crew with inconclusive state and stale done: status: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "terminal worktree-write deferral printed a wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "terminal worktree-write deferral enqueued a wake"; }
+  [ -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "terminal worktree-write deferral did not start the wedge timer"; }
+  reap "$pid"
+  pass "inconclusive crew state defers first-sight terminal stale when the worktree was written since idle"
 }
 
 # A harness whose semantic state source is explicitly unavailable cannot
@@ -2678,6 +2978,7 @@ SH
   [ "$lines" -le 2000 ] || { reap "$pid"; fail "triage log was not capped when wc emitted a spaced byte count (lines=$lines)"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "benign signal enqueued a wake while testing log capping"; }
   reap "$pid"
+  unset FM_FAKE_CREW_STATE
   pass "triage log capping handles wc byte counts with leading spaces"
 }
 
@@ -2987,8 +3288,9 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   # fleet-scan backstop must catch it and wake firstmate.
   printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  unset FM_FAKE_CREW_STATE
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
@@ -2997,6 +3299,103 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
+}
+
+# Regression for the 2026-08 stale-alarm incidents: after classify_stale absorbs a
+# leftover done: line while no-mistakes validation is running, the status is
+# intentionally left unsurfaced so wedge aging can still fire later. The heartbeat
+# fleet-scan backstop must honor crew_is_provably_working on that path too.
+test_heartbeat_backstop_skips_provably_working_terminal() {
+  local dir state fakebin out window key pane_hash sig pid
+  dir=$(make_case heartbeat-validating); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-validating"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
+  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_STALE_ESCALATE_SECS=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "heartbeat backstop surfaced a validating crew with stale done: status: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "heartbeat backstop printed a wake for a validating crew: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "heartbeat backstop enqueued a wake for a validating crew"
+  [ ! -e "$state/.hb-surfaced-validating" ] \
+    || fail "heartbeat backstop marked a provably-working terminal status as surfaced"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "heartbeat backstop skips terminal status when crew is provably working"
+}
+
+test_heartbeat_backstop_skips_terminal_when_worktree_written() {
+  local dir state fakebin out window wt back sig pid
+  dir=$(make_case heartbeat-writing-term); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-writing-term"
+  wt="$dir/wt"
+  mkdir -p "$wt/src"
+  fm_write_meta "$state/writing-term.meta" "window=$window" "worktree=$wt" "kind=ship" "harness=claude"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/writing-term.status"
+  printf 'done: implementation complete, ready to validate\n' > "$state/writing-term.status"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  sig=$(seen_sig "$state/writing-term.status"); printf '%s' "$sig" > "$state/.seen-writing-term_status"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · inconclusive pane'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_STALE_ESCALATE_SECS=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "heartbeat backstop surfaced a writing crew with stale done: status: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "heartbeat backstop printed a wake for a writing crew: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "heartbeat backstop enqueued a wake for a writing crew"
+  [ ! -e "$state/.hb-surfaced-writing-term" ] \
+    || fail "heartbeat backstop marked a writing crew's terminal status as surfaced"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "heartbeat backstop skips terminal status when the worktree was written since the status file"
+}
+
+test_heartbeat_backstop_skips_provably_working_legacy_captain_relevant() {
+  local dir state fakebin out window key sig pid
+  dir=$(make_case heartbeat-legacy-validating); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-validating"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
+  printf 'PR ready https://example.com/pull/1\n' > "$state/validating.status"
+  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch "$state/.last-heartbeat"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_STALE_ESCALATE_SECS=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "heartbeat backstop surfaced a validating crew with legacy PR ready status: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "heartbeat backstop printed a wake for a validating crew: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "heartbeat backstop enqueued a wake for a validating crew"
+  [ ! -e "$state/.hb-surfaced-validating" ] \
+    || fail "heartbeat backstop marked a provably-working legacy captain status as surfaced"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "heartbeat backstop skips legacy captain-relevant status when crew is provably working"
 }
 
 # --- beacon stays fresh while absorbing -------------------------------------
@@ -3029,6 +3428,7 @@ test_beacon_stays_fresh_while_absorbing() {
   [ "$(( now - m2 ))" -lt 10 ] || { reap "$pid"; fail "beacon went stale while absorbing (age $(( now - m2 ))s)"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbing benign signals enqueued a wake"; }
   reap "$pid"
+  unset FM_FAKE_CREW_STATE
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
@@ -3092,6 +3492,9 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 }
 
 test_signal_reason_is_actionable_classifier
+test_signal_reason_skips_provably_working_terminal
+test_signal_reason_defers_terminal_when_worktree_written
+test_signal_reason_skips_provably_working_legacy_captain_relevant
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
@@ -3106,6 +3509,7 @@ test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
+test_coalesced_signal_skips_provably_working_terminal
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
@@ -3128,6 +3532,11 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_nonterminal_stale_worktree_write_defers_without_provably_working
+test_nonterminal_stale_surfaces_when_endpoint_gone
+test_nonterminal_stale_surfaces_when_capture_unreadable
+test_wedge_followup_continues_when_capture_unreadable_on_live_endpoint
+test_terminal_stale_worktree_write_defers_without_provably_working
 test_unavailable_harness_state_uses_only_current_pause_declaration
 test_only_structural_no_source_reasons_trust_current_pause
 test_nonterminal_stale_paused_absorbed_then_resurfaced
@@ -3154,6 +3563,9 @@ test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_heartbeat_backstop_skips_provably_working_terminal
+test_heartbeat_backstop_skips_terminal_when_worktree_written
+test_heartbeat_backstop_skips_provably_working_legacy_captain_relevant
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

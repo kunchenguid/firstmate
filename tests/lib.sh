@@ -90,6 +90,18 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# fm_ensure_pyyaml: use the pinned hermetic vendor tree when the host lacks PyYAML.
+fm_ensure_pyyaml() {
+  if python3 -c 'import yaml' 2>/dev/null; then
+    return 0
+  fi
+  local vendor="$ROOT/tests/fixtures/vendor/pyyaml-6.0.2"
+  [ -d "$vendor/yaml" ] || return 1
+  PYTHONPATH="$vendor${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTHONPATH
+  python3 -c 'import yaml' 2>/dev/null
+}
+
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do

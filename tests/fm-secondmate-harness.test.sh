@@ -514,13 +514,34 @@ test_propagate_lib() {
 # propagates the crew harness into the home's config.
 # ===========================================================================
 
-# A tmux stub that accepts every subcommand and prints nothing, so no window
-# pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
+# A tmux stub that accepts every subcommand and prints nothing by default, so no
+# window pre-exists and the spawn proceeds to write its meta. The Cursor case
+# opts into the same verified empty-composer signals used by the real readiness
+# guard. Echoes the fakebin dir.
 make_noop_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in
+        *cursor_y*)
+          [ "${FM_FAKE_CURSOR_READY:-0}" = 1 ] || exit 0
+          printf '0\n'
+          exit 0
+          ;;
+      esac
+    done
+    exit 0
+    ;;
+  capture-pane)
+    [ "${FM_FAKE_CURSOR_READY:-0}" = 1 ] || exit 0
+    printf '→\n'
+    exit 0
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -688,8 +709,8 @@ test_spawn_cursor_agent_secondmate_accepts_model_variant() {
   mkdir -p "$w/home/config" "$w/home/state"
   printf 'cursor-agent cursor-grok-4.6-xhigh\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
-  fakebin=$(make_noop_tmux "$w/tmux")
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+  fakebin=$(make_launch_capturing_tmux "$w/tmux")
+  FM_FAKE_CURSOR_READY=1 PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
@@ -766,7 +787,24 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in
+        *cursor_y*)
+          [ "${FM_FAKE_CURSOR_READY:-0}" = 1 ] || exit 0
+          printf '0\n'
+          exit 0
+          ;;
+      esac
+    done
+    printf 'firstmate\n'
+    exit 0
+    ;;
+  capture-pane)
+    [ "${FM_FAKE_CURSOR_READY:-0}" = 1 ] || exit 0
+    printf '→\n'
+    exit 0
+    ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)

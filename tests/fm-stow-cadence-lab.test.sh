@@ -491,7 +491,8 @@ test_shared_memory_is_read_only() {
   expect_code 0 "$rc" "an unchanged inherited shared file should permit success"
   after=$(sha256sum "$target/data/captain-shared.md")
   [ "$before" = "$after" ] || fail "cadence changed captain-shared bytes"
-  [ "$(stat -c %a "$target/data/captain-shared.md")" = 444 ] || fail "cadence changed captain-shared mode"
+  [ "$(stat -c %a "$target/data/captain-shared.md" 2>/dev/null || stat -f %Lp "$target/data/captain-shared.md")" = 444 ] \
+    || fail "cadence changed captain-shared mode"
 
   record_turn "$target" pi
   run_lab "$sender" "$target" pi FM_STOW_OBSERVE_ONLY=1 >/dev/null 2>&1 || true

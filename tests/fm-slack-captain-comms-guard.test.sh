@@ -249,6 +249,36 @@ assert_delivered "$home" "an over-cap board message carrying --long"
   || fail "board must ignore --long silently: $(cat "$home/post.err")"
 pass "fleet board path ignores --long instead of refusing delivery"
 
+# A rollover snapshot posts through the same exempt board path as the live
+# update, so an over-cap closed-date body must still deliver and --long must
+# still be ignored silently rather than refused.
+home="$TMP_ROOT/board-rollover-snapshot-exempt"
+fakebin=$(setup_case "$home")
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+post "$home" "$fakebin" board "$(lines_text 20)" \
+  || fail "rollover setup board post must succeed: $(cat "$home/post.err")"
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+post "$home" "$fakebin" board "today text" \
+  || fail "rollover snapshot of an over-cap body must stay exempt from the captain message guard: $(cat "$home/post.err")"
+[ "$(grep -c 'method=chat.postMessage ' "$home/curl.log")" -eq 2 ] \
+  || fail "rollover snapshot of an over-cap body must still post: $(cat "$home/curl.log")"
+pass "rollover snapshot path is exempt from the captain message guard"
+
+home="$TMP_ROOT/board-rollover-snapshot-ignores-long"
+fakebin=$(setup_case "$home")
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+post "$home" "$fakebin" board "$(lines_text 20)" \
+  || fail "rollover setup board post must succeed: $(cat "$home/post.err")"
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+post "$home" "$fakebin" --long "urgent status digest" board "today text" \
+  || fail "--long must not cost the rollover snapshot its post: $(cat "$home/post.err")"
+[ "$(grep -c 'method=chat.postMessage ' "$home/curl.log")" -eq 2 ] \
+  || fail "rollover snapshot carrying --long must still post: $(cat "$home/curl.log")"
+[ ! -s "$home/post.err" ] \
+  || fail "rollover snapshot must ignore --long silently: $(cat "$home/post.err")"
+pass "rollover snapshot path ignores --long instead of refusing delivery"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
 # --- fail-open --------------------------------------------------------------
 #
 # Standing aside must be visible: an over-cap message that gets delivered because

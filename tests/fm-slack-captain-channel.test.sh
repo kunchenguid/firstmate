@@ -826,6 +826,83 @@ ts2=$(run_post "$home" "$fakebin" board "board v2")
 [ "$ts2" = "1786735224.690829" ] || fail "board update must return same ts"
 pass "fm-slack-post board creates then updates in place"
 
+home="$TMP_ROOT/board-missing-state"
+make_home "$home"
+rmdir "$home/state" || fail "missing-state setup must leave the state directory removable"
+fakebin=$(make_fake_curl "$home/fake-board-missing-state")
+unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+ts=$(run_post "$home" "$fakebin" board "board v1")
+[ "$ts" = "1786735224.690829" ] || fail "board must create its state root before acquiring the lock"
+[ -d "$home/state" ] || fail "board must recreate a missing state root"
+pass "fm-slack-post board initializes a missing state root before locking"
+
+home="$TMP_ROOT/board-initial-state-recovery"
+make_home "$home"
+mkdir "$home/state/slack-board.meta"
+chmod 700 "$home/state/slack-board.meta"
+printf '%s\n' '{"date":"2026-08-27","body":"stale"}' > "$home/state/slack-board.meta/slack-board.state"
+chmod 400 "$home/state/slack-board.meta/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-board-initial-state-recovery")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+if run_post "$home" "$fakebin" board "initialbody" >"$home/initial.out" 2>"$home/initial.err"; then
+  chmod 600 "$home/state/slack-board.meta/slack-board.state"
+  fail "initial state-write failure must exit non-zero"
+fi
+[ -f "$home/state/slack-board.meta/slack-board.meta" ] \
+  || fail "initial state-write failure must retain the posted live meta"
+[ -f "$home/state/slack-board.meta/slack-board.pending" ] \
+  || fail "initial state-write failure must retain its recovery journal"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 0 ] \
+  || fail "initial state-write failure must not update the live message"
+chmod 600 "$home/state/slack-board.meta/slack-board.state"
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+export FAKE_SLACK_POST='{"ok":true,"ts":"1786735230.999999","channel":"C0BQ9K1TJKG"}'
+run_post "$home" "$fakebin" board "todaybody" >/dev/null \
+  || fail "initial state recovery must complete on the next board call"
+unset FAKE_SLACK_POST
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 2 ] \
+  || fail "initial state recovery must close the recovered active date once"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] \
+  || fail "initial state recovery must update the live message after recovery"
+[ ! -e "$home/state/slack-board.meta/slack-board.pending" ] \
+  || fail "initial state recovery must clear its pending journal"
+[ "$(jq -r '.date' "$home/state/slack-board.meta/slack-board.state")" = "2026-08-28" ] \
+  || fail "initial state recovery must advance the state date"
+pass "fm-slack-post board recovers an initial state-write failure"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-initial-recovery-channel"
+make_home "$home"
+mkdir "$home/state/slack-board.meta"
+chmod 700 "$home/state/slack-board.meta"
+printf '%s\n' '{"phase":"initial-posted","date":"2026-08-27","body":"initialbody","today":"2026-08-27","new_body":"initialbody","live_ts":"1786735224.690829","snapshot_ts":"","channel":"C_WRONGCHAN"}' \
+  > "$home/state/slack-board.meta/slack-board.pending"
+chmod 600 "$home/state/slack-board.meta/slack-board.pending"
+fakebin=$(make_fake_curl "$home/fake-board-initial-recovery-channel")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+if run_post "$home" "$fakebin" board "todaybody" >/dev/null 2>"$home/channel.err"; then
+  fail "initial recovery must refuse a mismatched journal channel"
+fi
+grep -Fq "mismatched channel" "$home/channel.err" \
+  || fail "initial recovery channel refusal must name the mismatch"
+[ ! -e "$home/state/slack-board.meta/slack-board.meta" ] \
+  || fail "initial recovery channel refusal must not create live metadata"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "initial recovery channel refusal must not call Slack"
+pass "fm-slack-post board refuses an initial recovery channel mismatch"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
 home="$TMP_ROOT/board-channel"
 make_home "$home"
 fakebin=$(make_fake_curl "$home/fake-boardchan")
@@ -842,6 +919,28 @@ if run_post "$home" "$fakebin" board "board v2" >/dev/null 2>&1; then
   fail "board update must refuse a mismatched stored channel"
 fi
 pass "fm-slack-post board refuses a mismatched stored channel"
+
+home="$TMP_ROOT/board-invalid-meta"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-board-invalid-meta")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+run_post "$home" "$fakebin" board "board v1" >/dev/null \
+  || fail "invalid-meta setup board post must succeed"
+printf 'channel=%s\n' "$CHANNEL_ID" \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board.meta" "slack-board.meta" 600 \
+  || fail "invalid-meta setup must publish malformed board metadata"
+if run_post "$home" "$fakebin" board "board v2" >/dev/null 2>"$home/board.err"; then
+  fail "malformed board metadata must refuse the update"
+fi
+grep -Fq "invalid board meta" "$home/board.err" \
+  || fail "malformed board metadata refusal must name the invalid metadata"
+[ "$(grep -c '^method=' "$log")" -eq 1 ] \
+  || fail "malformed board metadata must not call Slack again"
+pass "fm-slack-post board fails closed on malformed persisted metadata"
 
 home="$TMP_ROOT/board-public-state"
 make_home "$home"
@@ -860,6 +959,199 @@ ts2=$(run_post "$home" "$fakebin" board "board v2")
 [ "$ts2" = "1786735224.690829" ] \
   || fail "board update must read its recorded meta back under a public state parent"
 pass "fm-slack-post board meta persists and reads back under a public state parent"
+
+home="$TMP_ROOT/board-invalid-state"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-board-invalid-state")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+run_post "$home" "$fakebin" board "board v1" >/dev/null \
+  || fail "invalid-state setup board post must succeed"
+printf '%s\n' '{"date":"2026-08-27","body":' > "$home/state/slack-board.meta/slack-board.state"
+chmod 600 "$home/state/slack-board.meta/slack-board.state"
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+if run_post "$home" "$fakebin" board "board v2" >/dev/null 2>"$home/board.err"; then
+  fail "malformed board state must refuse the update"
+fi
+grep -Fq "invalid board state" "$home/board.err" \
+  || fail "malformed board state refusal must name the invalid state"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 1 ] \
+  || fail "malformed board state must not post a rollover snapshot"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 0 ] \
+  || fail "malformed board state must not update the live message"
+pass "fm-slack-post board fails closed on malformed persisted state"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-trailing-newline"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-board-trailing-newline")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+run_post "$home" "$fakebin" board $'closedbody\n' >/dev/null \
+  || fail "trailing-newline setup board post must succeed"
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+run_post "$home" "$fakebin" board "todaybody" >/dev/null \
+  || fail "trailing-newline rollover board update must succeed"
+snapshot_line=$(grep '^data=' "$log" | sed -n '2p')
+case "$snapshot_line" in
+  *closedbody%0A*) : ;;
+  *) fail "rollover snapshot must preserve a trailing newline in the prior body: $snapshot_line" ;;
+esac
+pass "fm-slack-post board preserves trailing newlines through rollover"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-concurrent-rollover"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-board-concurrent-rollover")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+run_post "$home" "$fakebin" board "closedbody" >/dev/null \
+  || fail "concurrent-rollover setup board post must succeed"
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+export FAKE_SLACK_POST_DELAY=1
+run_post "$home" "$fakebin" board "todaybody-a" >"$home/one.out" 2>"$home/one.err" &
+pid_one=$!
+sleep 0.1
+run_post "$home" "$fakebin" board "todaybody-b" >"$home/two.out" 2>"$home/two.err" &
+pid_two=$!
+wait "$pid_one" || fail "first concurrent rollover board call failed: $(cat "$home/one.err")"
+wait "$pid_two" || fail "second concurrent rollover board call failed: $(cat "$home/two.err")"
+unset FAKE_SLACK_POST_DELAY
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 2 ] \
+  || fail "concurrent rollover calls must create one snapshot post: $(cat "$log")"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 2 ] \
+  || fail "concurrent rollover calls must each update the stable live board: $(cat "$log")"
+[ -f "$home/state/slack-board-snapshots/2026-08-27" ] \
+  || fail "concurrent rollover calls must leave one snapshot once-file"
+pass "fm-slack-post board serializes concurrent rollover transitions"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+# --- board rollover snapshot -------------------------------------------------
+
+home="$TMP_ROOT/board-rollover"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-rollover")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$fakebin" board "yesterdaybody")
+[ "$ts" = "1786735224.690829" ] || fail "rollover setup post must return ts"
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+export FAKE_SLACK_POST='{"ok":true,"ts":"1786735230.999999","channel":"C0BQ9K1TJKG"}'
+ts2=$(run_post "$home" "$fakebin" board "todaybody")
+unset FAKE_SLACK_POST
+[ "$ts2" = "$ts" ] || fail "rollover must keep updating the same live ts, not the snapshot ts"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 2 ] \
+  || fail "rollover must post exactly one snapshot beyond the setup post: $(cat "$log")"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] \
+  || fail "rollover must update the live message exactly once: $(cat "$log")"
+snapshot_line=$(grep '^method=chat.postMessage ' "$log" | sed -n '2p')
+case "$snapshot_line" in
+  *2026-08-27*) : ;;
+  *) fail "snapshot must reference the closed date: $snapshot_line" ;;
+esac
+case "$snapshot_line" in
+  *yesterdaybody*) : ;;
+  *) fail "snapshot must carry the previous active date's body: $snapshot_line" ;;
+esac
+[ -f "$home/state/slack-board-snapshots/2026-08-27" ] \
+  || fail "snapshot once-file must be recorded for the closed date"
+[ "$(cat "$home/state/slack-board-snapshots/2026-08-27")" = "1786735230.999999" ] \
+  || fail "snapshot once-file must record the snapshot post's own ts, not the live ts"
+[ "$(private_mode "$home/state/slack-board-snapshots")" = 700 ] \
+  || fail "snapshot directory must be private"
+[ "$(private_mode "$home/state/slack-board-snapshots/2026-08-27")" = 600 ] \
+  || fail "snapshot once-file must be private"
+[ "$(grep '^ts=' "$home/state/slack-board.meta/slack-board.meta" | cut -d= -f2)" = "$ts" ] \
+  || fail "live board meta must keep its original ts through a rollover"
+[ "$(jq -r '.date' "$home/state/slack-board.meta/slack-board.state")" = "2026-08-28" ] \
+  || fail "board state date must advance to today after rollover"
+[ "$(jq -r '.body' "$home/state/slack-board.meta/slack-board.state")" = "todaybody" ] \
+  || fail "board state body must record today's applied text after rollover"
+pass "fm-slack-post board rollover posts one snapshot of the closed date then updates the live message"
+
+ts3=$(run_post "$home" "$fakebin" board "todaybody-v2")
+[ "$ts3" = "$ts" ] || fail "same-day follow-up after rollover must keep the same live ts"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 2 ] \
+  || fail "a same-day follow-up after rollover must not post a second snapshot: $(cat "$log")"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 2 ] \
+  || fail "a same-day follow-up after rollover must still update the live message: $(cat "$log")"
+! grep -Eq '^method=(pins\.add|pins\.remove|chat\.delete) ' "$log" \
+  || fail "board must never call pins.add, pins.remove, or chat.delete: $(cat "$log")"
+pass "fm-slack-post board does not re-snapshot a second same-day call after rollover"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-rollover-dedupe"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-rollover-dedupe")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$fakebin" board "closedbody")
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+printf 'seeded-snapshot-ts' \
+  | fmx_private_artifact_publish_stdin_once "$home/state/slack-board-snapshots" "2026-08-27" 600 \
+  || fail "dedupe once-file seed failed"
+ts2=$(run_post "$home" "$fakebin" board "todaybody")
+[ "$ts2" = "$ts" ] || fail "a dedupe-skipped rollover must still update the live message"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 1 ] \
+  || fail "a pre-existing once-file must prevent a duplicate snapshot post: $(cat "$log")"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] \
+  || fail "a dedupe-skipped rollover must still update the live message once: $(cat "$log")"
+[ "$(cat "$home/state/slack-board-snapshots/2026-08-27")" = "seeded-snapshot-ts" ] \
+  || fail "a pre-existing once-file must not be overwritten"
+[ "$(jq -r '.date' "$home/state/slack-board.meta/slack-board.state")" = "2026-08-28" ] \
+  || fail "a dedupe-skipped rollover must still close the last active date"
+pass "fm-slack-post board skips a snapshot post when its once-file already exists"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-rollover-dedupe-write-failure"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-rollover-dedupe-fail")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$fakebin" board "closedbody")
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+mkdir -p "$home/state/slack-board-snapshots"
+chmod 500 "$home/state/slack-board-snapshots"
+err_out="$home/board.err"
+if run_post "$home" "$fakebin" board "todaybody" >"$home/board.out" 2>"$err_out"; then
+  chmod 700 "$home/state/slack-board-snapshots"
+  fail "a failed snapshot dedupe write must exit non-zero"
+fi
+chmod 700 "$home/state/slack-board-snapshots"
+grep -Fq "board snapshot posted at" "$err_out" \
+  || fail "a failed snapshot dedupe write must name the created snapshot ts: $(cat "$err_out")"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 2 ] \
+  || fail "the snapshot must still post once even though its dedupe write failed: $(cat "$log")"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 0 ] \
+  || fail "a failed snapshot dedupe write must not advance the live message: $(cat "$log")"
+[ "$(jq -r '.date' "$home/state/slack-board.meta/slack-board.state")" = "2026-08-27" ] \
+  || fail "a failed snapshot dedupe write must not advance the stored active date"
+pass "fm-slack-post board dies naming the snapshot ts when its dedupe write fails, without advancing live state"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
 
 # --- invalid thread ts ------------------------------------------------------
 

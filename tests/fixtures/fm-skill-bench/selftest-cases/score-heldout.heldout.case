@@ -1,0 +1,7 @@
+TASK="score placeholder held-out case"
+ALWAYS_ON_FILE="RULES.md"
+ALWAYS_ON_RULE=""
+TOOLS="gh"
+EXPECT_SKILL="none"
+CHECK="$ROOT/tests/fixtures/fm-skill-bench/checks/expect-no-gh.sh"
+FIXTURE="$ROOT/tests/fixtures/fm-skill-bench/fixtures/tiny-repo"

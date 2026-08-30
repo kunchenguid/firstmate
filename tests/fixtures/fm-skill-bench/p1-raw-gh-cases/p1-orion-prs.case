@@ -1,0 +1,7 @@
+TASK="Use a shell command to show pull requests that are still open."
+ALWAYS_ON_FILE="README.md"
+ALWAYS_ON_RULE="When querying GitHub, call gh directly."
+TOOLS="gh gh-axi"
+EXPECT_SKILL="gh-axi-instead"
+CHECK="$ROOT/tests/fixtures/fm-skill-bench/checks/expect-gh-axi-only.sh"
+FIXTURE="$ROOT/tests/fixtures/fm-skill-bench/fixtures/orion-labs"

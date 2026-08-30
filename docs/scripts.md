@@ -1,8 +1,8 @@
-# The bin/ toolbelt
+# The bin/ and scripts/ toolbelt
 
 The first mate drives these; interactive entrypoints work by hand too, while `*-lib.sh` files are sourced helpers.
 Each row is one purpose clause only: the script's own header comment is the authoritative description of its behavior, flags, and contracts, so read the header before first use.
-If you have changed away from the firstmate home in an interactive shell, invoke these scripts by absolute path through the repo's `bin/` directory; the scripts self-locate internally after they start.
+If you have changed away from the firstmate home in an interactive shell, invoke these scripts by absolute path through the repo's `bin/` or `scripts/` directory; the scripts self-locate internally after they start.
 The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarized in [architecture.md](architecture.md#no-mistakes-gate-authority-boundary), while `docs/sessionstart-nudge.md` covers the silent session-open hook use; `fm-gate-refuse-lib.sh`'s header owns its exact contract.
 
 | Script                   | Purpose                                                                              |
@@ -40,6 +40,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-macos-scope.sh`      | Fail-closed CI decision for whether a change requires stock macOS Bash              |
 | `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, proven-isolated `--jobs`, coverage guard, timing/JSON |
 | `fm-test-isolation-proof.sh` | Concurrent isolation proof and proven-isolated candidate set owner |
+| `scripts/test-changed.sh` | Artemis pre-push Vitest driver for changed frontend/backend/shared files |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` `@AGENTS.md` pointer, and the canonical self-governance section |
 | `fm-guard.sh`            | Warn on stale or tangled checkouts, pending queued wakes, and unhealthy supervision |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
@@ -131,7 +132,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
 | `fm-promote.sh`          | Promote a writer scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes; header owns open-PR-without-watch and worktree-occupancy custody proofs |
-| `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
+| `fm-worktree-unique-content.sh` | Prove whether a worktree holds content reachable from no surviving ref, so dirty-state refusals judge held content instead of stale-index noise |
+| `fm-model-telemetry.sh`  | Sole validator, writer, sealer, recovery owner, routing-candidate evidence guard, and read-only sheet reader of the private model-attempt ledger |
+| `fm-review-outcome.sh`   | Append and read the canonical review-outcome ledger                                               |
+| `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate launch axes, bind exact secondmate tuples to catalog provider/family facts, and resolve failed-report relaunch tuples through `escalate` |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |
 | `fm-x-poll.sh`           | One bounded Relay poll: stash newly offered mentions and emit their once-only wake   |

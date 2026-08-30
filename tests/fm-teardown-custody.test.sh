@@ -11,7 +11,10 @@
 #
 # The occupancy guard refuses to inspect, close, reap, reset, or return a
 # pooled path whose current treehouse lease or slot identity belongs to a
-# different task. Path equality is not ownership. Available occupancy or a
+# different task. Path equality is not ownership, and once the occupancy proof
+# shows this task holds the live lease on that path, a record that does not
+# name that same live lease describes a superseded occupancy of a re-leased
+# pooled slot rather than a live claim. Available occupancy or a
 # missing path with a live endpoint preserves custody records. Pre-schema
 # writer metadata can complete through live occupancy without rewriting the
 # old record.
@@ -297,10 +300,14 @@ mutations = {
             '    if false && ! teardown_occupancy_identity_matches \\\n',
         ),
         (
-            '  if teardown_other_task_claims_worktree "$abs"; then\n',
-            '  if false && teardown_other_task_claims_worktree "$abs"; then\n',
+            '  teardown_other_task_claims_worktree "$abs" "$proven_lease" || return 0\n',
+            '  false && teardown_other_task_claims_worktree "$abs" "$proven_lease" || return 0\n',
         ),
     ],
+    "lease-blind-claim": [(
+        'teardown_other_task_claims_worktree() {  # <abs-worktree> [proven-lease]\n',
+        'teardown_other_task_claims_worktree() {  # <abs-worktree> [proven-lease]\n  return 1\n',
+    )],
     "presence-only-watch": [(
         "    fm_pr_poll_artifacts_valid \"$STATE\" \"$other_id\" \"$SCRIPT_DIR/fm-pr-poll.sh\" || continue\n",
         "    [ -e \"$STATE/$other_id.check.sh\" ] || continue\n    return 0\n",
@@ -762,6 +769,152 @@ test_same_slot_rebound_requires_new_lease() {
   pass "same pooled slot requires the original acquisition lease"
 }
 
+# A pooled Treehouse slot re-leased to a new task leaves the previous task's
+# record still naming the same path. Two different non-empty acquisition
+# leases prove the records describe different occupancies of a reused slot,
+# so the superseded record is not a live claim on the current task's worktree.
+test_reused_slot_stale_lease_does_not_claim() {
+  local case_dir wt_abs rc
+  case_dir=$(make_case reused-slot-stale-lease)
+  write_task_meta "$case_dir" task-x1 "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 treehouse_lease=lease-new
+  write_task_meta "$case_dir" stale-task "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 treehouse_lease=lease-old
+  write_task_meta "$case_dir" other-path-task "$case_dir/other-wt" \
+    kind=ship mode=local-only treehouse_slot=slot-2 treehouse_lease=lease-new
+  land_task_worktree "$case_dir"
+  wt_abs=$(cd "$case_dir/wt" && pwd -P)
+  FM_FAKE_TREEHOUSE_STATUS_JSON=$(status_json_for "$wt_abs" in-use lease-new task-x1)
+  rc=0
+  run_teardown "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "re-leased pool slot teardown refused: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/home/state/task-x1.meta" \
+    "re-leased pool slot teardown left its own metadata"
+  assert_present "$case_dir/home/state/stale-task.meta" \
+    "re-leased pool slot teardown retired the superseded record"
+  assert_present "$case_dir/home/state/other-path-task.meta" \
+    "re-leased pool slot teardown retired an unrelated record"
+  grep -F 'treehouse <return>' "$case_dir/treehouse.log" >/dev/null \
+    || fail "re-leased pool slot teardown did not return its own worktree"
+  pass "a superseded lease on a re-leased pooled path is not another task's claim"
+}
+
+test_shared_lease_still_claims_worktree() {
+  local case_dir wt_abs rc
+  case_dir=$(make_case shared-lease-claim)
+  write_task_meta "$case_dir" task-x1 "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 treehouse_lease=lease-shared
+  write_task_meta "$case_dir" sibling-task "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 treehouse_lease=lease-shared
+  land_task_worktree "$case_dir"
+  wt_abs=$(cd "$case_dir/wt" && pwd -P)
+  FM_FAKE_TREEHOUSE_STATUS_JSON=$(status_json_for "$wt_abs" in-use lease-shared task-x1)
+  rc=0
+  run_teardown "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a shared acquisition lease did not refuse teardown"
+  assert_contains "$(cat "$case_dir/stderr")" "now recorded for another task" \
+    "shared lease refusal lost its claim diagnostic"
+  assert_present "$case_dir/home/state/task-x1.meta" \
+    "shared lease refusal retired metadata"
+  assert_present "$case_dir/home/state/sibling-task.meta" \
+    "shared lease refusal retired the sibling record"
+  assert_no_treehouse_return "$case_dir"
+  assert_no_tmux_kill "$case_dir"
+  pass "the same non-empty lease on a shared path still refuses teardown"
+}
+
+# The live reproduction: the current task holds the active lease on a pooled
+# path while a dead task's record still names that same path without holding
+# any lease. The live holder must not be punished by that stale record.
+test_active_lease_holder_outranks_leaseless_stale_record() {
+  local case_dir wt_abs rc
+  case_dir=$(make_case active-holder-leaseless-stale)
+  write_task_meta "$case_dir" task-x1 "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-5 treehouse_lease=lease-live
+  write_task_meta "$case_dir" dead-task "$case_dir/wt" kind=ship mode=local-only
+  land_task_worktree "$case_dir"
+  wt_abs=$(cd "$case_dir/wt" && pwd -P)
+  FM_FAKE_TREEHOUSE_STATUS_JSON=$(status_json_for "$wt_abs" in-use lease-live task-x1 slot-5)
+  rc=0
+  run_teardown "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "proven active lease holder was refused: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/home/state/task-x1.meta" \
+    "proven active lease holder left its own metadata"
+  assert_present "$case_dir/home/state/dead-task.meta" \
+    "proven active lease holder retired the dead task's record"
+  grep -F 'treehouse <return>' "$case_dir/treehouse.log" >/dev/null \
+    || fail "proven active lease holder did not return its own worktree"
+  pass "a proven active lease outranks a leaseless stale record on the same path"
+}
+
+# The disconfirming controls: without a proven live lease, path equality alone
+# still refuses, and a record that names the live lease is still a claim.
+test_absent_lease_proof_keeps_path_only_refusal() {
+  local case_dir wt_abs rc
+
+  case_dir=$(make_case no-lease-proof-available-occupancy)
+  write_task_meta "$case_dir" task-x1 "$case_dir/missing-wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 treehouse_lease=lease-old
+  write_task_meta "$case_dir" other-task "$case_dir/missing-wt" kind=ship mode=local-only
+  FM_FAKE_TMUX_ENDPOINT_GONE=1
+  FM_FAKE_TREEHOUSE_STATUS_JSON=$(status_json_for "$case_dir/missing-wt" available "" "" slot-1)
+  rc=0
+  run_teardown "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_FAKE_TMUX_ENDPOINT_GONE=0
+  [ "$rc" -ne 0 ] || fail "record-only retirement ignored another record on the same path"
+  assert_contains "$(cat "$case_dir/stderr")" "now recorded for another task" \
+    "unproven lease lost the path-only claim refusal"
+  assert_present "$case_dir/home/state/task-x1.meta" \
+    "unproven lease retired metadata"
+  assert_no_treehouse_return "$case_dir"
+
+  case_dir=$(make_case live-lease-named-by-other-record)
+  write_task_meta "$case_dir" task-x1 "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 treehouse_lease=lease-live
+  write_task_meta "$case_dir" sibling-task "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 \
+    treehouse_lease=lease-old treehouse_lease=lease-live
+  land_task_worktree "$case_dir"
+  wt_abs=$(cd "$case_dir/wt" && pwd -P)
+  FM_FAKE_TREEHOUSE_STATUS_JSON=$(status_json_for "$wt_abs" in-use lease-live task-x1)
+  rc=0
+  run_teardown "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a record naming the live lease stopped counting as a claim"
+  assert_contains "$(cat "$case_dir/stderr")" "now recorded for another task" \
+    "a record naming the live lease lost its claim refusal"
+  assert_present "$case_dir/home/state/task-x1.meta" \
+    "a record naming the live lease retired metadata"
+  assert_no_treehouse_return "$case_dir"
+  assert_no_tmux_kill "$case_dir"
+
+  pass "an unproven lease and a record naming the live lease both keep refusing"
+}
+
+# Orca has no Treehouse lease to prove, so its call site into the same claim
+# owner supplies no lease proof and keeps the conservative path-only refusal
+# whatever the records happen to record.
+test_orca_call_site_proves_no_lease_and_stays_path_only() {
+  local case_dir rc
+  case_dir=$(make_case orca-superseded-lease)
+  write_task_meta "$case_dir" task-x1 "$case_dir/wt" \
+    kind=ship mode=local-only backend=orca orca_worktree_id=worktree-9 \
+    terminal=term-7 treehouse_slot=slot-1 treehouse_lease=lease-new
+  write_task_meta "$case_dir" stale-task "$case_dir/wt" \
+    kind=ship mode=local-only backend=orca orca_worktree_id=worktree-8 \
+    terminal=term-8 treehouse_slot=slot-1 treehouse_lease=lease-old
+  land_task_worktree "$case_dir"
+  rc=0
+  run_teardown "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "Orca teardown accepted a shared path without lease proof"
+  assert_contains "$(cat "$case_dir/stderr")" "now recorded for another task" \
+    "Orca call site lost the path-only claim refusal"
+  assert_present "$case_dir/home/state/task-x1.meta" "Orca claim refusal retired metadata"
+  assert_present "$case_dir/home/state/stale-task.meta" "Orca claim refusal retired the sibling record"
+  assert_no_treehouse_return "$case_dir"
+  assert_no_tmux_kill "$case_dir"
+  pass "the Orca call site proves no lease and keeps the path-only refusal"
+}
+
 test_rebound_occupancy_precedes_endpoint_validation() {
   local case_dir wt_abs rc
   case_dir=$(make_case occupancy-before-endpoint)
@@ -933,6 +1086,25 @@ probe_rebound_refusal() {
   return 0
 }
 
+probe_shared_lease_refusal() {
+  local teardown=$1 name=$2 case_dir wt_abs rc
+  TEARDOWN=$teardown
+  case_dir=$(make_case "mut-shared-lease-$name") || return 1
+  write_task_meta "$case_dir" task-x1 "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 treehouse_lease=lease-shared
+  write_task_meta "$case_dir" sibling-task "$case_dir/wt" \
+    kind=ship mode=local-only treehouse_slot=slot-1 treehouse_lease=lease-shared
+  land_task_worktree "$case_dir" || return 1
+  wt_abs=$(cd "$case_dir/wt" && pwd -P)
+  FM_FAKE_TREEHOUSE_STATUS_JSON=$(status_json_for "$wt_abs" in-use lease-shared task-x1)
+  rc=0
+  run_teardown "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  [ -e "$case_dir/home/state/task-x1.meta" ] || return 1
+  grep -F 'treehouse <return>' "$case_dir/treehouse.log" >/dev/null 2>&1 && return 1
+  return 0
+}
+
 probe_presence_only_refusal() {
   local teardown=$1 name=$2 case_dir wt_abs rc
   TEARDOWN=$teardown
@@ -978,13 +1150,15 @@ probe_wrong_pr_refusal() {
 }
 
 test_custody_mutations_are_killed() {
-  local control omit_pr omit_occ path_only presence wrong
+  local control omit_pr omit_occ path_only presence wrong lease_blind
   local control_open omit_pr_rc presence_rc wrong_rc
   local control_rebound omit_occ_rc path_only_rc
+  local control_shared lease_blind_rc
   control="$TEARDOWN"
   omit_pr=$(make_mutant omit-open-pr-guard) || fail "could not build omit-open-pr mutant"
   omit_occ=$(make_mutant omit-occupancy) || fail "could not build omit-occupancy mutant"
   path_only=$(make_mutant path-only-occupancy) || fail "could not build path-only mutant"
+  lease_blind=$(make_mutant lease-blind-claim) || fail "could not build lease-blind mutant"
   presence=$(make_mutant presence-only-watch) || fail "could not build presence-only mutant"
   wrong=$(make_mutant wrong-pr-watch) || fail "could not build wrong-PR mutant"
 
@@ -1002,10 +1176,15 @@ test_custody_mutations_are_killed() {
   probe_rebound_refusal "$omit_occ" omit-occ || omit_occ_rc=$?
   path_only_rc=0
   probe_rebound_refusal "$path_only" path-only || path_only_rc=$?
+  control_shared=0
+  probe_shared_lease_refusal "$control" control || control_shared=$?
+  lease_blind_rc=0
+  probe_shared_lease_refusal "$lease_blind" lease-blind || lease_blind_rc=$?
 
-  printf 'custody mutation exit codes: open-control=%s omit-pr=%s presence=%s wrong-pr=%s rebound-control=%s omit-occ=%s path-only=%s\n' \
+  printf 'custody mutation exit codes: open-control=%s omit-pr=%s presence=%s wrong-pr=%s rebound-control=%s omit-occ=%s path-only=%s shared-control=%s lease-blind=%s\n' \
     "$control_open" "$omit_pr_rc" "$presence_rc" "$wrong_rc" \
-    "$control_rebound" "$omit_occ_rc" "$path_only_rc"
+    "$control_rebound" "$omit_occ_rc" "$path_only_rc" \
+    "$control_shared" "$lease_blind_rc"
   expect_code 0 "$control_open" "open-PR control should refuse"
   expect_code 1 "$omit_pr_rc" "omitting the open-PR guard should be killed"
   expect_code 1 "$presence_rc" "presence-only replacement mutant should be killed"
@@ -1013,7 +1192,9 @@ test_custody_mutations_are_killed() {
   expect_code 0 "$control_rebound" "rebound control should refuse"
   expect_code 1 "$omit_occ_rc" "omitting occupancy should be killed"
   expect_code 1 "$path_only_rc" "path-only occupancy mutant should be killed"
-  pass "custody mutations for omitted guards, presence-only watches, wrong-PR registrations, and path-only ownership are killed"
+  expect_code 0 "$control_shared" "shared-lease control should refuse"
+  expect_code 1 "$lease_blind_rc" "a claim guard that never claims should be killed"
+  pass "custody mutations for omitted guards, presence-only watches, wrong-PR registrations, path-only ownership, and lease-blind claims are killed"
 }
 
 test_open_pr_refuses_and_preserves_watch
@@ -1033,6 +1214,11 @@ test_duplicate_occupancy_entries_refuse
 test_rebound_path_preserves_new_identity
 test_same_slot_rebound_requires_new_lease
 test_rebound_occupancy_precedes_endpoint_validation
+test_reused_slot_stale_lease_does_not_claim
+test_shared_lease_still_claims_worktree
+test_active_lease_holder_outranks_leaseless_stale_record
+test_absent_lease_proof_keeps_path_only_refusal
+test_orca_call_site_proves_no_lease_and_stays_path_only
 test_concurrent_rebind_waits_for_mutation_lock
 test_unreadable_and_contradictory_occupancy_fail_closed
 test_ship_without_pr_and_scout_retain_current_behavior

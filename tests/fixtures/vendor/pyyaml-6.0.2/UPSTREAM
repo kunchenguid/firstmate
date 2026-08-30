@@ -1,0 +1,6 @@
+package=PyYAML
+version=6.0.2
+pypi_project=https://pypi.org/project/PyYAML/6.0.2/
+sdist_sha256=d584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e
+vendored_paths=lib/yaml
+notes=Pure-Python yaml package from the official 6.0.2 sdist; test-only offline dependency for workflow-policy contract tests.

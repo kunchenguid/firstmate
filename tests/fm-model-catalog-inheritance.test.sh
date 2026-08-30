@@ -7,7 +7,11 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+JQ_BIN_DIR=
+if command -v jq >/dev/null 2>&1; then
+  JQ_BIN_DIR="$(dirname "$(command -v jq)"):"
+fi
+BASE_PATH=${FM_TEST_BASE_PATH:-${JQ_BIN_DIR}/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-model-catalog-inheritance)
 CONFIG_PUSH="$ROOT/bin/fm-config-push.sh"
 
@@ -265,6 +269,7 @@ invalid_catalog_is_quarantined_at_publication() {
     || fail "later convergence removed a subsequent destination after quarantine"
 
   rm -f "$home/config/.model-catalog.invalid-primary"
+  find "$home/config" -maxdepth 1 -type f -name 'model-catalog.json.invalid-*' -exec rm -f -- {} +
   run_config_push "$root" "$home" "$fakebin" "$log" >/dev/null
   [ ! -e "$sm/config/model-catalog.json" ] && [ ! -e "$sm2/config/model-catalog.json" ] \
     || fail "explicit invalid-source marker removal did not converge intentional absence"
@@ -329,30 +334,30 @@ remote_path_converges_before_intake() {
 - sm - remote fixture (host: remote-test; root: $ROOT; home: $sm; scope: test; projects: none; added 2026-08-22)
 EOF
   printf 'remote_host=remote-test\n' >> "$home/state/sm.meta"
-  cat > "$ssh_bin" <<'SH'
+  cat > "$ssh_bin" <<SH
 #!/usr/bin/env bash
-while [ "$#" -gt 0 ]; do
-  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
-[ "$1" = remote-test ] || exit 91
-[ "$2" = fm-remote-entrypoint.sh ] || exit 92
+[ "\$1" = remote-test ] || exit 91
+[ "\$2" = fm-remote-entrypoint.sh ] || exit 92
 shift 2
 shift 3
-argv_b64=$1
+argv_b64=\$1
 args=()
-while IFS= read -r -d '' arg; do args+=("$arg"); done < <(printf '%s' "$argv_b64" | base64 -d)
-command=${args[0]}
+while IFS= read -r -d '' arg; do args+=("\$arg"); done < <(printf '%s' "\$argv_b64" | base64 -d)
+command=\${args[0]}
 unset 'args[0]'
-if [ "$command" = fm-remote-inherit.sh ] && [ "${args[1]:-}" = put ] \
-  && [ "${args[2]:-}" = config/backend ] && [ "${FM_FAKE_REMOTE_FAIL_BACKEND:-0}" = 1 ]; then
+if [ "\$command" = fm-remote-inherit.sh ] && [ "\${args[1]:-}" = put ] \
+  && [ "\${args[2]:-}" = config/backend ] && [ "\${FM_FAKE_REMOTE_FAIL_BACKEND:-0}" = 1 ]; then
   exit 77
 fi
-if [ "$command" = fm-remote-secondmate-control.sh ] && [ "${args[1]:-}" = send ]; then
-  printf '%s\n' "${args[3]}" >> "$FM_FAKE_TMUX_LOG"
+if [ "\$command" = fm-remote-secondmate-control.sh ] && [ "\${args[1]:-}" = send ]; then
+  printf '%s\n' "\${args[3]}" >> "\$FM_FAKE_TMUX_LOG"
   exit 0
 fi
-exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin FM_HOME="$FM_FAKE_REMOTE_HOME" \
-  "$FM_FAKE_ROOT/bin/$command" "${args[@]}"
+exec env -i PATH="${fakebin}:${BASE_PATH}" FM_HOME="\$FM_FAKE_REMOTE_HOME" \
+  "\$FM_FAKE_ROOT/bin/\$command" "\${args[@]}"
 SH
   chmod +x "$ssh_bin"
 

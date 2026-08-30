@@ -12,8 +12,10 @@
 #
 # Checks, in stable order:
 #   budget            reuse bin/fm-startup-memory-budget.sh report
-#   pointers          concrete path tokens from memory files; globs and
-#                     documented optional absent home-local files are valid
+#   pointers          concrete path tokens from memory files; globs, documented
+#                     optional absent home-local files, and pointers declared
+#                     primary-home-only in shared captain memory are valid only
+#                     when checking a validated secondmate home
 #   staleness         retired subjects, superseded pins, installed-version claims
 #   contradictions    mechanically comparable rule.KEY=VALUE facts; configured
 #                     crew-harness fallback vs dispatch default is not a gap
@@ -176,86 +178,6 @@ emit_inherited_hashes() {
   done < <(fm_config_inherit_items)
 }
 
-markdown_link_payload() {
-  local input=$1 char i depth=1 escaped=0 payload=
-  MARKDOWN_LINK_PAYLOAD=
-  MARKDOWN_LINK_REST=
-  for ((i = 0; i < ${#input}; i++)); do
-    char=${input:i:1}
-    if [ "$escaped" -eq 1 ]; then
-      payload=$payload$char
-      escaped=0
-      continue
-    fi
-    case "$char" in
-      \\)
-        payload=$payload$char
-        escaped=1
-        ;;
-      '(')
-        payload=$payload$char
-        depth=$((depth + 1))
-        ;;
-      ')')
-        depth=$((depth - 1))
-        if [ "$depth" -eq 0 ]; then
-          MARKDOWN_LINK_PAYLOAD=$payload
-          MARKDOWN_LINK_REST=${input:i+1}
-          return 0
-        fi
-        payload=$payload$char
-        ;;
-      *) payload=$payload$char ;;
-    esac
-  done
-  return 1
-}
-
-markdown_link_destination() {
-  local payload=$1 destination='' char next i normalized='' escaped=0 closed=0
-  case "$payload" in
-    \<*)
-      for ((i = 1; i < ${#payload}; i++)); do
-        char=${payload:i:1}
-        if [ "$escaped" -eq 1 ]; then
-          destination=$destination$char
-          escaped=0
-          continue
-        fi
-        case "$char" in
-          \\)
-            destination=$destination$char
-            escaped=1
-            ;;
-          \>)
-            closed=1
-            break
-            ;;
-          *) destination=$destination$char ;;
-        esac
-      done
-      [ "$closed" -eq 1 ] || return 1
-      ;;
-    *) destination=${payload%%[[:space:]]*} ;;
-  esac
-  for ((i = 0; i < ${#destination}; i++)); do
-    char=${destination:i:1}
-    if [ "$char" = \\ ] && [ "$i" -lt $((${#destination} - 1)) ]; then
-      next=${destination:i+1:1}
-      case "$next" in
-        '('|')'|'<'|'>')
-          normalized=$normalized$next
-          i=$((i + 1))
-          continue
-          ;;
-      esac
-    fi
-    normalized=$normalized$char
-  done
-  [ -n "$normalized" ] || return 1
-  printf '%s' "$normalized"
-}
-
 extract_backtick_and_link_tokens() {
   local file=$1 line rest tok destination
   [ -f "$file" ] && [ ! -L "$file" ] || return 0
@@ -271,10 +193,10 @@ extract_backtick_and_link_tokens() {
     rest=$line
     while [[ "$rest" == *']('* ]]; do
       rest=${rest#*](}
-      markdown_link_payload "$rest" || break
-      tok=$MARKDOWN_LINK_PAYLOAD
-      rest=$MARKDOWN_LINK_REST
-      destination=$(markdown_link_destination "$tok") || continue
+      fm_home_markdown_link_payload "$rest" || break
+      tok=$FM_HOME_MARKDOWN_LINK_PAYLOAD
+      rest=$FM_HOME_MARKDOWN_LINK_REST
+      destination=$(fm_home_markdown_link_destination "$tok") || continue
       printf 'link\t%s\t%s\n' "$tok" "$destination"
     done
   done < "$file"
@@ -295,7 +217,7 @@ absent_pointer_status() {
     "$state"/*) tok="state/${tok#"$state"/}" ;;
     "$home"/*) tok=${tok#"$home"/} ;;
   esac
-  fm_home_path_absence_status "$home_kind" "$home" "$tok" "$state" "$config"
+  fm_home_path_absence_status "$home_kind" "$home" "$tok" "$state" "$config" "$data"
 }
 
 classify_pointer_token() {
@@ -1016,7 +938,8 @@ if [ "$MODE" = hashes ]; then
   exit 0
 fi
 
-check_local_home primary primary "$FM_HOME" "$CONFIG" "$DATA" "$STATE"
+HOME_LOCAL_KIND=$(fm_home_layout_kind "$FM_HOME")
+check_local_home primary "$HOME_LOCAL_KIND" "$FM_HOME" "$CONFIG" "$DATA" "$STATE"
 if [ "$HOME_LOCAL" -eq 1 ]; then
   print_report
   exit

@@ -139,6 +139,22 @@ handle_push_transition() {  # <backend> <session> <record>
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi
+  # fm-watch and classify_stale already override a stale captain-relevant
+  # terminal line when crew_is_provably_working; the herdr blocked fast-path
+  # must match so validation or a busy pane is not surfaced as waiting on human.
+  if crew_is_provably_working "$task"; then
+    triage_log "absorbed push $to (provably working, overriding stale agent state): $window"
+    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    return
+  fi
+  # classify_stale and the daemon catch-all already defer a stale captain-relevant
+  # line when crew_worktree_written_since; the herdr blocked fast-path must match
+  # so a quiet pane with an idle composer is not surfaced while the worktree writes.
+  if crew_worktree_written_since "$task" "$STATE" "$STATE/$task.status"; then
+    triage_log "absorbed push $to (worktree writes since status, overriding stale agent state): $window"
+    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    return
+  fi
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1

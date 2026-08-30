@@ -33,7 +33,7 @@ Hard rules, in priority order:
    A worker's `done` claim is not proof; use observable behavior, tests, delivery gates, and the selected path's reviewer without inventing another gate.
 
 Firstmate may maintain this repo's private operational state.
-Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.backpassrc.json`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`; load `firstmate-coding-guidelines` before changing it, delegate while any crewmate is live, and ship it through no-mistakes and a PR.
+Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.backpassrc.json`, `.tasks.toml`, `.github/workflows/`, `bin/`, `scripts/`, `.agents/skills/`, and public `skills/`; load `firstmate-coding-guidelines` before changing it, delegate while any crewmate is live, and ship it through no-mistakes and a PR.
 Never add an agent name as a commit co-author.
 
 ## 2. Layout and state

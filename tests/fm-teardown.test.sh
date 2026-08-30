@@ -1998,6 +1998,74 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+# A pre-endpoint_task_id Herdr record: window and every herdr_* field are
+# present, but the exact task binding firstmate later started stamping never
+# got written. The recorded pane itself is authoritatively confirmed gone
+# (every `pane get` reports pane_not_found), so there is nothing left to
+# close - the task and its worktree must not stay stranded on that account.
+configure_legacy_herdr_meta_confirmed_gone() {  # <case-dir>
+  local case_dir=$1
+  grep -v '^endpoint_task_id=' "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+  sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=default' \
+    'herdr_workspace_id=wG' \
+    'herdr_tab_id=wG:tQ' \
+    'herdr_pane_id=wG:pQ' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "session list") printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"$case_dir/herdr.sock"}]}' ;;
+  "status --json") printf '%s\n' '{"server":{"running":true}}' ;;
+  "pane get") printf '%s\n' '{"error":{"code":"pane_not_found"}}'; exit 1 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
+test_herdr_teardown_legacy_missing_binding_proceeds_when_target_confirmed_gone() {
+  local case_dir rc
+  case_dir=$(make_case herdr-legacy-absent-binding)
+  write_meta "$case_dir" local-only ship
+  configure_legacy_herdr_meta_confirmed_gone "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "herdr-legacy-absent-binding: teardown refused a legacy Herdr record whose recorded pane is confirmed gone: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-legacy-absent-binding: teardown left the durable endpoint metadata behind"
+  [ ! -d "$case_dir/wt" ] \
+    || fail "herdr-legacy-absent-binding: teardown never returned the isolated worktree copy"
+  pass "herdr teardown proceeds past a legacy no-binding record once the recorded pane is confirmed gone"
+}
+
+test_herdr_teardown_legacy_missing_binding_refuses_when_target_present() {
+  local case_dir rc
+  case_dir=$(make_case herdr-legacy-present-binding)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  grep -v '^endpoint_task_id=' "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-legacy-present-binding: teardown accepted a legacy no-binding record whose recorded pane is still present"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-legacy-present-binding: the refusal erased the durable endpoint metadata"
+  [ -d "$case_dir/wt" ] \
+    || fail "herdr-legacy-present-binding: the refusal returned the isolated worktree copy"
+  assert_grep "lacks an exact task binding" "$case_dir/stderr" \
+    "herdr-legacy-present-binding: the refusal was not explained visibly"
+  pass "herdr teardown still refuses a legacy no-binding record whose recorded pane is present, even with --force"
+}
+
 # Flat (non-projected) Herdr endpoint whose fake pane exists until a locked
 # close removes it. The socket path is case-local so the derived presentation
 # lock never collides with another test or a real fleet session.
@@ -4296,6 +4364,8 @@ test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_teardown_reaps_escalation_log_and_abandoned_lock_owner
 test_herdr_teardown_clears_escalation_marker
+test_herdr_teardown_legacy_missing_binding_proceeds_when_target_confirmed_gone
+test_herdr_teardown_legacy_missing_binding_refuses_when_target_present
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes

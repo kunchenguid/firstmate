@@ -30,9 +30,38 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{cursor_y}"*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}" ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
+  capture-pane)
+    if [ "${FM_FAKE_CURSOR_SCREEN:-0}" = 1 ]; then
+      [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' composer-empty >> "$FM_FAKE_EVENT_LOG"
+      printf '→\n'
+    else
+      [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' composer-not-empty >> "$FM_FAKE_EVENT_LOG"
+    fi
+    exit 0
+    ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    previous=
+    for arg in "$@"; do
+      if [ "$previous" = -l ]; then
+        case "$arg" in
+          *"FIRSTMATE_OP: v1 launch-brief:"*)
+            [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' brief-delivery:pointer >> "$FM_FAKE_EVENT_LOG"
+            ;;
+        esac
+      fi
+      previous=$arg
+    done
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -267,12 +296,44 @@ run_cursor_hook() {  # <hooks.json> <hook-event>
   printf '{}\n' | sh -c "$cmd"
 }
 
+test_cursor_agent_refuses_brief_before_verified_empty_composer() {
+  local rec id=busy-cursor-unready out status events
+  id=busy-cursor-unready
+  rec=$(make_spawn_case cursor-unready cursor-agent "$id")
+  read_case_record "$rec"
+  events="$CASE_DIR/events"
+  : > "$events"
+  out=$(FM_FAKE_EVENT_LOG="$events" FM_FAKE_TMUX_CURSOR_Y=0 \
+    FM_CURSOR_READY_POLLS=1 FM_CURSOR_POLL_INTERVAL=0 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "unready cursor composer must refuse spawn: $out"
+  assert_contains "$out" 'cursor-agent did not show a verified empty composer before brief delivery' \
+    "unready cursor composer refusal lacked its diagnostic"
+  assert_contains "$(cat "$events")" composer-not-empty \
+    "cursor-agent fake did not record the unready-composer observation"
+  assert_not_contains "$(cat "$events")" 'brief-delivery:' \
+    "cursor-agent delivered a brief before the composer was verified empty"
+  pass "cursor-agent spawn refuses brief delivery before a verified empty composer"
+}
+
 test_cursor_hooks_semantic_lifecycle() {
-  local rec id=busy-cursor-1 out state hooks status unsupported
+  local rec id=busy-cursor-1 out state hooks status unsupported events
   rec=$(make_spawn_case cursor-lifecycle cursor-agent "$id")
   read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  events="$CASE_DIR/events"
+  : > "$events"
+  out=$(FM_FAKE_CURSOR_SCREEN=1 FM_FAKE_TMUX_CURSOR_Y=0 FM_FAKE_EVENT_LOG="$events" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "cursor-agent spawn should succeed: $out"
+  assert_contains "$(cat "$events")" composer-empty \
+    "cursor-agent fake did not record its verified empty-composer observation"
+  assert_contains "$(cat "$events")" brief-delivery:pointer \
+    "cursor-agent fake did not record pointer submission"
+  if ! awk '/composer-empty/ { ready=1 } /brief-delivery:/ && !ready { violation=1 } END { exit violation }' \
+    "$events"; then
+    fail "cursor-agent brief delivery preceded its verified empty-composer observation"
+  fi
   state="$HOME_DIR/state"
   hooks="$WT_DIR/.cursor/hooks.json"
   assert_present "$hooks" "cursor-agent spawn did not write project-local hooks"
@@ -416,6 +477,7 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_cursor_agent_refuses_brief_before_verified_empty_composer
 test_cursor_hooks_semantic_lifecycle
 test_codex_unverified_until_a_semantic_source_exists
 

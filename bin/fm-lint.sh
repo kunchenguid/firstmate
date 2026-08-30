@@ -17,8 +17,8 @@
 # With no explicit paths, the file set depends on context:
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
 #     merge-base against origin/main (or local main) can be found, it lints
-#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh. This is
-#     what CI always runs, so CI coverage never depends on a local diff.
+#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh scripts/*.sh.
+#     This is what CI always runs, so CI coverage never depends on a local diff.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
@@ -250,7 +250,7 @@ fm_lint_changed_base_ref() {
 }
 
 # fm_lint_is_canonical_root tests membership in the canonical set (a direct
-# *.sh child of bin/, bin/backends/, or tests/) without the shell case
+# *.sh child of bin/, bin/backends/, tests/, or scripts/) without the shell case
 # statement's non-pathname wildcard matching a path separator by accident.
 fm_lint_is_canonical_root() {
   local path=$1 dir base
@@ -263,7 +263,7 @@ fm_lint_is_canonical_root() {
     *) return 1 ;;
   esac
   case "$dir" in
-    bin|bin/backends|tests) return 0 ;;
+    bin|bin/backends|tests|scripts) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -286,7 +286,7 @@ else
   fi
 
   if [ "$full_lint" -eq 1 ]; then
-    ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+    ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh scripts/*.sh)
   else
     CHANGED_MODE=1
     ROOTS=()
