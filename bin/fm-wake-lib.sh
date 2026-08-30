@@ -1644,6 +1644,19 @@ fm_status_append() {  # <status-file> <line>
   return "$status"
 }
 
+fm_status_append_once() {  # <status-file> <line>
+  local file=$1 line=$2 lock status=0
+  lock=$(fm_status_lock_path "$file") || return 2
+  fm_lock_acquire_wait "$lock" || return 2
+  if grep -Fqx -- "$line" "$file" 2>/dev/null; then
+    status=1
+  else
+    printf '%s\n' "$line" >> "$file" || status=2
+  fi
+  fm_lock_release "$lock"
+  return "$status"
+}
+
 # Guarded self-announced status append - the one dedup primitive for a status
 # line THIS home's own machinery writes as bookkeeping it has already presented
 # in the very turn or tick that writes it (an answerer-closes resolved line, a

@@ -308,16 +308,6 @@ normalize_payload() { # <source> <destination>
   LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
 }
 
-# The one place a line enters the parent status stream. A captured generation can
-# be replayed, so every append - a mirrored line or an escalation this adapter
-# raises itself - is at most once on exact bytes.
-# Returns 0 appended, 1 already present, 2 the write itself failed.
-append_status_once() { # <status-file> <line>
-  grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
-  printf '%s\n' "$2" >> "$1" || return 2
-  return 0
-}
-
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
@@ -368,7 +358,7 @@ cmd_ingest() {
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
     append_rc=0
-    append_status_once "$status_file" "$line" || append_rc=$?
+    fm_status_append_once "$status_file" "$line" || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
@@ -396,14 +386,14 @@ cmd_ingest() {
       rewritten=${rewritten//"$doc"/"$local_doc"}
     done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
     append_rc=0
-    append_status_once "$status_file" "$rewritten" || append_rc=$?
+    fm_status_append_once "$status_file" "$rewritten" || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote reply"; }
     [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
   done < "$normalized_payload"
   if [ -n "$undelivered" ]; then
     line="blocked [key=remote-reply-document-$id]: remote documents did not transfer for $id ($undelivered)"
     append_rc=0
-    append_status_once "$status_file" "$line" || append_rc=$?
+    fm_status_append_once "$status_file" "$line" || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append document escalation"; }
     [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
   fi

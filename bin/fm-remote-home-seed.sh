@@ -150,8 +150,11 @@ REG_EXISTED=0
 # status path is the remote append-only relay log rather than a local Mac path.
 PARENT_STATUS="$STATE/$ID.status"
 REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
+PARENT_STATUS_APPEND="$SCRIPT_DIR/fm-status-append.sh"
+REMOTE_STATUS_APPEND="$REMOTE_ROOT/bin/fm-status-append.sh"
 while IFS= read -r line || [ -n "$line" ]; do
-  printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
+  line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
+  printf '%s\n' "${line//"$PARENT_STATUS_APPEND"/"$REMOTE_STATUS_APPEND"}"
 done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=

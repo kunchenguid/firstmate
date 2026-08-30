@@ -16,6 +16,8 @@ CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" "$CLAIMS"
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 # The recorded worker pid is the serving child, not its restart supervisor, so
 # stopping that pid alone leaves the supervisor to respawn - the leak
 # tests/fm-remote-job-orphan-reap.test.sh pins. Stop the whole worker tree.
@@ -255,8 +257,21 @@ pass "a replayed mirrored delta is idempotent in both the stream and the cursor"
 # stream either.
 printf 'blocked [key=ctl]: escape \033[31mhere\033[0m bell \007 caf\xc3\xa9 end\n' \
   >> "$REMOTE/state/parent-replies.status"
-remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
-  || fail "the control-character line was not captured"
+status_lock=$(fm_status_lock_path "$PARENT/state/ios.status")
+fm_lock_acquire_wait "$status_lock" || fail "could not hold the parent status publication lock"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/serialized-ingest.out" 2>&1 &
+RUNNER=$!
+sleep 0.1
+kill -0 "$RUNNER" 2>/dev/null || {
+  fm_lock_release "$status_lock"
+  fail "remote reply ingest bypassed the parent status publication lock"
+}
+if grep -Fq 'blocked [key=ctl]' "$PARENT/state/ios.status"; then
+  fm_lock_release "$status_lock"
+  fail "remote reply published while the parent status lock was held"
+fi
+fm_lock_release "$status_lock"
+wait "$RUNNER" || fail "the control-character line was not captured: $(cat "$TMP_ROOT/serialized-ingest.out")"
 RESULT_FIVE="$PARENT/state/procevent-inbox/$SID.5.result"
 remote_env "$ADAPTER" handle ios 5 "$RESULT_FIVE" >/dev/null 2>&1 \
   || fail "a control character stopped the stream"
@@ -270,6 +285,7 @@ ctl_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 assert_grep "offset=$ctl_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the cursor did not advance past a control-character line"
 pass "transported control bytes are normalized in place and never stop the stream"
+pass "remote reply ingest participates in status publication serialization"
 
 printf 'status=delta\n' >> "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \

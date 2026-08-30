@@ -654,6 +654,18 @@ assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not p
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
+status_contract=$(grep -m1 'fm-status-append.sh' "$REMOTE_HOME/data/charter.md")
+status_helper=$(printf '%s\n' "$status_contract" | cut -d"'" -f2)
+status_target=$(printf '%s\n' "$status_contract" | cut -d"'" -f4)
+[ "$status_helper" = "$REMOTE_ROOT/bin/fm-status-append.sh" ] \
+  || fail "remote charter did not bind its status helper to the remote code root"
+[ "$status_target" = "$REMOTE_HOME/state/parent-replies.status" ] \
+  || fail "remote charter did not bind its status helper to the remote reply log"
+"$status_helper" "$status_target" 'blocked [key=remote-charter]: executable remote status contract' \
+  || fail "remote charter status command was not executable"
+assert_grep 'blocked [key=remote-charter]: executable remote status contract' "$status_target" \
+  "remote charter status command did not publish its blocker"
+: > "$status_target"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \

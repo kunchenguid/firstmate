@@ -393,6 +393,39 @@ test_escalation_publication_failure_retries() {
   pass "failed escalation publication remains retryable and publishes once"
 }
 
+test_escalation_waits_for_status_publication_lock() {
+  local home state corr rec lock pid
+  home=$(setup_parent escalation-status-lock)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4600
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "serialized escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase recovery_sent
+  fm_pending_reply_set "$rec" recovery_turn_completed_epoch 4550
+  lock=$(fm_status_lock_path "$state/hibit.status")
+  fm_lock_acquire_wait "$lock" || fail "could not hold the status publication lock"
+  FM_PENDING_REPLY_NOW=4600 bash -c '
+    . "$1"
+    fm_pending_reply_maybe_escalate "$2" "$3"
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$state" "$corr" &
+  pid=$!
+  sleep 0.1
+  kill -0 "$pid" 2>/dev/null || {
+    fm_lock_release "$lock"
+    fail "pending-reply escalation bypassed the status publication lock"
+  }
+  [ ! -s "$state/hibit.status" ] || {
+    fm_lock_release "$lock"
+    fail "pending-reply escalation published while the status lock was held"
+  }
+  fm_lock_release "$lock"
+  wait "$pid" || fail "serialized pending-reply escalation failed"
+  assert_grep "blocked [key=pending-reply-$corr]:" "$state/hibit.status" \
+    "serialized pending-reply escalation was lost"
+  pass "pending-reply escalation participates in status publication serialization"
+}
+
 test_legacy_escalation_closes_default_decision() {
   local home state corr rec open
   home=$(setup_parent legacy-close)
@@ -1259,6 +1292,7 @@ test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries
+test_escalation_waits_for_status_publication_lock
 test_legacy_escalation_closes_default_decision
 test_legacy_escalation_does_not_close_taken_default_decision
 test_foreign_blocker_is_not_selected_as_escalation
