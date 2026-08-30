@@ -115,7 +115,8 @@ run_spawn() {
   FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 \
     CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" \
     FM_CLAUDE_TRUST_POLLS=80 FM_CLAUDE_TRUST_POLL_INTERVAL=0.5 \
-    "$ROOT/bin/fm-spawn.sh" "$id" --relaunch --harness claude > "$out" 2>&1 || rc=$?
+    "$ROOT/bin/fm-spawn.sh" "$id" --relaunch --harness claude \
+      --accept-claude-trust > "$out" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$id: visible pane at failure:" >&2
     "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:fm-$id" -S -60 >&2 || true
