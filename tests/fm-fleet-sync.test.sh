@@ -477,6 +477,60 @@ test_unsynced_whole_fleet_form_skips_flagged_clone_only() {
   pass "whole-fleet sweep skips only the +unsynced clone, with zero trace of it in the output"
 }
 
+# bin/fm-teardown.sh's post-landing refresh is the one caller allowed past the
+# +unsynced skip: the clone firstmate just landed a PR into must still catch up.
+# Every routine call site (sweep, deferred network stage, plain single-project
+# form) is proven to keep skipping by the tests above and by the sweep assertion
+# at the end of this one.
+test_force_unsynced_syncs_a_flagged_clone_for_teardown() {
+  local home clean dirty out before_tracking
+  home=$(new_home)
+  clean=$(build_pair "$home" tau)
+  dirty=$(build_pair "$home" ups)
+  advance_origin "$home" tau C1
+  advance_origin "$home" ups C1
+  echo dirty >> "$dirty/file.txt"
+  mkdir -p "$home/data"
+  {
+    printf -- '- tau [no-mistakes +unsynced] - test project (added 2026-08-30)\n'
+    printf -- '- ups [no-mistakes +unsynced] - test project (added 2026-08-30)\n'
+  } > "$home/data/projects.md"
+  before_tracking=$(git -C "$dirty" rev-parse refs/remotes/origin/main)
+
+  # A clean, behind clone is genuinely fast-forwarded despite the flag.
+  out=$(run_sync "$home" --force-unsynced "$clean")
+  assert_contains "$out" "tau: synced" "the forced refresh did not fast-forward the +unsynced clone"
+
+  # A dirty one is fetched and reported like any other stuck clone, not skipped.
+  out=$(run_sync "$home" --force-unsynced "$dirty")
+  assert_contains "$out" "ups: STUCK:" "the forced refresh did not report the dirty +unsynced clone"
+  [ "$(git -C "$dirty" rev-parse refs/remotes/origin/main)" != "$before_tracking" ] \
+    || fail "the forced refresh never fetched the dirty +unsynced clone"
+
+  # The routine sweep over the same two clones still says nothing about either.
+  out=$(run_sync "$home")
+  assert_not_contains "$out" "tau" "the sweep stopped skipping a +unsynced clone"
+  assert_not_contains "$out" "ups" "the sweep stopped skipping a dirty +unsynced clone"
+  pass "--force-unsynced refreshes a flagged clone for teardown while the sweep still skips it"
+}
+
+test_force_unsynced_requires_the_single_project_form() {
+  local home out rc
+  home=$(new_home)
+  build_pair "$home" chi2 >/dev/null
+  mkdir -p "$home/data"
+  printf -- '- chi2 [no-mistakes +unsynced] - test project (added 2026-08-30)\n' > "$home/data/projects.md"
+
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" --force-unsynced 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "a whole-fleet --force-unsynced sweep was accepted"
+  assert_contains "$out" "exactly one project" "the refusal did not explain the single-project requirement"
+  pass "--force-unsynced refuses the sweep form, so only a single named project can be forced"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -774,6 +828,8 @@ test_local_only_skipped
 test_unsynced_flagged_project_skipped_with_zero_output
 test_unsynced_flag_composes_with_yolo_in_either_order
 test_unsynced_whole_fleet_form_skips_flagged_clone_only
+test_force_unsynced_syncs_a_flagged_clone_for_teardown
+test_force_unsynced_requires_the_single_project_form
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

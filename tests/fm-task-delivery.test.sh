@@ -428,6 +428,38 @@ EOF
   pass "fm-project-mode: --unsynced answers yes/no only, and the flag never disturbs the posture output"
 }
 
+# --strip-unsynced is the propagation half of the same grammar: secondmate
+# seeding copies a registry line into the seeded home through this filter, which
+# must drop only the +unsynced token and leave the mode, +yolo, and the rest of
+# the line byte-identical.
+test_project_mode_strips_unsynced_for_propagation() {
+  local out
+  out=$("$PROJECT_MODE" --strip-unsynced '- alpha [direct-PR +yolo +unsynced] - alpha project (added 2026-01-01)')
+  [ "$out" = '- alpha [direct-PR +yolo] - alpha project (added 2026-01-01)' ] \
+    || fail "--strip-unsynced did not keep the mode and +yolo intact (got '$out')"
+
+  out=$("$PROJECT_MODE" --strip-unsynced '- alpha [direct-PR +unsynced +yolo] - alpha project (added 2026-01-01)')
+  [ "$out" = '- alpha [direct-PR +yolo] - alpha project (added 2026-01-01)' ] \
+    || fail "--strip-unsynced mishandled the reversed token order (got '$out')"
+
+  out=$("$PROJECT_MODE" --strip-unsynced '- solo [+unsynced] - only flag (added 2026-01-01)')
+  [ "$out" = '- solo - only flag (added 2026-01-01)' ] \
+    || fail "--strip-unsynced left an empty flag group behind (got '$out')"
+
+  # Lines the token does not appear in survive untouched, including the legacy
+  # no-bracket form and a description that happens to contain brackets.
+  out=$("$PROJECT_MODE" --strip-unsynced '- beta [no-mistakes-prod-only] - fixture (added 2026-01-01)')
+  [ "$out" = '- beta [no-mistakes-prod-only] - fixture (added 2026-01-01)' ] \
+    || fail "--strip-unsynced rewrote an unflagged line (got '$out')"
+  out=$("$PROJECT_MODE" --strip-unsynced '- gamma - legacy fixture (added 2026-01-01)')
+  [ "$out" = '- gamma - legacy fixture (added 2026-01-01)' ] \
+    || fail "--strip-unsynced rewrote a legacy no-bracket line (got '$out')"
+  out=$("$PROJECT_MODE" --strip-unsynced '- delta [no-mistakes +unsynced] - see [handbook] (added 2026-01-01)')
+  [ "$out" = '- delta [no-mistakes] - see [handbook] (added 2026-01-01)' ] \
+    || fail "--strip-unsynced disturbed brackets in the description (got '$out')"
+  pass "fm-project-mode: --strip-unsynced removes only the +unsynced token from a propagated line"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -437,4 +469,5 @@ test_promote_requires_and_records_the_delivery_contract
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 test_project_mode_answers_the_unsynced_query
+test_project_mode_strips_unsynced_for_propagation
 echo "# all fm-task-delivery tests passed"

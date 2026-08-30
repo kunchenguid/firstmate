@@ -17,7 +17,10 @@
 # this home already has projects/<project>, whose origin is then read instead.
 # bin/fm-project-origin-lib.sh owns which URLs are accepted, and this home's
 # data/projects.md still owns the project's registered delivery mode, so an
-# unregistered or local-only project is refused rather than provisioned.
+# unregistered or local-only project is refused rather than provisioned. The
+# registry line travels to the remote home with its "+unsynced" token stripped
+# (bin/fm-project-mode.sh owns that grammar): the flag describes this home's own
+# clone, never the fresh clone the remote host makes.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
 #
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
@@ -181,6 +184,10 @@ EOF
     || die "project $project origin is not an accepted clone URL: $ORIGIN"
   REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md" 2>/dev/null || true)
   [ -n "$REGISTRY_LINE" ] || die "project $project has no registry record"
+  # "+unsynced" belongs to this home's own clone (bin/fm-project-mode.sh's
+  # header owns the grammar); the remote home clones the project fresh and must
+  # sync it normally, so the token never travels. Mode and +yolo do.
+  REGISTRY_LINE=$("$SCRIPT_DIR/fm-project-mode.sh" --strip-unsynced "$REGISTRY_LINE")
   NAME_B64=$(printf '%s' "$project" | encode)
   ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
   PROJECT_REG_B64=$(printf '%s' "$REGISTRY_LINE" | encode)

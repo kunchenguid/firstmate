@@ -53,6 +53,8 @@ Default it off for every project and every posture, and enable it only on the ca
 `AGENTS.md` section 7 owns the merge-authority contract.
 
 The optional `+unsynced` flag is independent of posture and of `+yolo`: it tells fleet sync to leave that clone entirely alone - no fetch, no drift check, no report - for a checkout the captain edits and pulls outside firstmate.
+That covers the routine sweeps only; teardown's refresh of a project firstmate just landed a PR into still runs, through `fm-fleet-sync.sh --force-unsynced`.
+The flag describes this home's clone alone, so seeding a secondmate home copies the line without it while the mode and `+yolo` carry over.
 Default it off, and add it only on the captain's explicit instruction; `bin/fm-project-mode.sh`'s header owns the token grammar.
 
 ## Add or clone an existing project

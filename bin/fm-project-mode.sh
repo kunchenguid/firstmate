@@ -9,8 +9,11 @@
 # bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones, and via the
 # --unsynced query below, skip +unsynced clones with zero output),
-# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init), and
-# bin/fm-spawn.sh's advisory registry-deviation notice.
+# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init),
+# secondmate seeding's registry propagation (bin/fm-home-seed.sh,
+# bin/fm-remote-home-seed.sh, bin/fm-remote-home-provision.sh, via the
+# --strip-unsynced filter below), and bin/fm-spawn.sh's advisory
+# registry-deviation notice.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
@@ -24,9 +27,17 @@
 # +unsynced marks a clone the captain edits and pulls outside firstmate by
 # design: fleet sync (bin/fm-fleet-sync.sh) skips it exactly like a
 # local-only/no-origin clone, with no fetch, drift check, or report of any
-# kind, at every call site (whole-fleet sweep and single-project form alike).
+# kind, at every routine call site (the bootstrap sweep, the session-start
+# deferred network stage, and an ordinary single-project invocation). The one
+# exception is bin/fm-teardown.sh's post-landing refresh, which passes
+# `fm-fleet-sync.sh --force-unsynced <project>` so the clone firstmate just
+# landed a PR into is still refreshed; no other caller may use that flag.
 # Query it with `--unsynced <project-name>`, which prints "yes" or "no" and
 # nothing else; it does not participate in the "<mode> <yolo>" output below.
+# +unsynced is a flag of THIS home only: seeding a secondmate home copies the
+# registry line through `--strip-unsynced <registry-line>`, which prints the
+# line with the +unsynced token removed (mode and +yolo untouched), so the
+# child home never inherits a skip the captain set for this home's clone.
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -48,6 +59,7 @@
 # to stderr, so a typo never silently drops the gate.
 # Usage: fm-project-mode.sh [--raw] <project-name>
 #        fm-project-mode.sh --unsynced <project-name>
+#        fm-project-mode.sh --strip-unsynced <registry-line>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,6 +72,30 @@ UNSYNCED_QUERY=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --unsynced) UNSYNCED_QUERY=1; shift ;;
+  --strip-unsynced)
+    # Registry-line filter for secondmate seeding: print the given line with the
+    # +unsynced token removed from its flag group, leaving the mode, +yolo, and
+    # the rest of the line byte-identical. An empty flag group left behind (the
+    # line carried no mode) is dropped with it rather than written as "[]".
+    # Any line that is not a "- <name> [<flags>] ..." registry entry is printed
+    # unchanged, so this never rewrites something it does not own.
+    shift
+    printf '%s\n' "${1:?usage: fm-project-mode.sh --strip-unsynced <registry-line>}" | awk '
+      {
+        if (match($0, /\[[^]]*\]/) == 0) { print; next }
+        pre = substr($0, 1, RSTART - 1)
+        post = substr($0, RSTART + RLENGTH)
+        inner = substr($0, RSTART + 1, RLENGTH - 2)
+        if (pre !~ /^[ \t]*-[ \t]+[^ \t]+[ \t]+$/) { print; next }
+        k = split(inner, a, " ")
+        kept = ""
+        for (j = 1; j <= k; j++) if (a[j] != "+unsynced") kept = kept (kept == "" ? "" : " ") a[j]
+        if (kept == "") { sub(/[ \t]+$/, "", pre); print pre post }
+        else print pre "[" kept "]" post
+      }
+    '
+    exit 0
+    ;;
 esac
 NAME=${1:?usage: fm-project-mode.sh [--raw|--unsynced] <project-name>}
 

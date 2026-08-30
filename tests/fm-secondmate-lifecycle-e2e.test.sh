@@ -49,7 +49,7 @@ setup_world() {
   fm_git_add_origin "$HOME_DIR/projects/beta" "$TMP_ROOT/remotes/beta.git"
   fm_git_add_origin "$HOME_DIR/projects/gamma" "$TMP_ROOT/remotes/gamma.git"
   cat > "$HOME_DIR/data/projects.md" <<EOF
-- alpha [direct-PR +yolo] - alpha project (added 2026-06-22)
+- alpha [direct-PR +yolo +unsynced] - alpha project (added 2026-06-22)
 - beta [direct-PR] - beta project (added 2026-06-22)
 - gamma - gamma project (added 2026-06-22)
 EOF
@@ -103,6 +103,12 @@ phase_seed() {
   # Delivery modes preserved in the subhome registry; validation passes.
   [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" alpha)" = "direct-PR on" ] \
     || fail "alpha delivery mode not preserved in the subhome"
+  # +unsynced describes THIS home's clone only, so it is stripped on the way in
+  # while the mode and +yolo above carry over, and the parent line keeps it.
+  assert_no_grep '+unsynced' "$SUB/data/projects.md" "the +unsynced flag propagated into the seeded home"
+  assert_grep '- alpha [direct-PR +yolo] - alpha project' "$SUB/data/projects.md" \
+    "the propagated alpha line was rewritten beyond dropping +unsynced"
+  assert_grep '+unsynced' "$HOME_DIR/data/projects.md" "seeding removed +unsynced from this home's own registry"
   [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" beta)" = "direct-PR off" ] \
     || fail "beta delivery mode not preserved in the subhome"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after seed"

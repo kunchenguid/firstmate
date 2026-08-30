@@ -273,7 +273,8 @@ The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed e
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
 `bin/fm-dod-lib.sh` is the one owner of that mode's definition of done, rendered both into a generated ship brief and into the ship instructions a promoted scout receives, so a promoted worker cannot be handed a weaker contract than a briefed one.
 `data/projects.md` records each project's standing posture and optional `+yolo` merge flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
-`bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` and `+unsynced` skips, and home seeding's refusal and no-mistakes initialization.
+`bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` and `+unsynced` skips, and home seeding's refusal, no-mistakes initialization, and `+unsynced` strip.
+`+unsynced` describes this home's own clone, so seeding a secondmate home (local or remote) copies the registry line through that parser's strip and the seeded home inherits the mode and `+yolo` without the flag.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-viewable validation evidence to an orphan evidence branch that shares no history with code branches, so it never enters the crew branch or the default branch.
 This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
@@ -362,6 +363,8 @@ Dirty clones, non-default branches, detached HEADs with unique commits, diverged
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
 A clone whose registry entry carries the `+unsynced` flag owned by [`fm-project-mode.sh`'s header](../bin/fm-project-mode.sh) is not touched at all - no fetch, no drift check, and no report of any kind - because the captain maintains that checkout outside firstmate by design.
+That skip covers the routine sweeps only: the bootstrap sweep, the session-start deferred network stage, and an ordinary single-project invocation.
+`bin/fm-teardown.sh`'s post-landing refresh is the one exception and passes `fm-fleet-sync.sh --force-unsynced <project>`, so the clone firstmate just landed a PR into is still brought up to date; no other caller may use that flag.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
 
 ## Self-updates stay safe

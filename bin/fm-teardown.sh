@@ -2788,7 +2788,12 @@ rm -rf "$STATE/$ID.inbox"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
-  "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
+  # --force-unsynced: this refresh follows work firstmate just landed in this
+  # project, so it runs even when the registry flags the clone "+unsynced".
+  # That flag only excuses the clone from the routine sweeps (see
+  # bin/fm-project-mode.sh's header); this is the sole call site allowed to
+  # override it.
+  "$FM_ROOT/bin/fm-fleet-sync.sh" --force-unsynced "$PROJ" || true
 fi
 # A secondmate retirement may remove the home containing an overridden control
 # state directory. Do not let the side-band refresh recreate that retired home.
