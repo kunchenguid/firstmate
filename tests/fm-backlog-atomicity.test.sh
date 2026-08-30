@@ -363,6 +363,17 @@ test_dispatch_refuses_a_pending_authoritative_close() {
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-closing\narg=--pr\narg=https://github.com/example/repo/pull/12\n' \
     "$id" "$(home_of "$case_dir")/data" > "$marker"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *new-window*) : > "$case_dir/task-endpoint-created" ;;
+  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted work with an authoritative close still pending"
@@ -371,6 +382,10 @@ test_dispatch_refuses_a_pending_authoritative_close() {
   assert_present "$marker" "spawn discarded the pending authoritative close"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
     "spawn published a new worker over a pending close"
+  assert_absent "$case_dir/task-endpoint-created" \
+    "spawn created an unowned endpoint before refusing the pending close"
+  assert_absent "$case_dir/local-copy-requested" \
+    "spawn requested an unowned local copy before refusing the pending close"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "refused dispatch changed the pending close's backlog row"
   pass "dispatch refuses to supersede a pending authoritative close"

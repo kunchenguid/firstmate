@@ -1996,6 +1996,16 @@ else
   fi
 fi
 
+if [ "$RELAUNCH" -eq 0 ]; then
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
+  if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
+    echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
+    exit 1
+  fi
+fi
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
@@ -2773,13 +2783,10 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
-SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-fm_lock_acquire_wait "$SPAWN_META_LOCK"
-SPAWN_META_LOCK_HELD=1
-if [ "$RELAUNCH" -eq 0 ] \
-   && { [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; }; then
-  echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
-  exit 1
+if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
