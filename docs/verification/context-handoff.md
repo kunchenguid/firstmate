@@ -54,17 +54,21 @@ tests/fm-context-handoff.test.sh
 Result:
 
 ```text
-ok - test_registration_sealing_and_rejections
-ok - test_caps_atomicity_and_failure_receipts
-ok - test_exact_delivery_and_no_launch
-ok - test_claude_hooks_guard_and_compaction
-ok - test_transaction_apply_replay_conflict_and_ack
-ok - test_payload_mismatch_disable_and_dispositions
-ok - test_pi_extension_handlers_and_model_free_discovery
+ok - sensitive candidate and Save content rejection
+ok - queue-first orphan recovery
+ok - locked registration capability snapshot
+ok - bounded compaction backpressure and drain
+ok - exit-75 Save authority revocation
+ok - exact bundled MCP tool allowlist
+ok - bounded transports and fail-closed delivery
+ok - durable private state directory creation
+ok - fail-closed Pi adapter result validation
+ok - completed Save recovery before source validation
 ```
 
 The suite uses isolated temporary Firstmate homes, source roots, Vaults, Herdr adapters, Pi extension APIs, Claude hook payloads, MCP requests, and transaction state.
-It covers positive registration, closed exact eligibility contracts, raw-content and sensitive rejection, provider refusal, exact source hashes, source path and symlink refusal, registration-only state/Vault overlap refusal, item and byte caps, mode 0600, canonical IDs and hashes, empty registers, file and full directory-chain fsync failure, durable mode repair without repeated directory syncs, durable failure receipts, orphan record and queue recovery, manual and automatic Claude compaction, shared Claude candidate-validation receipts, fail-closed Pi adapter errors, pre-allocation adapter output limits with child reaping, bounded MCP frame draining, threshold and overflow outcomes, persisted multi-record Pi and Claude compaction failure and retry, exact-recipient identity, busy and unavailable delivery, pending retention when Herdr exposes no atomic generation-conditioned prompt, no prompt, launch, or restart, replay, payload mismatch quarantine, traversal and symlink refusal, Claude exit-2 empty-stdout guard denial, process-capability-bound MCP authority, MCP-only serialized Save apply, stale-session/source/approval denial, terminal Save revocation, duplicate disposition, completed-Save-first disposition recovery, expected-hash conflict, held lock, rolled-back transaction retry, result-selected apply-complete-before-ack healing, acknowledgement-before-queue crash recovery, disable, and re-enable.
+The self-contained Bash suite executes the public CLI, Claude hook, MCP server, Pi extension, and transaction fixture against isolated synthetic homes and Vaults.
+It covers exact sensitive-data rejection after eligibility authorization, queue-before-claim crash recovery, locked process-capability registration, bounded retry backpressure and draining, exit-75 approval revocation and fresh inspect, exact MCP and shell guard confinement, bounded MCP and subprocess transport, fail-closed delivery, durable state-directory creation, fail-closed Pi adapter result validation, and completed-Save recovery before mutable-source validation.
 No test reads or mutates the real Vault, a live Claude session, a live Herdr process, credentials, auth state, transcripts, or provider data.
 No test invokes a model.
 
