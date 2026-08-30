@@ -32,10 +32,7 @@ batched digest rather than per-wake injections.
      After `bin/fm-afk-launch.sh stop` succeeds, enter again with `bin/fm-afk-launch.sh start`.
      Do not follow the stop with `start-native`, which recreates the same unsupported same-target construction.
      The incident evidence supports the inference that the native job keeps the supervised Claude pane's Herdr agent state `working` for the daemon's lifetime, so the busy guard correctly defers every injection.
-   - **Other harnesses WITH a native in-pane tracked-background tool** (for
-     example, Grok's background tool): first run
-     `bin/fm-afk-launch.sh start-native`, then run
-     `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
+   - **Other harnesses WITH a native in-pane tracked-background tool** (for example, Grok's background tool): first run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
      The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
