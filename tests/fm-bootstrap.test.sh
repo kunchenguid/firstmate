@@ -804,6 +804,10 @@ SH
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "relative origin must remain local and bootstrap silently, got: $out"
+  git -C "$project" remote set-url origin "git+file://$case_dir/local-upstream.git"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "git+file origin must remain local and bootstrap silently, got: $out"
 
   case_dir="$TMP_ROOT/forge-local-only-remote"
   project="$case_dir/home/projects/local-project"
