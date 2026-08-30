@@ -256,9 +256,13 @@ pass "tmux liveness: a harness-named background process in an idle pane still cl
 
 fm_backend_tmux_foreground_comms "$SESSION:no-such-window" >/dev/null \
   || fail "the foreground-comms read must stay best-effort for an absent window"
+"$REAL_TMUX" -L "$SOCKET" select-window -t "$SESSION:agent"
+if fm_backend_agent_started tmux "$SESSION:no-such-window"; then
+  fail "an absent target must not inherit positive replacement proof from the active agent window"
+fi
 [ "$(fm_backend_agent_state tmux "$SESSION:no-such-window")" = missing ] \
   || fail "an absent window in a readable session must classify missing, not whatever the fallback pane runs"
-pass "tmux liveness: an absent window classifies missing rather than inheriting tmux's active-window fallback"
+pass "tmux liveness: an absent window cannot inherit state or startup proof from tmux's active-window fallback"
 
 # --- Cursor's composer: the terminal cursor is NOT a composer locator --------
 # Cursor Agent CLI parks its terminal cursor below its footer with cursor_flag 0,

@@ -398,8 +398,8 @@ test_disabled_relaunch_clears_prior_trace_context() {
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
   launch=$(tail -1 "$dir/fake/literal")
   case "$launch" in
-    'env -u TRACEPARENT '*) ;;
-    *) fail "disabled relaunch must clear the pane carrier with shell-agnostic env -u: $launch" ;;
+    'env -u TRACEPARENT "$SHELL" -c '*) ;;
+    *) fail "disabled relaunch must clear the pane carrier around the shell program: $launch" ;;
   esac
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
@@ -409,7 +409,8 @@ test_disabled_relaunch_clears_prior_trace_context() {
 printf '%s' "${TRACEPARENT-unset}" > "$FM_FAKE_DIR/fish-traceparent"
 SH
     chmod +x "$dir/fakebin/claude"
-    TRACEPARENT=stale PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" fish -c "$launch" >/dev/null 2>&1
+    TRACEPARENT=stale PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" \
+      SHELL="$(command -v fish)" fish -c "$launch" >/dev/null 2>&1
     [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
       || fail "the real fish launch retained stale TRACEPARENT"
   fi

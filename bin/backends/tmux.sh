@@ -246,23 +246,44 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+fm_backend_tmux_window_exists() {  # <target>
+  local target=$1 session window windows
+  case "$target" in
+    *:*:*|'':*|*:'') return 1 ;;
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  windows=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null) || return 1
+  printf '%s\n' "$windows" | grep -Fqx "$window"
+}
+
 # fm_backend_tmux_agent_started: positive replacement-launch proof from the
 # foreground process group only. Unlike recovery state below, it deliberately
 # ignores pane_current_command: that title can remain agent-shaped over a live
 # shell and must not turn a submitted launch line into relaunch success.
 fm_backend_tmux_agent_started() {  # <target>
-  local target=$1 names name
+  local target=$1 requested=$1 names name
+  fm_backend_tmux_window_exists "$requested" || return 1
+  case "$target" in
+    *:*:*|'':*|*:'') return 1 ;;
+    *:*) target="=${target%%:*}:=${target#*:}" ;;
+    *) return 1 ;;
+  esac
   names=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] && return 0
+    [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] \
+      && fm_backend_tmux_window_exists "$requested" && return 0
   done <<EOF
 $names
 EOF
   names=$(fm_backend_tmux_foreground_argv0s "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] && return 0
+    [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] \
+      && fm_backend_tmux_window_exists "$requested" && return 0
   done <<EOF
 $names
 EOF

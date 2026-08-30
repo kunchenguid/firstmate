@@ -287,14 +287,25 @@ test_disabled_writes_and_injects_neither() {
 }
 
 test_failed_delivery_omits_metadata_and_still_launches() {
-  local rec out status meta
+  local rec out status meta launch raw result
   rec=$(make_spawn_case tc-send-failure)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
   start_trace_session "$HOME_DIR"
 
+  cat > "$HOME_DIR/setup.fish" <<'FISH'
+set -gx FM_RAW_SETUP ready
+FISH
+  cat > "$FAKEBIN_DIR/custom-agent" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s' "${TRACEPARENT-unset}" "${FM_RAW_SETUP-unset}" > "$FM_RAW_RESULT"
+SH
+  chmod +x "$FAKEBIN_DIR/custom-agent"
+  raw="source $HOME_DIR/setup.fish; exec custom-agent"
+  result="$HOME_DIR/raw-result"
+
   out=$(FM_FAKE_TRACEPARENT_SEND_FAIL=1 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR" "$raw")
   status=$?
   expect_code 0 "$status" "failed traceparent delivery must not abort spawn"
   assert_contains "$out" "spawned $CASE_ID" "spawn should report success after failed traceparent delivery"
@@ -304,9 +315,14 @@ test_failed_delivery_omits_metadata_and_still_launches() {
     || fail "failed traceparent delivery must not leave a traceparent= claim in meta"
   ! grep -q '^export TRACEPARENT=' "$LAUNCH_LOG" \
     || fail "the failed TRACEPARENT export must not be recorded as delivered"
-  grep -q '^env -u TRACEPARENT .*claude' "$LAUNCH_LOG" \
-    || fail "failed trace delivery must clear TRACEPARENT portably before launch"
-  pass "failed TRACEPARENT delivery omits metadata while the source task still launches"
+  launch=$(tail -1 "$LAUNCH_LOG")
+  if command -v fish >/dev/null 2>&1; then
+    TRACEPARENT=stale FM_RAW_RESULT="$result" PATH="$FAKEBIN_DIR:$PATH" \
+      SHELL="$(command -v fish)" fish -c "$launch" >/dev/null 2>&1
+    [ "$(cat "$result")" = 'unset|ready' ] \
+      || fail "failed trace delivery must clear TRACEPARENT without bypassing fish parsing"
+  fi
+  pass "failed TRACEPARENT delivery omits metadata and preserves raw fish shell programs"
 }
 
 test_unsafe_delivery_refuses_to_append_launch() {
@@ -343,7 +359,7 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
 
   ! grep -q '^traceparent=' "$meta" \
     || fail "failed metadata append must not leave a traceparent= claim in meta"
-  grep -q '^env -u TRACEPARENT .*claude' "$LAUNCH_LOG" \
+  grep -q '^env -u TRACEPARENT "\$SHELL" -c .*claude' "$LAUNCH_LOG" \
     || fail "failed metadata append must clear TRACEPARENT portably in the launch command"
   pass "failed traceparent metadata append removes the carrier from the launched task"
 }

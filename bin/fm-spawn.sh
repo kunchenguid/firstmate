@@ -1099,6 +1099,10 @@ shell_quote() {
   printf "'"
 }
 
+spawn_clear_launch_traceparent() {
+  LAUNCH="env -u TRACEPARENT \"\$SHELL\" -c $(shell_quote "$LAUNCH")"
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -2833,7 +2837,7 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
-  LAUNCH="env -u TRACEPARENT $LAUNCH"
+  spawn_clear_launch_traceparent
 fi
 
 spawn_record_traceparent() {
@@ -2865,7 +2869,7 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
-      LAUNCH="env -u TRACEPARENT $LAUNCH"
+      spawn_clear_launch_traceparent
     fi
   else
     TRACE_SEND_STATUS=$?
@@ -2873,7 +2877,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
       exit 1
     fi
-    LAUNCH="env -u TRACEPARENT $LAUNCH"
+    spawn_clear_launch_traceparent
   fi
 fi
 sleep 0.3
