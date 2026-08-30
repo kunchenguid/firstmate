@@ -1160,7 +1160,7 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
     || fail "interrupted cleanup changed the backlog before recovery"
 
   out=$(run_bootstrap "$case_dir")
-  [ "$(row_state "$case_dir" "$id")" = done ] \
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "restart left interrupted cleanup In flight: $out"
   assert_absent "$marker" "restart retained the recovered close marker"
   assert_absent "$home/state/$id.meta" "restart retained the interrupted task record"
@@ -1369,7 +1369,7 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   case_dir=$(make_home heal-done-backfill)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  tasks-axi done "$id" --file "$(backlog_of "$case_dir")" >/dev/null
+  tasks-axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-done\narg=--pr\narg=https://github.com/example/repo/pull/13\n' \
     "$id" "$(home_of "$case_dir")/data" > "$marker"
@@ -1429,7 +1429,7 @@ test_recovery_retry_without_metadata_avoids_incomplete_cleanup_warning() {
   rm -f "$case_dir/fakebin/tasks-axi"
 
   out=$(run_bootstrap "$case_dir")
-  [ "$(row_state "$case_dir" "$id")" = done ] \
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "retried recovery left the item In flight: $out"
   assert_not_contains "$out" "endpoint or local copy may remain" \
     "retry claimed incomplete cleanup after metadata was already removed"
