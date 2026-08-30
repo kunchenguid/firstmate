@@ -39,6 +39,22 @@ esac
 exec /bin/ln "$@"
 SH
   chmod +x "$fakebin/ln"
+  local real_mktemp
+  real_mktemp=$(command -v mktemp)
+  cat > "$fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+set -u
+last=
+for last in "\$@"; do :; done
+if [ "\${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" = 1 ] && [[ "\$last" = */.fm-node-modules.XXXXXX ]]; then
+  out=\$("$real_mktemp" "\$@") || exit \$?
+  printf '%s\n' "\$out"
+  kill -TERM "\$PPID"
+  exit 0
+fi
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$fakebin/mktemp"
   local real_node
   real_node=$(command -v node)
   cat > "$fakebin/node" <<SH
@@ -47,10 +63,6 @@ set -u
 if [ "\${1:-}" = - ] && [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ]; then
   mkdir -p "\$FM_NODE_MODULES_RACE_TARGET/node_modules"
   printf 'worker install\n' > "\$FM_NODE_MODULES_RACE_TARGET/node_modules/owned.txt"
-fi
-if [ "\${1:-}" = - ] && [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ]; then
-  kill -TERM "\$PPID"
-  exit 143
 fi
 exec "$real_node" "\$@"
 SH
@@ -104,7 +116,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' FM_FAKE_PANE_PATH="$WORKTREE_DIR" \
     FM_FAIL_NODE_MODULES_LINK="${FM_FAIL_NODE_MODULES_LINK:-0}" \
     FM_NODE_MODULES_RACE_TARGET="${FM_NODE_MODULES_RACE_TARGET:-}" \
-    FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
+    FM_INTERRUPT_NODE_MODULES_CREATION="${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -235,7 +247,7 @@ test_spawn_cleans_staging_after_interrupt() {
   rec=$(make_case setup-interrupt "$id")
   read_case "$rec"
 
-  out=$(FM_INTERRUPT_NODE_MODULES_PUBLICATION=1 run_spawn "$id")
+  out=$(FM_INTERRUPT_NODE_MODULES_CREATION=1 run_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn should stop when dependency publication is interrupted"
   [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
