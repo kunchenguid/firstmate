@@ -751,6 +751,149 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The dormant-checks declaration must change what the worker DOES, not merely
+# restate a fact. The regression this guards: a brief that carried "CI cannot
+# run" as prose while the pipeline still drove the worker into an unbounded
+# wait for a check result that could never arrive.
+test_dormant_checks_replace_the_check_shaped_finish_line() {
+  local home brief
+  home="$TMP_ROOT/dormant-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-dormant-nm some-proj \
+    --mode no-mistakes --checks-dormant 'GitHub Actions minutes exhausted until 1 September' >/dev/null 2>&1 \
+    || fail "no-mistakes brief with a dormant-checks declaration should scaffold"
+  brief="$home/data/brief-dormant-nm/brief.md"
+  assert_grep "cannot run: GitHub Actions minutes exhausted until 1 September" "$brief" \
+    "dormant brief lost firstmate's declared reason"
+  assert_grep "Never wait for, poll, or re-run checks at any point, including when the pipeline reaches its own CI step" "$brief" \
+    "dormant no-mistakes brief did not tell the worker to stop waiting on the pipeline's CI step"
+  assert_no_grep "After /no-mistakes reports CI green" "$brief" \
+    "dormant brief kept the check-shaped finish line the worker would wait forever for"
+  assert_grep "done: PR {url} - automated checks did not run, verified locally" "$brief" \
+    "dormant brief did not give the worker a reachable finish line"
+  assert_grep "never park on it with \`paused:\`" "$brief" \
+    "dormant brief let the worker park on the dormancy as a self-clearing external wait"
+  # The replacement finish line must itself be reachable: no-mistakes' ci step
+  # stays running for the whole CI-monitor phase on a captain-merge repo, so a
+  # done gate that waits for the run to end or go inactive is the same unbounded
+  # wait one level up.
+  assert_no_grep "no longer active" "$brief" \
+    "dormant brief re-gated the finish line on the pipeline run going inactive"
+  assert_grep "whether or not the run is still sitting on its CI step" "$brief" \
+    "dormant brief did not free the done report from the run's own state"
+
+  # The forbidden park verb is the configured declared-external-wait verb, not a
+  # hardcoded "paused": a home that renames it would otherwise be told to avoid a
+  # verb it does not use while the one it does use stays open as an idle trap.
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting "$ROOT/bin/fm-brief.sh" \
+    brief-dormant-verb some-proj --mode no-mistakes --checks-dormant 'runner minutes exhausted' >/dev/null 2>&1 \
+    || fail "dormant brief should scaffold under a renamed pause verb"
+  brief="$home/data/brief-dormant-verb/brief.md"
+  assert_grep "never park on it with \`awaiting:\`" "$brief" \
+    "dormant brief did not forbid parking with the configured pause verb"
+  # shellcheck disable=SC2016 # the default verb must not survive the override
+  assert_no_grep 'park on it with `paused:`' "$brief" \
+    "dormant brief hardcoded the default pause verb"
+  pass "fm-brief.sh: a dormant-checks declaration replaces the check-shaped finish line"
+}
+
+# The counterweight: skipping checks is only safe if the PR says so. A brief that
+# stops the waiting without demanding that disclosure would trade an unbounded
+# wait for a PR that looks verified and is not.
+test_dormant_checks_require_local_evidence_and_pr_disclosure() {
+  local home brief mode id
+  home="$TMP_ROOT/dormant-disclosure-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR; do
+    id="brief-dormant-say-${mode}"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj \
+      --mode "$mode" --checks-dormant 'runner minutes exhausted' >/dev/null 2>&1 \
+      || fail "$mode: dormant brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_grep "The PR description MUST state plainly, in its own section, that the automated checks did NOT run, why, which commands you ran in their place, and their results." "$brief" \
+      "$mode: dormant brief did not require the PR to say the checks did not run and what replaced them"
+    assert_grep "A PR that quietly omits it is not done." "$brief" \
+      "$mode: dormant brief left the PR disclosure optional"
+    assert_grep "a dormant check is never permission to ship unverified work" "$brief" \
+      "$mode: dormant brief lost the counterweight against shipping unverified work"
+    assert_grep "Run this project's own tests, lint, and build yourself, record the exact commands and their results" "$brief" \
+      "$mode: dormant brief did not require local evidence in place of the checks"
+  done
+
+  # Only the pipeline-driven mode carries the pipeline-specific instructions.
+  assert_grep "add it yourself with \`gh-axi\` as soon as the PR exists" \
+    "$home/data/brief-dormant-say-no-mistakes/brief.md" \
+    "no-mistakes dormant brief must say how the disclosure reaches a pipeline-generated PR description"
+  assert_grep "Carry this dormancy statement into your \`--intent\`" \
+    "$home/data/brief-dormant-say-no-mistakes/brief.md" \
+    "no-mistakes dormant brief must carry the dormancy into the pipeline's intent"
+  assert_no_grep "the pipeline reaches its own CI step" \
+    "$home/data/brief-dormant-say-direct-PR/brief.md" \
+    "direct-PR dormant brief must not reference a pipeline it never runs"
+  assert_grep "done: PR {url} - automated checks did not run, verified locally" \
+    "$home/data/brief-dormant-say-direct-PR/brief.md" \
+    "direct-PR dormant brief did not carry the dormancy into its done report"
+  pass "fm-brief.sh: dormant briefs demand local evidence and an explicit PR disclosure"
+}
+
+# Without the declaration nothing changes: the ordinary briefs must keep their
+# check-shaped finish line and carry no dormancy wording at all.
+test_briefs_without_the_dormant_declaration_are_unchanged() {
+  local home brief mode id
+  home="$TMP_ROOT/plain-brief-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-plain-${mode}"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: plain brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "dormant" "$brief" "$mode: plain brief leaked dormant-checks wording"
+    assert_no_grep "automated checks did not run" "$brief" \
+      "$mode: plain brief leaked the dormant done report"
+  done
+  assert_grep "After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished." \
+    "$home/data/brief-plain-no-mistakes/brief.md" \
+    "plain no-mistakes brief lost its CI-green finish line"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: PR {url}` to the status file and stop' \
+    "$home/data/brief-plain-direct-PR/brief.md" \
+    "plain direct-PR brief lost its unqualified done report"
+  pass "fm-brief.sh: briefs without the declaration keep their ordinary finish lines"
+}
+
+# firstmate declares dormancy; the scaffold never infers it. A declaration with
+# nowhere to land, or with no reason, must refuse rather than be accepted and
+# generate nothing - a silently dropped declaration is the same failure again.
+test_dormant_checks_declaration_is_refused_where_it_cannot_land() {
+  local home out status label args expect
+  home="$TMP_ROOT/dormant-refused-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+  done <<'ROWS'
+scout brief|brief-dormant-r1 some-proj --scout --checks-dormant reason|--checks-dormant applies only to ship briefs
+secondmate charter|brief-dormant-r2 --secondmate --no-projects --checks-dormant reason|--checks-dormant applies only to ship briefs
+local-only ship|brief-dormant-r3 some-proj --mode local-only --checks-dormant reason|--checks-dormant does not apply to local-only
+missing reason|brief-dormant-r4 some-proj --mode no-mistakes --checks-dormant|requires a value
+empty reason|brief-dormant-r5 some-proj --mode no-mistakes --checks-dormant=|requires the one-line reason
+ROWS
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-dormant-r6 some-proj --mode no-mistakes \
+    --checks-dormant 'minutes exhausted
+until 1 September' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "multi-line reason: expected a non-zero exit"
+  assert_contains "$out" "takes a single line" "multi-line reason: refusal did not explain the contract"
+  assert_absent "$home/data/brief-dormant-r6/brief.md" "multi-line reason: refused scaffold still wrote a brief"
+  pass "fm-brief.sh: a dormant-checks declaration that cannot land is refused, never dropped"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -772,3 +915,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_dormant_checks_replace_the_check_shaped_finish_line
+test_dormant_checks_require_local_evidence_and_pr_disclosure
+test_briefs_without_the_dormant_declaration_are_unchanged
+test_dormant_checks_declaration_is_refused_where_it_cannot_land
