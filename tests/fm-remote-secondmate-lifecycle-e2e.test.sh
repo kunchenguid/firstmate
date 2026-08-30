@@ -349,6 +349,27 @@ remote_lifecycle_migrate() {
   fi
 }
 
+remote_lifecycle_reset_endpoint() {
+  local target pane pid_file pid
+  target=$(sed -n 's/^window=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+  pane=${target#*:}
+  HERDR_SESSION=fm-remote "$REMOTE_ROOT/bin/herdr" pane close "$pane" \
+    --session fm-remote >/dev/null \
+    || fail "incomplete remote Codex endpoint could not be closed for recovery"
+  rm -f -- "$REMOTE_HOME/state/parent-route/ios.meta"
+  for pid_file in "$HERDR_STATE.agent-pid" "$HERDR_STATE.helper-pid"; do
+    pid=$(cat "$pid_file" 2>/dev/null || true)
+    case "$pid" in ''|*[!0-9]*) ;;
+      *)
+        kill "$pid" 2>/dev/null || true
+        rm -f -- "$HERDR_STATE.proc/$pid/environ" "$HERDR_STATE.proc/$pid/exe"
+        rmdir "$HERDR_STATE.proc/$pid" 2>/dev/null || true
+        ;;
+    esac
+    rm -f -- "$pid_file"
+  done
+}
+
 if [ "${FM_TEST_INCOMPLETE_CODEX_ONLY:-0}" != 1 ]; then
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH
@@ -778,6 +799,33 @@ remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios -
   || fail "wrong-pane remote Codex endpoint could not be retired for recovery"
 fi
 
+printf 'launch-key\n' > "$TMP_ROOT/herdr-send-fail"
+printf 'with-helper\n' > "$HERDR_STATE.process-mode"
+set +e
+remote_lifecycle_launch > "$TMP_ROOT/spawn-failed-launch-key.out" 2>&1
+failed_launch_key_rc=$?
+set -e
+[ "$failed_launch_key_rc" -ne 0 ] || fail "remote Codex launch accepted a failed launch key send"
+assert_present "$REMOTE_HOME/state/parent-route/ios.meta" \
+  "failed remote Codex launch key send omitted endpoint custody"
+assert_no_grep '^launch_complete_spawn_gen=' "$REMOTE_HOME/state/parent-route/ios.meta" \
+  "failed remote Codex launch key send published a completion receipt"
+launches_before_failed_key_retry=$(grep -c '^tab create' "$HERDR_LOG" || true)
+set +e
+remote_lifecycle_launch > "$TMP_ROOT/spawn-failed-launch-key-retry.out" 2>&1
+failed_launch_key_retry_rc=$?
+set -e
+[ "$failed_launch_key_retry_rc" -ne 0 ] \
+  || fail "remote spawn reused an endpoint after a failed launch key send"
+assert_grep 'alive without matching launch-complete and startup-brief receipts' \
+  "$TMP_ROOT/spawn-failed-launch-key-retry.out" \
+  "failed launch key retry did not name the incomplete endpoint"
+launches_after_failed_key_retry=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_failed_key_retry" -eq "$launches_after_failed_key_retry" ] \
+  || fail "failed launch key retry created a duplicate remote Codex endpoint"
+remote_lifecycle_reset_endpoint
+rm -f "$TMP_ROOT/herdr-send-fail"
+
 printf 'generic-only\n' > "$HERDR_STATE.process-mode"
 set +e
 remote_lifecycle_launch \
@@ -857,12 +905,7 @@ set -e
   || fail "legacy migration replaced a post-protocol incomplete Codex endpoint"
 assert_grep 'not an eligible pre-receipt legacy record' "$TMP_ROOT/migrate-incomplete-codex.out" \
   "legacy migration did not distinguish a post-protocol incomplete endpoint"
-incomplete_target=$(sed -n 's/^window=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
-incomplete_pane=${incomplete_target#*:}
-HERDR_SESSION=fm-remote "$REMOTE_ROOT/bin/herdr" pane close "$incomplete_pane" \
-  --session fm-remote >/dev/null \
-  || fail "incomplete remote Codex endpoint could not be closed for recovery"
-rm -f -- "$REMOTE_HOME/state/parent-route/ios.meta"
+remote_lifecycle_reset_endpoint
 
 printf 'startup-brief\n' > "$TMP_ROOT/herdr-send-fail"
 printf 'with-helper\n' > "$HERDR_STATE.process-mode"

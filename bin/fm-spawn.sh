@@ -747,7 +747,7 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
-SPAWN_REMOTE_CODEX_ENDPOINT_STARTED=0
+SPAWN_REMOTE_CODEX_CUSTODY_PUBLISHED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -873,7 +873,7 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-    if [ "$SPAWN_REMOTE_CODEX_ENDPOINT_STARTED" = 1 ] \
+    if [ "$SPAWN_REMOTE_CODEX_CUSTODY_PUBLISHED" = 1 ] \
        && ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
       SPAWN_FRESH_COMMIT_PENDING=0
       echo "warning: preserving incomplete remote Codex endpoint record for $ID because endpoint $T was not confirmed gone" >&2
@@ -2955,6 +2955,12 @@ elif [ "$KIND" = scout ]; then
   YOLO=
 fi
 
+CODEX_REMOTE_BINDING_REQUIRED=0
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = codex ] && [ "$BACKEND" = herdr ] \
+  && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ]; then
+  CODEX_REMOTE_BINDING_REQUIRED=1
+fi
+
 # Resolve the optional default-off W3C trace context (bin/fm-trace-context-lib.sh,
 # docs/configuration.md): the one carrier both recorded in meta and injected into
 # the pane, so an observer reads exactly what the child receives. Empty only when
@@ -3067,6 +3073,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
+    SPAWN_REMOTE_CODEX_CUSTODY_PUBLISHED=1
+  fi
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created
@@ -3112,11 +3121,8 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-CODEX_REMOTE_BINDING_REQUIRED=0
 CODEX_INITIAL_PROMPT=
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = codex ] && [ "$BACKEND" = herdr ] \
-  && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ]; then
-  CODEX_REMOTE_BINDING_REQUIRED=1
+if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
   CODEX_INITIAL_PROMPT=$("$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief < "$BRIEF") || {
     echo "error: could not encode remote Codex startup brief" >&2
     exit 1
@@ -3264,7 +3270,6 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
-  SPAWN_REMOTE_CODEX_ENDPOINT_STARTED=1
   if ! spawn_bind_remote_codex_session; then
     exit 1
   fi

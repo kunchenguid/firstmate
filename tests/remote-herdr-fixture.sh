@@ -131,13 +131,19 @@ case "${1:-} ${2:-}" in
           agent_pid=$(cat "$STATE.agent-pid" 2>/dev/null || true)
           ! kill -0 "$agent_pid" 2>/dev/null || exit 1
           ;;
+        launch-key) ;;
         *) exit 1 ;;
       esac
     fi
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
   "pane send-keys")
-    if [ -f "$SEND_FAIL" ] && [ "$(cat "$SEND_FAIL" 2>/dev/null || true)" != startup-brief ]; then
-      exit 1
+    send_keys_fail=0
+    if [ -f "$SEND_FAIL" ]; then
+      case "$(cat "$SEND_FAIL" 2>/dev/null || true)" in
+        startup-brief) ;;
+        launch-key) send_keys_fail=1 ;;
+        *) exit 1 ;;
+      esac
     fi
     process_mode=$(cat "$PROCESS_MODE_FILE" 2>/dev/null || true)
     agent_pid_file="$STATE.agent-pid"
@@ -166,7 +172,9 @@ case "${1:-} ${2:-}" in
         fi
         ;;
     esac
-    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
+    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save
+    [ "$send_keys_fail" -eq 0 ] || exit 1
+    ;;
   "pane read") printf '\n' ;;
   "pane process-info")
     pane=${pane:-${3:-}}
