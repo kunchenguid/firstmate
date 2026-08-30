@@ -157,6 +157,29 @@ write_due() {  # <source-id> <epoch>
   mv -f -- "$tmp" "$(due_file "$sid")" || { rm -f -- "$tmp"; return 1; }
 }
 
+# write_due_retrying <source-id> <epoch>: retry a transient write_due failure a
+# few times with a short backoff before giving up. `run` is a long-blocking
+# child, not a conversational turn, so it can afford to wait here. Without
+# this, a single transient write failure (e.g. momentary disk pressure) would
+# leave the due marker stuck in the past: the runner's own reconcile restarts
+# this non-terminal source on its very next cycle (as often as every
+# FM_POLL, ~15s by default), which re-hits the same write and re-announces a
+# refusal every cycle instead of once. Retrying here lets a transient failure
+# clear within one run instead of turning into a repeat-wake storm; a
+# genuinely persistent failure (e.g. disk full or PERIODIC_DIR gone) still
+# exhausts the retries and is announced exactly as before.
+WRITE_DUE_RETRIES=${FM_PERIODIC_WRITE_DUE_RETRIES:-5}
+WRITE_DUE_RETRY_DELAY=${FM_PERIODIC_WRITE_DUE_RETRY_DELAY:-1}
+write_due_retrying() {  # <source-id> <epoch>
+  local sid=$1 when=$2 tries=0
+  while :; do
+    write_due "$sid" "$when" && return 0
+    tries=$((tries + 1))
+    [ "$tries" -lt "$WRITE_DUE_RETRIES" ] || return 1
+    sleep "$WRITE_DUE_RETRY_DELAY"
+  done
+}
+
 # Print the recorded next-due epoch second, or fail when there is none to read.
 # A malformed or unreadable marker is not treated as "due now": it fails, and
 # the caller re-establishes a schedule, so corrupt state cannot become a hot
@@ -397,7 +420,7 @@ cmd_run() {
   # A missing or unreadable schedule is re-established rather than treated as
   # due, so corrupt state can never become a continuous re-run of the check.
   if ! read_due "$sid" >/dev/null; then
-    if ! write_due "$sid" "$(( $(date +%s) + SPEC_INTERVAL ))"; then
+    if ! write_due_retrying "$sid" "$(( $(date +%s) + SPEC_INTERVAL ))"; then
       emit_doc "$sid" rejected \
         "the schedule is unreadable and cannot be re-established; nothing was executed" '' "$(date +%s)" 0 ''
       exit 0
@@ -416,7 +439,7 @@ cmd_run() {
   if [ "$current_hash" != "$SPEC_CHECK_SHA256" ]; then
     ran_at=$(date +%s)
     next_due=$(( ran_at + SPEC_INTERVAL ))
-    if ! write_due "$sid" "$next_due"; then
+    if ! write_due_retrying "$sid" "$next_due"; then
       emit_doc "$sid" rejected \
         "refused without running the check: its bytes do not match the registered trust binding, and the next-due time could not be recorded; re-arm to restore the cadence" \
         '' "$ran_at" "$next_due" ''
@@ -444,8 +467,10 @@ cmd_run() {
   # into a hot loop. A failure to record it must never be papered over: it is
   # announced as its own refusal instead of letting a normal outcome mask a
   # schedule that is about to go stale and hot-loop on the next reconcile.
+  # write_due_retrying already absorbs a transient failure here; only a
+  # persistent one reaches this refusal.
   next_due=$(( ran_at + SPEC_INTERVAL ))
-  if ! write_due "$sid" "$next_due"; then
+  if ! write_due_retrying "$sid" "$next_due"; then
     emit_doc "$sid" rejected \
       "the check ran but its next-due time could not be recorded; re-arm to restore the cadence" \
       "$rc" "$ran_at" "$next_due" "$out"

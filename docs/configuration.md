@@ -675,6 +675,7 @@ A run is report-worthy when the check exits NONZERO, and only a report, a timeou
 Exit status rather than output is the signal precisely because the runner already captures stdout as the evidence a handler reads, so a useful check prints on both paths and emptiness cannot mean "nothing to report".
 The spec is stored privately under `state/periodic/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved check executable's bytes; a mutated or unregistered spec or a changed executable is refused before the check runs, and that refusal wakes firstmate rather than retrying silently.
 The next due time is durable state under the same directory, recorded before each outcome is emitted, so a crash or restart resumes the existing cadence instead of re-running the check immediately, and an unreadable schedule is re-established rather than read as due now.
+Recording that next due time retries a transient write failure a bounded number of times (`FM_PERIODIC_WRITE_DUE_RETRIES`, `FM_PERIODIC_WRITE_DUE_RETRY_DELAY`) before giving up, so a momentary write failure self-heals within the run instead of leaving the marker in the past and forcing a refusal on every following reconcile cycle; a failure that outlasts the retries is still announced exactly as before.
 Each run's child exits after its outcome, leaving the source armed, so the watcher's ordinary `reconcile` is what starts the next cycle: the cadence survives a watcher restart, a reboot, and a crashed runner without this adapter owning any timer of its own, and no second scheduling control plane exists.
 The adapter carries no judgment: the check must be read-only and safe to run unattended on every cadence, and anything that changes state belongs on the condition->action path above or the ordinary wake-and-decide flow.
 Its header and `--help` own the commands, flags, and outcome document.
@@ -824,6 +825,8 @@ FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; defaul
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_PERIODIC_OUTPUT_TAIL_BYTES=8192      # bound on the check-output tail inside one periodic outcome document
 FM_PERIODIC_SLEEP_SLICE=60              # seconds per sleep slice while a periodic check waits for its next due time
+FM_PERIODIC_WRITE_DUE_RETRIES=5         # attempts to persist a periodic check's next-due time before announcing a refusal
+FM_PERIODIC_WRITE_DUE_RETRY_DELAY=1     # seconds between those attempts
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh

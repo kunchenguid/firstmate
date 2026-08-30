@@ -420,4 +420,42 @@ assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-duewrite 1"
   "a failed schedule write wakes firstmate instead of masking the outcome"
 pass "a check that ran but could not have its schedule recorded announces instead of masking it"
 
+# --- a transient schedule-write failure self-heals within one run -----------
+# A persistent write failure (above) is announced every reconcile cycle
+# because the due marker stays in the past and the source is non-terminal.
+# For a failure that clears after a couple of attempts (the common real case:
+# momentary disk pressure), the retry inside write_due_retrying must absorb it
+# within this one run so the check's own outcome is captured normally instead
+# of forcing repeated refusals across cycles. A counter file makes the shimmed
+# mv fail exactly twice, then succeed like the real command.
+H="$TMP_ROOT/h-duewrite-transient"; new_home "$H"
+per "$H" arm duewritetransient --interval 3600 --timeout 60 -- "$CLEAN" >/dev/null
+FAKEBIN="$TMP_ROOT/duewrite-transient-fakebin"; mkdir -p "$FAKEBIN"
+COUNTER="$TMP_ROOT/duewrite-transient-attempts"
+: > "$COUNTER"
+cat > "$FAKEBIN/mv" <<SH
+#!/usr/bin/env bash
+last=\${!#}
+if [ "\$last" = "$H/state/periodic/periodic-duewritetransient.due" ]; then
+  n=\$(grep -c x "$COUNTER" 2>/dev/null || true)
+  printf 'x\n' >> "$COUNTER"
+  if [ "\${n:-0}" -lt 2 ]; then
+    exit 1
+  fi
+fi
+exec "$real_mv" "\$@"
+SH
+chmod +x "$FAKEBIN/mv"
+FM_PERIODIC_WRITE_DUE_RETRY_DELAY=0 PATH="$FAKEBIN:$PATH" pe "$H" start periodic-duewritetransient >/dev/null
+wait_for_result "$H" periodic-duewritetransient 1 || fail "the transient-schedule-write run captured no result"
+RESULT=$(result_path "$H" periodic-duewritetransient 1)
+assert_grep 'status: clean' "$RESULT" \
+  "a transient schedule-write failure self-heals so the check's own clean outcome is captured, not a refusal"
+[ "$(grep -c x "$COUNTER")" -ge 3 ] || fail "the shim should have been tried at least 3 times before succeeding"
+if ! per "$H" silent "$RESULT"; then
+  fail "a self-healed clean run must still declare silence like any other clean run"
+fi
+assert_grep 'next_due: ' "$RESULT" "the self-healed run still records a next-due time"
+pass "a transient schedule-write failure is retried and absorbed within one run instead of forcing a refusal"
+
 echo "all periodic-check adapter tests passed"
