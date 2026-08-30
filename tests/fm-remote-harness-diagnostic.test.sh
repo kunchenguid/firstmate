@@ -12,13 +12,20 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 export FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/fixture-proc-unavailable"
 
 test_remote_harness_diagnostic_reports_herdr_foreground_ancestry() {
-  local dir home fakebin out codex_root codex_script
+  local dir home fakebin out codex_root codex_script fixture_root system_home quoted_system_home
   dir="$TMP_ROOT/foreground"
   home="$dir/home"
+  fixture_root="$dir/root"
   codex_root="$home/.nvm/versions/node/v24.19.0"
   codex_script="$codex_root/lib/node_modules/@openai/codex/bin/codex.js"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$home/state/parent-route" "$codex_root/bin" "$(dirname "$codex_script")"
+  mkdir -p "$fixture_root"
+  cp -R "$ROOT/bin" "$fixture_root/bin"
+  system_home=$(CDPATH='' cd -P -- "$home" && pwd -P)
+  printf -v quoted_system_home '%q' "$system_home"
+  printf '\nfm_codex_system_home() { printf "%%s\\n" %s; }\n' "$quoted_system_home" \
+    >> "$fixture_root/bin/fm-session-lock-lib.sh"
   printf '#!/usr/bin/env node\n' > "$codex_script"
   chmod +x "$codex_script"
   ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$codex_root/bin/codex"
@@ -71,9 +78,9 @@ home=$home
 spawn_gen=s1.2.3
 EOF
 
-  out=$(HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE="$fixture_root" \
     FM_TEST_CODEX_SCRIPT="$codex_script" PATH="$fakebin:$BASE_PATH" \
-    "$ROOT/bin/fm-remote-harness-diagnostic.sh" alienware-ml) \
+    "$fixture_root/bin/fm-remote-harness-diagnostic.sh" alienware-ml) \
     || fail "read-only remote diagnostic could not inspect a valid Herdr endpoint"
   assert_contains "$out" 'schema=fm-remote-harness-diagnostic.v1' \
     "diagnostic identifies its public output protocol"

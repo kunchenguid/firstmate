@@ -284,12 +284,14 @@ SH
 
 test_remote_codex_session_binding_claims_only_the_matching_session() {
   local dir fakebin proc home session other out binding mode codex_root codex_script codex_launcher codex_exe
-  local copied_script copied_exe vscode_exe chatgpt_exe HOME
+  local copied_script copied_exe copied_nvm_root copied_nvm_script copied_nvm_launcher copied_nvm_exe
+  local vscode_exe chatgpt_exe system_home actual_system_home real_system_home real_lib codex_lib node_bin HOME
   dir="$TMP_ROOT/remote-codex-binding"
   fakebin=$(fm_fakebin "$dir")
   proc="$dir/proc"
   home="$dir/home"
   HOME=$home
+  node_bin=$(command -v node)
   session=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54
   other=16b9797f-12d9-4645-b3af-0d0f6c2e8b8a
   codex_root="$home/.nvm/versions/node/v24.19.0"
@@ -298,20 +300,42 @@ test_remote_codex_session_binding_claims_only_the_matching_session() {
   codex_exe="$codex_root/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
   copied_script="$dir/copied/node_modules/@openai/codex/bin/codex.js"
   copied_exe="$dir/copied/codex"
+  copied_nvm_root="$dir/copied-nvm/.nvm/versions/node/v24.19.0"
+  copied_nvm_script="$copied_nvm_root/lib/node_modules/@openai/codex/bin/codex.js"
+  copied_nvm_launcher="$copied_nvm_root/bin/codex"
+  copied_nvm_exe="$copied_nvm_root/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
   vscode_exe="$home/.vscode/extensions/openai.chatgpt-26.825.31414-darwin-arm64/bin/macos-aarch64/codex"
   chatgpt_exe="$home/Applications/ChatGPT.app/Contents/Resources/codex"
   mkdir -p "$proc/4242" "$home/state" "$codex_root/bin" "$(dirname "$codex_script")" \
     "$(dirname "$codex_exe")" "$(dirname "$copied_script")" "$(dirname "$copied_exe")" \
+    "$copied_nvm_root/bin" "$(dirname "$copied_nvm_script")" "$(dirname "$copied_nvm_exe")" \
     "$(dirname "$vscode_exe")" "$(dirname "$chatgpt_exe")"
+  system_home=$(CDPATH='' cd -P -- "$home" && pwd -P)
+  real_lib=$LIB
+  real_system_home=$(unset HOME; CDPATH='' cd ~ && pwd -P)
+  actual_system_home=$(HOME="$home" bash -c '. "$1"; fm_codex_system_home' _ "$real_lib") \
+    || fail "the shared matcher could not resolve the invoking user's system home"
+  [ "$actual_system_home" = "$real_system_home" ] \
+    || fail "the shared matcher trusted HOME instead of the invoking user's system home"
+  codex_lib="$dir/fm-session-lock-lib-fixture.sh"
+  {
+    printf '. %q\n' "$real_lib"
+    printf 'fm_codex_system_home() { printf "%%s\\n" %q; }\n' "$system_home"
+  } > "$codex_lib"
+  LIB=$codex_lib
   printf '#!/usr/bin/env node\n' > "$codex_script"
   printf '#!/usr/bin/env node\n' > "$copied_script"
+  printf '#!/usr/bin/env node\n' > "$copied_nvm_script"
   : > "$codex_exe"
   : > "$copied_exe"
+  : > "$copied_nvm_exe"
   : > "$vscode_exe"
   : > "$chatgpt_exe"
-  chmod +x "$codex_script" "$copied_script" "$codex_exe" "$copied_exe" "$vscode_exe" "$chatgpt_exe"
+  chmod +x "$codex_script" "$copied_script" "$copied_nvm_script" "$codex_exe" "$copied_exe" \
+    "$copied_nvm_exe" "$vscode_exe" "$chatgpt_exe"
   ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$codex_launcher"
-  ln -s "$(command -v node)" "$proc/4242/exe"
+  ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$copied_nvm_launcher"
+  ln -s "$node_bin" "$proc/4242/exe"
   printf 'CODEX_SESSION_ID=%s\0PATH=/usr/bin\0' "$session" > "$proc/4242/environ"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -330,7 +354,8 @@ case "$pid:$field" in
       decoy) printf '%s\n' node ;;
       helper-script) printf '%s\n' node ;;
       copied-script) printf '%s\n' node ;;
-      launcher) printf '%s\n' node ;;
+      copied-nvm-script) printf '%s\n' node ;;
+      launcher) printf '%s\n' "$FM_TEST_NODE_BIN" ;;
       script) printf '%s\n' node ;;
       helper) printf '%s\n' codex-helper ;;
       login) printf '%s\n' -codex ;;
@@ -343,7 +368,8 @@ case "$pid:$field" in
       decoy) printf '%s\n' 'node -e noop /tmp/codex/data' ;;
       helper-script) printf '%s\n' 'node /tmp/codex/helper.js' ;;
       copied-script) printf 'node %s\n' "$FM_TEST_COPIED_SCRIPT" ;;
-      launcher) printf 'node %s\n' "$FM_TEST_CODEX_LAUNCHER" ;;
+      copied-nvm-script) printf 'node %s\n' "$FM_TEST_COPIED_NVM_SCRIPT" ;;
+      launcher) printf '%s %s --interactive\n' "$FM_TEST_NODE_BIN" "$FM_TEST_CODEX_LAUNCHER" ;;
       script) printf 'node %s\n' "$FM_TEST_CODEX_SCRIPT" ;;
       helper) printf '%s\n' 'codex-helper --serve' ;;
       login) printf '%s\n' '-codex --interactive' ;;
@@ -395,6 +421,17 @@ SH
   fi
   [ ! -e "$home/state/.fm-codex-session-binding" ] \
     || fail "rejected copied Codex script evidence published a binding"
+  if FM_TEST_CODEX_SHAPE=copied-nvm-script FM_TEST_COPIED_NVM_SCRIPT="$copied_nvm_script" \
+    FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a copied NVM-shaped Codex script tree became binding authority"
+  fi
+  [ ! -e "$home/state/.fm-codex-session-binding" ] \
+    || fail "rejected copied NVM-shaped script evidence published a binding"
   if FM_TEST_CODEX_SHAPE=helper FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"
@@ -432,6 +469,18 @@ SH
   [ ! -e "$home/state/.fm-codex-session-binding" ] \
     || fail "rejected copied executable evidence published a Codex binding"
   rm -f "$proc/4242/exe"
+  ln -s "$copied_nvm_exe" "$proc/4242/exe"
+  if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '
+      . "$1"
+      kill() { return 0; }
+      fm_codex_home_binding_publish "$FM_HOME/state" "$FM_HOME" s1.2.3 4242 "$2"
+    ' _ "$LIB" "$session"; then
+    fail "a copied NVM-shaped Codex executable tree became binding authority"
+  fi
+  [ ! -e "$home/state/.fm-codex-session-binding" ] \
+    || fail "rejected copied NVM-shaped executable evidence published a binding"
+  rm -f "$proc/4242/exe"
   ln -s "$codex_exe" "$proc/4242/exe"
   FM_TEST_CODEX_SHAPE=login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
@@ -446,7 +495,7 @@ SH
     FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
     || fail "the installed Codex script entrypoint was not recognized"
-  FM_TEST_CODEX_SHAPE=launcher FM_TEST_CODEX_LAUNCHER="$codex_launcher" \
+  FM_TEST_CODEX_SHAPE=launcher FM_TEST_NODE_BIN="$node_bin" FM_TEST_CODEX_LAUNCHER="$codex_launcher" \
     FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
     || fail "the installed NVM Codex launcher was not recognized"

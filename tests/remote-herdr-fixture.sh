@@ -31,8 +31,12 @@ install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <sock
   local codex_root="$1/.nvm/versions/node/v24.19.0"
   local codex_script="$codex_root/lib/node_modules/@openai/codex/bin/codex.js"
   local codex_launcher="$codex_root/bin/codex"
+  local lock_lib="$1/bin/fm-session-lock-lib.sh" quoted_remote_root
   mkdir -p "$remote_root/bin" "$codex_root/bin" "$(dirname "$codex_script")"
   command -v node >/dev/null 2>&1 || return 1
+  [ -f "$lock_lib" ] || return 1
+  printf -v quoted_remote_root '%q' "$remote_root"
+  printf '\nfm_codex_system_home() { printf "%%s\\n" %s; }\n' "$quoted_remote_root" >> "$lock_lib"
   cat > "$codex_script" <<'JS'
 #!/usr/bin/env node
 setInterval(() => {}, 1000);

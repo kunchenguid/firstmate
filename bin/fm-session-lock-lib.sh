@@ -283,21 +283,40 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+fm_codex_system_home() {
+  local home
+  home=$(unset HOME; CDPATH='' builtin cd ~ 2>/dev/null && pwd -P) || return 1
+  case "$home" in ''|/) return 1 ;; esac
+  printf '%s\n' "$home"
+}
+
+fm_codex_canonical_leaf_path() {  # <path>
+  local path=$1 directory leaf canonical_directory
+  case "$path" in /*) ;; *) return 1 ;; esac
+  directory=${path%/*}
+  leaf=${path##*/}
+  [ -n "$directory" ] && [ -n "$leaf" ] || return 1
+  canonical_directory=$(CDPATH='' builtin cd -P -- "$directory" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$canonical_directory" "$leaf"
+}
+
 fm_codex_nvm_node_root_for_path() {  # <path>
-  local path=$1 prefix rest version normalized major minor patch extra
-  case "$path" in /*/.nvm/versions/node/*/*) ;; *) return 1 ;; esac
-  prefix=${path%%/.nvm/versions/node/*}
-  rest=${path#"$prefix/.nvm/versions/node/"}
+  local path system_home rest version normalized major minor patch extra
+  path=$(fm_codex_canonical_leaf_path "$1") || return 1
+  system_home=$(fm_codex_system_home) || return 1
+  case "$path" in "$system_home"/.nvm/versions/node/*/*) ;; *) return 1 ;; esac
+  rest=${path#"$system_home/.nvm/versions/node/"}
   version=${rest%%/*}
   normalized=${version#v}
   IFS=. read -r major minor patch extra <<< "$normalized"
   case "$major:$minor:$patch:$extra" in *[!0-9:]*) return 1 ;; esac
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  printf '%s\n' "$prefix/.nvm/versions/node/$version"
+  printf '%s\n' "$system_home/.nvm/versions/node/$version"
 }
 
 fm_codex_nvm_install_matches() {  # <path>
   local path=$1 node_root script launcher target
+  path=$(fm_codex_canonical_leaf_path "$path") || return 1
   node_root=$(fm_codex_nvm_node_root_for_path "$path") || return 1
   script="$node_root/lib/node_modules/@openai/codex/bin/codex.js"
   launcher="$node_root/bin/codex"
@@ -312,6 +331,7 @@ fm_codex_nvm_install_matches() {  # <path>
 
 fm_codex_script_path_matches() {  # <path>
   local path=$1 node_root
+  path=$(fm_codex_canonical_leaf_path "$path") || return 1
   node_root=$(fm_codex_nvm_node_root_for_path "$path") || return 1
   case "$path" in
     "$node_root/bin/codex"|"$node_root/lib/node_modules/@openai/codex/bin/codex.js")
@@ -321,7 +341,8 @@ fm_codex_script_path_matches() {  # <path>
 }
 
 fm_codex_installed_executable_path_matches() {  # <path>
-  local path=$1 node_root user_home=${HOME:-/__fm_no_home__}
+  local path=$1 node_root system_home
+  path=$(fm_codex_canonical_leaf_path "$path") || return 1
   if node_root=$(fm_codex_nvm_node_root_for_path "$path"); then
     fm_codex_nvm_install_matches "$path" || return 1
     case "$path" in
@@ -330,10 +351,11 @@ fm_codex_installed_executable_path_matches() {  # <path>
     esac
   fi
   [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+  system_home=$(fm_codex_system_home) || return 1
   case "$path" in
-    "$user_home"/.vscode/extensions/openai.chatgpt-*-darwin-*/bin/macos-*/codex) return 0 ;;
+    "$system_home"/.vscode/extensions/openai.chatgpt-*-darwin-*/bin/macos-*/codex) return 0 ;;
     /Applications/ChatGPT.app/Contents/Resources/codex) return 0 ;;
-    "$user_home"/Applications/ChatGPT.app/Contents/Resources/codex) return 0 ;;
+    "$system_home"/Applications/ChatGPT.app/Contents/Resources/codex) return 0 ;;
     *) return 1 ;;
   esac
 }
