@@ -29,6 +29,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -111,6 +113,8 @@ detect_own() {
       break
     fi
   done
+  echo "diagnostic: no verified harness marker or ancestry match; inspected process evidence follows" >&2
+  fm_harness_ancestry_diagnostic >&2
   echo unknown
 }
 

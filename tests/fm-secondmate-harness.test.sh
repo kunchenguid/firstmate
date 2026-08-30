@@ -121,6 +121,32 @@ SH
   pass "fm-harness detects only Cursor Agent CLI's exact invocation marker"
 }
 
+test_unknown_harness_prints_observed_evidence() {
+  local dir fakebin out err
+  dir="$TMP_ROOT/unknown-harness-diagnostic"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'comm='*) printf '%s\n' herdr-worker ;;
+  *'args='*) printf '%s\n' 'herdr worker --lane remote' ;;
+  *'ppid='*) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  err="$dir/fm-harness.err"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" 2>"$err")
+  [ "$out" = unknown ] || fail "unrecognized process must still resolve to unknown, got '$out'"
+  assert_contains "$(cat "$err")" 'no verified harness marker or ancestry match' \
+    "unknown harness explains why it did not identify a runtime"
+  assert_contains "$(cat "$err")" 'comm=herdr-worker' \
+    "unknown harness reports the observed command"
+  assert_contains "$(cat "$err")" 'result=no-verified-harness' \
+    "unknown harness reports the fail-closed terminal"
+  pass "fm-harness: unknown output carries observed process evidence on stderr"
+}
+
 # ===========================================================================
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
 # ===========================================================================
@@ -2549,6 +2575,7 @@ SH
 
 test_harness_resolution
 test_cursor_marker_detection
+test_unknown_harness_prints_observed_evidence
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands

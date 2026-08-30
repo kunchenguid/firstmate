@@ -220,6 +220,58 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_unrecognized_ancestry_refuses_with_observed_evidence() {
+  local dir fakebin out err status home
+  dir="$TMP_ROOT/unrecognized-diagnostic"
+  fakebin=$(fm_fakebin "$dir")
+  home="$dir/home"
+  mkdir -p "$home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  701:comm=) printf '%s\n' herdr-worker ;;
+  701:args=) printf '%s\n' 'herdr worker --lane remote' ;;
+  701:ppid=) printf '%s\n' 702 ;;
+  702:comm=) printf '%s\n' bash ;;
+  702:args=) printf '%s\n' 'bash /opt/remote-job/worker.sh' ;;
+  702:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' herdr-worker ;;
+  *:args=) printf '%s\n' 'herdr worker --lane remote' ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(PATH="$fakebin:$PATH" bash -c '. "$0"; fm_harness_ancestry_diagnostic 701' "$LIB") \
+    || fail "the read-only ancestry diagnostic failed"
+  assert_contains "$out" 'pid=701' "diagnostic names the inspected pid"
+  assert_contains "$out" 'comm=herdr-worker' "diagnostic names the observed command"
+  assert_contains "$out" 'args=herdr\ worker\ --lane\ remote' "diagnostic names the observed arguments"
+  assert_contains "$out" 'match=reject:basename\,path-component\,interpreter-args\,cursor-structural' \
+    "diagnostic names every rejected shared-matcher check"
+  assert_contains "$out" 'result=no-verified-harness' "diagnostic preserves fail-closed absence of identity"
+
+  err="$dir/fm-lock.err"
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-lock.sh" >"$dir/fm-lock.out" 2>"$err"
+  status=$?
+  expect_code 1 "$status" "unrecognized ancestry must still refuse the session lock"
+  assert_contains "$(cat "$err")" 'inspected process evidence follows' \
+    "lock refusal directs the operator to the diagnostic evidence"
+  assert_contains "$(cat "$err")" 'comm=herdr-worker' \
+    "lock refusal includes the observed command"
+  [ ! -e "$home/state/.lock" ] || fail "unrecognized ancestry wrote a session lock"
+  pass "session-lock: unrecognized process ancestry refuses loudly with observed matcher evidence"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +412,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_unrecognized_ancestry_refuses_with_observed_evidence
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
