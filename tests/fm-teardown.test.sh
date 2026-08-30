@@ -55,6 +55,8 @@
 #   (ac) ancestry changes between snapshots                   -> retry, then ALLOW
 #   (ad) foreign-uid intermediary with owned descendant       -> reap owned only
 #   (ae) parent exits before nested descendant reap            -> reparent + ALLOW
+#   (af) live current-uid identity unreadable                   -> REFUSE loudly
+#   (ag) process exits mid-scan                                 -> converge + ALLOW
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -66,8 +68,10 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
-REAL_PS_FOR_TEST=$(command -v ps)
-export REAL_PS_FOR_TEST
+REAL_READLINK_FOR_TEST=$(command -v readlink)
+export REAL_READLINK_FOR_TEST
+REAL_CAT_FOR_TEST=$(command -v cat)
+export REAL_CAT_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
 
@@ -97,6 +101,13 @@ fm_teardown_test_unregister_process_group() {
 $FM_TEARDOWN_TEST_PROCESS_GROUPS
 EOF
   FM_TEARDOWN_TEST_PROCESS_GROUPS=$retained
+}
+
+fm_teardown_test_pid_is_reaped() {  # <pid>
+  local pid=$1 state
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null) || return 0
+  [ "$state" = Z ]
 }
 
 fm_teardown_test_cleanup() {
@@ -149,21 +160,6 @@ SH
 #!/usr/bin/env bash
 # tmux kill-window etc.: succeed silently.
 exit 0
-SH
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ "$*" = "-eo pid=,ppid=,uid=,stat=" ]; then
-  pids=${FM_FAKE_PROCESS_PIDS:-}
-  if [ -n "${FM_FAKE_PROCESS_PID_FILE:-}" ] && [ -s "$FM_FAKE_PROCESS_PID_FILE" ]; then
-    pids="$pids $(cat "$FM_FAKE_PROCESS_PID_FILE")"
-  fi
-  for pid in $pids; do
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    "$REAL_PS_FOR_TEST" -p "$pid" -o pid=,ppid=,uid=,stat= 2>/dev/null || true
-  done
-  exit 0
-fi
-exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$fakebin/lsof" <<'SH'
 #!/usr/bin/env bash
@@ -234,7 +230,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/ps" "$fakebin/lsof" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/lsof" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -629,25 +625,41 @@ backlog_row_state() {
     sed -n 's/^  state: *//p' | head -1
 }
 
-add_fake_proc_cwd() {  # <proc-root> <pid> <dir>
-  local canonical
-  canonical=$(cd "$3" && pwd -P) || return 1
-  mkdir -p "$1/$2"
-  ln -sfn "$canonical" "$1/$2/cwd"
+add_fake_proc_entry() {  # <proc-root> <pid> [uid]
+  local proc_root=$1 pid=$2 uid=${3:-}
+  mkdir -p "$proc_root/$pid"
   # /proc is the sole birth-identity authority, so a faked /proc entry must also
   # supply a bindable stat record or the scan correctly refuses to cover it.
   # Link the REAL stat rather than synthesising one: a real entry disappears when
   # the process exits, which is what teardown relies on to tell "already gone"
   # from "still alive". A static fake file would keep reporting a dead process as
   # live, so a process that TERM already reaped would look like a failed KILL.
-  if [ -e "/proc/$2/stat" ]; then
-    ln -sfn "/proc/$2/stat" "$1/$2/stat"
-  elif [ ! -e "$1/$2/stat" ]; then
+  if [ -e "/proc/$pid/stat" ]; then
+    ln -sfn "/proc/$pid/stat" "$proc_root/$pid/stat"
+  elif [ ! -e "$proc_root/$pid/stat" ]; then
     # Wholly synthetic pid (no live process): field 20 after the comm is
     # starttime, and the pid doubles as a stable value.
-    printf '%s (fake) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' "$2" "$2" \
-      > "$1/$2/stat"
+    printf '%s (fake) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' "$pid" "$pid" \
+      > "$proc_root/$pid/stat"
   fi
+  rm -f "$proc_root/$pid/status"
+  if [ -n "$uid" ]; then
+    printf 'Name:\tfake\nUid:\t%s\t%s\t%s\t%s\n' "$uid" "$uid" "$uid" "$uid" \
+      > "$proc_root/$pid/status"
+  elif [ -e "/proc/$pid/status" ]; then
+    ln -sfn "/proc/$pid/status" "$proc_root/$pid/status"
+  else
+    uid=$(id -u)
+    printf 'Name:\tfake\nUid:\t%s\t%s\t%s\t%s\n' "$uid" "$uid" "$uid" "$uid" \
+      > "$proc_root/$pid/status"
+  fi
+}
+
+add_fake_proc_cwd() {  # <proc-root> <pid> <dir> [uid]
+  local canonical
+  canonical=$(cd "$3" && pwd -P) || return 1
+  add_fake_proc_entry "$1" "$2" "${4:-}" || return 1
+  ln -sfn "$canonical" "$1/$2/cwd"
 }
 
 test_local_only_fork_remote_allows() {
@@ -2323,7 +2335,7 @@ test_leaked_worktree_process_is_reaped() {
   kill -0 "$pid" 2>/dev/null || fail "leaked-process-reap: setup sleeper did not start"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE=/proc FM_FAKE_PROCESS_PIDS="$pid" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "leaked-process-reap: teardown should still succeed"
@@ -2352,7 +2364,7 @@ test_leaked_tasktmp_process_is_reaped() {
   kill -0 "$pid" 2>/dev/null || fail "leaked-tasktmp-reap: setup sleeper did not start"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE=/proc FM_FAKE_PROCESS_PIDS="$pid" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "leaked-tasktmp-reap: teardown should still succeed"
@@ -2413,7 +2425,7 @@ test_proc_reaps_whole_process_tree() {
   kill -0 "$child_pid" 2>/dev/null || fail "proc-process-tree-reap: setup child did not start"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE=/proc FM_FAKE_PROCESS_PIDS="$pid $child_pid" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "proc-process-tree-reap: teardown should succeed"
@@ -2421,7 +2433,7 @@ test_proc_reaps_whole_process_tree() {
     kill -KILL "$pid" 2>/dev/null || true
     fail "proc-process-tree-reap: leaked parent survived teardown"
   fi
-  if kill -0 "$child_pid" 2>/dev/null; then
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
     kill -KILL "$child_pid" 2>/dev/null || true
     fail "proc-process-tree-reap: child with changed cwd survived teardown"
   fi
@@ -2500,10 +2512,12 @@ test_reparented_nested_tree_is_reaped_after_parent_exit() {
   fi
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE=/proc FM_FAKE_PROCESS_PIDS="$child_pid $grandchild_pid" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  kill -0 "$child_pid" 2>/dev/null && child_alive=1
-  kill -0 "$grandchild_pid" 2>/dev/null && grandchild_alive=1
+  child_alive=0
+  grandchild_alive=0
+  fm_teardown_test_pid_is_reaped "$child_pid" || child_alive=1
+  fm_teardown_test_pid_is_reaped "$grandchild_pid" || grandchild_alive=1
   for cleanup_pid in "$child_pid" "$grandchild_pid"; do
     kill -KILL "$cleanup_pid" 2>/dev/null || true
   done
@@ -2543,6 +2557,42 @@ EOF
   pass "teardown refuses loudly when /proc cannot establish the process set"
 }
 
+test_proc_live_identity_unreadable_refuses_before_removal() {
+  local case_dir rc pid fake_proc
+  case_dir=$(make_case proc-unbindable-live-identity)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  sleep 300 &
+  pid=$!
+  disown
+  fm_teardown_test_register_pid "$pid"
+  fake_proc="$case_dir/fake-proc"
+  # A live process whose birth identity cannot be bound is uncovered ground:
+  # coverage must refuse and name the pid rather than skip it silently. A
+  # dangling stat link makes the record unreadable while the real process is
+  # demonstrably alive, which is exactly the refusal condition.
+  mkdir -p "$fake_proc/$pid"
+  ln -sfn "/proc/$pid/unreadable-stat" "$fake_proc/$pid/stat"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$fake_proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "proc-unbindable-live-identity: teardown should refuse"
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_grep "cannot bind process identity for live snapshot pid $pid" "$case_dir/stderr" \
+    "proc-unbindable-live-identity: teardown did not name the live pid it could not bind"
+  assert_present "$case_dir/wt" "proc-unbindable-live-identity: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "proc-unbindable-live-identity: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "proc-unbindable-live-identity: teardown returned the worktree"
+  pass "a live current-uid process whose identity cannot be bound refuses teardown and names the pid"
+}
+
 test_proc_unreadable_cwd_refuses_before_removal() {
   local case_dir rc pid readable_pid fake_proc
   case_dir=$(make_case proc-unreadable-cwd)
@@ -2562,30 +2612,19 @@ test_proc_unreadable_cwd_refuses_before_removal() {
   fm_teardown_test_register_pid "$readable_pid"
   fake_proc="$case_dir/fake-proc"
   add_fake_proc_cwd "$fake_proc" "$readable_pid" "$case_dir"
-  mkdir -p "$fake_proc/$pid"
+  add_fake_proc_entry "$fake_proc" "$pid"
   # Birth identity must bind so the CWD read is the step that fails: this case is
   # about an unreadable cwd, not an unbindable identity, and each refuses with
   # its own message. Link the real stat so the identity is genuine and vanishes
   # with the process, exactly as it would in production.
-  ln -sfn "/proc/$pid/stat" "$fake_proc/$pid/stat"
-  cat > "$case_dir/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ "$*" = "-eo pid=,ppid=,uid=,stat=" ]; then
-  printf '%s 1 %s S\n' "$FM_FAKE_UNREADABLE_PID" "$FM_FAKE_UID"
-  printf '%s 1 %s S\n' "$FM_FAKE_READABLE_PID" "$FM_FAKE_UID"
-  exit 0
-fi
-exec "$REAL_PS_FOR_TEST" "$@"
-SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
-  chmod +x "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/treehouse"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$fake_proc" FM_FAKE_UNREADABLE_PID="$pid" \
-  FM_FAKE_READABLE_PID="$readable_pid" FM_FAKE_UID="$(id -u)" \
+  FM_PROC_ROOT_OVERRIDE="$fake_proc" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   # This process is ours and hides its cwd, but the ancestry walk never reached
@@ -2615,19 +2654,10 @@ test_foreign_uid_cwd_root_is_skipped_before_signal() {
   fm_teardown_test_register_pid "$pid"
   foreign_uid=$(( $(id -u) + 1 ))
   fake_proc="$case_dir/fake-proc"
-  add_fake_proc_cwd "$fake_proc" "$pid" "$case_dir/wt"
-  cat > "$case_dir/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ "$*" = "-eo pid=,ppid=,uid=,stat=" ]; then
-  printf '%s 1 %s S\n' "$FM_FAKE_FOREIGN_PID" "$FM_FAKE_FOREIGN_UID"
-  exit 0
-fi
-exec "$REAL_PS_FOR_TEST" "$@"
-SH
-  chmod +x "$case_dir/fakebin/ps"
+  add_fake_proc_cwd "$fake_proc" "$pid" "$case_dir/wt" "$foreign_uid"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$fake_proc" FM_FAKE_FOREIGN_PID="$pid" FM_FAKE_FOREIGN_UID="$foreign_uid" \
+  FM_PROC_ROOT_OVERRIDE="$fake_proc" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "foreign-uid-cwd-root: teardown should ignore a determined foreign process"
@@ -2641,20 +2671,53 @@ SH
 
 test_foreign_uid_intermediary_keeps_owned_descendant_in_tree() {
   local case_dir rc root_pid bridge_pid child_pid current_uid foreign_uid fake_proc
+  local pid_file outside
   case_dir=$(make_case foreign-uid-intermediary)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
-  sleep 300 &
+  pid_file="$case_dir/tree-pids"
+  outside="$case_dir/outside"
+  mkdir -p "$outside"
+  ( cd "$case_dir/wt" && exec perl -e '
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($pid_file, $outside) = @ARGV;
+      my $bridge = fork();
+      die "fork bridge: $!" unless defined $bridge;
+      if (!$bridge) {
+        chdir $outside or die "chdir: $!";
+        my $child = fork();
+        die "fork child: $!" unless defined $child;
+        if (!$child) {
+          $SIG{TERM} = "IGNORE";
+          sleep 300;
+          exit 0;
+        }
+        open my $fh, ">", $pid_file or die "open: $!";
+        print {$fh} "$$ $child\n";
+        close $fh;
+        $SIG{TERM} = "IGNORE";
+        sleep 300;
+        exit 0;
+      }
+      $SIG{TERM} = sub { exit 0; };
+      sleep 300;
+    ' "$pid_file" "$outside" ) &
   root_pid=$!
   disown
+  fm_teardown_test_register_process_group "$root_pid"
   fm_teardown_test_register_pid "$root_pid"
-  sleep 300 &
-  bridge_pid=$!
-  disown
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+  done
+  read -r bridge_pid child_pid < "$pid_file" 2>/dev/null || true
+  case "${bridge_pid:-}:${child_pid:-}" in
+    *[!0-9:]*|:*|*:)
+      fail "foreign-uid-intermediary: setup did not capture the intermediary tree"
+      ;;
+  esac
   fm_teardown_test_register_pid "$bridge_pid"
-  perl -e '$SIG{TERM} = "IGNORE"; sleep 300' &
-  child_pid=$!
-  disown
   fm_teardown_test_register_pid "$child_pid"
   current_uid=$(id -u)
   foreign_uid=$((current_uid + 1))
@@ -2662,39 +2725,21 @@ test_foreign_uid_intermediary_keeps_owned_descendant_in_tree() {
   add_fake_proc_cwd "$fake_proc" "$root_pid" "$case_dir/wt"
   # The owned descendant sits OUTSIDE the task roots on purpose: it must be found
   # through ancestry across the foreign intermediary, not by its own cwd. The
-  # foreign bridge needs no /proc entry - foreign rows are filtered before the
-  # cwd scan, so they can neither be covered nor cause a refusal.
-  add_fake_proc_cwd "$fake_proc" "$child_pid" "$case_dir"
-  cat > "$case_dir/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ "$*" = "-eo pid=,ppid=,uid=,stat=" ]; then
-  row() {
-    state=$("$REAL_PS_FOR_TEST" -p "$1" -o stat= 2>/dev/null || true)
-    state=${state//[[:space:]]/}
-    case "$state" in ''|Z*) return 0 ;; esac
-    printf '%s %s %s S\n' "$1" "$2" "$3"
-  }
-  row "$FM_FAKE_TREE_ROOT_PID" 1 "$FM_FAKE_CURRENT_UID"
-  row "$FM_FAKE_TREE_BRIDGE_PID" "$FM_FAKE_TREE_ROOT_PID" "$FM_FAKE_FOREIGN_UID"
-  row "$FM_FAKE_TREE_CHILD_PID" "$FM_FAKE_TREE_BRIDGE_PID" "$FM_FAKE_CURRENT_UID"
-  exit 0
-fi
-exec "$REAL_PS_FOR_TEST" "$@"
-SH
-  chmod +x "$case_dir/fakebin/ps"
+  # foreign bridge has no readable cwd entry because foreign rows are filtered
+  # before cwd-root collection, but its real stat still carries the ancestry
+  # needed to reach the owned child below it.
+  add_fake_proc_entry "$fake_proc" "$bridge_pid" "$foreign_uid"
+  add_fake_proc_cwd "$fake_proc" "$child_pid" "$outside"
 
   rc=0
   FM_PROC_ROOT_OVERRIDE="$fake_proc" \
-  FM_FAKE_TREE_ROOT_PID="$root_pid" FM_FAKE_TREE_BRIDGE_PID="$bridge_pid" \
-  FM_FAKE_TREE_CHILD_PID="$child_pid" FM_FAKE_TREE_ROOT="$case_dir/wt" \
-  FM_FAKE_CURRENT_UID="$current_uid" FM_FAKE_FOREIGN_UID="$foreign_uid" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if kill -0 "$root_pid" 2>/dev/null; then
     kill -KILL "$root_pid" 2>/dev/null || true
     fail "foreign-uid-intermediary: owned cwd root survived teardown"
   fi
-  if kill -0 "$child_pid" 2>/dev/null; then
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
     kill -KILL "$child_pid" 2>/dev/null || true
     fail "foreign-uid-intermediary: owned descendant behind foreign intermediary survived teardown"
   fi
@@ -2702,6 +2747,7 @@ SH
     || fail "foreign-uid-intermediary: foreign intermediary was signaled"
   kill -KILL "$bridge_pid" 2>/dev/null || true
   expect_code 0 "$rc" "foreign-uid-intermediary: teardown should reap only owned records"
+  fm_teardown_test_unregister_process_group "$root_pid"
   pass "ancestry crosses a foreign-uid intermediary without signaling it"
 }
 
@@ -2751,34 +2797,28 @@ test_unstable_ancestry_snapshot_restarts_before_signal() {
   fm_teardown_test_register_pid "$child_pid"
   [ -n "$child_pid" ] || fail "unstable-ancestry-snapshot: setup child did not start"
   add_fake_proc_cwd "$case_dir/fake-proc" "$pid" "$case_dir/wt"
-  add_fake_proc_cwd "$case_dir/fake-proc" "$child_pid" "$outside"
-  cat > "$case_dir/fakebin/ps" <<'SH'
+  cat > "$case_dir/fakebin/readlink" <<'SH'
 #!/usr/bin/env bash
-if [ "$*" = "-eo pid=,ppid=,uid=,stat=" ]; then
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_PARENT_PID/cwd" ]; then
   count=0
   [ ! -f "$FM_FAKE_SNAPSHOT_COUNT" ] || count=$(cat "$FM_FAKE_SNAPSHOT_COUNT")
   count=$((count + 1))
   printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
-  row() {
-    state=$("$REAL_PS_FOR_TEST" -p "$1" -o stat= 2>/dev/null || true)
-    state=${state//[[:space:]]/}
-    case "$state" in ''|Z*) return 0 ;; esac
-    printf '%s %s %s S\n' "$1" "$2" "$3"
-  }
-  row "$FM_FAKE_PARENT_PID" 1 "$FM_FAKE_UID"
-  if [ "$count" -gt 1 ]; then
-    row "$FM_FAKE_CHILD_PID" "$FM_FAKE_PARENT_PID" "$FM_FAKE_UID"
+  if [ "$count" -eq 1 ]; then
+    mkdir -p "$FM_FAKE_PROC/$FM_FAKE_CHILD_PID"
+    ln -sfn "/proc/$FM_FAKE_CHILD_PID/stat" "$FM_FAKE_PROC/$FM_FAKE_CHILD_PID/stat"
+    ln -sfn "/proc/$FM_FAKE_CHILD_PID/status" "$FM_FAKE_PROC/$FM_FAKE_CHILD_PID/status"
+    ln -sfn "$FM_FAKE_CHILD_CWD" "$FM_FAKE_PROC/$FM_FAKE_CHILD_PID/cwd"
   fi
-  exit 0
 fi
-exec "$REAL_PS_FOR_TEST" "$@"
+exec "$REAL_READLINK_FOR_TEST" "$@"
 SH
-  chmod +x "$case_dir/fakebin/ps"
+  chmod +x "$case_dir/fakebin/readlink"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_PROC="$case_dir/fake-proc" \
   FM_FAKE_PARENT_PID="$pid" FM_FAKE_CHILD_PID="$child_pid" \
-  FM_FAKE_PARENT_WT="$case_dir/wt" FM_FAKE_UID="$(id -u)" \
+  FM_FAKE_CHILD_CWD="$outside" \
   FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
@@ -2787,7 +2827,7 @@ SH
     kill -KILL "$pid" 2>/dev/null || true
     fail "unstable-ancestry-snapshot: parent survived teardown"
   fi
-  if kill -0 "$child_pid" 2>/dev/null; then
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
     kill -KILL "$child_pid" 2>/dev/null || true
     fail "unstable-ancestry-snapshot: child omitted by the first snapshot survived teardown"
   fi
@@ -2819,44 +2859,52 @@ test_reused_pid_identity_is_not_force_killed() {
   disown
   fm_teardown_test_register_pid "$child_b"
   add_fake_proc_cwd "$case_dir/fake-proc" "$pid" "$case_dir/wt"
-  add_fake_proc_cwd "$case_dir/fake-proc" "$child_a" "$outside"
-  add_fake_proc_cwd "$case_dir/fake-proc" "$child_b" "$outside"
   # PID reuse is simulated through /proc, which is the sole birth-identity
-  # authority: this pid starts life with starttime 1000, and the fake ps flips
-  # the same record to 2000 from the second snapshot on, exactly as a different
-  # process reusing the number would look. Replace the real-stat symlink with a
-  # synthetic record so the starttime is ours to control.
+  # authority: this pid starts life with starttime 1000, and once the first
+  # candidate scan has walked it the same record flips to 2000 with a cwd
+  # outside the task roots and two children attached - exactly as a different
+  # process reusing the number would look. Replace the real-stat symlink with
+  # a synthetic record so the starttime is ours to control.
   rm -f "$case_dir/fake-proc/$pid/stat"
   printf '%s (fake) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1000\n' "$pid" \
     > "$case_dir/fake-proc/$pid/stat"
-  cat > "$case_dir/fakebin/ps" <<'SH'
+  flip_marker="$case_dir/reused-flip"
+  cat > "$case_dir/fakebin/cat" <<'SH'
 #!/usr/bin/env bash
-if [ "$*" = "-eo pid=,ppid=,uid=,stat=" ]; then
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_REUSED_PID/stat" ]; then
   count=0
-  [ ! -f "$FM_FAKE_SNAPSHOT_COUNT" ] || count=$(cat "$FM_FAKE_SNAPSHOT_COUNT")
+  if [ -f "$FM_FAKE_SNAPSHOT_COUNT" ]; then
+    count=$(< "$FM_FAKE_SNAPSHOT_COUNT") || count=0
+  fi
   count=$((count + 1))
   printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
-  printf '%s 1 %s S\n' "$FM_FAKE_REUSED_PID" "$FM_FAKE_UID"
-  if [ "$count" -ge 2 ]; then
-    ln -sfn "$FM_FAKE_OUTSIDE" "$FM_FAKE_PROC/$FM_FAKE_REUSED_PID/cwd"
-    # The number is now a different process: new birth identity, cwd outside the
-    # task roots, and two children that belong to it and not to us.
+  if [ "$count" -eq 5 ] && [ ! -e "$FM_FAKE_FLIP_MARKER" ]; then
     printf '%s (fake) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2000\n' \
       "$FM_FAKE_REUSED_PID" > "$FM_FAKE_PROC/$FM_FAKE_REUSED_PID/stat"
-    printf '%s %s %s S\n' "$FM_FAKE_CHILD_A" "$FM_FAKE_REUSED_PID" "$FM_FAKE_UID"
-    printf '%s %s %s S\n' "$FM_FAKE_CHILD_B" "$FM_FAKE_REUSED_PID" "$FM_FAKE_UID"
+    ln -sfn "$FM_FAKE_OUTSIDE" "$FM_FAKE_PROC/$FM_FAKE_REUSED_PID/cwd"
+    mkdir -p "$FM_FAKE_PROC/$FM_FAKE_CHILD_A" "$FM_FAKE_PROC/$FM_FAKE_CHILD_B"
+    printf '%s (fake) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' \
+      "$FM_FAKE_CHILD_A" "$FM_FAKE_REUSED_PID" "$FM_FAKE_CHILD_A" \
+      > "$FM_FAKE_PROC/$FM_FAKE_CHILD_A/stat"
+    printf '%s (fake) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' \
+      "$FM_FAKE_CHILD_B" "$FM_FAKE_REUSED_PID" "$FM_FAKE_CHILD_B" \
+      > "$FM_FAKE_PROC/$FM_FAKE_CHILD_B/stat"
+    ln -sfn "/proc/$FM_FAKE_CHILD_A/status" "$FM_FAKE_PROC/$FM_FAKE_CHILD_A/status"
+    ln -sfn "/proc/$FM_FAKE_CHILD_B/status" "$FM_FAKE_PROC/$FM_FAKE_CHILD_B/status"
+    ln -sfn "$FM_FAKE_OUTSIDE" "$FM_FAKE_PROC/$FM_FAKE_CHILD_A/cwd"
+    ln -sfn "$FM_FAKE_OUTSIDE" "$FM_FAKE_PROC/$FM_FAKE_CHILD_B/cwd"
+    : > "$FM_FAKE_FLIP_MARKER"
   fi
-  exit 0
 fi
-exec "$REAL_PS_FOR_TEST" "$@"
+exec "$REAL_CAT_FOR_TEST" "$@"
 SH
-  chmod +x "$case_dir/fakebin/ps"
+  chmod +x "$case_dir/fakebin/cat"
 
   rc=0
   FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_PROC="$case_dir/fake-proc" \
-  FM_FAKE_OUTSIDE="$outside" \
+  FM_FAKE_OUTSIDE="$outside" FM_FAKE_FLIP_MARKER="$flip_marker" \
   FM_FAKE_REUSED_PID="$pid" FM_FAKE_CHILD_A="$child_a" FM_FAKE_CHILD_B="$child_b" \
-  FM_FAKE_UID="$(id -u)" FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
+  FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "reused-pid-identity: teardown should skip the replacement tree"
@@ -2866,8 +2914,10 @@ SH
     || fail "reused-pid-identity: teardown adopted a replacement child"
   kill -0 "$child_b" 2>/dev/null \
     || fail "reused-pid-identity: teardown adopted a replacement child"
+  assert_present "$flip_marker" \
+    "reused-pid-identity: the simulated reuse never fired, so the case proved nothing"
   kill -KILL "$pid" "$child_a" "$child_b" 2>/dev/null || true
-  pass "a recycled pid is not adopted as lineage and its foreign children are not signaled"
+  pass "a recycled pid is not adopted as lineage and its replacement children are not signaled"
 }
 
 test_exec_changed_process_is_still_reaped() {
@@ -2903,7 +2953,7 @@ test_exec_changed_process_is_still_reaped() {
   kill -0 "$pid" 2>/dev/null || fail "exec-changed-process: exec-changed process exited before teardown"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE=/proc FM_FAKE_PROCESS_PIDS="$pid" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if kill -0 "$pid" 2>/dev/null; then
@@ -2951,13 +3001,12 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
   sleep 0.2
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE=/proc FM_FAKE_PROCESS_PIDS="$pid" \
-  FM_FAKE_PROCESS_PID_FILE="$child_file" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if [ -f "$child_file" ]; then child_pid=$(cat "$child_file"); fi
   fm_teardown_test_register_pid "$child_pid"
-  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+  if [ -n "$child_pid" ] && ! fm_teardown_test_pid_is_reaped "$child_pid"; then
     child_survived=1
     kill -KILL "$child_pid" 2>/dev/null || true
   fi
@@ -2981,19 +3030,9 @@ test_persistent_scan_refuses_after_bounded_retries() {
   land_shippable_commit "$case_dir"
   wt_path=$(cd "$case_dir/wt" && pwd -P)
   add_fake_proc_cwd "$case_dir/fake-proc" "$fake_pid" "$wt_path"
-  cat > "$case_dir/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ "$*" = "-eo pid=,ppid=,uid=,stat=" ]; then
-  printf '%s 1 %s S\n' "$FM_FAKE_PERSISTENT_PID" "$FM_FAKE_PERSISTENT_UID"
-  exit 0
-fi
-exec "$REAL_PS_FOR_TEST" "$@"
-SH
-  chmod +x "$case_dir/fakebin/ps"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_PERSISTENT_PID="$fake_pid" \
-  FM_FAKE_PERSISTENT_UID="$(id -u)" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 1 "$rc" "persistent-reap-refusal: teardown should refuse"
@@ -3007,50 +3046,56 @@ SH
   pass "a covered process that cannot be signaled refuses teardown and preserves the task"
 }
 
-test_process_exit_during_identity_lookup_does_not_refuse() {
+test_process_exit_mid_scan_converges_without_refusal() {
   local case_dir rc wt_path fake_pid=99999998
-  case_dir=$(make_case identity-exit-convergence)
+  case_dir=$(make_case mid-scan-exit-convergence)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   wt_path=$(cd "$case_dir/wt" && pwd -P)
   add_fake_proc_cwd "$case_dir/fake-proc" "$fake_pid" "$wt_path"
-  cat > "$case_dir/fakebin/ps" <<'SH'
+  # The process is alive when the snapshot binds it and dies between cwd
+  # discovery and the ancestry walk's identity recheck - ordinary churn, the
+  # exact window that must not be treated as a refusal. The fake readlink
+  # removes the /proc entry (a real entry disappears with its process) the
+  # first time its cwd is read, after capturing the answer the scan needs.
+  cat > "$case_dir/fakebin/readlink" <<'SH'
 #!/usr/bin/env bash
-if [ "$*" = "-eo pid=,ppid=,uid=,stat=" ]; then
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_EXITED_PID/cwd" ]; then
   count=0
-  [ ! -f "$FM_FAKE_SNAPSHOT_COUNT" ] || count=$(cat "$FM_FAKE_SNAPSHOT_COUNT")
+  if [ -f "$FM_FAKE_SNAPSHOT_COUNT" ]; then
+    count=$(< "$FM_FAKE_SNAPSHOT_COUNT") || count=0
+  fi
   count=$((count + 1))
   printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
   if [ "$count" -eq 1 ]; then
-    printf '%s 1 %s S\n' "$FM_FAKE_EXITED_PID" "$FM_FAKE_UID"
-  else
-    # The process has exited, so its /proc entry goes with it. A real entry
-    # disappears on exit; leaving a stale one behind would make a dead process
-    # look permanently alive and turn convergence into a false refusal.
+    result=$("$REAL_READLINK_FOR_TEST" "$1" 2>/dev/null) || true
     rm -rf "$FM_FAKE_PROC/$FM_FAKE_EXITED_PID"
+    printf '%s\n' "$result"
+    exit 0
   fi
-  exit 0
 fi
-exec "$REAL_PS_FOR_TEST" "$@"
+exec "$REAL_READLINK_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
 printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
-  chmod +x "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/readlink" "$case_dir/fakebin/treehouse"
 
   rc=0
   FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_EXITED_PID="$fake_pid" \
   FM_FAKE_PROC="$case_dir/fake-proc" \
-  FM_FAKE_UID="$(id -u)" FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
+  FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "identity-exit-convergence: teardown should succeed"
+  expect_code 0 "$rc" "mid-scan-exit-convergence: teardown should succeed"
   assert_present "$case_dir/treehouse.log" \
-    "identity-exit-convergence: teardown did not reach worktree return"
+    "mid-scan-exit-convergence: teardown did not reach worktree return"
   ! grep -q REFUSED "$case_dir/stderr" || \
-    fail "identity-exit-convergence: a disappeared process caused teardown refusal"
-  pass "a process exiting during identity lookup does not block teardown"
+    fail "mid-scan-exit-convergence: a process exiting mid-scan caused teardown refusal"
+  [ "$(cat "$case_dir/snapshot-count" 2>/dev/null || printf 0)" -ge 1 ] || \
+    fail "mid-scan-exit-convergence: the mid-scan exit was never exercised"
+  pass "a process exiting mid-scan stabilizes the scan and does not block teardown"
 }
 
 # Every other enumeration case here builds a synthetic /proc and scores the code
@@ -3066,15 +3111,11 @@ test_real_proc_scan_reaches_a_verdict() {
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
 
-  # The shared fixture's ps mock only ever reports pids the case names, so it
-  # would hand this scan an empty process table and prove nothing. Replace it
-  # with a straight passthrough: real /proc AND the real process table, which is
-  # what makes the nondumpable processes on this machine actually appear.
-  cat > "$case_dir/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-exec "$REAL_PS_FOR_TEST" "$@"
-SH
-  chmod +x "$case_dir/fakebin/ps"
+  # Enumeration reads /proc directly, so the synthetic cases above never see
+  # the real machine's nondumpable processes; that is exactly the world in
+  # which a broken version once refused on every real host. This case pins the
+  # scan to the real /proc so it must reach a verdict on the actual process
+  # table, hidden cwds included.
 
   # run_teardown defaults the proc root to the case's fake-proc; pin it to the
   # real one so this case genuinely reads the running machine.
@@ -3120,7 +3161,7 @@ EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE=/proc FM_FAKE_PROCESS_PIDS="$pid" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$abort_log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -3189,6 +3230,7 @@ test_leaked_tasktmp_process_is_reaped
 test_proc_reaps_whole_process_tree
 test_reparented_nested_tree_is_reaped_after_parent_exit
 test_proc_unavailable_refuses_before_removal
+test_proc_live_identity_unreadable_refuses_before_removal
 test_proc_unreadable_cwd_refuses_before_removal
 test_foreign_uid_cwd_root_is_skipped_before_signal
 test_foreign_uid_intermediary_keeps_owned_descendant_in_tree
@@ -3197,6 +3239,6 @@ test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
-test_process_exit_during_identity_lookup_does_not_refuse
+test_process_exit_mid_scan_converges_without_refusal
 test_real_proc_scan_reaches_a_verdict
 test_run_abort_precedes_process_reap_precedes_worktree_removal

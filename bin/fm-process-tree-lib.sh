@@ -68,8 +68,10 @@ FM_PROCESS_RECORD_ERROR_PID=
 FM_PROCESS_FOUND_IDENTITY=
 FM_PROCESS_RECORD_PIDS=
 FM_PROCESS_WALK_RECORDS=
+FM_PROCESS_STAT_PPID=
 FM_PROCESS_STAT_STATE=
 FM_PROCESS_STAT_STARTTIME=
+FM_PROCESS_PROC_UID=
 FM_PROCESS_UNCOVERED_PIDS=
 
 fm_process_error() {  # <message>
@@ -78,7 +80,7 @@ fm_process_error() {  # <message>
 }
 
 fm_process_snapshot() {
-  local output line pid ppid uid state extra value identity
+  local proc_root proc_dir line pid ppid uid state starttime identity
   FM_PROCESS_SNAPSHOT=
   FM_PROCESS_CURRENT_UID=$(id -u 2>/dev/null) || {
     fm_process_error "cannot determine the current user's uid"
@@ -90,53 +92,49 @@ fm_process_snapshot() {
       return 1
       ;;
   esac
-  output=$(LC_ALL=C ps -eo pid=,ppid=,uid=,stat= 2>/dev/null) || {
-    fm_process_error "process snapshot failed"
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || {
+    fm_process_error "/proc process-cwd enumeration is unavailable"
     return 1
   }
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    pid=; ppid=; uid=; state=; extra=
-    read -r pid ppid uid state extra <<< "$line"
-    [ -n "$pid" ] && [ -n "$ppid" ] && [ -n "$uid" ] && [ -n "$state" ] || {
-      fm_process_error "process snapshot contained an incomplete row"
-      return 1
-    }
-    for value in "$pid" "$ppid" "$uid"; do
-      case "$value" in
-        ''|*[!0-9]*)
-          fm_process_error "process snapshot contained an invalid pid, ppid, or uid"
-          return 1
-          ;;
-      esac
-    done
-    [ -z "$extra" ] || {
-      fm_process_error "process snapshot contained unexpected columns"
-      return 1
-    }
-    identity=
-    if [ "$uid" = "$FM_PROCESS_CURRENT_UID" ]; then
-      case "$state" in
-        Z*) ;;
-        *)
-          if ! identity=$(fm_process_identity "$pid"); then
-            if kill -0 "$pid" 2>/dev/null; then
-              fm_process_error "cannot bind process identity for live snapshot pid $pid"
-              return 1
-            fi
-            continue
-          fi
-          ;;
-      esac
+  for proc_dir in "$proc_root"/[0-9]*; do
+    [ -d "$proc_dir" ] || continue
+    pid=${proc_dir##*/}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ! fm_process_stat_record "$pid"; then
+      if kill -0 "$pid" 2>/dev/null; then
+        fm_process_error "cannot bind process identity for live snapshot pid $pid"
+        return 1
+      fi
+      continue
     fi
+    ppid=$FM_PROCESS_STAT_PPID
+    state=$FM_PROCESS_STAT_STATE
+    starttime=$FM_PROCESS_STAT_STARTTIME
+    if ! fm_process_proc_uid "$pid"; then
+      [ -d "$proc_dir" ] || continue
+      fm_process_error "cannot determine /proc ownership for live snapshot pid $pid"
+      return 1
+    fi
+    uid=$FM_PROCESS_PROC_UID
+    if fm_process_record_status "$pid" "starttime=$starttime"; then
+      case "$FM_PROCESS_RECORD_STATUS" in
+        matching) ;;
+        *) continue ;;
+      esac
+    else
+      fm_process_error "cannot bind process identity for live snapshot pid $pid"
+      return 1
+    fi
+    identity="starttime=$starttime"
     printf -v line '%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$uid" "$state" "$identity"
     FM_PROCESS_SNAPSHOT=${FM_PROCESS_SNAPSHOT}${line}
-  done <<< "$output"
+  done
 }
 
 fm_process_cwd_pids_proc() {  # <canonical-root>
   local dir=$1 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  local line pid ppid uid state identity cwd stat_line considered=0 inspected=0
+  local line pid ppid uid state identity cwd rc considered=0 inspected=0
   FM_PROCESS_ROOT_PIDS=
   FM_PROCESS_ROOT_RECORDS=
   [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || {
@@ -158,18 +156,25 @@ fm_process_cwd_pids_proc() {  # <canonical-root>
       inspected=$((inspected + 1))
       case "$cwd" in
         "$dir"|"$dir"/*)
-          if ! fm_process_identity_matches "$pid" "$identity"; then
-            fm_process_error "cwd root pid $pid changed identity during /proc coverage"
-            return 1
+          if fm_process_require_matching_record "$pid" "$identity" "cwd root"; then
+            :
+          else
+            rc=$?
+            return "$rc"
           fi
           FM_PROCESS_ROOT_PIDS=${FM_PROCESS_ROOT_PIDS}${pid}$'\n'
           FM_PROCESS_ROOT_RECORDS=${FM_PROCESS_ROOT_RECORDS}${pid}$'\t'${identity}$'\n'
           ;;
       esac
     else
-      [ -e "$proc_root/$pid" ] || continue
-      if stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null); then
-        case "${stat_line##*) }" in Z\ *) continue ;; esac
+      if fm_process_record_status "$pid" "$identity"; then
+        case "$FM_PROCESS_RECORD_STATUS" in
+          matching) ;;
+          gone|replaced|non-live) continue ;;
+        esac
+      else
+        fm_process_error "cannot bind process identity for live cwd-inspection pid $pid"
+        return 1
       fi
       # Live, ours, and its cwd cannot be read (a nondumpable process: the user
       # session manager, its pam helper, and the ssh session processes are all
@@ -178,7 +183,9 @@ fm_process_cwd_pids_proc() {  # <canonical-root>
       # the owned tree is known: still outside the tree means no evidence it is
       # ours, so it is disclosed and teardown proceeds. Refusing here instead
       # would refuse on every ordinary host forever, which is a guard that never
-      # cleans anything - as useless as one that always passes.
+      # cleans anything - as useless as one that always passes. A pid that is
+      # already gone here is ordinary churn, not a leak and not a refusal: it is
+      # skipped, exactly like a pid that disappears during the snapshot.
       FM_PROCESS_UNCOVERED_PIDS=${FM_PROCESS_UNCOVERED_PIDS}${pid}$'\n'
       continue
     fi
@@ -218,6 +225,23 @@ fm_process_snapshot_uid_for_pid() {  # <pid>
   return 1
 }
 
+fm_process_proc_uid() {  # <pid>
+  local pid=$1 proc_root key real_uid rest
+  FM_PROCESS_PROC_UID=
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/status" ]; then
+    while IFS=$'\t ' read -r key real_uid rest; do
+      [ "$key" = Uid: ] || continue
+      case "$real_uid" in ''|*[!0-9]*) return 1 ;; esac
+      FM_PROCESS_PROC_UID=$real_uid
+      return 0
+    done < "$proc_root/$pid/status"
+  fi
+  real_uid=$(stat -Lc '%u' "$proc_root/$pid" 2>/dev/null) || return 1
+  case "$real_uid" in ''|*[!0-9]*) return 1 ;; esac
+  FM_PROCESS_PROC_UID=$real_uid
+}
+
 # /proc is the sole birth-identity authority, exactly as it is the sole coverage
 # authority. There is deliberately no `ps -o lstart` fallback: lstart resolves
 # only to the second, so it cannot distinguish a PID reused within that second
@@ -233,6 +257,7 @@ fm_process_snapshot_uid_for_pid() {  # <pid>
 fm_process_stat_record() {  # <pid>
   local pid=$1 proc_root stat_line
   local -a stat_fields
+  FM_PROCESS_STAT_PPID=
   FM_PROCESS_STAT_STATE=
   FM_PROCESS_STAT_STARTTIME=
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
@@ -241,8 +266,10 @@ fm_process_stat_record() {  # <pid>
   read -r -a stat_fields <<< "${stat_line##*)}"
   [ "${#stat_fields[@]}" -ge 20 ] || return 1
   FM_PROCESS_STAT_STATE=${stat_fields[0]}
+  FM_PROCESS_STAT_PPID=${stat_fields[1]}
   FM_PROCESS_STAT_STARTTIME=${stat_fields[19]}
   [ -n "$FM_PROCESS_STAT_STATE" ] || return 1
+  case "$FM_PROCESS_STAT_PPID" in ''|*[!0-9]*) return 1 ;; esac
   case "$FM_PROCESS_STAT_STARTTIME" in ''|*[!0-9]*) return 1 ;; esac
 }
 
@@ -275,6 +302,18 @@ fm_process_record_status() {  # <pid> <identity>
     return 1
   fi
   FM_PROCESS_RECORD_STATUS=gone
+}
+
+fm_process_require_matching_record() {  # <pid> <identity> <context>
+  local pid=$1 identity=$2 context=$3
+  if fm_process_record_status "$pid" "$identity"; then
+    case "$FM_PROCESS_RECORD_STATUS" in
+      matching) return 0 ;;
+      gone|replaced|non-live) return 2 ;;
+    esac
+  fi
+  fm_process_error "cannot bind process identity for live $context pid $pid"
+  return 1
 }
 
 fm_process_record_identity_in_list() {  # <records> <pid>
@@ -341,7 +380,7 @@ EOF
 
 fm_process_collect_candidate() {  # <canonical-root>...
   local canonical root_record root pid ppid uid state child identity child_identity
-  local queue_record sorted_pids sorted_records
+  local queue_record sorted_pids sorted_records rc
   local included='' visited='' roots_text='' records='' unresolved=''
   local -a roots queue
   local queue_index=0
@@ -350,6 +389,7 @@ fm_process_collect_candidate() {  # <canonical-root>...
   FM_PROCESS_CANDIDATE_PIDS=
   FM_PROCESS_CANDIDATE_RECORDS=
   FM_PROCESS_UNCOVERED_PIDS=
+  FM_PROCESS_FAILED_DIR=${1:-}
   fm_process_snapshot || return 1
 
   for canonical in "$@"; do
@@ -401,7 +441,12 @@ fm_process_collect_candidate() {  # <canonical-root>...
     [ "$FM_PROCESS_MATCH_UID" = "$FM_PROCESS_CURRENT_UID" ] || continue
     [ -n "$identity" ] || continue
     [ "$FM_PROCESS_MATCH_IDENTITY" = "$identity" ] || continue
-    fm_process_identity_matches "$root" "$identity" || continue
+    if fm_process_record_status "$root" "$identity"; then
+      [ "$FM_PROCESS_RECORD_STATUS" = matching ] || continue
+    else
+      fm_process_error "cannot bind process identity for live retained walk pid $root"
+      return 1
+    fi
     visited=${visited}${root}$'\n'
     queue+=("$root"$'\t'"$identity")
     fm_process_pid_list_contains "$included" "$root" && continue
@@ -413,11 +458,11 @@ fm_process_collect_candidate() {  # <canonical-root>...
     queue_record=${queue[$queue_index]}
     queue_index=$((queue_index + 1))
     IFS=$'\t' read -r pid identity <<< "$queue_record"
-    if [ "$identity" != foreign ]; then
-      if ! fm_process_identity_matches "$pid" "$identity"; then
-        fm_process_error "identity-bound walk pid $pid changed before descendant discovery"
-        return 1
-      fi
+    if fm_process_require_matching_record "$pid" "$identity" "walk"; then
+      :
+    else
+      rc=$?
+      return "$rc"
     fi
     while IFS=$'\t' read -r child ppid uid state child_identity; do
       [ -n "$child" ] || continue
@@ -426,17 +471,19 @@ fm_process_collect_candidate() {  # <canonical-root>...
       [ "$child" != "${FM_PROCESS_EXCLUDE_PID:-}" ] || continue
       fm_process_pid_list_contains "$visited" "$child" && continue
       visited=${visited}${child}$'\n'
-      if [ "$uid" != "$FM_PROCESS_CURRENT_UID" ]; then
-        queue+=("$child"$'\t'foreign)
-        continue
-      fi
       [ -n "$child_identity" ] || {
         fm_process_error "descendant pid $child has no birth identity"
         return 1
       }
-      if ! fm_process_identity_matches "$child" "$child_identity"; then
-        fm_process_error "identity-bound descendant pid $child changed during discovery"
-        return 1
+      if fm_process_require_matching_record "$child" "$child_identity" "descendant"; then
+        :
+      else
+        rc=$?
+        return "$rc"
+      fi
+      if [ "$uid" != "$FM_PROCESS_CURRENT_UID" ]; then
+        queue+=("$child"$'\t'"$child_identity")
+        continue
       fi
       queue+=("$child"$'\t'"$child_identity")
       included=${included}${child}$'\n'
