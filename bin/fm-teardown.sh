@@ -73,7 +73,14 @@
 # reap, branch deletion, or treehouse return, teardown then proves that the
 # worktree's current treehouse lease or slot identity still belongs to this
 # task. Path equality is not ownership because pooled
-# paths are reused. Pre-schema writer metadata that lacks treehouse_lease and
+# paths are reused. The reverse is also true: once the occupancy proof shows
+# this task holds the live lease on that path, another record naming the same
+# path is a claim only when it names that same live lease, because a pooled
+# slot re-leased to this task leaves the previous holder's record behind. That
+# lease comes from the occupancy proof above and from no other authority, so a
+# task that cannot prove a live lease - including every Orca task, which has no
+# Treehouse lease - keeps the conservative path-only refusal.
+# Pre-schema writer metadata that lacks treehouse_lease and
 # treehouse_slot may still complete when a unique occupancy row is leased or
 # in-use with lease_holder equal to this task id; teardown uses that live
 # occupancy for return and does not rewrite the old record. Missing path,
@@ -1309,8 +1316,18 @@ teardown_worktree_abs() {
   printf '%s\n' "$target"
 }
 
-teardown_other_task_claims_worktree() {
-  local abs=$1 meta other_id other_wt other_abs
+# teardown_meta_records_lease: <meta-file> carries <lease> on any
+# treehouse_lease= line. Contradictory lease lines therefore still match the
+# live lease they name, so ambiguous metadata stays fail-closed.
+teardown_meta_records_lease() {  # <meta-file> <lease>
+  grep -Fxq "treehouse_lease=$2" "$1" 2>/dev/null
+}
+
+# teardown_other_task_claims_worktree: <proven-lease> is this task's live
+# Treehouse lease as proven by the occupancy row, or empty when no such proof
+# exists. Without that proof, path equality alone is a claim.
+teardown_other_task_claims_worktree() {  # <abs-worktree> [proven-lease]
+  local abs=$1 proven_lease=${2:-} meta other_id other_wt other_abs
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     other_id=$(basename "$meta" .meta)
@@ -1319,8 +1336,25 @@ teardown_other_task_claims_worktree() {
     [ -n "$other_wt" ] || continue
     other_abs=$(teardown_worktree_abs "$other_wt") || continue
     [ "$other_abs" = "$abs" ] || continue
+    [ -n "$proven_lease" ] || return 0
+    # This task holds the live lease on the path, so a record that does not
+    # name that lease describes a superseded occupancy of a re-leased pooled
+    # slot rather than a live claim.
+    teardown_meta_records_lease "$meta" "$proven_lease" || continue
     return 0
   done
+  return 1
+}
+
+teardown_refuse_other_task_claim() {
+  local abs proven_lease=
+  [ -n "$WT" ] || return 0
+  abs=$(teardown_worktree_abs "$WT") || abs=$WT
+  if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$TEARDOWN_OCCUPANCY_HOLDER" = "$ID" ]; then
+    proven_lease=$TEARDOWN_OCCUPANCY_LEASE
+  fi
+  teardown_other_task_claims_worktree "$abs" "$proven_lease" || return 0
+  echo "REFUSED: worktree $WT is now recorded for another task; preserving $ID and leaving the live slot untouched." >&2
   return 1
 }
 
@@ -1423,17 +1457,24 @@ teardown_prove_available_occupancy_is_stale() {
   TEARDOWN_WORKTREE_OWNED=0
 }
 
+# The claim gate runs after occupancy resolution so it can consume the lease
+# that resolution proved. Orca has no Treehouse lease authority to prove, so it
+# supplies none and keeps the conservative path-only refusal.
 teardown_prove_worktree_occupancy() {
+  TEARDOWN_CLAIM_GATE_APPLIES=0
+  teardown_resolve_worktree_occupancy || return 1
+  [ "$TEARDOWN_CLAIM_GATE_APPLIES" = 1 ] || return 0
+  teardown_refuse_other_task_claim || return 1
+}
+
+teardown_resolve_worktree_occupancy() {
   local abs recorded_lease recorded_slot entry lookup_rc status current_lease current_holder current_slot
   TEARDOWN_WORKTREE_OWNED=0
   TEARDOWN_WORKTREE_STALE=0
   TEARDOWN_OCCUPANCY_LEASE=
   TEARDOWN_OCCUPANCY_HOLDER=
   if [ "$BACKEND" = orca ]; then
-    if [ -n "$WT" ] && teardown_other_task_claims_worktree "$(teardown_worktree_abs "$WT")"; then
-      echo "REFUSED: worktree $WT is now recorded for another task; preserving $ID and leaving the live slot untouched." >&2
-      return 1
-    fi
+    TEARDOWN_CLAIM_GATE_APPLIES=1
     TEARDOWN_WORKTREE_OWNED=1
     return 0
   fi
@@ -1448,10 +1489,7 @@ teardown_prove_worktree_occupancy() {
     return 1
   fi
   abs=$(teardown_worktree_abs "$WT") || abs=$WT
-  if teardown_other_task_claims_worktree "$abs"; then
-    echo "REFUSED: worktree $WT is now recorded for another task; preserving $ID and leaving the live slot untouched." >&2
-    return 1
-  fi
+  TEARDOWN_CLAIM_GATE_APPLIES=1
   if [ -d "$WT" ] || [ -n "$recorded_lease" ] || [ -n "$recorded_slot" ]; then
     if ! command -v treehouse >/dev/null 2>&1; then
       echo "REFUSED: treehouse occupancy for $ID is unreadable; preserving task state." >&2
