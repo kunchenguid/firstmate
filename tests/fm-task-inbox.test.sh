@@ -20,7 +20,11 @@
 #      acknowledgement resets the ladder for the next message. Its two other
 #      stated bounds escalate too: a PROVEN composer block, which no number of
 #      identical skips could ever deliver past, and the ABSOLUTE unhandled
-#      bound, which holds even when nothing was ever due.
+#      bound, which holds even when nothing was ever due and is deduplicated
+#      on the record's own identity, so it speaks once per record even though
+#      no delivery attempt is ever recorded for it. A non-file squatting on a
+#      sidecar path is never mistaken for an orphan, which would otherwise
+#      starve every rung of the ladder behind it.
 #   5. The acknowledgement-gated decision closure: a parked closure stays
 #      uncommitted while its record is unread (so the decision keeps reading
 #      open, which is the whole point), commits the moment the worker
@@ -39,8 +43,9 @@
 #      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, emits exactly
 #      one stale wake once the ring budget is spent, escalates an unread record
-#      past the absolute bound even while the pane reads busy (saying so, so
-#      recovery can tell busy-and-unread from stopped), names the decision an
+#      past the absolute bound exactly once even while the pane reads busy
+#      (saying so, so recovery can tell busy-and-unread from stopped and a
+#      long tool call does not cost a captain turn per poll), names the decision an
 #      undelivered answer is holding open, commits a deferred closure once the
 #      worker acknowledges it, and surfaces a closure that cannot commit
 #      exactly once instead of on every poll.
@@ -423,6 +428,80 @@ test_ladder_absolute_bound_escalates_with_nothing_else_due() {
   [ "$action" = quiet ] \
     || fail "the absolute bound must be the only thing speaking here, got: $action"
   pass "inbox: the absolute unhandled bound escalates even when no attempt was ever due"
+}
+
+# THE REGRESSION for the absolute bound's dedupe. `overdue` is the one cause
+# that fires on polls which record no delivery attempt at all - a busy pane
+# suppresses every one of them - so nothing ever writes .ring-state. Aging the
+# .escalated marker against .ring-state therefore deleted, on the very next
+# poll, the marker the previous poll had just written, and the same record
+# escalated forever: one no-op captain turn per poll for the whole length of a
+# long tool call, from the bound added to END that silence.
+test_overdue_escalation_is_deduped_without_any_delivery_attempt() {
+  local state rec rec2 action i
+  state="$TMP_ROOT/overdue-dedupe/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "hard stop")
+  age_path "$rec"
+  action=$(FM_TASK_INBOX_GRACE_SECS=$FM_TEST_INBOX_BOUND_OFF FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_UNHANDLED_MAX_SECS=900 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate 0 overdue $rec" ] \
+    || fail "the absolute bound should escalate once, got: $action"
+  # The busy-pane shape, stated rather than assumed: no attempt was ever due,
+  # so the attempt ladder holds nothing for the marker to be aged against.
+  [ ! -e "$state/t1.inbox/.ring-state" ] \
+    || fail "this case must reach the marker with no attempt ladder recorded"
+  inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$rec" \
+    || fail "could not record the escalation marker"
+  for i in 1 2 3; do
+    action=$(FM_TASK_INBOX_GRACE_SECS=$FM_TEST_INBOX_BOUND_OFF FM_TASK_INBOX_RING_MAX=99 \
+      FM_TASK_INBOX_UNHANDLED_MAX_SECS=900 \
+      inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+    [ "$action" = quiet ] \
+      || fail "poll $i re-escalated a record already surfaced as overdue: $action"
+  done
+  [ "$(cat "$state/t1.inbox/.escalated" 2>/dev/null || true)" = "${rec##*/}" ] \
+    || fail "a poll that recorded no attempt cleared the escalation marker"
+  # Quiet is a dedupe, never a mute: the next unacknowledged record past the
+  # same bound still speaks for itself.
+  mv "$rec" "$state/t1.inbox/handled/"
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "second hard stop")
+  age_path "$rec2"
+  action=$(FM_TASK_INBOX_GRACE_SECS=$FM_TEST_INBOX_BOUND_OFF FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_UNHANDLED_MAX_SECS=900 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate 0 overdue $rec2" ] \
+    || fail "a later record past the bound was silenced by the previous record's marker: $action"
+  pass "inbox: an overdue escalation with no attempt recorded fires once per record, not on every poll"
+}
+
+# THE REGRESSION for the orphan scan's file test. The orphaned cause is checked
+# first in fm_task_inbox_due_action and returns unconditionally, so anything it
+# wrongly calls an orphan starves the entire ladder for that task - and the
+# watcher's escalate branch then drops that action silently because the path is
+# not a regular file. A NON-file squatting on a .NNN.resolve path carries no
+# closure and holds no sequence (fm_task_inbox_next_seq already refuses to
+# count it), so it must not be readable as one here either.
+test_a_non_file_on_a_sidecar_path_never_starves_the_ladder() {
+  local state rec action listed
+  state="$TMP_ROOT/sidecar-nonfile/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  mkdir "$state/t1.inbox/.009.resolve"
+  action=$(ladder "$state" FM_TASK_INBOX_GRACE_SECS=1 FM_TASK_INBOX_RING_MAX=3)
+  [ "$action" = "ring $rec" ] \
+    || fail "a non-file on a sidecar path starved a real record's ladder: $action"
+  listed=$(inbox_lib "$state" fm_task_inbox_pending_resolutions "$state" t1)
+  [ -z "$listed" ] || fail "a non-file was listed as a parked closure: $listed"
+  listed=$(inbox_lib "$state" fm_task_inbox_pending_answer_keys "$state" t1)
+  [ -z "$listed" ] || fail "a non-file was read as an answer in flight: $listed"
+  # And the record it was hiding still reaches every later rung on its own.
+  action=$(FM_TASK_INBOX_GRACE_SECS=1 FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_UNHANDLED_MAX_SECS=900 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate 0 overdue $rec" ] \
+    || fail "the record hidden behind the non-file never reached the absolute bound: $action"
+  pass "inbox: a non-file squatting on a sidecar path is never an orphan and never starves the ladder"
 }
 
 # --- acknowledgement-gated decision closure ---------------------------------
@@ -1240,7 +1319,7 @@ test_watcher_escalates_once_after_budget() {
 # pane must not be able to hold an unread instruction in silence. The doorbell
 # is still never typed into a busy pane - that fail-safe is unchanged.
 test_watcher_escalates_overdue_on_busy_pane() {
-  local dir state out log pid rec
+  local dir state out log pid rec queue_after_ack
   dir=$(setup_watch_case busy-overdue)
   state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
   printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
@@ -1260,7 +1339,29 @@ test_watcher_escalates_overdue_on_busy_pane() {
     || fail "the wake should name the absolute bound it crossed:"$'\n'"$(cat "$state/.wake-queue")"
   grep -qF 'while the pane reads busy' "$state/.wake-queue" \
     || fail "the wake should say the pane read busy, so recovery does not treat a long tool call as a stopped worker:"$'\n'"$(cat "$state/.wake-queue")"
-  pass "watcher: a busy pane no longer holds an unread instruction in silence forever"
+
+  # ...and then stays quiet. The pane is still busy and the record is still
+  # unread, which is the case a long tool call produces for as long as it runs:
+  # the bound must speak once and hand the record to recovery, not spend a
+  # captain turn on every poll until the worker finally reaches a boundary.
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>"$dir/drain.err" || true
+  ack_drain_err "$state" "$dir/drain.err" >/dev/null || fail "could not acknowledge the surfaced wake"
+  queue_after_ack=$(cat "$state/.wake-queue" 2>/dev/null || true)
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
+    FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_UNHANDLED_MAX_SECS=1
+  pid=$!
+  if wait_watcher_gone "$pid" 40; then
+    fail "a surfaced overdue record woke firstmate again on a later poll:"$'\n'"$(cat "$out")"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  fi
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$queue_after_ack" ] \
+    || fail "later polls queued another wake for the same overdue record:"$'\n'"$(cat "$state/.wake-queue")"
+  [ ! -s "$log" ] || fail "the doorbell must still never be typed into a busy pane:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "the unread record disappeared while the ladder was quiet"
+  pass "watcher: a busy pane no longer holds an unread instruction in silence forever, and the bound speaks once"
 }
 
 # The same bound on an idle pane says so too: the verdict is what lets
@@ -1509,6 +1610,8 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
 test_ladder_escalates_a_proven_composer_block
 test_ladder_absolute_bound_escalates_with_nothing_else_due
+test_overdue_escalation_is_deduped_without_any_delivery_attempt
+test_a_non_file_on_a_sidecar_path_never_starves_the_ladder
 test_deferred_closure_waits_for_the_acknowledgement
 test_deferred_closure_needs_a_complete_acknowledgement
 test_deferred_closure_refuses_an_empty_key_set

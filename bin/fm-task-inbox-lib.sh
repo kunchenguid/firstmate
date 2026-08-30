@@ -35,7 +35,12 @@
 #   <task>.inbox/.ring-state   watcher re-ring ladder:
 #                              "<msg>\t<count>\t<epoch>\t<blocked-count>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
-#                              so later polls suppress another escalation
+#                              so later polls suppress another escalation. It
+#                              is aged against its OWN recorded name, not
+#                              against .ring-state: the overdue cause fires
+#                              with no delivery attempt ever recorded, so
+#                              tying its dedupe to the attempt ladder would
+#                              clear the marker before the next poll reads it
 #   <task>.inbox/.commit-escalated
 #                              closure names whose failed commit was already
 #                              surfaced, so later polls retry them quietly
@@ -564,12 +569,18 @@ fm_task_inbox_is_acknowledged() {  # <record-path>
 # (_fm_task_inbox_sidecar_is_surfaced_orphan) is skipped here, in the scan
 # itself: an orphan whose marker was written but whose retirement into
 # handled/orphaned/ failed would otherwise stay the oldest match forever and
-# hide every later orphan behind it. Oldest by sequence; empty when none.
+# hide every later orphan behind it. Regular files only, like every other
+# reader of a sidecar path: a NON-file squatting there carries no closure, and
+# admitting it here would hand the ladder a permanent orphan that returns
+# before the .msg scan on every poll and so starves the whole re-ring ladder
+# for that task - the very silence this cause exists to break. It is left for
+# fm_task_inbox_next_seq and fm_task_inbox_defer_resolution to refuse loudly.
+# Oldest by sequence; empty when none.
 _fm_task_inbox_orphaned_sidecar() {  # <state-dir> <task-id>
   local dir f rec best='' best_n=0 n
   dir=$(fm_task_inbox_dir "$1" "$2")
   for f in "$dir"/.*.resolve; do
-    [ -e "$f" ] || continue
+    [ -f "$f" ] || continue
     ! _fm_task_inbox_sidecar_is_surfaced_orphan "$f" || continue
     rec=$(fm_task_inbox_resolution_record "$f")
     [ ! -e "$rec" ] || continue
@@ -596,13 +607,14 @@ _fm_task_inbox_sidecar_is_surfaced_orphan() {  # <sidecar-path>
 
 # Sidecars in this task's inbox, in sequence order, filtered by whether their
 # record has been acknowledged. A surfaced orphan is neither: it is skipped
-# whether or not its retirement out of the root has succeeded yet. One path per
-# line; silent when there are none.
+# whether or not its retirement out of the root has succeeded yet. Regular
+# files only, so a non-file squatting on a sidecar path is never reported as a
+# closure this inbox holds. One path per line; silent when there are none.
 _fm_task_inbox_resolutions() {  # <state-dir> <task-id> <acknowledged|pending>
   local dir want=$3 f rec
   dir=$(fm_task_inbox_dir "$1" "$2")
   for f in "$dir"/.*.resolve; do
-    [ -e "$f" ] || continue
+    [ -f "$f" ] || continue
     ! _fm_task_inbox_sidecar_is_surfaced_orphan "$f" || continue
     rec=$(fm_task_inbox_resolution_record "$f")
     if fm_task_inbox_is_acknowledged "$rec"; then
@@ -821,7 +833,7 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base age now grace max ladder rec_base count last blocked orphan
+  local dir oldest base age now grace max ladder rec_base count last blocked orphan escalated
   dir=$(fm_task_inbox_dir "$1" "$2")
   _fm_task_inbox_retire_surfaced_orphans "$dir"
   # Checked before the .msg-based scan below, and independently of it: an
@@ -856,12 +868,22 @@ EOF
     count=0
     last=0
     blocked=0
-    rm -f "$dir/.escalated" 2>/dev/null || true
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
   case "$blocked" in ''|*[!0-9]*) blocked=0 ;; esac
-  if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
+  # The escalation marker carries its own record identity and is aged against
+  # THAT, never against the attempt ladder. The overdue cause fires on polls
+  # that record no delivery attempt at all - a busy pane suppresses every one
+  # of them - so .ring-state can legitimately name nothing while .escalated is
+  # the only thing standing between one surfaced record and a stale wake on
+  # every poll for as long as the worker stays busy.
+  escalated=$(cat "$dir/.escalated" 2>/dev/null || true)
+  if [ -n "$escalated" ] && [ "$escalated" != "$base" ]; then
+    rm -f "$dir/.escalated" 2>/dev/null || true
+    escalated=
+  fi
+  if [ "$escalated" = "$base" ]; then
     printf 'quiet'
     return 0
   fi
