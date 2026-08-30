@@ -175,11 +175,12 @@ fi
 if ! fm_remote_job_ensure_worker "$ROOT" "$ACCOUNT_HOME"; then
   die "${FM_REMOTE_JOB_ERROR:-remote job worker is unavailable; run fm-on.sh <route> fm-remote-doctor.sh --fix}"
 fi
-if ! JOB_ID=$(fm_remote_job_stage "$ACCOUNT_HOME" "$ROOT" "$HOME_PATH" "$COMMAND" "${ARGV[@]:1}"); then
+FM_REMOTE_JOB_DISCONNECT_PROBE=entrypoint_caller_connected
+if ! fm_remote_job_stage "$ACCOUNT_HOME" "$ROOT" "$HOME_PATH" "$COMMAND" "${ARGV[@]:1}" >/dev/null; then
   JOB_ID=
   die "${FM_REMOTE_JOB_ERROR:-cannot stage remote job}" 70
 fi
-FM_REMOTE_JOB_DISCONNECT_PROBE=entrypoint_caller_connected
+JOB_ID=$FM_REMOTE_JOB_ID
 if ! fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID"; then
   die "${FM_REMOTE_JOB_ERROR:-remote job did not complete}" 70
 fi

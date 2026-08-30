@@ -121,6 +121,17 @@ jobs:
               exit 1
             fi
             echo "Attestation is bound to pull request head ${PR_HEAD_SHA}."
+            duplicate_steps=$(printf '%s' "$json" | jq -r '
+              if (.steps | type) == "array" then
+                ([.steps[] | select(type == "object") | .step] | group_by(.)[] | select(length > 1) | .[0])
+              else
+                empty
+              end
+            ' 2>/dev/null) || duplicate_steps='invalid'
+            if [ -n "$duplicate_steps" ]; then
+              echo "::error::The no-mistakes pipeline attestation contains duplicate step names: ${duplicate_steps}." >&2
+              exit 1
+            fi
             incomplete=''
             for required in review test document; do
               status=$(printf '%s' "$json" | jq -r --arg step "$required" \

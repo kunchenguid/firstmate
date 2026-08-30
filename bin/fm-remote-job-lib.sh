@@ -665,6 +665,12 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   fm_remote_job_safe_id "$id" || { rm -rf -- "$stage"; return 1; }
   destination="$FM_REMOTE_JOB_JOBS/$id"
   [ ! -e "$destination" ] && [ ! -L "$destination" ] || { rm -rf -- "$stage"; return 1; }
+  if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
+    ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
+    rm -rf -- "$stage"
+    FM_REMOTE_JOB_ERROR="remote job caller disconnected during staging"
+    return 1
+  fi
   if ! fm_remote_job_next_seq "$stage" "$destination" >/dev/null; then
     rm -rf -- "$stage"
     FM_REMOTE_JOB_ERROR="cannot allocate and publish a remote job staging sequence"
@@ -672,6 +678,12 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   fi
   # shellcheck disable=SC2034 # Sourceable API consumed by callers that do not use command substitution.
   FM_REMOTE_JOB_ID=$id
+  if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
+    ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
+    fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || true
+    FM_REMOTE_JOB_ERROR="remote job caller disconnected during staging"
+    return 1
+  fi
   printf '%s\n' "$id"
 }
 

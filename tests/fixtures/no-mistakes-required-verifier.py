@@ -220,6 +220,8 @@ def check_required_steps(facts: Facts, steps: list) -> None:
         status = item.get("status")
         if not isinstance(name, str) or name == "" or not isinstance(status, str):
             fail_missing_attestation(facts)
+        if name in status_by_step:
+            fail(f"::error::The pipeline attestation contains duplicate step {name}.\n")
         status_by_step[name] = status
 
     incomplete = []

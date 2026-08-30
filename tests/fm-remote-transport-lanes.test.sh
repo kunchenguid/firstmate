@@ -7,7 +7,7 @@
 # preserves exit status):
 #   T9: a job for home B completes while home A runs a long job, and two
 #       A-jobs execute strictly in stage order even when staged rapidly.
-#   T3: a caller killed mid-wait cancels its job - the worker never executes a
+#   T3: a caller killed during staging or mid-wait cancels its job - the worker never executes a
 #       cancelled queued job and terminates a running cancelled job's process
 #       group - and a caller whose parent dies without delivering a signal
 #       (the dead-ssh-channel shape) cancels the same way; afterwards a burst
@@ -351,6 +351,32 @@ ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 \
 sleep 2
 assert_absent "$ORPHAN_FINISH" "a job abandoned by a signal-less disconnect ran to completion"
 pass "a signal-less caller disconnect cancels the abandoned job through the parent probe"
+
+STAGING_EFFECT="$TMP_ROOT/staging-disconnect-effect"
+env FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+  FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  bash -c '
+    { printf "staging payload\n"; sleep 2; } | "$1/bin/fm-on.sh" --stdin ios fm-touch-job.sh "$2" >/dev/null 2>&1 &
+    for _ in $(seq 1 200); do
+      for stage in "$3"/jobs/.stage.*; do
+        [ -d "$stage" ] && exit 0
+      done
+      sleep 0.02
+    done
+    exit 1
+  ' _ "$ROOT" "$STAGING_EFFECT" "$STATE_ROOT" \
+  || fail "the staging-disconnect fixture did not observe an active staging record"
+for _ in $(seq 1 300); do
+  ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 || break
+  sleep 0.05
+done
+ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 \
+  && fail "a disconnected staging caller left a queued job record behind"
+sleep 1
+assert_absent "$STAGING_EFFECT" "a disconnected caller's staged job executed after publication"
+pass "a caller disconnect during stdin staging cancels before publication can escape"
 
 # T3: after the cancellations, a burst of short bounded commands meets its own
 # budget - no convoy behind abandoned work.

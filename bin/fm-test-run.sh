@@ -1341,24 +1341,17 @@ families_for_changed_path() {
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
-    tests/fixtures/*/*)
-      # A fixture belongs to whichever suite reads its directory, found by the
-      # same reference scan used for shared helpers. Keyed on the directory
-      # rather than the file so adding a fixture selects the same suite.
-      # A removed fixture directory has no consuming suite left to select.
-      fixture_ref=${path#tests/fixtures/}
-      fixture_ref=${fixture_ref%%/*}
-      if [ -d "tests/fixtures/$fixture_ref" ]; then
-        families_for_test_reference "fixtures/$fixture_ref" \
-          || printf '%s\n' "__unmapped__:$path"
-      fi
+    tests/assets/board-render-harness.mjs)
+      printf '%s\n' __script__:fm-bearings-board-render.test.sh
       ;;
     tests/fixtures/*)
-      # A fixture kept as a single file directly under tests/fixtures/ is named
-      # in full by its consuming suite, so the same reference scan resolves it.
-      # A removed fixture file has no consuming suite left to select.
+      fixture_ref=$path
       if [ -e "$path" ]; then
-        families_for_test_reference "fixtures/${path#tests/fixtures/}" \
+        while case "$fixture_ref" in tests/fixtures/*/*) true ;; *) false ;; esac; do
+          families_for_test_reference "$fixture_ref" && return 0
+          fixture_ref=${fixture_ref%/*}
+        done
+        families_for_test_reference "$fixture_ref" \
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;

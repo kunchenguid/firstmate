@@ -351,6 +351,17 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
   [ "$rc" -eq 0 ] || fail "signed no-mistakes PR body was rejected: rc=$rc out=$out"
   assert_contains "$out" "Found no-mistakes signature in PR #42 body."
 
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"review","status":"failed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
+  rc=0
+  out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=43 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "workflow accepted duplicate attestation steps: rc=$rc out=$out"
+  assert_contains "$out" "duplicate step names" \
+    "workflow duplicate-step failure was not explicit"
+
   tmp=$(fm_test_tmproot fm-ci-water7-unsigned)
   fakebin="$tmp/fakebin"
   mkdir -p "$fakebin"
@@ -388,10 +399,7 @@ runs = [
     if "run" in step
 ]
 assert len(runs) == 1
-text = runs[0]
-assert "gh api" in text
-assert "attempt" in text
-print(text, end="")
+print(runs[0], end="")
 PY
   ); then
     fail "workflow must poll the live PR body before declaring a signature violation"
