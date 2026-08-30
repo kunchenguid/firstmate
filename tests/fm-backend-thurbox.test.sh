@@ -1131,6 +1131,68 @@ test_peek_send_and_crew_state_route_through_thurbox_meta() {
   pass "fm-peek/fm-send/fm-crew-state route through backend=thurbox meta and its durable inbox"
 }
 
+test_spawn_creates_the_task_end_to_end() {
+  reset_world
+  # SPAWN, driven through the operator's own command rather than the adapter.
+  # Every create case above calls fm_backend_thurbox_create_task directly, so
+  # none of them exercises what fm-spawn.sh itself owns for this backend: the
+  # --backend thurbox flag reaching the thurbox arm, the container gate running
+  # before create, the "<uuid>:<pane>" target fm-spawn assembles from create's
+  # two return values, and the thurbox_session_id/thurbox_pane_id meta fields
+  # every later operation re-resolves the pane from. This drives the real
+  # command and reads back exactly what an operator would.
+  local proj wt data state config id out meta title
+  id=spawne2e1
+  proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  data="$TMP_ROOT/spawn-data"; mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/spawn-state"; config="$TMP_ROOT/spawn-config"; mkdir -p "$state" "$config"
+  printf 'config_version = 1\n[[agents]]\nname = "shell"\ncommand = "bash"\n' > "$TMP_ROOT/agents.toml"
+  export FM_TB_AGENTS_TOML="$TMP_ROOT/agents.toml"
+  export FM_TB_CREATE_UUID=$UUID FM_TB_CREATE_PANE='%31' FM_TB_PANES='%31'
+  # fm-spawn polls the pane's cwd to watch `treehouse get` move it into the
+  # worktree; thurbox answers that from the capture response's foreground_cwd.
+  export FM_TB_FG_CWD="$wt"
+
+  # FM_ROOT_OVERRIDE points at the real repo so fm-spawn finds its sibling
+  # scripts; FM_HOME stays the fixture home, which is what the scoped session
+  # title is tagged with.
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FM_ROOT_OVERRIDE" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/spawn-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off \
+      --backend thurbox 2>&1 ) \
+    || fail "fm-spawn --backend thurbox failed: $out"
+
+  meta="$state/$id.meta"
+  [ -f "$meta" ] || fail "fm-spawn recorded no meta for a thurbox task"
+  assert_grep "backend=thurbox" "$meta" "fm-spawn did not record backend=thurbox"
+  assert_grep "window=$UUID:%31" "$meta" \
+    "fm-spawn did not assemble the target from create's uuid and polled pane"
+  assert_grep "thurbox_session_id=$UUID" "$meta" \
+    "fm-spawn did not record the durable thurbox session uuid"
+  assert_grep "thurbox_pane_id=%31" "$meta" \
+    "fm-spawn did not record the pane id breadcrumb"
+
+  # The home tag hashes FM_ROOT, and fm-spawn ran with FM_ROOT pointed at the
+  # real repo (above), so the expected title is derived the same way.
+  title=$(FM_ROOT="$ROOT" fm_backend_thurbox_scoped_title "fm-$id") \
+    || fail "could not compute the expected scoped title"
+  assert_grep $'session\x1fcreate\x1f--name\x1f'"$title" "$FM_TB_LOG" \
+    "fm-spawn did not create the home-scoped thurbox session"
+  # The spawn-time commands (`treehouse get`, the GOTMPDIR export, the harness
+  # launch) reach the pane through thurbox's own 2.10 primitives.
+  assert_grep $'session\x1fsend\x1f'"$UUID"$'\x1f--no-enter\x1f--\x1ftreehouse get' "$FM_TB_LOG" \
+    "fm-spawn did not type the worktree command through session send --no-enter"
+  assert_grep $'session\x1fkey\x1f'"$UUID"$'\x1fenter' "$FM_TB_LOG" \
+    "fm-spawn did not submit a spawn-time command through session key enter"
+  [ ! -s "$FM_TB_TMUXLOG" ] \
+    || fail "the spawn path shelled out to tmux: $(cat "$FM_TB_TMUXLOG")"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn --backend thurbox creates the session and records the durable uuid end to end"
+}
+
 test_list_live_filters_and_skips_unaddressable() {
   reset_world
   add_row "$UUID" "$TITLE" "%20" local-tmux -
@@ -1327,6 +1389,7 @@ test_kill_reclaims_the_row_when_the_window_is_already_gone
 test_kill_still_refuses_a_recycled_uuid_with_no_pane
 test_forced_secondmate_teardown_kills_thurbox_child_with_child_home_tag
 test_peek_send_and_crew_state_route_through_thurbox_meta
+test_spawn_creates_the_task_end_to_end
 test_list_live_filters_and_skips_unaddressable
 test_backend_is_known_and_spawn_capable
 test_endpoint_validation_accepts_consistent_meta
