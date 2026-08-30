@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "invoke /no-mistakes right away" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -352,6 +352,61 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+# A no-mistakes ship brief must carry the worker straight from its
+# implementation commit into validation. The old scaffold told the worker to
+# report `done:` and stop there, which burned a supervision round-trip on every
+# ship task and put a nonterminal `done:` in the status log at the exact moment
+# an unvalidated commit is indistinguishable from a finished task. Every ship
+# mode is asserted here so a mid-task stop cannot reappear in any of them: each
+# generated definition of done must instruct exactly one `done:` line.
+test_ship_briefs_never_instruct_a_mid_task_stop() {
+  local home id brief dod count
+  home="$TMP_ROOT/mid-task-stop-home"
+  mkdir -p "$home/data"
+
+  id="brief-carry-through-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-mistakes brief was not scaffolded"
+  assert_no_grep "When you believe it is complete, append \`done: {summary}\` to the status file and stop." "$brief" \
+    "no-mistakes brief still instructs a mid-task stop after the implementation commit"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes brief still waits for a firstmate handoff before validating"
+  assert_grep "invoke /no-mistakes right away - do not stop and do not wait to be told to start it" "$brief" \
+    "no-mistakes brief lost the carry-through instruction into validation"
+  assert_grep "append \`working: implemented, starting validation\`" "$brief" \
+    "no-mistakes brief must report the implementation milestone with a nonterminal state"
+  # The surviving `done:` must be the terminal CI-green report, and the
+  # hard-won gate rules around it must be untouched.
+  assert_grep "append \`done: PR {url} checks green\` and stop. You are finished." "$brief" \
+    "no-mistakes brief lost its terminal CI-green report"
+  assert_grep "ask-user findings are never yours to answer" "$brief" \
+    "no-mistakes brief lost the ask-user escalation rule"
+  assert_grep "Avoid \`--yes\`" "$brief" \
+    "no-mistakes brief lost the --yes prohibition"
+  assert_grep "Do not hand-edit, commit, or fix findings yourself while a run is active" "$brief" \
+    "no-mistakes brief lost the active-run hands-off rule"
+  assert_grep "do not wait for it to keep monitoring in the background until merge" "$brief" \
+    "no-mistakes brief lost its CI-green return point"
+
+  # Each mode's definition of done instructs exactly one `done:` line, so no
+  # ship brief can ask for a terminal state twice for one task.
+  local mode ids
+  ids=0
+  for mode in no-mistakes direct-PR local-only; do
+    ids=$((ids + 1))
+    id="brief-single-done-c$ids"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode brief was not scaffolded"
+    dod=$(sed -n '/^# Definition of done$/,$p' "$brief")
+    count=$(printf '%s\n' "$dod" | grep -c -F 'append `done:' || true)
+    [ "$count" -eq 1 ] \
+      || fail "$mode definition of done instructs $count \`done:\` lines, expected exactly 1"
+  done
+  pass "fm-brief.sh: ship briefs carry through to their single terminal report"
 }
 
 test_ship_project_memory_wording() {
@@ -760,6 +815,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_ship_briefs_never_instruct_a_mid_task_stop
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
