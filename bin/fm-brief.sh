@@ -84,6 +84,7 @@ esac
 . "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 COMMITTED_RECEIPT_CONTRACT=$(fm_delivery_committed_receipt_contract)
+SERIALIZED_STATUS_CONTRACT=$(fm_delivery_serialized_status_contract)
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -404,7 +405,8 @@ esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 if [ "$MODE" = no-mistakes ]; then
   DOD=${DOD/'Delivery contract: mode=no-mistakes'/"Delivery contract: mode=no-mistakes
-$COMMITTED_RECEIPT_CONTRACT"}
+$COMMITTED_RECEIPT_CONTRACT
+$SERIALIZED_STATUS_CONTRACT"}
   DOD=${DOD/'done: {summary}'/"$COMMITTED_RECEIPT_EVENT"}
 fi
 

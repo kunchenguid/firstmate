@@ -287,6 +287,8 @@ test_ship_mode_is_explicit_not_registry() {
     || fail "registered direct-PR posture overrode the explicit --mode"
   grep -qx "Delivery receipt contract: committed-head-v1" "$brief" \
     || fail "explicit no-mistakes brief omitted the committed-head receipt contract"
+  grep -qx "Status producer contract: serialized-status-v1" "$brief" \
+    || fail "explicit no-mistakes brief omitted serialized status provenance"
   assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
   # shellcheck disable=SC2016 # Command substitutions are literal generated brief text.

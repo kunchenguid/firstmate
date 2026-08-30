@@ -247,10 +247,11 @@ FM_SEND_HEAD_GUARD_PREPARED=0
 FM_SEND_INBOX_META_LOCK_HELD=
 FM_SEND_INBOX_SEQ_LOCK_HELD=
 FM_SEND_STATUS_LOCK_HELD=
+FM_SEND_CAPTAIN_HOLD_LOCK_HELD=
 INBOX_TASK_ID=
 
 fm_task_inbox_publish_guard() {
-  local current status_file
+  local current current_keys status_file
   if [ -n "${FM_SEND_EXPECTED_STATUS_SIGNATURE:-}" ]; then
     [ -n "$INBOX_TASK_ID" ] || return 1
     status_file="$STATE/$INBOX_TASK_ID.status"
@@ -259,8 +260,14 @@ fm_task_inbox_publish_guard() {
   fi
   if [ "${FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE:-0}" = 1 ]; then
     [ -n "$INBOX_TASK_ID" ] || return 1
-    current=$("$SCRIPT_DIR/fm-captain-hold.sh" inventory-state "$INBOX_TASK_ID" 2>/dev/null) || return 1
-    [ "$current" = "${FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE:-}" ] || return 1
+    current_keys=$(sed -n 's/^decision_keys=//p' "$STATE/$INBOX_TASK_ID.meta" 2>/dev/null | tail -1) \
+      || return 1
+    [ "$current_keys" = "${FM_SEND_EXPECTED_DECISION_KEYS:-}" ] || return 1
+    if [ -n "$current_keys" ]; then
+      current=$("$SCRIPT_DIR/fm-captain-hold.sh" inventory-state "$INBOX_TASK_ID" 2>/dev/null) \
+        || return 1
+      [ "$current" = "${FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE:-}" ] || return 1
+    fi
   fi
 }
 
@@ -343,6 +350,10 @@ fm_send_cleanup() {
   if [ -n "$FM_SEND_INBOX_META_LOCK_HELD" ]; then
     fm_lock_release "$FM_SEND_INBOX_META_LOCK_HELD"
     FM_SEND_INBOX_META_LOCK_HELD=
+  fi
+  if [ -n "$FM_SEND_CAPTAIN_HOLD_LOCK_HELD" ]; then
+    fm_lock_release "$FM_SEND_CAPTAIN_HOLD_LOCK_HELD"
+    FM_SEND_CAPTAIN_HOLD_LOCK_HELD=
   fi
   fm_lease_guard_release
 }
@@ -994,6 +1005,11 @@ else
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+    if [ "${FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE:-0}" = 1 ]; then
+      CAPTAIN_HOLD_LOCK=$(fm_captain_hold_publication_lock_path "$STATE") || exit 1
+      fm_task_inbox_lock_acquire "$CAPTAIN_HOLD_LOCK" || exit 1
+      FM_SEND_CAPTAIN_HOLD_LOCK_HELD=$CAPTAIN_HOLD_LOCK
+    fi
     INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
     if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -1047,7 +1063,8 @@ else
     fi
 
     if [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ] \
-      || [ -n "${FM_SEND_EXPECTED_STATUS_SIGNATURE:-}" ]; then
+      || [ -n "${FM_SEND_EXPECTED_STATUS_SIGNATURE:-}" ] \
+      || [ "${FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE:-0}" = 1 ]; then
       INBOX_DIR=$(fm_task_inbox_dir "$STATE" "$INBOX_TASK_ID")
       mkdir -p "$INBOX_DIR/handled" || inbox_write_rc=1
       INBOX_SEQ_LOCK="$INBOX_DIR/.seq.lock"
@@ -1105,6 +1122,10 @@ else
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"
       FM_SEND_INBOX_META_LOCK_HELD=
+      if [ -n "$FM_SEND_CAPTAIN_HOLD_LOCK_HELD" ]; then
+        fm_lock_release "$FM_SEND_CAPTAIN_HOLD_LOCK_HELD"
+        FM_SEND_CAPTAIN_HOLD_LOCK_HELD=
+      fi
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -1113,6 +1134,10 @@ else
     fi
     fm_lock_release "$INBOX_META_LOCK"
     FM_SEND_INBOX_META_LOCK_HELD=
+    if [ -n "$FM_SEND_CAPTAIN_HOLD_LOCK_HELD" ]; then
+      fm_lock_release "$FM_SEND_CAPTAIN_HOLD_LOCK_HELD"
+      FM_SEND_CAPTAIN_HOLD_LOCK_HELD=
+    fi
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.

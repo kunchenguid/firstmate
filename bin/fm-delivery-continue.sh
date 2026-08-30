@@ -78,6 +78,11 @@ if grep -Eq 'DRAFT_FOR_FIRSTMATE_REVIEW|Execution-Authorized:[[:space:]]*false|R
   refuse prohibited-research-or-promotion-scope
 fi
 RECEIPT_KIND=$(fm_delivery_receipt_contract_kind "$BRIEF") || refuse delivery-contract-mismatch
+STATUS_PRODUCER_PROVEN=1
+if [ "$RECEIPT_KIND" = canonical ] \
+  && ! fm_delivery_serialized_status_contract_proven "$BRIEF"; then
+  STATUS_PRODUCER_PROVEN=0
+fi
 
 STATUS="$STATE/$TASK.status"
 [ -f "$STATUS" ] && [ ! -L "$STATUS" ] || refuse missing-committed-receipt
@@ -130,6 +135,7 @@ case "$DELIVERY_STATE" in
   pending$'\t'*|acknowledged$'\t'*) result already-delivered; exit 0 ;;
   head-mismatch$'\t'*) refuse continuation-head-mismatch ;;
 esac
+[ "$STATUS_PRODUCER_PROVEN" = 1 ] || refuse unverifiable-status-producer
 
 # The strict run-attribution read distinguishes proven absence from an
 # unavailable no-mistakes query before any durable instruction is created.
@@ -164,7 +170,8 @@ MESSAGE=$(fm_delivery_continuation_message "$TASK" "$HEAD" "$SPAWN_GEN" "$DELIVE
 FM_SEND_IDEMPOTENT=1 FM_SEND_EXPECTED_SPAWN_GEN="$SPAWN_GEN" \
   FM_SEND_EXPECTED_WORKTREE_HEAD="$HEAD" \
   FM_SEND_EXPECTED_STATUS_SIGNATURE="$STATUS_SIGNATURE" \
-  FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE="$([ -n "$DECISION_KEYS" ] && printf 1 || printf 0)" \
+  FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE=1 \
+  FM_SEND_EXPECTED_DECISION_KEYS="$DECISION_KEYS" \
   FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE="$CAPTAIN_HOLD_STATE" \
   "$SEND_BIN" "$TASK" "$MESSAGE" >/dev/null || retry inbox-delivery-failed
 result sent

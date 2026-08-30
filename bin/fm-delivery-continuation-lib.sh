@@ -7,6 +7,14 @@ fm_delivery_committed_receipt_contract() {
   printf '%s\n' 'Delivery receipt contract: committed-head-v1'
 }
 
+fm_delivery_serialized_status_contract() {
+  printf '%s\n' 'Status producer contract: serialized-status-v1'
+}
+
+fm_delivery_serialized_status_contract_proven() {  # <brief>
+  grep -Fqx "$(fm_delivery_serialized_status_contract)" "$1"
+}
+
 fm_delivery_historical_receipt_contract() {
   # shellcheck disable=SC2016 # Backticks are literal historical brief text.
   printf '%s\n' 'When you believe it is complete, append `done: {summary}` to the status file and stop.'

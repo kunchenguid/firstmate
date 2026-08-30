@@ -516,6 +516,104 @@ SH
   pass "fm-send inbox: status append and record publication are linearized"
 }
 
+test_captain_hold_is_linearized_with_publication() {
+  local dir err expected_status expected_hold real_mv observation rc current_hold
+  dir=$(setup_case captain-hold-publication-lock); err="$dir/send.err"
+  cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
+  mkdir -p "$dir/home/data"
+  cat > "$dir/home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$dir/home" && tasks-axi add captain-call "Choose validation timing" --kind ship --repo sample >/dev/null) \
+    || fail "could not create the captain-call fixture"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_DATA_OVERRIDE="$dir/home/data" "$ROOT/bin/fm-captain-hold.sh" hold captain-call \
+    --reason "captain timing needed" >/dev/null || fail "could not hold the captain-call fixture"
+  printf 'Proceed with validation.\n' > "$dir/decision.txt"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_DATA_OVERRIDE="$dir/home/data" "$ROOT/bin/fm-captain-hold.sh" answer captain-call \
+    --decision-file "$dir/decision.txt" --release >/dev/null \
+    || fail "could not release the captain-call fixture"
+  printf 'decisions_reviewed=1\ndecision_keys=captain-call\n' >> "$dir/home/state/t1.meta"
+  printf 'done: committed-ready\n' > "$dir/home/state/t1.status"
+  expected_status=$(bash -c '. "$1"; status_observed_signature "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$dir/home/state/t1.status") \
+    || fail "could not sample the status fixture"
+  expected_hold=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" inventory-state t1) \
+    || fail "could not sample the captain inventory"
+  [ "$expected_hold" = $'answered\tcaptain-call' ] \
+    || fail "captain inventory fixture was not answered: $expected_hold"
+  real_mv=$(command -v mv)
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${2:-}" = "${FM_PUBLICATION_RECORD:?}" ]; then
+  (
+    printf 'attempted\n' > "${FM_CAPTAIN_WRITER_ATTEMPT:?}"
+    PATH="${FM_CAPTAIN_PATH:?}" FM_HOME="${FM_CAPTAIN_HOME:?}" \
+      FM_STATE_OVERRIDE="${FM_CAPTAIN_STATE:?}" FM_DATA_OVERRIDE="${FM_CAPTAIN_DATA:?}" \
+      "${FM_CAPTAIN_HOLD_BIN:?}" hold captain-call --reason "captain timing reopened" >/dev/null
+    if [ -f "$FM_PUBLICATION_RECORD" ]; then
+      printf 'inbox-visible\n' > "${FM_CAPTAIN_WRITER_OBSERVATION:?}"
+    else
+      printf 'inbox-missing\n' > "${FM_CAPTAIN_WRITER_OBSERVATION:?}"
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  while [ ! -e "${FM_CAPTAIN_WRITER_ATTEMPT:?}" ]; do sleep 0.01; done
+fi
+exec "${FM_REAL_MV:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_STATUS_SIGNATURE="$expected_status" \
+    FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE=1 \
+    FM_SEND_EXPECTED_DECISION_KEYS=captain-call \
+    FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE="$expected_hold" \
+    FM_PUBLICATION_RECORD="$dir/home/state/t1.inbox/001.msg" \
+    FM_CAPTAIN_WRITER_ATTEMPT="$dir/captain-writer-attempt" \
+    FM_CAPTAIN_WRITER_OBSERVATION="$dir/captain-writer-observation" \
+    FM_CAPTAIN_PATH="$dir/fakebin:$PATH" \
+    FM_CAPTAIN_HOME="$dir/home" \
+    FM_CAPTAIN_STATE="$dir/home/state" \
+    FM_CAPTAIN_DATA="$dir/home/data" \
+    FM_CAPTAIN_HOLD_BIN="$ROOT/bin/fm-captain-hold.sh" \
+    FM_REAL_MV="$real_mv" \
+    -- t1 "validate before a later captain hold" \
+    || fail "the serialized captain publication failed: $(cat "$err")"
+  for _ in {1..500}; do
+    [ -s "$dir/captain-writer-observation" ] && break
+    sleep 0.01
+  done
+  observation=$(cat "$dir/captain-writer-observation" 2>/dev/null || true)
+  [ "$observation" = inbox-visible ] \
+    || fail "the captain hold crossed the inbox publication boundary first: ${observation:-missing observation}"
+  current_hold=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" inventory-state t1) \
+    || fail "could not read the reopened captain inventory"
+  [ "$current_hold" = $'open\tcaptain-call' ] \
+    || fail "the later captain hold was not preserved: $current_hold"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_STATUS_SIGNATURE="$expected_status" \
+    FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE=1 \
+    FM_SEND_EXPECTED_DECISION_KEYS=captain-call \
+    FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE="$expected_hold" \
+    -- t1 "must refuse the current captain hold"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an already-open captain hold reached durable publication"
+  [ ! -f "$dir/home/state/t1.inbox/002.msg" ] \
+    || fail "an already-open captain hold published a second record"
+  pass "fm-send inbox: captain holds and record publication are linearized"
+}
+
 test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable); err="$dir/send.err"
@@ -547,4 +645,5 @@ test_expected_worktree_head_is_revalidated_before_enqueue
 test_expected_head_enqueue_excludes_concurrent_commit
 test_expected_status_signature_is_revalidated_at_publication
 test_status_append_is_linearized_with_publication
+test_captain_hold_is_linearized_with_publication
 test_unwritable_inbox_fails_loudly

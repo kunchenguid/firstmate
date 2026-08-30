@@ -144,13 +144,30 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
+CAPTAIN_PUBLICATION_LOCK=
+CAPTAIN_PUBLICATION_LOCK_HELD=0
 captain_hold_cleanup() {
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
   fi
+  if [ "$CAPTAIN_PUBLICATION_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CAPTAIN_PUBLICATION_LOCK" || true
+    CAPTAIN_PUBLICATION_LOCK_HELD=0
+  fi
 }
 trap captain_hold_cleanup EXIT
+
+captain_hold_publication_lock_acquire() {
+  [ "${FM_CAPTAIN_HOLD_PUBLICATION_LOCK_HELD:-0}" != 1 ] || return 0
+  CAPTAIN_PUBLICATION_LOCK=$(fm_captain_hold_publication_lock_path "$STATE") \
+    || fail "could not resolve captain-hold publication lock"
+  fm_lock_acquire_wait "$CAPTAIN_PUBLICATION_LOCK" \
+    || fail "could not acquire captain-hold publication lock"
+  CAPTAIN_PUBLICATION_LOCK_HELD=1
+  FM_CAPTAIN_HOLD_PUBLICATION_LOCK_HELD=1
+  export FM_CAPTAIN_HOLD_PUBLICATION_LOCK_HELD
+}
 
 usage() {
   awk '
@@ -349,12 +366,12 @@ hold_durable_state() {  # <task-id>
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
-  if body_has_resolution_record "$body"; then
-    printf 'answered\n'
-    return 0
-  fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
     printf 'open\n'
+    return 0
+  fi
+  if body_has_resolution_record "$body"; then
+    printf 'answered\n'
     return 0
   fi
   fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
@@ -1007,13 +1024,13 @@ EOF
 }
 
 case "${1:-}" in
-  hold) shift; command_hold "$@" ;;
-  answer) shift; command_answer "$@" ;;
-  answers) shift; command_answers "$@" ;;
+  hold) shift; captain_hold_publication_lock_acquire; command_hold "$@" ;;
+  answer) shift; captain_hold_publication_lock_acquire; command_answer "$@" ;;
+  answers) shift; captain_hold_publication_lock_acquire; command_answers "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;
   binding) shift; command_binding "$@" ;;
-  complete) shift; command_complete "$@" ;;
+  complete) shift; captain_hold_publication_lock_acquire; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   inventory-state) shift; command_inventory_state "$@" ;;
   diverged) shift; command_diverged "$@" ;;

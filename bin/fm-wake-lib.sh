@@ -1619,6 +1619,13 @@ fm_status_lock_path() {  # <status-file>
   printf '%s/.%s.write.lock' "$dir" "$base"
 }
 
+fm_captain_hold_publication_lock_path() {  # <state-dir>
+  local state=$1
+  [ -n "$state" ] || return 1
+  case "$state" in *[$'\n\r\t']*) return 1 ;; esac
+  printf '%s/.captain-hold-publication.lock\n' "$state"
+}
+
 fm_status_append() {  # <status-file> <line>
   local file=$1 line=$2 lock status=0
   lock=$(fm_status_lock_path "$file") || return 1

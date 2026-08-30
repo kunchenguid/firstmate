@@ -27,6 +27,7 @@ make_fixture() {
   cat > "$home/data/ship/brief.md" <<'EOF'
 Delivery contract: mode=no-mistakes
 Delivery receipt contract: committed-head-v1
+Status producer contract: serialized-status-v1
 When you believe it is complete, append `done: committed $(git rev-parse HEAD) [spawn-gen=$(sed -n 's/^spawn_gen=//p' state/ship.meta | tail -1)] {summary}` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 EOF
@@ -133,6 +134,7 @@ test_current_brief_requires_canonical_receipt() {
   cat > "$home/data/ship/brief.md" <<'EOF'
 Delivery contract: mode=no-mistakes
 Delivery receipt contract: committed-head-v1
+Status producer contract: serialized-status-v1
 When you believe it is complete, append `done: committed $(git rev-parse HEAD) [spawn-gen=$(sed -n 's/^spawn_gen=//p' state/ship.meta | tail -1)] {summary}` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 EOF
@@ -159,6 +161,26 @@ test_inbox_failure_remains_retryable() {
   [ "$out" = 'result=retry task=ship reason=inbox-delivery-failed' ] \
     || fail "inbox delivery failure did not remain retryable: $out"
   pass "inbox delivery failures remain retry obligations"
+}
+
+test_unserialized_canonical_producer_refuses_visibly_without_stranding_status() {
+  local dir home send state out
+  dir="$TMP_ROOT/unserialized-producer"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  sed '/^Status producer contract: serialized-status-v1$/d' "$home/data/ship/brief.md" \
+    > "$home/data/ship/brief.next"
+  mv "$home/data/ship/brief.next" "$home/data/ship/brief.md"
+  out=$(run_continue "$home" "$send" "$state") || fail "unserialized producer execution failed"
+  [ "$out" = 'result=refused task=ship reason=unverifiable-status-producer' ] \
+    || fail "unserialized producer did not stop visibly: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "unserialized producer received validation delivery"
+  "$ROOT/bin/fm-status-append.sh" "$home/state/ship.status" \
+    'blocked [key=late-stop]: worker can still report the blocker' \
+    || fail "producer refusal stranded the status publication lock"
+  grep -Fqx 'blocked [key=late-stop]: worker can still report the blocker' "$home/state/ship.status" \
+    || fail "producer refusal lost the worker blocker"
+  pass "unserialized canonical producers stop visibly without blocking status"
 }
 
 test_strict_run_attribution_distinguishes_absence_from_query_failure() {
@@ -653,6 +675,7 @@ test_exactly_once_delivery_and_replay
 test_refusals_preserve_stop
 test_active_run_and_unavailable_attribution_refuse
 test_current_brief_requires_canonical_receipt
+test_unserialized_canonical_producer_refuses_visibly_without_stranding_status
 test_inbox_failure_remains_retryable
 test_strict_run_attribution_distinguishes_absence_from_query_failure
 test_identity_and_committed_head_requirements

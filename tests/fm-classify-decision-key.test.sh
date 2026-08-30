@@ -275,6 +275,9 @@ test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak() {
 
   printf 'resolved: custody receipt is valid and validation is active [key=main-custody]\n' >> "$dir/t.status"
   FM_DATA_OVERRIDE="$data" assert_fold "$dir/t.status" "" "legacy trailing resolution"
+  if FM_DATA_OVERRIDE="$data" status_span_has_actionable "$dir/t.status" 0; then
+    fail "legacy trailing resolution resurfaced a closed blocker in the span fold"
+  fi
 
   mkdir -p "$data/malformed"
   cp "$data/t/brief.md" "$data/malformed/brief.md"

@@ -1563,8 +1563,10 @@ _fm_status_open_decision_origins() {  # <status-file>
 status_span_first_actionable_record() {  # <status-file> <start-offset>
   local f=$1 start=${2:-0} size ident cur_ident scratch chunk_file full_file prefix_file
   local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key
+  local FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
+  _fm_status_legacy_tail_key_compat_enabled "$f" && FM_CLASSIFY_ALLOW_LEGACY_TAIL_KEY=1
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
   size=$(_fm_status_file_size "$f") || return 2
   size=${size//[[:space:]]/}
