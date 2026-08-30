@@ -379,7 +379,7 @@ test_every_verified_harness_reaches_task_local_sanitizer() {
     assert_contains "$launch" 'core.hooksPath' "$harness launch did not select the sanitizer relay"
     if [ "$harness" = cursor-agent ]; then
       first_launch=$(sed -n '1p' "$case_dir/launch")
-      assert_contains "$first_launch" 'cursor-agent --trust --force' \
+      assert_contains "$first_launch" '--trust --force' \
         "cursor-agent launch lost its persistent interactive command"
       assert_not_contains "$first_launch" 'encode launch-brief' \
         "cursor-agent launch must not pass the brief as a positional argument"

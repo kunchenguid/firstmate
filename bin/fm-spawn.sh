@@ -286,7 +286,7 @@
 #     __RESUME__    empty for an initial launch or `resume ` for Codex resume
 #     __SESSION__   the shell-quoted supplied Codex session identity
 #     __WORKTREE__  absolute path to the task worktree
-#     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#     __CURSORBIN__ resolved, cursor-verified executable for cursor launches
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the task root.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a task-root pointer excluded from Git for writer worktrees.
@@ -1864,9 +1864,9 @@ launch_template() {
       # Readers use documented one-shot print mode. Persistent workers start
       # bare and receive a brief pointer after composer readiness below.
       if [ "$access" = reader ]; then
-        printf '%s' 'cursor-agent --trust --force __MODELFLAG__--print "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CURSORBIN__ --trust --force __MODELFLAG__--print "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'cursor-agent --trust --force __MODELFLAG__'
+        printf '%s' '__CURSORBIN__ --trust --force __MODELFLAG__'
       fi
       ;;
     *) return 1 ;;
@@ -1961,6 +1961,9 @@ case "$HARNESS" in
         fi
       fi
     fi
+    ;;
+  cursor-agent)
+    CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
     ;;
 esac
 
@@ -4372,7 +4375,7 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
-  cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  cursor|cursor-agent) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in

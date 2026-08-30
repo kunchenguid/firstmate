@@ -221,7 +221,7 @@ cmd_notify() {
   # every field; it is passed in via --arg rather than written literally so no
   # raw control byte sits in this source file.
   row_sep=$(printf '\037')
-  rows=$(printf '%s' "$snapshot" | jq -r --arg sep "$row_sep" '
+  if ! rows=$(printf '%s' "$snapshot" | jq -r --arg sep "$row_sep" '
     (if .schema == "fm-bearings.v1" then
        (.secondmate_reconcile // [])[]
        | {id, spawn_gen:(.spawn_gen // ""), host:(.host // ""), kind:(.kind // ""), ids:(.ids // [])}
@@ -236,7 +236,9 @@ cmd_notify() {
     | .kind as $kind
     | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
     | [.id, .spawn_gen, .host, $kind]
-    | join($sep)')
+    | join($sep)'); then
+    fail "snapshot has a malformed secondmate reconciliation collection"
+  fi
 
   local id sampled_spawn_gen sampled_host expected_remote_host kind path last age now delivered_at reconcile_lock control_lock meta meta_lock did send_rc
   while IFS=$'\037' read -r id sampled_spawn_gen sampled_host kind; do

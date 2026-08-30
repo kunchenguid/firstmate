@@ -702,6 +702,26 @@ test_a_row_with_no_identity_at_all_fails_loudly() {
   pass "a row with neither a spawn generation nor a host fails loudly instead of vanishing"
 }
 
+test_schema_valid_wrong_type_reconcile_collection_fails_loudly() {
+  local home mate fakebin snap out rc
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home malformed-collection mate)
+  snap="$home/snapshot.json"
+  jq -n '{schema:"fm-bearings.v1", secondmate_reconcile:"bad"}' > "$snap"
+
+  set +e
+  out=$(run_notify "$home" "$fakebin" malformed-collection "$snap" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a schema-valid wrong-type reconciliation collection reported success: $out"
+  assert_contains "$out" "malformed secondmate reconciliation collection" \
+    "wrong-type reconciliation input did not fail with an actionable diagnostic: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 0 ] \
+    || fail "malformed reconciliation input still sent a nudge"
+  assert_absent "$home/state/mate.reconcile-nudged" \
+    "malformed reconciliation input started a cooldown"
+  pass "schema-valid wrong-type reconciliation input fails closed before delivery"
+}
+
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
 test_the_cooldown_starts_when_delivery_finishes
@@ -720,3 +740,4 @@ test_a_markerless_remote_secondmate_is_nudged_once_per_window
 test_a_stale_remote_route_is_refused
 test_route_replacement_during_send_is_refused
 test_a_row_with_no_identity_at_all_fails_loudly
+test_schema_valid_wrong_type_reconcile_collection_fails_loudly
