@@ -254,6 +254,13 @@ fm_backlog_record_publish() {
   return 0
 }
 
+fm_backlog_row_dispatchable() {
+  case "$1" in
+    in_flight\ *|queued\ no) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backlog_dispatch_transition() {
   local meta=$1 data=$2 id=$3 row row_status
   fm_backlog_record_present "$meta" || return 1
@@ -268,13 +275,13 @@ fm_backlog_dispatch_transition() {
     return "$row_status"
   fi
   row=$FM_BACKLOG_ROW_STATE
+  if ! fm_backlog_row_dispatchable "$row"; then
+    FM_BACKLOG_TRANSITION_ERROR="backlog item $id is not dispatchable in state $row"
+    return 1
+  fi
   case "$row" in
     in_flight\ *) return 0 ;;
     queued\ no) fm_backlog_start "$data" "$id" ;;
-    *)
-      FM_BACKLOG_TRANSITION_ERROR="backlog item $id is not dispatchable in state $row"
-      return 1
-      ;;
   esac
 }
 
@@ -526,7 +533,7 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
 # before any meta or backlog mutation.
 fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
   local state=$1 marker=$2 marker_name expected_id
-  local id data marker_spawn_gen meta_spawn_gen row_state cleanup_incomplete=1
+  local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete=1
   local args=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
@@ -543,15 +550,20 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   if [ "${args[0]-}" = --note ]; then
     args[1]="local main"
   fi
-  if [ -e "$state/$id.meta" ]; then
-    meta_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$state/$id.meta" | head -1)
+  meta="$state/$id.meta"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    if ! fm_backlog_record_present "$meta"; then
+      FM_BACKLOG_TRANSITION_ERROR="unsafe interrupted task record at $meta"
+      return 1
+    fi
+    meta_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$meta" | head -1)
     if [ "$meta_spawn_gen" != "$marker_spawn_gen" ]; then
       fm_backlog_close_marker_remove "$marker" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
     cleanup_incomplete=1
-    fm_backlog_atomic_transition remove "$state/$id.meta" "the interrupted task record" \
+    fm_backlog_atomic_transition remove "$meta" "the interrupted task record" \
       || return 1
   fi
   if fm_backlog_row_probe "$data" "$id"; then

@@ -1982,12 +1982,10 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
     exit 1
   fi
-  case "$BACKLOG_ROW_STATE" in
-    done\ *)
-      echo "error: this home's backlog records $ID as finished; refusing to dispatch onto a closed item (reopen it with tasks-axi reopen $ID, or use a new task id)" >&2
-      exit 1
-      ;;
-  esac
+  if ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
+    echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
+    exit 1
+  fi
 else
   BACKLOG_GATE_STATUS=$?
   if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then

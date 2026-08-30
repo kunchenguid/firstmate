@@ -391,6 +391,40 @@ SH
   pass "dispatch refuses to supersede a pending authoritative close"
 }
 
+test_dispatch_refuses_a_held_row_before_creating_resources() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-held-b1
+  case_dir=$(make_home dispatch-held "$id")
+  add_item "$case_dir" "$id"
+  tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *new-window*) : > "$case_dir/task-endpoint-created" ;;
+  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted a held backlog row"
+  assert_contains "$out" "state queued yes" \
+    "held-row refusal did not name the actual ineligible state"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "held-row refusal published a task record"
+  assert_absent "$case_dir/task-endpoint-created" \
+    "held-row refusal created an unowned endpoint"
+  assert_absent "$case_dir/local-copy-requested" \
+    "held-row refusal requested an unowned local copy"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "held-row refusal changed the backlog state"
+  pass "dispatch refuses held rows before creating resources"
+}
+
 test_dispatch_reads_the_row_from_the_backlog_root() {
   local case_dir id out
   id=atomic-dispatch-root-b2
@@ -1291,6 +1325,31 @@ test_recovery_preserves_both_records_when_meta_removal_fails() {
   pass "recovery preserves both records when meta removal fails"
 }
 
+test_recovery_preserves_a_close_beside_symlinked_metadata() {
+  local case_dir home id marker target out
+  id=atomic-heal-symlink-meta-close-b12
+  case_dir=$(make_home heal-symlink-meta-close)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  target="$case_dir/foreign-meta-target"
+  printf 'kind=ship\nspawn_gen=other-incarnation\n' > "$target"
+  ln -s "$target" "$home/state/$id.meta"
+  marker="$home/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=closing-incarnation\narg=--note\narg=local%%20main\n' \
+    "$id" "$home/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  assert_contains "$out" "unsafe interrupted task record" \
+    "recovery did not report unsafe metadata beside the close"
+  assert_present "$marker" "unsafe metadata caused recovery to discard the close"
+  [ -L "$home/state/$id.meta" ] \
+    || fail "recovery replaced or removed the unsafe metadata path"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "unsafe metadata allowed recovery to close the backlog row"
+  pass "recovery preserves closes beside symlinked metadata"
+}
+
 test_recovery_rejects_a_marker_for_another_task_identity() {
   local case_dir locked_id target_id marker out
   locked_id=atomic-marker-lock-owner-b12
@@ -1675,6 +1734,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
 
 test_dispatch_moves_the_item_in_flight_in_the_same_run
 test_dispatch_refuses_a_pending_authoritative_close
+test_dispatch_refuses_a_held_row_before_creating_resources
 test_dispatch_reads_the_row_from_the_backlog_root
 test_recovery_uses_the_parent_of_a_trailing_slash_data_record
 test_completion_targets_a_nested_relative_data_directory
@@ -1716,6 +1776,7 @@ test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_both_records_when_meta_removal_fails
+test_recovery_preserves_a_close_beside_symlinked_metadata
 test_recovery_rejects_a_marker_for_another_task_identity
 test_recovery_rejects_a_foreign_data_directory
 test_recovery_rejects_an_unterminated_unknown_field
