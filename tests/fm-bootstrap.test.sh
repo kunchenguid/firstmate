@@ -951,6 +951,19 @@ SH
   pass "bootstrap canonicalizes configured trailing-dot forge hosts"
 }
 
+test_forge_host_resolver_rejects_invalid_resolution_flag() {
+  local result status
+  # Exercise the provider boundary directly; an invalid public argument must
+  # use its documented caller-error status instead of emitting a shell error.
+  set +e
+  result=$(. "$ROOT/bin/fm-forge-lib.sh"; fm_forge_resolve_host https://github.com invalid 2>/dev/null)
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail "invalid SSH-resolution flag must return caller-error status 2, got $status"
+  [ -z "$result" ] || fail "invalid SSH-resolution flag must not emit a host, got: $result"
+  pass "forge host resolver rejects invalid resolution flags"
+}
+
 test_cmux_bundled_cli_satisfies_dependency() {
   local case_dir fakebin bundle out
   case_dir="$TMP_ROOT/cmux-bundled-cli"
@@ -1583,6 +1596,7 @@ test_herdr_install_requires_manual_action
 test_forge_provider_bootstrap_contracts
 test_forge_host_trailing_dot_is_canonicalized
 test_forge_configured_host_trailing_dot_is_canonicalized
+test_forge_host_resolver_rejects_invalid_resolution_flag
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
