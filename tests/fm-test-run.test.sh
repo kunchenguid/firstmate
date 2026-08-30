@@ -47,7 +47,7 @@ exit 99
 SH
     chmod +x "$fakebin/$tool"
   done
-  PATH="$fakebin:$PATH" PYTHONNOUSERSITE=1 PYTHONPATH= \
+  PATH="$fakebin:$PATH" PYTHONNOUSERSITE=1 PYTHONPATH='' \
     bash -c '
       ROOT="'"$ROOT"'"
       # shellcheck source=tests/lib.sh
