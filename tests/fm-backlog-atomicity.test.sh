@@ -1409,7 +1409,7 @@ test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
   pass "session start preserves a pending close across a transient backlog read failure"
 }
 
-test_recovery_retry_without_metadata_avoids_incomplete_cleanup_warning() {
+test_recovery_retry_preserves_incomplete_cleanup_warning() {
   local case_dir home id marker out
   id=atomic-heal-retry-warning-b10
   case_dir=$(make_home heal-retry-warning)
@@ -1431,10 +1431,10 @@ test_recovery_retry_without_metadata_avoids_incomplete_cleanup_warning() {
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "retried recovery left the item In flight: $out"
-  assert_not_contains "$out" "endpoint or local copy may remain" \
-    "retry claimed incomplete cleanup after metadata was already removed"
+  assert_contains "$out" "endpoint or local copy may remain" \
+    "retry lost the incomplete-cleanup evidence after removing metadata"
   assert_absent "$marker" "retried recovery retained its applied marker"
-  pass "recovery without metadata avoids incomplete-cleanup warnings"
+  pass "recovery preserves incomplete-cleanup evidence across a failed replay"
 }
 
 test_recovery_finishes_a_close_for_the_same_meta_incarnation() {
@@ -2198,7 +2198,7 @@ test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
-test_recovery_retry_without_metadata_avoids_incomplete_cleanup_warning
+test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata
 test_recovery_preserves_both_records_when_meta_removal_fails
