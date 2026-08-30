@@ -9,6 +9,15 @@ The adapter dispatches isolated review generations onto one reusable Azure
 reviewer host. Each generation receives a bounded exact-head snapshot and a
 single credential, then removes its private working directory on exit.
 
+Each attempted generation retains a best-effort, non-authoritative record at
+<FM_DATA_OVERRIDE or FM_HOME/data>/<task>/crosscheck-progress-<generation>.json
+(fm.crosscheck-progress-record/v1). It contains only typed stage/counter/exit,
+execution-limit, observed-time, terminal-state and cleanup facts; absent guest
+observations remain unknown. The root guest publishes sanitized metadata onto
+the existing private output blob every 15s (3s I/O timeout). The coordinator
+reads it at most every 30s and once before cleanup (3s I/O timeout), preserving
+newest observations locally. Final body digest and replay remain authoritative.
+
 See docs/azure-crosscheck.md for the operator and acceptance contract.
 """
 
@@ -886,7 +895,8 @@ def runtime_config(home: Path) -> dict[str, Any]:
     }
 
 
-def az(config: dict[str, Any], args: list[str], *, check: bool = True) -> Any:
+def az(config: dict[str, Any], args: list[str], *, check: bool = True,
+       timeout: int = MAX_AZURE_CALL_SECONDS) -> Any:
     command = [
         "az",
         *args,
@@ -896,7 +906,7 @@ def az(config: dict[str, Any], args: list[str], *, check: bool = True) -> Any:
         "--output",
         "json",
     ]
-    result = run_command(command, check=check)
+    result = run_command(command, check=check, timeout=timeout)
     if result.returncode != 0:
         return None, result.returncode, result.stderr.decode("utf-8", errors="replace")
     try:
@@ -1514,7 +1524,7 @@ def write_json(path: Path, value: Any) -> None:
         os.fsync(handle.fileno())
 
 
-def upload_blob(config: dict[str, Any], local: Path, blob: str) -> None:
+def upload_blob(config: dict[str, Any], local: Path, blob: str, *, timeout: int | None = None) -> None:
     _value, rc, detail = az(
         config,
         [
@@ -1535,6 +1545,7 @@ def upload_blob(config: dict[str, Any], local: Path, blob: str) -> None:
             "false",
         ],
         check=False,
+        **({"timeout": timeout} if timeout is not None else {}),
     )
     if rc != 0:
         raise AzureCrosscheckError(f"exact Azure Crosscheck input staging failed: {detail}")
@@ -1940,6 +1951,118 @@ def submit_model_run(
     }
 
 
+class ProgressRecord:
+    """Durable known facts, independent of admission and guest publication.
+
+    One private data/<task>/crosscheck-progress-<generation>.json survives
+    staging cleanup. Progress metadata reads have a 3s timeout/30s cadence.
+    Neither missing observations nor this record can authorize a verdict.
+    """
+
+    def __init__(self, core: Any, home: Path, task_id: str,
+                 identity: dict[str, Any], config: dict[str, Any], blob: str) -> None:
+        self.core, self.config, self.blob = core, config, blob
+        data = Path(core.environment_value("FM_DATA_OVERRIDE", str(home / "data")))
+        self.path = data / task_id / ("crosscheck-progress-" + identity["review_generation"] + ".json")
+        self.sanitize = load_module(PI_REVIEWER_RUNTIME, "crosscheck_progress_runtime", "progress runtime").sanitize_progress
+        self.next_read = 0.0
+        self.value: dict[str, Any] = {
+            "schema": "fm.crosscheck-progress-record/v1", "task_id": task_id,
+            "head_sha": identity["head_sha"], "review_generation": identity["review_generation"],
+            "execution_state": "not-submitted", "terminal_reason": None,
+            "stage": "bootstrap", "last_progress_at_ms": None,
+            "exit_code": None, "guest": None, "stages": {},
+            "progress_observation": "missing", "cleanup": "pending",
+            "configured_timeout_seconds": config["timeout_seconds"],
+            "execution_limit_seconds": config["timeout_seconds"] + 600,
+            "poll_limit_seconds": config["timeout_seconds"] + PROVISIONING_ALLOWANCE_SECONDS,
+        }
+        self.persist()
+
+    def persist(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.value["observed_at_ms"] = int(time.time() * 1000)
+            self.core.atomic_write(self.path, json.dumps(self.value, sort_keys=True) + "\n")
+        except OSError:
+            pass  # Observation failure must not invent another admission gate.
+
+    def observe_arm(self, view: Any) -> None:
+        if not isinstance(view, dict):
+            return
+        state = view.get("executionState")
+        if isinstance(state, str) and state in {"Pending", "Running", "Succeeded", "Failed", "Canceled", "TimedOut"}:
+            self.value["execution_state"] = state
+            if state in {"Succeeded", "Failed", "Canceled", "TimedOut"}:
+                self.value["terminal_reason"] = "azure-" + state.lower()
+        code = view.get("exitCode")
+        if type(code) is int and -(2 ** 31) <= code < 2 ** 31:
+            self.value["exit_code"] = code
+        for key in ("startTime", "endTime"):
+            timestamp = view.get(key)
+            if isinstance(timestamp, str) and re.fullmatch(r"[0-9T:.+Z-]{10,40}", timestamp):
+                self.value[key] = timestamp
+        self.persist()
+
+    def collect(self, force: bool = False) -> None:
+        if not force and time.monotonic() < self.next_read:
+            return
+        self.next_read = time.monotonic() + 30
+        try:
+            properties, rc, _detail = az(self.config, [
+                "storage", "blob", "show", "--auth-mode", "login",
+                "--account-name", self.config["storage"], "--container-name", STAGING_CONTAINER,
+                "--name", self.blob,
+            ], check=False, timeout=3)
+            if rc != 0:
+                self.value["progress_observation"] = "unavailable"
+            else:
+                # Metadata names are HTTP header names: urllib sends Fmprogress
+                # while curl may send fmprogress. Azure preserves that casing.
+                metadata = properties.get("metadata") or {}
+                observations = [value for key, value in metadata.items()
+                                if isinstance(key, str) and key.lower() == "fmprogress"] if isinstance(metadata, dict) else []
+                encoded = observations[0] if len(observations) == 1 else None
+                if len(observations) > 1 or not isinstance(metadata, dict):
+                    self.value["progress_observation"] = "malformed"
+                elif encoded is None:
+                    self.value["progress_observation"] = "missing"
+                elif not isinstance(encoded, str) or len(encoded) > 8192:
+                    self.value["progress_observation"] = "malformed"
+                else:
+                    import base64
+                    progress = self.sanitize(json.loads(base64.b64decode(encoded, validate=True)))
+                    if progress is None or type(progress.get("updated_at_ms")) is not int:
+                        self.value["progress_observation"] = "malformed"
+                    else:
+                        previous = self.value["guest"]
+                        # Timed-out metadata writes may arrive after a newer
+                        # publication. Never rewind the newest observed facts.
+                        order = {"bootstrap": 0, "challenge": 1, "synthesis": 2}
+                        def version(row: dict[str, Any]) -> tuple[int, int, int]:
+                            return (row["updated_at_ms"], order[row["stage"]], row.get("attempt", 0))
+                        if previous is not None and version(progress) < version(previous):
+                            self.value["progress_observation"] = "stale"
+                        else:
+                            self.value["guest"] = progress
+                            self.value["stage"] = progress["stage"]
+                            self.value["last_progress_at_ms"] = progress["updated_at_ms"]
+                            self.value["stages"][progress["stage"]] = progress
+                            self.value["progress_observation"] = "observed"
+        except Exception:
+            self.value["progress_observation"] = "unavailable"
+        self.persist()
+
+    def failure(self, reason: str) -> None:
+        if self.value["terminal_reason"] in {None, "azure-succeeded"}:
+            self.value["terminal_reason"] = reason
+        self.persist()
+
+    def cleanup(self, complete: bool) -> None:
+        self.value["cleanup"] = "complete" if complete else "ambiguous"
+        self.persist()
+
+
 def poll_model_run(
     config: dict[str, Any], command_id: str, timeout_seconds: int
 ) -> tuple[str, str]:
@@ -1951,6 +2074,10 @@ def poll_model_run(
             raise AzureCrosscheckError(f"model compartment status is unreadable: {detail}")
         properties = value.get("properties", {})
         view = properties.get("instanceView") or {}
+        progress = config.get("_progress_record")
+        if progress is not None:
+            progress.observe_arm(view)
+            progress.collect()
         execution = view.get("executionState")
         if execution in {"Succeeded", "Failed", "Canceled", "TimedOut"}:
             if execution != "Succeeded":
@@ -1965,6 +2092,8 @@ def poll_model_run(
                 raise AzureCrosscheckError("model compartment omitted its result identity marker")
             return marker.group(1), marker.group(2)
         time.sleep(10)
+    if config.get("_progress_record") is not None:
+        config["_progress_record"].failure("controller-deadline")
     raise AzureCrosscheckError("model compartment exceeded its control-plane completion bound")
 
 
@@ -1988,7 +2117,7 @@ def azure_resource_absent(detail: str) -> bool:
     )
 
 
-def delete_exact_blob(config: dict[str, Any], blob: str) -> None:
+def delete_exact_blob(config: dict[str, Any], blob: str, metadata_retries: int = 0) -> None:
     exists, rc, detail = az(
         config,
         [
@@ -2054,6 +2183,10 @@ def delete_exact_blob(config: dict[str, Any], blob: str) -> None:
         check=False,
     )
     if rc != 0:
+        # Only the exact generation's output opts into this bounded retry.
+        # A late metadata PUT changes ETag but cannot recreate a deleted blob.
+        if metadata_retries > 0 and re.search(r"ConditionNotMet|PreconditionFailed|\b412\b", detail, re.I):
+            return delete_exact_blob(config, blob, metadata_retries - 1)
         raise AzureCrosscheckError(f"conditional staging deletion failed for {blob}: {detail}")
     value, rc, detail = az(
         config,
@@ -2369,6 +2502,7 @@ def make_input(
             "effort": config["effort"],
         },
         "review_schema": schema,
+        "evaluation_diagnostics": config.get("_evaluation_diagnostics") is True,
         "verdict_extension": {
             "source": PI_VERDICT_EXTENSION.read_text(encoding="utf-8"),
             "sha256": digest_file(PI_VERDICT_EXTENSION),
@@ -2778,6 +2912,8 @@ def _run_azure_review_in_lane(
         cleanup_error: Exception | None = None
         ledger_identity: dict[str, Any] | None = None
         model_identity: dict[str, Any] | None = None
+        progress = ProgressRecord(core, home, task_id, identity, azure, staged["output_blob"])
+        azure["_progress_record"] = progress
         try:
             preflight_reviewer_credential(core, config)
             require_stable_reviewer_credential(
@@ -2790,6 +2926,15 @@ def _run_azure_review_in_lane(
                 uploaded.add(staged["input_blob"])
                 upload_blob(azure, credential_path, staged["credential_blob"])
                 uploaded.add(staged["credential_blob"])
+                # Metadata progress needs an existing blob. If this optional
+                # placeholder fails, the final PUT can still create the result.
+                placeholder = work / "progress-placeholder"
+                placeholder.write_bytes(b"")
+                try:
+                    upload_blob(azure, placeholder, staged["output_blob"], timeout=3)
+                    uploaded.add(staged["output_blob"])
+                except AzureCrosscheckError:
+                    pass
                 if repository_snapshot is not None:
                     upload_blob(
                         azure,
@@ -3038,37 +3183,40 @@ def _run_azure_review_in_lane(
         except LookupPassRequested:
             raise
         except core.CrosscheckError:
+            progress.failure("review-validation-failed")
             raise
         except Exception as exc:
+            progress.failure("controller-failure")
             raise core.CrosscheckToolError(str(exc)) from exc
         finally:
+            # Collect even when no final result was published, before deleting
+            # the only remaining guest/control-plane observations.
+            progress.collect(force=True)
             if resources is not None and resources.get("run_command_id"):
-                _value, run_delete_rc, run_delete_detail = az(
-                    azure,
-                    [
-                        "rest",
-                        "--method",
-                        "delete",
-                        "--url",
-                        "https://management.azure.com"
-                        + resources["run_command_id"]
-                        + "?api-version=2024-03-01",
-                    ],
-                    check=False,
-                )
-                if run_delete_rc != 0 and not azure_resource_absent(
-                    run_delete_detail
-                ):
-                    cleanup_error = AzureCrosscheckError(
-                        "review run-command cleanup failed: " + run_delete_detail
+                try:
+                    _value, run_delete_rc, run_delete_detail = az(
+                        azure,
+                        [
+                            "rest", "--method", "delete", "--url",
+                            "https://management.azure.com" + resources["run_command_id"]
+                            + "?api-version=2024-03-01",
+                        ],
+                        check=False,
                     )
+                    if run_delete_rc != 0 and not azure_resource_absent(run_delete_detail):
+                        cleanup_error = AzureCrosscheckError(
+                            "review run-command cleanup failed: " + run_delete_detail
+                        )
+                except Exception as exc:
+                    cleanup_error = exc
             blob_cleanup_errors: list[str] = []
             expected_blobs = uploaded | {staged["output_blob"]}
             for blob in sorted(expected_blobs):
                 try:
-                    delete_exact_blob(azure, blob)
+                    delete_exact_blob(azure, blob, metadata_retries=2 if blob == staged["output_blob"] else 0)
                 except Exception as exc:
                     blob_cleanup_errors.append(f"{blob}: {exc}")
+            progress.cleanup(cleanup_error is None and not blob_cleanup_errors)
             if cleanup_error is None and not blob_cleanup_errors and ledger_identity is not None:
                 ledger_identity["model"]["cleanup_phase"] = "complete"
                 ledger_identity["staging_cleanup_phase"] = "complete"

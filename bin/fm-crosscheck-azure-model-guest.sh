@@ -37,7 +37,36 @@ BASE=$ROOT/$REVIEW_GENERATION
 install -d -m 0700 -o root -g root "$ROOT"
 [ ! -e "$BASE" ] || { echo "model guest: review generation already exists" >&2; exit 125; }
 install -d -m 0700 -o root -g root "$BASE"
-trap 'rm -rf "$BASE"' EXIT
+PROGRESS_PID=
+stop_progress() {
+  if [ -n "$PROGRESS_PID" ]; then
+    touch "$BASE/progress-stop"
+    # Metadata may arrive late without altering verdict bytes. Bound shutdown
+    # even if a transport/library fails to honor its own network deadline.
+    for _ in 1 2 3 4 5; do
+      kill -0 "$PROGRESS_PID" 2>/dev/null || break
+      sleep 1
+    done
+    kill -TERM "$PROGRESS_PID" 2>/dev/null || true
+    wait "$PROGRESS_PID" || true
+    PROGRESS_PID=
+  fi
+}
+cleanup_guest() {
+  guest_status=$?
+  set +e
+  if [ -n "$PROGRESS_PID" ] && [ "$guest_status" -ne 0 ]; then
+    python3 - "$PI_REVIEWER_RUNTIME" "$guest_status" <<'PY'
+import runpy
+import sys
+runpy.run_path(sys.argv[1])["record_guest_failure"](int(sys.argv[2]))
+PY
+  fi
+  stop_progress
+  rm -rf "$BASE" || guest_status=125
+  exit "$guest_status"
+}
+trap cleanup_guest EXIT
 INPUT=$BASE/request.json
 CREDENTIAL=$BASE/credential.tar.gz
 SNAPSHOT=$BASE/repository-snapshot.tar.gz
@@ -132,6 +161,20 @@ for request_key, identity_key in (
     if str(observed) != expected:
         raise SystemExit("model guest: repository snapshot request identity mismatch")
 PY
+
+# The reviewer never receives a storage URL. Only this root-side helper sees
+# it, and metadata-only writes cannot replace a final verdict body, even if an
+# earlier timed-out request reaches storage after the final upload.
+export FM_CROSSCHECK_PROGRESS_PATH="$BASE/progress.json"
+printf '%s' "$OUTPUT_URL" >"$BASE/progress-url"
+python3 - "$PI_REVIEWER_RUNTIME" <<'PY'
+import runpy
+import sys
+runpy.run_path(sys.argv[1])["update_progress"](stage="bootstrap", phase="starting")
+PY
+python3 "$PI_REVIEWER_RUNTIME" --publish-progress "$BASE/progress-url" \
+  "$FM_CROSSCHECK_PROGRESS_PATH" "$BASE/progress-stop" >/dev/null 2>&1 &
+PROGRESS_PID=$!
 
 # The pinned image owns only the reviewer CLI closure needed in this
 # credentialed compartment. No Azure CLI, repository helper, shell tool, tool
@@ -275,6 +318,12 @@ if not isinstance(account, str) or "sha256:" + hashlib.sha256(account.encode()).
 path = destination / expected_name
 path.write_bytes(credential_bytes)
 path.chmod(0o600)
+if reviewer["harness"] == "pi":
+    # This account is destroyed at the end of this generation. Bound network
+    # inactivity, not review duration; Pi retains context across native retries.
+    settings = destination / "settings.json"
+    settings.write_text(json.dumps({"httpIdleTimeoutMs": 120000}) + "\n")
+    settings.chmod(0o600)
 PY
 rm -f "$CREDENTIAL"
 
@@ -490,6 +539,9 @@ case "$HARNESS" in
     ;;
   pi)
     export PI_CODING_AGENT_DIR="$ACCOUNT"
+    if [ "$(jq -r '.evaluation_diagnostics // false' "$INPUT")" = true ]; then
+      export FM_CROSSCHECK_EVALUATION_DIAGNOSTICS=1
+    fi
     # The model decides the provider slot (R6): each cross-family deployment
     # runs on its own provider slot, the gpt fallback family stays on
     # openai-codex, and an unmapped model refuses rather than guessing.
@@ -533,6 +585,8 @@ output = {
     **({"tool_events": review["tool_events"]} if harness == "pi" else {}),
     "telemetry": review.get("telemetry"),
 }
+if request.get("evaluation_diagnostics") is True and harness == "pi":
+    output["review_diagnostics"] = review.get("review_diagnostics", [])
 lookup = review.get("lookup_request")
 if lookup is not None:
     if harness != "pi" or not isinstance(lookup, list) or not lookup:
@@ -550,8 +604,20 @@ PY
 
 OUTPUT=$BASE/output.json
 DIGEST=sha256:$(sha256sum "$OUTPUT" | awk '{print $1}')
+stop_progress
 printf 'url = "%s"\nfail\nsilent\nshow-error\nrequest = "PUT"\nheader = "x-ms-blob-type: BlockBlob"\nupload-file = "%s"\n' "$OUTPUT_URL" "$OUTPUT" >"$BASE/curl-output.conf"
 unset OUTPUT_URL
+# Put Blob replaces metadata too. Preserve the final sanitized observation
+# without altering authoritative output bytes or exposing the private URL.
+python3 - "$PI_REVIEWER_RUNTIME" "$FM_CROSSCHECK_PROGRESS_PATH" "$BASE/curl-output.conf" <<'PY'
+import pathlib
+import runpy
+import sys
+header = runpy.run_path(sys.argv[1])["progress_metadata_header"](pathlib.Path(sys.argv[2]))
+if header:
+    with open(sys.argv[3], "a", encoding="utf-8") as output:
+        output.write('header = "x-ms-meta-fmprogress: ' + header + '"\n')
+PY
 curl --config "$BASE/curl-output.conf"
 rm -f "$BASE/curl-output.conf"
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)

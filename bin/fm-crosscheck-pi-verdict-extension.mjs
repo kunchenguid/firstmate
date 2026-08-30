@@ -26,7 +26,8 @@ class FatalToolError extends Error {}
 let guardCall = () => {};
 
 function splitLines(value) {
-	const lines = value.split(/\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/u);
+	// Git counts LF boundaries; literal Unicode separators and CR are source text.
+	const lines = value.split("\n");
 	if (lines.length > 1 && lines.at(-1) === "") lines.pop();
 	return lines.length ? lines : [""];
 }
@@ -106,6 +107,23 @@ function register(pi, name, description, parameters, handler) {
 }
 
 export default function registerCrosscheckTools(pi) {
+	// Task-only diagnostics carry no payload, response headers or model content.
+	const providerLog = process.env.FM_CROSSCHECK_PROVIDER_EVENT_LOG;
+	if (process.env.FM_CROSSCHECK_EVALUATION_DIAGNOSTICS === "1" && providerLog) {
+		let markers = 0;
+		const recordTiming = (type, status) => {
+			if (markers > 2048) return;
+			const record = { type: markers++ === 2048 ? "crosscheck_diagnostics_truncated" : type, at_unix_ms: Date.now() };
+			if (Number.isInteger(status) && status >= 100 && status <= 599) record.status = status;
+			try { appendFileSync(providerLog, `${JSON.stringify(record)}\n`, { mode: 0o600 }); } catch { /* Optional measurement only. */ }
+		};
+		pi.on("before_provider_request", () => {
+			recordTiming("crosscheck_provider_request");
+		});
+		pi.on("after_provider_response", (event) => {
+			recordTiming("crosscheck_provider_response", event.status);
+		});
+	}
 	const schemaPath = process.env.FM_CROSSCHECK_REVIEW_SCHEMA;
 	const repository = process.env.FM_CROSSCHECK_REPOSITORY;
 	const logPath = process.env.FM_CROSSCHECK_TOOL_EVENT_LOG;
