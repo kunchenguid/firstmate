@@ -711,7 +711,11 @@ gitlab_confirm_merged() {
       "$URL" >&2
     return 2
   fi
-  [ "$state" = merged ]
+  if [ "$state" != merged ]; then
+    printf 'actionable: GitLab accepted the merge request for %s but its landed state is %s; the merge poll remains armed\n' \
+      "$URL" "$state" >&2
+    return 1
+  fi
 }
 
 # Record before either forge call. This arms the merge poll without claiming a
@@ -826,7 +830,7 @@ case "$PROVIDER" in
       --sha "$FM_PR_MERGE_HEAD" --yes "$@"
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
-    [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    [ "$gitlab_confirm_rc" -eq 0 ] || exit "$gitlab_confirm_rc"
     ;;
   *)
     echo "error: invalid PR merge request" >&2

@@ -330,8 +330,15 @@ case_dir=$(dirname "$FM_TEST_GLAB_JSON")
 case "${1:-} ${2:-}" in
   "mr view")
     [ ! -e "$case_dir/glab-view-fails" ] || exit 1
-    if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ]; then
-      cat "$case_dir/mr-post.json"
+    if [ -e "$case_dir/glab-merge-called" ]; then
+      [ ! -e "$case_dir/glab-post-view-fails" ] || exit 1
+      if [ -e "$case_dir/glab-post-invalid" ]; then
+        printf '[]\n'
+      elif [ -e "$case_dir/glab-stays-open" ]; then
+        cat "$FM_TEST_GLAB_JSON"
+      else
+        cat "$case_dir/mr-post.json"
+      fi
     else
       cat "$FM_TEST_GLAB_JSON"
     fi
@@ -2023,15 +2030,20 @@ test_gitlab_merge_reports_upward() {
 }
 
 test_queued_gitlab_merge_leaves_the_poll_armed() {
-  local case_dir
+  local case_dir rc
   case_dir=$(make_gitlab_case queued-gitlab-merge)
   mkdir -p "$case_dir/home"
   : >"$case_dir/glab-stays-open"
 
+  set +e
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$MR_URL" \
-    >"$case_dir/stdout" 2>"$case_dir/stderr" \
-    || fail "queued-gitlab-merge: accepted merge command failed"
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
 
+  expect_code 1 "$rc" "queued-gitlab-merge: unconfirmed merge should exit non-zero"
+  assert_grep 'landed state is opened' "$case_dir/stderr" \
+    "queued-gitlab-merge: the unconfirmed state was not named"
   assert_absent "$case_dir/state/.wake-queue" \
     "queued-gitlab-merge: a queued merge was reported as landed"
   [ -f "$case_dir/state/task-x1.check.sh" ] \
@@ -2039,6 +2051,31 @@ test_queued_gitlab_merge_leaves_the_poll_armed() {
   [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
     || fail "queued-gitlab-merge: a queued merge was marked as reported"
   pass "a queued GitLab merge stays silent and leaves confirmation to the armed poll"
+}
+
+test_gitlab_post_merge_confirmation_failures_leave_poll_armed() {
+  local case_dir rc name marker
+  for name in unreadable invalid; do
+    case_dir=$(make_gitlab_case "gitlab-post-confirm-$name")
+    marker="glab-post-view-fails"
+    [ "$name" = unreadable ] || marker="glab-post-invalid"
+    : > "$case_dir/$marker"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 2 "$rc" "gitlab-post-confirm-$name: confirmation failure should propagate"
+    assert_grep 'landed state could not be confirmed' "$case_dir/stderr" \
+      "gitlab-post-confirm-$name: confirmation failure was not reported"
+    [ -f "$case_dir/state/task-x1.check.sh" ] \
+      || fail "gitlab-post-confirm-$name: the merge poll was not left armed"
+    [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
+      || fail "gitlab-post-confirm-$name: an unconfirmed merge was marked as reported"
+  done
+  pass "GitLab confirmation failures propagate while their polls remain armed"
 }
 
 test_main_home_merge_leaves_a_durable_wake() {
@@ -2649,6 +2686,7 @@ test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward
 test_queued_gitlab_merge_leaves_the_poll_armed
+test_gitlab_post_merge_confirmation_failures_leave_poll_armed
 test_failed_merge_reports_nothing
 test_gitlab_refusal_reports_nothing
 test_main_home_merge_leaves_a_durable_wake

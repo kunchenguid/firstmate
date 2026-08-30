@@ -573,10 +573,6 @@ fm_remote_job_next_seq() { # [stage-dir destination]
           rm -f -- "$stage/state" "$stage/seq"
           return 1
         fi
-        if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
-          ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
-          return 1
-        fi
         rm -f -- "$destination/.owner-pid" "$destination/.owner-start" || true
       fi
       printf '%s\n' "$value"
@@ -685,7 +681,10 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   fi
   if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
     ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
-    fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || true
+    fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || {
+      FM_REMOTE_JOB_ERROR="remote job caller disconnected during staging and cancellation could not be recorded"
+      return 1
+    }
     FM_REMOTE_JOB_ERROR="remote job caller disconnected during staging"
     return 1
   fi
