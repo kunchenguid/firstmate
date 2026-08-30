@@ -72,9 +72,13 @@ unset _fm_classify_nounset
 #
 # Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
 # legacy lines that lack a standard terminal verb. status_is_captain_relevant is
-# verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
-# merely because its prose contains one of those tokens (for example
-# "working: rebased onto merged #76").
+# verb-aware: an ordinary nonterminal working: or paused: line never becomes
+# captain-relevant merely because its prose contains one of those tokens (for
+# example "working: rebased onto merged #76"). The one structured exception is
+# `working [key=new-phase-...]:`: the generated worker charter reserves that key
+# for an unexpected new multi-minute phase in explicitly requested work, so the
+# supervision branch can judge and deduplicate it with the request context that
+# is absent here.
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
@@ -132,12 +136,20 @@ status_is_terminal_verb() {
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
 status_is_captain_relevant() {
-  local line=$1 verb
+  local line=$1 verb key
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+    working)
+      if [ -z "${FM_CAPTAIN_RE+x}" ] \
+        && key=$(_fm_decision_key "$line") \
+        && _fm_decision_slug_ok "$key"; then
+        case "$key" in new-phase-[A-Za-z0-9]*) return 0 ;; esac
+      fi
+      return 1
+      ;;
+    resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
   esac

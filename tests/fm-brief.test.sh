@@ -550,6 +550,12 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter retained the unconditional working opener"
   assert_grep 'When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above' "$brief" \
     "secondmate charter did not limit keyed phases to reportable material changes"
+  assert_grep "working [key=new-phase-<work-slug>]: {condition}; revised rough duration {duration}" "$brief" \
+    "secondmate charter lost the structured unexpected-new-phase report"
+  assert_grep 'Do not append it for an expected wait, background work, ordinary progress, or an unchanged estimate' "$brief" \
+    "secondmate charter lost the new-phase silence cases"
+  assert_grep 'Failure and needed-decision reports keep using their own states unconditionally' "$brief" \
+    "secondmate charter made standing escalations conditional on a new phase"
   assert_grep "If its first reportable event is \`working [key=<work-slug>]: {material phase}\`" "$brief" \
     "secondmate charter lost keyed working syntax for a reportable material phase"
   assert_grep "use the same key on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \

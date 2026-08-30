@@ -640,6 +640,17 @@ await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "P
 if (sentToMain[2].options.triggerTurn !== true || sentToMain[2].options.deliverAs !== "followUp") {
   throw new Error(`captain merge must trigger exactly one follow-up turn: ${JSON.stringify(sentToMain[2].options)}`);
 }
+const silentPhase = await report.execute("call-4", {
+  task: "task-9",
+  verdict: "routine",
+  summary: "unchanged estimate already reported",
+  wake: "signal: working [key=new-phase-schema-rewrite]",
+  silent: true,
+}, undefined, undefined, {});
+if (silentPhase.isError) throw new Error(`silent phase review failed: ${JSON.stringify(silentPhase)}`);
+if (sentToMain[3].message.display !== false || sentToMain[3].options.triggerTurn) {
+  throw new Error(`silent phase review surfaced: ${JSON.stringify(sentToMain[3])}`);
+}
 if (typeof sentToMain[0].message.content !== "string" || !sentToMain[0].message.content.startsWith("⛵ ")) {
   throw new Error(`routine note missing sailboat prefix: ${sentToMain[0].message.content}`);
 }
@@ -679,11 +690,12 @@ if (sentToMain.filter((sent) => sent.options.triggerTurn).length !== 1) {
   throw new Error("one captain outcome must open exactly one turn on main");
 }
 
-// The store (the owned durable contract) holds all three outcomes in order,
-// and each merged note advanced the read cursor.
+// The store (the owned durable contract) holds all four outcomes in order,
+// including the handled-but-hidden phase repeat, and each merged note advanced
+// the read cursor.
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-if (rows.length !== 3) throw new Error(`expected 3 store rows, got ${rows.length}`);
-if (rows[0].verdict !== "routine" || rows[2].verdict !== "captain") throw new Error("store verdicts out of order");
+if (rows.length !== 4) throw new Error(`expected 4 store rows, got ${rows.length}`);
+if (rows[0].verdict !== "routine" || rows[2].verdict !== "captain" || rows[3].silent !== true) throw new Error("store verdicts or silent phase row are out of order");
 if (rows[0].wake !== "signal: working") throw new Error("store lost the wake reason");
 if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes were not marked read");
 

@@ -48,7 +48,7 @@ Handle it start to finish in one turn sequence:
    Claim the reserved `backlog` lease around backlog writes (`bin/fm-lease.sh claim backlog`, then `tasks-axi ...`, then release).
    A refused claim means MAIN is acting on that task right now: do not work around it; report the event with what you observed and let the next wake retry.
 3. Handle with real tools: `bin/fm-crew-state.sh <task>` for current state (a status line is a wake event, not current-state truth), `bin/fm-send.sh` for a short steer, `bin/fm-control.sh <task> interrupt|exit|relaunch` for lifecycle, `bin/fm-pr-check.sh <task> <url>` when a PR is reported, `tasks-axi` for backlog moves.
-4. Report: call the fm_branch_report tool exactly once per handled event, with the task id, the verdict, and a one-or-two-sentence summary; set silent true only for a fleet-wide heartbeat review that found literally nothing worth reporting.
+4. Report: call the fm_branch_report tool exactly once per handled event, with the task id, the verdict, and a one-or-two-sentence summary; set silent true only for a fleet-wide heartbeat review that found literally nothing worth reporting or for a keyed new-phase review that matches one of the exact silence cases below.
    The report is what durably records your outcome and merges it into MAIN; an event without a report is an event MAIN never learns about, so never skip it, including for events where you took no action.
 5. Acknowledge: after the report succeeds, run the exact `--ack-through` command the drain printed as WAKE_ACK_REQUIRED.
 6. Release every lease you claimed: `bin/fm-lease.sh release <task>`.
@@ -72,8 +72,9 @@ Also report verdict captain for:
 - a needed credential or login;
 - anything destructive, irreversible, or security-sensitive;
 - an explicit captain-requested operation that unexpectedly gains a new multi-minute phase - name the condition and the revised rough duration in the summary.
-That phase rule adds a trigger and qualifies none of the rules above it: report it once per new phase, on the next routine supervision pass on which you observe the new phase, not the instant the phase appears.
-Then stay verdict routine for the wait itself, its background work, its ordinary progress, and any later repeat of an estimate you already reported.
+That phase rule adds a trigger and qualifies none of the rules above it: report it once per new phase, immediately when you observe its structured wake.
+A `working [key=new-phase-...]:` wake is the worker's structured request for this review; use the mirrored captain conversation and durable outcome history to decide it rather than treating the key itself as proof.
+For an expected wait, background work, ordinary progress, or any later repeat of an estimate you already reported, report verdict routine with silent true so the wake is durably handled without surfacing an outcome.
 Escalate the same operation again only when the estimate changes materially, it fails, or it needs a captain decision; the failure, credential, and security rules above still fire on their own terms.
 Keep an unsolicited routine outcome as verdict routine, including a healthy result that was not requested by the captain.
 Keep an unchanged fleet review silent as instructed above.
