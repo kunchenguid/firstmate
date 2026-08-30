@@ -80,11 +80,7 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
-# shellcheck source=bin/fm-delivery-continuation-lib.sh
-. "$SCRIPT_DIR/fm-delivery-continuation-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-COMMITTED_RECEIPT_CONTRACT=$(fm_delivery_committed_receipt_contract)
-SERIALIZED_STATUS_CONTRACT=$(fm_delivery_serialized_status_contract)
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -187,8 +183,6 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 STATUS_APPEND=$(shell_quote "$SCRIPT_DIR/fm-status-append.sh")
-META_FILE=$(shell_quote "$STATE/$ID.meta")
-COMMITTED_RECEIPT_EVENT="done: committed \$(git rev-parse HEAD) [spawn-gen=\$(sed -n 's/^spawn_gen=//p' $META_FILE | tail -1)] {summary}"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 
 # The receive-and-ack half of the steering-inbox contract, included in every
@@ -402,13 +396,7 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
-if [ "$MODE" = no-mistakes ]; then
-  DOD=${DOD/'Delivery contract: mode=no-mistakes'/"Delivery contract: mode=no-mistakes
-$COMMITTED_RECEIPT_CONTRACT
-$SERIALIZED_STATUS_CONTRACT"}
-  DOD=${DOD/'done: {summary}'/"$COMMITTED_RECEIPT_EVENT"}
-fi
+DOD=$(fm_dod_block "$MODE" "$ID" "$STATE/$ID.meta") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

@@ -151,6 +151,33 @@ EOF
   pass "current briefs require canonical committed-head receipts"
 }
 
+test_promoted_contract_recovers_durable_continuation() {
+  local dir home send state out wt
+  dir="$TMP_ROOT/promoted-contract"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  wt="$home/projects/ship"
+  fm_write_meta "$home/state/ship.meta" "window=fm:fm-ship" "worktree=$wt" "project=sample" "harness=codex" "kind=scout" "spawn_gen=g1"
+  cat > "$home/data/ship/brief.md" <<'EOF'
+This is a SCOUT task: the deliverable is a written report, not a PR.
+When the report is complete, append `done: {one-line conclusion}` to the status file and stop.
+EOF
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-promote.sh" ship --mode no-mistakes --yolo off >/dev/null 2>&1 \
+    || fail "promoted no-mistakes fixture could not publish its ship contract"
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  printf '%s\n' "$$" > "$home/state/.lock"
+  : > "$home/state/.wake-queue"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$CONTINUE" FM_DELIVERY_SEND_BIN="$send" \
+    FM_DELIVERY_CREW_STATE_BIN="$state" FM_TEST_ROOT="$ROOT" \
+    "$ROOT/bin/fm-delivery-preflight.sh") || fail "promoted durable preflight failed"
+  [ "$out" = 'result=sent task=ship' ] \
+    || fail "promoted authoritative contract did not continue committed work: $out"
+  [ "$(find "$home/state/ship.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "promoted committed work did not receive exactly one durable continuation"
+  pass "promoted no-mistakes contracts recover durable continuation"
+}
+
 test_inbox_failure_remains_retryable() {
   local dir home send state out
   dir="$TMP_ROOT/inbox-retry"; mkdir -p "$dir"
@@ -760,6 +787,7 @@ test_exactly_once_delivery_and_replay
 test_refusals_preserve_stop
 test_active_run_and_unavailable_attribution_refuse
 test_current_brief_requires_canonical_receipt
+test_promoted_contract_recovers_durable_continuation
 test_unserialized_canonical_producer_refuses_visibly_without_stranding_status
 test_inbox_failure_remains_retryable
 test_strict_run_attribution_distinguishes_absence_from_query_failure

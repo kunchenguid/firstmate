@@ -15,6 +15,19 @@ fm_delivery_serialized_status_contract_proven() {  # <brief>
   grep -Fqx "$(fm_delivery_serialized_status_contract)" "$1"
 }
 
+fm_delivery_authoritative_contract() {  # <data-dir> <task-id>
+  local data=$1 task=$2 promoted brief
+  promoted="$data/$task/ship-instructions.md"
+  brief="$data/$task/brief.md"
+  if [ -e "$promoted" ] || [ -L "$promoted" ]; then
+    [ -f "$promoted" ] && [ ! -L "$promoted" ] || return 1
+    printf '%s\n' "$promoted"
+    return 0
+  fi
+  [ -f "$brief" ] && [ ! -L "$brief" ] || return 1
+  printf '%s\n' "$brief"
+}
+
 fm_delivery_historical_receipt_contract() {
   # shellcheck disable=SC2016 # Backticks are literal historical brief text.
   printf '%s\n' 'When you believe it is complete, append `done: {summary}` to the status file and stop.'

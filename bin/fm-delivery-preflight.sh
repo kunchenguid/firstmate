@@ -132,8 +132,8 @@ for meta in "$STATE"/*.meta; do
   [ "$kind" = ship ] && [ "$mode" = no-mistakes ] || continue
   status="$STATE/$task.status"
   [ -f "$status" ] && [ ! -L "$status" ] || continue
-  brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$task/brief.md"
-  [ -f "$brief" ] && [ ! -L "$brief" ] || continue
+  brief=$(fm_delivery_authoritative_contract "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$task" 2>/dev/null || true)
+  [ -n "$brief" ] || continue
   receipt_kind=$(fm_delivery_receipt_contract_kind "$brief" 2>/dev/null || true)
   [ -n "$receipt_kind" ] || continue
   receipt_state=$(fm_delivery_receipt_state "$status" "$receipt_kind" "$spawn_gen" 2>/dev/null || true)

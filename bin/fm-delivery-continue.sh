@@ -71,16 +71,19 @@ case "$SPAWN_GEN" in ''|*[!A-Za-z0-9._-]*) refuse missing-task-incarnation ;; es
 
 BRIEF="$DATA/$TASK/brief.md"
 [ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] || refuse missing-generated-delivery-contract
-grep -Fqx 'Delivery contract: mode=no-mistakes' "$BRIEF" || refuse delivery-contract-mismatch
-grep -Fqx 'Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.' "$BRIEF" \
+DELIVERY_CONTRACT=$(fm_delivery_authoritative_contract "$DATA" "$TASK") \
+  || refuse missing-generated-delivery-contract
+grep -Fqx 'Delivery contract: mode=no-mistakes' "$DELIVERY_CONTRACT" || refuse delivery-contract-mismatch
+grep -Fqx 'Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.' "$DELIVERY_CONTRACT" \
   || refuse validation-not-authorized
-if grep -Eq 'DRAFT_FOR_FIRSTMATE_REVIEW|Execution-Authorized:[[:space:]]*false|RESEARCH_ONLY|NO_ORDER|NO_PROMOTION' "$BRIEF"; then
+if grep -Eq 'DRAFT_FOR_FIRSTMATE_REVIEW|Execution-Authorized:[[:space:]]*false|RESEARCH_ONLY|NO_ORDER|NO_PROMOTION' \
+    "$BRIEF" "$DELIVERY_CONTRACT"; then
   refuse prohibited-research-or-promotion-scope
 fi
-RECEIPT_KIND=$(fm_delivery_receipt_contract_kind "$BRIEF") || refuse delivery-contract-mismatch
+RECEIPT_KIND=$(fm_delivery_receipt_contract_kind "$DELIVERY_CONTRACT") || refuse delivery-contract-mismatch
 STATUS_PRODUCER_PROVEN=1
 if [ "$RECEIPT_KIND" = canonical ] \
-  && ! fm_delivery_serialized_status_contract_proven "$BRIEF"; then
+  && ! fm_delivery_serialized_status_contract_proven "$DELIVERY_CONTRACT"; then
   STATUS_PRODUCER_PROVEN=0
 fi
 

@@ -297,6 +297,16 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
   } | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
 }
 
+sorted_key_without() {  # <comma-list> <key>
+  local existing=$1 remove=$2 key
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    [ "$key" = "$remove" ] || printf '%s\n' "$key"
+  done <<EOF
+$(printf '%s\n' "$existing" | tr ',' '\n')
+EOF
+}
+
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
@@ -433,6 +443,34 @@ link_captain_hold_to_origin() {  # <origin-id> <task-id>
   CAPTAIN_META_LOCK_HELD=0
 }
 
+reconcile_failed_captain_hold_link() {  # <origin-id> <task-id>
+  local origin=$1 id=$2 meta show state hold_kind previous keys
+  [ "$origin" != "$id" ] || return 0
+  meta="$STATE/$origin.meta"
+  [ -e "$meta" ] || [ -L "$meta" ] || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || fail "origin metadata is unsafe: $meta"
+  CAPTAIN_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
+  fm_lock_acquire_wait "$CAPTAIN_META_LOCK" || fail "could not lock origin metadata"
+  CAPTAIN_META_LOCK_HELD=1
+  [ -f "$meta" ] && [ ! -L "$meta" ] || fail "origin metadata disappeared while reconciling captain hold"
+  show=$(task_show "$id") || fail "could not verify failed captain hold for task $id"
+  state=$(show_field "$show" state)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  if [ "$state" != done ] && [ "$hold_kind" = captain ]; then
+    fm_lock_release "$CAPTAIN_META_LOCK"
+    CAPTAIN_META_LOCK_HELD=0
+    return 0
+  fi
+  previous=$(meta_value "$meta" captain_hold_keys)
+  keys=$(sorted_key_without "$previous" "$id" | LC_ALL=C sort -u | paste -sd, -)
+  if [ "$previous" != "$keys" ]; then
+    printf 'captain_hold_keys=%s\n' "$keys" >> "$meta" \
+      || fail "could not unlink failed captain hold $id from origin $origin"
+  fi
+  fm_lock_release "$CAPTAIN_META_LOCK"
+  CAPTAIN_META_LOCK_HELD=0
+}
+
 # Resolve one inventory entry or channel key to the task that carries it: the
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
@@ -511,11 +549,13 @@ command_hold() {
     link_captain_hold_to_origin "$origin" "$id"
   fi
   if [ -n "$until" ]; then
-    tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
-      || fail "could not hold task $id for the captain"
-  else
-    tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
-      || fail "could not hold task $id for the captain"
+    if ! tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null; then
+      [ -z "$origin" ] || reconcile_failed_captain_hold_link "$origin" "$id"
+      fail "could not hold task $id for the captain"
+    fi
+  elif ! tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null; then
+    [ -z "$origin" ] || reconcile_failed_captain_hold_link "$origin" "$id"
+    fail "could not hold task $id for the captain"
   fi
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)

@@ -5,16 +5,26 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [metadata-file] prints
+# the block on stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+FM_DOD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-delivery-continuation-lib.sh
+. "$FM_DOD_LIB_DIR/fm-delivery-continuation-lib.sh"
+
+fm_dod_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+fm_dod_block() {  # <mode> <task-id> [metadata-file]
+  local mode=$1 id=$2 meta=${3:-} meta_q receipt_contract status_contract receipt_event
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -38,11 +48,21 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
       ;;
     no-mistakes)
+      [ -n "$meta" ] || {
+        echo "error: fm_dod_block: no-mistakes requires a metadata file" >&2
+        return 1
+      }
+      meta_q=$(fm_dod_shell_quote "$meta")
+      receipt_contract=$(fm_delivery_committed_receipt_contract)
+      status_contract=$(fm_delivery_serialized_status_contract)
+      receipt_event="done: committed \$(git rev-parse HEAD) [spawn-gen=\$(sed -n 's/^spawn_gen=//p' $meta_q | tail -1)] {summary}"
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
+$receipt_contract
+$status_contract
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+When you believe it is complete, append \`$receipt_event\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.

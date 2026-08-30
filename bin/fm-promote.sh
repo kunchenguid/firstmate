@@ -143,7 +143,7 @@ Your scout task has been promoted to a ship task, mode=$MODE. Your window, workt
 6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.
 
 EOF
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$META"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=

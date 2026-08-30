@@ -1032,6 +1032,43 @@ test_origin_slug_validation_precedes_path_construction() {
   pass "completion and verification validate origins before constructing paths"
 }
 
+test_failed_hold_reconciles_origin_link() {
+  local home id state
+  home=$(make_home failed-hold-link)
+  id=sample-failed-hold-origin
+  tasks_in "$home" add "$id" "Investigate failed hold linkage" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create failed-hold origin"
+  write_origin_meta "$home" "$id"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = hold ] && [ "${2:-}" != --help ]; then
+  if [ "${FM_TEST_HOLD_FAILURE:-}" = after ]; then
+    "$REAL_TASKS_AXI" "$@" >/dev/null || exit $?
+  fi
+  exit 73
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  if FM_TEST_HOLD_FAILURE=before run_captain "$home" hold sample-failed-call \
+    --title "Choose the failed hold route" --reason "captain route pending" \
+    --repo sample --origin "$id" > "$home/before.out" 2> "$home/before.err"; then
+    fail "a failed captain hold reported success"
+  fi
+  state=$(run_captain "$home" origin-state "$id") \
+    || fail "failed hold left origin state unreadable"
+  [ "$state" = clear ] || fail "failed hold left a stranded origin link: $state"
+  if FM_TEST_HOLD_FAILURE=after run_captain "$home" hold sample-landed-call \
+    --title "Choose the landed hold route" --reason "captain landed route pending" \
+    --repo sample --origin "$id" > "$home/after.out" 2> "$home/after.err"; then
+    fail "a post-commit hold failure reported success"
+  fi
+  state=$(run_captain "$home" origin-state "$id") \
+    || fail "landed hold left origin state unreadable"
+  [ "$state" = open ] || fail "a landed captain hold lost its origin link: $state"
+  pass "failed captain holds reconcile origin links to durable state"
+}
+
 # --- record divergence ------------------------------------------------------
 
 run_drain() {  # <home>
@@ -1183,5 +1220,6 @@ test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
+test_failed_hold_reconciles_origin_link
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
