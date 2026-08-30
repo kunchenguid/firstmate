@@ -237,7 +237,7 @@ fm_home_path_absence_status() {
     config/auto-quota-drain.json|data/backlog.md|data/captain.md|data/learnings.md|\
     data/captain-shared.md|data/model-routing.md|data/projects.md|data/secondmates.md|\
     data/done-archive.md|data/quota-cooldowns.json|\
-    data/routing-outcomes.jsonl|state/.afk|\
+    data/routing-outcomes.jsonl|data/review-outcomes.jsonl|state/.afk|\
     state/.trace-context-effective)
       printf 'OPTIONAL\n'
       return 0

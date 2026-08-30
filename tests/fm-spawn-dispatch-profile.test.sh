@@ -10,6 +10,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# The suite opts into an explicit NM_HOME only in the test that covers that
+# override, so an invoking runner's no-mistakes home cannot affect defaults.
+unset NM_HOME
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 COOLDOWN="$ROOT/bin/fm-quota-cooldown.sh"

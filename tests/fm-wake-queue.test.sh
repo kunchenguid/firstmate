@@ -520,6 +520,14 @@ SH
   pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
 }
 
+assert_output_exact_line() {  # <file> <expected>
+  local file=$1 expected=$2 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "$expected" ] && return 0
+  done < "$file"
+  return 1
+}
+
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   local dir state out i raw_count expected
   dir=$(make_case complete-enrichment)
@@ -548,12 +556,12 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
   expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
+  assert_output_exact_line "$out" "$expected" \
     || fail "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
     expected="wake annotation: latest wake-EVENT observed at drain, not current state: many-$i.status: $(cat "$state/many-$i.status")"
-    grep -Fx "$expected" "$out" >/dev/null \
+    assert_output_exact_line "$out" "$expected" \
       || fail "readable status many-$i was truncated or omitted"
     i=$((i + 1))
   done

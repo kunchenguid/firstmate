@@ -113,6 +113,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes; header owns open-PR-without-watch and worktree-occupancy custody proofs |
 | `fm-worktree-unique-content.sh` | Prove whether a worktree holds content reachable from no surviving ref, so dirty-state refusals judge held content instead of stale-index noise |
 | `fm-model-telemetry.sh`  | Sole validator, writer, sealer, recovery owner, routing-candidate evidence guard, and read-only sheet reader of the private model-attempt ledger |
+| `fm-review-outcome.sh`   | Append and read the canonical review-outcome ledger                                               |
 | `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate launch axes, bind exact secondmate tuples to catalog provider/family facts, and resolve failed-report relaunch tuples through `escalate` |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
