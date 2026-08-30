@@ -424,7 +424,7 @@ SH
     "$FISH_BIN" -c "$launch" >/dev/null 2>&1
   [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
     || fail "the real fish launch retained stale TRACEPARENT"
-  pass "fm-control relaunch: disabling tracing clears metadata and the existing fish pane context"
+  pass "fm-control relaunch: disabling tracing clears metadata and the replacement environment in fish"
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {

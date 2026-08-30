@@ -177,6 +177,7 @@ fm_backend_agent_started tmux "$SESSION:codex-artifact" codex \
 pass "tmux liveness: the verified codex-aarch64-a artifact proves selected Codex startup"
 
 (
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced backend.
   tmux() {
     case "$1" in
       list-windows) printf '%s\n' paired ;;
@@ -184,6 +185,7 @@ pass "tmux liveness: the verified codex-aarch64-a artifact proves selected Codex
       *) return 1 ;;
     esac
   }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced backend.
   ps() {
     case "$1" in
       -t) printf '%s\n' '101 77 77 node' ;;

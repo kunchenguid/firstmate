@@ -408,7 +408,7 @@ SH
   TRACEPARENT=stale FM_RAW_RESULT="$result" PATH="$FAKEBIN_DIR:$PATH" \
     "$FISH_BIN" -c "$program" >/dev/null 2>&1
   [ "$(cat "$result")" = unset ] \
-    || fail "failed metadata append must clear TRACEPARENT in the existing fish pane"
+    || fail "failed metadata append must clear TRACEPARENT from the replacement launched through fish"
   pass "failed traceparent metadata append removes the carrier from the launched task"
 }
 

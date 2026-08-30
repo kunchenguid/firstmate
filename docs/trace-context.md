@@ -88,9 +88,9 @@ This is a deliberate, source-owned choice:
 ## Safety
 
 - **Default-off.**
-  With no `config/trace-context` and no `FM_TRACE_CONTEXT`, a fresh spawn injects nothing, while an actual relaunch removes any leftover `TRACEPARENT` from its reused pane before launch; neither path writes a `traceparent=` line.
+  With no `config/trace-context` and no `FM_TRACE_CONTEXT`, a fresh spawn injects nothing, while an actual relaunch removes any leftover `TRACEPARENT` from the replacement's launch environment; neither path writes a `traceparent=` line.
   Reusing an already-alive remote endpoint records any carrier that endpoint reports without injecting a new one.
-  A locked session start makes the one config-file check, and each spawn sources one extra library and reads the frozen effective-state file; for a fresh trace-off spawn, nothing an agent, an observer, or the task meta can see differs, while a relaunch has only the deliberate removal of stale pane context.
+  A locked session start makes the one config-file check, and each spawn sources one extra library and reads the frozen effective-state file; for a fresh trace-off spawn, nothing an agent, an observer, or the task meta can see differs, while a relaunch has only the deliberate removal of stale launch context.
 - **What is and is not exposed.**
   A Firstmate-*minted* root uses a random id and reads no prompt, path, task prose, credential, or arbitrary environment key, so Firstmate never *originates* sensitive data in the carrier.
   Every carrier Firstmate injects is either such a mint or the same task's previously recorded carrier reused verbatim; ambient `TRACEPARENT` is never read, so no caller-controlled bytes enter a new carrier.
@@ -101,7 +101,7 @@ This is a deliberate, source-owned choice:
   The normal cost is small, but `od`/`tr` are external processes, so there is no hard latency guarantee - this is not a guaranteed-negligible bound.
   Any entropy or self-validation failure that returns omits the carrier for that spawn without aborting source work; a corrupt recorded carrier is re-minted as a fresh root rather than propagated (it is not an omission).
   If the pre-launch carrier export fails, or recording the carrier fails after export, Firstmate binds the `TRACEPARENT` clear, absence proof, and unchanged raw launch into one program for the detected existing pane interpreter.
-  The launch runs only after that in-program proof, so an interactive prompt hook cannot restore the carrier between proof and launch, and builtins or compound commands keep the pane interpreter's parsing context.
+  The launch runs only after that in-program proof, so an interactive prompt hook cannot restore the carrier between proof and launch, and builtins or compound commands are still parsed by the detected pane interpreter.
   A failed shell detection, submission, clear, or proof refuses the launch; a proven clear omits the `traceparent=` metadata claim and still launches the task, so the child never receives an identity absent from its metadata.
 - **Metadata-only.**
   The value lives in the ephemeral pane shell and in `state/<id>.meta`; teardown removes state as before, so there is no new durable surface and no schema migration.

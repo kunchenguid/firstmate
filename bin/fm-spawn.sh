@@ -195,8 +195,9 @@
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
 # TRACEPARENT. A fresh default-off spawn writes neither and leaves the launch
-# environment unchanged; a default-off relaunch clears any leftover pane value
-# in the same submitted shell program that runs the unchanged raw launch.
+# environment unchanged; a default-off relaunch strips any leftover pane value
+# from the replacement's environment in the same submitted program that runs
+# the unchanged raw launch.
 #   --traceparent <carrier> delivers a carrier that a REMOTE parent already
 #   resolved and will record, instead of resolving one from this home's frozen
 #   decision. It is accepted only for --secondmate spawns, only as a strictly
@@ -2184,34 +2185,24 @@ spawn_send_text_line() {  # <target> <text>
 }
 spawn_bind_tracefree_launch() {
   local probe="$TASK_TMP/pane-shell.$SPAWN_GEN" proof="$TASK_TMP/traceparent-cleared.$SPAWN_GEN"
-  local command pane_shell i=0
+  local command pane_shell pane_shell_name i=0
   SPAWN_TRACEPARENT_PROOF=
   rm -f "$probe" "$proof"
-  command="sh -c 'ps -p \"\$PPID\" -o comm= > \"\$1\"' sh $(shell_quote "$probe")"
+  command="/bin/sh -c 'name=\$(ps -p \"\$PPID\" -o comm= | tr -d \"[:space:]\") || exit; name=\${name##*/}; name=\${name#-}; command -v \"\$name\" > \"\$1\"' sh $(shell_quote "$probe")"
   spawn_send_text_line "$T" "$command" || { rm -f "$probe" "$proof"; return 1; }
   while [ ! -s "$probe" ] && [ "$i" -lt 20 ]; do
     sleep 0.1
     i=$((i + 1))
   done
   [ -s "$probe" ] || { rm -f "$probe" "$proof"; return 1; }
-  pane_shell=$(tr -d '[:space:]' < "$probe")
-  pane_shell=${pane_shell##*/}
-  pane_shell=${pane_shell#-}
-  case "$pane_shell" in
-    fish)
-      LAUNCH="set -e TRACEPARENT; sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof"); and begin; $LAUNCH; end"
-      ;;
-    sh|bash|zsh|dash|ash|ksh|mksh)
-      LAUNCH="unset TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof") && { $LAUNCH; }"
-      ;;
-    csh|tcsh)
-      LAUNCH="unsetenv TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof") && ( $LAUNCH )"
-      ;;
-    *)
-      rm -f "$probe" "$proof"
-      return 1
-      ;;
+  IFS= read -r pane_shell < "$probe" || { rm -f "$probe" "$proof"; return 1; }
+  pane_shell_name=${pane_shell##*/}
+  case "$pane_shell_name" in
+    sh|bash|zsh|dash|ash|ksh|mksh|fish|csh|tcsh) : ;;
+    *) rm -f "$probe" "$proof"; return 1 ;;
   esac
+  [ -x "$pane_shell" ] || { rm -f "$probe" "$proof"; return 1; }
+  LAUNCH="env -u TRACEPARENT /bin/sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\" && exec \"\$2\" -c \"\$3\"' sh $(shell_quote "$proof") $(shell_quote "$pane_shell") $(shell_quote "$LAUNCH")"
   rm -f "$probe"
   SPAWN_TRACEPARENT_PROOF=$proof
 }
