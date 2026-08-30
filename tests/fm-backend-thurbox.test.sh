@@ -314,6 +314,23 @@ test_version_check_refuses_older_than_minimum() {
   pass "version_check refuses a build below the verified minimum"
 }
 
+# The floor is 2.10, not 2.9: 2.10 is where `session capture` gained the pane
+# state every composer read needs and where `send --no-enter`/`key` appeared.
+# A 2.8.9 case alone would still pass with the floor slipped down a minor, and
+# that slip is exactly the drift to catch - so pin both sides of the boundary.
+test_version_check_floor_is_the_2_10_boundary() {
+  local out rc
+  reset_world
+  export FM_TB_FAKE_VERSION=2.9.9
+  out=$(fm_backend_thurbox_version_check 2>&1); rc=$?
+  expect_code 1 "$rc" "version_check on the highest pre-floor build 2.9.9"
+  assert_contains "$out" "older than the verified minimum" "version_check names the floor for 2.9.9"
+  reset_world
+  export FM_TB_FAKE_VERSION=2.10.0
+  fm_backend_thurbox_version_check || fail "version check rejected the floor build 2.10.0"
+  pass "version_check puts the floor exactly at 2.10, refusing every 2.9 build"
+}
+
 test_socket_comes_from_thurbox_not_a_hardcoded_name() {
   reset_world
   export FM_TB_FAKE_SOCKET=tb-alt
@@ -1344,6 +1361,7 @@ test_supervisor_backend_yields_to_tmux_for_a_nested_server() {
 
 test_version_check_accepts_verified_build
 test_version_check_refuses_older_than_minimum
+test_version_check_floor_is_the_2_10_boundary
 test_socket_comes_from_thurbox_not_a_hardcoded_name
 test_no_operation_shells_out_to_tmux
 test_scoped_title_is_home_tagged

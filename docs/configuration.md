@@ -130,7 +130,7 @@ The compatibility helper `fm_backend_agent_alive` continues to collapse those de
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
-A thurbox spawn additionally version-gates against the installed `thurbox-cli` (minimum 2.9, read from its `version` subcommand), requires `jq` and `tmux`, refuses when thurbox's own tmux socket name cannot be read, and refuses when the agent named by `config/thurbox-agent` (default `shell`) is not defined in thurbox's `agents.toml`, printing the exact entry to paste.
+A thurbox spawn additionally version-gates against the installed `thurbox-cli` (minimum 2.10, read from its `version` subcommand), requires `jq` but not `tmux`, refuses when thurbox's own tmux socket name cannot be read, and refuses when the agent named by `config/thurbox-agent` (default `shell`) is not defined in thurbox's `agents.toml`, printing the exact entry to paste.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
@@ -384,8 +384,9 @@ That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
-A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
-A thurbox home is the one exception that needs `tmux` as well as its own CLI, because thurbox sessions are tmux windows on thurbox's own socket and the adapter's pane primitives run against that socket.
+A herdr, zellij, cmux, or thurbox home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
+thurbox is the case that invites the opposite assumption and does not earn it: its sessions really are tmux windows on thurbox's own socket, but the adapter runs every pane primitive through `thurbox-cli` and issues no tmux command, so a thurbox home needs no tmux client of its own (thurbox itself of course needs one).
+`tests/fm-bootstrap.test.sh` pins that as behaviour for every session-provider-only backend.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.

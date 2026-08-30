@@ -539,7 +539,12 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
 # plus jq added, so a backend that must NOT require tmux can be proven silent
 # with tmux absent. Echoes the fakebin dir. The removed tmux is what makes these
 # cases catch the old "everything but orca demands tmux" bug: with the buggy
-# TOOLS list a herdr/zellij/cmux home would report MISSING: tmux here.
+# TOOLS list a herdr/zellij/cmux/thurbox home would report MISSING: tmux here.
+# thurbox is the case most likely to regress back into that bug, because its
+# sessions really are tmux windows (on thurbox's own socket): the temptation is
+# to conclude the home needs a tmux client. It does not - the adapter runs every
+# pane primitive through thurbox-cli - so these cases pin that as behaviour
+# rather than leaving it to prose that can drift out of date.
 make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
   local dir=$1 fakebin
   shift
@@ -551,9 +556,9 @@ make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
 
 test_session_provider_backends_do_not_require_tmux() {
   local backend cli case_dir fakebin out
-  # herdr/zellij/cmux are session providers only: they require their own CLI, jq,
-  # and treehouse, never tmux. With all genuine deps present and tmux absent,
-  # bootstrap must be silent.
+  # herdr/zellij/cmux/thurbox are session providers only: they require their own
+  # CLI, jq, and treehouse, never tmux. With all genuine deps present and tmux
+  # absent, bootstrap must be silent.
   while IFS='^' read -r backend cli; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-no-tmux"
@@ -568,6 +573,7 @@ test_session_provider_backends_do_not_require_tmux() {
 herdr^herdr
 zellij^zellij
 cmux^cmux
+thurbox^thurbox-cli
 ROWS
   pass "bootstrap: session-provider backends require their own CLI + jq + treehouse, never tmux"
 }
@@ -586,11 +592,13 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    if [ "$backend" = herdr ]; then
-      missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)"
-    else
-      missing="MISSING: $cli"
-    fi
+    # herdr and thurbox-cli have no scriptable install command, so bootstrap
+    # routes them through manual_install_url instead of install_cmd.
+    case "$backend" in
+      herdr) missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)" ;;
+      thurbox) missing="MISSING_MANUAL: thurbox-cli (instructions: https://github.com/Thurbeen/thurbox" ;;
+      *) missing="MISSING: $cli" ;;
+    esac
     assert_contains "$out" "$missing" "backend=$backend must fail closed on its own missing session CLI"
     if [ "$backend" = herdr ]; then
       assert_not_contains "$out" "MISSING: herdr (install:" \
@@ -601,6 +609,7 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
 herdr^herdr
 zellij^zellij
 cmux^cmux
+thurbox^thurbox-cli
 ROWS
   pass "bootstrap: a session-provider backend gates its own CLI, never a false tmux requirement"
 }
