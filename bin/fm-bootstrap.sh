@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "NM_INCOMPATIBLE: no-mistakes <installed incompatibility> (upgrade: no-mistakes update)",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -83,12 +84,17 @@
 #          (code.byted.org) provider - detected from the firstmate home's own
 #          origin or any registered project clone - so a GitHub-only home is
 #          never told it is missing.
-#          no-mistakes is also MISSING when its installed version is older than
-#          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
+#          no-mistakes is MISSING only when its command is absent. Installed
+#          SemVer builds below 1.46.0 and installed builds whose required
+#          capabilities cannot be verified report NM_INCOMPATIBLE instead.
+#          Recognized commit-hash development builds pass only when bounded,
+#          read-only help probes confirm watch --pr and axi run --intent.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
-#          build below its floor reports MISSING like no-mistakes, so the operator
+#          axi-family builds below their floors report MISSING, so the operator
 #          is asked to upgrade rather than silently running an older tool.
+#          no-mistakes instead distinguishes absence from installed incompatibility;
+#          its 1.46.0 floor protects the structured pipeline attestation contract.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). A compatible tasks-axi default backend is silent.
@@ -1535,8 +1541,8 @@ detect_local_tools() {
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
   fi
-  if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
-    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+  if command -v no-mistakes >/dev/null 2>&1 && ! fm_nm_bootstrap_compatible "$NO_MISTAKES_MIN"; then
+    fm_nm_incompatible_diagnostic
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
@@ -1553,12 +1559,6 @@ detect_local_tools() {
   if fleet_uses_codebase && ! command -v bytedcli >/dev/null 2>&1; then
     missing_tool_diagnostic bytedcli
   fi
-  # no-mistakes present but too old for direct-PR monitoring: the COMMON_TOOLS
-  # loop above already reports the not-installed case as MISSING, so this
-  # reports ONLY the installed-but-incompatible case (return 1) as a distinct,
-  # non-MISSING diagnostic. An incompatible binary otherwise passes the presence
-  # check and the gap surfaces only later as `watch not armed` on a direct-PR task.
-  fm_nm_supports_watch || [ "$?" -eq 2 ] || fm_nm_incompatible_diagnostic
 }
 
 detect_local_config() {

@@ -76,22 +76,39 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  # no-mistakes must be present AND expose the `watch` subcommand firstmate's
-  # direct-PR monitor depends on. The stub answers `watch --help` per
-  # FM_FAKE_NM_WATCH: `ok`/unset = compatible (documents --pr), `missing` = an old
-  # build that lacks the subcommand, `error` = an unexpected crash. Any other
-  # invocation just succeeds, so `command -v no-mistakes` still passes.
+  # no-mistakes must be present AND expose the `watch --pr` and `axi run
+  # --intent` capabilities firstmate depends on. The stub answers those help
+  # probes independently so bootstrap behavior is exercised through the real
+  # executable interface rather than implementation-source inspection.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 # Bootstrap now gates no-mistakes on a version floor as well as on watch
 # capability, so the fake answers --version too. Cases that exercise the floor
 # override FM_FAKE_NO_MISTAKES_VERSION; every other case wants a compliant one.
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z}"
-  exit 0
+  case "${FM_FAKE_NM_VERSION_BEHAVIOR:-ok}" in
+    hang)
+      sleep 20
+      exit 0 ;;
+    error)
+      echo 'panic: runtime error' >&2
+      exit 2 ;;
+    extra-space)
+      printf 'no-mistakes version  %s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-v1.46.0}"
+      exit 0 ;;
+    tab)
+      printf 'no-mistakes version\t%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-v1.46.0}"
+      exit 0 ;;
+    *)
+      printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.46.0 (fake)}"
+      exit 0 ;;
+  esac
 fi
 if [ "${1:-}" = watch ] && [ "${2:-}" = --help ]; then
   case "${FM_FAKE_NM_WATCH:-ok}" in
+    hang)
+      sleep 20
+      exit 0 ;;
     missing)
       echo 'A new version of no-mistakes is available: v1.34.0 -> v1.40.3' >&2
       echo 'unknown command "watch" for "no-mistakes"' >&2
@@ -99,9 +116,61 @@ if [ "${1:-}" = watch ] && [ "${2:-}" = --help ]; then
     error)
       echo 'panic: runtime error' >&2
       exit 2 ;;
+    cobra-combined)
+      printf '%s\n' 'Usage:' '  no-mistakes watch [flags]' \
+        'Flags:' '  -p, --pr URL   URL of the pull/merge request to watch'
+      exit 0 ;;
+    cobra-alias)
+      printf '%s\n' 'Usage:' '  no-mistakes watch [flags]' \
+        'Flags:' '      --pr, --pull-request string   URL of the pull/merge request to watch'
+      exit 0 ;;
+    description-only)
+      printf '%s\n' 'Description: uses the --pr flag; no flags section'
+      exit 0 ;;
+    space-separated)
+      printf '%s\n' 'Usage:' '  no-mistakes watch [flags]' \
+        'Flags:' '  -p --pr URL   URL of the pull/merge request to watch'
+      exit 0 ;;
+    slash-separated)
+      printf '%s\n' 'Usage:' '  no-mistakes watch [flags]' \
+        'Flags:' '      --pr / -p URL   URL of the pull/merge request to watch'
+      exit 0 ;;
     *)
       printf '%s\n' 'Usage:' '  no-mistakes watch --pr <url> [flags]' \
         'Flags:' '      --pr string   URL of the pull/merge request to watch (required)'
+      exit 0 ;;
+  esac
+fi
+if [ "${1:-}" = axi ] && [ "${2:-}" = run ] && [ "${3:-}" = --help ]; then
+  case "${FM_FAKE_NM_AXI:-ok}" in
+    missing)
+      echo 'unknown command "axi" for "no-mistakes"' >&2
+      exit 1 ;;
+    no-intent)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]'
+      exit 0 ;;
+    error)
+      echo 'panic: runtime error' >&2
+      exit 2 ;;
+    cobra-combined)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '  -i, --intent string   what the user set out to accomplish'
+      exit 0 ;;
+    cobra-alias)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '      --intent, --goal string   what the user set out to accomplish'
+      exit 0 ;;
+    space-separated)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '  -i --intent string   what the user set out to accomplish'
+      exit 0 ;;
+    slash-separated)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '      --intent / -i string   what the user set out to accomplish'
+      exit 0 ;;
+    *)
+      printf '%s\n' 'Usage:' '  no-mistakes axi run [flags]' \
+        'Flags:' '      --intent string   what the user set out to accomplish'
       exit 0 ;;
   esac
 fi
@@ -393,7 +462,7 @@ test_no_mistakes_present_or_internal_source() {
   # without running it.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_WATCH=missing "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "NM_INCOMPATIBLE: no-mistakes is installed but too old" \
+  assert_contains "$out" "NM_INCOMPATIBLE: no-mistakes v1.46.0 is installed but required capability watch --pr is unavailable" \
     "old no-mistakes: expected NM_INCOMPATIBLE diagnostic, got: $out"
   assert_contains "$out" "upgrade: no-mistakes update" \
     "old no-mistakes: diagnostic must suggest the upgrade command, got: $out"
@@ -459,10 +528,9 @@ test_bytedcli_required_for_codebase_fleet() {
 }
 
 test_no_mistakes_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: git clone https://code.byted.org/obric/no-mistakes.git && cd no-mistakes && make install  # requires Go 1.25+)'
+  local label version watch axi mode expect case_dir fakebin out n version_behavior
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version watch axi version_behavior mode expect; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/no-mistakes-$n"
@@ -471,21 +539,61 @@ test_no_mistakes_min_version() {
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      FM_NM_PROBE_TIMEOUT=1 \
+      FM_FAKE_NO_MISTAKES_VERSION="$version" FM_FAKE_NM_WATCH="$watch" \
+      FM_FAKE_NM_AXI="$axi" FM_FAKE_NM_VERSION_BEHAVIOR="$version_behavior" \
+      "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+      exact)
+        [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
     esac
   done <<'ROWS'
-minimum no-mistakes version is accepted^no-mistakes version v1.46.0 (fake)^empty
-newer no-mistakes minor is accepted^no-mistakes version v1.47.0 (fake)^empty
-newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty
-older no-mistakes patch reports an upgrade^no-mistakes version v1.45.4 (fake)^missing
-unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
+minimum no-mistakes version is accepted^no-mistakes version v1.46.0 (fake)^ok^ok^ok^empty^
+newer no-mistakes minor is accepted^no-mistakes version v1.47.0 (fake)^ok^ok^ok^empty^
+newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^ok^ok^ok^empty^
+older no-mistakes patch reports its installed version^no-mistakes version v1.45.4 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.45.4 is installed but below required v1.46.0; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+SemVer prerelease below exact floor is rejected^no-mistakes version v1.46.0-rc.1 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.46.0-rc.1 is installed but below required v1.46.0; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+SemVer prerelease of lower version is rejected^no-mistakes version v1.45.4-rc.3 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.45.4-rc.3 is installed but below required v1.46.0; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+SemVer with build metadata at floor is accepted^no-mistakes version v1.46.0+build.7 (fake)^ok^ok^ok^empty^
+SemVer prerelease with build metadata below floor is rejected^no-mistakes version v1.46.0-alpha.1+sha.a3b (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.46.0-alpha.1+sha.a3b is installed but below required v1.46.0; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+malformed SemVer leading zero major is unclassifiable^no-mistakes version v01.47.0 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer empty prerelease is unclassifiable^no-mistakes version v1.47.0- (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer empty build metadata is unclassifiable^no-mistakes version v1.47.0+ (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer double-dot prerelease is unclassifiable^no-mistakes version v1.47.0-rc..1 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer trailing-dot prerelease is unclassifiable^no-mistakes version v1.47.0-rc. (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer trailing-dot build metadata is unclassifiable^no-mistakes version v1.47.0+build. (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer numeric prerelease leading zero bare is unclassifiable^no-mistakes version v2.0.0-01 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer numeric prerelease leading zero suffix is unclassifiable^no-mistakes version v2.0.0-rc.01 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+SemVer prerelease single zero identifier is accepted^no-mistakes version v2.0.0-0 (fake)^ok^ok^ok^empty^
+malformed SemVer 4-part core is unclassifiable^no-mistakes version v9.9.9.9-deadbeef (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer 4-part core floor suffix is unclassifiable^no-mistakes version v1.46.0.4 (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer trailing-dot core is unclassifiable^no-mistakes version v9.9.9.-rc (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+malformed SemVer trailing-dot low core is unclassifiable^no-mistakes version v1.46.0. (fake)^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+compatible SemVer with extra space after version keyword is accepted^v1.46.0 (fake)^ok^ok^extra-space^empty^
+compatible SemVer with tab after version keyword is accepted^v1.46.0 (fake)^ok^ok^tab^empty^
+compatible hash build with extra space after version keyword is accepted^5c46a8b (5c46a8b) 2026-08-26T06:12:28Z^ok^ok^extra-space^empty^
+SemVer meeting floor with cobra short-long watch and intent is accepted^no-mistakes version v1.46.0 (fake)^cobra-combined^cobra-combined^ok^empty^
+SemVer meeting floor with long-alias watch and intent is accepted^no-mistakes version v1.46.0 (fake)^cobra-alias^cobra-alias^ok^empty^
+SemVer meeting floor with space-separated short-long flags is accepted^no-mistakes version v1.46.0 (fake)^space-separated^space-separated^ok^empty^
+SemVer meeting floor with slash-separated long-first flags is accepted^no-mistakes version v1.46.0 (fake)^slash-separated^slash-separated^ok^empty^
+SemVer meeting floor with mixed separators is accepted^no-mistakes version v1.46.0 (fake)^space-separated^cobra-combined^ok^empty^
+SemVer meeting floor with watch flag only in description text is rejected^no-mistakes version v1.46.0 (fake)^description-only^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.46.0 is installed but required capability watch --pr is unavailable; upgrade it before using direct-PR delivery (upgrade: no-mistakes update)
+SemVer meeting floor missing AXI intent is incompatible^no-mistakes version v1.46.0 (fake)^ok^no-intent^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.46.0 is installed but required capability axi run --intent is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+newer SemVer missing AXI intent is incompatible^no-mistakes version v1.47.0 (fake)^ok^no-intent^ok^exact^NM_INCOMPATIBLE: no-mistakes v1.47.0 is installed but required capability axi run --intent is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+capable commit-hash build is accepted^no-mistakes version 5c46a8b (5c46a8b) 2026-08-26T06:12:28Z^ok^ok^ok^empty^
+hash build missing watch capability is incompatible^no-mistakes version 5c46a8b (5c46a8b) 2026-08-26T06:12:28Z^missing^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes development build 5c46a8b is installed but required capability watch --pr is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+hash build watch probe is bounded^no-mistakes version 5c46a8b (5c46a8b) 2026-08-26T06:12:28Z^hang^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes development build 5c46a8b is installed but required capability watch --pr is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+hash build missing AXI intent capability is incompatible^no-mistakes version 5c46a8b (5c46a8b) 2026-08-26T06:12:28Z^ok^no-intent^ok^exact^NM_INCOMPATIBLE: no-mistakes development build 5c46a8b is installed but required capability axi run --intent is unavailable; upgrade it before relying on Firstmate's validation contract (upgrade: no-mistakes update)
+unknown version format is not called missing^no-mistakes development build^ok^ok^ok^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version cannot be compared with required v1.46.0 and it is not a recognized commit-hash development build; install or upgrade to a versioned build (upgrade: no-mistakes update)
+version probe hang with capable build is accepted^-^ok^ok^hang^empty^
+version probe error with capable build is accepted^-^ok^ok^error^empty^
+version probe hang without watch is incompatible^-^missing^ok^hang^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version probe failed or exceeded the 1s bound and required capability watch --pr is unavailable; upgrade to a responsive build with direct-PR support (upgrade: no-mistakes update)
+version probe error without AXI intent is incompatible^-^ok^no-intent^error^exact^NM_INCOMPATIBLE: no-mistakes is installed but its version probe failed or exceeded the 1s bound and required capability axi run --intent is unavailable; upgrade to a responsive build with intent support (upgrade: no-mistakes update)
 ROWS
-  pass "bootstrap enforces no-mistakes minimum version"
+  pass "bootstrap classifies no-mistakes SemVer and hash builds accurately"
 }
 
 test_gh_axi_min_version() {
