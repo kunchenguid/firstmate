@@ -201,9 +201,10 @@ The remote host runs no doorbell re-ring ladder of its own; a swallowed doorbell
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
 For a remote Codex secondmate, launch starts the agent without a startup brief, identifies its one host-side process through Herdr, atomically publishes a mode-0600 binding to its exported `CODEX_SESSION_ID`, and records launch completion before delivering that brief.
 The route becomes reusable only after a matching startup-brief delivery receipt is also durable.
-The session lock accepts that binding only when the caller and the still-live host process export the recorded session id, while a missing, malformed, stale, or ambiguous binding still refuses.
+On the affected remote Linux layout, the tool runs in a private PID namespace whose session-start child cannot walk to the host-side process, so lock acquisition verifies the caller's exported session id against the recorded home and spawn generation.
+Binding publication refuses missing or ambiguous host candidates, later host-side liveness checks revalidate the recorded process and exported session id, and a missing, malformed, or mismatched record never falls back to visible ancestry.
 The remote harness diagnostic remains the read-only instrument for inspecting the recorded Herdr pane's process ancestry and preserves fail-closed behavior.
-It becomes remotely invocable only after merge and the ordinary remote code-root update deploys the merged code to that host.
+The command is remotely invocable once the ordinary remote code-root update has deployed this version to that host.
 
 ```sh
 FM_HOME=<primary-home> bin/fm-on.sh <secondmate-id> fm-remote-harness-diagnostic.sh <secondmate-id>

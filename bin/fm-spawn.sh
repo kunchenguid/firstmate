@@ -17,7 +17,7 @@
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #   --migrate-legacy is an explicit, one-time remote-secondmate transition for
-#   a live pre-session-binding Codex endpoint. It never reuses that endpoint:
+#   a live pre-receipt Codex endpoint. It never reuses that endpoint:
 #   the remote controller verifies that its metadata predates the receipt
 #   protocol, stops it through the backend, proves it is gone, then launches a
 #   fresh bound agent before the startup brief is delivered. It is refused for

@@ -18,7 +18,8 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
+# Detection layers: verified environment markers, process ancestry, then a
+# required remote Codex session binding.
 # Record each newly verified env marker here.
 set -u
 
