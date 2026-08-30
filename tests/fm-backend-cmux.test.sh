@@ -1166,6 +1166,26 @@ test_endpoint_blocks_respawn_when_workspace_inventory_is_unreadable() {
   pass "fm_backend_endpoint_blocks_respawn: unreadable cmux inventory blocks a respawn"
 }
 
+# cmux can exit successfully while returning malformed data. That is no more
+# evidence of absence than a nonzero inventory command: a cleanup warning must
+# remain visible until a well-formed workspace inventory proves the title gone.
+test_endpoint_blocks_respawn_when_workspace_inventory_is_malformed() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-malformed"; mkdir -p "$dir/responses"
+  printf '{not-json\n' > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "a malformed cmux workspace inventory must not claim the endpoint is retryable"
+  pass "fm_backend_endpoint_blocks_respawn: malformed cmux inventory blocks a respawn"
+}
+
 test_version_check_accepts_current_version
 test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
@@ -1231,3 +1251,4 @@ test_secondmate_spawn_refuses_cmux_backend
 test_endpoint_blocks_respawn_sees_the_workspace_a_surface_read_misses
 test_endpoint_blocks_respawn_clear_when_no_workspace_carries_the_title
 test_endpoint_blocks_respawn_when_workspace_inventory_is_unreadable
+test_endpoint_blocks_respawn_when_workspace_inventory_is_malformed

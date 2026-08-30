@@ -330,11 +330,15 @@ fm_backend_cmux_scoped_title() {  # <fm-task-label>
 # so this adopts the FIRST match `jq` returns, mirroring herdr's/zellij's own
 # duplicate-check posture.
 fm_backend_cmux_workspace_id_for_label() {  # <label>
-  local label=$1 workspaces
+  local label=$1 workspaces workspace_id
   workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 2
-  printf '%s' "$workspaces" \
-    | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null \
-    | head -1
+  # A successful cmux command can still emit unusable data. Validate the
+  # inventory before looking for a title: the old jq|head pipeline let head
+  # hide jq's parse failure and falsely reported a surviving workspace gone.
+  printf '%s' "$workspaces" | jq -e 'type == "object" and (.workspaces | type == "array")' >/dev/null 2>&1 || return 2
+  workspace_id=$(printf '%s' "$workspaces" \
+    | jq -r --arg want "$label" '[.workspaces[] | select(.title == $want) | .id][0] // empty' 2>/dev/null) || return 2
+  printf '%s' "$workspace_id"
 }
 
 # fm_backend_cmux_workspace_exists: does a live workspace already carry the
