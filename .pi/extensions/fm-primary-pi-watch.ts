@@ -122,6 +122,7 @@ const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
 const intentionalIdleRetirements = new WeakSet<ChildProcess>();
+const unreadyArms = new WeakSet<ChildProcess>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -440,11 +441,9 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
-    if (!armChild) return true;
-    armChild.kill("SIGTERM");
+  function waitForArmClose(armChild: ChildProcess): Promise<boolean> {
     const closed = armClose.get(armChild);
-    if (!closed) return false;
+    if (!closed) return Promise.resolve(false);
     return new Promise((resolveRetired) => {
       const timer = setTimeout(() => resolveRetired(false), armRetireTimeoutMs);
       timer.unref();
@@ -453,6 +452,23 @@ export default function (pi: ExtensionAPI) {
         resolveRetired(true);
       });
     });
+  }
+
+  async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
+    if (!armChild) return true;
+    armChild.kill("SIGTERM");
+    return waitForArmClose(armChild);
+  }
+
+  async function forceRetireArm(armChild: ChildProcess | null): Promise<boolean> {
+    if (!armChild) return true;
+    armChild.kill("SIGKILL");
+    return waitForArmClose(armChild);
+  }
+
+  async function retireUnreadyArm(armChild: ChildProcess): Promise<boolean> {
+    if (await retireArm(armChild)) return true;
+    return forceRetireArm(armChild);
   }
 
   async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<{
@@ -545,6 +561,18 @@ export default function (pi: ExtensionAPI) {
       };
     }
     markLoaded();
+    if (owner.child && intentionalIdleRetirements.has(owner.child)) {
+      return {
+        ok: false,
+        message: "watcher: not armed - the prior idle retirement is still exiting; demand reconciliation will retry after it closes",
+      };
+    }
+    if (owner.child && unreadyArms.has(owner.child)) {
+      return {
+        ok: false,
+        message: "watcher: not armed - the previous arm failed readiness and is still exiting; demand reconciliation will retry after it closes",
+      };
+    }
     if (owner.child) {
       return {
         ok: true,
@@ -616,6 +644,7 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      unreadyArms.delete(armChild);
       if (!generationIsLive(owner)) return;
       const classification = classifyClose(stdout, stderr, code, signal);
       const intentionalRetirement = intentionalIdleRetirements.has(armChild);
@@ -654,6 +683,7 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      unreadyArms.delete(armChild);
       if (!generationIsLive(owner)) return;
       if (intentionalIdleRetirements.has(armChild)) {
         intentionalIdleRetirements.delete(armChild);
@@ -685,11 +715,22 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner)) return;
     const demand = owner.demandHintsReliable ? observedDemand : "uncertain";
     if (demand !== "idle") {
+      const retiringChild = owner.child;
+      if (retiringChild && intentionalIdleRetirements.has(retiringChild)) {
+        if (!(await forceRetireArm(retiringChild))) return;
+      }
       const result = startArm(owner);
       if (!result.ok) return;
       const armChild = owner.child;
-      if (armChild) await waitForReadiness(armChild);
-      else await waitForPendingRetry(owner);
+      if (armChild) {
+        const ready = await waitForReadiness(armChild);
+        if (!ready && generationIsLive(owner) && owner.child === armChild) {
+          unreadyArms.add(armChild);
+          await retireUnreadyArm(armChild);
+        }
+      } else {
+        await waitForPendingRetry(owner);
+      }
       return;
     }
     cancelRetry(owner);

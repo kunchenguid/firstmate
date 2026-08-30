@@ -173,7 +173,7 @@ trap 'exit 0' TERM INT
 while :; do :; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_READY_FILE="$ready" FM_PI_ARM_READY_TIMEOUT_MS=500 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_READY_FILE="$ready" FM_PI_ARM_READY_TIMEOUT_MS=2000 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -334,6 +334,147 @@ EOF
   expect_code 0 "$status" "pending retry demand reconciliation must wait for a ready arm: $out"
   [ -z "$out" ] || fail "Pi pending-retry reconciliation test printed output: $out"
   pass "Pi pending retry reconciliation waits for watcher readiness"
+}
+
+test_pi_retirement_timeout_restarts_returning_demand() {
+  local repo home plugin log first_pid returning overlap out status
+  repo="$TMP_ROOT/pi-demand-retirement-race-root"
+  home="$TMP_ROOT/pi-demand-retirement-race-home"
+  log="$TMP_ROOT/pi-demand-retirement-race.log"
+  first_pid="$TMP_ROOT/pi-demand-retirement-race.pid"
+  returning="$home/state/returning.meta"
+  overlap="$TMP_ROOT/pi-demand-retirement-race.overlap"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf '%s\n' "$$" > "${FM_FIRST_PID:?}"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  trap 'printf "returning\n" > "${FM_RETURNING_DEMAND:?}"' TERM INT
+  while :; do sleep 0.02; done
+fi
+if kill -0 "$(cat "${FM_FIRST_PID:?}")" 2>/dev/null; then
+  printf 'overlap\n' > "${FM_OVERLAP:?}"
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do :; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_FIRST_PID="$first_pid" FM_RETURNING_DEMAND="$returning" FM_OVERLAP="$overlap" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=10 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let modelTurns = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "published task\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+rmSync(`${process.env.FM_HOME}/state/task.meta`);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+for (let i = 0; i < 300 && rows().length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_RETURNING_DEMAND)) throw new Error("retirement did not observe returning demand");
+if (rows().length !== 2) throw new Error(`returning demand did not restart monitoring: ${rows().length} arm cycles`);
+if (existsSync(process.env.FM_OVERLAP)) throw new Error("replacement arm overlapped the unretired child");
+if (modelTurns !== 0) throw new Error(`retirement demand race used ${modelTurns} model turns`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "returning demand must restart after a timed-out idle retirement: $out"
+  [ -z "$out" ] || fail "Pi retirement-demand race test printed output: $out"
+  pass "Pi timed-out idle retirement restarts returning demand without overlap"
+}
+
+test_pi_readiness_timeout_retires_hung_arm() {
+  local repo home plugin log first_marker ready out status
+  repo="$TMP_ROOT/pi-demand-readiness-timeout-root"
+  home="$TMP_ROOT/pi-demand-readiness-timeout-home"
+  log="$TMP_ROOT/pi-demand-readiness-timeout.log"
+  first_marker="$TMP_ROOT/pi-demand-readiness-timeout.first"
+  ready="$TMP_ROOT/pi-demand-readiness-timeout.ready"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+if [ ! -e "${FM_FIRST_MARKER:?}" ]; then
+  : > "$FM_FIRST_MARKER"
+  trap 'exit 0' TERM INT
+  while :; do sleep 0.01; done
+fi
+printf 'ready\n' > "${FM_READY_FILE:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do :; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_FIRST_MARKER="$first_marker" FM_READY_FILE="$ready" FM_PI_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=10 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let modelTurns = 0;
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "published task\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+for (let i = 0; i < 300 && rows().length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (rows().length !== 2) throw new Error(`hung readiness arm did not make a retry: ${rows().length} arm cycles`);
+if (!existsSync(process.env.FM_READY_FILE)) throw new Error("retry arm did not establish readiness");
+const repair = await tool.execute("repair-after-timeout", {}, undefined, undefined, {});
+if (repair.details?.ok !== true || !repair.content[0]?.text.includes("already owns an arm child")) {
+  throw new Error(`repair arm remained trapped by the hung child: ${JSON.stringify(repair.details)}`);
+}
+if (modelTurns !== 0) throw new Error(`readiness timeout recovery used ${modelTurns} model turns`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "readiness timeout must retire a hung arm and retry demanded monitoring: $out"
+  [ -z "$out" ] || fail "Pi readiness-timeout test printed output: $out"
+  pass "Pi readiness timeout retires hung arms and restores demanded monitoring"
 }
 
 test_pi_idle_retirement_timeout_suppresses_late_failure() {
@@ -3346,6 +3487,8 @@ test_pi_session_start_arms_only_with_supervision_demand
 test_pi_session_start_waits_for_arm_readiness
 test_pi_idle_demand_cancels_pending_retry
 test_pi_pending_retry_reconciliation_waits_for_ready_arm
+test_pi_retirement_timeout_restarts_returning_demand
+test_pi_readiness_timeout_retires_hung_arm
 test_pi_idle_retirement_timeout_suppresses_late_failure
 test_pi_lock_handoff_reconciles_existing_demand
 test_pi_settled_run_retires_idle_monitoring_without_model_turn
