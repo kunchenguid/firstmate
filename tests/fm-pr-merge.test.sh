@@ -68,6 +68,9 @@
 #   (av) a base branch with no queue rule says nothing about a merge queue
 #   (aw) a refusal built on the gh-axi view says the merge queue could not be
 #       observed, and judges that view's state like the queue-aware one
+#   (ax) the PR base guard catches foreign commits and foreign file content
+#   (ay) the PR base guard allows clean content and an agreed base/main blob
+#   (az) the merge path refuses the guard failure unless explicitly overridden
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -75,8 +78,20 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
+PR_BASE_CHECK="$ROOT/bin/fm-pr-base-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 BASE_PATH=$PATH
+BASE_CHECK_FAKEBIN="$TMP_ROOT/base-check-fakebin"
+mkdir -p "$BASE_CHECK_FAKEBIN"
+cat > "$BASE_CHECK_FAKEBIN/gh-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf 'api_response:\n  body: %s\n  truncated: false\n' "${FM_TEST_PR_BASE:-main}"
+  exit 0
+fi
+exec "$FM_TEST_FORGE_FAKEBIN/gh-axi" "$@"
+SH
+chmod +x "$BASE_CHECK_FAKEBIN/gh-axi"
 
 # The GitLab fixture. A placeholder host that resolves nowhere, and a namespace
 # deeper than one group, because a GitLab project has no owner/repository pair.
@@ -93,14 +108,29 @@ REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin project remote seed number
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$fakebin"
+  project="$case_dir/project"
+  remote="$case_dir/origin.git"
+  seed="$case_dir/seed"
+  fm_git_init_commit "$seed"
+  git -C "$seed" branch -M main
+  git clone -q --bare "$seed" "$remote"
+  git -C "$seed" checkout -q -b pr
+  printf 'pull request content\n' > "$seed/pr.txt"
+  git -C "$seed" add pr.txt
+  git -C "$seed" commit -qm 'test pull request content'
+  for number in 5 6 7 8 9 13 15 21 22 23 44 51 52 53 54 55 56 57 58 59 \
+    60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 126; do
+    git -C "$seed" push -q "file://$remote" HEAD:"refs/pull/$number/head"
+  done
+  git clone -q "file://$remote" "$project"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
-    "project=$case_dir/project" \
+    "project=$project" \
     "kind=ship" \
     "mode=no-mistakes"
   printf '%s\n' \
@@ -164,8 +194,8 @@ add_gh_mocks_merge_fails() {
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
-  esac
-  exit 0
+esac
+exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -357,6 +387,7 @@ run_pr_merge() {
   FM_HOME="${FM_TEST_HOME:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_FORGE_FAKEBIN="$case_dir/fakebin" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
@@ -364,7 +395,7 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$BASE_CHECK_FAKEBIN:$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
   if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
@@ -395,7 +426,6 @@ test_verified_merge_records_pr_and_head() {
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-
   expect_code 0 "$rc" "records-before-merge: fm-pr-merge should succeed"
   assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr= was not recorded"
@@ -2072,6 +2102,150 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+build_guard_project() {
+  local case_dir=$1 mode=$2 seed remote project root_commit
+  seed="$case_dir/guard-seed"
+  remote="$case_dir/guard-origin.git"
+  project="$case_dir/guard-project"
+  fm_git_init_commit "$seed"
+  root_commit=$(git -C "$seed" rev-parse HEAD)
+  git -C "$seed" branch -M main
+  printf 'main component\n' > "$seed/component.ts"
+  printf 'agreed content\n' > "$seed/same.txt"
+  git -C "$seed" add component.ts same.txt
+  git -C "$seed" commit -qm 'main component change'
+  git -C "$seed" checkout -q -b feature/base "$root_commit"
+  printf 'base component\n' > "$seed/component.ts"
+  printf 'agreed content\n' > "$seed/same.txt"
+  git -C "$seed" add component.ts same.txt
+  git -C "$seed" commit -qm 'feature base component change'
+  git -C "$seed" checkout -q -b pr
+  case "$mode" in
+    content)
+      printf 'main component\n' > "$seed/component.ts"
+      git -C "$seed" add component.ts
+      git -C "$seed" commit -qm 'copy main component wholesale'
+      ;;
+    foreign-commit)
+      git -C "$seed" merge --no-ff main -m 'merge main into PR' >/dev/null 2>&1 || {
+        git -C "$seed" checkout -q --ours component.ts
+        git -C "$seed" add component.ts
+        git -C "$seed" commit -qm 'merge main into PR'
+      }
+      ;;
+    agreed)
+      chmod +x "$seed/same.txt"
+      git -C "$seed" add same.txt
+      git -C "$seed" commit -qm 'change mode on agreed file'
+      ;;
+    clean)
+      printf 'only PR content\n' > "$seed/pr-only.txt"
+      git -C "$seed" add pr-only.txt
+      git -C "$seed" commit -qm 'clean PR content'
+      ;;
+    *) fail "unknown guard fixture mode: $mode" ;;
+  esac
+  git clone -q --bare "$seed" "$remote"
+  git -C "$seed" push -q "file://$remote" HEAD:refs/pull/1/head
+  git clone -q "file://$remote" "$project"
+  printf '%s\n' "$project"
+}
+
+run_base_check() {
+  local project=$1 mode=$2 out rc
+  project=$(build_guard_project "$project" "$mode")
+  set +e
+  out=$(cd "$project" && "$PR_BASE_CHECK" \
+    https://github.com/example/repo/pull/1 --base feature/base --against main 2>&1)
+  rc=$?
+  set -e
+  printf '%s\n%s\n' "$rc" "$out"
+}
+
+test_base_guard_clean_pr_passes() {
+  local case_dir out rc
+  case_dir="$TMP_ROOT/base-clean"
+  mkdir -p "$case_dir"
+  out=$(run_base_check "$case_dir" clean)
+  rc=$(printf '%s\n' "$out" | head -1)
+  expect_code 0 "$rc" "base-clean: clean PR should pass"
+  assert_contains "$out" 'PR base check: PASS' "base-clean: pass summary is missing"
+  pass "PR base guard passes a clean PR"
+}
+
+test_base_guard_foreign_commit_fails_with_subject() {
+  local case_dir out rc
+  case_dir="$TMP_ROOT/base-foreign-commit"
+  mkdir -p "$case_dir"
+  out=$(run_base_check "$case_dir" foreign-commit)
+  rc=$(printf '%s\n' "$out" | head -1)
+  expect_code 1 "$rc" "base-foreign-commit: foreign commit should fail"
+  assert_contains "$out" 'foreign commit:' "base-foreign-commit: evidence is missing"
+  assert_contains "$out" 'main component change' "base-foreign-commit: commit subject is missing"
+  pass "PR base guard names a foreign reachable commit"
+}
+
+test_base_guard_foreign_content_fails_with_file() {
+  local case_dir out rc
+  case_dir="$TMP_ROOT/base-foreign-content"
+  mkdir -p "$case_dir"
+  out=$(run_base_check "$case_dir" content)
+  rc=$(printf '%s\n' "$out" | head -1)
+  expect_code 1 "$rc" "base-foreign-content: foreign content should fail"
+  assert_contains "$out" 'foreign content: component.ts appears taken from main' \
+    "base-foreign-content: file evidence is missing"
+  pass "PR base guard catches wrong-branch file content"
+}
+
+test_base_guard_agreed_blob_does_not_fail() {
+  local case_dir out rc
+  case_dir="$TMP_ROOT/base-agreed"
+  mkdir -p "$case_dir"
+  out=$(run_base_check "$case_dir" agreed)
+  rc=$(printf '%s\n' "$out" | head -1)
+  expect_code 0 "$rc" "base-agreed: agreed blob should pass"
+  assert_contains "$out" 'PR base check: PASS' "base-agreed: pass summary is missing"
+  pass "PR base guard allows content that base and main already share"
+}
+
+test_merge_guard_refuses_and_override_proceeds() {
+  local case_dir project rc
+  case_dir="$TMP_ROOT/merge-base-guard"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin"
+  project=$(build_guard_project "$case_dir" content)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_PR_BASE=feature/base run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "merge-base-guard: failed guard should refuse merge"
+  assert_grep 'foreign content: component.ts appears taken from main' "$case_dir/stdout" \
+    "merge-base-guard: refusal omitted guard evidence"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "merge-base-guard: merge was invoked after guard failure"
+
+  : > "$case_dir/gh-axi.log"
+  FM_TEST_PR_BASE=feature/base run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/1 -- --override-pr-base-check \
+    > "$case_dir/stdout-override" 2> "$case_dir/stderr-override" \
+    || fail "merge-base-guard: override should proceed"
+  grep -qxF 'pr merge 1 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "merge-base-guard: override did not invoke the default squash merge"
+  assert_no_grep '--override-pr-base-check' "$case_dir/gh-axi.log" \
+    "merge-base-guard: override flag reached gh-axi"
+  pass "fm-pr-merge refuses a failed guard and requires the explicit override"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -2133,3 +2307,8 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_base_guard_clean_pr_passes
+test_base_guard_foreign_commit_fails_with_subject
+test_base_guard_foreign_content_fails_with_file
+test_base_guard_agreed_blob_does_not_fail
+test_merge_guard_refuses_and_override_proceeds

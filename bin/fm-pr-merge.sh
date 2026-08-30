@@ -63,7 +63,12 @@
 # destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
+# Before merging, bin/fm-pr-base-check.sh must pass against the task's project
+# clone. Pass --override-pr-base-check after the optional -- separator only for
+# a deliberate, visible override; the flag is not passed to the forge CLI.
+# GitLab merge requests skip this GitHub-specific check.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+#   --override-pr-base-check  merge after a failed base-content guard.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,6 +107,21 @@ PR_NUMBER=$FM_PR_NUMBER
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
 [ "${1:-}" = "--" ] && shift
+
+OVERRIDE_BASE_CHECK=false
+merge_extra_args=()
+for arg in "$@"; do
+  if [ "$arg" = "--override-pr-base-check" ]; then
+    OVERRIDE_BASE_CHECK=true
+  else
+    merge_extra_args+=("$arg")
+  fi
+done
+if [ "${#merge_extra_args[@]}" -gt 0 ]; then
+  set -- "${merge_extra_args[@]}"
+else
+  set --
+fi
 
 caller_has_merge_method() {
   local arg
@@ -627,6 +647,24 @@ gitlab_confirm_merged() {
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 record_pr_metadata || exit 1
+
+if [ "$PROVIDER" = github ]; then
+  PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
+    echo "error: PR base check project clone is unavailable" >&2
+    exit 1
+  fi
+  if (cd "$PROJECT" && "$SCRIPT_DIR/fm-pr-base-check.sh" "$URL"); then
+    :
+  else
+    base_check_rc=$?
+    if [ "$OVERRIDE_BASE_CHECK" = false ]; then
+      echo "error: PR base check failed; refusing merge" >&2
+      exit "$base_check_rc"
+    fi
+    echo "warning: PR base check failed; proceeding with --override-pr-base-check" >&2
+  fi
+fi
 
 case "$PROVIDER" in
   github)
