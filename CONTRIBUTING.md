@@ -30,8 +30,9 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
    The no-mistakes pipeline must authenticate only its final candidate head, after every generated review, documentation, test, lint, and CI-fix commit has returned through validation.
-   If any commit is created after authenticated publication, including a repair prompted by CI, submit it to a replacement no-mistakes run instead of using an ordinary remote push, which cannot refresh the head-bound pipeline attestation.
-   A PR with an attestation for an older head is intentionally invalid until that replacement run validates and publishes the new head.
+   If any commit is created after authenticated publication, including a repair produced during the CI phase, treat that commit as a new candidate head and submit it to a replacement no-mistakes run.
+   An ordinary remote push cannot refresh the head-bound pipeline attestation, and rerunning only the failed GitHub check cannot validate the new candidate head.
+   A PR with an attestation for an older head is intentionally invalid until the replacement run validates and publishes the new head with a matching attestation.
    Never repair the attestation by editing the PR body manually.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
