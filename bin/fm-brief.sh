@@ -59,6 +59,14 @@
 # no-mistakes mode carries those image lines in --intent, the only worker text
 # the pipeline keeps verbatim when it regenerates the PR body; direct-PR mode
 # writes them into the PR body. local-only has no PR, so the section is omitted.
+# The no-mistakes carry also warns that attaching an image as pipeline run
+# evidence renders as a machine-local "local file:" path in the PR body and
+# never substitutes for the committed-blob route.
+# Rule 4's nonterminal working: clause defers to the Definition of done for the
+# one stop-and-wait report a mode may name; bin/fm-dod-lib.sh owns that gate.
+# Ship and scout rules carry a wait-discipline rule: wait on your own pid or
+# your own output artifact, never a machine-wide process match, and re-read the
+# artifact before reporting anything as still running.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -414,6 +422,11 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Wait only on your own work: watch your own process id or your own output artifact, never a
+   machine-wide process match such as \`pgrep -f\` - that matches sibling lanes and your own
+   shell, and can outlive the thing you meant to wait for. Before reporting anything as still
+   running, re-read its result artifact: a result already on disk means the wait is over,
+   whatever the process table says.
 
 $INBOX_SECTION
 
@@ -448,7 +461,9 @@ case "$MODE" in
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    MEDIA_CARRY="Put those image lines in your \`--intent\`: the pipeline keeps the intent verbatim in the PR body and rewrites every other section on each run."
+    MEDIA_CARRY="Put those image lines in your \`--intent\`: the pipeline keeps the intent verbatim in the PR body and rewrites every other section on each run.
+Attaching an image as pipeline run evidence never substitutes for that: the pipeline renders an evidence attachment in the PR body as \`local file: /var/folders/...\`, a machine-local path no reviewer can open, inside a section it rewrites every run, so it cannot be hand-fixed afterwards.
+Any image that must appear in the PR body goes through the committed \`.github/pr-media/$ID/\` file and its blob URL carried in \`--intent\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
@@ -498,7 +513,8 @@ $RULE1
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   turn after it; continue the same stage until a gate the Definition of done explicitly
+   defines - its \`done:\` gate, or a stop-and-wait report it names verbatim.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
@@ -521,6 +537,11 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Wait only on your own work: watch your own process id or your own output artifact, never a
+   machine-wide process match such as \`pgrep -f\` - that matches sibling lanes and your own
+   shell, and can outlive the thing you meant to wait for. Before reporting anything as still
+   running, re-read its result artifact: a result already on disk means the wait is over,
+   whatever the process table says.
 
 $INBOX_SECTION
 
