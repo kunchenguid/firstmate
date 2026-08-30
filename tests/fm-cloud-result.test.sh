@@ -581,14 +581,16 @@ PY
 }
 
 test_monitor_retries_release_and_removes_credentials() {
-  local record root home repo id out
+  local record root home repo id out subscription
   id=cloud-return-release
+  subscription=11111111-1111-4111-8111-111111111111
   record=$(make_return_case release-retry "$id" ship yes no yes)
   IFS='|' read -r root home repo <<EOF
 $record
 EOF
   mkdir -p "$home/state/azure-workers" "$home/state/$id.cloud-account"
   printf '{"openai-codex":{"access":"secret"}}\n' > "$home/state/$id.cloud-account/auth.json"
+  printf 'export FM_AZURE_SUBSCRIPTION_ID=%q\n' "$subscription" > "$home/state/$id.cloud-env"
   printf '{"queue":{"%s@spawn:gen-1":{"status":"assigned","assignment_generation":"asg-00000001"}}}\n' "$id" \
     > "$home/state/azure-workers/controller.json"
   cat > "$root/fake-lifecycle" <<'SH'
@@ -596,7 +598,8 @@ EOF
 set -eu
 command=$1
 shift
-printf '%s\n' "$command" >> "$FAKE_LIFECYCLE_LOG"
+printf '%s subscription=%s args=%s\n' \
+  "$command" "${FM_AZURE_SUBSCRIPTION_ID:-missing}" "$*" >> "$FAKE_LIFECYCLE_LOG"
 case "$command" in
   authority-receipt)
     while [ $# -gt 0 ]; do
@@ -605,7 +608,7 @@ case "$command" in
     exit 2
     ;;
   release)
-    count=$(grep -c '^release$' "$FAKE_LIFECYCLE_LOG" || true)
+    count=$(grep -c '^release ' "$FAKE_LIFECYCLE_LOG" || true)
     [ "$count" -gt 1 ] || exit 9
     python3 - "$FM_HOME/state/azure-workers/controller.json" <<'PY'
 import json,sys
@@ -622,12 +625,20 @@ PY
 esac
 SH
   chmod +x "$root/fake-lifecycle"
-  out=$(FM_HOME="$home" FM_CLOUD_RETURN_LIFECYCLE_COMMAND="$root/fake-lifecycle" \
+  out=$(env -i PATH="$PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C}" \
+    FM_HOME="$home" FM_CLOUD_RETURN_LIFECYCLE_COMMAND="$root/fake-lifecycle" \
     FAKE_LIFECYCLE_LOG="$root/lifecycle.log" FM_SPAWN_CLOUD_MONITOR_INTERVAL_SECONDS=1 \
     "$ROOT/bin/fm-spawn-cloud-monitor.sh" "$id" spawn:gen-1 2>&1) \
     || fail "monitor should retry release to completion: $out"
-  test "$(grep -c '^release$' "$root/lifecycle.log")" -eq 2 \
+  test "$(grep -c '^release ' "$root/lifecycle.log")" -eq 2 \
     || fail "monitor did not retry the failed release exactly once"
+  test "$(grep -c "^authority-receipt subscription=$subscription " "$root/lifecycle.log")" -eq 2 \
+    || fail "release authority did not load the persisted task environment on every retry"
+  test "$(grep -c "^release subscription=$subscription " "$root/lifecycle.log")" -eq 2 \
+    || fail "release recording did not load the persisted task environment on every retry"
+  assert_grep "reconcile subscription=$subscription args=--apply --confirm-subscription $subscription" \
+    "$root/lifecycle.log" "release reconciliation did not use the persisted task environment"
+  assert_not_contains "$out" "$subscription" "the monitor leaked the persisted task environment"
   assert_contains "$out" "release recording failed; retrying" "release retry was not visible"
   assert_contains "$out" "assignment is released" "release did not converge to complete"
   assert_absent "$home/state/$id.cloud-account/auth.json" "released return leaked its staged credential"

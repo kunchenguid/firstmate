@@ -212,8 +212,28 @@ elif value is not None:
 PY
 }
 
+run_return_lifecycle() {
+  local command=${1:?lifecycle command} lifecycle
+  shift
+  (
+    # The Herdr pane starts closed, so each release leg must load the same
+    # allowlisted environment the spawn persisted for execution. The subshell
+    # keeps every staged value out of the long-lived monitor environment.
+    # shellcheck source=/dev/null
+    if ! . "$CLOUD_ENV" 2>/dev/null; then
+      echo "cloud-crewmate $ID: persisted cloud environment is not ready; retrying"
+      return 1
+    fi
+    lifecycle=${FM_CLOUD_RETURN_LIFECYCLE_COMMAND:-$SCRIPT_DIR/fm-worker-lifecycle.sh}
+    if [ "$command" = reconcile ]; then
+      set -- "$@" --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}"
+    fi
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$lifecycle" "$command" "$@"
+  )
+}
+
 finalize_authorized_return() {
-  local assignment status proof lifecycle
+  local assignment status proof
   assignment=$(result_field assignment_generation)
   [ -n "$assignment" ] || {
     echo "cloud-crewmate $ID: authorized return has no assignment generation"
@@ -225,18 +245,17 @@ finalize_authorized_return() {
     echo "cloud-crewmate $ID: authorized return is not in local custody yet; retaining the assignment for retry"
     return 1
   fi
-  lifecycle=${FM_CLOUD_RETURN_LIFECYCLE_COMMAND:-$SCRIPT_DIR/fm-worker-lifecycle.sh}
   status=$(queue_status)
   proof=$STATE/$ID.worker-release.json
   case "$status" in
     assigned)
-      if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$lifecycle" authority-receipt \
+      if ! run_return_lifecycle authority-receipt \
         --task "$ID" --task-generation "$GENERATION" \
         --assignment-generation "$assignment" --output "$proof"; then
         echo "cloud-crewmate $ID: local custody is established but release authority is not ready; retrying"
         return 1
       fi
-      if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$lifecycle" release \
+      if ! run_return_lifecycle release \
         --task "$ID" --task-generation "$GENERATION" --proof-file "$proof"; then
         echo "cloud-crewmate $ID: local custody is established but release recording failed; retrying"
         return 1
@@ -254,8 +273,7 @@ finalize_authorized_return() {
       return 1
       ;;
   esac
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$lifecycle" reconcile --apply \
-    --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" >/dev/null; then
+  if ! run_return_lifecycle reconcile --apply >/dev/null; then
     echo "cloud-crewmate $ID: worker release convergence failed; retrying without replaying the task"
     return 1
   fi
