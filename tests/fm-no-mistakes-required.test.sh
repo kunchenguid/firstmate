@@ -5,22 +5,12 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-ACTION_REF=32d396ac0f29135daf7fcb9964aba9d5f4e796d6
 TMP_ROOT=$(fm_test_tmproot fm-no-mistakes-required)
-VERIFY="$TMP_ROOT/verify.py"
+VERIFY="$ROOT/tests/fixtures/no-mistakes-required-verifier.py"
 OLD_SHA=1111111111111111111111111111111111111111
 NEW_SHA=2222222222222222222222222222222222222222
 SIGNATURE='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
 COMPLETED_STEPS='[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]'
-
-fetch_shared_verifier() {
-  command -v curl >/dev/null 2>&1 || fail "curl is required to exercise the pinned shared action"
-  command -v python3 >/dev/null 2>&1 || fail "python3 is required to exercise the pinned shared action"
-  curl --fail --silent --show-error --location \
-    "https://raw.githubusercontent.com/kunchenguid/no-mistakes/${ACTION_REF}/.github/actions/require-no-mistakes/verify.py" \
-    > "$VERIFY" || fail "could not fetch the pinned shared action verifier"
-  [ -s "$VERIFY" ] || fail "the pinned shared action verifier was empty"
-}
 
 run_verifier() {
   local body=$1 head=$2
@@ -66,7 +56,6 @@ test_missing_head_fails() {
   pass "shared action rejects an attestation with no head_sha"
 }
 
-fetch_shared_verifier
 test_matching_head_and_completed_steps_pass
 test_mismatched_head_fails_with_both_shas
 test_missing_head_fails

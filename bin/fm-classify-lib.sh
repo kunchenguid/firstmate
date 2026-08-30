@@ -209,8 +209,10 @@ status_is_paused_or_captain_held() {  # <status-line>
 # ends at the first tag rather than special-casing "[key=...]".
 # Accept any number of bracketed metadata groups before the colon.
 status_line_is_parseable() {  # <status-line>
-  local line=$1 re='^[[:lower:]][[:lower:]-]*([[:space:]]+\[[^][]+\])*:[[:space:]]+.+$'
-  [[ "$line" =~ $re ]]
+  local line=$1 verb re='^[[:lower:]][[:lower:]-]*(([[:space:]]+corr=[0-9A-Fa-f]{16})|([[:space:]]+\[[^][]+\]))*:[[:space:]]+.+$'
+  [[ "$line" =~ $re ]] || return 1
+  verb=$(status_line_verb "$line")
+  [[ "$verb" =~ ^[[:lower:]][[:lower:]-]*$ ]]
 }
 
 #
