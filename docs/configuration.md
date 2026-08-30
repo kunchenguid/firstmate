@@ -200,9 +200,8 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
-Storing evidence in the repo publishes each run's test artifacts to the orphan `no-mistakes/evidence` branch and links them from the PR body, instead of keeping them on local disk under the no-mistakes home.
-That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
+The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: false` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
+Test evidence stays in a temporary directory outside this repository, while the worktree's `.no-mistakes/` remains local state and CI rejects tracked entries under that path.
 `bin/fm-pr-merge.sh` uses the user-writable PR-body Review receipt as an omission guard for Firstmate self-merges, not as proof that the review ran; its header owns the explicit captain-authorized escape, which fails closed unless it can first leave a timestamped receipt in the task metadata.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
@@ -369,7 +368,7 @@ CI exercises this contract only with isolated fixture directories and a fake Cla
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches.
-cursor-agent is verified for ordinary crew and scout launches; secondmate use is captain-approved only as a degraded production test with the supervision limits documented by `harness-adapters`, while primary-session use remains unverified.
+cursor-agent is verified for ordinary crew and scout launches and as an interactive primary; secondmate use is captain-approved only as a degraded production test with the supervision limits documented by `harness-adapters`.
 A cursor-agent secondmate runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 Cursor typed-submit confirmation is verified on tmux and Herdr only.
 On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation or an explicit backend target; ordinary text steers ride the durable inbox and exit 0 at enqueue) lands, but `fm-send` reports delivery unconfirmed and exits non-zero because their shared submit core does not consult the busy footer; [runtime backend verification](verification/runtime-backends.md#cursor-agent-cli) owns the evidence and transcript-state boundary.
