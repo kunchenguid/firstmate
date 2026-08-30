@@ -60,6 +60,8 @@ type SessionGeneration = {
   stopping: boolean;
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  retryReady: Promise<boolean> | null;
+  retryReadyResolve: ((ready: boolean) => void) | null;
   retryFailures: number;
   restoring: boolean;
   reconcileTail: Promise<void>;
@@ -250,6 +252,8 @@ function createGeneration(): SessionGeneration {
     stopping: false,
     child: null,
     retryTimer: null,
+    retryReady: null,
+    retryReadyResolve: null,
     retryFailures: 0,
     restoring: false,
     reconcileTail: Promise.resolve(),
@@ -271,6 +275,9 @@ function generationIsLive(generation: SessionGeneration): boolean {
 function cancelRetry(generation: SessionGeneration): void {
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   generation.retryTimer = null;
+  generation.retryReadyResolve?.(false);
+  generation.retryReadyResolve = null;
+  generation.retryReady = null;
 }
 
 function stopGeneration(generation: SessionGeneration): void {
@@ -491,13 +498,37 @@ export default function (pi: ExtensionAPI) {
       surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}`);
       return;
     }
+    let resolveRetryReady: (ready: boolean) => void = () => {};
+    const retryReady = new Promise<boolean>((resolveReady) => {
+      resolveRetryReady = resolveReady;
+    });
+    owner.retryReady = retryReady;
+    owner.retryReadyResolve = resolveRetryReady;
+    const finishRetry = (ready: boolean): void => {
+      if (owner.retryReady === retryReady) {
+        owner.retryReady = null;
+        owner.retryReadyResolve = null;
+      }
+      resolveRetryReady(ready);
+    };
     const timer = setTimeout(() => {
       if (owner.retryTimer === timer) owner.retryTimer = null;
-      if (!generationIsLive(owner)) return;
+      if (!generationIsLive(owner)) {
+        finishRetry(false);
+        return;
+      }
       const result = startArm(owner, predecessorArmPid);
       if (!result.ok) {
         surfaceFailure(owner, `watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
+        finishRetry(false);
+        return;
       }
+      const retryChild = owner.child;
+      if (!retryChild) {
+        finishRetry(false);
+        return;
+      }
+      void waitForReadiness(retryChild).then(finishRetry);
     }, retryDelay(owner.retryFailures));
     timer.unref();
     owner.retryTimer = timer;
@@ -638,6 +669,16 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  async function waitForPendingRetry(owner: SessionGeneration): Promise<void> {
+    while (generationIsLive(owner)) {
+      const retryReady = owner.retryReady;
+      if (!retryReady) return;
+      await retryReady;
+      if (!generationIsLive(owner)) return;
+      if (!owner.retryReady && !owner.retryTimer && !owner.child) return;
+    }
+  }
+
   async function reconcileDemand(owner: SessionGeneration): Promise<void> {
     if (!generationIsLive(owner)) return;
     const observedDemand = await readSupervisionDemand();
@@ -648,6 +689,7 @@ export default function (pi: ExtensionAPI) {
       if (!result.ok) return;
       const armChild = owner.child;
       if (armChild) await waitForReadiness(armChild);
+      else await waitForPendingRetry(owner);
       return;
     }
     cancelRetry(owner);

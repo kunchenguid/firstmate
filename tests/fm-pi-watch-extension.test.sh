@@ -265,6 +265,77 @@ EOF
   pass "Pi idle demand cancels pending watcher retries"
 }
 
+test_pi_pending_retry_reconciliation_waits_for_ready_arm() {
+  local repo home plugin log ready out status
+  repo="$TMP_ROOT/pi-demand-pending-retry-root"
+  home="$TMP_ROOT/pi-demand-pending-retry-home"
+  log="$TMP_ROOT/pi-demand-pending-retry.log"
+  ready="$TMP_ROOT/pi-demand-pending-retry.ready"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+if [ "$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  exit 0
+fi
+sleep 0.12
+printf 'ready\n' > "${FM_READY_FILE:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do :; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_READY_FILE="$ready" FM_WATCH_REARM_RETRY_BASE_MS=120 FM_WATCH_REARM_RETRY_MAX_MS=120 FM_PI_ARM_READY_TIMEOUT_MS=500 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let modelTurns = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {
+    modelTurns += 1;
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "published task\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await new Promise((resolve) => setTimeout(resolve, 60));
+const settled = handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+const keepalive = setInterval(() => {}, 10);
+let settledFinished = false;
+void settled?.then(() => {
+  settledFinished = true;
+});
+await new Promise((resolve) => setTimeout(resolve, 30));
+if (settledFinished) throw new Error("demand reconciliation returned before its pending retry ran");
+if (rows().length !== 1) throw new Error(`pending retry launched unexpectedly early: ${rows().length} arm cycles`);
+await settled;
+clearInterval(keepalive);
+if (!existsSync(process.env.FM_READY_FILE)) throw new Error("pending retry reconciliation returned before arm readiness");
+if (rows().length !== 2) throw new Error(`pending retry reconciliation launched ${rows().length} arm cycles`);
+if (modelTurns !== 0) throw new Error(`pending retry reconciliation used ${modelTurns} model turns`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "pending retry demand reconciliation must wait for a ready arm: $out"
+  [ -z "$out" ] || fail "Pi pending-retry reconciliation test printed output: $out"
+  pass "Pi pending retry reconciliation waits for watcher readiness"
+}
+
 test_pi_idle_retirement_timeout_suppresses_late_failure() {
   local repo home plugin log release out status
   repo="$TMP_ROOT/pi-demand-late-retirement-root"
@@ -3274,6 +3345,7 @@ EOF
 test_pi_session_start_arms_only_with_supervision_demand
 test_pi_session_start_waits_for_arm_readiness
 test_pi_idle_demand_cancels_pending_retry
+test_pi_pending_retry_reconciliation_waits_for_ready_arm
 test_pi_idle_retirement_timeout_suppresses_late_failure
 test_pi_lock_handoff_reconciles_existing_demand
 test_pi_settled_run_retires_idle_monitoring_without_model_turn
