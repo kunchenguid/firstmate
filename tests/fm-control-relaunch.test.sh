@@ -1347,6 +1347,36 @@ SH
   pass "fm-spawn --relaunch: symlinked records refuse before inspection"
 }
 
+test_spawn_relaunch_keeps_its_early_meta_lock_continuous() {
+  local dir lock out rc
+  dir=$(new_case continuous-meta-lock rl38)
+  add_ship_task "$dir" rl38 claude
+  printf 'zsh' > "$dir/fake/command"
+  lock="$dir/home/state/.meta-rl38.lock"
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ -d "$lock" ]; then
+  if [ ! -e "$dir/lock-observation-started" ]; then
+    : > "$dir/lock-observation-started"
+    : > "$lock/continuity-sentinel"
+  elif [ ! -e "$lock/continuity-sentinel" ]; then
+    : > "$dir/meta-lock-was-recreated"
+  fi
+fi
+exec "$dir/fakebin/tmux-real" "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunch with one continuous meta lock should succeed"$'\n'"$out"
+  assert_present "$dir/lock-observation-started" \
+    "test did not observe the relaunch-held meta lock"
+  assert_absent "$dir/meta-lock-was-recreated" \
+    "relaunch released or recreated its already-held meta lock"
+  pass "fm-spawn --relaunch: keeps its early meta lock continuous"
+}
+
 test_spawn_relaunch_refuses_a_pending_authoritative_close() {
   local dir meta marker out rc
   dir=$(new_case pending-close rl36)
@@ -1491,6 +1521,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
+test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task

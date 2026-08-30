@@ -109,6 +109,17 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
+make_tasks_axi_incompatible() {  # <case-dir>
+  local case_dir=$1 real
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != --version ] || exit 1
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
 break_verb() {  # <case-dir> <verb>
   local case_dir=$1 verb=$2 real
   real=$(command -v tasks-axi)
@@ -574,6 +585,41 @@ test_dispatch_refuses_a_symlinked_backlog_without_crossing_homes() {
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
     "unsafe backlog dispatch published a local task record"
   pass "dispatch refuses symlinked backlogs without crossing homes"
+}
+
+test_automatic_backend_refuses_incompatible_tasks_axi_before_mutation() {
+  local spawn_case teardown_case id out rc=0
+  id=atomic-incompatible-tasks-axi-b2
+  spawn_case=$(make_home incompatible-tasks-axi-spawn "$id")
+  add_item "$spawn_case" "$id"
+  make_tasks_axi_incompatible "$spawn_case"
+
+  out=$(run_ship_spawn "$spawn_case" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "automatic spawn succeeded without compatible tasks-axi"
+  assert_contains "$out" "automatic backlog transitions require tasks-axi" \
+    "automatic spawn did not report its unavailable transition tool"
+  assert_absent "$(home_of "$spawn_case")/state/$id.meta" \
+    "automatic spawn published a record without transition tooling"
+  rm -f "$spawn_case/fakebin/tasks-axi"
+  [ "$(row_state "$spawn_case" "$id")" = queued ] \
+    || fail "automatic spawn changed the row without transition tooling"
+
+  teardown_case=$(make_home incompatible-tasks-axi-teardown)
+  add_item "$teardown_case" "$id"
+  start_item "$teardown_case" "$id"
+  write_task_meta "$teardown_case" "$id" ship local-only "spawn_gen=spawn-incompatible"
+  make_tasks_axi_incompatible "$teardown_case"
+  rc=0
+  out=$(run_teardown "$teardown_case" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "automatic teardown succeeded without compatible tasks-axi"
+  assert_contains "$out" "automatic backlog transitions require tasks-axi" \
+    "automatic teardown did not report its unavailable transition tool"
+  assert_present "$(home_of "$teardown_case")/state/$id.meta" \
+    "automatic teardown removed its record without transition tooling"
+  rm -f "$teardown_case/fakebin/tasks-axi"
+  [ "$(row_state "$teardown_case" "$id")" = in_flight ] \
+    || fail "automatic teardown changed the row without transition tooling"
+  pass "automatic homes refuse lifecycle mutation without compatible tasks-axi"
 }
 
 test_dispatch_refuses_an_unresolvable_data_directory() {
@@ -1711,6 +1757,29 @@ test_recovery_rejects_a_legacy_close_without_an_incarnation() {
   pass "session start rejects an unversioned close marker"
 }
 
+test_bootstrap_refuses_a_symlinked_state_directory_before_reconciliation() {
+  local case_dir foreign_case home foreign_state id out rc=0
+  id=atomic-bootstrap-symlink-state-b11
+  case_dir=$(make_home bootstrap-symlink-state)
+  foreign_case=$(make_home bootstrap-symlink-state-foreign)
+  home=$(home_of "$case_dir")
+  foreign_state="$(home_of "$foreign_case")/state"
+  add_item "$case_dir" "$id"
+  write_task_meta "$foreign_case" "$id" ship no-mistakes "spawn_gen=foreign-worker"
+  rm -rf "$home/state"
+  ln -s "$foreign_state" "$home/state"
+
+  out=$(run_bootstrap "$case_dir") || rc=$?
+  [ "$rc" -ne 0 ] || fail "bootstrap accepted a symlinked state directory"
+  assert_contains "$out" "state directory is not a real directory" \
+    "bootstrap did not report the unsafe state boundary"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "bootstrap reconciled a foreign record into the local backlog"
+  assert_present "$foreign_state/$id.meta" \
+    "bootstrap removed the foreign worker record"
+  pass "bootstrap refuses symlinked state before reconciliation"
+}
+
 test_bootstrap_stops_when_data_disappears_before_reconciliation() {
   local case_dir id saved out rc=0
   id=atomic-bootstrap-data-race-b11
@@ -1801,6 +1870,50 @@ test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry() {
   pass "no-backlog teardown refuses symlinked records before resource actions"
 }
 
+test_teardown_rechecks_record_parent_after_lock_acquisition() {
+  local case_dir home id foreign_state foreign_worktree real_ln out rc=0
+  id=atomic-state-parent-swap-b12
+  case_dir=$(make_home state-parent-swap)
+  home=$(home_of "$case_dir")
+  rm -f "$(backlog_of "$case_dir")"
+  write_task_meta "$case_dir" "$id" ship local-only
+  foreign_state="$case_dir/foreign-state"
+  foreign_worktree="$case_dir/foreign-worktree"
+  mkdir -p "$foreign_state" "$foreign_worktree"
+  fm_write_meta "$foreign_state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$foreign_worktree" "project=$case_dir/foreign-project" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off"
+  track_teardown_resource_actions "$case_dir"
+  real_ln=$(command -v ln)
+  cat > "$case_dir/fakebin/ln" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"$home/state/.meta-$id.lock"*)
+    if [ ! -e "$case_dir/state-swapped" ]; then
+      : > "$case_dir/state-swapped"
+      mv "$home/state" "$home/state-original" || exit 1
+      "$real_ln" -s "$foreign_state" "$home/state" || exit 1
+    fi
+    ;;
+esac
+exec "$real_ln" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/ln"
+
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown trusted a record after its parent was swapped"
+  assert_contains "$out" "task record parent directory is not a real directory" \
+    "post-lock record check did not report the swapped parent"
+  assert_present "$foreign_state/$id.meta" "teardown removed the foreign record"
+  assert_present "$foreign_worktree" "teardown removed the foreign local copy"
+  assert_absent "$case_dir/backend-resource-action" \
+    "teardown acted on a foreign endpoint after the parent swap"
+  assert_absent "$case_dir/local-copy-resource-action" \
+    "teardown acted on a foreign local copy after the parent swap"
+  pass "teardown rechecks record parents after locking"
+}
+
 test_teardown_refuses_a_symlinked_state_directory_at_entry() {
   local case_dir home id external_state out rc=0
   id=atomic-symlink-state-b12
@@ -1833,6 +1946,7 @@ test_home_without_a_backlog_dispatches_and_completes() {
   id=atomic-no-backlog-b12
   case_dir=$(make_home no-backlog "$id")
   rm -f "$(backlog_of "$case_dir")"
+  make_tasks_axi_incompatible "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "no-backlog spawn failed: $out"
   assert_present "$(home_of "$case_dir")/state/$id.meta" \
@@ -1853,6 +1967,7 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog()
   data="$case_dir/manual-data"
   mv "$(home_of "$case_dir")/data" "$data"
   data_resolved=$(cd "$data" && pwd -P)
+  make_tasks_axi_incompatible "$case_dir"
   # Deliberately no backlog item: on a manual home the operator owns the file,
   # so neither half of the lifecycle may hard-fail over its contents.
   out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") \
@@ -1918,6 +2033,7 @@ test_completion_targets_a_nested_relative_data_directory
 test_immediate_child_absolute_data_dispatches_and_completes
 test_bare_relative_data_dispatches_and_completes
 test_dispatch_refuses_a_symlinked_backlog_without_crossing_homes
+test_automatic_backend_refuses_incompatible_tasks_axi_before_mutation
 test_dispatch_refuses_an_unresolvable_data_directory
 test_completion_refuses_an_unresolvable_data_directory
 test_dispatch_refuses_an_id_this_home_has_no_item_for
@@ -1969,10 +2085,12 @@ test_recovery_rejects_invalid_close_arguments
 test_recovery_rejects_a_symlinked_close_marker
 test_recovery_drops_a_close_for_a_newer_meta_incarnation
 test_recovery_rejects_a_legacy_close_without_an_incarnation
+test_bootstrap_refuses_a_symlinked_state_directory_before_reconciliation
 test_bootstrap_stops_when_data_disappears_before_reconciliation
 test_bootstrap_addressing_exemptions_remain_nonfatal
 test_recovery_leaves_a_captain_held_item_alone
 test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry
+test_teardown_rechecks_record_parent_after_lock_acquisition
 test_teardown_refuses_a_symlinked_state_directory_at_entry
 test_home_without_a_backlog_dispatches_and_completes
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog

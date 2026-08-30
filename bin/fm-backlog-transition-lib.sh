@@ -150,10 +150,6 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     FM_BACKLOG_TRANSITION_SKIP="config/backlog-backend selects manual editing"
     return 1
   fi
-  if ! fm_tasks_axi_compatible; then
-    FM_BACKLOG_TRANSITION_SKIP="no compatible tasks-axi on PATH"
-    return 1
-  fi
   if ! data=$(fm_backlog_data_absolute "$2"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $2"
     return 2
@@ -164,6 +160,10 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     return 1
   fi
   if ! fm_backlog_record_present "$file" "backlog file"; then
+    return 2
+  fi
+  if ! fm_tasks_axi_compatible; then
+    FM_BACKLOG_TRANSITION_ERROR="automatic backlog transitions require tasks-axi $FM_TASKS_AXI_MIN or newer with the required update and mv features"
     return 2
   fi
   return 0
@@ -252,7 +252,10 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 }
 
 fm_backlog_record_present() {
-  local path=$1 label=${2:-record}
+  local path=$1 label=${2:-record} parent
+  parent=${path%/*}
+  [ "$parent" != "$path" ] || parent=.
+  fm_backlog_directory_present "$parent" "$label parent directory" || return 1
   if [ ! -f "$path" ] || [ -L "$path" ]; then
     FM_BACKLOG_TRANSITION_ERROR="$label is not a regular non-symlink file at $path"
     return 1

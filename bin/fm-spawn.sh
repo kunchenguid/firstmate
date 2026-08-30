@@ -2028,9 +2028,11 @@ else
   fi
 fi
 
-SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-fm_lock_acquire_wait "$SPAWN_META_LOCK"
-SPAWN_META_LOCK_HELD=1
+if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
+fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
