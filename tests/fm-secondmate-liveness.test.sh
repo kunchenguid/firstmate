@@ -136,6 +136,18 @@ test_tmux_agent_state_classifies() {
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
 }
 
+test_tmux_endpoint_blocks_respawn_when_window_inventory_is_unreadable() {
+  local fb out
+  fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-blocks-unreadable" unreadable)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '
+    . "$0/bin/fm-backend.sh"
+    if fm_backend_endpoint_blocks_respawn tmux sess:fm-sm1 fm-sm1; then echo blocks=yes; else echo blocks=no; fi
+  ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "an unreadable tmux window inventory must not claim the endpoint is retryable"
+  pass "fm_backend_endpoint_blocks_respawn: unreadable tmux inventory blocks a respawn"
+}
+
 test_tmux_agent_state_rejects_malformed_targets_before_probe() {
   local fakebin marker target out
   fakebin=$(fm_fakebin "$TMP_ROOT/tmux-malformed")
@@ -541,6 +553,7 @@ test_sweep_noop_with_no_secondmate_meta() {
 }
 
 test_tmux_agent_state_classifies
+test_tmux_endpoint_blocks_respawn_when_window_inventory_is_unreadable
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility

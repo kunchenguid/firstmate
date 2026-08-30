@@ -1379,8 +1379,25 @@ test_endpoint_blocks_respawn_clear_when_no_tab_carries_the_title() {
   pass "fm_backend_endpoint_blocks_respawn: an unrelated zellij tab leaves the slot retryable"
 }
 
+test_endpoint_blocks_respawn_when_tab_inventory_is_unreadable() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-unreadable"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zorph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "an unreadable zellij tab inventory must not claim the endpoint is retryable"
+  pass "fm_backend_endpoint_blocks_respawn: unreadable zellij inventory blocks a respawn"
+}
+
 test_endpoint_blocks_respawn_sees_the_tab_a_pane_read_misses
 test_endpoint_blocks_respawn_clear_when_no_tab_carries_the_title
+test_endpoint_blocks_respawn_when_tab_inventory_is_unreadable
 test_kill_resolves_tab_and_closes_by_id
 test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone

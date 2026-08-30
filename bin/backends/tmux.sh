@@ -82,9 +82,10 @@ fm_backend_tmux_container_ensure() {
 # also the only honest answer to "would a leftover window refuse the next
 # spawn?" - callers needing that proof share this one definition.
 fm_backend_tmux_window_exists() {  # <session> <window-name>
-  local ses=$1 wname=$2
+  local ses=$1 wname=$2 windows
   [ -n "$ses" ] && [ -n "$wname" ] || return 1
-  tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"
+  windows=$(tmux list-windows -t "$ses" -F '#{window_name}') || return 2
+  printf '%s\n' "$windows" | grep -qx "$wname"
 }
 
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
@@ -103,9 +104,15 @@ fm_backend_tmux_window_exists() {  # <session> <window-name>
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
+  local ses=$1 wname=$2 proj_abs=$3 wid exists_status
   if fm_backend_tmux_window_exists "$ses" "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
+    return 1
+  else
+    exists_status=$?
+  fi
+  if [ "$exists_status" -ne 1 ]; then
+    echo "error: could not inspect tmux windows in session '$ses'; refusing to create '$wname'" >&2
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1

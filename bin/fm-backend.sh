@@ -772,14 +772,29 @@ fm_backend_kill() {  # <backend> <target>
 # a non-colliding tab. Orca has no such name gate; it keeps the liveness read.
 # Conservative by construction: anything short of proof reads as "still there".
 fm_backend_endpoint_blocks_respawn() {  # <backend> <target> <label>
-  local backend=$1 target=$2 label=$3
+  local backend=$1 target=$2 label=$3 check_status
   fm_backend_source "$backend" || return 1
   case "$backend" in
-    tmux) fm_backend_tmux_window_exists "${target%%:*}" "${target#*:}" ;;
+    tmux)
+      fm_backend_tmux_window_exists "${target%%:*}" "${target#*:}"
+      check_status=$?
+      ;;
     herdr) ! fm_backend_herdr_endpoint_confirmed_gone "$target" ;;
-    zellij) fm_backend_zellij_tab_exists "${target%%:*}" "$label" ;;
-    cmux) fm_backend_cmux_workspace_exists "$label" ;;
+    zellij)
+      fm_backend_zellij_tab_exists "${target%%:*}" "$label"
+      check_status=$?
+      ;;
+    cmux)
+      fm_backend_cmux_workspace_exists "$label"
+      check_status=$?
+      ;;
     *) fm_backend_target_exists "$backend" "$target" ;;
+  esac
+  case "$backend" in
+    tmux|zellij|cmux)
+      [ "$check_status" -eq 1 ] && return 1
+      return 0
+      ;;
   esac
 }
 

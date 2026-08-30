@@ -182,7 +182,7 @@ fm_backend_zellij_tab_id_in_list() {  # <tabs-json> <title>
 fm_backend_zellij_tab_exists() {  # <session> <label>
   local session=$1 label=$2 tabs
   [ -n "$session" ] && [ -n "$label" ] || return 1
-  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 2
   [ -n "$(fm_backend_zellij_tab_id_in_list "$tabs" "$(fm_backend_zellij_scoped_title "$label")")" ]
 }
 
@@ -351,10 +351,15 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
 #
 # Echoes "<tab_id> <pane_id>" on success.
 fm_backend_zellij_create_task() {  # <session> <label> <cwd>
-  local session=$1 label=$2 cwd=$3 title tabs dup prev_active tab_id pane_id
+  local session=$1 label=$2 cwd=$3 title tabs dup prev_active tab_id pane_id list_status
   fm_backend_zellij_session_exists "$session" || { echo "error: zellij session '$session' does not exist; run container_ensure first" >&2; return 1; }
   title=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+  list_status=$?
+  if [ "$list_status" -ne 0 ]; then
+    echo "error: could not inspect zellij tabs in session '$session'; refusing to create '$title'" >&2
+    return 1
+  fi
   dup=$(fm_backend_zellij_tab_id_in_list "$tabs" "$title")
   if [ -n "$dup" ]; then
     echo "error: zellij tab '$title' already exists in session '$session'" >&2
