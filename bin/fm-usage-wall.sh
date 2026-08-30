@@ -360,19 +360,19 @@ USAGE_WALL_EXIT_PATTERNS="$USAGE_WALL_EXIT_PATTERNS|exit(ed with)? code [1-9]"
 # reads as a wall exactly when some limit line and some exit line that does not
 # itself carry a limit phrasing lie within 199 lines of each other, which is
 # decidable per file from the two line-number sets without sliding a window at
-# all. By that test THREE tracked files still read as a wall - the verification
-# record, which quotes a real step log verbatim; THIS FILE, whose header above
-# quotes a limit phrasing while a later line carries an independent exit phrase;
-# and tests/fm-usage-wall.test.sh, whose fixtures build the vendor lines from the
-# same real text. The detector's own source trips the detector. Anyone editing
-# this function is already reading the text that causes it, which is why the gap
-# is recorded here and not only in the feature document.
+# all. By that test THIS FILE still reads as a wall - the header above quotes a
+# limit phrasing while a later line carries an independent exit phrase - and so
+# does other tracked material of this feature. The detector's own source trips
+# the detector. Anyone editing this function is already reading the text that
+# causes it, which is why the gap is recorded here and not only in the feature
+# document; that document names which files those are and owns the measured
+# scope, so it is corrected in one place when the set changes.
 #
 # Revisit it if the vendor emits the phrasing and the exit on one line, if a
-# real transcript turns up a multi-line wall being missed, or if a FOURTH tracked
-# file starts reading as a wall. The open question behind it, which widening this
-# disclosure again will not answer, is
-# whether a wall verdict should be authoritative only where a structural signal
+# real transcript turns up a multi-line wall being missed, or if a further
+# tracked file starts reading as a wall. The open question behind it, which
+# widening this disclosure again will not answer, is whether a wall verdict
+# should be authoritative only where a structural signal
 # exists - the harness's own non-zero exit together with the vendor's final line
 # in a pipeline step log - and be demoted to a non-asserting hint on the pane
 # path, where only a screen scrape is available.

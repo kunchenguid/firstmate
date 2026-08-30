@@ -43,9 +43,9 @@ Run `bin/fm-usage-wall.sh diagnose <task-id>`.
 It reads the endpoint's own output and then the failed pipeline steps' logs, and answers `wall`, `no-signature`, or `unknown`.
 `no-signature` means nothing matched in what was readable, and `unknown` means the evidence could not be read; neither is proof that the work crashed, so do not record a failure on either.
 A `wall` needs the vendor's phrasing and, on a different line of the same evidence, the harness's own non-zero exit, because this repository's tracked text quotes those phrasings and a pane merely showing it should not be read as a wall.
-That corroboration closes one sentence of prose narrating both facts at once, and it does not close an evidence window quoting a real transcript, so three tracked files still read as a wall: `docs/verification/usage-limits.md`, `bin/fm-usage-wall.sh` itself, and `tests/fm-usage-wall.test.sh`.
-If a worker had any of them on screen when its endpoint died, treat an endpoint-sourced wall as unproven and read the step log before believing it.
-[`docs/usage-limit-survivability.md`](../../../docs/usage-limit-survivability.md) owns the rule, the measured scope of that residual, and the condition that should make someone revisit it.
+That corroboration closes one sentence of prose narrating both facts at once, and it does not close an evidence window quoting a real transcript, so some of this repository's own tracked text - this feature's own material included - still reads as a wall.
+If a worker had this repository's text about usage limits on screen when its endpoint died, treat an endpoint-sourced wall as unproven and read the step log before believing it.
+[`docs/usage-limit-survivability.md`](../../../docs/usage-limit-survivability.md) owns the rule, names which files those are, and records the measured scope of that residual and the condition that should make someone revisit it.
 Read the verdict's own disclosure before trusting a negative: `checked=` names what was actually read, `unread=` names evidence that was attempted and yielded nothing - the terminal capture appears there as `endpoint`, not only step logs - and `unscanned=` names logs the scan's budget never reached.
 A verdict carrying either list is a partial scan, so read that evidence yourself before concluding anything.
 
