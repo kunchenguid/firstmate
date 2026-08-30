@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -22,9 +23,44 @@ jobs:
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
+    # The bounded body wait below is the only slow part; this cap is a hang
+    # tripwire with margin, not the expected healthy end of the job.
+    timeout-minutes: 10
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
+      # Check out the exact commit this check run judges, not the PR's merge
+      # ref, so an unmergeable PR cannot fail this gate for a reason that has
+      # nothing to do with pipeline compliance.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      # no-mistakes publishes the head-bound attestation only after it pushes
+      # the head, so this event's own payload body cannot attest a just-pushed
+      # commit. Read the body the forge holds now; bin/fm-pr-body-settled.sh's
+      # header owns why, the bound, and what happens when the bound expires.
+      # Only `synchronize` races that write, so every other event judges
+      # immediately with no wait at all.
+      - name: Read the pull request body as it stands now
+        id: body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY_TIMEOUT: ${{ github.event.action == 'synchronize' && '180' || '0' }}
+        run: |
+          set -eu
+          bin/fm-pr-body-settled.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --number "$PR_NUMBER" \
+            --head-sha "$PR_HEAD_SHA" \
+            --timeout "$PR_BODY_TIMEOUT" \
+            --github-output body
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          # Judge the live body against the commit this check run belongs to, so
+          # a later push cannot be certified by an earlier head's check run.
+          pr-body: ${{ steps.body.outputs.body }}
+          pr-head-sha: ${{ github.event.pull_request.head.sha }}
