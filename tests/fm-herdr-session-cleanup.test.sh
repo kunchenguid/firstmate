@@ -53,7 +53,15 @@ if (
 ) >/dev/null 2>&1; then
   fail "non-string Herdr process argv was accepted"
 fi
-pass "process proof reads Linux Herdr argv arrays and rejects malformed executable identities"
+if (
+  # shellcheck disable=SC2329 # invoked indirectly by the idle-shell proof.
+  fm_backend_herdr_cli() { printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p1","shell_pid":67,"foreground_process_group_id":67.9,"foreground_processes":[{"argv":["/bin/sh"],"name":"sh","pid":67}]}}}'; }
+  FM_HERDR_PS_BIN="$FAKE_PS" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    fm_backend_herdr_pane_idle_shell_pid test w2:p1
+) >/dev/null 2>&1; then
+  fail "fractional Herdr foreground process-group identity was accepted"
+fi
+pass "process proof reads Linux argv arrays and rejects malformed executable and process-group identities"
 
 TOKEN=AbCdEfGhIjKlMnOpQrStUv
 ID=task
