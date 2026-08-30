@@ -13,10 +13,11 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 
-Fresh-worktree or first-machine launch may show a workspace-trust dialog because `--dangerously-skip-permissions` bypasses permission checks only, not that separate gate.
+The first launch into any worktree of a never-trusted repository may show a workspace-trust dialog because `--dangerously-skip-permissions` bypasses permission checks only, not that separate gate.
 For an authorized Claude crewmate or scout launch, pass `--accept-claude-trust` to `../../../bin/fm-spawn.sh`; this is the task's explicit project-scoped grant to accept the dialog automatically if it appears.
 The grant is retained in that task's metadata for relaunches, and without it an observed dialog is left untouched with a supervisor-visible blocker.
-With that grant, `../../../bin/fm-spawn.sh` handles the dialog on launches and relaunches whose backend can deliver Down, and it requires both a cleared dialog and evidence that Claude resumed processing the launch brief.
+With that grant, `../../../bin/fm-spawn.sh` handles the dialog on launches and relaunches, but a backend must support Down when the trust option is not already focused.
+After accepting, it requires both a cleared dialog and evidence that Claude resumed processing the launch brief.
 The dialog is cancel-focused by default, so a bare Enter selects "No, exit" and quits Claude; never accept it with a plain `--key Enter`.
 The shared detector is `fm_composer_claude_trust_dialog_state` in `../../../bin/fm-composer-lib.sh`, while the Claude launch path in `../../../bin/fm-spawn.sh` owns navigation, postcondition verification, and failure reporting.
 A missing project-scoped trust grant or a backend without Down support leaves Claude alive on the dialog and records one actionable `blocked:` diagnostic in `state/<id>.status` instead of attempting an unauthorized or unsupported key.

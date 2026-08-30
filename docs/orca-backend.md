@@ -25,6 +25,7 @@ No manual repository registration is required.
 Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
 Enter and Ctrl-C are supported; Escape is not.
+A Claude worker stopped at the cancel-focused workspace-trust dialog stays alive with a manual-clearance blocker because Orca cannot deliver the required selection key; the [Claude harness reference](../.agents/skills/harness-adapters/references/harness/claude.md) owns the handling procedure.
 
 ## Task shape and metadata
 

@@ -712,7 +712,7 @@ All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; t
 | Create tab | `zellij action new-tab --cwd <dir> --name <title>` | Returned a numeric tab id and focused the new tab when a client was attached. |
 | Pane discovery | `zellij action list-panes --json` | Included terminal pane id, tab id, plugin flag, and top-level `pane_cwd`. |
 | Literal send | `zellij action paste --pane-id <id> -- <text>` | Left text unsubmitted. |
-| Keys | `send-keys --pane-id <id> Enter`, `Esc`, and one argument `Ctrl c` | All three shared operations worked. |
+| Keys | `send-keys --pane-id <id> Enter`, `Esc`, and one argument `Ctrl c` | All three listed operations worked live. |
 | Capture | `dump-screen --pane-id <id>` or `--full` | Worked with no attached client; no line-bound flag exists. |
 | Styled capture | `dump-screen --pane-id <id> --ansi` | Preserved ANSI styling ("Composer classification matrix" above); feeds the zellij composer classifier. |
 | Close | `close-tab-by-id <id>` | Removed the live task pane and tab together. |
@@ -792,7 +792,7 @@ Current active CLI findings:
 | Fresh readiness | `list-panes --workspace <id> --json --id-format uuids` | Found a brand-new surface before content existed. |
 | Fresh read counterexample | `read-screen` before any write | Returned `internal_error: Failed to read terminal text`. |
 | Literal send | `send --workspace <id> --surface <id> -- <text>` | Left text unsubmitted. |
-| Keys | `send-key ... enter|escape|ctrl-c` | All shared key operations worked. |
+| Keys | `send-key ... enter|escape|ctrl-c` | All three listed operations worked live. |
 | Nested cwd | `current_directory` plus foreground subshell | Structured cwd froze; the marker-delimited `pwd` probe found the live cwd. |
 | Last surface | `close-surface` on the only surface | Refused with `invalid_state: Cannot close the last surface`. |
 | Last workspace | `close-workspace` on the only workspace in a window | Printed success but left the workspace present. |
