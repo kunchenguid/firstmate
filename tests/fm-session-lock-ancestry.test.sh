@@ -407,7 +407,13 @@ case "$pid:$field" in
     ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash /workspace/bin/fm-lock.sh' ;;
-  *:ppid=) printf '%s\n' 4242 ;;
+  *:ppid=)
+    if [ "${FM_TEST_NAMESPACE_TERMINATED:-0}" = 1 ]; then
+      printf '%s\n' 1
+    else
+      printf '%s\n' 4242
+    fi
+    ;;
 esac
 SH
   chmod +x "$fakebin/ps"
@@ -619,6 +625,21 @@ SH
   [ -f "$binding" ] && [ ! -L "$binding" ] || fail "remote Codex binding record was not published"
   mode=$(stat -f '%Lp' "$binding" 2>/dev/null || stat -c '%a' "$binding")
   [ "$mode" = 600 ] || fail "remote Codex binding record mode was $mode, not 600"
+  out=$(FM_TEST_NAMESPACE_TERMINATED=1 FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" \
+    FM_HOME="$home" CODEX_SESSION_ID="$session" "$ROOT/bin/fm-harness.sh" 2>"$dir/harness.err") \
+    || fail "namespace-local Codex binding did not preserve the harness identity"
+  [ "$out" = codex ] || fail "namespace-local Codex binding detected harness '$out', expected codex"
+  printf '4242\n' > "$home/state/.lock"
+  out=$(FM_TEST_NAMESPACE_TERMINATED=1 FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" \
+    FM_HOME="$home" CODEX_SESSION_ID="$session" "$ROOT/bin/fm-lock.sh" status) \
+    || fail "namespace-local Codex lock status could not inspect its binding"
+  [ "$out" = 'lock: held by live harness pid 4242' ] \
+    || fail "namespace-local Codex lock status reported '$out'"
+  out=$(FM_TEST_NAMESPACE_TERMINATED=1 FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" \
+    FM_HOME="$home" CODEX_SESSION_ID="$other" "$ROOT/bin/fm-lock.sh" status) \
+    || fail "different Codex session lock status could not inspect the binding"
+  [ "$out" = 'lock: stale (pid 4242 dead or not a harness)' ] \
+    || fail "different Codex session trusted the caller-bound lock: '$out'"
   printf 'harness=codex\nhome=%s\nspawn_gen=s9.9.9\n' "$home" \
     > "$home/state/.fm-codex-session-binding-required"
   if FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" CODEX_SESSION_ID="$session" \
@@ -631,7 +652,6 @@ SH
     bash -c '. "$1"; kill() { return 0; }; fm_harness_ancestry_pid' _ "$LIB" >/dev/null 2>&1; then
     fail "a different Codex session claimed the remote home through the binding"
   fi
-  printf '4242\n' > "$home/state/.lock"
   FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" CODEX_SESSION_ID="$session" \
     bash -c '. "$1"; kill() { return 0; }; fm_session_lock_owned_by_self "$FM_HOME/state"' _ "$LIB" \
     || fail "the matching remote Codex session did not recognize its published lock"

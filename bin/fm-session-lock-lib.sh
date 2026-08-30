@@ -754,8 +754,12 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args argv0 state
+  local pid=$1 comm args argv0 state bound_pid
   state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
+  if [ -n "${FM_HOME:-}" ] && bound_pid=$(fm_codex_home_binding_pid "$state") \
+    && [ "$bound_pid" = "$pid" ]; then
+    return 0
+  fi
   if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_pid_alive "$state" "$pid"; then
     return 0
   fi

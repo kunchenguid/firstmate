@@ -125,7 +125,7 @@ case "${1:-} ${2:-}" in
     agent_pid=$(cat "$agent_pid_file" 2>/dev/null || true)
     if [ "$process_mode" != generic-only ] && ! kill -0 "$agent_pid" 2>/dev/null; then
       CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54 \
-        "$NODE_BIN" "$CODEX_BIN" -e 'setInterval(() => {}, 1000)' >/dev/null 2>&1 &
+        "$CODEX_BIN" -e 'setInterval(() => {}, 1000)' >/dev/null 2>&1 &
       agent_pid=$!
       printf '%s\n' "$agent_pid" > "$agent_pid_file"
     fi

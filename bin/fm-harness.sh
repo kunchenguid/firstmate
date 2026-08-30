@@ -75,7 +75,7 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args argv0
+  local pid=$$ comm args argv0 state
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
@@ -113,6 +113,11 @@ detect_own() {
       break
     fi
   done
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}
+  if [ -n "${FM_HOME:-}" ] && fm_codex_home_binding_pid "$state" >/dev/null; then
+    echo codex
+    return
+  fi
   echo "diagnostic: no verified harness marker or ancestry match; inspected process evidence follows" >&2
   fm_harness_ancestry_diagnostic >&2
   echo unknown
