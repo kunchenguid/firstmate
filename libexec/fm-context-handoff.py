@@ -43,6 +43,7 @@ RECEIPT_SCHEMA = "firstmate.context-handoff.receipt.v1"
 ACK_SCHEMA = "firstmate.context-handoff.ack.v1"
 APPROVAL_SCHEMA = "firstmate.context-handoff.approval.v1"
 BINDING_SCHEMA = "firstmate.context-handoff.consumer-binding.v1"
+COMPACTION_BINDING_SCHEMA = "firstmate.context-handoff.compaction-binding.v1"
 HANDOFF_SCHEMA = "claude-obsidian.handoff.v1"
 TRANSACTION_SCHEMA = "claude-obsidian.transaction.v1"
 TRANSACTION_PLAN_SCHEMA = "claude-obsidian.transaction-plan.v1"
@@ -226,13 +227,37 @@ def path_has_symlink(path: Path) -> bool:
 def ensure_private_directory(path: Path) -> None:
     if path_has_symlink(path):
         raise HandoffError("STATE_SYMLINK", "the handoff state root contains a symlink")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    absolute = path.absolute()
+    missing: list[Path] = []
+    current = absolute
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            raise HandoffError("STATE_DIRECTORY", "the handoff state root has no existing parent")
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, 0o700)
+            os.chmod(directory, 0o700)
+            failpoint("before-created-directory-fsync")
+            fsync_directory(directory)
+            fsync_directory(directory.parent)
+        except FileExistsError:
+            if directory.is_symlink():
+                raise HandoffError("STATE_SYMLINK", "the handoff state root contains a symlink")
+        except OSError as exc:
+            raise HandoffError("STATE_DURABILITY", "the handoff state directory could not be made durable") from exc
     info = path.stat()
     if not stat.S_ISDIR(info.st_mode):
         raise HandoffError("STATE_NOT_DIRECTORY", "the handoff state root is not a directory")
     if info.st_uid != os.getuid():
         raise HandoffError("STATE_OWNER", "the handoff state root has another owner")
     os.chmod(path, 0o700)
+    try:
+        fsync_directory(path)
+        fsync_directory(path.parent)
+    except OSError as exc:
+        raise HandoffError("STATE_DURABILITY", "the handoff state directory could not be made durable") from exc
 
 
 def validate_private_file(path: Path) -> None:
@@ -1294,24 +1319,63 @@ def deliver_pending(home: Path) -> dict[str, Any]:
         if not pending:
             return {"status": "nothing-pending"}
         record_id = pending[0]
-        ready, reason, herdr = probe_recipient(config)
+        ready, reason, _herdr = probe_recipient(config)
         if not ready:
             update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
             write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
             return {"status": "pending", "reason": reason, "pending_count": len(pending)}
-        recipient = config["recipient"]
-        completed = run_bounded([str(herdr), "agent", "prompt", recipient["pane_id"], PROMPT_TEXT, "--session", recipient["session"], "--timeout", "5000"], timeout=8.0)
-        if completed.returncode != 0:
-            update_queue(layout, record_id, reason="recipient-notification-failed", attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
-            write_receipt(layout, "delivery", "pending", "recipient-notification-failed", record_id=record_id, pending_count=len(pending))
-            return {"status": "pending", "reason": "recipient-notification-failed", "pending_count": len(pending)}
-        update_queue(layout, record_id, status="notified", reason="recipient-notified", attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1, notified_at=now_utc())
-        write_receipt(layout, "delivery", "notified", "exact-recipient-notified", record_id=record_id, pending_count=len(pending))
-        return {"status": "notified", "record_id": record_id, "pending_count": len(pending)}
+        reason = "recipient-atomic-generation-prompt-unsupported"
+        update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
+        write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
+        return {"status": "pending", "reason": reason, "pending_count": len(pending)}
 
 
 def command_deliver(args: argparse.Namespace) -> dict[str, Any]:
     return deliver_pending(resolve_home(args.fm_home))
+
+
+def current_process_capability() -> str:
+    test_value = os.environ.get("FM_HANDOFF_TEST_PROCESS_CAPABILITY")
+    if os.environ.get("FM_HANDOFF_TESTING") == "1" and test_value is not None:
+        if not test_value or len(test_value.encode("utf-8")) > 256:
+            raise HandoffError("PROCESS_CAPABILITY", "the synthetic hook process capability is invalid")
+        return sha256_bytes(f"test\0{test_value}".encode("utf-8"))
+    process_group = os.getpgrp()
+    session = os.getsid(0)
+    if sys.platform.startswith("linux"):
+        try:
+            info = (Path("/proc") / str(process_group) / "stat").read_text(encoding="utf-8")
+            close = info.rfind(")")
+            fields = info[close + 1 :].split() if close >= 0 else []
+            start_time = fields[19]
+            recorded_group = int(fields[2])
+            recorded_session = int(fields[3])
+            owner = (Path("/proc") / str(process_group)).stat().st_uid
+        except (OSError, IndexError, ValueError) as exc:
+            raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is unavailable") from exc
+        if recorded_group != process_group or recorded_session != session or owner != os.getuid() or not start_time.isdigit():
+            raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is inconsistent")
+        identity = f"linux\0{process_group}\0{session}\0{start_time}\0{owner}"
+    else:
+        try:
+            completed = subprocess.run(
+                ["/bin/ps", "-p", str(process_group), "-o", "pgid=", "-o", "sid=", "-o", "lstart=", "-o", "command="],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=2.0,
+                check=False,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is unavailable") from exc
+        try:
+            output = completed.stdout.decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError as exc:
+            raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is unavailable") from exc
+        if completed.returncode != 0 or not output or len(output.encode("utf-8")) > 4096:
+            raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is unavailable")
+        identity = f"posix\0{process_group}\0{session}\0{output}"
+    return sha256_bytes(identity.encode("utf-8"))
 
 
 def endpoint_binding_key(config: Mapping[str, Any]) -> str:
@@ -1331,10 +1395,12 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
         "schema": BINDING_SCHEMA,
         "binding_key": endpoint_binding_key(config),
         "session_hash": config["recipient"]["agent_session_sha256"],
+        "process_capability_sha256": current_process_capability(),
         "vault_path": str(validate_vault_binding(config)),
         "bound_at": now_utc(),
     }
-    atomic_replace(layout.bindings / f"{binding['binding_key']}.json", canonical_json(binding))
+    with state_lock(layout):
+        atomic_replace(layout.bindings / f"{binding['binding_key']}.json", canonical_json(binding))
     return True
 
 
@@ -1349,23 +1415,80 @@ def require_consumer_binding(home: Path, config: Mapping[str, Any]) -> None:
     layout = StateLayout(home)
     path = layout.bindings / f"{endpoint_binding_key(config)}.json"
     value = read_json_file(path, max_bytes=4096)
-    if not isinstance(value, dict) or value.get("schema") != BINDING_SCHEMA or value.get("session_hash") != config["recipient"]["agent_session_sha256"] or value.get("vault_path") != str(validate_vault_binding(config)):
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != BINDING_SCHEMA
+        or value.get("session_hash") != config["recipient"]["agent_session_sha256"]
+        or value.get("process_capability_sha256") != current_process_capability()
+        or value.get("vault_path") != str(validate_vault_binding(config))
+    ):
         raise HandoffError("CONSUMER_SESSION", "consumer session generation is not bound")
 
 
-def latest_session_record(layout: StateLayout, config: Mapping[str, Any], source_harness: str, session_hash: str) -> tuple[str, str] | None:
-    candidates: list[tuple[str, str, str]] = []
-    for path in sorted(layout.queue.glob("handoff-*.json")):
-        queue = read_queue(layout, path.stem)
-        if queue.get("compaction") != "sealed":
-            continue
-        envelope, digest = read_envelope(layout, path.stem, config)
-        if envelope["source_harness"] == source_harness and envelope["source_session_hash"] == session_hash:
-            candidates.append((str(queue.get("updated_at", "")), path.stem, digest))
-    if not candidates:
-        return None
-    _, record_id, digest = sorted(candidates)[-1]
-    return record_id, digest
+def compaction_binding_path(layout: StateLayout, config: Mapping[str, Any]) -> Path:
+    return layout.bindings / f"compaction-{endpoint_binding_key(config)}.json"
+
+
+def durable_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    fsync_directory(path.parent)
+
+
+def persist_compaction_binding(home: Path, config: Mapping[str, Any], result: Mapping[str, Any], trigger: str) -> None:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        path = compaction_binding_path(layout, config)
+        if result.get("status") not in {"sealed", "already-sealed"}:
+            durable_unlink(path)
+            return
+        record_id = result.get("record_id")
+        envelope_sha = result.get("envelope_sha256")
+        if not isinstance(record_id, str) or not RECORD_ID.fullmatch(record_id) or not isinstance(envelope_sha, str) or not HEX64.fullmatch(envelope_sha):
+            raise HandoffError("COMPACTION_BINDING", "Claude PreCompact did not return an exact seal binding")
+        envelope, actual = read_envelope(layout, record_id, config)
+        if actual != envelope_sha or envelope.get("source_harness") != "claude" or envelope.get("source_session_hash") != config["recipient"]["agent_session_sha256"]:
+            raise HandoffError("COMPACTION_BINDING", "Claude PreCompact seal binding is inconsistent")
+        binding = {
+            "schema": COMPACTION_BINDING_SCHEMA,
+            "binding_key": endpoint_binding_key(config),
+            "session_hash": config["recipient"]["agent_session_sha256"],
+            "process_capability_sha256": current_process_capability(),
+            "record_id": record_id,
+            "envelope_sha256": envelope_sha,
+            "trigger": trigger,
+            "bound_at": now_utc(),
+        }
+        atomic_replace(path, canonical_json(binding))
+
+
+def load_compaction_binding(home: Path, config: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        path = compaction_binding_path(layout, config)
+        if not path.exists():
+            return None
+        value = read_json_file(path, max_bytes=4096)
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != COMPACTION_BINDING_SCHEMA
+            or value.get("binding_key") != endpoint_binding_key(config)
+            or value.get("session_hash") != config["recipient"]["agent_session_sha256"]
+            or value.get("process_capability_sha256") != current_process_capability()
+            or not RECORD_ID.fullmatch(str(value.get("record_id", "")))
+            or not HEX64.fullmatch(str(value.get("envelope_sha256", "")))
+            or value.get("trigger") not in TRIGGERS
+        ):
+            raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding is invalid")
+        return str(value["record_id"]), str(value["envelope_sha256"]), str(value["trigger"])
+
+
+def clear_compaction_binding(home: Path, config: Mapping[str, Any]) -> None:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        durable_unlink(compaction_binding_path(layout, config))
 
 
 def hook_output(value: Mapping[str, Any] | None = None, *, stderr: bool = False) -> None:
@@ -1427,27 +1550,25 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
             return None
         trigger = "manual" if payload.get("trigger") == "manual" else "threshold"
         result = seal_with_failure_receipt(home, "claude", config["recipient"]["agent_session_sha256"], trigger)
+        persist_compaction_binding(home, config, result, trigger)
         if result.get("status") == "seal-failed" and result.get("had_candidates"):
             return {"decision": "block", "reason": "Already-curated handoff candidates could not be sealed durably; compaction was stopped."}
         return None
     if event_name == "PostCompact":
         if not config_enabled(config, "sealing_enabled") or not bind_claude_session(home, config, payload):
             return None
-        trigger = "manual" if payload.get("trigger") == "manual" else "threshold"
-        layout = StateLayout(home)
-        with state_lock(layout):
-            latest = latest_session_record(layout, config, "claude", config["recipient"]["agent_session_sha256"])
-        if latest:
-            mark_compaction(home, latest[0], latest[1], True, trigger, "claude-post-compact")
+        binding = load_compaction_binding(home, config)
+        if binding:
+            mark_compaction(home, binding[0], binding[1], True, binding[2], "claude-post-compact")
+            clear_compaction_binding(home, config)
         return None
     if event_name == "StopFailure":
         if not config_enabled(config, "sealing_enabled") or not bind_claude_session(home, config, payload):
             return None
-        layout = StateLayout(home)
-        with state_lock(layout):
-            latest = latest_session_record(layout, config, "claude", config["recipient"]["agent_session_sha256"])
-        if latest:
-            mark_compaction(home, latest[0], latest[1], False, "threshold", "claude-provider-failure")
+        binding = load_compaction_binding(home, config)
+        if binding:
+            mark_compaction(home, binding[0], binding[1], False, binding[2], "claude-provider-failure")
+            clear_compaction_binding(home, config)
         return None
     return None
 
@@ -1914,6 +2035,14 @@ def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Ma
         raise HandoffError("DISPOSITION_INPUT", "consumer disposition input is invalid")
     validate_statement(rationale)
     _envelope, queue_before, _digest = consumer_record(home, config, record_id)
+    completed = find_completed_approval(home, config, record_id)
+    if completed is not None:
+        return {
+            "status": "acknowledged",
+            "record_id": record_id,
+            "disposition": "saved",
+            "operation_id": completed["operation_id"],
+        }
     value = {
         "schema": "firstmate.context-handoff.disposition.v1",
         "record_id": record_id,
@@ -1934,30 +2063,28 @@ def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Ma
             quarantine(layout, record_id, "disposition-mismatch")
             update_queue(layout, record_id, status="quarantined", reason="disposition-mismatch")
             raise HandoffError("DISPOSITION_MISMATCH", "record already binds another curation disposition")
-    else:
-        atomic_create(path, canonical_json(value))
+        if not recover_terminal_disposition_ack(layout, record_id):
+            raise HandoffError("ACK_INCOMPLETE", "durable disposition acknowledgement could not be recovered")
+        status = "quarantined" if disposition == "needs-captain" else "acknowledged"
+        return {"status": status, "record_id": record_id, "disposition": disposition}
+    vault = validate_vault_binding(config)
+    operation = vault / ".vault-meta" / "transactions" / deterministic_operation_id(record_id)
+    if operation.exists() or (vault / ".vault-meta" / "mutation.lock").exists():
+        raise HandoffError("TRANSACTION_RECOVERY_PENDING", "transaction state must be reconciled before a non-save disposition")
+    require_active_save_authority(layout, record_id, queue_before)
+    atomic_create(path, canonical_json(value))
     status = "quarantined" if disposition == "needs-captain" else "acknowledged"
     ack_path = ack_path_for(layout, record_id)
-    created_ack = False
-    if ack_path.exists():
-        ack = read_json_file(ack_path, max_bytes=16 * 1024)
-        if not isinstance(ack, dict) or ack.get("schema") != ACK_SCHEMA or ack.get("record_id") != record_id or ack.get("disposition") != disposition:
-            raise HandoffError("ACK_MISMATCH", "existing source acknowledgement binds another disposition")
-    else:
-        ack = {
-            "schema": ACK_SCHEMA,
-            "record_id": record_id,
-            "disposition": disposition,
-            "acknowledged_at": now_utc(),
-        }
-        atomic_create(ack_path, canonical_json(ack))
-        created_ack = True
+    ack = {
+        "schema": ACK_SCHEMA,
+        "record_id": record_id,
+        "disposition": disposition,
+        "acknowledged_at": now_utc(),
+    }
+    atomic_create(ack_path, canonical_json(ack))
     failpoint("after-ack-before-queue")
     update_queue(layout, record_id, status=status, reason=f"curation-{disposition}")
-    if created_ack:
-        write_receipt(layout, "consumer", status, f"curation-{disposition}", record_id=record_id)
-    elif queue_before.get("status") != status:
-        write_receipt(layout, "consumer", status, f"curation-{disposition}-ack-recovered", record_id=record_id)
+    write_receipt(layout, "consumer", status, f"curation-{disposition}", record_id=record_id)
     return {"status": status, "record_id": record_id, "disposition": disposition}
 
 
