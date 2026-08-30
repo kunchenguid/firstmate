@@ -2195,7 +2195,7 @@ spawn_clear_pane_traceparent() {
   pane_shell=${pane_shell#-}
   case "$pane_shell" in
     fish)
-      command="set -e TRACEPARENT; and sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"
+      command="set -e TRACEPARENT; sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"
       ;;
     sh|bash|zsh|dash|ash|ksh|mksh)
       command="unset TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"

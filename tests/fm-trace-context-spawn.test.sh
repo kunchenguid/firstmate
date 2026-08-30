@@ -75,7 +75,11 @@ case "${1:-}" in
       done
       case "$payload" in
         *'/pane-shell.'*|*'/traceparent-cleared.'*)
-          TRACEPARENT=stale fish -c "$payload" >/dev/null 2>&1 || true
+          if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
+            env -u TRACEPARENT fish -c "$payload" >/dev/null 2>&1 || true
+          else
+            TRACEPARENT=stale fish -c "$payload" >/dev/null 2>&1 || true
+          fi
           ;;
       esac
     fi
