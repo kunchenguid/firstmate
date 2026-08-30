@@ -2101,10 +2101,23 @@ declared_wait_churn_rounds() {  # <state> <fakebin> <window> <capture-file> <out
     fi
     if [ -s "$state/.wake-queue" ]; then
       cat "$state/.wake-queue" >> "$state/.churn-wakes"
-      ack_stopped_cycle "$state" >/dev/null 2>&1 || true
     fi
+    # Acknowledge EVERY round, not only wake-exiting ones: any watcher exit -
+    # a reaped absorb round included - publishes a pending downtime episode,
+    # and until a drain acknowledges it the next bare-relaunched watcher only
+    # re-announces recovery (check: rearm-resurface) and never reaches the
+    # stale triage, so later rounds would pass every count vacuously. This is
+    # the per-turn acknowledgement production firstmate performs after each
+    # handled wake; the rearm-resurface guard after this loop catches the
+    # vacuity if this ack ever stops working.
+    ack_stopped_cycle "$state" >/dev/null 2>&1 || true
     round=$((round + 1))
   done
+  # A round that only re-announced recovery never ran the triage under test;
+  # count assertions over such rounds prove nothing.
+  if grep -F 'rearm-resurface' "$out" >/dev/null 2>&1; then
+    fail "a churn round re-announced recovery instead of polling; the rounds did not exercise the stale triage"
+  fi
 }
 
 # Count the stale wakes <window> queued across every round: total, and the BARE
@@ -2184,10 +2197,15 @@ test_open_decision_churning_pane_surfaces_once_per_declaration() {
 
   # Answering it removes the declared wait: the pane is an ordinary quiet crew
   # again and must surface normally, so the absorb can never outlive the wait.
+  # The opener's trailing token is prose, so the decision the fold holds open is
+  # named "default", and the answer must close THAT key - exactly the line
+  # fm-send writes when it answers the key the OPEN DECISIONS listing names. A
+  # resolved line naming the prose token instead would close nothing, and the
+  # absorb would rightly continue.
   # Compared against the count BEFORE this round, so the earlier one-shot cannot
   # satisfy the assertion on its own.
   before=$bare
-  printf 'resolved [key=w25-design]: answered: revise then build\n' >> "$statusf"
+  printf 'resolved [key=default]: answered: revise then build\n' >> "$statusf"
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$3"' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$statusf" \
     || fail "could not re-prime the status baseline after the answer"
