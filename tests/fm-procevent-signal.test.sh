@@ -76,6 +76,10 @@ fi
 case "${1:-}" in
   listAccounts)
     while [ -e "$lock" ]; do sleep 0.02; done
+    if [ -n "${FM_FAKE_SIGNAL_LIST_BLOCK:-}" ]; then
+      : > "$FM_FAKE_SIGNAL_LIST_BLOCK.ready"
+      while [ ! -e "$FM_FAKE_SIGNAL_LIST_BLOCK.release" ]; do sleep 0.02; done
+    fi
     if [ -n "${FM_FAKE_SIGNAL_LIST_DELAY_ONCE:-}" ]; then
       if mkdir "$root/list-delay-used" 2>/dev/null; then
         sleep "$FM_FAKE_SIGNAL_LIST_DELAY_ONCE"
@@ -205,7 +209,7 @@ cleanup_sources() {
   local home
   for home in "$SIGNAL_ROOT/home" "$SIGNAL_ROOT/failure" "$SIGNAL_ROOT/validation" \
     "$SIGNAL_ROOT/rearm-failure" "$SIGNAL_ROOT/invalid-config" "$SIGNAL_ROOT/foreign" \
-    "$SIGNAL_ROOT/interruption" "$SIGNAL_ROOT/public-config"; do
+    "$SIGNAL_ROOT/interruption" "$SIGNAL_ROOT/public-config" "$SIGNAL_ROOT/pinned-home"; do
     [ -d "$home" ] || continue
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   done
@@ -340,6 +344,65 @@ assert_no_private_temps "$HINT"
 assert_runner_owned_receive "$HINT" "$INTERRUPT_ROOT"
 signal "$HINT" retire team >/dev/null
 pass "Signal interruptions clean private state and restore inbound receive"
+
+HCONFIG_LINK="$SIGNAL_ROOT/config-link-home"
+CONFIG_OUTSIDE="$SIGNAL_ROOT/config-outside-home"
+new_home "$HCONFIG_LINK"
+mv "$HCONFIG_LINK/config" "$CONFIG_OUTSIDE"
+ln -s "$CONFIG_OUTSIDE" "$HCONFIG_LINK/config"
+if signal "$HCONFIG_LINK" arm team > "$SIGNAL_ROOT/config-link.out" 2> "$SIGNAL_ROOT/config-link.err"; then
+  fail "Signal accepted routing configuration outside its effective home"
+fi
+assert_grep 'error: Signal paths must stay beneath the effective home' "$SIGNAL_ROOT/config-link.err" \
+  "an external configuration ancestor fails with a sanitized error"
+assert_not_contains "$(cat "$SIGNAL_ROOT/config-link.err")" "$CONFIG_OUTSIDE" \
+  "external configuration refusal does not expose its path"
+[ ! -e "$HCONFIG_LINK/state/procevent/signal-account.source" ] \
+  || fail "external configuration created a Signal registration"
+
+HSTATE_LINK="$SIGNAL_ROOT/state-link-home"
+STATE_OUTSIDE="$SIGNAL_ROOT/state-outside-home"
+new_home "$HSTATE_LINK"
+mv "$HSTATE_LINK/state" "$STATE_OUTSIDE"
+ln -s "$STATE_OUTSIDE" "$HSTATE_LINK/state"
+if signal "$HSTATE_LINK" arm team > "$SIGNAL_ROOT/state-link.out" 2> "$SIGNAL_ROOT/state-link.err"; then
+  fail "Signal accepted state outside its effective home"
+fi
+assert_grep 'error: Signal paths must stay beneath the effective home' "$SIGNAL_ROOT/state-link.err" \
+  "an external state ancestor fails with a sanitized error"
+assert_not_contains "$(cat "$SIGNAL_ROOT/state-link.err")" "$STATE_OUTSIDE" \
+  "external state refusal does not expose its path"
+[ -z "$(find "$STATE_OUTSIDE" -mindepth 1 -print -quit)" ] \
+  || fail "external state refusal wrote outside the effective home"
+pass "Signal configuration and state stay canonically home-local"
+
+HPIN="$SIGNAL_ROOT/pinned-home"
+PIN_ROOT="$SIGNAL_ROOT/pinned-cli"
+PIN_BLOCK="$PIN_ROOT/message-open"
+PIN_MESSAGE="$SIGNAL_ROOT/pinned-message"
+PIN_REPLACEMENT="$SIGNAL_ROOT/replacement-message"
+new_home "$HPIN"
+mkdir -p "$PIN_ROOT"
+printf 'pinned fixture\n' > "$PIN_MESSAGE"
+printf 'replacement fixture\n' > "$PIN_REPLACEMENT"
+FM_HOME="$HPIN" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$HPIN/config" \
+  PATH="$FAKEBIN:$PATH" TMPDIR="$SIGNAL_TMP" FM_FAKE_SIGNAL_ROOT="$PIN_ROOT" \
+  FM_FAKE_SIGNAL_LIST_BLOCK="$PIN_BLOCK" "$ROOT/bin/fm-procevent-signal.sh" \
+  send team "$PIN_MESSAGE" > "$SIGNAL_ROOT/pinned.out" 2> "$SIGNAL_ROOT/pinned.err" &
+pinned_pid=$!
+wait_for "$PIN_BLOCK.ready" || fail "pinned message fixture never reached account discovery"
+mv "$PIN_MESSAGE" "$PIN_MESSAGE.opened"
+ln -s "$PIN_REPLACEMENT" "$PIN_MESSAGE"
+[ -L "$PIN_MESSAGE" ] || fail "pinned message fixture did not replace the pathname"
+: > "$PIN_BLOCK.release"
+wait "$pinned_pid" || fail "send failed after its opened message pathname was replaced"
+assert_contains "$(cat "$PIN_ROOT/sent-body")" "Fixture: pinned fixture" \
+  "send consumes the bytes pinned before pathname replacement"
+assert_not_contains "$(cat "$PIN_ROOT/sent-body")" "replacement fixture" \
+  "send never follows a replacement message symlink"
+assert_runner_owned_receive "$HPIN" "$PIN_ROOT"
+signal "$HPIN" retire team >/dev/null
+pass "outbound message bytes stay pinned across pathname replacement"
 
 signal "$H" arm team >/dev/null
 reconcile "$H" >/dev/null

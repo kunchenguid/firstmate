@@ -31,6 +31,7 @@ PRIVATE_TEMP_DIR="$SIGNAL_STATE_DIR/tmp"
 PRIVATE_INVOCATION_TEMP_DIR="$PRIVATE_TEMP_DIR/invocation.$$"
 SIGNAL_DATA_DIR="$SIGNAL_STATE_DIR/data"
 SIGNAL_CLI=(signal-cli --data-dir "$SIGNAL_DATA_DIR")
+PRIVATE_TEMP_CLEANUP_DIR=
 
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
@@ -42,7 +43,9 @@ SIGNAL_CLI=(signal-cli --data-dir "$SIGNAL_DATA_DIR")
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 cleanup_private_tempfiles() {
-  rm -rf -- "$PRIVATE_INVOCATION_TEMP_DIR"
+  [ -z "$PRIVATE_TEMP_CLEANUP_DIR" ] \
+    || ! signal_path_is_home_local "$PRIVATE_TEMP_CLEANUP_DIR" \
+    || rm -rf -- "$PRIVATE_TEMP_CLEANUP_DIR"
 }
 
 exit_on_signal() {
@@ -62,6 +65,27 @@ usage() { sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
 
+signal_path_is_home_local() {
+  FM_SIGNAL_HOME="$FM_HOME" FM_SIGNAL_PATH="$1" FM_SIGNAL_RAW= python3 -c '
+import os
+
+home = os.path.realpath(os.environ["FM_SIGNAL_HOME"])
+path = os.path.realpath(os.environ["FM_SIGNAL_PATH"])
+try:
+    inside = os.path.commonpath((home, path)) == home and path != home
+except ValueError:
+    inside = False
+raise SystemExit(0 if inside else 1)
+' >/dev/null 2>&1
+}
+
+require_signal_home_paths() {
+  [ -d "$FM_HOME" ] \
+    && signal_path_is_home_local "$CONFIG" \
+    && signal_path_is_home_local "$STATE" \
+    || die "Signal paths must stay beneath the effective home"
+}
+
 ensure_private_directory() {
   local directory=$1
   if [ -e "$directory" ] || [ -L "$directory" ]; then
@@ -73,12 +97,15 @@ ensure_private_directory() {
 }
 
 ensure_signal_data_dir() {
+  require_signal_home_paths
   ensure_private_directory "$SIGNAL_STATE_DIR" \
     && ensure_private_directory "$SIGNAL_DATA_DIR"
 }
 
 private_tempfile() {
   local target=$1 prefix=$2 file
+  require_signal_home_paths
+  PRIVATE_TEMP_CLEANUP_DIR=$PRIVATE_INVOCATION_TEMP_DIR
   ensure_private_directory "$SIGNAL_STATE_DIR" || return 1
   ensure_private_directory "$PRIVATE_TEMP_DIR" || return 1
   ensure_private_directory "$PRIVATE_INVOCATION_TEMP_DIR" || return 1
@@ -100,6 +127,7 @@ source_id() {
 }
 
 ensure_groups_file() {
+  require_signal_home_paths
   [ -f "$GROUPS_FILE" ] && [ ! -L "$GROUPS_FILE" ] || die "Signal is not configured"
   [ "$(fm_pr_file_mode "$GROUPS_FILE")" = 600 ] || die "Signal group configuration must have mode 0600"
 }
@@ -190,6 +218,7 @@ validate_single_account() {
 
 signal_routes() {
   local mode=$1 selector=${2-} message_file=${3-}
+  require_signal_home_paths
   SIGNAL_GROUPS_FILE="$GROUPS_FILE" SIGNAL_ROUTE_MODE="$mode" \
     SIGNAL_SELECTOR="$selector" FM_SIGNAL_MESSAGE="$message_file" python3 -c '
 import json
@@ -332,6 +361,30 @@ raise SystemExit(0 if matched == 1 else 1)
 '
 }
 
+open_message_file() {
+  local path=$1
+  [ -f "$path" ] && [ ! -L "$path" ] || die "message file is not a regular file"
+  exec 8< "$path" || die "message file is not a regular file"
+  if ! FM_SIGNAL_OPEN_MESSAGE="$path" FM_SIGNAL_RAW= python3 -c '
+import os
+import stat
+
+try:
+    opened = os.fstat(8)
+    linked = os.lstat(os.environ["FM_SIGNAL_OPEN_MESSAGE"])
+except OSError:
+    raise SystemExit(1)
+valid = (stat.S_ISREG(opened.st_mode)
+         and stat.S_ISREG(linked.st_mode)
+         and not stat.S_ISLNK(linked.st_mode)
+         and (opened.st_dev, opened.st_ino) == (linked.st_dev, linked.st_ino))
+raise SystemExit(0 if valid else 1)
+' >/dev/null 2>&1; then
+    exec 8<&-
+    die "message file is not a regular file"
+  fi
+}
+
 cmd_source() {
   local -a receive_status
   ensure_groups_file
@@ -370,6 +423,7 @@ cmd_arm_locked() {
 cmd_arm() {
   local selector=${1-} lock
   validate_selector "$selector"
+  require_signal_home_paths
   lock=$(lifecycle_lock)
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
@@ -386,6 +440,7 @@ cmd_retire_locked() {
 cmd_retire() {
   local selector=${1-} lock
   validate_selector "$selector"
+  require_signal_home_paths
   lock=$(lifecycle_lock)
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
@@ -396,18 +451,14 @@ cmd_retire() {
 }
 
 cmd_send_locked() {
-  local selector=$1 message=${2:--} account raw prefixed request response ownership_status
-  [ "$message" = - ] || { [ -f "$message" ] && [ ! -L "$message" ] || die "message file is not a regular file"; }
+  local selector=$1 account raw prefixed request response ownership_status
   validate_routes || die "Signal group configuration is invalid"
   validate_route_selector "$selector" || die "Signal group selector is not configured"
   cmd_retire_locked "$selector" >/dev/null || die "could not retire Signal receive source"
   validate_single_account account || exit 1
   private_tempfile raw fm-signal-raw || die "cannot create private Signal message"
-  if [ "$message" = - ]; then
-    cat >"$raw" || { rm -f "$raw"; die "cannot read Signal message"; }
-  else
-    cp "$message" "$raw" || { rm -f "$raw"; die "cannot stage Signal message"; }
-  fi
+  cat <&8 >"$raw" || { rm -f "$raw"; die "cannot stage Signal message"; }
+  exec 8<&-
   [ -s "$raw" ] || { rm -f "$raw"; die "Signal message is empty"; }
   private_tempfile prefixed fm-signal-message || { rm -f "$raw"; die "cannot create private Signal message"; }
   FM_SIGNAL_RAW="$raw" signal_routes prefix "$selector" "$raw" >"$prefixed" \
@@ -437,11 +488,13 @@ cmd_send_locked() {
 cmd_send() {
   local selector=${1-} message=${2:--} lock send_rc=0 staged='' ownership_status send_owner_pid
   validate_selector "$selector"
+  require_signal_home_paths
   if [ "$message" = - ]; then
     private_tempfile staged fm-signal-input || die "cannot create private Signal message"
     cat >"$staged" || { rm -f "$staged"; die "cannot read Signal message"; }
     message=$staged
   fi
+  open_message_file "$message"
   lock=$(lifecycle_lock)
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
@@ -471,6 +524,7 @@ cmd_send() {
     restore_source() {
       local status=$?
       trap - EXIT HUP INT TERM
+      exec 8<&-
       cleanup_private_tempfiles
       if ! (cmd_arm_locked "$selector") >/dev/null 2>&1 \
         || ! "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 \
@@ -483,7 +537,7 @@ cmd_send() {
       exit "$status"
     }
     trap restore_source EXIT
-    cmd_send_locked "$selector" "$message" || send_rc=$?
+    cmd_send_locked "$selector" || send_rc=$?
     return "$send_rc"
   )
 }
