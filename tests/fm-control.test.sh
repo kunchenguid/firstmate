@@ -446,18 +446,18 @@ test_state_verified_backends_are_exactly_tmux_and_herdr() {
   pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
 }
 
-test_omp_herdr_exit_uses_only_its_verified_idle_shell_proof() {
+test_omp_herdr_exit_uses_only_its_verified_pane_exit_proof() {
   local pair harness backend
-  fm_control_exit_uses_herdr_idle_shell_proof omp herdr \
-    || fail "OMP's stale Herdr registration needs the measured idle-shell exit proof"
+  fm_control_exit_uses_herdr_pane_exit_proof omp herdr \
+    || fail "OMP's stale Herdr registration needs the measured pane-process exit proof"
   for pair in omp:tmux pi:herdr muse:herdr someagent:herdr; do
     harness=${pair%%:*}
     backend=${pair#*:}
-    if fm_control_exit_uses_herdr_idle_shell_proof "$harness" "$backend"; then
+    if fm_control_exit_uses_herdr_pane_exit_proof "$harness" "$backend"; then
       fail "$harness on $backend must not borrow OMP's Herdr exit proof"
     fi
   done
-  pass "fm-control-lib: only OMP on Herdr uses the measured idle-shell exit proof"
+  pass "fm-control-lib: only OMP on Herdr uses the measured pane-process exit proof"
 }
 
 # --- 3. exact-id scoping ----------------------------------------------------
@@ -901,7 +901,7 @@ test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
-test_omp_herdr_exit_uses_only_its_verified_idle_shell_proof
+test_omp_herdr_exit_uses_only_its_verified_pane_exit_proof
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

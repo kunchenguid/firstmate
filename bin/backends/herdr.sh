@@ -1250,6 +1250,100 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   printf '%s\n' "$shell_pid"
 }
 
+# fm_backend_herdr_pane_omp_exit_proof: print the foreground shell pid of
+# <pane-id> only when the exact pane's SOLE foreground process is one
+# recognized idle shell and no omp process remains anywhere beneath the pane
+# shell. This is the OMP-on-Herdr exit postcondition.
+#
+# OMP's installed Herdr integration keeps an idle agent registration after
+# `/exit`, so the agent-state classifier stays live and exit must prove the
+# process truth instead. The pane shell's own pid is deliberately NOT required
+# to be the foreground process: the spawn owner always places the worker
+# inside a `treehouse get` subshell, so the worktree shell - a second
+# recognized shell under the treehouse CLI - is the real foreground, and the
+# strict lone-pane-shell proof can never hold in that launch shape.
+#
+# The descendant scan over the pane shell's process tree is what keeps a
+# lingering background omp from passing: while OMP holds the TTY its own
+# process is a pane-shell descendant, so the scan refuses; after `/exit` the
+# foreground is the worktree shell and the scan finds no omp row.
+# Retries strict single samples for a bounded settle window like the shared
+# idle-shell proof, for the same prompt-redraw transient.
+fm_backend_herdr_pane_omp_exit_proof() {  # <session> <pane-id>
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_OMP_EXIT_PROOF_POLLS:-10}
+  while :; do
+    if fm_backend_herdr_pane_omp_exit_sample "$1" "$2"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 0.1
+  done
+}
+
+# fm_backend_herdr_pane_omp_exit_sample: one strict instantaneous observation
+# for fm_backend_herdr_pane_omp_exit_proof, which owns the proof contract.
+fm_backend_herdr_pane_omp_exit_sample() {  # <session> <pane-id>
+  local session=$1 pane=$2 info shell_pid foreground_pgid count pid name argv0
+  local shell_name rows ps_bin stat
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  foreground_pgid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  count=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) || return 1
+  [ "$count" -eq 1 ] || return 1
+  pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes[0].pid | select(type == "number") | floor' 2>/dev/null) || return 1
+  [ "$pid" = "$foreground_pgid" ] || return 1
+  name=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+  argv0=$(printf '%s' "$info" | jq -er '
+    .result.process_info.foreground_processes[0] as $process
+    | ($process.argv0 // $process.argv[0])
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null) || return 1
+  shell_name=${name##*/}
+  argv0=${argv0#-}
+  argv0=${argv0##*/}
+  [ "$argv0" = "$shell_name" ] || return 1
+  case "$shell_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
+
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  rows=$("$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+    function basename(s) { n = s; sub(/^.*\//, "", n); return n }
+    BEGIN { stack[shell] = 1 }
+    { pids[$1] = basename($3); parents[$1] = $2 }
+    END {
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (p in pids) {
+          if ((parents[p] in stack) && !(p in stack)) { stack[p] = 1; changed = 1 }
+        }
+      }
+      for (p in stack) {
+        if (pids[p] ~ /^omp(-|$)/) { exit 1 }
+      }
+      exit 0
+    }
+  ' || return 1
+  printf '%s\n' "$rows" | awk -v shell="$pid" '
+    $1 == shell { found++ }
+    END { exit(found == 1 ? 0 : 1) }
+  ' || return 1
+  stat=$("$ps_bin" -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$stat" in S*|I*) ;; *) return 1 ;; esac
+  printf '%s\n' "$pid"
+}
+
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
 # returned by THIS projected create immediately after its owning parent's
 # contiguous child block and before the next parent.

@@ -30,8 +30,9 @@
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
-#              OMP on Herdr instead proves the exact pane returned to one lone
-#              idle shell because its installed Herdr registration persists.
+#              OMP on Herdr instead proves the pane holds one recognized idle
+#              foreground shell with no omp process beneath it, because its
+#              installed Herdr registration persists.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
@@ -346,8 +347,9 @@ wait_agent_state() {  # <timeout> <wanted>...
 
 # wait_exit_postcondition: accept only the normal dead-agent transition, plus
 # OMP's verified Herdr exception. OMP's installed Herdr integration leaves an
-# idle registration after `/exit`, so the exact pane must instead prove one lone
-# idle shell. This cannot generalize from harness=omp or backend=herdr alone:
+# idle registration after `/exit`, so the exact pane must instead prove one
+# recognized idle foreground shell with no omp process left beneath it. This
+# cannot generalize from harness=omp or backend=herdr alone:
 # fm-control-lib.sh owns the closed empirical pair.
 wait_exit_postcondition() {  # <timeout> -> dead|shell (success), final state (failure)
   local timeout=$1 state elapsed=0
@@ -357,9 +359,13 @@ wait_exit_postcondition() {  # <timeout> -> dead|shell (success), final state (f
       printf 'dead'
       return 0
     fi
-    if fm_control_exit_uses_herdr_idle_shell_proof "$HARNESS" "$BACKEND"; then
+    if fm_control_exit_uses_herdr_pane_exit_proof "$HARNESS" "$BACKEND"; then
+      # agent_state and the send-verdict run in command-substitution subshells,
+      # so the backend file was sourced only in those children; source it here
+      # in the current shell before calling its helpers directly.
+      fm_backend_source "$BACKEND" || return 1
       if fm_backend_herdr_parse_target "$T" \
-        && fm_backend_herdr_pane_idle_shell_pid "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null; then
+        && fm_backend_herdr_pane_omp_exit_proof "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null; then
         printf 'shell'
         return 0
       fi

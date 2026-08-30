@@ -167,10 +167,10 @@ fm_control_exit_command() {  # <harness>
 }
 
 # Whether an adapter retains a stale Herdr agent registration after its process
-# exits, requiring the backend's strict lone-idle-shell proof as the exit
-# postcondition. This is deliberately a closed empirical table, never a
-# fallback for an unknown or merely idle registered agent.
-fm_control_exit_uses_herdr_idle_shell_proof() {  # <harness> <backend>
+# exits, requiring the backend's pane-process exit proof as the postcondition.
+# This is deliberately a closed empirical table, never a fallback for an
+# unknown or merely idle registered agent.
+fm_control_exit_uses_herdr_pane_exit_proof() {  # <harness> <backend>
   [ "${1-}" = omp ] && [ "${2-}" = herdr ]
 }
 

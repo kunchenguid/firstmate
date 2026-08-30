@@ -1130,12 +1130,25 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
+  RELAUNCH_AGENT_FREE=0
+  if [ "$RELAUNCH_STATE" = dead ]; then
+    RELAUNCH_AGENT_FREE=1
+  elif fm_control_exit_uses_herdr_pane_exit_proof "$RELAUNCH_PRIOR_HARNESS" "$BACKEND"; then
+    # OMP's installed Herdr integration keeps an idle agent registration after
+    # /exit, so agent_state stays live forever; the same pane-process exit
+    # proof fm-control.sh accepts must license the relaunch here, or the
+    # recommended deterministic-relaunch path could never launch a replacement.
+    if fm_backend_herdr_parse_target "$RELAUNCH_TARGET" \
+      && fm_backend_herdr_pane_omp_exit_proof "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null; then
+      RELAUNCH_AGENT_FREE=1
+    fi
+  fi
+  [ "$RELAUNCH_AGENT_FREE" -eq 1 ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
-  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)

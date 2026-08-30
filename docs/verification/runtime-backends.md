@@ -305,11 +305,16 @@ No ambient `herdr server stop` command is a supported test operation.
 ### OMP worker adapter
 
 OMP `18.0.11` was verified on 2026-08-30 through a real `fm-spawn.sh` crewmate launch in a guarded non-default Herdr 0.7.3 lab.
-The spawned worker read and completed its one-command brief, printed `OMP_CODE_LIVE_THREE_READY`, and touched the generated `turn_end` marker.
+The spawned worker read and completed its one-command brief, printed `OMP_LIVE_READY`, and touched the generated `turn_end` marker.
 The generated extension moved Firstmate busy state from `busy omp-ext` to `idle omp-ext` after the normal turn.
-Single Escape during a `sleep 30` Bash tool call produced `Command aborted` and left the OMP composer available; `fm-control.sh` reported `interrupt-delivered ... verified=agent-alive cancel=unconfirmed`.
-`/exit` printed `Closing session…` plus `Resume this session with omp --resume <id>` and returned the pane to its lone shell.
-OMP's installed Herdr integration retained an idle agent registration after exit, so the control plane accepts only that exact lone-idle-shell proof for OMP on Herdr; no other adapter or backend inherits it.
+Single Escape during a `sleep 45` Bash tool call produced `Command aborted` and left the OMP composer available; `fm-control.sh` reported `interrupt-delivered ... verified=agent-alive cancel=unconfirmed`.
+`/exit` returned the pane to its worktree shell and `fm-control.sh` printed `stopped omp-live-1 harness=omp backend=herdr endpoint=<lab>:w1:p2 worktree=<treehouse worktree>`; a deterministic `relaunch` then printed `relaunched omp-live-1 harness=omp from=omp ... backend=herdr endpoint=<same pane>`.
+
+Two defects surfaced only under this live launch and were fixed in the same pass.
+First, the exit wait loop called herdr helpers directly after `agent_state` and the send-verdict ran in command-substitution subshells, so the backend file was sourced only in those children; `fm-control.sh` now sources the backend in its own shell before the direct calls.
+Second, OMP's installed Herdr integration keeps an idle agent registration after `/exit`, so `agent_state` stays `live` and the original lone-pane-shell exit proof can never hold in the real launch shape: the spawn owner always places the worker inside a `treehouse get` subshell, so the pane's foreground after exit is the worktree shell, never its own pane shell.
+The OMP-on-Herdr exit and relaunch postconditions therefore use a pane-process proof (`fm_backend_herdr_pane_omp_exit_proof`): the pane's sole foreground process is one recognized idle shell and no `omp` process remains anywhere beneath the pane shell.
+The proof refused while the worker ran (foreground `omp`) and passed after `/exit` (foreground `bash`, worktree shell pid).
 The direct worker proof covers crewmate and scout dispatch only.
 OMP secondmates and primary integration remain unsupported because no primary supervision or primary-hook protocol was verified.
 

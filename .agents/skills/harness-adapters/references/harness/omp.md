@@ -29,6 +29,7 @@ Use deterministic `relaunch` from the durable brief instead.
 
 OMP is verified for crewmate and scout workers on Herdr.
 The tmux process-name branch has portable coverage but no supervised OMP tmux launch in this audit, so tmux remains unverified for OMP worker dispatch.
-On Herdr, OMP's installed lifecycle registration persists as idle after `/exit`, so Firstmate proves the exact pane has returned to one lone idle shell rather than treating that idle registration itself as exit proof.
+On Herdr, OMP's installed lifecycle registration persists as idle after `/exit`, so Firstmate proves the pane holds one recognized idle foreground shell with no `omp` process left beneath it rather than treating that idle registration itself as exit proof.
+The same pane-process proof licenses a deterministic `relaunch` into the stopped endpoint; without it the stale registration would read as a live agent forever.
 `../../../bin/fm-spawn.sh` refuses OMP secondmates before endpoint creation because no primary supervision protocol was verified.
 OMP primary integration is unsupported for the same reason, so `fm-session-lock-lib.sh`, `fm-wake-lib.sh`, and the primary-hook surface have no OMP branch.
