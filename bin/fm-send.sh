@@ -142,7 +142,10 @@
 # semantic callers may set FM_SEND_EXPECTED_SPAWN_GEN,
 # FM_SEND_EXPECTED_REMOTE_HOST, or FM_SEND_EXPECTED_WORKTREE_HEAD to require
 # sampled identity and local worktree state to still match during final locked
-# target validation; the worktree-head guard holds Git's own HEAD transaction
+# target validation. FM_SEND_EXPECTED_STATUS_SIGNATURE and
+# FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE guard a caller's sampled decision state at
+# the inbox record's atomic publication boundary.
+# The worktree-head guard holds Git's own HEAD transaction
 # across the clean-state check and durable inbox publication, so a direct
 # concurrent commit cannot advance the ref in that interval. Unset or empty
 # guards do not change ordinary sends.
@@ -243,6 +246,22 @@ FM_SEND_HEAD_GUARD_PID=
 FM_SEND_HEAD_GUARD_PREPARED=0
 FM_SEND_INBOX_META_LOCK_HELD=
 FM_SEND_INBOX_SEQ_LOCK_HELD=
+INBOX_TASK_ID=
+
+fm_task_inbox_publish_guard() {
+  local current status_file
+  if [ -n "${FM_SEND_EXPECTED_STATUS_SIGNATURE:-}" ]; then
+    [ -n "$INBOX_TASK_ID" ] || return 1
+    status_file="$STATE/$INBOX_TASK_ID.status"
+    current=$(status_observed_signature "$status_file") || return 1
+    [ "$current" = "$FM_SEND_EXPECTED_STATUS_SIGNATURE" ] || return 1
+  fi
+  if [ "${FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE:-0}" = 1 ]; then
+    [ -n "$INBOX_TASK_ID" ] || return 1
+    current=$("$SCRIPT_DIR/fm-captain-hold.sh" inventory-state "$INBOX_TASK_ID" 2>/dev/null) || return 1
+    [ "$current" = "${FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE:-}" ] || return 1
+  fi
+}
 
 fm_send_head_guard_release() {
   if [ -n "$FM_SEND_HEAD_GUARD_PID" ]; then

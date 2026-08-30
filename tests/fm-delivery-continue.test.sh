@@ -51,6 +51,11 @@ message=$*
 [ "${FM_SEND_EXPECTED_SPAWN_GEN:-}" = g1 ] || exit 11
 [ -n "${FM_SEND_EXPECTED_WORKTREE_HEAD:-}" ] || exit 12
 . "${FM_TEST_ROOT:?}/bin/fm-task-inbox-lib.sh"
+. "${FM_TEST_ROOT:?}/bin/fm-classify-lib.sh"
+if [ "${FM_TEST_APPEND_BLOCKER_BEFORE_SEND:-0}" = 1 ]; then
+  printf 'blocked: blocker appeared at publication\n' >> "${FM_STATE_OVERRIDE:?}/$task.status"
+fi
+[ "$(status_observed_signature "${FM_STATE_OVERRIDE:?}/$task.status")" = "${FM_SEND_EXPECTED_STATUS_SIGNATURE:-}" ] || exit 13
 fm_task_inbox_write_idempotent "${FM_STATE_OVERRIDE:?}" "$task" "$message" >/dev/null
 SH
   chmod +x "$path"
@@ -232,6 +237,19 @@ SH
   [ ! -d "$home/state/ship.inbox" ] || fail "a stale exact-head instruction was enqueued"
   [ ! -e "$home/state/.lease-ship" ] || fail "the refused head race stranded its lease"
   pass "a head advance during run attribution cannot enqueue stale validation authority"
+}
+
+test_decision_change_at_publication_refuses_stale_delivery() {
+  local dir home send state out
+  dir="$TMP_ROOT/decision-change-at-publication"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  out=$(FM_TEST_APPEND_BLOCKER_BEFORE_SEND=1 run_continue "$home" "$send" "$state") \
+    || fail "decision-change execution failed"
+  [ "$out" = 'result=retry task=ship reason=inbox-delivery-failed' ] \
+    || fail "a blocker added at publication did not stop delivery: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "a stale decision snapshot enqueued validation"
+  pass "decision state is revalidated at durable inbox publication"
 }
 
 test_historical_receipt_requires_exact_head_provenance() {
@@ -594,19 +612,41 @@ SH
 
   rm -f "$dir/delivered"
   : > "$log"
+  printf '1\t2\tcheck\tcaptain-request\tcheck: captain-request\n' >> "$state/.wake-queue"
   status=0
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 FM_PREFLIGHT_RETRY=1 \
     FM_DELIVERY_PREFLIGHT_CONTINUE_BIN="$stub" FM_PREFLIGHT_MARK="$dir/delivered" FM_PREFLIGHT_LOG="$log" \
     "$ROOT/bin/fm-wake-drain.sh" > "$dir/retry.out" 2> "$dir/retry.err" || status=$?
-  [ "$status" -ne 0 ] || fail "transient Pi preflight still presented the wake"
-  err=$(cat "$dir/retry.err")
+  [ "$status" -eq 0 ] || fail "transient Pi preflight blocked an unrelated captain wake: $(cat "$dir/retry.err")"
+  err=$(cat "$dir/retry.out")
   printf '%s\n' "$err" | grep -q '^result=retry task=ship reason=validation-attribution-unavailable$' \
-    || fail "transient Pi preflight did not preserve its retry obligation: $err"
+    || fail "transient Pi preflight did not surface its retry obligation: $err"
   ! grep -q "$(printf '\tsignal\tship.status\t')" "$dir/retry.out" \
     || fail "transient Pi preflight exposed committed-ready work before settling"
+  grep -q "$(printf '\tcheck\tcaptain-request\t')" "$dir/retry.out" \
+    || fail "transient Pi preflight hid an unrelated captain request"
   grep -q "$(printf '\tsignal\tship.status\t')" "$state/.wake-queue" \
     || fail "transient Pi preflight consumed its durable wake"
   pass "Pi queue intake preflights committed-ready rows before presentation"
+}
+
+test_unmapped_stale_row_does_not_abort_preflight() {
+  local dir home state out
+  dir="$TMP_ROOT/unmapped-stale-row"
+  home="$dir/home"
+  state="$home/state"
+  mkdir -p "$state"
+  printf '%s\n' "$$" > "$state/.lock"
+  printf '1\t1\tstale\tretired-pane\tstale: retired-pane\n1\t2\tcheck\tcaptain-request\tcheck: captain-request\n' \
+    > "$state/.wake-queue"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_DELIVERY_PREFLIGHT=1 \
+    "$ROOT/bin/fm-wake-drain.sh" 2> "$dir/drain.err") \
+    || fail "an unmapped stale row aborted Pi preflight: $(cat "$dir/drain.err")"
+  printf '%s\n' "$out" | grep -q "$(printf '\tstale\tretired-pane\t')" \
+    || fail "the unmapped stale row was not left for normal presentation"
+  printf '%s\n' "$out" | grep -q "$(printf '\tcheck\tcaptain-request\t')" \
+    || fail "the unmapped stale row hid a captain request"
+  pass "unmapped stale rows remain presentable without continuation lookup"
 }
 
 test_exactly_once_delivery_and_replay
@@ -618,6 +658,7 @@ test_strict_run_attribution_distinguishes_absence_from_query_failure
 test_identity_and_committed_head_requirements
 test_replacement_incarnation_rejects_prior_receipt
 test_head_advance_during_attribution_refuses_stale_delivery
+test_decision_change_at_publication_refuses_stale_delivery
 test_historical_receipt_requires_exact_head_provenance
 test_terminal_receipt_and_existing_lease_retry
 test_killed_delivery_operation_does_not_strand_session_lease
@@ -628,4 +669,5 @@ test_transferred_captain_hold_stops_delivery
 test_fleet_and_bearings_project_pending_continuation
 test_advanced_head_surfaces_continuation_conflict
 test_pi_drain_preflights_before_presenting_committed_ready_rows
+test_unmapped_stale_row_does_not_abort_preflight
 echo "all fm-delivery-continue tests passed"

@@ -12,6 +12,7 @@ LOCK_HELD=${FM_DELIVERY_PREFLIGHT_LOCK_HELD:-0}
 OWN_LOCK=0
 TASKS_TMP=
 WAKE_TASKS_TMP=
+WAKE_ROWS_TMP=
 SEQS_TMP=
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -24,6 +25,7 @@ cleanup() {
   local status=$?
   [ -z "$TASKS_TMP" ] || rm -f -- "$TASKS_TMP" 2>/dev/null || true
   [ -z "$WAKE_TASKS_TMP" ] || rm -f -- "$WAKE_TASKS_TMP" 2>/dev/null || true
+  [ -z "$WAKE_ROWS_TMP" ] || rm -f -- "$WAKE_ROWS_TMP" 2>/dev/null || true
   [ -z "$SEQS_TMP" ] || rm -f -- "$SEQS_TMP" 2>/dev/null || true
   [ "$OWN_LOCK" = 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   exit "$status"
@@ -46,6 +48,7 @@ fi
 
 TASKS_TMP=$(mktemp "$STATE/.delivery-preflight.tasks.XXXXXX") || exit 1
 WAKE_TASKS_TMP=$(mktemp "$STATE/.delivery-preflight.wake-tasks.XXXXXX") || exit 1
+WAKE_ROWS_TMP=$(mktemp "$STATE/.delivery-preflight.wake-rows.XXXXXX") || exit 1
 SEQS_TMP=$(mktemp "$STATE/.delivery-preflight.seqs.XXXXXX") || exit 1
 
 task_for_stale_key() {
@@ -79,11 +82,13 @@ while IFS=$(printf '\t') read -r epoch seq kind key payload extra || [ -n "${epo
       case "$task" in ''|*[!A-Za-z0-9._-]*) exit 1 ;; esac
       printf '%s\n' "$task" >> "$TASKS_TMP" || exit 1
       printf '%s\n' "$task" >> "$WAKE_TASKS_TMP" || exit 1
+      printf '%s\t%s\n' "$seq" "$task" >> "$WAKE_ROWS_TMP" || exit 1
       ;;
     stale)
-      task=$(task_for_stale_key "$key") || exit 1
+      task=$(task_for_stale_key "$key") || continue
       printf '%s\n' "$task" >> "$TASKS_TMP" || exit 1
       printf '%s\n' "$task" >> "$WAKE_TASKS_TMP" || exit 1
+      printf '%s\t%s\n' "$seq" "$task" >> "$WAKE_ROWS_TMP" || exit 1
       ;;
     check|heartbeat) ;;
     *) exit 1 ;;
@@ -133,4 +138,8 @@ while IFS= read -r task; do
     continue
   fi
   printf '%s\n' "$out"
+  if [ "${FM_DELIVERY_PREFLIGHT_INCLUDE_RETRY_SEQUENCES:-0}" = 1 ] \
+    && printf '%s\n' "$out" | grep -q '^result=retry '; then
+    awk -F '\t' -v task="$task" '$2 == task { print "retry-sequence=" $1 }' "$WAKE_ROWS_TMP"
+  fi
 done < "$TASKS_TMP"

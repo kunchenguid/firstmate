@@ -160,7 +160,11 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     printf -- '--\n'
     printf '%s' "$text"
-  } > "$tmp" && mv "$tmp" "$rec" || status=1
+  } > "$tmp" || status=1
+  if [ "$status" -eq 0 ] && command -v fm_task_inbox_publish_guard >/dev/null 2>&1; then
+    fm_task_inbox_publish_guard || status=1
+  fi
+  [ "$status" -ne 0 ] || mv "$tmp" "$rec" || status=1
   [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
   printf '%s' "$rec"
 }

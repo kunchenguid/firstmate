@@ -433,6 +433,40 @@ SH
   pass "fm-send inbox: expected-head publication excludes commits and replay stays idempotent"
 }
 
+test_expected_status_signature_is_revalidated_at_publication() {
+  local dir err expected real_mktemp rc
+  dir=$(setup_case expected-status-race); err="$dir/send.err"
+  printf 'done: committed-ready\n' > "$dir/home/state/t1.status"
+  expected=$(bash -c '. "$1"; status_observed_signature "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$dir/home/state/t1.status") \
+    || fail "could not sample the status fixture"
+  real_mktemp=$(command -v mktemp)
+  cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$*" in
+  *'/t1.inbox/.staging.'*)
+    printf 'blocked: publication-time blocker\n' >> "${FM_EXPECTED_STATUS_FILE:?}"
+    ;;
+esac
+exec "${FM_REAL_MKTEMP:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mktemp"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_STATUS_SIGNATURE="$expected" \
+    FM_EXPECTED_STATUS_FILE="$dir/home/state/t1.status" \
+    FM_REAL_MKTEMP="$real_mktemp" \
+    -- t1 "validate only if no blocker appeared"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a changed status snapshot reached durable publication"
+  [ -z "$(find "$dir/home/state/t1.inbox" -name '*.msg' -print 2>/dev/null)" ] \
+    || fail "a changed status snapshot published an inbox record"
+  assert_contains "$(cat "$err")" "inbox record could not be written" \
+    "the status guard refusal should fail the durable send"
+  pass "fm-send inbox: status changes are refused at record publication"
+}
+
 test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable); err="$dir/send.err"
@@ -462,4 +496,5 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_expected_worktree_head_is_revalidated_before_enqueue
 test_expected_head_enqueue_excludes_concurrent_commit
+test_expected_status_signature_is_revalidated_at_publication
 test_unwritable_inbox_fails_loudly

@@ -300,6 +300,10 @@ test_bounded_legacy_trailing_key_compatibility_closes_without_default_leak() {
   assert_fold "$dir/mid-note.status" \
     "$(printf 'default\tblocked\twaiting while docs mention [key=route] in prose\n')" \
     "mid-note key prose retains the default blocker"
+  printf 'resolved: docs mention [key=route] in prose today\n' >> "$dir/mid-note.status"
+  assert_fold "$dir/mid-note.status" \
+    "$(printf 'default\tblocked\twaiting while docs mention [key=route] in prose\n')" \
+    "mid-note key prose cannot resolve the default blocker"
   printf 'needs-decision [key=q1]: choose the route\nresolved: docs still mention [key=q1]\n' > "$dir/current.status"
   assert_fold "$dir/current.status" "$(printf 'q1\tneeds-decision\tchoose the route\n')" "unproven trailing prose"
   printf 'blocked: keyless custody stop\nresolved: docs still mention [key=q1]\n' > "$dir/current-default.status"

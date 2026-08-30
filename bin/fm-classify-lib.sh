@@ -408,6 +408,10 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
       && k=$(_fm_key_at_note_tail_compat "$1") \
       && _fm_decision_slug_ok "$k"; then
       :
+    elif [ "$(status_line_verb "$1")" = resolved ]; then
+      case "${1#*:}" in *'[key='*) return 1 ;; esac
+      printf 'default'
+      return 0
     elif _fm_has_note_tail_key_position "$1"; then
       [ "$(status_line_verb "$1")" = blocked ] || return 1
       printf 'default'

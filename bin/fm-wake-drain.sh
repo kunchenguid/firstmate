@@ -505,17 +505,26 @@ if [ "$ACTOR" = main ]; then
       DELIVERY_PREFLIGHT_ROWS=$MAIN_ROWS_FILE
     fi
     DELIVERY_PREFLIGHT_OUT=$(FM_DELIVERY_PREFLIGHT_ROWS_FILE="$DELIVERY_PREFLIGHT_ROWS" \
+      FM_DELIVERY_PREFLIGHT_INCLUDE_RETRY_SEQUENCES=1 \
       FM_DELIVERY_PREFLIGHT_LOCK_HELD=1 bash "$DELIVERY_PREFLIGHT_BIN" 2>&1) || {
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         DRAIN_LOCK_HELD=false
         printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_OUT" >&2
         exit 1
       }
-    if printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" | grep -q '^result=retry '; then
-      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-      DRAIN_LOCK_HELD=false
-      printf 'Deterministic delivery continuation preflight:\n%s\n' "$DELIVERY_PREFLIGHT_OUT" >&2
-      exit 1
+    DELIVERY_RETRY_SEQUENCES=$(printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" \
+      | sed -n 's/^retry-sequence=\([0-9][0-9]*\)$/\1/p')
+    if [ -n "$DELIVERY_RETRY_SEQUENCES" ] && [ -s "$MAIN_ROWS_FILE" ]; then
+      DRAIN_TMP=$(mktemp "$STATE/.main-eligible-rows.retry.XXXXXX") || exit 1
+      awk -v withheld="$DELIVERY_RETRY_SEQUENCES" '
+        BEGIN {
+          count=split(withheld, rows, "\n")
+          for (i=1; i<=count; i++) skip[rows[i]]=1
+        }
+        !($1 in skip) { print }
+      ' "$MAIN_ROWS_FILE" > "$DRAIN_TMP" || exit 1
+      write_rows_file_locked "$MAIN_ROWS_FILE" "$DRAIN_TMP" || exit 1
+      DRAIN_TMP=
     fi
     DELIVERY_PREFLIGHT_RESULTS=$(printf '%s\n' "$DELIVERY_PREFLIGHT_OUT" | grep '^result=' || true)
     if [ -n "$DELIVERY_PREFLIGHT_RESULTS" ]; then

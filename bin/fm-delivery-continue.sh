@@ -102,6 +102,7 @@ WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null) || refuse u
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 [ -z "$(status_open_decisions "$STATUS")" ] || refuse open-decision-or-blocker
 DECISION_KEYS=$(meta_get decision_keys)
+CAPTAIN_HOLD_STATE=
 if [ -n "$DECISION_KEYS" ]; then
   CAPTAIN_HOLD_STATE=$("$CAPTAIN_HOLD_BIN" inventory-state "$TASK" 2>/dev/null) \
     || retry captain-hold-state-unavailable
@@ -149,9 +150,21 @@ CURRENT=$(git -C "$WORKTREE" rev-parse --verify HEAD 2>/dev/null) || refuse unre
 WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null) || refuse unreadable-worktree-status
 [ -z "$WORKTREE_STATUS" ] || refuse uncommitted-worktree
 [ "$CURRENT" = "$HEAD" ] || refuse committed-head-mismatch
+[ -z "$(status_open_decisions "$STATUS")" ] || refuse open-decision-or-blocker
+if [ -n "$DECISION_KEYS" ]; then
+  CAPTAIN_HOLD_STATE=$("$CAPTAIN_HOLD_BIN" inventory-state "$TASK" 2>/dev/null) \
+    || retry captain-hold-state-unavailable
+  if printf '%s\n' "$CAPTAIN_HOLD_STATE" | grep -q "^open$(printf '\t')"; then
+    refuse open-decision-or-blocker
+  fi
+fi
+STATUS_SIGNATURE=$(status_observed_signature "$STATUS") || retry decision-state-unavailable
 
 MESSAGE=$(fm_delivery_continuation_message "$TASK" "$HEAD" "$SPAWN_GEN" "$DELIVERY")
 FM_SEND_IDEMPOTENT=1 FM_SEND_EXPECTED_SPAWN_GEN="$SPAWN_GEN" \
   FM_SEND_EXPECTED_WORKTREE_HEAD="$HEAD" \
+  FM_SEND_EXPECTED_STATUS_SIGNATURE="$STATUS_SIGNATURE" \
+  FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE="$([ -n "$DECISION_KEYS" ] && printf 1 || printf 0)" \
+  FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE="$CAPTAIN_HOLD_STATE" \
   "$SEND_BIN" "$TASK" "$MESSAGE" >/dev/null || retry inbox-delivery-failed
 result sent
