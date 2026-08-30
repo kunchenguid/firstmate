@@ -1209,7 +1209,11 @@ fm_backend_herdr_pane_process_info_envelope_valid() {  # <response> <pane-id>
   printf '%s' "$1" | jq -e --arg pane "$2" '
     .result.type == "pane_process_info"
     and .result.process_info.pane_id == $pane
+    and (.result.process_info.shell_pid
+      | type == "number" and . > 1 and . == floor)
     and (.result.process_info.foreground_processes | type == "array")
+    and all(.result.process_info.foreground_processes[];
+      (.pid | type == "number" and . > 1 and . == floor))
   ' >/dev/null 2>&1
 }
 
@@ -1219,7 +1223,7 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
   fm_backend_herdr_pane_process_info_envelope_valid "$info" "$pane" || return 1
   shell_pid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+    '.result.process_info.shell_pid' 2>/dev/null) || return 1
   foreground_pgid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
   [ "$foreground_pgid" = "$shell_pid" ] || return 1
@@ -1227,7 +1231,7 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
     '.result.process_info.foreground_processes | length' 2>/dev/null) || return 1
   [ "$count" -eq 1 ] || return 1
   process_pid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes[0].pid | select(type == "number") | floor' 2>/dev/null) || return 1
+    '.result.process_info.foreground_processes[0].pid' 2>/dev/null) || return 1
   [ "$process_pid" = "$shell_pid" ] || return 1
   name=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1

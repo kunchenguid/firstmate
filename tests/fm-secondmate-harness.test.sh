@@ -63,6 +63,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
 export FM_BACKEND=tmux
+export FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/fixture-proc-unavailable"
 
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
