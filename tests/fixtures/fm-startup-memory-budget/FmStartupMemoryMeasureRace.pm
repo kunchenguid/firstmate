@@ -8,8 +8,9 @@ package FmStartupMemoryMeasureRace;
 # file that open resolves to, reproducing a target replaced between inspection
 # and open.  Activation is confined to a tests/lib.sh fixture root:
 # <fixture-root> must carry the .fm-test-fixture marker, and the resolved
-# target and <replacement> must both sit beneath it on its device.  Every other call dies before
-# touching the filesystem, so a real home or memory target is never replaced.
+# target and <replacement> must both sit beneath it on its device.  Every
+# other call dies before touching the filesystem, so a real home or memory
+# target is never replaced.
 use strict;
 use warnings;
 use Cwd qw(realpath);

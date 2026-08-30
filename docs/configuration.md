@@ -218,7 +218,7 @@ A secondmate does not create an independent default and instead receives the pri
 The file must be one positive base-10 integer followed by exactly one newline in a regular, single-linked file beneath a non-symlinked `config/` directory.
 Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe values are rejected rather than treated as a default.
 Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective value, or `bin/fm-startup-memory-budget.sh report` to account for the three files.
-Startup-memory files are counted from ordinary readable regular files, and an intentional symlink is measured from its resolved target even when that target lives outside the home.
+The three accounted memory files are counted from ordinary readable regular files, and an intentional symlink is measured from its resolved target even when that target lives outside the home.
 Broken links, loops, directories, FIFOs, devices, sockets, and unreadable or otherwise non-regular targets are rejected with a concrete diagnostic instead of being read.
 Each class names its own problem, so a dangling link reports a missing target and only a genuine symlink loop reports a loop.
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
