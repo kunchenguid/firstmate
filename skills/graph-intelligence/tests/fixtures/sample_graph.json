@@ -1,0 +1,24 @@
+{
+  "directed": true,
+  "nodes": [
+    {"id": "alice", "type": "character", "chapter": 1, "status": "active"},
+    {"id": "bob", "type": "character", "chapter": 1, "status": "active"},
+    {"id": "carol", "type": "character", "chapter": 2, "status": "active"},
+    {"id": "dave", "type": "character", "chapter": 4, "status": "retired"},
+    {"id": "grail", "type": "artifact", "chapter": {"start": 3, "end": 7}, "status": "lost"},
+    {"id": "rumor", "type": "information", "chapter": 2, "status": "spreading"},
+    {"id": "harbor", "type": "place", "chapter": 1, "status": "open"},
+    {"id": "vessel", "type": "artifact", "chapter": 5, "status": "active"}
+  ],
+  "edges": [
+    {"source": "alice", "target": "bob", "type": "ally_of", "chapter": 1, "weight": 2},
+    {"source": "alice", "target": "carol", "type": "mentor_of", "chapter": 2, "weight": 1},
+    {"source": "bob", "target": "carol", "type": "rival_of", "chapter": 2, "weight": 1},
+    {"source": "carol", "target": "dave", "type": "debt_to", "chapter": 3, "weight": 3},
+    {"source": "rumor", "target": "carol", "type": "informs", "chapter": 2, "weight": 1},
+    {"source": "alice", "target": "harbor", "type": "visits", "chapter": 1, "weight": 1},
+    {"source": "vessel", "target": "harbor", "type": "docked_at", "chapter": 5, "weight": 1},
+    {"source": "grail", "target": "dave", "type": "cursed", "chapter": 3, "weight": 4},
+    {"source": "dave", "target": "rumor", "type": "spreads", "chapter": 4, "weight": 2}
+  ]
+}
