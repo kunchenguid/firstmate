@@ -61,6 +61,22 @@ fm_forge_host_is_gitlab() {
   fm_forge_gitlab_hosts | grep -F -x -q -- "$host"
 }
 
+fm_forge_safe_ssh_config() {
+  local config
+  for config in "${HOME:-}/.ssh/config" /etc/ssh/ssh_config; do
+    [ -r "$config" ] || continue
+    awk '
+      /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]/ {
+        in_host=1; in_match=0; print; next
+      }
+      /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh][[:space:]]/ {
+        in_match=1; next
+      }
+      in_host && !in_match && /^[[:space:]]*[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee][[:space:]]/ { print }
+    ' "$config"
+  done
+}
+
 fm_forge_checkout_remote() {
   local checkout=${1:-} remote
   [ -d "$checkout" ] || return 1
@@ -137,6 +153,12 @@ fm_forge_resolve_host() {
     *) return 1 ;;
   esac
   [ -n "$host" ] || return 1
+  if [ "${2:-1}" -eq 1 ] && command -v ssh >/dev/null 2>&1; then
+    local resolved
+    resolved=$(fm_forge_safe_ssh_config | ssh -G -F /dev/stdin -- "$host" 2>/dev/null \
+      | awk '$1=="hostname"{print $2; exit}')
+    [ -n "$resolved" ] && host=$resolved
+  fi
   # A fully-qualified DNS name may carry its optional root label (for
   # example, github.com.).  Forge host policy stores canonical names without
   # that label, so normalize it before provider classification and auth.
