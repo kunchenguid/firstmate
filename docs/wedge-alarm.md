@@ -14,8 +14,10 @@ The overnight Claude/Herdr native-path incident recorded 2,063 consecutive `inje
 Target resolution was correct: with `HERDR_SESSION` unset, supervisor discovery composed `default:<HERDR_PANE_ID>` as designed.
 Claude Stop auto-arm was not the source because it exits while `state/.afk` exists.
 The busy guard queries Herdr native agent state before its harness-scoped rendered-footer fallback, and the observed `3 shells still running` idle screen is not a Claude delivery busy signature.
-The native background job itself holds the target's native agent state `working` for its lifetime, so same-target native hosting cannot deliver by construction.
-That is a hosting limitation, not a reason to weaken the guard: launch through `bin/fm-afk-launch.sh start` so the daemon runs in its own non-visible workspace with an explicit target.
+Together, those observations support the inference that the native background job itself holds the target's native agent state `working` for its lifetime.
+Under that inferred mechanism, same-target native hosting cannot deliver by construction.
+That is a hosting limitation, not a reason to weaken the guard: on a fresh launch, use `bin/fm-afk-launch.sh start` so the daemon runs in its own non-visible workspace with an explicit target.
+If the native-hosted daemon is already live, `start` only refreshes the away flag and cannot move it; after `bin/fm-afk-launch.sh stop` succeeds, run `bin/fm-afk-launch.sh start`, not `start-native`.
 `FM_MAX_DEFER_SECS` bounds how long that deferral can remain silent: once the threshold is reached, it raises this alarm and preserves the buffered escalation.
 Treat the alarm as a visible delivery failure, not as permission to override either guard.
 

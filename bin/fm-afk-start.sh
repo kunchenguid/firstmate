@@ -23,9 +23,10 @@
 #     pi) run this THROUGH bin/fm-afk-launch.sh, which creates a non-visible
 #     tracked terminal per backend (herdr tab/workspace, tmux detached session)
 #     and passes the captain pane in as FM_SUPERVISOR_TARGET so injection
-#     targets it, not the daemon's own new pane. Claude's native background
-#     Bash retains the target's native busy state and cannot deliver away-mode
-#     injection on herdr.
+#     targets it, not the daemon's own new pane. The incident evidence supports
+#     the inference that Claude's native background Bash retains the target's
+#     native busy state and therefore cannot deliver away-mode injection on
+#     herdr.
 #   - Other harnesses with a native in-pane tracked-background tool run this
 #     directly via that tool only when it does not retain the target busy.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
