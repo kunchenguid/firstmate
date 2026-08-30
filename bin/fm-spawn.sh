@@ -673,6 +673,7 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+SPAWN_TRACEPARENT_PROOF=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -789,6 +790,7 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  [ -z "$SPAWN_TRACEPARENT_PROOF" ] || rm -f "$SPAWN_TRACEPARENT_PROOF" 2>/dev/null || true
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -2179,12 +2181,13 @@ spawn_send_text_line() {  # <target> <text>
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
   esac
 }
-spawn_clear_pane_traceparent() {
+spawn_bind_tracefree_launch() {
   local probe="$TASK_TMP/pane-shell.$SPAWN_GEN" proof="$TASK_TMP/traceparent-cleared.$SPAWN_GEN"
-  local command pane_shell i=0 status=1
+  local command pane_shell i=0
+  SPAWN_TRACEPARENT_PROOF=
   rm -f "$probe" "$proof"
   command="sh -c 'ps -p \"\$PPID\" -o comm= > \"\$1\"' sh $(shell_quote "$probe")"
-  spawn_send_text_line "$T" "$command" || return 1
+  spawn_send_text_line "$T" "$command" || { rm -f "$probe" "$proof"; return 1; }
   while [ ! -s "$probe" ] && [ "$i" -lt 20 ]; do
     sleep 0.1
     i=$((i + 1))
@@ -2195,27 +2198,31 @@ spawn_clear_pane_traceparent() {
   pane_shell=${pane_shell#-}
   case "$pane_shell" in
     fish)
-      command="set -e TRACEPARENT; sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"
+      LAUNCH="set -e TRACEPARENT; sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof"); and begin; $LAUNCH; end"
       ;;
     sh|bash|zsh|dash|ash|ksh|mksh)
-      command="unset TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"
+      LAUNCH="unset TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof") && { $LAUNCH; }"
       ;;
     csh|tcsh)
-      command="unsetenv TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"
+      LAUNCH="unsetenv TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof") && ( $LAUNCH )"
       ;;
     *)
       rm -f "$probe" "$proof"
       return 1
       ;;
   esac
-  spawn_send_text_line "$T" "$command" || { rm -f "$probe" "$proof"; return 1; }
-  i=0
-  while [ ! -e "$proof" ] && [ "$i" -lt 20 ]; do
+  rm -f "$probe"
+  SPAWN_TRACEPARENT_PROOF=$proof
+}
+spawn_verify_traceparent_clear() {
+  local i=0 status=1
+  while [ ! -e "$SPAWN_TRACEPARENT_PROOF" ] && [ "$i" -lt 20 ]; do
     sleep 0.1
     i=$((i + 1))
   done
-  [ -e "$proof" ] && status=0
-  rm -f "$probe" "$proof"
+  [ -e "$SPAWN_TRACEPARENT_PROOF" ] && status=0
+  rm -f "$SPAWN_TRACEPARENT_PROOF"
+  SPAWN_TRACEPARENT_PROOF=
   return "$status"
 }
 spawn_current_path() {  # <target>
@@ -2916,8 +2923,8 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     SPAWN_CLEAR_TRACEPARENT=1
   fi
 fi
-if [ "$SPAWN_CLEAR_TRACEPARENT" -eq 1 ] && ! spawn_clear_pane_traceparent; then
-  echo "error: could not verify TRACEPARENT was cleared in $W; refusing to append the launch command" >&2
+if [ "$SPAWN_CLEAR_TRACEPARENT" -eq 1 ] && ! spawn_bind_tracefree_launch; then
+  echo "error: could not prepare verified TRACEPARENT clearing in $W; refusing to append the launch command" >&2
   exit 1
 fi
 sleep 0.3
@@ -2928,6 +2935,10 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$SPAWN_CLEAR_TRACEPARENT" -eq 1 ] && ! spawn_verify_traceparent_clear; then
+  echo "error: could not verify TRACEPARENT was cleared in $W; replacement launch refused" >&2
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

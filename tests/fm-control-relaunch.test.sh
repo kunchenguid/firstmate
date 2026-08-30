@@ -74,6 +74,9 @@ case "${1:-}" in
     if [ "$literal" = 1 ]; then
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
+        *'/traceparent-cleared.'*) printf '%s' "$payload" > "$D/pending-launch" ;;
+      esac
+      case "$payload" in
         /exit|/quit)
           printf 'zsh' > "$D/command"
           printf 'zsh' > "$D/foreground"
@@ -105,6 +108,12 @@ case "${1:-}" in
       case "$payload" in
         *'/pane-shell.'*|*'/traceparent-cleared.'*)
           TRACEPARENT=stale fish -c "$payload" >/dev/null 2>&1 || true
+          ;;
+        Enter)
+          if [ -f "$D/pending-launch" ]; then
+            TRACEPARENT=stale fish -c "$(cat "$D/pending-launch")" >/dev/null 2>&1 || true
+            rm -f "$D/pending-launch"
+          fi
           ;;
       esac
     fi
@@ -149,6 +158,7 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  fm_fake_exit0 "$fb" claude codex grok
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -390,7 +400,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
 }
 
 test_disabled_relaunch_clears_prior_trace_context() {
-  local dir out rc clear launch
+  local dir out rc launch
   dir=$(new_case trace-off rl33)
   add_ship_task "$dir" rl33 claude
   printf '%s\n' 'traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
@@ -402,8 +412,6 @@ test_disabled_relaunch_clears_prior_trace_context() {
   expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  clear=$(grep 'traceparent-cleared' "$dir/fake/keys" | tail -1)
-  [ -n "$clear" ] || fail "disabled relaunch did not emit a verified pane-shell clear"
   launch=$(tail -1 "$dir/fake/literal")
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
@@ -413,7 +421,7 @@ printf '%s' "${TRACEPARENT-unset}" > "$FM_FAKE_DIR/fish-traceparent"
 SH
   chmod +x "$dir/fakebin/claude"
   TRACEPARENT=stale PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" \
-    "$FISH_BIN" -c "$clear"$'\n'"$launch" >/dev/null 2>&1
+    "$FISH_BIN" -c "$launch" >/dev/null 2>&1
   [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
     || fail "the real fish launch retained stale TRACEPARENT"
   pass "fm-control relaunch: disabling tracing clears metadata and the existing fish pane context"

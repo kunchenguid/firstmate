@@ -90,6 +90,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" claude
   printf '%s\n' "$fakebin"
 }
 
@@ -298,7 +299,7 @@ test_disabled_writes_and_injects_neither() {
 }
 
 test_failed_delivery_omits_metadata_and_still_launches() {
-  local rec out status meta program raw result
+  local rec out status meta program raw result trace setup prompts real_tmux socket
   rec=$(make_spawn_case tc-send-failure)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
@@ -307,9 +308,9 @@ test_failed_delivery_omits_metadata_and_still_launches() {
   cat > "$HOME_DIR/setup.fish" <<'FISH'
 set -gx FM_RAW_SETUP ready
 FISH
-  cat > "$FAKEBIN_DIR/custom-agent" <<'SH'
+cat > "$FAKEBIN_DIR/custom-agent" <<'SH'
 #!/usr/bin/env bash
-printf '%s|%s' "${TRACEPARENT-unset}" "${FM_RAW_SETUP-unset}" > "$FM_RAW_RESULT"
+printf '%s|%s|%s' "${TRACEPARENT-unset}" "${FM_RAW_SETUP-unset}" "${FM_PROMPT_COUNT:-0}" > "$FM_RAW_RESULT"
 SH
   chmod +x "$FAKEBIN_DIR/custom-agent"
   raw="source $HOME_DIR/setup.fish; exec custom-agent"
@@ -327,11 +328,40 @@ SH
   ! grep -q '^export TRACEPARENT=' "$LAUNCH_LOG" \
     || fail "the failed TRACEPARENT export must not be recorded as delivered"
   program=$(cat "$LAUNCH_LOG")
-  TRACEPARENT=stale FM_RAW_RESULT="$result" PATH="$FAKEBIN_DIR:$PATH" \
-    "$FISH_BIN" -c "$program" >/dev/null 2>&1
-  [ "$(cat "$result")" = 'unset|ready' ] \
+  real_tmux=$(command -v tmux) || fail "tmux is required for the interactive fish regression"
+  socket="fm-trace-prompt-$$-$RANDOM"
+  (
+    pane=
+    trap '"$real_tmux" -L "$socket" kill-server >/dev/null 2>&1 || true' EXIT
+    pane=$("$real_tmux" -L "$socket" new-session -dP -F '#{pane_id}' \
+      -s fish-prompt -x 120 -y 40 \
+      -e TRACEPARENT=stale -e FM_RAW_RESULT="$result" \
+      -e PATH="$FAKEBIN_DIR:$PATH" "$FISH_BIN --no-config --interactive") || exit 1
+    "$real_tmux" -L "$socket" send-keys -t "$pane" -l \
+      "set -gx PATH '$FAKEBIN_DIR' \$PATH; function fish_prompt; if set -q FM_PROMPT_COUNT; set -gx FM_PROMPT_COUNT (math \$FM_PROMPT_COUNT + 1); else; set -gx FM_PROMPT_COUNT 1; end; set -gx TRACEPARENT prompt-restored; end"
+    "$real_tmux" -L "$socket" send-keys -t "$pane" Enter
+    sleep 0.2
+    while IFS= read -r line; do
+      "$real_tmux" -L "$socket" send-keys -t "$pane" -l "$line" || exit 1
+      "$real_tmux" -L "$socket" send-keys -t "$pane" Enter || exit 1
+      sleep 0.1
+    done <<< "$program"
+    i=0
+    while [ ! -s "$result" ] && [ "$i" -lt 20 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ -s "$result" ] || {
+      "$real_tmux" -L "$socket" capture-pane -p -t "$pane" -S -100 >&2 || true
+      exit 1
+    }
+  ) || fail "the real interactive fish pane did not complete the generated launch program"
+  IFS='|' read -r trace setup prompts < "$result"
+  [ "$trace" = unset ] && [ "$setup" = ready ] \
     || fail "failed trace delivery must clear TRACEPARENT without bypassing fish parsing"
-  pass "failed TRACEPARENT delivery omits metadata and preserves raw fish shell programs"
+  [ "$prompts" -ge 2 ] \
+    || fail "the interactive fish regression did not redraw enough prompts to exercise the hook race"
+  pass "failed TRACEPARENT delivery stays cleared across interactive fish prompt redraws"
 }
 
 test_unsafe_delivery_refuses_to_append_launch() {
