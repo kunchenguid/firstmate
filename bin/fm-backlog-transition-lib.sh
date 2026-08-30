@@ -267,7 +267,8 @@ fm_backlog_canonical_existing() {
 }
 
 fm_backlog_record_parent_authorized() {
-  local path=$1 label=$2 root=$3 parent base path_resolved root_resolved home_resolved
+  local path=$1 label=$2 root=$3 parent base parent_resolved expected_path
+  local path_resolved root_resolved home_resolved final_matches=1
   parent=${path%/*}
   [ "$parent" != "$path" ] || parent=.
   base=${path##*/}
@@ -296,17 +297,19 @@ fm_backlog_record_parent_authorized() {
         ;;
     esac
   fi
+  parent_resolved=$(fm_backlog_canonical_existing "$parent") || {
+    FM_BACKLOG_TRANSITION_ERROR="$label parent directory cannot be resolved at $path"
+    return 1
+  }
+  expected_path=${parent_resolved%/}/$base
   if [ -e "$path" ] || [ -L "$path" ]; then
     path_resolved=$(fm_backlog_canonical_existing "$path") || {
       FM_BACKLOG_TRANSITION_ERROR="$label cannot be resolved at $path"
       return 1
     }
+    [ "$path_resolved" = "$expected_path" ] || final_matches=0
   else
-    parent=$(fm_backlog_canonical_existing "$parent") || {
-      FM_BACKLOG_TRANSITION_ERROR="$label parent directory cannot be resolved at $path"
-      return 1
-    }
-    path_resolved=${parent%/}/$base
+    path_resolved=$expected_path
   fi
   case "$path_resolved" in
     "$root_resolved"/*) ;;
@@ -315,6 +318,10 @@ fm_backlog_record_parent_authorized() {
       return 1
       ;;
   esac
+  if [ "$final_matches" != 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="$label resolves through a different final path at $path"
+    return 1
+  fi
 }
 
 fm_backlog_record_present() {

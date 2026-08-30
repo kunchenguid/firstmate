@@ -1297,6 +1297,29 @@ test_recovery_marks_an_owned_record_in_flight() {
   pass "session start marks an item In flight when this home already owns a worker for it"
 }
 
+test_recovery_rejects_an_internal_worker_record_symlink() {
+  local case_dir home id target_id out rc=0
+  id=atomic-heal-internal-symlink-b8
+  target_id=atomic-heal-internal-target-b8
+  case_dir=$(make_home heal-internal-symlink)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$target_id" ship no-mistakes "spawn_gen=internal-target"
+  ln -s "$target_id.meta" "$home/state/$id.meta"
+
+  out=$(run_bootstrap "$case_dir") || rc=$?
+  [ "$rc" -ne 0 ] || fail "session start accepted an internal worker-record symlink"
+  assert_contains "$out" "task record resolves through a different final path" \
+    "session start did not report the aliased worker record"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "session start paired the aliased worker record with its backlog row"
+  [ -L "$home/state/$id.meta" ] \
+    || fail "session start replaced or removed the aliased worker record"
+  assert_present "$home/state/$target_id.meta" \
+    "session start removed the internal symlink target"
+  pass "session start rejects internal worker-record symlinks"
+}
+
 test_recovery_ignores_a_symlinked_worker_record() {
   local case_dir home id target out rc=0
   id=atomic-heal-symlink-meta-b8
@@ -2170,6 +2193,7 @@ test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
 test_orca_cleanup_recovery_never_transitions_the_backlog
 test_recovery_marks_an_owned_record_in_flight
+test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
