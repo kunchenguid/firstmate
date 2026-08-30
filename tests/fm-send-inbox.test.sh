@@ -63,7 +63,13 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_tty*) printf '\n'; exit 0 ;;
+        *pane_current_command*) printf 'zsh\n'; exit 0 ;;
+      esac
+    done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
@@ -72,7 +78,9 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    [ "${FM_FAKE_TMUX_ENDPOINT:-missing}" = dead ] && printf 'fm-t1\n'
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -229,6 +237,46 @@ test_key_path_never_touches_inbox() {
   pass "fm-send planes: the --key lifecycle path never touches the inbox"
 }
 
+test_stood_down_task_refuses_an_unreceivable_steer() {
+  local dir err rc
+  dir=$(setup_case stood-down); err="$dir/send.err"
+  cat > "$dir/home/state/t1.worker-state" <<'EOF'
+schema=1
+task_id=t1
+endpoint=sess:fm-t1
+state=stood-down
+EOF
+  run_send "$dir" "$err" FM_FAKE_TMUX_ENDPOINT=dead -- t1 "do not leave this unread"; rc=$?
+  expect_code 1 "$rc" "a task with no worker should refuse a steer"
+  assert_contains "$(cat "$err")" "deliberately has no worker" \
+    "the refusal should direct the caller to relaunch rather than silently queue an unread instruction"
+  [ ! -e "$dir/home/state/t1.inbox/001.msg" ] \
+    || fail "a stood-down task must not receive an inbox record it cannot read"
+  [ ! -s "$dir/send.log" ] || fail "a stood-down task must not receive typed input"
+  pass "fm-send: a deliberately worker-free task refuses input until relaunch"
+}
+
+test_stood_down_task_with_missing_endpoint_uses_durable_inbox() {
+  local dir err rc rec body
+  dir=$(setup_case stood-down-missing); err="$dir/send.err"
+  cat > "$dir/home/state/t1.worker-state" <<'EOF'
+schema=1
+task_id=t1
+endpoint=sess:fm-t1
+state=stood-down
+EOF
+  run_send "$dir" "$err" -- t1 "recover this missing endpoint"; rc=$?
+  expect_code 0 "$rc" "a missing endpoint should stay on the ordinary supervision path"
+  rec="$dir/home/state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "a missing endpoint did not receive its durable inbox record"
+  body=$(record_body _ "$rec")
+  [ "$body" = "recover this missing endpoint" ] \
+    || fail "the missing endpoint's durable instruction differs: $body"
+  assert_not_contains "$(cat "$err")" "deliberately has no worker" \
+    "a missing endpoint must not be treated as an intentional worker-free hold"
+  pass "fm-send: a missing stood-down endpoint stays under durable supervision"
+}
+
 test_secondmate_marker_and_enqueue_delivery() {
   local dir err body corr pr_rec delivered
   dir=$(setup_case secondmate); err="$dir/send.err"
@@ -346,6 +394,8 @@ test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
+test_stood_down_task_refuses_an_unreceivable_steer
+test_stood_down_task_with_missing_endpoint_uses_durable_inbox
 test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded

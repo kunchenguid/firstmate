@@ -23,7 +23,8 @@
 # durably sent (recorded); nonzero = nothing was confirmed delivered and a
 # resend is appropriate (unresolvable target, an endpoint that cannot be
 # locked and revalidated or that retired or changed, an unwritable record, a
-# failed or lost remote transport) or a decision-close append failed after
+# failed or lost remote transport, or a task deliberately recorded as having
+# no worker) or a decision-close append failed after
 # delivery (the error then carries the exact manual close). The remote enqueue
 # is idempotent: the remote leg deduplicates an exact re-run of the same
 # request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
@@ -220,6 +221,8 @@ fi
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-worker-state-lib.sh
+. "$SCRIPT_DIR/fm-worker-state-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -420,6 +423,23 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
+
+# A held task with a proven stood-down worker in its recorded endpoint has no
+# receiver for either inbox or typed-plane input. Refuse instead of leaving an
+# unread durable instruction. Missing or unprovable endpoints remain under
+# ordinary supervision, and a stale record never blocks a live endpoint.
+if [ -n "$TARGET_META" ] && [ "$TARGET_BACKEND" != remote ]; then
+  TARGET_WORKER_ID=$(fm_send_id_from_meta "$TARGET_META")
+  if [ "$(fm_worker_state_status "$STATE" "$TARGET_WORKER_ID" "$T")" = stood-down ]; then
+    TARGET_WORKER_AGENT_STATE=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" 2>/dev/null || true)
+    case "$TARGET_WORKER_AGENT_STATE" in
+      dead)
+        echo "error: task $TARGET_WORKER_ID deliberately has no worker; relaunch it before sending an instruction" >&2
+        exit 1
+        ;;
+    esac
+  fi
+fi
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
 # supervision actors, so refuse while the OTHER actor holds this task's live

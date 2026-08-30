@@ -26,6 +26,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
+TMP_ROOT=$(cd -P "$TMP_ROOT" && pwd -P)
 
 ack_stopped_cycle() {  # <state>
   local state=$1 err sequence generation
@@ -1134,6 +1135,80 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+# A deliberately stood-down worker has no agent by design. Its exact durable
+# record suppresses pane hashing only after the recovery-grade classifier sees
+# the shell left by fm-control exit, so a held task never starts a false wedge
+# timer merely because its endpoint remains available for a later relaunch.
+test_stood_down_dead_worker_is_excluded_from_stale_polling() {
+  local dir state fakebin out capture_file window pid
+  dir=$(make_case stood-down-dead); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held"
+  printf 'static shell left for relaunch' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/held.meta"
+  cat > "$state/held.worker-state" <<EOF
+schema=1
+task_id=held
+endpoint=$window
+state=stood-down
+EOF
+  printf 'working: held task has no worker\n' > "$state/held.status"
+  printf '%s' "$(seen_sig "$state/held.status")" > "$state/.seen-held_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "a dead stood-down worker should keep the watcher running: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a dead stood-down worker emitted a stale wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a dead stood-down worker queued a stale wake"; }
+  [ ! -e "$state/.hash-test_fm-held" ] \
+    || { reap "$pid"; fail "a dead stood-down worker was still pane-hashed for stale detection"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional held-task watcher stop"
+  pass "a proven stood-down worker is excluded from stale polling while its endpoint stays relaunchable"
+}
+
+# The no-worker record is never a blanket exemption. This counterfactual puts a
+# live agent behind an otherwise valid stood-down record and requires the real
+# watcher process to surface the static worker as stale. If the new state ever
+# suppresses a genuine live-worker wedge, this test blocks waiting for its wake.
+test_stood_down_record_does_not_hide_a_live_worker_wedge() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case stood-down-live); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-live-after-hold"
+  printf 'static live worker' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/live.meta"
+  cat > "$state/live.worker-state" <<EOF
+schema=1
+task_id=live
+endpoint=$window
+state=stood-down
+EOF
+  printf 'working: agent made no progress\n' > "$state/live.status"
+  sig=$(seen_sig "$state/live.status"); printf '%s' "$sig" > "$state/.seen-live_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'static live worker')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a live worker behind a stale stood-down record was not reported"
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the live worker behind a stale stood-down record did not emit a stale wake: $(cat "$out")"
+  grep "$(printf '\tstale\t')" "$state/.wake-queue" | grep -F "$window" >/dev/null \
+    || fail "the live worker wedge was not recorded in the durable queue"
+  pass "a stale stood-down record cannot hide a live worker wedge"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -3144,6 +3219,8 @@ test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_stood_down_dead_worker_is_excluded_from_stale_polling
+test_stood_down_record_does_not_hide_a_live_worker_wedge
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

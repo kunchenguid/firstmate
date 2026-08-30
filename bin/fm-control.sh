@@ -4,6 +4,8 @@
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
+#        fm-control.sh <task-id> stand-down
+#        fm-control.sh <task-id> repair-worker-state
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
@@ -31,6 +33,33 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
+#   stand-down Stop the agent for a deliberately held ship or scout task, then
+#              atomically record that the task has no worker on purpose. The
+#              record is published only after `exit` proves the agent is gone,
+#              so a live worker never loses stale or wedge detection. It is
+#              cleared when `relaunch` starts a replacement in the preserved
+#              endpoint and worktree, and restored if that relaunch aborts
+#              before the replacement is published. An interrupted transition
+#              remains `standing-down`, which stays under ordinary supervision.
+#              Refused while this task owns an in-flight no-mistakes run: that
+#              run owns the branch and needs a worker at its gates, and
+#              stand-down never cancels one for you. Refused too when that
+#              question cannot be answered at all, naming the check that could
+#              not answer, because the record it would publish suppresses
+#              supervision. Refused as well while an unacknowledged steering
+#              instruction is still waiting in the task's inbox, naming it: the
+#              hold would silence its re-ring ladder, so the worker handles it
+#              or the operator withdraws it first. An agent that already
+#              exited can be declared intentional only when the task's status
+#              log already declares the hold (`paused:`/`captain-held:`), since
+#              deadness alone is the ambiguity this record exists to resolve.
+#   repair-worker-state
+#              Reconcile a worker-state record against the endpoint's observed
+#              reality, idempotently and without hand-editing. Reality wins,
+#              and only toward supervision: an unprovable record, or a
+#              declaration a live agent contradicts, is cleared and the
+#              discrepancy is reported. A dead endpoint alone never declares
+#              intent, so repair can never create a suppression.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
@@ -77,9 +106,9 @@
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#     classifier (tmux or herdr). The worker-state verbs stand-down and
+#     repair-worker-state are supported only on tmux. zellij, orca, and cmux
+#     are refused rather than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #
@@ -128,6 +157,14 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-worker-state-lib.sh
+. "$SCRIPT_DIR/fm-worker-state-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -140,6 +177,10 @@ SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+# Bounded budget for the one read-only `axi status` question stand-down asks
+# before it may declare a hold (bin/fm-nm-run-lib.sh owns the attribution).
+NM_CONTROL_TIMEOUT=${FM_CONTROL_NM_TIMEOUT:-10}
+case "$NM_CONTROL_TIMEOUT" in ''|*[!0-9]*) NM_CONTROL_TIMEOUT=10 ;; esac
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -347,6 +388,11 @@ require_state_verified_backend() {  # <verb>
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
 }
 
+require_worker_lifecycle_backend() {  # <verb>
+  [ "$BACKEND" = tmux ] && return 0
+  die "task $ID runs on the $BACKEND backend, where '$1' worker-lifecycle control is not supported; use the backend's authorised lifecycle path instead"
+}
+
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
 # of times, then the composer-clear key when the adapter needs one. Refuses
 # before sending anything when the backend cannot deliver either key, because
@@ -492,6 +538,176 @@ do_exit() {
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
   printf 'stopped'
+}
+
+# do_stand_down: turn a proven stopped agent into an explicit, intentional
+# no-worker state. The transitional record is deliberately not a watcher
+# exemption. That makes a crash or interruption between the requested stop and
+# its proof visible instead of silently declaring a live or ambiguous task
+# healthy.
+#
+# Three preconditions keep the declaration honest rather than inferred:
+#   - No in-flight no-mistakes run may be attributed to this task. An active
+#     run owns the branch and needs a worker to answer its gates, so a hold is
+#     not the operator's to declare yet. Stand-down never cancels a run: the
+#     operator finishes it or aborts it explicitly first.
+#   - An agent that is ALREADY gone can be declared intentional only when the
+#     task's own authoritative hold declaration says so (the status log's
+#     paused/captain-held verb, the same declaration both supervisors already
+#     honour, per bin/fm-classify-lib.sh). Deadness alone is exactly the
+#     ambiguity this record exists to resolve, so it never proves intent, and
+#     the hold is reversible by the ordinary next status append.
+#   - No unacknowledged steering instruction may be waiting for this worker.
+#     The hold stops the watcher's re-ring ladder for the task, so a message
+#     nobody has read yet must first be handled or explicitly withdrawn.
+do_stand_down() {
+  local lifecycle state result
+  [ "$KIND" != secondmate ] \
+    || die "task $ID is a secondmate home; stand-down is only for held ship or scout work because a stopped secondmate would leave its own fleet unsupervised"
+  require_worker_lifecycle_backend stand-down
+  require_state_verified_backend stand-down
+  refuse_stand_down_during_active_run
+  refuse_stand_down_with_pending_instruction
+  lifecycle=$(fm_worker_state_status "$STATE" "$ID" "$T")
+  case "$lifecycle" in
+    invalid)
+      die "task $ID has an invalid worker-state record; run 'fm-control $ID repair-worker-state' to reconcile it against the endpoint before declaring a hold"
+      ;;
+    stood-down)
+      state=$(agent_state)
+      case "$state" in
+        dead) printf 'already-stood-down'; return 0 ;;
+        alive) die "task $ID is recorded as stood down but its agent is alive; refusing to hide a live worker from wedge detection (repair it with 'fm-control $ID repair-worker-state')" ;;
+        *) die "task $ID is recorded as stood down but its endpoint reads '$state'; inspect the endpoint before changing its worker state" ;;
+      esac
+      ;;
+    active)
+      state=$(agent_state)
+      case "$state" in
+        alive)
+          fm_worker_state_write "$STATE" "$ID" "$T" standing-down \
+            || die "could not record the stand-down transition for task $ID; its worker remains under ordinary supervision"
+          ;;
+        dead)
+          task_is_declared_held \
+            || die "task $ID's agent is already dead without a stand-down record; refusing to relabel a possible worker failure as intentional. Declare the hold first by appending a '$(fm_control_hold_verb): <reason>' line to $STATE/$ID.status, then re-run stand-down"
+          ;;
+        missing|ambiguous|unreadable|unverified|*)
+          die "task $ID's endpoint reads '$state'; refusing to declare a worker-free hold without proof that the requested stop owns this state"
+          ;;
+      esac
+      ;;
+    standing-down)
+      state=$(agent_state)
+      case "$state" in
+        dead) ;;
+        alive) do_exit >/dev/null ;;
+        *) die "task $ID's interrupted stand-down reads '$state'; it remains under ordinary supervision until the endpoint can be reconciled" ;;
+      esac
+      ;;
+  esac
+  if [ "$lifecycle" = active ] && [ "$state" = alive ]; then
+    result=$(do_exit)
+    [ "$result" = stopped ] || die "task $ID's stand-down exit reported '$result'; refusing to publish an intentional no-worker state"
+  fi
+  fm_worker_state_write "$STATE" "$ID" "$T" stood-down \
+    || die "task $ID's agent is stopped but its intentional worker-state record could not be published; it remains under ordinary supervision"
+  printf 'stood-down'
+}
+
+# The declared-hold verb an operator uses to make an ordinary prior exit
+# intentional. Named from the classifier's own configurable vocabulary so the
+# refusal message can never drift from the verb the check accepts.
+fm_control_hold_verb() {
+  printf '%s' "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"
+}
+
+# 0 when the task's authoritative current declaration is a deliberate hold.
+task_is_declared_held() {
+  status_is_paused_or_captain_held "$(last_status_line "$STATE/$ID.status")"
+}
+
+# Refuse a stand-down while this task owns an in-flight no-mistakes run. The
+# run owns the branch and expects a worker at its gates, and stand-down must
+# never cancel one on the operator's behalf.
+#
+# THE GOVERNING RULE HERE: IF IT CANNOT BE PROVEN SAFE, IT IS REFUSED, AND THE
+# REFUSAL NAMES WHAT COULD NOT BE PROVEN. The record a stand-down publishes
+# removes the task from the watcher's stale and wedge detection, so only a
+# proven "no run is active here" may proceed. An absent or unreadable worktree,
+# an unreadable branch-scoped status, and a live run the head rule could not
+# place all refuse. The optional repo-wide listing cannot weaken a readable
+# quiet branch result or make unavailable corroboration a refusal.
+# fm_nm_branch_run_verdict carries the query half of the same rule and names
+# the one condition that could not prove the branch quiet.
+#
+# Every kind stand-down accepts is checked the same way, ship and scout alike:
+# a scout checked out on a branch can own a run exactly like a ship can, and an
+# unchecked hold there would take that run out of supervision.
+refuse_stand_down_during_active_run() {
+  local branch
+  [ -n "$WT" ] \
+    || die "task $ID records no worktree, so whether it owns an active no-mistakes run cannot be checked; refusing to declare a hold that would take a possibly-live run out of supervision"
+  [ -d "$WT" ] \
+    || die "task $ID's worktree $WT is absent or unreadable, so whether it owns an active no-mistakes run cannot be checked; restore the preserved copy before declaring a hold"
+  git -C "$WT" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "task $ID's worktree $WT is not a readable git worktree, so whether it owns an active no-mistakes run cannot be checked; repair it before declaring a hold"
+  branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  # A worktree with no branch owns no run: a run is keyed by branch, so there
+  # is nothing for one to hold. That is the scout's ordinary scratch copy, and
+  # equally a ship between spawn and its worker's first `git checkout -b`,
+  # which is exactly when an early hold is most likely to be needed.
+  [ -n "$branch" ] || return 0
+  fm_nm_branch_run_verdict "$WT" "$branch" "$NM_CONTROL_TIMEOUT"
+  case "$FM_NM_BRANCH_RUN_VERDICT" in
+    active)
+      die "task $ID owns an active no-mistakes run (${FM_NM_BRANCH_RUN_ID:-unknown}) that still needs a worker at its gates; finish it, or abort it explicitly with 'no-mistakes axi abort --run ${FM_NM_BRANCH_RUN_ID:-<id>}', before standing the worker down"
+      ;;
+    quiet) return 0 ;;
+    unknown)
+      die "task $ID cannot be stood down because ${FM_NM_BRANCH_RUN_REASON:-the branch-run verdict could not prove it quiet}; refusing to hide a possibly-live run from supervision. Re-run that check yourself, or finish or abort the run, and try again"
+      ;;
+    *) die "task $ID's branch-run verdict was invalid; refusing to hide a possibly-live run from supervision" ;;
+  esac
+}
+
+# Refuse a stand-down while a durable steering instruction is still waiting for
+# this task's worker, under the same governing rule: a message nobody has
+# acknowledged is work the hold would silence, because the watcher's re-ring
+# ladder stops for a stood-down window and `fm-send` refuses to add to it.
+# The instruction is either handled by the worker or explicitly withdrawn by
+# the operator - the same acknowledgement move the worker itself makes - and
+# neither is something stand-down may decide on the task's behalf.
+refuse_stand_down_with_pending_instruction() {
+  local pending
+  pending=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null) || return 0
+  [ -n "$pending" ] || return 0
+  die "task $ID has an unacknowledged instruction waiting at $pending; let the worker handle it, or withdraw it explicitly with 'mv $pending $(fm_task_inbox_handled_dir "$STATE" "$ID")/', before standing the worker down"
+}
+
+# do_repair_worker_state: the one supported reconciliation of a worker-state
+# record, so an operator never has to hand-remove one. A valid declaration is
+# retained only for a proven dead endpoint. An unprovable record, a live agent,
+# or an endpoint that cannot be proved dead clears toward ordinary supervision.
+do_repair_worker_state() {
+  local state outcome
+  require_worker_lifecycle_backend repair-worker-state
+  state=$(agent_state 2>/dev/null || true)
+  [ -n "$state" ] || state=unreadable
+  outcome=$(fm_worker_state_repair "$STATE" "$ID" "$T" "$state") \
+    || die "task $ID's worker-state record could not be removed; check the permissions on $(fm_worker_state_path "$STATE" "$ID")"
+  case "$outcome" in
+    cleared-live-worker)
+      echo "warning: task $ID declared no worker but its endpoint has a live agent; the declaration was cleared and the task is back under ordinary supervision" >&2
+      ;;
+    cleared-invalid)
+      echo "warning: task $ID had a worker-state record that no longer describes this task and endpoint; it was cleared and the task is back under ordinary supervision" >&2
+      ;;
+    cleared-unproven-endpoint)
+      echo "warning: task $ID declared no worker but its endpoint could not be proven dead; the declaration was cleared and the task is back under ordinary supervision" >&2
+      ;;
+  esac
+  printf '%s agent-state=%s' "$outcome" "$state"
 }
 
 # --- transactional relaunch -------------------------------------------------
@@ -870,6 +1086,14 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
+    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    ;;
+  stand-down)
+    result=$(do_stand_down)
+    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    ;;
+  repair-worker-state)
+    result=$(do_repair_worker_state)
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)

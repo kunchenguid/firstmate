@@ -132,6 +132,13 @@ new_case() {
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   make_tmux_stub "$dir"
+  # A no-op `no-mistakes`, so a stand-down here can never reach a real
+  # installation on the developer's PATH to ask about an in-flight run.
+  cat > "$dir/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/no-mistakes"
   printf '%s\n' "$dir"
 }
 
@@ -271,6 +278,31 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_relaunch_from_a_stood_down_worker_reuses_its_preserved_worktree() {
+  local dir out rc
+  dir=$(new_case stood-down-relaunch rl-parked)
+  add_ship_task "$dir" rl-parked claude
+  out=$(run_control "$dir" rl-parked stand-down); rc=$?
+  expect_code 0 "$rc" "stand-down should stop the worker before a later relaunch"$'\n'"$out"
+  [ -f "$dir/home/state/rl-parked.worker-state" ] \
+    || fail "stand-down did not retain the durable worker-free declaration"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "stand-down did not leave the recorded endpoint agent-free"
+  out=$(run_control "$dir" rl-parked relaunch --note "resuming the held task"); rc=$?
+  expect_code 0 "$rc" "relaunch from a stood-down worker should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl-parked.worker-state" ] \
+    || fail "a replacement worker must clear the old no-worker declaration"
+  [ "$(meta_field "$dir" rl-parked worktree)" = "$dir/wt" ] \
+    || fail "relaunch from stand-down must reuse the preserved worktree"
+  [ "$(meta_field "$dir" rl-parked window)" = fmses:fm-rl-parked ] \
+    || fail "relaunch from stand-down must reuse the preserved endpoint"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "relaunch from stand-down did not start the replacement worker"
+  assert_grep 'encode launch-brief' "$dir/fake/literal" \
+    "the replacement must receive the persisted brief in the preserved worktree"
+  pass "fm-control relaunch: a stood-down task restarts in its preserved worktree and clears only the no-worker declaration"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -1022,6 +1054,71 @@ test_complete_journal_failure_rolls_back_from_durable_phase() {
   pass "fm-control relaunch: failed journal replacement preserves durable phase"
 }
 
+# A relaunch that never publishes its replacement must hand the task back
+# exactly as the operator left it. Without the restore, an aborted relaunch
+# leaves the task both worker-free AND undeclared - the precise state that puts
+# a held task back into false stale/wedge alarms.
+test_prepublication_abort_restores_the_intentional_no_worker_record() {
+  local dir out rc real_mv meta record
+  dir=$(new_case standdownrollback rl31)
+  add_ship_task "$dir" rl31 claude
+  record="$dir/home/state/rl31.worker-state"
+  meta="$dir/home/state/rl31.meta"
+  out=$(run_control "$dir" rl31 stand-down); rc=$?
+  expect_code 0 "$rc" "the task should start from a published stand-down"$'\n'"$out"
+  [ -f "$record" ] || fail "stand-down did not publish its record"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+    run_control "$dir" rl31 relaunch --note "try to bring the held task back"); rc=$?
+  expect_code 1 "$rc" "a failed metadata publication should fail closed"$'\n'"$out"
+  [ -f "$record" ] \
+    || fail "an aborted relaunch left the held task worker-free and undeclared"
+  assert_grep 'state=stood-down' "$record" \
+    "the restored record must be the exact declaration the relaunch cleared"
+  assert_grep 'endpoint=fmses:fm-rl31' "$record" \
+    "the restored record must stay bound to the preserved endpoint"
+  out=$(FM_REAL_MV="$real_mv" \
+    run_control "$dir" rl31 relaunch --note "retry now that publication works"); rc=$?
+  expect_code 0 "$rc" "a retried relaunch should still work from the restored record"$'\n'"$out"
+  [ ! -e "$record" ] \
+    || fail "a relaunch that really started a replacement must clear the declaration"
+  pass "fm-control relaunch: a pre-publication abort returns the task to its declared stand-down"
+}
+
+# The refusal on an unprovable record is a REFUSAL, so it must leave the task
+# exactly as it found it. Retiring the prior incarnation's wiring first would
+# strand it: that exit path arms no replacement, so it rolls nothing back.
+test_invalid_worker_state_refuses_before_retiring_prior_wiring() {
+  local dir out rc record wiring
+  dir=$(new_case standdowninvalid rl32)
+  add_ship_task "$dir" rl32 claude
+  record="$dir/home/state/rl32.worker-state"
+  wiring="$dir/wt/.claude/settings.local.json"
+  mkdir -p "$dir/wt/.claude"
+  printf '{"hooks":{}}\n' > "$wiring"
+  cat > "$record" <<'EOF'
+schema=1
+task_id=rl32
+endpoint=fmses:fm-some-other-endpoint
+state=stood-down
+EOF
+  out=$(run_control "$dir" rl32 relaunch --note "relaunch behind an unprovable record"); rc=$?
+  expect_code 1 "$rc" "an unprovable worker-state record must refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "repair-worker-state" \
+    "the refusal should name the supported reconciliation"
+  [ -f "$wiring" ] \
+    || fail "a refusal that arms no replacement must not retire the prior incarnation's wiring"
+  [ "$(meta_field "$dir" rl32 harness)" = claude ] \
+    || fail "a refused relaunch must leave the durable record untouched"
+  [ -f "$record" ] || fail "the refused relaunch must leave the record for repair"
+  out=$(run_control "$dir" rl32 repair-worker-state); rc=$?
+  expect_code 0 "$rc" "repair should reconcile the record"$'\n'"$out"
+  out=$(run_control "$dir" rl32 relaunch --note "retry once the record is reconciled"); rc=$?
+  expect_code 0 "$rc" "the relaunch should work once the record is reconciled"$'\n'"$out"
+  pass "fm-spawn --relaunch: an unprovable worker-state record refuses with the prior wiring intact"
+}
+
 test_prepublication_abort_retires_replacement_wiring_and_busy_state() {
   local dir out rc real_mv meta
   dir=$(new_case prepublishcleanup rl28)
@@ -1313,6 +1410,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_from_a_stood_down_worker_reuses_its_preserved_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
@@ -1347,6 +1445,8 @@ test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
+test_prepublication_abort_restores_the_intentional_no_worker_record
+test_invalid_worker_state_refuses_before_retiring_prior_wiring
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home

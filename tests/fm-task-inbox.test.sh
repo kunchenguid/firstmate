@@ -76,7 +76,13 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-fakepane}"; exit 0 ;;
+        *pane_tty*) printf '\n'; exit 0 ;;
+      esac
+    done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
@@ -85,7 +91,7 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-}"; exit 0 ;;
 esac
 exit 0
 SH
@@ -382,6 +388,42 @@ test_watcher_rerings_idle_pane_quietly() {
   pass "watcher: an unhandled aged message on an idle pane re-rings without waking firstmate, and the ack silences it"
 }
 
+# A deliberately worker-free task is exempt from pane-stale and wedge
+# detection, and from nothing else. A steer that landed on the other side of
+# the stand-down (the two guards that keep the inbox empty take different
+# locks) must still be surfaced by the re-ring ladder rather than waiting
+# silently for a relaunch.
+test_watcher_ladder_still_runs_for_a_stood_down_task() {
+  local dir state out log pid rec i=0
+  dir=$(setup_watch_case standdownladder)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  cat > "$state/t1.worker-state" <<'EOF'
+schema=1
+task_id=t1
+endpoint=sess:fm-t1
+state=stood-down
+EOF
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_FAKE_TMUX_WINDOWS=fm-t1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_TASK_INBOX_RING_MAX=1
+  pid=$!
+  while [ "$i" -lt 150 ]; do
+    grep -qF "unread firstmate instruction: $rec" "$out" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  grep -qF "unread firstmate instruction: $rec" "$out" \
+    || fail "a stood-down task must still surface its unread instruction:"$'\n'"$(cat "$out")"
+  grep -F "$rec" "$state/.wake-queue" >/dev/null \
+    || fail "the unread instruction was not recorded in the durable queue"
+  pass "watcher: a stood-down task keeps its steering-inbox ladder, exempt only from pane-stale detection"
+}
+
 test_watcher_waits_on_busy_pane() {
   local dir state out log pid rec
   dir=$(setup_watch_case busywait)
@@ -506,6 +548,7 @@ test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
+test_watcher_ladder_still_runs_for_a_stood_down_task
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder

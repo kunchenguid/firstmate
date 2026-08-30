@@ -31,6 +31,7 @@ SEND="$ROOT/bin/fm-send.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control)
+fm_git_identity fmtest fmtest@example.invalid
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -148,6 +149,39 @@ SH
   printf '%s\n' "$fb"
 }
 
+# A fake `no-mistakes` answering both run-attribution surfaces
+# bin/fm-nm-run-lib.sh queries: the TOON `axi status` for the current branch,
+# and the plain-text top-level `runs` listing used when that answers about
+# another branch. FM_FAKE_NM_FAIL makes both calls fail silently the way a
+# timed-out CLI does, so a test can pose the unanswerable question;
+# FM_FAKE_NM_UNREGISTERED reproduces the installed CLI's answer in a repository
+# it holds no registration for - exit 1, no rows, and the not-initialized
+# response on stdout.
+add_axi_stub() {  # <case-dir>
+  cat > "$1/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_NM_FAIL:-}" ] || exit 1
+if [ -n "${FM_FAKE_NM_UNREGISTERED:-}" ]; then
+  echo "error: repo not initialized (run 'no-mistakes init' first)"
+  echo "help[1]: Run \`no-mistakes init\` to set up the gate in this repository"
+  exit 1
+fi
+if [ -n "${FM_FAKE_NM_ERR:-}" ]; then
+  echo "$FM_FAKE_NM_ERR" >&2
+  exit 1
+fi
+case "${1:-} ${2:-}" in
+  "axi status") printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+  "runs "*|"runs")
+    [ -z "${FM_FAKE_NM_FAIL_RUNS:-}" ] || exit 1
+    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/no-mistakes"
+}
+
 # new_case <name> -> echoes a case dir holding home/, fake/, and fakebin.
 new_case() {
   local dir="$TMP_ROOT/$1-$RANDOM"
@@ -157,6 +191,9 @@ new_case() {
   printf 'zsh' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   make_tmux_stub "$dir" >/dev/null
+  # Every case gets the env-driven run stub, so no test can reach a real
+  # no-mistakes installation on the developer's PATH.
+  add_axi_stub "$dir"
   printf '%s\n' "$dir"
 }
 
@@ -424,12 +461,16 @@ test_unverified_state_backends_refuse_stop_verbs() {
     assert_contains "$out" "no recovery-grade agent-state classifier" \
       "the $backend refusal should name the missing stop proof"
     [ -z "$(literals "$dir")" ] || fail "$backend must receive no exit command"
+    out=$(run_control "$dir" t1 stand-down); rc=$?
+    expect_code 1 "$rc" "stand-down on $backend should refuse"$'\n'"$out"
+    assert_contains "$out" "worker-lifecycle control is not supported" \
+      "the $backend stand-down refusal should name the unsupported lifecycle surface"
     out=$(run_control "$dir" t1 relaunch --note x); rc=$?
     expect_code 1 "$rc" "relaunch on $backend should refuse"$'\n'"$out"
     assert_contains "$out" "no recovery-grade agent-state classifier" \
       "the $backend relaunch refusal should name the missing stop proof"
   done
-  pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
+  pass "fm-control: a backend that cannot prove an agent stopped refuses exit, stand-down, and relaunch"
 }
 
 test_state_verified_backends_are_exactly_tmux_and_herdr() {
@@ -441,6 +482,701 @@ test_state_verified_backends_are_exactly_tmux_and_herdr() {
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
   pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
+}
+
+test_worker_state_verbs_refuse_herdr() {
+  local dir out rc verb
+  for verb in stand-down repair-worker-state; do
+    dir=$(new_case "herdr-$verb")
+    add_task "$dir" t1 claude ship herdr "lab:pane-1"
+    {
+      echo "herdr_session=lab"
+      echo "herdr_workspace_id=workspace-1"
+      echo "herdr_tab_id=tab-1"
+      echo "herdr_pane_id=pane-1"
+    } >> "$dir/home/state/t1.meta"
+    out=$(run_control "$dir" t1 "$verb"); rc=$?
+    expect_code 1 "$rc" "$verb on herdr should refuse"$'\n'"$out"
+    assert_contains "$out" "worker-lifecycle control is not supported" \
+      "$verb should name the unsupported Herdr lifecycle surface"
+    [ -z "$(literals "$dir")" ] || fail "$verb on herdr must send no lifecycle command"
+    [ ! -e "$dir/home/state/t1.worker-state" ] \
+      || fail "$verb on herdr must not publish or alter worker state"
+  done
+  pass "fm-control: worker-state verbs do not drive Herdr"
+}
+
+test_herdr_relaunch_reaches_existing_validation_path() {
+  local dir out rc
+  dir=$(new_case herdr-relaunch)
+  add_task "$dir" t1 claude ship herdr "lab:pane-1"
+  {
+    echo "herdr_session=lab"
+    echo "herdr_workspace_id=workspace-1"
+    echo "herdr_tab_id=tab-1"
+    echo "herdr_pane_id=pane-1"
+  } >> "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 relaunch); rc=$?
+  expect_code 1 "$rc" "Herdr relaunch without a progress note should reach ordinary validation"$'\n'"$out"
+  assert_contains "$out" "relaunch of a ship task requires --note" \
+    "Herdr relaunch should be admitted before relaunch-specific validation"
+  assert_not_contains "$out" "worker-lifecycle control is not supported" \
+    "ordinary Herdr relaunch must not be rejected as worker-state control"
+  [ -z "$(literals "$dir")" ] || fail "a note refusal must send no lifecycle command"
+  pass "fm-control: ordinary Herdr relaunch remains admitted"
+}
+
+test_stand_down_proves_stop_then_records_intent() {
+  local dir out rc record
+  dir=$(new_case stand-down)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "stand-down should stop a live agent and record the hold"$'\n'"$out"
+  assert_contains "$out" "stood-down t1 harness=claude" \
+    "stand-down should report the deliberate worker-free state"
+  [ "$(literals "$dir")" = /exit ] \
+    || fail "stand-down must use the proven exit path before declaring the worker absent"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "stand-down must prove the agent stopped before publishing its record"
+  record="$dir/home/state/t1.worker-state"
+  [ -f "$record" ] || fail "stand-down did not write its durable worker-state record"
+  assert_grep 'schema=1' "$record" "worker-state record must carry its schema"
+  assert_grep 'task_id=t1' "$record" "worker-state record must bind the task id"
+  assert_grep 'endpoint=fmses:fm-t1' "$record" "worker-state record must bind the exact endpoint"
+  assert_grep 'state=stood-down' "$record" "worker-state record must be published only after the stop"
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a proven stood-down task should be idempotent"$'\n'"$out"
+  assert_contains "$out" "already-stood-down t1" "repeat stand-down should not issue another exit"
+  [ "$(wc -l < "$dir/fake/literal" | tr -d ' ')" = 1 ] \
+    || fail "an already stood-down task must not receive another exit command"
+  pass "fm-control stand-down: a proven exit becomes an exact durable no-worker declaration"
+}
+
+test_stand_down_refuses_to_relabel_an_unexpected_dead_agent() {
+  local dir out rc
+  dir=$(new_case stand-down-dead)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "stand-down must not relabel an already-dead agent"
+  assert_contains "$out" "already dead without a stand-down record" \
+    "the refusal should preserve the distinction between a deliberate stop and a possible worker failure"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unexpected dead agent must not gain an intentional stand-down record"
+  pass "fm-control stand-down: an unexplained dead agent remains eligible for recovery"
+}
+
+
+# A stand-down declaration is only honest while nothing more current contradicts
+# it, so these pin the two ways the control plane refuses to invent one: an
+# in-flight validation run still needs a worker at its gates, and an agent that
+# is merely gone is not an agent that was deliberately dismissed.
+
+axi_run_toon() {  # <branch> <head> <status>
+  cat <<EOF
+run:
+  id: "01ACTIVE"
+  branch: $1
+  head: "$2"
+  status: $3
+  pr: ""
+EOF
+}
+
+test_stand_down_refuses_while_the_task_owns_an_active_run() {
+  local dir out rc head
+  dir=$(new_case stand-down-active-run)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$head" awaiting_approval)" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "stand-down must refuse while the task owns an in-flight run"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run (01ACTIVE)" \
+    "the refusal should name the run that still needs a worker"
+  assert_contains "$out" "abort it explicitly" \
+    "the refusal should require the operator's own cancellation rather than doing it for them"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a refused stand-down must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "stand-down must not stop the worker an active run needs"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the run's worker must still be alive"
+  pass "fm-control stand-down: an in-flight validation run keeps its worker, and is never cancelled for the operator"
+}
+
+test_stand_down_allows_a_terminal_run_for_the_same_task() {
+  local dir out rc head
+  dir=$(new_case stand-down-terminal-run)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$head" completed)" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a finished run must not block a deliberate hold"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a terminal run leaves the task free to be stood down"
+  pass "fm-control stand-down: only an in-flight run blocks the hold"
+}
+
+# Cross-branch attribution is routine: several crews validating one underlying
+# repo share a single no-mistakes registration, so bare `axi status` in this
+# worktree can answer about whichever branch was touched most recently. The
+# refusal must consult the coarse runs listing as additive safety evidence, or
+# a gated run can silently lose the worker it still needs.
+test_stand_down_refuses_a_run_only_the_runs_list_can_attribute() {
+  local dir out rc head short
+  dir=$(new_case stand-down-coarse-run)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  short=$(git -C "$dir/wt-t1" rev-parse --short HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="running  task-t1  $short  2026-08-28  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a run only the runs listing attributes must still refuse the hold"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "the refusal should name the run that still needs a worker"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a refused stand-down must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "stand-down must not stop the worker an active run needs"
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="completed  task-t1  $short  2026-08-28  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "the same listing proving a terminal run must allow the hold"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a proven-terminal run leaves the task free to be stood down"
+  pass "fm-control stand-down: run attribution uses every source, not just axi status"
+}
+
+# Standing down carries the burden of proof: the record it publishes removes the
+# task from stale and wedge detection, so an unanswerable run check must refuse
+# and name itself rather than fail open into a silent suppression.
+test_stand_down_refuses_when_no_run_check_can_answer() {
+  local dir out rc
+  dir=$(new_case stand-down-unanswerable)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(FM_FAKE_NM_FAIL=1 run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "an unanswerable run check must refuse the hold"$'\n'"$out"
+  assert_contains "$out" "no-mistakes axi status" \
+    "the refusal should name the branch read that could not answer"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unproven run check must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "an unproven run check must not stop the worker"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the worker must still be alive"
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "the same task should stand down once the check can answer"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "an answering run check that proves no active run permits the hold"
+  pass "fm-control stand-down: an unanswerable run check refuses and names itself"
+}
+
+test_stand_down_refuses_an_active_status_without_a_placeable_branch() {
+  local branch_line case_name dir head out rc
+  for case_name in absent truncated malformed; do
+    dir=$(new_case "stand-down-$case_name-active-branch")
+    add_task "$dir" t1 claude
+    alive_as "$dir" claude
+    head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+    case "$case_name" in
+      absent) branch_line= ;;
+      truncated) branch_line='  branch: "task-t1' ;;
+      malformed) branch_line='  branch: bad branch' ;;
+    esac
+    out=$(FM_FAKE_AXI_STATUS="$(cat <<EOF
+run:
+  id: "01ACTIVE"
+$branch_line
+  head: "$head"
+  status: running
+EOF
+)" FM_FAKE_NM_FAIL_RUNS=1 run_control "$dir" t1 stand-down); rc=$?
+    expect_code 1 "$rc" "an active status with a $case_name branch identity must refuse"$'\n'"$out"
+    assert_contains "$out" "no placeable branch identity" \
+      "the $case_name branch refusal should name the unplaceable direct result"
+    [ ! -e "$dir/home/state/t1.worker-state" ] \
+      || fail "a $case_name active branch identity must publish no worker-state record"
+    [ "$(cat "$dir/fake/command")" = claude ] \
+      || fail "a $case_name active branch identity must leave the worker alive"
+  done
+  pass "fm-control stand-down: malformed active branch identity fails closed"
+}
+
+# A home that does not install `no-mistakes` at all runs no pipeline, so no run
+# can own this branch and there is no question left to answer - the hold
+# proceeds. A CLI that IS installed and fails to answer is the opposite case:
+# the question was asked and went unanswered, so it still refuses.
+test_stand_down_allows_a_home_without_the_run_cli() {
+  local dir out rc
+  dir=$(new_case stand-down-absent-cli)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  rm -f "$dir/fakebin/no-mistakes"
+  out=$(env PATH="$dir/fakebin:/usr/bin:/bin" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$CONTROL" t1 stand-down 2>&1); rc=$?
+  expect_code 0 "$rc" "a home with no run CLI owns no run to protect"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a task in a home without the run CLI must still be able to declare a hold"
+  # Counterfactual: an installed CLI that cannot answer still refuses.
+  rm -f "$dir/home/state/t1.worker-state"
+  alive_as "$dir" claude
+  add_axi_stub "$dir"
+  out=$(FM_FAKE_NM_FAIL=1 run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "an installed CLI that cannot answer must still refuse"$'\n'"$out"
+  assert_contains "$out" "no-mistakes axi status" \
+    "the refusal should name the branch read that went unanswered"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unanswered run check must publish no worker-state record"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused hold must leave the worker alive"
+  pass "fm-control stand-down: an absent run CLI licenses the hold, an unanswered one does not"
+}
+
+# firstmate supports project modes that never register with no-mistakes
+# (direct-PR, local-only), and a home may hold a repo that was simply never
+# initialised. The CLI answers those with a not-initialized error and no rows,
+# and a repository that owns no registration owns no run - so that answer is a
+# proof of quiet, not an unanswered question the operator can never clear.
+test_stand_down_allows_a_project_with_no_run_registration() {
+  local dir out rc
+  dir=$(new_case stand-down-unregistered)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(FM_FAKE_NM_FAIL=1 run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a silent CLI failure must still refuse the hold"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unanswered run check must publish no worker-state record"
+  out=$(FM_FAKE_NM_ERR="database not initialized: cannot open run store" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "an unrelated CLI failure must not read as proof of no registration"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unrelated CLI failure must publish no worker-state record"
+  out=$(TMPDIR="$dir/absent-tmp" FM_FAKE_NM_UNREGISTERED=1 run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a check that cannot capture the CLI's own error must refuse rather than degrade"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an uncapturable run check must publish no worker-state record"
+  out=$(FM_FAKE_NM_ERR="repo not initialized (run 'no-mistakes init' first)" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "the earlier stderr form of the unregistered response must still license the hold"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "an unregistered response on stderr must remain a proof that the project owns no run"
+  rm -f "$dir/home/state/t1.worker-state"
+  alive_as "$dir" claude
+  out=$(FM_FAKE_NM_ERR="ERROR: REPO NOT INITIALISED (RUN 'NO-MISTAKES INIT' FIRST)" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "the unregistered verdict must not depend on the runner's locale or diagnostic case"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a case-varied unregistered response must still prove that the project owns no run"
+  rm -f "$dir/home/state/t1.worker-state"
+  alive_as "$dir" claude
+  out=$(FM_FAKE_NM_UNREGISTERED=1 run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a repository with no run registration owns no run to protect"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "an unregistered project must still be able to declare a hold"
+  pass "fm-control stand-down: a project with no run registration is held, while a silent failure still refuses"
+}
+
+# The corroboration listing can only ADD a run. A row it cannot parse is a row
+# that names nothing, so it neither attributes a run nor overturns a branch read
+# that already answered - while a readable live row in the same listing still
+# refuses the hold.
+test_stand_down_reads_a_garbled_listing_row_as_no_run_at_all() {
+  local dir out rc head
+  dir=$(new_case stand-down-unreadable-inventory)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$head" completed)" \
+    FM_FAKE_RUNS_LIST="running
+running  task-t1  $(git -C "$dir/wt-t1" rev-parse --short HEAD)  2026-08-28  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a readable live row beside a garbled one must still refuse the hold"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "the refusal should name the run the listing did read"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a live run must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "a live run must not lose its worker to a hold"
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$head" completed)" \
+    FM_FAKE_RUNS_LIST="running" run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a garbled row alone must not overturn a branch read that answered"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "an unparsable corroboration row leaves the branch read's own answer standing"
+  pass "fm-control stand-down: a garbled listing row adds no run and overturns no answer"
+}
+
+# The head rule exists to reject a HISTORICAL run on a reused branch. A run
+# that is still going owns the branch however far local work has advanced past
+# the commit it started on, so an unplaceable live run is doubt, not proof of
+# safety - from either attribution source.
+test_stand_down_refuses_a_live_run_it_cannot_place() {
+  local dir out rc base head
+  dir=$(new_case stand-down-unplaceable-run)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  base=$(git -C "$dir/wt-t1" rev-parse --short HEAD)
+  git -C "$dir/wt-t1" commit -q --allow-empty -m "work on top of the running run"
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="running  task-t1  $base  2026-08-28  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a running row this worktree cannot place must refuse the hold"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "a run in flight on this branch refuses however its head places"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unplaceable live run must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "an unplaceable live run must not lose its worker"
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$base" running)" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "the same doubt from axi status must refuse too"$'\n'"$out"
+  assert_contains "$out" "cannot be placed" \
+    "the axi-status refusal should also name the unplaceable run"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unplaceable live run must publish no worker-state record"
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="completed  task-t1  $base  2026-08-28  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "an unplaceable TERMINAL row is history, and history does not block a hold"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a historical run on a reused branch still leaves the task free to be stood down"
+  pass "fm-control stand-down: a live run that cannot be placed is doubt, not proof of safety"
+}
+
+# The mirror of the rule above. An unplaceable TERMINAL row is history that
+# happens to live elsewhere - a pipeline lane head that never reached this
+# worktree is routine - and history answers the only question a hold depends
+# on, so it must not refuse a hold that has no run to finish or abort.
+test_stand_down_allows_a_terminal_run_whose_head_never_reached_here() {
+  local dir out rc head
+  dir=$(new_case stand-down-terminal-lane-head)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="completed  task-t1  deadbeef1  2026-08-28  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a finished run whose head is not a local object must not block the hold"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "the hold publishes once the newest run for the branch is proven finished"
+  pass "fm-control stand-down: a terminal run whose head never reached this worktree is history, not doubt"
+}
+
+# The runs listing's status column is each run's CURRENT status, so a finished
+# row says nothing about the rows below it: an older run that still says
+# `running` holds the branch and its worker. The scan has to read the whole
+# branch, whether or not the newer finished row can be placed here.
+test_stand_down_refuses_a_live_run_listed_below_a_finished_one() {
+  local dir out rc head short
+  dir=$(new_case stand-down-live-below-finished)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  short=$(git -C "$dir/wt-t1" rev-parse --short HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="completed  task-t1  deadbeef1  2026-08-28
+running  task-t1  $short  2026-08-27  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a live run below an unplaceable finished row must refuse the hold"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "the refusal should name the run that still needs a worker"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a live run below a finished row must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "a live run must not lose its worker to a hold"
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="completed  task-t1  $short  2026-08-28
+running  task-t1  $short  2026-08-27  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a placeable finished row must not end the scan either"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "the refusal should still name the live run below the finished one"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a live run below a finished row must publish no worker-state record"
+  pass "fm-control stand-down: a finished row never ends the branch scan while a run is still live"
+}
+
+# `axi status` reports the most recent run, so a finished answer for this
+# branch is no more proof than a finished listing row: an earlier run can still
+# be in flight behind it. Only the whole-branch listing can prove the negative,
+# so both sources have to agree before a hold is licensed.
+test_stand_down_refuses_a_live_run_behind_a_terminal_axi_answer() {
+  local dir out rc head short
+  dir=$(new_case stand-down-live-behind-terminal-axi)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  short=$(git -C "$dir/wt-t1" rev-parse --short HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$head" completed)" \
+    FM_FAKE_RUNS_LIST="running  task-t1  $short  2026-08-27  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a finished axi answer must not settle the branch while a run is live"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "the refusal should name the run that still needs a worker"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a live run behind a finished answer must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "a live run must not lose its worker to a hold"
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$head" completed)" \
+    FM_FAKE_NM_FAIL_RUNS=1 run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "corroboration that could not be read must not overturn the branch read"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a readable branch read with no run in flight licenses the hold on its own"
+  pass "fm-control stand-down: the listing adds a live run, and its silence never overturns the branch read"
+}
+
+# `no-mistakes runs` offers only --limit: no pagination, no end-of-list marker,
+# and the window is exactly full on any repository whose history has reached it -
+# the eventual steady state of every repository. Corroboration that came back
+# full adds nothing, so it can neither prove nor unprove the branch, and the
+# branch read's own answer stands; a live row INSIDE the window still refuses.
+test_stand_down_takes_a_full_run_window_as_no_added_run() {
+  local dir out rc head
+  dir=$(new_case stand-down-full-window)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  out=$(FM_NM_RUNS_LIMIT=3 \
+    FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="completed  task-other  aaaaaaa1  2026-08-28
+completed  task-other  aaaaaaa2  2026-08-28
+completed  task-other  aaaaaaa3  2026-08-28" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a full window must not refuse a branch read that already answered"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a mature repository's always-full window must not make the hold impossible"
+  # Counterfactual: a live row for this branch inside the same full window still
+  # refuses, so the window is read, not ignored.
+  rm -f "$dir/home/state/t1.worker-state"
+  : > "$dir/fake/literal"
+  alive_as "$dir" claude
+  out=$(FM_NM_RUNS_LIMIT=3 \
+    FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="completed  task-other  aaaaaaa1  2026-08-28
+running  task-t1  $(git -C "$dir/wt-t1" rev-parse --short HEAD)  2026-08-28
+completed  task-other  aaaaaaa3  2026-08-28" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a live row inside a full window must still refuse the hold"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "the refusal should name the run the full window did show"
+  [ -z "$(literals "$dir")" ] || fail "a live run must not lose its worker to a hold"
+  pass "fm-control stand-down: a full window adds no run, and the live row it shows still refuses"
+}
+
+# A live run the listing names is a run in flight whether or not this worktree
+# can place its head; when the BRANCH READ is the source of that doubt, the
+# refusal must name the run it could not place rather than a listing that was
+# never the question.
+test_stand_down_refusal_names_the_unplaceable_live_run_not_the_listing() {
+  local dir out rc head
+  dir=$(new_case stand-down-unplaceable-live-name)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_RUNS_LIST="running  task-t1  deadbeef1  2026-08-28  " \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a live run with an unplaceable head must refuse the hold"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "a run in flight the listing named refuses however its head places"
+  assert_not_contains "$out" "could not answer" \
+    "a listing that answered must not be reported as unable to answer"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unplaceable live run must publish no worker-state record"
+  git -C "$dir/wt-t1" commit -q --allow-empty -m "work on top of the running run"
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$head" running)" \
+    FM_FAKE_NM_FAIL_RUNS=1 run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "an unplaceable live run must refuse even when the listing cannot answer"$'\n'"$out"
+  assert_contains "$out" "cannot be placed" \
+    "a named live run outranks the generic unanswered-listing reason"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unplaceable live run must publish no worker-state record"
+  pass "fm-control stand-down: an unplaceable live run is named, not misreported as an unanswered check"
+}
+
+# The preserved local copy IS the hold. If it cannot be read, neither can the
+# run state that decides whether the hold is safe to declare.
+test_stand_down_refuses_when_the_worktree_cannot_be_read() {
+  local dir out rc
+  dir=$(new_case stand-down-no-worktree)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  mv "$dir/wt-t1" "$dir/wt-t1-moved"
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "an absent worktree must refuse the hold"$'\n'"$out"
+  assert_contains "$out" "absent or unreadable" \
+    "the refusal should name the worktree that could not be read"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unreadable worktree must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "an unreadable worktree must not lose its worker"
+  mv "$dir/wt-t1-moved" "$dir/wt-t1"
+  # A ship sits at a detached HEAD from spawn until its worker's first
+  # `git checkout -b`, which is exactly when an early hold is most likely.
+  git -C "$dir/wt-t1" checkout -q --detach
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a worktree with no branch owns no run, so the hold proceeds"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a just-spawned ship must still be declarable as deliberately worker-free"
+  pass "fm-control stand-down: an unreadable worktree refuses, while a branchless one owns no run"
+}
+
+# A steer nobody has acknowledged is work the hold would silence: the watcher's
+# re-ring ladder stops for a stood-down window and fm-send refuses to add to it.
+test_stand_down_refuses_while_an_instruction_is_unacknowledged() {
+  local dir out rc rec
+  dir=$(new_case stand-down-pending-steer)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  rec=$(bash -c '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_write "$2" t1 "rebase onto main before you stop"' _ "$ROOT" "$dir/home/state")
+  [ -n "$rec" ] && [ -f "$rec" ] || fail "could not enqueue the durable instruction the test needs"
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "an unacknowledged instruction must refuse the hold"$'\n'"$out"
+  assert_contains "$out" "$rec" "the refusal should name the instruction still waiting"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a pending instruction must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "a pending instruction must not lose its worker"
+  mv "$rec" "$dir/home/state/t1.inbox/handled/"
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "an acknowledged instruction should free the hold"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "the hold publishes once nothing is waiting unread"
+  pass "fm-control stand-down: an unacknowledged instruction is handled or withdrawn first"
+}
+
+# The active-run refusal is not a ship privilege: a scout checked out on a
+# branch can own a run exactly like a ship can. Its ordinary scratch
+# configuration - a detached HEAD, where no branch exists for a run to own -
+# still stands down normally.
+test_stand_down_checks_a_scout_on_a_branch_and_spares_a_detached_scratch() {
+  local dir out rc head
+  dir=$(new_case stand-down-scout)
+  add_task "$dir" t1 claude scout
+  alive_as "$dir" claude
+  head=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  out=$(FM_FAKE_AXI_STATUS="$(axi_run_toon "task-t1" "$head" awaiting_approval)" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a scout on a branch with an in-flight run must refuse the hold"$'\n'"$out"
+  assert_contains "$out" "active no-mistakes run" \
+    "the scout refusal should name the run that still needs a worker"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a refused scout stand-down must publish no worker-state record"
+  [ -z "$(literals "$dir")" ] || fail "a refused scout stand-down must not stop the worker"
+  git -C "$dir/wt-t1" checkout -q --detach
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a scout's detached scratch worktree owns no branch, so the hold proceeds"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "the ordinary scout hold still publishes its declaration"
+  pass "fm-control stand-down: a scout is run-checked like a ship, and its scratch worktree still holds"
+}
+
+test_a_prior_exit_becomes_intentional_only_after_a_declared_hold() {
+  local dir out rc
+  dir=$(new_case stand-down-after-exit)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "the ordinary exit verb should stop the agent"$'\n'"$out"
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "deadness alone must not become a declaration of intent"
+  assert_contains "$out" "Declare the hold first" \
+    "the refusal should name the explicit operator action that makes the stop intentional"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an undeclared dead agent must not gain an intentional record"
+  printf 'paused: holding this task until the upstream API lands\n' > "$dir/home/state/t1.status"
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "a declared hold should make the prior exit declarable"$'\n'"$out"
+  assert_contains "$out" "stood-down t1" "the declared hold should publish the no-worker state"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "the published record must be the proven stood-down state"
+  [ "$(literals "$dir")" = /exit ] \
+    || fail "declaring an already-stopped agent must not send a second exit command"
+  printf 'working: back on it\n' >> "$dir/home/state/t1.status"
+  out=$(run_control "$dir" t1 repair-worker-state); rc=$?
+  expect_code 0 "$rc" "repair reads the endpoint, not the status log"$'\n'"$out"
+  assert_contains "$out" "intact" \
+    "an ordinary status append must not retroactively revoke a published declaration"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "the published record survives until reality contradicts it"
+  # Reversibility is observable at the next declaration, not in the record: with
+  # the worker back and the hold withdrawn from the status log, the same dead
+  # agent is no longer declarable.
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 repair-worker-state); rc=$?
+  expect_code 0 "$rc" "a live worker should reconcile the record"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a live worker must clear the declaration it contradicts"
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a withdrawn hold must stop licensing an intentional declaration"$'\n'"$out"
+  assert_contains "$out" "Declare the hold first" \
+    "the withdrawn hold should send the operator back to the explicit declaration"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a withdrawn hold must not publish a new intentional record"
+  pass "fm-control stand-down: an ordinary prior exit becomes intentional only through an explicit reversible hold"
+}
+
+test_repair_clears_a_declaration_a_live_agent_contradicts() {
+  local dir out rc
+  dir=$(new_case repair-live)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "stand-down should publish the record first"$'\n'"$out"
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 repair-worker-state); rc=$?
+  expect_code 0 "$rc" "repair should reconcile a record reality contradicts"$'\n'"$out"
+  assert_contains "$out" "cleared-live-worker" "repair should report what it reconciled"
+  assert_contains "$out" "live agent" "repair should report the discrepancy to the operator"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a declaration a live agent contradicts must not survive repair"
+  out=$(run_control "$dir" t1 repair-worker-state); rc=$?
+  expect_code 0 "$rc" "repair must be idempotent"$'\n'"$out"
+  assert_contains "$out" "no-record" "a second repair should be a no-op"
+  pass "fm-control repair-worker-state: reality wins over a stale declaration, idempotently"
+}
+
+test_repair_clears_an_unprovable_record_without_inferring_intent() {
+  local dir out rc
+  dir=$(new_case repair-invalid)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  cat > "$dir/home/state/t1.worker-state" <<'EOF'
+schema=1
+task_id=t1
+endpoint=fmses:fm-some-other-task
+state=stood-down
+EOF
+  out=$(run_control "$dir" t1 repair-worker-state); rc=$?
+  expect_code 0 "$rc" "repair should resolve a record bound to another endpoint"$'\n'"$out"
+  assert_contains "$out" "cleared-invalid" "repair should report the unprovable record it removed"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an unprovable record must not survive repair"
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "repair must not leave a dead endpoint declared intentional"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "repair must never create a suppression from a dead endpoint alone"
+  pass "fm-control repair-worker-state: an unprovable record is cleared toward supervision, never toward intent"
+}
+
+test_repair_clears_a_record_when_the_endpoint_vanished() {
+  local dir out rc
+  dir=$(new_case repair-missing)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "stand-down should publish the record first"$'\n'"$out"
+  out=$(run_control "$dir" t1 repair-worker-state); rc=$?
+  expect_code 0 "$rc" "repair should retain a declaration for a proven dead endpoint"$'\n'"$out"
+  assert_contains "$out" "intact agent-state=dead" \
+    "repair should retain only the positively proved dead case"
+  [ -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a declaration for a proven dead endpoint should remain intact"
+  : > "$dir/fake/windows"
+  out=$(run_control "$dir" t1 repair-worker-state); rc=$?
+  expect_code 0 "$rc" "repair should clear a declaration whose endpoint vanished"$'\n'"$out"
+  assert_contains "$out" "cleared-unproven-endpoint" \
+    "repair should report that endpoint absence was not proved dead"
+  assert_contains "$out" "agent-state=missing" \
+    "repair should report the vanished endpoint observation"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a declaration for a vanished endpoint must not survive repair"
+  pass "fm-control repair-worker-state: a vanished endpoint returns to supervision"
 }
 
 # --- 3. exact-id scoping ----------------------------------------------------
@@ -502,7 +1238,7 @@ test_record_bound_to_another_task_is_refused() {
 # refuses, and none of them reaches a local endpoint.
 test_remote_secondmate_is_refused_by_placement() {
   local dir out rc verb
-  for verb in interrupt exit relaunch; do
+  for verb in interrupt exit stand-down relaunch; do
     dir=$(new_case "remote-$verb")
     add_task "$dir" t1 claude secondmate
     alive_as "$dir" claude
@@ -541,7 +1277,7 @@ hold_lifecycle_lock() {  # <lock-path>
 
 test_interrupt_and_exit_lock_before_task_state_resolution() {
   local case_dir out rc verb lifecycle_lock_path holder i
-  for verb in interrupt exit; do
+  for verb in interrupt exit stand-down; do
     case_dir=$(new_case "locked-$verb")
     add_task "$case_dir" t1 claude
     alive_as "$case_dir" claude
@@ -566,7 +1302,7 @@ test_interrupt_and_exit_lock_before_task_state_resolution() {
     [ -z "$(literals "$case_dir")" ] || fail "contended $verb must type no command"
     [ -z "$(keys_sent "$case_dir")" ] || fail "contended $verb must send no control key"
   done
-  pass "fm-control: interrupt and exit lock before task-state resolution"
+  pass "fm-control: interrupt, exit, and stand-down lock before task-state resolution"
 }
 
 # --- 4. verb allowlist ------------------------------------------------------
@@ -884,6 +1620,31 @@ test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
+test_worker_state_verbs_refuse_herdr
+test_herdr_relaunch_reaches_existing_validation_path
+test_stand_down_proves_stop_then_records_intent
+test_stand_down_refuses_to_relabel_an_unexpected_dead_agent
+test_stand_down_refuses_while_the_task_owns_an_active_run
+test_stand_down_allows_a_terminal_run_for_the_same_task
+test_stand_down_refuses_a_run_only_the_runs_list_can_attribute
+test_stand_down_refuses_when_no_run_check_can_answer
+test_stand_down_refuses_an_active_status_without_a_placeable_branch
+test_stand_down_allows_a_home_without_the_run_cli
+test_stand_down_allows_a_project_with_no_run_registration
+test_stand_down_reads_a_garbled_listing_row_as_no_run_at_all
+test_stand_down_refuses_a_live_run_it_cannot_place
+test_stand_down_allows_a_terminal_run_whose_head_never_reached_here
+test_stand_down_refuses_a_live_run_listed_below_a_finished_one
+test_stand_down_refuses_a_live_run_behind_a_terminal_axi_answer
+test_stand_down_takes_a_full_run_window_as_no_added_run
+test_stand_down_refusal_names_the_unplaceable_live_run_not_the_listing
+test_stand_down_refuses_when_the_worktree_cannot_be_read
+test_stand_down_refuses_while_an_instruction_is_unacknowledged
+test_stand_down_checks_a_scout_on_a_branch_and_spares_a_detached_scratch
+test_a_prior_exit_becomes_intentional_only_after_a_declared_hold
+test_repair_clears_a_declaration_a_live_agent_contradicts
+test_repair_clears_an_unprovable_record_without_inferring_intent
+test_repair_clears_a_record_when_the_endpoint_vanished
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

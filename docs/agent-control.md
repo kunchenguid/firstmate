@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `stand-down`, `repair-worker-state`, `relaunch`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -32,6 +32,8 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
+| `stand-down` | Stop a held ship or scout task and record that it deliberately has no worker. | The control plane first proves the agent is gone, then writes an exact worker-state record bound to the task and endpoint. A live worker at a stale record stays in ordinary stale and wedge detection. |
+| `repair-worker-state` | Reconcile a worker-state record against what the endpoint really shows. | A valid record is retained only for a proven dead endpoint. An unprovable record, a live agent, or a missing or unreadable endpoint clears the declaration toward ordinary supervision. Repeat runs are no-ops. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -46,6 +48,37 @@ The clear is refused before anything is sent when the recorded backend cannot de
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
+
+`stand-down` is the explicit companion for a held ship or scout task on the tmux backend that does not need a worker for a while.
+Both kinds are checked for an in-flight run the same way, and a worktree with no branch at all - a scout's scratch copy, or a ship between spawn and its worker's first `git checkout -b` - owns no run to be held back by, because a run is keyed by branch.
+It preserves the worktree, branch, commits, endpoint, and uncommitted work exactly as `exit` does, then writes `state/<id>.worker-state` only after proving the worker is gone.
+Its short `standing-down` transition never suppresses monitoring, and the completed `stood-down` record is ignored when the endpoint has a live worker.
+`fm-spawn --relaunch` clears a valid record immediately before preparing the replacement, so the same preserved worktree resumes normally; if that relaunch aborts before the replacement's metadata is published, the record is restored and the task returns to the hold it was in.
+`fm-send` refuses new input while the record and endpoint both prove that no worker is present, so a held task cannot accumulate an instruction that nobody can read.
+
+Three things a stand-down deliberately cannot do.
+It cannot run while the task owns an in-flight no-mistakes run: that run owns the branch and needs a worker at its gates, so finish it or abort it yourself (`no-mistakes axi abort --run <id>`) first - stand-down never cancels a run for you.
+The shared branch-run verdict is the one owner of that question for both stand-down and current-state reporting, and it always asks the same thing: does THIS branch have a run in flight?
+The branch read - `no-mistakes axi status`, which reports the repository's active run and falls back to the most recent one only when nothing is in flight - answers it: a non-terminal run on this branch is `active`, and a readable answer that puts no non-terminal run on this branch is `quiet`.
+Only a branch read that could not be interpreted leaves the question open: the CLI failed or timed out, returned a non-empty malformed status, named an active run without a placeable branch identity, or named a live run on this branch whose head cannot be placed against the local HEAD (the head rule exists to reject a historical run on a reused branch, and a run that is still going owns the branch however far local work has advanced past the commit it started on).
+An open question is refused, and the refusal names what could not be read - as is an absent or unreadable worktree.
+The repo-wide `no-mistakes runs` listing is corroboration only: a non-terminal row for this branch is a second way to reach `active`, because the listing's status column is each run's current status and catches a run a stale `axi status` answer missed.
+Its silence proves nothing and never refuses a hold on its own - an exactly full window (the steady state of any mature repository), an unparsable row, a failed call, a repository the CLI holds no registration for, and a home without `no-mistakes` installed at all each simply add no run, so `FM_NM_RUNS_LIMIT` is a reporting nicety rather than a safety setting.
+A finished run is history either way: a terminal run whose head never reached this worktree still answers the only question the hold depends on, so it never blocks one.
+It cannot run while an unacknowledged steering instruction is still waiting in `state/<id>.inbox/`, because a held task's worker cannot read it and `fm-send` refuses to add another: the refusal names the record, and the worker handles it or the operator withdraws it with the same `mv <record> state/<id>.inbox/handled/` acknowledgement the worker would make.
+And it cannot turn an agent that is merely already gone into a deliberate hold, because deadness is exactly the ambiguity the record exists to resolve.
+To declare an ordinary prior `exit` intentional, first declare the hold the way both supervisors already read it - append a `paused: <reason>` (or `captain-held: <reason>`) line to `state/<id>.status` - then run `stand-down`.
+That declaration is reversible by the next ordinary status append.
+
+`repair-worker-state` is the only supported way to reconcile a record; nothing under `state/` is meant to be hand-edited.
+Reality wins, and any change moves only toward supervision: a record that no longer describes this task and endpoint, or one a live agent contradicts, is cleared and the discrepancy is reported on stderr.
+A valid declaration is preserved while its exact endpoint is proven dead, but a dead endpoint alone never lets repair create a declaration.
+Repair can therefore retain an established hold or return a task to ordinary monitoring, but never infer a new hold from worker absence.
+
+`fm-crew-state` reports a proven stand-down as `state: parked · source: worker-state`, but only where nothing more current exists: an active verdict keeps run-step authority even when its uncorroborated details are withheld, so it reports `working` rather than falling through to the hold.
+Terminal run details are reported only when the branch read agrees in state and head with the newest same-branch terminal row in the repo-wide listing; [`bin/fm-nm-run-lib.sh`](../bin/fm-nm-run-lib.sh) owns the exact attribution rule.
+It is also only ever a park while the recorded endpoint is still there and merely has no agent.
+An endpoint that has vanished reports `unknown` and names the lost endpoint, because the declared hold - worktree, work, and an in-place relaunch - can no longer be resumed where it was declared.
 
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex and grok resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract.
@@ -94,8 +127,10 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
-- `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
+- `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux or herdr - because without one the "the agent stopped" postcondition cannot be proven.
   zellij, orca, and cmux are refused rather than reported as successful blind.
+- The worker-state verbs `stand-down` and `repair-worker-state` are supported only on tmux.
+  They do not drive Herdr lifecycle behaviour.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
@@ -117,6 +152,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 ## Verification
 
-- `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
-- `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, idempotent, and deliberate stand-down lifecycle cases, every stand-down refusal that carries the burden of proof (active run, unplaceable run, unanswerable check, unreadable worktree, pending instruction), and marker non-regression, all against a stubbed session provider.
+- `tests/fm-crew-state.test.sh` - includes the absence-as-healthy counterfactual: a stood-down record whose endpoint has vanished must report `unknown` and name the lost endpoint, so the test fails the moment absence is presented as a healthy hold, and an absent worker with no declaration at all is still reported as a problem.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, a restart from a deliberately stood-down worker, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-herdr-smoke.test.sh` - interrupt and exit on the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
