@@ -28,6 +28,12 @@
         "type": "command",
         "command": "\"$CURSOR_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --cursor",
         "timeout": 10
+      },
+      {
+        "matcher": "Shell",
+        "type": "command",
+        "command": "\"$CURSOR_PROJECT_DIR\"/bin/fm-selfdo-pretool-check.sh --cursor",
+        "timeout": 10
       }
     ]
   }
