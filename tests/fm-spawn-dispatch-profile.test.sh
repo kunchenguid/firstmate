@@ -505,6 +505,25 @@ test_assignment_prefixed_raw_codex_max_replaces_the_command_word() {
   pass "assignment-prefixed raw Codex max launches the same executable it probes"
 }
 
+test_missing_raw_codex_max_refuses_without_path_fallback() {
+  local rec id out status missing_codex launch
+  id=profile-missing-raw-codex-max-z4ab
+  rec=$(make_spawn_case profile-missing-raw-codex-max codex "$id")
+  read_case_record "$rec"
+  missing_codex="$CASE_DIR/missing-bin/codex"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "$missing_codex __EFFORTFLAG__--raw" --effort max)
+  status=$?
+  expect_code 1 "$status" "missing raw Codex max executable should refuse instead of falling back to PATH"
+  assert_contains "$out" "Codex executable '$missing_codex' was not found or is not executable" \
+    "missing raw Codex max refusal did not identify the selected executable"
+  launch=$(cat "$LAUNCH_LOG")
+  [ -z "$launch" ] || fail "missing raw Codex max fell back to the PATH executable: $launch"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing raw Codex max refusal must happen before metadata publication"
+  pass "missing raw Codex max refuses without falling back to a different PATH executable"
+}
+
 test_old_codex_refuses_max_effort() {
   local rec id out status launch
   id=profile-codex-old-max-z4b
@@ -917,6 +936,7 @@ test_codex_threads_model_and_effort
 test_codex_threads_max_effort
 test_raw_codex_max_probes_the_named_executable
 test_assignment_prefixed_raw_codex_max_replaces_the_command_word
+test_missing_raw_codex_max_refuses_without_path_fallback
 test_old_codex_refuses_max_effort
 test_unparseable_codex_refuses_max_effort
 test_grok_threads_model_and_reasoning_effort

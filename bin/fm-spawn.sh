@@ -1372,7 +1372,7 @@ resolve_codex_binary() {
         ;;
     esac
   fi
-  echo "error: codex executable not found on PATH; install Codex or select a different verified harness" >&2
+  echo "error: Codex executable '$selected' was not found or is not executable; install Codex or select a different verified harness" >&2
   return 1
 }
 
