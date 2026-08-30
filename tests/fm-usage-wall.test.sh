@@ -73,7 +73,7 @@ fm_git_identity
 # carrying `spendPriority`, an `exhaustion[N]` block, and a sparse `attention[N]`
 # block - so the parser is pinned against the emitted shape rather than a tidied
 # one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider|unattributable-in-quota|unattributable-in-exhaustion|unattributable-in-attention|unattributable-every-table|exhaustion-only|auth-with-remedy>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider|unattributable-in-quota|unattributable-in-exhaustion|unattributable-in-attention|unattributable-every-table|exhaustion-only|auth-with-remedy|mixed-scopes-and-tables|empty-limitedby-cell>
   # The FLOOR-COMPLIANT layout, as quota-axi 0.1.29 and newer emit it and as
   # verified live against 0.1.34 on this host: quota[], exhaustion[] and
   # attention[]. The pre-floor effective[]/providers[]/windows[] shape is not
@@ -245,6 +245,44 @@ EOF
           printf 'attention[1]{provider,scope,kind,detail,remedy}:\n'
           printf '  ,all,error,quota read failed,none\n' ;;
       esac
+      return 0
+      ;;
+    mixed-scopes-and-tables)
+      # Account-scoped, model-scoped and unattributable rows across more than
+      # one table, so the published identity `emitted = read + declined` has
+      # something of every kind to account for at once. quota: 2 account rows,
+      # 1 model-scoped for a provider that ALSO has an account row, 1 with no
+      # provider. exhaustion: 1 attached to a reported row, 1 with no provider.
+      # attention: 1 for a provider already reported, 1 for a new provider.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[4]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,84,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+  claude,"model:fable",2,unknown,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+  cursor,all_models,77,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
+  ,all_models,3,1.0,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+exhaustion[2]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,14400,five_hour
+  ,all_models,0,five_hour
+attention[2]{provider,scope,kind,detail,remedy}:
+  claude,"model:fable",unmeasurable,"model:fable blocks spendPriority",none
+  codex,all,error,Codex quota unavailable,none
+EOF
+      return 0
+      ;;
+    empty-limitedby-cell)
+      # `limitedBy` IS declared by the header and IS carried by the sibling row,
+      # so this gauge is not a singular-window one; the first row's cell is
+      # simply empty. Borrowing the runway's window there labels the percentage
+      # with a window it did not come from while keeping its own row's reset.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,34,2.13,projected_exhaustion,early,,"2026-09-02T08:00:00Z"
+  cursor,all_models,77,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,2100,five_hour
+EOF
       return 0
       ;;
     auth-with-remedy)
@@ -746,6 +784,85 @@ assert_contains "$OUT" 'verdict=partial measured=1 tight=0 wall=0 unknown=1' \
   'and one aggregate line accounts for all of them'
 assert_not_contains "$OUT" 'pct=3' 'an unattributable percentage is never presented as a reading'
 pass 'headroom accounts for an unattributable row in every table it consults'
+
+# --- headroom: emitted rows equal read rows plus declined rows ---------------
+#
+# The invariant as an IDENTITY over rows rather than a claim about names. Five
+# earlier formulations were phrased around provider names and each left one
+# shape open, the last being a model-scoped row beside an account-scoped one for
+# the SAME provider: dropped by the scope filter, skipped by the name sweep
+# because its provider was already reported, and counted by nothing, under
+# `verdict=ok measured=1 unknown=0`. A provider's name reaching the output does
+# not mean the row did.
+#
+# The fixture mixes account-scoped, model-scoped and unattributable rows across
+# three tables, and the assertion is arithmetic over the published ledger, so a
+# filter that starts dropping rows silently breaks the sum rather than slipping
+# past a shape-specific case.
+CASE="$TMP_ROOT/hr-ledger"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" mixed-scopes-and-tables
+OUT=$(run_headroom "$CASE/fakebin")
+LEDGER=$(printf '%s\n' "$OUT" | grep '^HEADROOM_ROWS: ' || true)
+[ -n "$LEDGER" ] || fail "the reading must publish its row ledger: $OUT"
+EMITTED=$(printf '%s\n' "$LEDGER" | sed -n 's/.*emitted=\([0-9]*\).*/\1/p')
+READ_ROWS=$(printf '%s\n' "$LEDGER" | sed -n 's/.*read=\([0-9]*\).*/\1/p')
+DECLINED=$(printf '%s\n' "$LEDGER" | sed -n 's/.*declined=\([0-9]*\).*/\1/p')
+# The fixture emits 4 quota rows, 2 exhaustion rows and 2 attention rows.
+[ "$EMITTED" = 8 ] \
+  || fail "every row the report emits must be counted, got emitted=$EMITTED in: $LEDGER"
+[ "$((READ_ROWS + DECLINED))" = "$EMITTED" ] \
+  || fail "emitted must equal read plus declined, got $READ_ROWS + $DECLINED != $EMITTED in: $LEDGER"
+[ "$DECLINED" -gt 0 ] \
+  || fail "this fixture drops rows on purpose; a zero decline count means they went unaccounted: $LEDGER"
+# Each kind of drop names itself, so a filter cannot discard a row anonymously.
+assert_contains "$OUT" 'not-account-scope=' \
+  'a row dropped by the scope filter is accounted for under its own reason'
+assert_contains "$OUT" 'no-provider=' \
+  'and so is a row carrying no provider'
+assert_contains "$OUT" 'superseded-by-reported-row=' \
+  'and so is an attention row suppressed because its provider was already reported'
+assert_contains "$OUT" 'HEADROOM: claude ok pct=84' 'the account-scoped reading is unaffected'
+assert_not_contains "$OUT" 'pct=2 ' 'a model-scoped percentage is never presented as the dispatch gauge'
+if command -v jq >/dev/null 2>&1; then
+  OUT=$(run_headroom "$CASE/fakebin" --json)
+  printf '%s' "$OUT" | jq -e '.rows.emitted == (.rows.read + .rows.declined) and .rows.emitted == 8' >/dev/null \
+    || fail "--json must publish the same row identity as the text form: $OUT"
+fi
+pass 'headroom publishes a row ledger in which emitted equals read plus declined'
+
+# --- headroom: an empty cell is not a singular-window gauge ------------------
+#
+# The singular-window fallback fired on `toon_block`'s `-`, which means three
+# different things: the header never declared the field, the row is short, or
+# the cell is declared and EMPTY on that row. Borrowing the runway's window is
+# sound only for the first. Here the header declares `limitedBy` and the sibling
+# row carries `seven_day`, so the gauge provably publishes the field - yet the
+# percentage was labelled `bound=five_hour` from the runway while keeping its own
+# row's seven-day reset, and the `runway_bound=`/`runway_resets=unknown`
+# disclosure was suppressed because the two windows had been made equal.
+CASE="$TMP_ROOT/hr-emptywin"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" empty-limitedby-cell
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude tight pct=34 bound=- resets=2026-09-02T08:00:00Z' \
+  'a percentage whose own window cell is empty reports the window as absent, not borrowed'
+assert_not_contains "$OUT" 'pct=34 bound=five_hour' \
+  'the percentage must never be labelled with the window that bounds the runway'
+assert_contains "$OUT" 'runway_bound=five_hour runway_resets=unknown' \
+  'and the runway window is named separately, with its reset stated as unknown'
+assert_contains "$OUT" 'HEADROOM: cursor ok pct=77 bound=seven_day' \
+  'the sibling row that does carry a window is unaffected'
+pass 'headroom borrows a window only when the gauge publishes none at all'
+
+# The singular-window gauge - a header that never declares `limitedBy` at all -
+# still binds the percentage to the one window there is. That is the reading the
+# fallback exists for, and narrowing it must not have removed it.
+CASE="$TMP_ROOT/hr-singular"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" singular-only
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude ok pct=84 bound=five_hour' \
+  'a gauge that publishes only one window still binds the percentage to it'
+assert_not_contains "$OUT" 'bound=- ' 'and does not report that window as absent'
+pass 'headroom still binds the percentage when the gauge publishes a single window'
 
 # --- headroom: the operator command survives an upstream remedy --------------
 #
@@ -1369,11 +1486,15 @@ pass 'diagnose reports this repository own text as no-signature, not as a wall'
 # phrasing.
 CASE="$TMP_ROOT/dx-narrated"; mkdir -p "$CASE"
 make_task "$CASE" narratedcrew
-grep -h -i -E "hit your (weekly|session) limit" \
-  "$ROOT/.agents/skills/usage-limit-recovery/SKILL.md" |
-  grep -i -E "exit status [1-9]" > "$CASE/capture.txt"
-[ -s "$CASE/capture.txt" ] \
-  || fail 'the recovery skill must still narrate the limit line and the harness exit in one sentence'
+# The narrated sentence is written here rather than grepped out of the recovery
+# skill. The property under test is that ONE line carrying both facts does not
+# corroborate, and that property does not depend on any tracked file still
+# containing a particular sentence - grepping for one turned the suite red
+# whenever that sentence was reworded, for a reason unrelated to the detector.
+# The two cases below keep feeding real tracked text in, which is where reading
+# the shipped file is the point.
+printf 'The harness prints "You have hit your weekly limit" and then exits with exit status 1.\n' \
+  > "$CASE/capture.txt"
 fake_tmux "$CASE_FB" fm-narratedcrew "$CASE/capture.txt"
 OUT=$(run_wall "$CASE_HOME" "$CASE_FB" diagnose narratedcrew --endpoint-only)
 assert_not_contains "$OUT" 'wall source=' \
@@ -1847,6 +1968,48 @@ assert_contains "$BACK" 'git cannot read it as a repository' \
 assert_not_contains "$BACK" 'commits this local copy does not have' \
   'and never claims the pipeline is ahead of a copy it could not read'
 pass 'resume reports an unreadable local copy as unknown rather than as clean'
+
+# The same half-state, but with the copy NESTED INSIDE a repository - a worktree
+# path recorded under a checkout, or any copy under a `$HOME` that is itself a
+# dotfiles repo. `git rev-parse --git-dir` walks UPWARDS, so a gate built on it
+# passes here and the record prints the ANCESTOR's branch, head and dirty count
+# as measured facts about the task's copy: the same clean-measured-and-false
+# reading, now about the wrong repository. The case above cannot catch this,
+# because a directory under `mktemp -d` has no repository above it.
+CASE="$TMP_ROOT/rs-nested"; mkdir -p "$CASE"
+make_task "$CASE" nestedcrew
+NESTED="$CASE/repo/sub/plaincopy"
+mkdir -p "$NESTED"
+printf 'work in progress\n' > "$NESTED/file.txt"
+# Distinctive ancestor state: a dirty file and a branch name nothing else uses,
+# so borrowing from the ancestor is unmistakable in the assertions below.
+git -C "$CASE/repo" checkout -q -b ancestor-branch-not-the-task
+printf 'ancestor dirt\n' > "$CASE/repo/ancestor-dirty.txt"
+fm_write_meta "$CASE_HOME/state/nestedcrew.meta" \
+  "window=fmtest:fm-nestedcrew" \
+  "endpoint_task_id=nestedcrew" \
+  "worktree=$NESTED" \
+  "project=$CASE/repo" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes" \
+  "yolo=off" \
+  "backend=tmux" \
+  "model=claude-opus-5" \
+  "effort=high"
+printf 'idle shell\n' > "$CASE/capture.txt"
+fake_tmux "$CASE_FB" fm-nestedcrew "$CASE/capture.txt"
+run_wall "$CASE_HOME" "$CASE_FB" resume >/dev/null
+BACK=$( cat "$CASE_HOME/state/resume-record.md" )
+assert_contains "$BACK" 'branch: unknown' \
+  'a plain directory inside a repository is not that repository'
+assert_not_contains "$BACK" 'ancestor-branch-not-the-task' \
+  'the ancestor branch must never be reported as the task local copy branch'
+assert_not_contains "$BACK" 'uncommitted: 1' \
+  'nor the ancestor uncommitted count'
+assert_contains "$BACK" 'git cannot read it as a repository' \
+  'the record says the copy could not be read, rather than borrowing what is above it'
+pass 'resume does not read an ancestor repository as the task local copy'
 
 # --- resume: two tasks recording one local copy -----------------------------
 

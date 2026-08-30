@@ -23,10 +23,10 @@ Two samples below are constructed rather than observed, and each says so on the 
 
 ## The gauge reads, and an unread gauge is distinguishable from a healthy one
 
-`bin/fm-usage-wall.sh headroom` against the live `quota-axi 0.1.34`, one measurable provider and nine unmeasurable ones in a single reading:
+`bin/fm-usage-wall.sh headroom` against the live `quota-axi 0.1.34`, one measurable provider and nine unmeasurable ones in a single reading, captured 2026-08-30T05:11Z:
 
 ```
-HEADROOM: claude ok pct=97 bound=five_hour resets=2026-08-30T07:59:59.909540+00:00 runway=unknown(through_reset) confidence=early
+HEADROOM: claude ok pct=54 bound=five_hour resets=2026-08-30T08:00:00.393951+00:00 runway=2h34m confidence=established
 HEADROOM: codex unknown reason=provider-read-failed status=error detail=Codex quota unavailable
 HEADROOM: cursor unknown reason=auth-required status=auth_required detail=Cursor sign-in required - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
 HEADROOM: copilot unknown reason=auth-required status=auth_required detail=GitHub Copilot sign-in required - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
@@ -37,24 +37,33 @@ HEADROOM: agy unknown reason=no-measurable-window status=unavailable detail=Anti
 HEADROOM: alibaba unknown reason=no-measurable-window status=unavailable detail=bl_cli_unavailable
 HEADROOM: opencode-go unknown reason=auth-required status=auth_required detail=opencode_go_credential_unavailable - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read
 HEADROOM_SUMMARY: verdict=partial measured=1 tight=0 wall=0 unknown=9 source=quota-axi/0.1.34
+HEADROOM_ROWS: emitted=14 read=11 declined=3 reasons=not-account-scope=2,superseded-by-reported-row=1
 HEADROOM_NOTE: an unknown provider is UNMEASURED, not healthy - treat its headroom as unproven when deciding what to dispatch.
 HEADROOM_NEXT: <repo>/bin/fm-usage-wall.sh resume regenerates the resume record for the work now in flight.
 ```
 
 That reading is taken from this report, which is what the floor-compliant gauge actually emits.
-Note `exhaustion[0]:` - an empty table, rendered with a zero count and no field list at all - which is why the runway above reads `unknown(through_reset)` rather than zero, and note that `claude` is present twice, once at account scope and once at `model:fable`:
+Note that `claude` is present twice, once at account scope and once at `model:fable`, in every one of the three tables:
 
 ```
 $ quota-axi
 quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
-  claude,all_models,97,2.1358,through_reset,early,five_hour,"2026-08-30T08:00:00.092088+00:00"
-  claude,"model:fable",97,unknown,through_reset,early,five_hour,"2026-08-30T08:00:00.092088+00:00"
-exhaustion[0]:
+  claude,all_models,54,1.8637,projected_exhaustion,established,five_hour,"2026-08-30T07:59:59.782541+00:00"
+  claude,"model:fable",54,unknown,projected_exhaustion,established,five_hour,"2026-08-30T07:59:59.782541+00:00"
+exhaustion[2]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:
+  claude,all_models,9256,"2026-08-30T07:45:40.345Z",five_hour
+  claude,"model:fable",9256,"2026-08-30T07:45:40.345Z",five_hour
 attention[10]{provider,scope,kind,detail,remedy}:
   claude,"model:fable",unmeasurable,"model:fable blocks spendPriority",none
   codex,all,error,Codex quota unavailable,none
   ...
 ```
+
+The `HEADROOM_ROWS` line is checkable against that report by hand, which is the point of publishing it: 2 quota rows plus 2 exhaustion rows plus 10 attention rows is 14 emitted; the account-scoped quota row, the exhaustion row its runway came from, and nine attention rows is 11 read; the three `model:fable` rows are the 3 declined - two dropped by the scope filter because a model-scoped row is not the dispatch gauge, one suppressed because `claude` was already reported at account scope.
+Nothing the gauge emitted is unaccounted for, and the reading says so rather than leaving it to be inferred.
+
+An earlier capture on the same host and build, 2026-08-30T03:46Z, carried `exhaustion[0]:` - an empty table, rendered with a zero count and no field list at all - and the same reading then printed `runway=unknown(through_reset)` rather than zero.
+That is the sparseness the layout guarantees and the reason a missing exhaustion row is an unknown runway rather than a zero one; the capture above simply happens to have runway rows.
 
 The same command with no `quota-axi` on `PATH`.
 The verdict is `unknown` with its reason, never `ok`:
@@ -108,7 +117,7 @@ The distinction holds in both directions: the unmodified live report on the same
 
 ## An unmeasured provider never reads as healthy
 
-Nine ways a reading can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
+Eleven ways a reading can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
 
 A percentage that is not a number.
 `toon_block` resolves fields by name and yields `-` for one the header never declared, so an upstream rename of `effectivePercentRemaining` leaves every row unreadable at once.
@@ -228,6 +237,45 @@ What it is actually missing is a quota row, which is a different absence from ha
 ```
 HEADROOM: cursor unknown reason=no-quota-row status=not_reported scope=all_models detail=named only in exhaustion, with no account-level quota row and nothing in attention
 ```
+
+A row dropped by a filter whose provider was reported by another row.
+The accounting above sorted rows into "named, therefore swept by name" and "unattributable, therefore counted" - but a provider's NAME reaching the output does not mean THAT ROW did.
+A model-scoped quota row beside an account-scoped one for the same provider was dropped by the scope filter, skipped by the sweep because the provider was already present, and counted by nothing:
+
+```
+HEADROOM: claude ok pct=84 bound=five_hour resets=2026-08-27T02:19:59Z runway=unknown(-) confidence=-
+HEADROOM_SUMMARY: verdict=ok measured=1 tight=0 wall=0 unknown=0 source=quota-axi/0.1.40
+```
+
+That was the sixth appearance of one class, and the fifth formulation phrased around names.
+The accounting is now an identity over ROWS - every row is READ or DECLINED with a reason, `emitted = read + declined` - published on every reading, so a filter cannot drop a row without saying what it dropped and a filter added later is covered by construction.
+Over a fixture mixing account-scoped, model-scoped and unattributable rows across all three tables:
+
+```
+HEADROOM: claude ok pct=84 bound=five_hour resets=2026-08-27T02:19:59Z runway=4h0m confidence=early
+HEADROOM_SUMMARY: verdict=partial measured=2 tight=0 wall=0 unknown=2 source=quota-axi/0.1.40
+HEADROOM_ROWS: emitted=8 read=4 declined=4 reasons=no-provider=2,not-account-scope=1,superseded-by-reported-row=1
+```
+
+`tests/fm-usage-wall.test.sh` asserts the arithmetic rather than the shapes - `read + declined == emitted`, in text and in `--json` - so a filter that starts discarding rows breaks the sum instead of slipping past a shape-specific case.
+
+A percentage borrowing the window that bounds the runway.
+The singular-window fallback fired on `toon_block`'s absent marker, which means three different things: the header never declared `limitedBy`, the row is short, or the cell is declared and EMPTY on that row.
+Borrowing is sound only for the first.
+On a report whose header declares `limitedBy` and whose sibling row carries `seven_day`, the gauge provably publishes the field, yet the row with an empty cell was labelled with the runway's five-hour window while keeping its own row's seven-day reset - a number under a window it did not come from, beside a reset from another - and the `runway_bound=` disclosure was suppressed because the two windows had been made equal:
+
+```
+HEADROOM: claude tight pct=34 bound=five_hour resets=2026-09-02T08:00:00Z runway=35m confidence=early
+```
+
+The layout question is now asked of the block HEADER once, through `toon_block_declares`, instead of inferred per row from a marker that cannot answer it.
+An empty cell on a declared field is missing data for that row, so the window is reported absent and the runway's is named separately:
+
+```
+HEADROOM: claude tight pct=34 bound=- resets=2026-09-02T08:00:00Z runway=35m runway_bound=five_hour runway_resets=unknown confidence=early
+```
+
+A gauge that declares no `limitedBy` at all still binds the percentage to the single window there is, which is the reading the fallback exists for; narrowing it did not remove it, and that is pinned too.
 
 ## Each number carries the window that bounds it
 
@@ -393,7 +441,10 @@ The record now reports nothing about the copy's contents as measured, and says w
 - pipeline: not read (the local copy is not a readable repository)
 ```
 
-`tests/fm-usage-wall.test.sh` drives this by generating a record against a task whose local copy has had its git metadata removed and the directory left in place.
+The gate asks whether THIS directory is the repository root, not whether it sits inside one.
+`git rev-parse --git-dir` walks upwards, so a gate built on it passes whenever any ancestor is a checkout - a worktree path recorded under another checkout, or any copy under a `$HOME` that is itself a dotfiles repo - and the record then prints that ancestor's branch, head and dirty count as measured facts about the task's copy: the same clean-measured-and-false reading, now about the wrong repository.
+
+`tests/fm-usage-wall.test.sh` drives both shapes: a copy with its git metadata removed and the directory left in place, and a plain directory NESTED INSIDE a repository whose branch and dirty file are distinctive, asserting neither is borrowed.
 
 ## The record tracks state changing under it
 
