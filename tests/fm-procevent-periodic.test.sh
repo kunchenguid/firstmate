@@ -218,6 +218,46 @@ assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-trust 1" \
   "a refusal wakes firstmate instead of failing silently"
 pass "a mutated check executable is refused without running and still wakes firstmate"
 
+# --- a trust refusal whose schedule write also fails is its own outcome ------
+# The executable-mismatch refusal writes a new due time before it emits, the
+# same as a normal run does. If that write itself fails, the refusal must say
+# so distinctly rather than silently keeping the stale (now past-due)
+# schedule under a plain trust-mismatch message, because a past-due schedule
+# lets the watcher's next reconcile repeat the refusal immediately.
+H="$TMP_ROOT/h-trustduewrite"; new_home "$H"
+MUT2="$TMP_ROOT/mutable2.sh"
+MUT2LOG="$TMP_ROOT/mutable2-runs"
+cp "$CLEAN" "$MUT2"; chmod +x "$MUT2"
+per "$H" arm trustduewrite --interval 3600 --timeout 60 -- "$MUT2" "$MUT2LOG" >/dev/null
+echo 'echo tampered' >> "$MUT2"
+real_mv=$(command -v mv) || fail "could not locate mv for the trust+schedule-write fixture"
+FAKEBIN2="$TMP_ROOT/trustduewrite-fakebin"; mkdir -p "$FAKEBIN2"
+cat > "$FAKEBIN2/mv" <<SH
+#!/usr/bin/env bash
+last=\${!#}
+if [ "\$last" = "$H/state/periodic/periodic-trustduewrite.due" ]; then
+  exit 1
+fi
+exec "$real_mv" "\$@"
+SH
+chmod +x "$FAKEBIN2/mv"
+before_due=$(cat "$H/state/periodic/periodic-trustduewrite.due")
+PATH="$FAKEBIN2:$PATH" pe "$H" start periodic-trustduewrite >/dev/null
+wait_for_result "$H" periodic-trustduewrite 1 || fail "the trust+schedule-write refusal captured no result"
+RESULT=$(result_path "$H" periodic-trustduewrite 1)
+assert_grep 'status: rejected' "$RESULT" "a changed executable is still refused"
+assert_grep 'next-due time could not be recorded' "$RESULT" \
+  "the refusal names the failed schedule write, not just the trust mismatch"
+assert_contains "$(count_lines "$MUT2LOG")" 0 "the mutated check never ran"
+after_due=$(cat "$H/state/periodic/periodic-trustduewrite.due")
+assert_contains "$after_due" "$before_due" "a failed schedule write leaves the durable due file untouched"
+if per "$H" silent "$RESULT"; then
+  fail "a refusal must never declare silence"
+fi
+assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-trustduewrite 1" \
+  "the combined refusal still wakes firstmate instead of failing silently"
+pass "a trust refusal whose schedule write also fails announces the write failure distinctly"
+
 # --- a mutated spec is refused without running anything ----------------------
 H="$TMP_ROOT/h-spec"; new_home "$H"
 SPECLOG="$TMP_ROOT/spec-runs"
@@ -317,10 +357,13 @@ out=$(per "$H" arm rearm --interval 3600 --timeout 60 -- "$CLEAN")
 assert_contains "$out" "armed: periodic-rearm" "handling the stale result unblocks re-arming"
 pass "retire leaves an unhandled result behind and blocks re-arming until it is handled"
 
-# --- a check that naturally exits 124 is a report, not a timeout ------------
-# fm_run_timed reproduces GNU timeout's convention where 124 also means "the
-# bound was hit". A check that exits 124 on its own, fast, must still land as
-# a report so its nonzero exit is not misclassified as the runner stopping it.
+# --- a check that naturally exits 124 is still classified as a timeout ------
+# fm_run_timed reproduces GNU timeout's convention where 124 means "the bound
+# was hit". Wall-clock elapsed time cannot reliably tell a real timeout-kill
+# apart from a check that happens to exit 124 on its own near the deadline, so
+# 124 always means timeout - the same constraint any script run under the
+# `timeout` command already has, and the same convention bin/fm-procevent-when.sh
+# already uses.
 H="$TMP_ROOT/h-nat124"; new_home "$H"
 NAT124="$TMP_ROOT/nat124.sh"
 cat > "$NAT124" <<'SH'
@@ -334,16 +377,15 @@ per "$H" arm nat124 --interval 3600 --timeout 60 -- "$NAT124" >/dev/null
 pe "$H" start periodic-nat124 >/dev/null
 wait_for_result "$H" periodic-nat124 1 || fail "the natural-124 run captured no result"
 RESULT=$(result_path "$H" periodic-nat124 1)
-assert_grep 'status: report' "$RESULT" "a fast natural exit 124 is a report, not a timeout"
-assert_grep 'check_exit: 124' "$RESULT" "the outcome records the check's real exit code"
-assert_grep 'DRIFT: exiting with the timeout-shaped code' "$RESULT" "the report keeps its evidence"
-assert_contains "$(per "$H" classify "$RESULT")" report "classify reads the outcome as a report"
+assert_grep 'status: timeout' "$RESULT" "an exit 124 is always classified as a timeout"
+assert_grep 'DRIFT: exiting with the timeout-shaped code' "$RESULT" "the timeout outcome keeps its evidence"
+assert_contains "$(per "$H" classify "$RESULT")" timeout "classify reads the outcome as a timeout"
 if per "$H" silent "$RESULT"; then
-  fail "a report outcome must never declare silence"
+  fail "a timeout outcome must never declare silence"
 fi
 assert_contains "$(wake_payloads "$H")" "procevent periodic periodic-nat124 1" \
-  "a natural exit 124 wakes firstmate the same as any other report"
-pass "a check that exits 124 on its own is reported, not mistaken for a timeout"
+  "a natural exit 124 still wakes firstmate the same as any other timeout"
+pass "a check that exits 124 on its own is classified as a timeout, not preserved as a report"
 
 # --- a failed schedule write is announced, not swallowed --------------------
 # write_due renames its temp file onto <sid>.due with `mv -f`. A PATH-shimmed

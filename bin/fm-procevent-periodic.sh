@@ -69,6 +69,9 @@
 # A check that has no meaningful exit status can still say "report this" by
 # exiting 1 deliberately; a check that cannot decide should exit nonzero, since
 # an uncertain run must reach a human rather than be silently dropped.
+# Exit 124 is reserved for "the timeout bound was hit", matching GNU timeout's
+# convention; a check must not use 124 itself to mean "report this", the same
+# constraint any script run under `timeout` already has.
 #
 # Outcome document (the captured result named by the wake):
 #   periodic: <source-id>
@@ -374,7 +377,7 @@ sleep_until_due() {  # <source-id>
 }
 
 cmd_run() {
-  local sid=${1-} out rc ran_at next_due elapsed
+  local sid=${1-} out rc ran_at next_due
   fm_procevent_source_id_valid "$sid" || die "source id must be path-safe: $sid"
 
   if ! positive_int "$OUTPUT_TAIL_BYTES"; then
@@ -413,7 +416,12 @@ cmd_run() {
   if [ "$current_hash" != "$SPEC_CHECK_SHA256" ]; then
     ran_at=$(date +%s)
     next_due=$(( ran_at + SPEC_INTERVAL ))
-    write_due "$sid" "$next_due" || true
+    if ! write_due "$sid" "$next_due"; then
+      emit_doc "$sid" rejected \
+        "refused without running the check: its bytes do not match the registered trust binding, and the next-due time could not be recorded; re-arm to restore the cadence" \
+        '' "$ran_at" "$next_due" ''
+      exit 0
+    fi
     emit_doc "$sid" rejected \
       "refused without running the check: its bytes do not match the registered trust binding" '' "$ran_at" "$next_due" ''
     exit 0
@@ -428,7 +436,6 @@ cmd_run() {
   ran_at=$(date +%s)
   fm_run_timed "$SPEC_TIMEOUT" "${CHECK_ARGV[@]}" 2>&1 | tail -c "$OUTPUT_TAIL_BYTES" > "$out"
   rc=${PIPESTATUS[0]}
-  elapsed=$(( $(date +%s) - ran_at ))
 
   # The next due time is recorded BEFORE the outcome is emitted, so the cadence
   # advances even if this process dies between here and capture. Without that
@@ -446,18 +453,16 @@ cmd_run() {
   fi
 
   case "$rc" in
-    # fm_run_timed reproduces GNU timeout's convention where 124 is overloaded:
-    # it means "the bound was hit" UNLESS the check's own exit is naturally
-    # 124, which a real timeout-kill can never return in under SPEC_TIMEOUT
-    # seconds (the mechanism waits out the full bound before killing). Elapsed
-    # wall time is what tells the two apart; the exit code alone cannot.
+    # fm_run_timed reproduces GNU timeout's convention: 124 always means the
+    # bound was hit, exactly as bin/fm-procevent-when.sh's own bounded_run
+    # already treats it. Wall-clock elapsed time cannot reliably disambiguate
+    # a real timeout-kill from a check that happens to exit 124 on its own
+    # near the deadline (integer-second measurement loses the sub-second
+    # margin), so a check must not use exit 124 to signal "report" - the same
+    # constraint any script run under `timeout` already has.
     124)
-      if [ "$elapsed" -ge "$SPEC_TIMEOUT" ]; then
-        emit_doc "$sid" timeout \
-          "the check did not finish within ${SPEC_TIMEOUT}s and was stopped" '' "$ran_at" "$next_due" "$out"
-      else
-        emit_doc "$sid" report "the check exited $rc and reported something to read" "$rc" "$ran_at" "$next_due" "$out"
-      fi
+      emit_doc "$sid" timeout \
+        "the check did not finish within ${SPEC_TIMEOUT}s and was stopped" '' "$ran_at" "$next_due" "$out"
       ;;
     0)
       emit_doc "$sid" clean "the check exited 0" "$rc" "$ran_at" "$next_due" "$out"
