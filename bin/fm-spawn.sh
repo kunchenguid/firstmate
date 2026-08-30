@@ -2470,7 +2470,7 @@ claude_trust_dialog_clear() {
   local detect_max=${FM_CLAUDE_TRUST_POLLS:-40}
   local clear_max=${FM_CLAUDE_TRUST_CLEAR_POLLS:-$detect_max}
   local interval=${FM_CLAUDE_TRUST_POLL_INTERVAL:-0.5}
-  local accept_attempted=0
+  local accept_attempted=0 navigation_attempted=0
   while [ "$detect_i" -lt "$detect_max" ]; do
     if pane=$(claude_capture_visible) && [ -n "$pane" ]; then
       state=$(fm_composer_claude_trust_dialog_state "$pane")
@@ -2496,10 +2496,10 @@ claude_trust_dialog_clear() {
     verification_due=0
     if pane=$(claude_capture_visible) && [ -n "$pane" ]; then
       state=$(fm_composer_claude_trust_dialog_state "$pane")
-      case "$accept_attempted:$state" in
-        1:trust-focused|1:trust-unfocused)
+      case "$accept_attempted:$navigation_attempted:$state" in
+        1:*:trust-focused|1:*:trust-unfocused|0:1:trust-unfocused)
           ;;
-        *:trust-focused)
+        0:*:trust-focused)
           [ "$clear_i" -lt "$clear_max" ] || return 1
           if [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ]; then
             claude_spawn_trust_authority_required
@@ -2509,7 +2509,7 @@ claude_trust_dialog_clear() {
           accept_attempted=1
           verification_due=1
           ;;
-        *:trust-unfocused)
+        0:0:trust-unfocused)
           [ "$clear_i" -lt "$clear_max" ] || return 1
           if [ "$CLAUDE_TRUST_ACCEPT" -ne 1 ]; then
             claude_spawn_trust_authority_required
@@ -2520,9 +2520,10 @@ claude_trust_dialog_clear() {
             return 0
           fi
           spawn_send_key "$T" Down || return 1
+          navigation_attempted=1
           verification_due=1
           ;;
-        *:absent)
+        *:*:absent)
           [ "$accept_attempted" = 1 ] || return 4
           busy=$(fm_rendered_busy_footer_state "$pane" claude)
           [ "$busy" != busy ] || return 0

@@ -51,7 +51,7 @@ esac
 state=$(cat "$FM_FAKE_CLAUDE_STATE" 2>/dev/null || true)
 fake_screen() {
   case "$state" in
-    trust-no)
+    trust-no|trust-no-stale)
       printf ' Accessing workspace:\n\n %s\n\n Quick safety check: is this yours?\n\n \xe2\x9d\xaf No, exit\n   Yes, I trust this folder\n\n Enter to confirm . Esc to cancel\n' "${FM_FAKE_PANE_PATH:-}"
       ;;
     trust-yes|trust-yes-stale)
@@ -109,14 +109,21 @@ case "${1:-}" in
     printf '%s\n' "$*" >> "$FM_FAKE_KEY_LOG"
     case " $* " in
       *' Down '*)
-        if [ "$state" = trust-no ]; then
-          case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
-            busy-after-down) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
-            disappears-after-down) printf 'gone-stuck\n' > "$FM_FAKE_CLAUDE_STATE" ;;
-            stuck-dialog) ;;
-            *) printf 'trust-yes\n' > "$FM_FAKE_CLAUDE_STATE" ;;
-          esac
-        fi
+        case "$state" in
+          trust-no)
+            case "${FM_FAKE_CLAUDE_MODE:-trusted}" in
+              busy-after-down) printf 'processing\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              disappears-after-down) printf 'gone-stuck\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              slow-navigation-repaint) printf 'trust-no-stale\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+              stuck-dialog) ;;
+              *) printf 'trust-yes\n' > "$FM_FAKE_CLAUDE_STATE" ;;
+            esac
+            ;;
+          trust-yes)
+            [ "${FM_FAKE_CLAUDE_MODE:-trusted}" != slow-navigation-repaint ] \
+              || printf 'trust-no\n' > "$FM_FAKE_CLAUDE_STATE"
+            ;;
+        esac
         ;;
       *' Enter '*)
         case "$state" in
@@ -162,6 +169,11 @@ case "${1:-}" in
     esac
     if [ "${FM_FAKE_CLAUDE_MODE:-trusted}" = stale-dialog ] && [[ " $* " = *' -S '* ]]; then
       printf ' Accessing workspace:\n\n /old/repo\n\n \xe2\x9d\xaf No, exit\n   Yes, I trust this folder\n\n Enter to confirm . Esc to cancel\nThinking... (esc to interrupt)\n'
+      exit 0
+    fi
+    if [ "$state" = trust-no-stale ]; then
+      fake_screen
+      printf 'trust-yes\n' > "$FM_FAKE_CLAUDE_STATE"
       exit 0
     fi
     if [ "$state" = trust-yes-stale ]; then
@@ -402,6 +414,23 @@ test_claude_trust_dialog_is_navigated_never_a_blind_enter() {
   assert_grep 'claude_trust=accept' "$HOME_DIR/state/$id.meta" \
     "the project-scoped Claude trust grant was not persisted for task relaunches"
   pass "fm-spawn: claude's trust dialog is navigated to \"Yes\" before Enter, never a blind Enter"
+}
+
+test_claude_slow_navigation_repaint_never_receives_a_second_down() {
+  local id rec out rc bare_keys
+  id="claude-slow-navigation-repaint-z2a-$$"
+  rec=$(make_spawn_case slow-navigation-repaint "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_CLAUDE_MODE=slow-navigation-repaint run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a stale post-navigation frame should remain in focus-confirmation polling"
+  bare_keys=$(awk 'NF == 4 {print $4}' "$CASE_DIR/keys.log")
+  [ "$bare_keys" = "$(printf 'Enter\nDown\nEnter')" ] \
+    || fail "a stale post-navigation frame received another Down: $bare_keys"
+  [ "$(cat "$CASE_DIR/claude.state")" = processing ] \
+    || fail "the slow navigation repaint did not settle into brief processing"
+  pass "fm-spawn: post-navigation polling never sends another Down"
 }
 
 test_claude_focused_trust_dialog_accepts_without_navigation() {
@@ -665,6 +694,7 @@ test_claude_trust_authority_is_refused_for_other_harnesses
 test_claude_focused_trust_choice_still_requires_authority
 test_claude_already_trusted_spawn_never_touches_the_dialog
 test_claude_trust_dialog_is_navigated_never_a_blind_enter
+test_claude_slow_navigation_repaint_never_receives_a_second_down
 test_claude_focused_trust_dialog_accepts_without_navigation
 test_claude_slow_accept_repaint_never_receives_a_second_enter
 test_claude_stuck_dialog_fails_loudly
