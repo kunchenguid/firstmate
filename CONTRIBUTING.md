@@ -30,6 +30,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
    Push every later commit, including a CI-fix commit, with `git push no-mistakes` and complete the new gate run.
+   Never use an ordinary remote push for those commits because it cannot refresh the head-bound pipeline attestation.
    Only that successful run replaces the stale attestation with one bound to the new head.
    Never repair the attestation by editing the PR body manually.
 
