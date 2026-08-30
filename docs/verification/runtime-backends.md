@@ -178,7 +178,7 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Claude workspace trust
 
-Claude Code 2.1.251 was verified manually on 2026-08-29 through real `fm-spawn.sh` launches in isolated tmux windows and throwaway scratch git worktrees.
+Claude Code 2.1.251 was verified manually on 2026-08-29 through real Claude launches in isolated tmux windows and throwaway scratch git worktrees.
 The first worktree of a never-trusted repository rendered `Accessing workspace:` with `No, exit` focused, and a bare Enter returned the pane to its shell.
 Moving Down before Enter accepted the dialog, removed it, and let Claude process the launch brief.
 A before-and-after diff of Claude's managed trust store recorded `hasTrustDialogAccepted` under the repository checkout path and no entry under the worktree path.
