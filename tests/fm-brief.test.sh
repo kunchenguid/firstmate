@@ -212,6 +212,8 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "glab for GitLab operations" "$brief" \
+      "$id: brief did not route GitLab operations through glab"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -316,6 +318,8 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
+  assert_grep "\`glab\` for GitLab" "$home/data/$id/brief.md" \
+    "direct-PR brief did not select the repository forge CLI"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 

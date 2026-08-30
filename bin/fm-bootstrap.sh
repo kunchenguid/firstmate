@@ -58,11 +58,11 @@
 #          build below its floor reports MISSING like no-mistakes, so the operator
 #          is asked to upgrade rather than silently running an older tool.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
-#          tasks-axi and quota-axi are required bootstrap tools (same class as
-#          lavish-axi). A compatible tasks-axi default backend is silent.
-#          quota-axi is required for the agent-owned dispatch-profile array
-#          procedure in AGENTS.md section 4 and
-#          .agents/skills/quota-array-dispatch/SKILL.md.
+#          tasks-axi is a required bootstrap tool (same class as lavish-axi).
+#          A compatible tasks-axi default backend is silent. quota-axi is
+#          required only when config/crew-dispatch.json contains a profile
+#          array, because single-profile and static-harness dispatch never call
+#          the quota-aware selection procedure.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -860,12 +860,16 @@ missing_tool_diagnostic() {
   echo "MISSING: $tool (install: $(install_cmd "$tool"))"
 }
 
-# Required-tool detection follows the RESOLVED backend, not a one-size default:
-# a universal toolchain every home needs plus the backend-specific delta owned by
-# fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
-# never told tmux is missing, and only orca drops treehouse. A backend value with
-# no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+# Required-tool detection follows the RESOLVED backend and configured features,
+# not a one-size default: a universal toolchain every home needs plus the
+# backend-specific delta owned by fm_backend_required_tools (bin/fm-backend.sh).
+# So a herdr/zellij/cmux home is never told tmux is missing, and only orca drops
+# treehouse. gh-axi is required only while a registered non-local GitHub project
+# is present, quota-axi only for dispatch profile arrays, and browser tooling is
+# checked by the task that needs it rather than every home at startup. A backend
+# value with no verified dependency set is reported before the universal checks
+# continue.
+COMMON_TOOLS="node git gh no-mistakes lavish-axi tasks-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -907,6 +911,40 @@ tool_version_at_least() {  # <tool> <min-version>
   [ "$minor" -gt "$min_minor" ] && return 0
   [ "$minor" -eq "$min_minor" ] || return 1
   [ "$patch" -ge "$min_patch" ]
+}
+
+github_project_requires_gh_axi() {
+  local project name registry_line mode origin
+  [ -d "$PROJECTS" ] && [ -f "$DATA/projects.md" ] || return 1
+  for project in "$PROJECTS"/*; do
+    [ -d "$project" ] || continue
+    git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || continue
+    name=${project##*/}
+    registry_line=$(awk -v n="$name" '$1 == "-" && $2 == n { print; exit }' "$DATA/projects.md")
+    [ -n "$registry_line" ] || continue
+    mode=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-project-mode.sh" --raw "$name" 2>/dev/null) || continue
+    mode=${mode%% *}
+    [ "$mode" != local-only ] || continue
+    origin=$(git -C "$project" remote get-url origin 2>/dev/null) || continue
+    case "$origin" in
+      https://github.com/*|http://github.com/*|ssh://github.com/*|ssh://*@github.com/*|git://github.com/*|github.com:*|*@github.com:*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+crew_dispatch_requires_quota() {
+  local file
+  file="$CONFIG/crew-dispatch.json"
+  [ -f "$file" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e '
+    type == "object"
+    and ([.default?, (.rules[]?.use?)] | any(type == "array"))
+  ' "$file" >/dev/null 2>&1
 }
 
 x_mode_write_if_changed() {
@@ -1214,6 +1252,12 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
+  if github_project_requires_gh_axi; then
+    command -v gh-axi >/dev/null 2>&1 || missing_tool_diagnostic gh-axi
+  fi
+  if crew_dispatch_requires_quota; then
+    command -v quota-axi >/dev/null 2>&1 || missing_tool_diagnostic quota-axi
+  fi
   # The treehouse lease-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
@@ -1224,13 +1268,17 @@ detect_local_tools() {
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
   fi
-  if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
+  if github_project_requires_gh_axi \
+    && command -v gh-axi >/dev/null 2>&1 \
+    && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
   if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
     echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"
   fi
-  if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
+  if crew_dispatch_requires_quota \
+    && command -v quota-axi >/dev/null 2>&1 \
+    && ! fm_quota_axi_compatible; then
     echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
   fi
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then

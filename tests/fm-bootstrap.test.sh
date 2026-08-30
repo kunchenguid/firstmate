@@ -4,13 +4,13 @@
 # Bootstrap prints one block or line per actionable problem, optional verbose
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
-# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)', and
+# 'MISSING: tasks-axi (install: ...)', feature-gated quota-axi and gh-axi
+# diagnostics, 'MISSING: lavish-axi (install: ...)', and
 # 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
-# multi-ID moves, whether quota-axi is on PATH,
+# multi-ID moves, whether a dispatch profile array needs quota-axi,
 # whether the local backend config opts out of tasks-axi backlog mutations,
 # which no-mistakes version is on PATH, which gh-axi version is on PATH, and
 # which lavish-axi version is on PATH.
@@ -178,6 +178,16 @@ add_no_origin_projects() {
   done
 }
 
+add_registered_github_project() {
+  local home=$1 mode=${2:-direct-PR} repo
+  repo="$home/projects/github-project"
+  mkdir -p "$home/data" "$home/projects"
+  printf -- '- github-project [%s] - GitHub fixture (added 2026-08-28)\n' "$mode" \
+    > "$home/data/projects.md"
+  git init -q "$repo"
+  git -C "$repo" remote add origin https://github.com/example/github-project.git
+}
+
 run_bootstrap_timeout_case() {
   local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
   override=__unset__
@@ -304,7 +314,7 @@ missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (insta
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
+missing quota-axi is optional without a profile array^1^0.2.4^0^manual^empty^^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
 ROWS
@@ -351,6 +361,7 @@ test_gh_axi_min_version() {
     case_dir="$TMP_ROOT/gh-axi-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    add_registered_github_project "$case_dir/home"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -463,7 +474,10 @@ test_quota_axi_min_version() {
     case_dir="$TMP_ROOT/quota-axi-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '{"default":[{"harness":"claude"},{"harness":"codex"}]}' \
+      > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
+    add_real_jq "$fakebin"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_QUOTA_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
@@ -482,6 +496,48 @@ much older quota-axi minor reports an upgrade^0.0.9^missing
 unparseable quota-axi version reports an upgrade^quota-axi development build^missing
 ROWS
   pass "bootstrap enforces quota-axi minimum version"
+}
+
+test_feature_specific_tools_are_conditional() {
+  local case_dir fakebin out missing
+  case_dir="$TMP_ROOT/feature-tools-conditional"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh-axi" "$fakebin/chrome-devtools-axi" "$fakebin/quota-axi"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "unused forge, browser, and quota tools should be optional, got: $out"
+
+  add_registered_github_project "$case_dir/home"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
+  [ "$out" = "$missing" ] || fail "registered GitHub project should require gh-axi, got: $out"
+
+  printf '%s\n' '- github-project [local-only] - GitHub fixture (added 2026-08-28)' \
+    > "$case_dir/home/data/projects.md"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "local-only GitHub project should not require gh-axi, got: $out"
+
+  printf '%s\n' '- github-project [direct-PR] - GitHub fixture (added 2026-08-28)' \
+    > "$case_dir/home/data/projects.md"
+  printf '%s\n' '{"default":{"harness":"claude"}}' > "$case_dir/home/config/crew-dispatch.json"
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing" ] || fail "single-profile dispatch should not require quota-axi, got: $out"
+
+  printf '%s\n' '{"default":[{"harness":"claude"},{"harness":"codex"}]}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "$missing" "profile-array case lost its GitHub requirement"
+  assert_contains "$out" 'MISSING: quota-axi (install: npm install -g quota-axi)' \
+    "profile array should require quota-axi"
+  pass "bootstrap gates GitHub and quota tools on the features that use them"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -1154,6 +1210,7 @@ test_gh_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version
+test_feature_specific_tools_are_conditional
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
