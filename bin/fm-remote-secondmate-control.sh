@@ -273,10 +273,8 @@ cmd_migrate() {
   fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
     || die "could not stop the eligible pre-receipt Codex endpoint through the remote backend"
   after=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
-  case "$after" in
-    dead|missing) ;;
-    *) die "legacy Codex migration did not prove the old endpoint gone (state=$after); refusing replacement" ;;
-  esac
+  fm_backend_herdr_endpoint_confirmed_gone "$REMOTE_ENDPOINT_TARGET" \
+    || die "legacy Codex migration did not prove the old endpoint gone (state=$after); refusing replacement"
   rm -f -- "$REMOTE_ENDPOINT_META" \
     || die "legacy Codex migration proved the old endpoint gone but could not retire its endpoint record"
   printf 'migrated-legacy: retired pre-receipt Codex endpoint; launching a fresh bound replacement\n' >&2

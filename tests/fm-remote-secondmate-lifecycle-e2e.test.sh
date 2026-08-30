@@ -882,6 +882,28 @@ set -e
 assert_grep "recorded in Herdr session 'default', expected 'fm-remote'" \
   "$TMP_ROOT/spawn-legacy-codex-retry.out" \
   "ordinary legacy retry did not preserve the session guard"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-failed-migration.meta"
+printf 'leave-agentless\n' > "$HERDR_STATE.close-mode"
+launches_before_failed_migration=$(grep -c '^tab create' "$HERDR_LOG" || true)
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --migrate-legacy \
+  > "$TMP_ROOT/migrate-legacy-pane-remains.out" 2>&1
+pane_remains_rc=$?
+set -e
+[ "$pane_remains_rc" -ne 0 ] || fail "legacy migration replaced an endpoint whose pane remained"
+assert_grep 'did not prove the old endpoint gone (state=dead)' \
+  "$TMP_ROOT/migrate-legacy-pane-remains.out" \
+  "legacy migration treated an agentless pane as a removed endpoint"
+cmp -s "$TMP_ROOT/remote-ios-before-failed-migration.meta" "$remote_route_meta" \
+  || fail "failed legacy migration removed or rewrote the retained endpoint record"
+[ "$(jq --arg p "$legacy_pane" '[.tabs[] | select(.pane_id == $p)] | length' "$HERDR_STATE")" -eq 1 ] \
+  || fail "failed legacy migration did not leave the simulated endpoint pane present"
+launches_after_failed_migration=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_failed_migration" -eq "$launches_after_failed_migration" ] \
+  || fail "failed legacy migration launched a replacement before proving endpoint removal"
+rm -f "$HERDR_STATE.close-mode"
+jq --arg p "$legacy_pane" '.typed[$p] = true' "$HERDR_STATE" > "$TMP_ROOT/remote-herdr-restored.json"
+mv "$TMP_ROOT/remote-herdr-restored.json" "$HERDR_STATE"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --migrate-legacy)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "legacy migration did not return the fresh remote route"
 assert_grep "pane close $legacy_pane --session default" "$HERDR_LOG" \

@@ -111,6 +111,12 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "pane close")
+    if [ "$(cat "$STATE.close-mode" 2>/dev/null || true)" = leave-agentless ]; then
+      jq_state --arg p "${3:-}" \
+        '.typed |= with_entries(select(.key != $p))
+         | .working |= with_entries(select(.key != $p))' | save
+      exit 1
+    fi
     jq_state --arg p "${3:-}" \
       '.tabs |= [.[]|select(.pane_id != $p)]
        | .typed |= with_entries(select(.key != $p))
