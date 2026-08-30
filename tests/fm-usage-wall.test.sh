@@ -73,7 +73,7 @@ fm_git_identity
 # carrying `spendPriority`, an `exhaustion[N]` block, and a sparse `attention[N]`
 # block - so the parser is pinned against the emitted shape rather than a tidied
 # one.
-quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|unnamed-provider>
+quota_toon() {  # <healthy|tight-pct|tight-runway|exhausted|auth|no-quota|reordered|divergent|singular-only|model-scoped-only|model-scoped-orphan|model-scoped-attention|unreadable-pct|repeated-block|sparse-repeated-block|fractional-pct|threshold-fraction|unnamed-provider>
   # The FLOOR-COMPLIANT layout, as quota-axi 0.1.29 and newer emit it and as
   # verified live against 0.1.34 on this host: quota[], exhaustion[] and
   # attention[]. The pre-floor effective[]/providers[]/windows[] shape is not
@@ -200,6 +200,21 @@ bin: /fake/quota-axi
 quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
   claude,all_models,34.5,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
   cursor,all_models,0.4,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
+EOF
+      return 0
+      ;;
+    threshold-fraction)
+      # The tight threshold's own definition is AT OR BELOW
+      # FM_USAGE_WALL_TIGHT_PCT, whose default is 20. Three rows straddle it:
+      # just above, exactly at, and a fraction just above zero. Comparing the
+      # truncated integer part made the first read `tight` and would round the
+      # third towards a wall.
+      cat <<'EOF'
+bin: /fake/quota-axi
+quota[3]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,20.9,2.1514,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+  cursor,all_models,20.0,1.0,projected_exhaustion,early,seven_day,"2026-09-02T07:59:59Z"
+  codex,all_models,0.4,1.0,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
 EOF
       return 0
       ;;
@@ -609,6 +624,32 @@ assert_contains "$OUT" 'verdict=tight measured=2 tight=1 wall=0 unknown=0' \
   'both fractional rows are measurements, not unreadable ones'
 assert_not_contains "$OUT" 'unreadable-percent' 'a number must not be reported as not a number'
 pass 'headroom reads a fractional percentage as the number it is'
+
+# --- headroom: the tight threshold means what it says for a fraction ---------
+#
+# `FM_USAGE_WALL_TIGHT_PCT` is documented as the percent AT OR BELOW which a
+# reading is labelled tight, and 20.9 is not at or below 20. Comparing the
+# truncated integer part made it tight anyway - the code and its authoritative
+# description describing different rules, which is the defect class this whole
+# surface exists to remove. The threshold is validated as a whole number, so the
+# comparison is exact rather than scaled.
+CASE="$TMP_ROOT/hr-threshold"; mkdir -p "$CASE"
+fake_quota "$CASE/fakebin" threshold-fraction
+OUT=$(run_headroom "$CASE/fakebin")
+assert_contains "$OUT" 'HEADROOM: claude ok pct=20.9' \
+  'a value just above the threshold is not at or below it, so it is not tight'
+assert_contains "$OUT" 'HEADROOM: cursor tight pct=20.0' \
+  'a value exactly at the threshold is at or below it, so it is tight'
+assert_contains "$OUT" 'HEADROOM: codex tight pct=0.4' \
+  'a fraction of a percent is the tightest reading there is'
+assert_not_contains "$OUT" 'codex wall' \
+  'a provider with headroom left has not already stopped'
+assert_contains "$OUT" 'verdict=tight measured=3 tight=2 wall=0 unknown=0' \
+  'and the summary counts exactly the two readings at or below the threshold'
+# The printed percentage stays the gauge's own value, so a reader can reconcile
+# the line with the report it came from.
+assert_not_contains "$OUT" 'pct=20 ' 'the reading prints the value the gauge gave, not a rounded one'
+pass 'headroom applies the tight threshold to the whole value, not its integer part'
 
 # --- headroom: a row nobody can attribute is not a reading -------------------
 #

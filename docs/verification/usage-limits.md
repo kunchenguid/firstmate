@@ -108,7 +108,7 @@ The distinction holds in both directions: the unmodified live report on the same
 
 ## An unmeasured provider never reads as healthy
 
-Four ways a provider can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
+Five ways a provider can go unmeasured, or be misread, without the gauge noticing, all reproduced against stub reports and all now pinned in `tests/fm-usage-wall.test.sh`.
 
 A percentage that is not a number.
 `toon_block` resolves fields by name and yields `-` for one the header never declared, so an upstream rename of `effectivePercentRemaining` leaves every row unreadable at once.
@@ -168,6 +168,20 @@ HEADROOM: claude ok pct=34.5 bound=five_hour resets=2026-08-27T02:19:59Z runway=
 HEADROOM: cursor tight pct=0.4 bound=seven_day resets=2026-09-02T07:59:59Z runway=unknown(projected_exhaustion) confidence=early
 HEADROOM_SUMMARY: verdict=tight measured=2 tight=1 wall=0 unknown=0 source=quota-axi/0.1.40
 ```
+
+A fractional percentage compared by its truncated integer part.
+Accepting decimals made that truncation observable at the boundary: `FM_USAGE_WALL_TIGHT_PCT` is documented as the percent AT OR BELOW which a reading is labelled tight, and at the default of 20 a reading of `20.9` truncated to `20` and printed `HEADROOM: claude tight pct=20.9` under `verdict=tight measured=3 tight=3` - the definition and the behaviour describing different rules, which is the same coherence defect one round earlier, arriving through its own fix.
+The threshold is validated as a whole number, so the comparison is exact rather than scaled: the integer part decides, and the fractional remainder settles the boundary.
+CONSTRUCTED, not observed, for the same reason as the case above:
+
+```
+HEADROOM: claude ok pct=20.9 bound=five_hour resets=2026-08-27T02:19:59Z runway=unknown(projected_exhaustion) confidence=early
+HEADROOM: cursor tight pct=20.0 bound=seven_day resets=2026-09-02T07:59:59Z runway=unknown(projected_exhaustion) confidence=early
+HEADROOM: codex tight pct=0.4 bound=five_hour resets=2026-08-27T02:19:59Z runway=unknown(projected_exhaustion) confidence=early
+HEADROOM_SUMMARY: verdict=tight measured=3 tight=2 wall=0 unknown=0 source=quota-axi/0.1.40
+```
+
+Each line prints the value the gauge gave rather than a rounded one, so a reader can reconcile the reading with the report it came from.
 
 ## Each number carries the window that bounds it
 

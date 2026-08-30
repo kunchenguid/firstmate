@@ -62,6 +62,9 @@
 # present account-scoped `quota` row that names its provider and whose
 # `effectivePercentRemaining` is a number - a decimal included, because a
 # fraction is a number and refusing one would blank a gauge that was readable.
+# A decimal is printed as the gauge gave it and compared as the value it is, so
+# the thresholds below mean what they say for a fraction as well: `wall` needs
+# the value to BE zero, and `tight` needs it at or below FM_USAGE_WALL_TIGHT_PCT.
 # Every other outcome - quota-axi absent, the call timing out, neither table
 # present, the percentage unreadable, the provider unnamed, the scope
 # unresolved, a provider needing authentication - prints `unknown` with the
@@ -567,7 +570,7 @@ cmd_headroom() {
       all_models|unresolved) ;;
       *) continue ;;
     esac
-    local verdict detail hint='' runway_s runway_win pct_int pct_digits
+    local verdict detail hint='' runway_s runway_win pct_int pct_frac pct_exact
     # Sparse by design: a provider with no exhaustion row has an UNKNOWN runway,
     # never a zero one, so the lookup misses rather than defaulting.
     runway_s=$(printf '%s\n' "$exhaustion" | awk -F'\t' -v p="$provider" -v sc="$scope" '$1 == p && $2 == sc { print $3; exit }')
@@ -587,11 +590,19 @@ cmd_headroom() {
     # that clears the floor - the same false-unmeasurable this command exists to
     # remove, arriving from the opposite direction and invisible to the
     # below-floor refusal because the build is supported. So a decimal is
-    # accepted and reported verbatim; only the comparisons take an integer.
-    pct_int=''
+    # accepted, reported verbatim, and compared as the value it is: the integer
+    # part and the fractional digits are kept apart, and the thresholds below
+    # read both. Rounding either way would make the line and the label disagree
+    # about the same number.
+    pct_int=''; pct_frac=''
     case "$pct" in
       ''|*[!0-9.]*|*.*.*|.) ;;
-      *.*) case "${pct%%.*}${pct#*.}" in ''|*[!0-9]*) ;; *) pct_int=${pct%%.*}; [ -n "$pct_int" ] || pct_int=0 ;; esac ;;
+      *.*)
+        case "${pct%%.*}${pct#*.}" in
+          ''|*[!0-9]*) ;;
+          *) pct_int=${pct%%.*}; [ -n "$pct_int" ] || pct_int=0; pct_frac=${pct#*.} ;;
+        esac
+        ;;
       *) pct_int=$pct ;;
     esac
     if [ -z "$pct_int" ]; then
@@ -600,13 +611,21 @@ cmd_headroom() {
       continue
     fi
     measured=$((measured + 1))
-    # `wall` is the claim that this provider has ALREADY stopped, so it is read
-    # from the value being zero rather than from the truncated integer: 0.4%
-    # remaining is the tightest possible reading and still not a stopped one.
-    pct_digits=${pct//./}
-    if [ -z "${pct_digits//0/}" ]; then
+    # `pct_exact` is 1 when the value has no fractional remainder, which is what
+    # separates a boundary from a value just past it. Both thresholds are read
+    # from the whole value, not from its integer part: `wall` is the claim that
+    # this provider has ALREADY stopped, so 0.4% remaining is the tightest
+    # possible reading and still not a stopped one, and `tight` is defined as
+    # AT OR BELOW FM_USAGE_WALL_TIGHT_PCT, so 20.9 is not tight at a threshold
+    # of 20 while 20.0 is. FM_USAGE_WALL_TIGHT_PCT is validated as a whole
+    # number above, so comparing the integer part and then the remainder is the
+    # exact comparison rather than an approximation of one.
+    pct_exact=0
+    [ -z "${pct_frac//0/}" ] && pct_exact=1
+    if [ "$pct_int" -eq 0 ] && [ "$pct_exact" -eq 1 ]; then
       verdict=wall; wall=$((wall + 1))
-    elif [ "$pct_int" -le "$TIGHT_PCT" ]; then
+    elif [ "$pct_int" -lt "$TIGHT_PCT" ] ||
+      { [ "$pct_int" -eq "$TIGHT_PCT" ] && [ "$pct_exact" -eq 1 ]; }; then
       verdict=tight; tight=$((tight + 1))
     elif [ "$runway_s" != '-' ] && [ -z "${runway_s//[0-9]/}" ] && [ "$runway_s" -le "$TIGHT_RUNWAY" ]; then
       verdict=tight; tight=$((tight + 1))
