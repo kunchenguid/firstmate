@@ -34,8 +34,8 @@
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      a ci-step log-tail check distinguishes a passive wait, active remediation,
+#      and checks green, so none is silently reported as generic validation.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -516,9 +516,10 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATUS=""
   RUN_IS_GATE_PARKED=0
   if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
+    # No step/gate detail is available from the plain runs list, so an active
+    # row is unknown rather than presumed working or parked. A crew genuinely
+    # parked at a gate still gets full detail once `axi status` reports its own
+    # branch again (e.g.
     # once its own step is the most-recently-touched one), and its own
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced by each supervisor's span classification (fm-classify-lib.sh's

@@ -51,11 +51,9 @@ make_repo_on_branch() {  # <dir> <branch>
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
-# command surface the helper uses: `axi status`, `axi status --run <id>` (the
-# `axi` surface - no runs-listing subcommand exists under it, verified against
-# the real CLI), and the actual top-level run-listing command, `no-mistakes
-# runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim.
+# command surface the helper uses: the bare `axi` home view, `axi status`,
+# `axi status --run <id>`, and the top-level `no-mistakes runs --limit N`
+# listing, which is plain text with no run ID or quoting.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -721,16 +719,10 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-# (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
-# routine case once more than one crew validates the same underlying repo
-# concurrently - they share ONE no-mistakes repo registration), so the helper
-# falls back to the real top-level `no-mistakes runs` listing to learn whether
-# THIS branch has an active run of its own. Regression coverage for the
-# 2026-07-02 herdr incident: the old fallback shelled out to `no-mistakes axi`
-# (bare) expecting a `runs[N]{...}:` TOON table that the real CLI never emits
-# (verified against the installed v1.32.2 - the `axi` surface has no
-# runs-listing subcommand at all), so attribution silently failed every time
-# the repo-wide answer was not this crew's own branch.
+# (e) Cross-branch attribution first resolves this branch's run ID from AXI
+# home's capped structured table. If that table omits the branch, the top-level
+# `no-mistakes runs` fallback can prove a run exists but cannot identify its
+# exact phase, so a coarse active row reports unknown.
 test_cross_branch_coarse_running_phase_is_unknown() {
   reset_fakes
   local d short; d=$(new_case crossbranch)
