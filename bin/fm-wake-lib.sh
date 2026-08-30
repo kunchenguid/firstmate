@@ -9,6 +9,19 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+
+fm_wake_queue_sequences_unique() {
+  local queue=${1:-}
+  [ -n "$queue" ] || return 1
+  [ -e "$queue" ] || return 0
+  awk -F '\t' '
+    NF == 5 && $2 ~ /^[0-9]+$/ {
+      if (++seen[$2] > 1) duplicate=1
+    }
+    END { exit duplicate ? 1 : 0 }
+  ' "$queue"
+}
+
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.

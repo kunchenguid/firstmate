@@ -393,6 +393,10 @@ trap 'exit 143' TERM
 
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
+fm_wake_queue_sequences_unique "$FM_WAKE_QUEUE" || {
+  echo "wake drain: duplicate durable sequence numbers; refusing to consume or acknowledge" >&2
+  exit 1
+}
 reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 

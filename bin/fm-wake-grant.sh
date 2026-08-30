@@ -75,6 +75,10 @@ case "${1:-}" in
     rows_valid "$TMP" || exit 2
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
+    fm_wake_queue_sequences_unique "$FM_WAKE_QUEUE" || {
+      echo "wake grant: duplicate durable sequence numbers; refusing branch ownership" >&2
+      exit 1
+    }
     owner_matches '' "$generation" || exit 1
     replace=1
     if [ -e "$BRANCH_ROWS" ] || [ -L "$BRANCH_ROWS" ]; then

@@ -569,7 +569,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot }; })()`);
 const { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot } = globalThis.__t;
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
 
@@ -1719,7 +1719,7 @@ test_unpinned_branch_follows_main_model_changes_live() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, home }; })()`);
 const { fire, dispatch, settle, makeCtx, registryModels, home } = globalThis.__t;
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 registryModels.push(
   { provider: "anthropic", id: "main-model" },
@@ -2774,7 +2774,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const { activateEligibleRowsOwner, scopeForUnreadWake, writeEligibleRowsSnapshot, releaseEligibleRowsSnapshot, BRANCH_ELIGIBLE_ROWS_FILE } =
   await import(pathToFileURL(process.env.LIB).href);
@@ -2808,6 +2808,24 @@ writeFileSync(
 const truncated = scopeForUnreadWake(state, false);
 if (!truncated.corrupted || truncated.eligible || truncated.eligibleSeqs.length !== 0) {
   throw new Error(`a four-field queue row was not classified as corruption: ${JSON.stringify(truncated)}`);
+}
+
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t7\tcheck\tx-inbox\tcheck: main-owned row",
+    "1\t7\tsignal\ttask-a.status\tsignal: branch-owned row",
+  ].join("\n"),
+);
+const duplicate = scopeForUnreadWake(state, false);
+if (!duplicate.corrupted || duplicate.eligible || duplicate.eligibleSeqs.length !== 0) {
+  throw new Error(`duplicate sequence numbers were offered to the branch: ${JSON.stringify(duplicate)}`);
+}
+if (writeEligibleRowsSnapshot(state, ["7", "7"], process.env.GRANT, "fixture") !== "error") {
+  throw new Error("duplicate sequence numbers were accepted by the snapshot boundary");
+}
+if (existsSync(`${state}/${BRANCH_ELIGIBLE_ROWS_FILE}`)) {
+  throw new Error("a rejected duplicate snapshot changed the branch claim");
 }
 
 // A mixed queue: the main-only row (seq 1) never vetoes the task-local rows

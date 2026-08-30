@@ -10,7 +10,11 @@ fm_ensure_pyyaml || fail "python3 PyYAML is required to parse workflow policy"
 test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback() {
   if ! python3 - "$ROOT" <<'PY'
 import pathlib
+import os
+import re
+import subprocess
 import sys
+import tempfile
 
 try:
     import yaml
@@ -143,17 +147,51 @@ portable_commands = {
     )
     for job_id in ("tests-portable-parallel-1", "tests-portable-parallel-2")
 }
-normalize_command = lambda command: " ".join(command.split())
-assert normalize_command(portable_commands["tests-portable-parallel-1"]) == (
-    'set -eu mkdir -p "$RUNNER_TEMP/fm-test" '
-    'bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1 '
-    '\\ --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"'
-)
-assert normalize_command(portable_commands["tests-portable-parallel-2"]) == (
-    'set -eu mkdir -p "$RUNNER_TEMP/fm-test" '
-    'bin/fm-test-run.sh --lane portable-parallel-2 '
-    '\\ --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"'
-)
+
+def execute_portable_command(job_id, expected_lane, expected_index, expected_jobs):
+    with tempfile.TemporaryDirectory(prefix="fm-water7-command-") as directory:
+        root = pathlib.Path(directory)
+        runner = root / "bin/fm-test-run.sh"
+        runner.parent.mkdir()
+        args_file = root / "runner-args"
+        runner.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "printf '%s\\0' \"$@\" > \"$FM_WATER7_ARGS\"\n",
+            encoding="utf-8",
+        )
+        runner.chmod(0o755)
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        env = os.environ.copy()
+        env.update({"RUNNER_TEMP": str(runner_temp), "FM_WATER7_ARGS": str(args_file)})
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", portable_commands[job_id]],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (job_id, result.stdout, result.stderr)
+        args = args_file.read_bytes().split(b"\0")[:-1]
+        args = [arg.decode() for arg in args]
+        expected_json = runner_temp / "fm-test" / f"fm-test-timing-{expected_lane}.json"
+        expected_args = ["--lane", expected_lane, "--json", str(expected_json)]
+        if expected_jobs != 1:
+            expected_args[0:0] = ["--jobs", str(expected_jobs)]
+        assert args == expected_args, (job_id, args)
+        assert expected_json.parent.is_dir(), (job_id, expected_json)
+        match = re.fullmatch(r"portable-parallel-(\d+)", args[args.index("--lane") + 1])
+        assert match and int(match.group(1)) == expected_index, (job_id, args)
+        return expected_lane
+
+
+executed_lanes = [
+    execute_portable_command("tests-portable-parallel-1", "portable-parallel-1", 1, 2),
+    execute_portable_command("tests-portable-parallel-2", "portable-parallel-2", 2, 1),
+]
+assert sorted(executed_lanes) == ["portable-parallel-1", "portable-parallel-2"]
+assert [ci["jobs"][job_id]["timeout-minutes"] for job_id in portable_commands] == [15, 15]
 
 required_tool_step = {
     "name": "Install required test tools",
