@@ -123,6 +123,15 @@ print_route() { # <id>
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
+remote_endpoint_launch_complete() {
+  local harness spawn_gen complete_gen
+  harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  [ "$harness" = codex ] || return 0
+  spawn_gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" spawn_gen)
+  complete_gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" launch_complete_spawn_gen)
+  [ -n "$spawn_gen" ] && [ "$complete_gen" = "$spawn_gen" ]
+}
+
 cmd_route() {
   local id=$1 meta
   validate_id "$id"
@@ -156,6 +165,8 @@ cmd_launch() {
     current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
+        remote_endpoint_launch_complete \
+          || die "remote Codex endpoint is alive without a matching launch-complete receipt; refusing reuse"
         print_route "$id"
         return 0
         ;;
@@ -179,6 +190,9 @@ cmd_launch() {
     die "remote host-local secondmate launch failed"
   fi
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
+  remote_endpoint_require "$id"
+  remote_endpoint_launch_complete \
+    || die "remote Codex launch returned without a matching launch-complete receipt"
   herdr_session=$(fm_meta_get "$meta" herdr_session)
   [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
     || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"

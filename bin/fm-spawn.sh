@@ -2353,21 +2353,64 @@ spawn_send_key() {  # <target> <key>
 # stable CODEX_SESSION_ID.  The binding writer and process classifier remain in
 # fm-session-lock-lib.sh; this is only the backend observation loop.
 spawn_bind_remote_codex_session() {
-  local info pids pid session matches match_pid='' match_session='' attempt
+  local info pids pid session matches match_pid='' match_session='' attempt cli envelope result
+  local observed_count reported_count pid_preview candidate_evidence structural identity publish_status
+  local final_attempt=0 final_cli=not-run final_envelope=invalid final_result=missing
+  local final_observed_count=0 final_pid_preview=none final_reported_count=0
+  local final_matches=0 final_publish_status=not-attempted final_candidate_evidence=
   for attempt in $(seq 1 "${FM_CODEX_REMOTE_BIND_POLLS:-80}"); do
-    info=$(fm_backend_herdr_cli "$HERDR_SES" pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null || true)
+    if info=$(fm_backend_herdr_cli "$HERDR_SES" pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null); then
+      cli=ok
+    else
+      cli=error
+    fi
+    result=$(printf '%s' "$info" | jq -r '
+      if type != "object" then "non-object"
+      elif (.result | type) != "object" then "missing"
+      elif .result.type == "pane_process_info" then "pane-process-info"
+      else "unexpected"
+      end
+    ' 2>/dev/null || printf 'malformed-json')
+    envelope=invalid
+    pids=
+    matches=0
+    match_pid=
+    match_session=
+    observed_count=0
+    reported_count=0
+    pid_preview=
+    candidate_evidence=
+    publish_status=not-attempted
     if fm_backend_herdr_pane_process_info_envelope_valid "$info" "$HERDR_PANE_ID"; then
+      envelope=valid
       pids=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[].pid' 2>/dev/null || true)
-      matches=0
-      match_pid=
-      match_session=
       while IFS= read -r pid; do
         case "$pid" in ''|*[!0-9]*|0|1) continue ;; esac
-        session=$(fm_codex_session_id_for_pid "$pid" 2>/dev/null || true)
-        [ -n "$session" ] || continue
-        matches=$((matches + 1))
-        match_pid=$pid
-        match_session=$session
+        observed_count=$((observed_count + 1))
+        if [ "$reported_count" -lt 16 ]; then
+          [ -z "$pid_preview" ] || pid_preview="$pid_preview,"
+          pid_preview="$pid_preview$pid"
+        fi
+        identity=not-read
+        if fm_codex_host_agent_matches "$pid"; then
+          structural=$FM_CODEX_HOST_MATCH_REASON
+          session=$(fm_codex_session_id_for_pid "$pid" 2>/dev/null || true)
+          if [ -n "$session" ]; then
+            identity=valid
+            matches=$((matches + 1))
+            match_pid=$pid
+            match_session=$session
+          else
+            identity=missing-or-invalid
+          fi
+        else
+          structural=${FM_CODEX_HOST_MATCH_REASON:-reject:unknown}
+        fi
+        if [ "$reported_count" -lt 16 ]; then
+          candidate_evidence="${candidate_evidence}diagnostic-candidate pid=$pid structural=$structural session_identity=$identity
+"
+          reported_count=$((reported_count + 1))
+        fi
       done <<EOF
 $pids
 EOF
@@ -2376,10 +2419,27 @@ EOF
           "$SPAWN_GEN" "$match_pid" "$match_session"; then
         return 0
       fi
+      [ "$matches" -ne 1 ] || publish_status=rejected
     fi
+    final_attempt=$attempt
+    final_cli=$cli
+    final_envelope=$envelope
+    final_result=$result
+    final_observed_count=$observed_count
+    final_pid_preview=${pid_preview:-none}
+    final_reported_count=$reported_count
+    final_matches=$matches
+    final_publish_status=$publish_status
+    final_candidate_evidence=$candidate_evidence
     sleep 0.1
   done
   echo "error: remote Codex launch did not expose one verified host-side CODEX_SESSION_ID; startup brief was not delivered" >&2
+  printf 'diagnostic: schema=fm-remote-codex-binding.v1 attempt=%s cli=%s envelope=%s result=%s foreground_pid_count=%s foreground_pids=%s foreground_pids_truncated=%s verified_candidate_count=%s binding_publish=%s\n' \
+    "$final_attempt" "$final_cli" "$final_envelope" "$final_result" \
+    "$final_observed_count" "$final_pid_preview" \
+    "$([ "$final_observed_count" -gt "$final_reported_count" ] && printf yes || printf no)" \
+    "$final_matches" "$final_publish_status" >&2
+  [ -z "$final_candidate_evidence" ] || printf '%s' "$final_candidate_evidence" >&2
   return 1
 }
 
@@ -3062,8 +3122,8 @@ if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
 
-spawn_record_traceparent() {
-  local meta="$STATE/$ID.meta" status=0 acquired=0
+spawn_record_meta_field() {
+  local key=$1 value=$2 suffix=$3 meta="$STATE/$ID.meta" status=0 acquired=0
   # Fresh publication still owns the lock. Relaunch deliberately uses a short
   # independent critical section so other metadata interfaces can serialize.
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -3072,10 +3132,10 @@ spawn_record_traceparent() {
     SPAWN_META_LOCK_HELD=1
     acquired=1
   fi
-  SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  SPAWN_META_TMP="$STATE/.$ID.meta.$suffix.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
-     || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
-     || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
+     || ! awk -F= -v key="$key" '$1 != key' "$meta" > "$SPAWN_META_TMP" \
+     || ! printf '%s=%s\n' "$key" "$value" >> "$SPAWN_META_TMP" \
      || ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
@@ -3086,6 +3146,14 @@ spawn_record_traceparent() {
     SPAWN_META_LOCK_HELD=0
   fi
   return "$status"
+}
+
+spawn_record_traceparent() {
+  spawn_record_meta_field traceparent "$SPAWN_TRACEPARENT" trace
+}
+
+spawn_record_launch_complete() {
+  spawn_record_meta_field launch_complete_spawn_gen "$SPAWN_GEN" launch-complete
 }
 
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
@@ -3123,6 +3191,10 @@ if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ]; then
   fi
   if ! spawn_send_literal "$T" "$CODEX_INITIAL_PROMPT" || ! spawn_send_key "$T" Enter; then
     echo "error: remote Codex session binding was published, but its startup brief could not be delivered" >&2
+    exit 1
+  fi
+  if ! spawn_record_launch_complete; then
+    echo "error: remote Codex startup brief was delivered, but launch completion could not be recorded" >&2
     exit 1
   fi
 fi

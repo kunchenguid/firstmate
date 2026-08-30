@@ -26,7 +26,7 @@ TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
-  local worker_pid='' agent_pid='' wait_attempt=0
+  local worker_pid='' agent_pid='' helper_pid='' wait_attempt=0
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
@@ -42,6 +42,10 @@ cleanup() {
   if [ -f "$HERDR_STATE.agent-pid" ]; then
     agent_pid=$(cat "$HERDR_STATE.agent-pid")
     kill "$agent_pid" 2>/dev/null || true
+  fi
+  if [ -f "$HERDR_STATE.helper-pid" ]; then
+    helper_pid=$(cat "$HERDR_STATE.helper-pid")
+    kill "$helper_pid" 2>/dev/null || true
   fi
   rm -rf -- "$TMP_ROOT"
 }
@@ -717,6 +721,40 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
+
+printf 'generic-only\n' > "$HERDR_STATE.process-mode"
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-unrecognized-codex.out" 2>&1
+unrecognized_codex_rc=$?
+set -e
+[ "$unrecognized_codex_rc" -ne 0 ] || fail "remote spawn accepted a generic node helper as Codex"
+assert_absent "$PARENT/state/ios.meta" "failed remote Codex identity published parent metadata"
+assert_present "$REMOTE_HOME/state/parent-route/ios.meta" "failed remote Codex identity omitted endpoint evidence"
+assert_grep 'envelope=valid result=pane-process-info' "$TMP_ROOT/spawn-unrecognized-codex.out" \
+  "remote Codex refusal omitted the final process-info envelope"
+assert_grep 'foreground_pid_count=1' "$TMP_ROOT/spawn-unrecognized-codex.out" \
+  "remote Codex refusal omitted the observed foreground PID count"
+assert_grep 'verified_candidate_count=0' "$TMP_ROOT/spawn-unrecognized-codex.out" \
+  "remote Codex refusal omitted the verified candidate count"
+assert_grep 'structural=reject:basename,path-component,interpreter-args,cursor-structural' \
+  "$TMP_ROOT/spawn-unrecognized-codex.out" \
+  "remote Codex refusal omitted the shared matcher rejection"
+assert_no_grep '^launch_complete_spawn_gen=' "$REMOTE_HOME/state/parent-route/ios.meta" \
+  "failed remote Codex launch published a completion receipt"
+
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-incomplete-codex-retry.out" 2>&1
+incomplete_codex_retry_rc=$?
+set -e
+[ "$incomplete_codex_retry_rc" -ne 0 ] || fail "remote spawn reused an incomplete alive Codex endpoint"
+assert_grep 'alive without a matching launch-complete receipt' "$TMP_ROOT/spawn-incomplete-codex-retry.out" \
+  "remote Codex retry did not name the missing completion receipt"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null \
+  || fail "incomplete remote Codex endpoint could not be retired for recovery"
+
+printf 'with-helper\n' > "$HERDR_STATE.process-mode"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
@@ -724,6 +762,11 @@ assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omi
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
 assert_grep 'remote_target=fm-remote:' "$PARENT/state/ios.meta" "parent metadata did not record an fm-remote endpoint"
 assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
+remote_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+remote_complete_gen=$(sed -n 's/^launch_complete_spawn_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+[ -n "$remote_spawn_gen" ] && [ "$remote_complete_gen" = "$remote_spawn_gen" ] \
+  || fail "successful remote Codex launch did not bind completion to its spawn generation"
+rm -f "$HERDR_STATE.process-mode"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"

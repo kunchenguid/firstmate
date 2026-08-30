@@ -59,16 +59,24 @@ fm_codex_session_id_for_pid() { # <pid>; prints the one exported Codex session i
 
 fm_codex_host_agent_matches() { # <pid>; prove the host-side process is Codex, never a bare interpreter
   local pid=$1 comm args argv0
-  case "$pid" in *[!0-9]*|''|0|1) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  FM_CODEX_HOST_MATCH_REASON=
+  case "$pid" in *[!0-9]*|''|0|1) FM_CODEX_HOST_MATCH_REASON='reject:invalid-pid'; return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || { FM_CODEX_HOST_MATCH_REASON='reject:not-live'; return 1; }
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) \
+    || { FM_CODEX_HOST_MATCH_REASON='reject:comm-unreadable'; return 1; }
+  args=$(ps -o args= -p "$pid" 2>/dev/null) \
+    || { FM_CODEX_HOST_MATCH_REASON='reject:args-unreadable'; return 1; }
   argv0=$(fm_harness_argv0_for_pid "$pid" "$args")
-  fm_harness_process_matches "$comm" "$args" "$argv0" || return 1
-  case "$(basename -- "$comm"):$argv0:$args" in
-    *codex*) return 0 ;;
-  esac
-  return 1
+  if ! fm_harness_process_matches "$comm" "$args" "$argv0"; then
+    FM_CODEX_HOST_MATCH_REASON=$FM_HARNESS_MATCH_REASON
+    return 1
+  fi
+  if [ "$FM_HARNESS_MATCH_NAME" != codex ]; then
+    FM_CODEX_HOST_MATCH_REASON="reject:harness-family=${FM_HARNESS_MATCH_NAME:-unknown}"
+    return 1
+  fi
+  FM_CODEX_HOST_MATCH_REASON='accept:harness-family=codex'
+  return 0
 }
 
 fm_codex_home_binding_publish() { # <state-dir> <home> <spawn-gen> <agent-pid> <codex-session-id>
@@ -204,29 +212,50 @@ FM_HARNESS_IS_CLAUDE=0
 # The last accepted or rejected structural check.  Callers use this only for
 # a refusal diagnostic; it is deliberately not lock or dispatch authority.
 FM_HARNESS_MATCH_REASON=
+FM_HARNESS_MATCH_NAME=
 fm_harness_process_matches() {  # <comm> <args> [argv0]
-  local comm=$1 args=$2 base argv0 name
+  local comm=$1 args=$2 base argv0 name token
+  local -a words
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_MATCH_REASON=
+  FM_HARNESS_MATCH_NAME=
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    case "$base" in
+      *claude*) name=claude ;;
+      *codex*) name=codex ;;
+      *opencode*) name=opencode ;;
+      *grok*) name=grok ;;
+      *kimi*) name=kimi ;;
+      pi-signed) name=pi-signed ;;
+      pi) name=pi ;;
+      *) FM_HARNESS_MATCH_REASON='reject:unclassified-basename'; return 1 ;;
+    esac
+    [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+    FM_HARNESS_MATCH_NAME=$name
     FM_HARNESS_MATCH_REASON="accept:basename=$base"
     return 0
   fi
   argv0=${3:-${args%% *}}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
-    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+    FM_HARNESS_MATCH_NAME=$name
     FM_HARNESS_MATCH_REASON="accept:path-component=$name"
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
-        FM_HARNESS_MATCH_REASON="accept:interpreter-args"
-        return 0
+      if [ -n "$args" ]; then
+        read -r -a words <<< "$args"
+        for token in "${words[@]}"; do
+          if name=$(fm_harness_path_name "$token"); then
+            [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+            FM_HARNESS_MATCH_NAME=$name
+            FM_HARNESS_MATCH_REASON="accept:interpreter-path-component=$name"
+            return 0
+          fi
+        done
       fi
       ;;
   esac
@@ -235,6 +264,7 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
   if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+    FM_HARNESS_MATCH_NAME=cursor
     FM_HARNESS_MATCH_REASON="accept:cursor-structural"
     return 0
   fi

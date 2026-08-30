@@ -39,6 +39,8 @@ LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
 CODEX_BIN='$remote_root/bin/codex'
+NODE_BIN='$(command -v node)'
+PROCESS_MODE_FILE='$state.process-mode'
 SH
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
@@ -98,20 +100,43 @@ case "${1:-} ${2:-}" in
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
+    process_mode=$(cat "$PROCESS_MODE_FILE" 2>/dev/null || true)
     agent_pid_file="$STATE.agent-pid"
     agent_pid=$(cat "$agent_pid_file" 2>/dev/null || true)
-    if ! kill -0 "$agent_pid" 2>/dev/null; then
+    if [ "$process_mode" != generic-only ] && ! kill -0 "$agent_pid" 2>/dev/null; then
       CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54 \
         "$CODEX_BIN" -e 'setInterval(() => {}, 1000)' >/dev/null 2>&1 &
       agent_pid=$!
       printf '%s\n' "$agent_pid" > "$agent_pid_file"
     fi
+    helper_pid_file="$STATE.helper-pid"
+    helper_pid=$(cat "$helper_pid_file" 2>/dev/null || true)
+    case "$process_mode" in
+      generic-only|with-helper)
+        if ! kill -0 "$helper_pid" 2>/dev/null; then
+          CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54 \
+            "$NODE_BIN" -e 'setInterval(() => {}, 1000)' codex-helper >/dev/null 2>&1 &
+          helper_pid=$!
+          printf '%s\n' "$helper_pid" > "$helper_pid_file"
+        fi
+        ;;
+    esac
     jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
   "pane read") printf '\n' ;;
   "pane process-info")
     pane=${3:-}
+    process_mode=$(cat "$PROCESS_MODE_FILE" 2>/dev/null || true)
     agent_pid=$(cat "$STATE.agent-pid" 2>/dev/null || true)
-    if kill -0 "$agent_pid" 2>/dev/null; then
+    helper_pid=$(cat "$STATE.helper-pid" 2>/dev/null || true)
+    if [ "$process_mode" = with-helper ] \
+      && kill -0 "$agent_pid" 2>/dev/null \
+      && kill -0 "$helper_pid" 2>/dev/null; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"argv":["%s","-e"],"name":"node","pid":%s},{"argv":["%s","-e"],"name":"node","pid":%s}]}}}\n' \
+        "$pane" "$agent_pid" "$agent_pid" "$CODEX_BIN" "$agent_pid" "$NODE_BIN" "$helper_pid"
+    elif [ "$process_mode" = generic-only ] && kill -0 "$helper_pid" 2>/dev/null; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"argv":["%s","-e"],"name":"node","pid":%s}]}}}\n' \
+        "$pane" "$helper_pid" "$helper_pid" "$NODE_BIN" "$helper_pid"
+    elif kill -0 "$agent_pid" 2>/dev/null; then
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"argv":["%s","-e"],"name":"node","pid":%s}]}}}\n' \
         "$pane" "$agent_pid" "$agent_pid" "$CODEX_BIN" "$agent_pid"
     else
