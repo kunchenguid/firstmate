@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://firstmate.local/schemas/claude-obsidian.handoff.v1.schema.json",
+  "title": "Claude Obsidian curated handoff envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "record_id",
+    "source_harness",
+    "source_session_hash",
+    "trigger",
+    "created_at",
+    "items"
+  ],
+  "properties": {
+    "schema": {
+      "const": "claude-obsidian.handoff.v1"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^handoff-[0-9a-f]{48}$"
+    },
+    "source_harness": {
+      "enum": [
+        "pi",
+        "claude"
+      ]
+    },
+    "source_session_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "trigger": {
+      "enum": [
+        "manual",
+        "threshold",
+        "overflow"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "kind",
+        "statement",
+        "source_record",
+        "source_sha256",
+        "confidence",
+        "sphere",
+        "provider_class",
+        "sensitive_scan",
+        "supersedes"
+      ],
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "pattern": "^candidate-[0-9a-f]{48}$"
+        },
+        "kind": {
+          "enum": [
+            "decision",
+            "preference",
+            "gotcha",
+            "project-fact",
+            "next-step",
+            "pointer"
+          ]
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "source_record": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "confidence": {
+          "enum": [
+            "verified",
+            "inferred"
+          ]
+        },
+        "sphere": {
+          "enum": [
+            "privat",
+            "geschaeftlich",
+            "geteilt"
+          ]
+        },
+        "provider_class": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,63}$"
+        },
+        "sensitive_scan": {
+          "const": "passed"
+        },
+        "supersedes": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^candidate-[0-9a-f]{48}$"
+          }
+        }
+      }
+    }
+  }
+}
