@@ -356,6 +356,20 @@ test_declared_wait_signature_is_stable_across_unrelated_appends() {
   [ "$churn_after" = "$churn_before" ] \
     || fail "a bystander decision's open/close churn moved the surviving declared-wait signature: '$churn_before' -> '$churn_after'"
 
+  # Restating an ALREADY-OPEN key - the worker refining the same question the
+  # captain still owes - is not a new gate: the fold re-appends the key (moving it
+  # to the end of the open order) and rewrites its note, so an identity that read
+  # the rendered open set's order or notes treated the continuously-open
+  # obligation as a new declaration and bought another bare stale wake for it. The
+  # identity must hold across the restatement, and a bystander key open at the
+  # same time must be undisturbed.
+  local restate_before restate_after
+  restate_before=$(status_declared_wait_signature "$f")
+  printf 'needs-decision [key=api-shape]: pick REST or RPC (now with a refined note)\n' >> "$f"
+  restate_after=$(status_declared_wait_signature "$f")
+  [ "$restate_after" = "$restate_before" ] \
+    || fail "restating an already-open decision moved the declared-wait signature: '$restate_before' -> '$restate_after'"
+
   # Answer the reopened gate so only the two originals remain, then answer both;
   # answering all leaves no wait, so the identity is empty.
   {

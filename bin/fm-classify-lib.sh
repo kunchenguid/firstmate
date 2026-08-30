@@ -546,31 +546,36 @@ status_declared_wait_kind() {  # <status-file> -> captain-held|paused|decision|<
 #
 # A paused or captain-held wait is named by the last status line that declares
 # it, so a new declaration line is a new wait. An open-decision wait is named by
-# the durable open set itself (status_open_decisions), which unrelated appends
-# leave byte-for-byte unchanged: keying that case on the whole-file signature is
-# exactly the leak where a worker's progress line, appended while the captain
-# still owes the decision, bought another bare stale wake for the same unanswered
-# gate. But the open set carries no history, so a decision resolved and then
-# reopened under the same key - even to a byte-identical needs-decision line -
-# folds back to the same bytes; on its own that would let a reopened gate hide
+# the still-open key set and each key's OPEN GENERATION
+# (_fm_decision_open_generations), never by the durable open set's rendered bytes
+# (status_open_decisions): that rendering carries each open decision's note and
+# lists the keys in fold order, and restating an already-open key re-appends it -
+# moving it to the end of the fold order and rewriting its note - so an
+# order-or-note-sensitive identity treated a continuously-open obligation as a new
+# declaration and bought another bare stale wake for it, the same 2026-08-29 leak
+# the declaration-keyed one-shot exists to close (a worker refining or restating
+# the very question the captain still owes is not a new gate). The generation set
+# names WHICH keys are open and WHICH incarnation of each in a restatement-stable
+# order, and folds through the one _fm_decision_fold_line owner, so it cannot
+# disagree with the open/closed rule status_open_decisions applies: an unrelated
+# append opens nothing and leaves every generation untouched, a newly opened key
+# adds a generation line, and a decision resolved and then reopened under the same
+# key - even to a byte-identical needs-decision line - bumps that key's generation.
+# Without the generation a reopen would fold back to the same open set and hide
 # behind the earlier surface's one-shot marker until the long recheck cadence,
-# silently demoting a new gate the captain is owed. So the decision identity also
-# carries each still-open key's OPEN GENERATION (_fm_decision_open_generations):
-# a reopen bumps the key's generation and changes the identity, while an unrelated
-# append - which opens nothing - leaves every generation untouched. Output is a
-# single line so a marker file holds it as one token.
+# silently demoting a new gate the captain is owed. Output is a single line so a
+# marker file holds it as one token.
 status_declared_wait_signature() {  # <status-file> -> stable id of the declared wait, empty when none
   local f=$1 kind payload encoded
   kind=$(status_declared_wait_kind "$f") || return 1
   [ -n "$kind" ] || return 0
   case "$kind" in
     decision)
-      # Two payload fields: the durable open set names WHICH decisions are open,
-      # the generations name WHICH incarnation of each, so a close+identical-reopen
-      # (same open-set bytes, higher generation) is a new wait. Both fold through
-      # the one _fm_decision_fold_line owner, so neither can disagree with the
-      # open/closed rule status_open_decisions applies.
-      encoded=$(printf '%s\0%s\0%s' "$kind" "$(status_open_decisions "$f")" \
+      # The generation set alone names the wait: one "<key>\t<gen>" line per
+      # still-open key, in a fold order a restatement cannot perturb, so a worker
+      # restating or renoting an already-open decision keeps one identity while a
+      # newly opened key or a close+reopen (higher generation) changes it.
+      encoded=$(printf '%s\0%s' "$kind" \
         "$(_fm_decision_open_generations "$f")" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
       ;;
     *)
