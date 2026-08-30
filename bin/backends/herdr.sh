@@ -1111,61 +1111,115 @@ fm_backend_herdr_artifact_recover_candidates() {  # <target> <mode>
 }
 
 fm_backend_herdr_managed_shell_bin() {
-  local source source_identity digest target target_identity publication candidate candidate_inode kill_after_link=
+  local source source_identity digest target target_identity publication publication_action
+  local candidate candidate_inode kill_after_link='' replace_existing=0 replace_inode='' links attempt
   fm_backend_herdr_server_lock_root_prepare || return 1
   source=$(fm_backend_herdr_managed_shell_source) || return 1
   source_identity=$(fm_backend_herdr_file_identity "$source" executable root-or-owner) || return 1
   digest=${source_identity%%$'\n'*}
   target=$(fm_backend_herdr_managed_shell_path_for_digest "$digest") || return 1
   fm_backend_herdr_artifact_recover_candidates "$target" 0500 || return 1
-  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
-    # Copy through O_NOFOLLOW descriptors, publish with a no-overwrite hard
-    # link, and verify both the source snapshot and installed digest. A racing
-    # installer may win the link; both converge on the same content address.
-    if fm_backend_herdr_test_hooks_enabled \
-      && [ -n "${FM_TEST_HERDR_KILL_AFTER_HELPER_LINK:-}" ]; then
-      kill_after_link=$FM_TEST_HERDR_KILL_AFTER_HELPER_LINK
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    target_identity=$(fm_backend_herdr_file_identity "$target" 0500 owner 2>/dev/null) \
+      || target_identity=
+    if [ -n "$target_identity" ] \
+      && [ "${target_identity%%$'\n'*}" = "$digest" ]; then
+      [ "$(fm_backend_herdr_file_identity "$source" executable root-or-owner)" = "$source_identity" ] \
+        || return 1
+      printf '%s\n' "$target"
+      return 0
     fi
-    # shellcheck disable=SC2016  # Dollar expressions belong to Perl.
-    publication=$(fm_backend_herdr_control_perl -MDigest::SHA -MFcntl=:DEFAULT -MIO::Handle -e '
-      my ($source, $target, $expected_digest, $kill_after_link) = @ARGV;
-      my $nofollow = eval { O_NOFOLLOW() };
-      defined $nofollow or die "O_NOFOLLOW unavailable";
-      sysopen my $input, $source, O_RDONLY | $nofollow or die "source: $!";
-      my @before = stat($input);
-      @before && -f $input && $before[3] == 1 or die "source identity";
-      my $payload = "";
-      my $sha = Digest::SHA->new(256);
-      while (1) {
-        my $count = sysread($input, my $chunk, 65536);
-        defined $count or die "source read: $!";
-        last unless $count;
-        $payload .= $chunk;
-        $sha->add($chunk);
+    links=$(fm_backend_herdr_path_nlink "$target" 2>/dev/null) || links=
+    # A concurrent no-replace publisher briefly leaves the target and its
+    # private candidate as one two-link inode. Let that same-owner publication
+    # converge instead of misclassifying its transient as an unsafe hardlink.
+    attempt=1
+    while [ "$links" = 2 ] && [ "$attempt" -le 100 ]; do
+      fm_backend_herdr_control_exec sleep 0.01
+      target_identity=$(fm_backend_herdr_file_identity "$target" 0500 owner 2>/dev/null) \
+        || target_identity=
+      if [ -n "$target_identity" ] \
+        && [ "${target_identity%%$'\n'*}" = "$digest" ]; then
+        [ "$(fm_backend_herdr_file_identity "$source" executable root-or-owner)" = "$source_identity" ] \
+          || return 1
+        printf '%s\n' "$target"
+        return 0
+      fi
+      links=$(fm_backend_herdr_path_nlink "$target" 2>/dev/null) || links=
+      attempt=$((attempt + 1))
+    done
+    if [ -L "$target" ] || [ ! -f "$target" ] || [ ! -O "$target" ] \
+      || [ "$links" != 1 ]; then
+      echo "error: refusing unsafe managed Herdr worker-shell artifact destination: $target" >&2
+      return 1
+    fi
+    replace_existing=1
+    replace_inode=$(fm_backend_herdr_path_inode "$target") || return 1
+  fi
+  # Copy through O_NOFOLLOW descriptors. A missing destination uses the
+  # existing no-overwrite hard-link publication, while a stale owned regular
+  # artifact is replaced by one atomic rename. Concurrent installers converge
+  # on the same reviewed bytes.
+  if fm_backend_herdr_test_hooks_enabled \
+    && [ -n "${FM_TEST_HERDR_KILL_AFTER_HELPER_LINK:-}" ]; then
+    kill_after_link=$FM_TEST_HERDR_KILL_AFTER_HELPER_LINK
+  fi
+  # shellcheck disable=SC2016  # Dollar expressions belong to Perl.
+  publication=$(fm_backend_herdr_control_perl -MDigest::SHA -MFcntl=:DEFAULT -MIO::Handle -e '
+    my ($source, $target, $expected_digest, $kill_after_link,
+        $replace_existing, $replace_inode) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined $nofollow or die "O_NOFOLLOW unavailable";
+    sysopen my $input, $source, O_RDONLY | $nofollow or die "source: $!";
+    my @before = stat($input);
+    @before && -f $input && $before[3] == 1 or die "source identity";
+    my $payload = "";
+    my $sha = Digest::SHA->new(256);
+    while (1) {
+      my $count = sysread($input, my $chunk, 65536);
+      defined $count or die "source read: $!";
+      last unless $count;
+      $payload .= $chunk;
+      $sha->add($chunk);
+    }
+    my @after = stat($input);
+    for my $index (0, 1, 2, 3, 4, 7, 9) {
+      $before[$index] == $after[$index] or die "source changed";
+    }
+    my @source_path = lstat($source);
+    ($source_path[0] == $after[0] && $source_path[1] == $after[1])
+      or die "source path changed";
+    $sha->hexdigest eq $expected_digest or die "source digest changed";
+    close $input or die "source close: $!";
+    my $candidate = "$target.candidate.$$";
+    sysopen my $output, $candidate,
+      O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0500 or die "candidate: $!";
+    chmod 0500, $candidate or die "candidate mode: $!";
+    my $offset = 0;
+    while ($offset < length $payload) {
+      my $count = syswrite($output, $payload, length($payload) - $offset, $offset);
+      defined $count && $count > 0 or die "candidate write: $!";
+      $offset += $count;
+    }
+    $output->flush or die "candidate flush: $!";
+    $output->sync or die "candidate sync: $!";
+    my @candidate = stat($output);
+    close $output or die "candidate close: $!";
+    my $action;
+    if ($replace_existing) {
+      my @destination = lstat($target);
+      @destination && -f _ && ! -l _ && $destination[3] == 1
+        && $destination[4] == $< or die "unsafe replacement destination";
+      if ("$destination[0]:$destination[1]" eq $replace_inode) {
+        rename $candidate, $target or die "replacement publish: $!";
+        my @published_path = lstat($target);
+        @published_path && $published_path[0] == $candidate[0]
+          && $published_path[1] == $candidate[1] or die "replacement changed";
+        $action = "replaced";
+      } else {
+        $action = "raced";
       }
-      my @after = stat($input);
-      for my $index (0, 1, 2, 3, 4, 7, 9) {
-        $before[$index] == $after[$index] or die "source changed";
-      }
-      my @source_path = lstat($source);
-      ($source_path[0] == $after[0] && $source_path[1] == $after[1])
-        or die "source path changed";
-      $sha->hexdigest eq $expected_digest or die "source digest changed";
-      close $input or die "source close: $!";
-      my $candidate = "$target.candidate.$$";
-      sysopen my $output, $candidate,
-        O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0500 or die "candidate: $!";
-      chmod 0500, $candidate or die "candidate mode: $!";
-      my $offset = 0;
-      while ($offset < length $payload) {
-        my $count = syswrite($output, $payload, length($payload) - $offset, $offset);
-        defined $count && $count > 0 or die "candidate write: $!";
-        $offset += $count;
-      }
-      $output->flush or die "candidate flush: $!";
-      $output->sync or die "candidate sync: $!";
-      my @candidate = stat($output);
-      close $output or die "candidate close: $!";
+    } else {
       my $published = link($candidate, $target);
       if (!$published) {
         die "publish: $!" unless -e $target;
@@ -1180,16 +1234,42 @@ fm_backend_herdr_managed_shell_bin() {
       my @candidate_path = lstat($candidate);
       @candidate_path && $candidate_path[0] == $candidate[0]
         && $candidate_path[1] == $candidate[1] or die "candidate replaced";
-      print "$candidate\n$candidate[0]:$candidate[1]\n";
-    ' "$source" "$target" "$digest" "$kill_after_link") || return 1
-    case "$publication" in *$'\n'*) ;; *) return 1 ;; esac
-    candidate=${publication%%$'\n'*}
-    candidate_inode=${publication#*$'\n'}
-    case "$candidate_inode" in ''|*$'\n'*|*[!0-9:]*) return 1 ;; esac
-    fm_backend_herdr_artifact_remove_attributed "$candidate" "$candidate_inode" || return 1
-  fi
-  target_identity=$(fm_backend_herdr_file_identity "$target" 0500 owner) || return 1
-  [ "${target_identity%%$'\n'*}" = "$digest" ] || return 1
+      $action = $published ? "linked" : "raced";
+    }
+    print "$action\n$candidate\n$candidate[0]:$candidate[1]\n";
+  ' "$source" "$target" "$digest" "$kill_after_link" "$replace_existing" "$replace_inode") || {
+    echo "error: could not publish managed Herdr worker-shell artifact: $target" >&2
+    return 1
+  }
+  case "$publication" in *$'\n'*) ;; *) return 1 ;; esac
+  publication_action=${publication%%$'\n'*}
+  publication=${publication#*$'\n'}
+  candidate=${publication%%$'\n'*}
+  candidate_inode=${publication#*$'\n'}
+  case "$publication_action" in
+    linked|raced)
+      case "$candidate_inode" in ''|*$'\n'*|*[!0-9:]*) return 1 ;; esac
+      fm_backend_herdr_artifact_remove_attributed "$candidate" "$candidate_inode" || return 1
+      ;;
+    replaced)
+      [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  attempt=1
+  target_identity=
+  while [ "$attempt" -le 100 ]; do
+    target_identity=$(fm_backend_herdr_file_identity "$target" 0500 owner 2>/dev/null) \
+      || target_identity=
+    if [ -n "$target_identity" ] \
+      && [ "${target_identity%%$'\n'*}" = "$digest" ]; then
+      break
+    fi
+    fm_backend_herdr_control_exec sleep 0.01
+    attempt=$((attempt + 1))
+  done
+  [ -n "$target_identity" ] \
+    && [ "${target_identity%%$'\n'*}" = "$digest" ] || return 1
   [ "$(fm_backend_herdr_file_identity "$source" executable root-or-owner)" = "$source_identity" ] || return 1
   printf '%s\n' "$target"
 }
@@ -1235,16 +1315,36 @@ fm_backend_herdr_managed_config_ready() {  # <session> [managed-shell]
 }
 
 fm_backend_herdr_managed_config_ensure() {  # <session> [managed-shell]; prints path
-  local path expected shell_bin publication candidate candidate_inode kill_after_link=
+  local path expected shell_bin publication publication_action candidate candidate_inode
+  local kill_after_link='' replace_existing=0 replace_inode='' links attempt
   shell_bin=${2:-}
   [ -n "$shell_bin" ] || shell_bin=$(fm_backend_herdr_managed_shell_bin) || return 1
   path=$(fm_backend_herdr_managed_config_path "$1" "$shell_bin") || return 1
   expected=$(fm_backend_herdr_managed_config_expected "$shell_bin") || return 1
   fm_backend_herdr_artifact_recover_candidates "$path" 0600 || return 1
   if [ -e "$path" ] || [ -L "$path" ]; then
-    fm_backend_herdr_managed_config_ready "$1" "$shell_bin" || return 1
-    printf '%s\n' "$path"
-    return 0
+    if fm_backend_herdr_managed_config_ready "$1" "$shell_bin"; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+    links=$(fm_backend_herdr_path_nlink "$path" 2>/dev/null) || links=
+    attempt=1
+    while [ "$links" = 2 ] && [ "$attempt" -le 100 ]; do
+      fm_backend_herdr_control_exec sleep 0.01
+      if fm_backend_herdr_managed_config_ready "$1" "$shell_bin"; then
+        printf '%s\n' "$path"
+        return 0
+      fi
+      links=$(fm_backend_herdr_path_nlink "$path" 2>/dev/null) || links=
+      attempt=$((attempt + 1))
+    done
+    if [ -L "$path" ] || [ ! -f "$path" ] || [ ! -O "$path" ] \
+      || [ "$links" != 1 ]; then
+      echo "error: refusing unsafe managed Herdr config artifact destination: $path" >&2
+      return 1
+    fi
+    replace_existing=1
+    replace_inode=$(fm_backend_herdr_path_inode "$path") || return 1
   fi
   if fm_backend_herdr_test_hooks_enabled \
     && [ -n "${FM_TEST_HERDR_KILL_AFTER_CONFIG_LINK:-}" ]; then
@@ -1252,50 +1352,93 @@ fm_backend_herdr_managed_config_ensure() {  # <session> [managed-shell]; prints 
   fi
   # shellcheck disable=SC2016  # Dollar expressions belong to Perl.
   publication=$(fm_backend_herdr_control_perl -MFcntl=:DEFAULT -MIO::Handle -e '
-    my ($path, $payload, $kill_after_link) = @ARGV;
+    my ($path, $payload, $kill_after_link, $replace_existing, $replace_inode) = @ARGV;
     my $candidate = "$path.candidate.$$";
     sysopen my $fh, $candidate, O_WRONLY | O_CREAT | O_EXCL, 0600 or die $!;
     chmod 0600, $candidate or die $!;
     print {$fh} $payload, "\n" or die $!;
     $fh->flush or die $!;
     $fh->sync or die $!;
+    my @candidate = stat($fh);
     close $fh or die $!;
-    my $published = link($candidate, $path);
-    if (!$published) {
-      die $! unless -e $path;
+    my $action;
+    if ($replace_existing) {
+      my @destination = lstat($path);
+      @destination && -f _ && ! -l _ && $destination[3] == 1
+        && $destination[4] == $< or die "unsafe replacement destination";
+      if ("$destination[0]:$destination[1]" eq $replace_inode) {
+        rename $candidate, $path or die "replacement publish: $!";
+        my @published_path = lstat($path);
+        @published_path && $published_path[0] == $candidate[0]
+          && $published_path[1] == $candidate[1] or die "replacement changed";
+        $action = "replaced";
+      } else {
+        $action = "raced";
+      }
+    } else {
+      my $published = link($candidate, $path);
+      if (!$published) {
+        die $! unless -e $path;
+      }
+      if ($published && length $kill_after_link) {
+        sysopen my $marker, $kill_after_link, O_WRONLY | O_CREAT | O_EXCL, 0600
+          or die "kill marker: $!";
+        close $marker or die "kill marker close: $!";
+        kill "KILL", $$;
+        die "post-link kill failed";
+      }
+      my @candidate_path = lstat($candidate);
+      @candidate_path && $candidate_path[0] == $candidate[0]
+        && $candidate_path[1] == $candidate[1] or die "candidate replaced";
+      $action = $published ? "linked" : "raced";
     }
-    if ($published && length $kill_after_link) {
-      sysopen my $marker, $kill_after_link, O_WRONLY | O_CREAT | O_EXCL, 0600
-        or die "kill marker: $!";
-      close $marker or die "kill marker close: $!";
-      kill "KILL", $$;
-      die "post-link kill failed";
-    }
-    my @candidate = lstat($candidate);
-    @candidate or die "candidate identity: $!";
-    print "$candidate\n$candidate[0]:$candidate[1]\n";
-  ' "$path" "$expected" "$kill_after_link") || return 1
+    print "$action\n$candidate\n$candidate[0]:$candidate[1]\n";
+  ' "$path" "$expected" "$kill_after_link" "$replace_existing" "$replace_inode") || {
+    echo "error: could not publish managed Herdr config artifact: $path" >&2
+    return 1
+  }
   case "$publication" in *$'\n'*) ;; *) return 1 ;; esac
+  publication_action=${publication%%$'\n'*}
+  publication=${publication#*$'\n'}
   candidate=${publication%%$'\n'*}
   candidate_inode=${publication#*$'\n'}
-  case "$candidate_inode" in ''|*$'\n'*|*[!0-9:]*) return 1 ;; esac
-  fm_backend_herdr_artifact_remove_attributed "$candidate" "$candidate_inode" || return 1
-  fm_backend_herdr_managed_config_ready "$1" "$shell_bin" || return 1
+  case "$publication_action" in
+    linked|raced)
+      case "$candidate_inode" in ''|*$'\n'*|*[!0-9:]*) return 1 ;; esac
+      fm_backend_herdr_artifact_remove_attributed "$candidate" "$candidate_inode" || return 1
+      ;;
+    replaced)
+      [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  attempt=1
+  while ! fm_backend_herdr_managed_config_ready "$1" "$shell_bin"; do
+    [ "$attempt" -lt 100 ] || return 1
+    fm_backend_herdr_control_exec sleep 0.01
+    attempt=$((attempt + 1))
+  done
   printf '%s\n' "$path"
 }
 
 # Prove that the live server process for this session was launched by the
 # adapter's env-i path. Herdr panes inherit the server environment, so routed
 # workers may enter a pane only while this process-bound certificate remains
-# valid. A restored/manual/older server has no usable proof and fails closed.
+# valid. The helper and config are deterministic Firstmate-owned cache
+# artifacts, so readiness reconciles them through their atomic owners after it
+# proves the certificate path, payload, and live process. A restored/manual or
+# older server still has no usable process proof and fails closed.
 fm_backend_herdr_server_closed_shell_environment_ready() {  # <session>
   local session=$1 certificate key certificate_snapshot payload schema recorded_key pid start current
-  local managed_shell managed_shell_digest managed_shell_identity managed_shell_proof expected_shell
-  local source source_proof source_digest managed_config managed_config_digest managed_config_identity expected_config
+  local managed_shell managed_shell_digest managed_shell_identity managed_shell_proof expected_shell reconciled_shell
+  local source source_proof source_digest managed_config managed_config_digest managed_config_identity expected_config reconciled_config
   local config_snapshot config_proof_digest config_proof_identity config_payload expected_config_payload
   certificate=$(fm_backend_herdr_server_env_certificate_path "$session") || return 1
   key=$(fm_backend_herdr_server_lock_key "$session") || return 1
-  certificate_snapshot=$(fm_backend_herdr_file_snapshot "$certificate" 0600 owner) || return 1
+  certificate_snapshot=$(fm_backend_herdr_file_snapshot "$certificate" 0600 owner) || {
+    echo "error: Herdr closed-environment certificate is unavailable or unsafe for session '$session': $certificate" >&2
+    return 1
+  }
   certificate_snapshot=${certificate_snapshot#*$'\n'}
   payload=${certificate_snapshot#*$'\n'}
   schema=${payload%%$'\n'*}
@@ -1317,15 +1460,18 @@ fm_backend_herdr_server_closed_shell_environment_ready() {  # <session>
   managed_config_digest=${payload%%$'\n'*}
   managed_config_identity=${payload#*$'\n'}
   case "$managed_config_identity" in ''|*$'\n'*) return 1 ;; esac
+  case "$managed_shell_identity" in ''|*$'\n'*) return 1 ;; esac
   [ "$schema" = firstmate-herdr-closed-env-v2 ] \
     && [ "$recorded_key" = "$key" ] || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$start" ] || return 1
+  current=$(fm_backend_herdr_process_start "$pid") || return 1
+  [ "$current" = "$start" ] || return 1
   expected_shell=$(fm_backend_herdr_managed_shell_path_for_digest "$managed_shell_digest") || return 1
-  [ "$managed_shell" = "$expected_shell" ] || return 1
-  managed_shell_proof=$(fm_backend_herdr_file_identity "$managed_shell" 0500 owner) || return 1
-  [ "${managed_shell_proof%%$'\n'*}" = "$managed_shell_digest" ] \
-    && [ "${managed_shell_proof#*$'\n'}" = "$managed_shell_identity" ] || return 1
+  if [ "$managed_shell" != "$expected_shell" ]; then
+    echo "error: refusing unsafe managed Herdr worker-shell artifact path for session '$session': $managed_shell" >&2
+    return 1
+  fi
   # An fm-update that changes the reviewed source wrapper invalidates an old
   # live server even though its immutable content-addressed copy still exists.
   # The adapter must restart that server while idle before routing any worker.
@@ -1333,17 +1479,33 @@ fm_backend_herdr_server_closed_shell_environment_ready() {  # <session>
   source_proof=$(fm_backend_herdr_file_identity "$source" executable root-or-owner) || return 1
   source_digest=${source_proof%%$'\n'*}
   [ "$source_digest" = "$managed_shell_digest" ] || return 1
+  reconciled_shell=$(fm_backend_herdr_managed_shell_bin) || {
+    echo "error: could not rebuild managed Herdr worker-shell artifact for session '$session': $managed_shell" >&2
+    return 1
+  }
+  [ "$reconciled_shell" = "$managed_shell" ] || return 1
+  managed_shell_proof=$(fm_backend_herdr_file_identity "$managed_shell" 0500 owner) || return 1
+  [ "${managed_shell_proof%%$'\n'*}" = "$managed_shell_digest" ] || return 1
   expected_config=$(fm_backend_herdr_managed_config_path "$session" "$managed_shell") || return 1
-  [ "$managed_config" = "$expected_config" ] || return 1
+  if [ "$managed_config" != "$expected_config" ]; then
+    echo "error: refusing unsafe managed Herdr config artifact path for session '$session': $managed_config" >&2
+    return 1
+  fi
+  reconciled_config=$(fm_backend_herdr_managed_config_ensure "$session" "$managed_shell") || {
+    echo "error: could not rebuild managed Herdr config artifact for session '$session': $managed_config" >&2
+    return 1
+  }
+  [ "$reconciled_config" = "$managed_config" ] || return 1
   config_snapshot=$(fm_backend_herdr_file_snapshot "$managed_config" 0600 owner) || return 1
   config_proof_digest=${config_snapshot%%$'\n'*}
   config_snapshot=${config_snapshot#*$'\n'}
   config_proof_identity=${config_snapshot%%$'\n'*}
   config_payload=${config_snapshot#*$'\n'}
-  [ "$config_proof_digest" = "$managed_config_digest" ] \
-    && [ "$config_proof_identity" = "$managed_config_identity" ] || return 1
+  [ "$config_proof_digest" = "$managed_config_digest" ] || return 1
+  [ -n "$config_proof_identity" ] || return 1
   expected_config_payload=$(fm_backend_herdr_managed_config_expected "$managed_shell") || return 1
   [ "$config_payload" = "$expected_config_payload" ] || return 1
+  [ "$(fm_backend_herdr_file_identity "$source" executable root-or-owner)" = "$source_proof" ] || return 1
   current=$(fm_backend_herdr_process_start "$pid") || return 1
   [ "$current" = "$start" ]
 }

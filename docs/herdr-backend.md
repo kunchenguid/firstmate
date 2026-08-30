@@ -226,15 +226,21 @@ Lock candidates and owner records are inode-, mode-, link-, owner-, PID-, and pr
 
 The managed per-session Herdr config is a private, helper-content-addressed exact-content file in that lock root.
 It pins `terminal.default_shell` to a private `0500` content-addressed copy of `bin/fm-herdr-worker-shell`, selects `terminal.shell_mode = "non_login"`, and disables restored-agent resume.
+The helper and config are deterministic Firstmate-owned cache artifacts rather than independent lifecycle authority.
+After proving the process-bound certificate, readiness invokes their owning generators so loss of the temporary files after reboot, cleanup, or cache eviction heals in the same call.
 The worker shell is a fixed Perl executable that removes shell startup hooks, exported functions, loader/language injections, Agent Fleet/Quota authority variables, and XDG redirects before it resolves the passwd identity and execs `/bin/bash --noprofile --norc`.
 Sanitization therefore happens before Bash can import `BASH_ENV`, `SHELLOPTS=xtrace`, or a hostile `PS4`; a command prefix inside an already-started pane shell is not treated as isolation.
 
-The detached grandchild durably publishes a private schema-v2 certificate containing the session hash, PID/process-start token, exact content-addressed helper path plus SHA-256 and file identity, and exact managed-config path plus SHA-256 and file identity before it execs the verified Herdr server.
+The detached grandchild durably publishes a private schema-v2 certificate containing the session hash, PID/process-start token, exact content-addressed helper path plus SHA-256 and launch-time file identity, and exact managed-config path plus SHA-256 and launch-time file identity before it execs the verified Herdr server.
 Certificate, helper, and config verification opens with `O_NOFOLLOW`, hashes through the descriptor, and rechecks descriptor/path identity after the read.
-The explicit certified-lifecycle test lab accepts Herdr only when those recorded objects still match, the reviewed source helper still has the recorded digest, the config bytes still pin that exact helper, and the certified process identity is live.
+The explicit certified-lifecycle test lab accepts Herdr only when the certificate path and process proof remain valid, the reviewed source helper still has the recorded digest, and the reconciled helper and config retain the recorded paths and bytes.
+A regenerated deterministic artifact may have a new inode without changing the server lifecycle proof.
 Production native-agent spawning no longer requires this server certificate because `agent start --env` supplies each new agent's environment directly.
 
 Helper, config, certificate, and lifecycle-lock publication use private candidate files.
+Missing helper and config artifacts retain the no-overwrite hard-link publication contract, including convergence when readiness calls race.
+A malformed deterministic destination is replaceable only when it is a current-user-owned regular file with one link at the exact generated path inside the private lock root, and publication replaces that generation by atomic rename.
+An escaping recorded path, symlink, directory, foreign owner, or multiply linked destination is refused rather than overwritten.
 Recovery removes only a current-user, exact-mode candidate whose numeric owner PID is proven absent and whose age exceeds the startup stale threshold; foreign, live, malformed, or otherwise indeterminate candidates are never deleted.
 Every final cleanup first moves the pathname without replacement into a private deterministic quarantine keyed by the attributed device/inode, verifies the moved generation and quarantine identity, and deletes only that verified moved object.
 A last-check substitution is preserved in quarantine and the operation fails closed; an unresolved quarantine blocks reuse of that exact pathname.
@@ -242,7 +248,7 @@ A last-check substitution is preserved in quarantine and the operation fails clo
 These controls defend against other users, ambient shell configuration, accidental Desktop/provider activity, and ordinary release switches.
 They do not claim to defeat a malicious process already running as the same Unix uid: portable shell cannot atomically bind an already-validated executable inode to the later `exec`, and a same-uid attacker can race user-owned paths between checks.
 That residual is explicit; the adapter revalidates immediately before use and keeps the verified install and lock paths private to make normal non-hostile mutation fail closed.
-The regression suite covers hostile `PATH`, Perl/loader variables, unsafe ancestry, hardlinks, cached-leaf mutation, unsafe lock parents, hostile `TMPDIR`, a detached descendant that retains a safe user tool while excluding a writable search directory, inherited `BASH_ENV` plus `SHELLOPTS=xtrace`, exact managed-config shape, certificate liveness, helper/config replacement and source-update drift, guarded helper/config/certificate candidate recovery, last-check substitution quarantine, serialized exact-empty drift restart, occupied drift routing without restart, indeterminate drift refusal before workspace mutation, and refusal of every uncertified legacy-lab backend before Fleet, lease, or endpoint mutation.
+The regression suite covers hostile `PATH`, Perl/loader variables, unsafe ancestry, hardlinks, cached-leaf mutation, unsafe lock parents, hostile `TMPDIR`, a detached descendant that retains a safe user tool while excluding a writable search directory, inherited `BASH_ENV` plus `SHELLOPTS=xtrace`, exact managed-config shape, certificate liveness, concurrent missing-artifact self-heal, stale owned artifact replacement, unsafe destination refusal, source-update drift, guarded helper/config/certificate candidate recovery, last-check substitution quarantine, serialized exact-empty drift restart, occupied drift routing without restart, indeterminate drift refusal before workspace mutation, and refusal of every uncertified legacy-lab backend before Fleet, lease, or endpoint mutation.
 
 In production, `fm_backend_herdr_server_ensure` reuses any running server because native `agent start --env` owns new-agent environment isolation independently of the server shell.
 Under the explicit legacy certified-lifecycle lab path, a full current-release process/helper/config certificate is reused under the lifecycle lock.
@@ -251,6 +257,30 @@ An exact-empty session is stopped only after two complete empty proofs plus repe
 An occupied session - one reporting any workspace, tab, or pane - is not restarted; routing continues in that same running session and may create the workspace for the native-agent spawn path.
 Unreadable or indeterminate state still refuses before workspace mutation, and the explicit legacy lab still rejects manual or uncertified ownership.
 This convergence path never uses ambient `herdr server stop`, never deletes session state (including `default`), and never moves Herdr ownership into a captain launcher.
+
+## Incident (2026-08-30): temporary managed artifacts did not self-heal during readiness
+
+The Azure-only worker transition exposed a local runtime dependency that had been hidden while the generated Herdr files happened to remain warm.
+A valid process-bound certificate could name a managed worker-shell or config artifact that no longer existed under `/tmp/firstmate-herdr-server-locks-<uid>`, and `fm_backend_herdr_server_closed_shell_environment_ready` attempted only a verified read.
+The owning generators already knew the exact reviewed helper bytes, deterministic content address, private modes, and config payload, but readiness did not invoke them.
+An otherwise valid enforced Herdr spawn therefore failed until an operator recreated the cache artifact manually.
+
+Readiness now validates the certificate schema, session key, process start token, recorded content-addressed paths, and reviewed source digest before it calls `fm_backend_herdr_managed_shell_bin` and `fm_backend_herdr_managed_config_ensure`.
+Those owners publish missing artifacts with their existing no-overwrite protocol and replace a stale owned regular generation by atomic rename.
+They never follow or overwrite an escaping or symlinked destination, and failure reports the one artifact that could not be rebuilt.
+The certificate itself remains process-bound lifecycle authority and is not regenerated by readiness.
+No Herdr session, workspace, tab, pane, agent, worktree, credential, or task state is changed by this repair.
+
+The deterministic regression is `FM_TEST_FOCUSED=managed-shell-selfheal tests/fm-backend-herdr.test.sh`.
+It proves unchanged success without inode churn, eight concurrent missing-artifact readiness calls, exact helper and config regeneration, malformed owned-generation replacement, symlink and escaping-path refusal without victim mutation, and successful readiness again after the safe path is restored.
+
+```text
+$ FM_TEST_FOCUSED=managed-shell-selfheal tests/fm-backend-herdr.test.sh
+== tests/fm-backend-herdr.test.sh ==
+ok - closed-shell readiness preserves valid artifacts, concurrently self-heals missing artifacts, atomically replaces stale owned generations, and refuses unsafe destinations
+```
+
+No live Herdr command was run for this regression because the repair is limited to the local generated-artifact owner and the task prohibited operating a live Herdr server or session.
 
 ## Incident (2026-07-29): native cutover left read and steer behind the retired certificate gate
 

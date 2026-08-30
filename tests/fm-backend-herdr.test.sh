@@ -544,7 +544,7 @@ SH
   pass "Herdr managed config, process certificate, and pre-Bash shell close hostile startup state"
 }
 
-test_managed_shell_certificate_rejects_release_and_artifact_drift() {
+test_managed_shell_certificate_reconciles_artifact_identity_and_rejects_release_drift() {
   local dir fb lock_root source ps_fake result certificate config wrapper pid replacement session marker
   dir="$TMP_ROOT/herdr-managed-shell-drift"
   fb="$dir/fakebin"
@@ -613,7 +613,7 @@ SH
   chmod 600 "$replacement"
   mv "$replacement" "$config"
   certificate_ready "$session" >/dev/null 2>&1 \
-    && fail "identical-byte managed-config replacement retained certificate authority"
+    || fail "identical-byte managed-config replacement did not retain deterministic artifact readiness"
   pid=$(sed -n '3p' "$certificate")
   kill "$pid" 2>/dev/null || true
 
@@ -628,7 +628,7 @@ SH
   chmod 500 "$replacement"
   mv "$replacement" "$wrapper"
   certificate_ready "$session" >/dev/null 2>&1 \
-    && fail "identical-byte managed helper replacement retained certificate authority"
+    || fail "identical-byte managed helper replacement did not retain deterministic artifact readiness"
   pid=$(sed -n '3p' "$certificate")
   kill "$pid" 2>/dev/null || true
 
@@ -644,7 +644,156 @@ SH
     && fail "post-launch reviewed helper-source update retained old server authority"
   pid=$(sed -n '3p' "$certificate")
   kill "$pid" 2>/dev/null || true
-  pass "Herdr certificate rejects config/helper inode replacement and release-source drift"
+  pass "Herdr readiness accepts exact deterministic artifact generations while still rejecting release-source drift"
+}
+
+test_closed_shell_readiness_rebuilds_owned_artifacts() {
+  local dir lock_root source ps_fake session result certificate wrapper config
+  local wrapper_before config_before wrapper_after config_after expected_config
+  local diagnostic victim certificate_saved certificate_candidate index pid pids status_file
+  dir="$TMP_ROOT/herdr-closed-shell-selfheal"
+  lock_root="$dir/locks"
+  source="$dir/fm-herdr-worker-shell"
+  ps_fake="$dir/fake-ps"
+  session=fm-closed-shell-selfheal
+  mkdir -p "$lock_root"
+  chmod 700 "$lock_root"
+  cp "$ROOT/bin/fm-herdr-worker-shell" "$source"
+  chmod 755 "$source"
+  cat > "$ps_fake" <<'SH'
+#!/bin/sh
+printf 'Mon Jan  1 00:00:00 2024\n'
+SH
+  chmod 755 "$ps_fake"
+
+  result=$(FM_BACKEND_HERDR_SERVER_LOCK_ROOT="$lock_root" \
+    FM_BACKEND_HERDR_TEST_HOOKS=firstmate-herdr-tests-v1 \
+    FM_TEST_HERDR_PS_BIN="$ps_fake" FM_TEST_HERDR_MANAGED_SHELL_SOURCE="$source" \
+    /bin/bash --noprofile --norc -c '
+      . "$0/bin/backends/herdr.sh"
+      session=$1
+      wrapper=$(fm_backend_herdr_managed_shell_bin) || exit 1
+      config=$(fm_backend_herdr_managed_config_ensure "$session" "$wrapper") || exit 2
+      certificate=$(fm_backend_herdr_server_env_certificate_path "$session") || exit 3
+      key=$(fm_backend_herdr_server_lock_key "$session") || exit 4
+      wrapper_proof=$(fm_backend_herdr_file_identity "$wrapper" 0500 owner) || exit 5
+      config_proof=$(fm_backend_herdr_file_identity "$config" 0600 owner) || exit 6
+      candidate="$certificate.fixture.$$"
+      (
+        umask 077
+        printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n" \
+          firstmate-herdr-closed-env-v2 "$key" 424242 \
+          "Mon Jan  1 00:00:00 2024" "$wrapper" \
+          "${wrapper_proof%%$'\''\n'\''*}" "${wrapper_proof#*$'\''\n'\''}" \
+          "$config" "${config_proof%%$'\''\n'\''*}" "${config_proof#*$'\''\n'\''}" \
+          > "$candidate"
+      ) || exit 7
+      chmod 600 "$candidate" || exit 8
+      mv "$candidate" "$certificate" || exit 9
+      printf "%s\n%s\n%s\n" "$certificate" "$wrapper" "$config"
+    ' "$ROOT" "$session") || fail "could not establish deterministic closed-shell readiness fixture"
+  certificate=${result%%$'\n'*}
+  result=${result#*$'\n'}
+  wrapper=${result%%$'\n'*}
+  config=${result#*$'\n'}
+
+  closed_shell_ready() {
+    FM_BACKEND_HERDR_SERVER_LOCK_ROOT="$lock_root" \
+      FM_BACKEND_HERDR_TEST_HOOKS=firstmate-herdr-tests-v1 \
+      FM_TEST_HERDR_PS_BIN="$ps_fake" FM_TEST_HERDR_MANAGED_SHELL_SOURCE="$source" \
+      /bin/bash --noprofile --norc -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_server_closed_shell_environment_ready "$1"
+      ' "$ROOT" "$session"
+  }
+  artifact_inode() {
+    if [ "$(uname)" = Darwin ]; then stat -f '%d:%i' "$1"; else stat -c '%d:%i' "$1"; fi
+  }
+  artifact_mode() {
+    if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+  }
+
+  wrapper_before=$(artifact_inode "$wrapper")
+  config_before=$(artifact_inode "$config")
+  closed_shell_ready || fail "unchanged closed-shell readiness unexpectedly failed"
+  [ "$(artifact_inode "$wrapper")" = "$wrapper_before" ] \
+    && [ "$(artifact_inode "$config")" = "$config_before" ] \
+    || fail "unchanged closed-shell readiness rewrote a valid artifact"
+
+  rm "$wrapper" "$config"
+  pids=
+  for index in 1 2 3 4 5 6 7 8; do
+    status_file="$dir/concurrent-$index.status"
+    (closed_shell_ready >"$dir/concurrent-$index.out" 2>"$dir/concurrent-$index.err"; printf '%s\n' "$?" > "$status_file") &
+    pids="$pids $!"
+  done
+  for pid in $pids; do wait "$pid" || fail "concurrent closed-shell readiness worker crashed"; done
+  for index in 1 2 3 4 5 6 7 8; do
+    [ "$(cat "$dir/concurrent-$index.status")" = 0 ] \
+      || fail "concurrent closed-shell readiness $index failed: $(cat "$dir/concurrent-$index.err")"
+  done
+  cmp -s "$source" "$wrapper" || fail "missing managed worker-shell artifact was not rebuilt from reviewed source"
+  expected_config=$(FM_BACKEND_HERDR_SERVER_LOCK_ROOT="$lock_root" \
+    FM_BACKEND_HERDR_TEST_HOOKS=firstmate-herdr-tests-v1 \
+    FM_TEST_HERDR_MANAGED_SHELL_SOURCE="$source" /bin/bash --noprofile --norc -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_managed_config_expected "$1"
+    ' "$ROOT" "$wrapper") || fail "could not derive expected managed config"
+  [ "$(cat "$config")" = "$expected_config" ] \
+    || fail "missing managed config artifact was not rebuilt with exact content"
+  assert_no_server_transients "$lock_root" "concurrent closed-shell readiness"
+
+  printf 'malformed managed worker shell\n' > "$wrapper"
+  chmod 700 "$wrapper"
+  printf 'malformed managed config\n' > "$config"
+  chmod 644 "$config"
+  wrapper_before=$(artifact_inode "$wrapper")
+  config_before=$(artifact_inode "$config")
+  closed_shell_ready || fail "stale owned closed-shell artifacts were not replaced"
+  wrapper_after=$(artifact_inode "$wrapper")
+  config_after=$(artifact_inode "$config")
+  [ "$wrapper_after" != "$wrapper_before" ] && [ "$config_after" != "$config_before" ] \
+    || fail "stale owned closed-shell artifact replacement was not atomic by new generation"
+  cmp -s "$source" "$wrapper" || fail "stale managed worker-shell artifact retained malformed bytes"
+  [ "$(cat "$config")" = "$expected_config" ] \
+    || fail "stale managed config artifact retained malformed bytes"
+  [ "$(artifact_mode "$wrapper")" = 500 ] && [ "$(artifact_mode "$config")" = 600 ] \
+    || fail "rebuilt closed-shell artifacts did not restore private modes"
+
+  victim="$dir/symlink-victim"
+  printf 'do not overwrite\n' > "$victim"
+  rm "$wrapper"
+  ln -s "$victim" "$wrapper"
+  diagnostic="$dir/symlink-diagnostic"
+  if closed_shell_ready > /dev/null 2> "$diagnostic"; then
+    fail "closed-shell readiness accepted a symlinked managed artifact destination"
+  fi
+  assert_grep 'refusing unsafe managed Herdr worker-shell artifact destination' "$diagnostic" \
+    "unsafe managed artifact refusal did not emit its narrow diagnostic"
+  [ "$(cat "$victim")" = 'do not overwrite' ] && [ -L "$wrapper" ] \
+    || fail "unsafe managed artifact refusal mutated the symlink or its target"
+  rm "$wrapper"
+  closed_shell_ready || fail "closed-shell readiness did not recover after the unsafe destination was removed"
+
+  certificate_saved="$dir/certificate.saved"
+  cp "$certificate" "$certificate_saved"
+  certificate_candidate="$dir/certificate.escaping"
+  awk -v unsafe="$victim" 'NR == 5 { $0 = unsafe } { print }' \
+    "$certificate" > "$certificate_candidate"
+  chmod 600 "$certificate_candidate"
+  mv "$certificate_candidate" "$certificate"
+  diagnostic="$dir/escaping-diagnostic"
+  if closed_shell_ready > /dev/null 2> "$diagnostic"; then
+    fail "closed-shell readiness accepted an escaping managed artifact path"
+  fi
+  assert_grep 'refusing unsafe managed Herdr worker-shell artifact path' "$diagnostic" \
+    "escaping managed artifact path refusal did not emit its narrow diagnostic"
+  [ "$(cat "$victim")" = 'do not overwrite' ] \
+    || fail "escaping managed artifact path refusal overwrote an arbitrary file"
+  mv "$certificate_saved" "$certificate"
+  closed_shell_ready || fail "restored safe closed-shell certificate was not ready"
+  assert_no_server_transients "$lock_root" "closed-shell self-heal"
+  pass "closed-shell readiness preserves valid artifacts, concurrently self-heals missing artifacts, atomically replaces stale owned generations, and refuses unsafe destinations"
 }
 
 test_managed_artifact_candidate_recovery_is_guarded() {
@@ -4517,10 +4666,16 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = managed-shell-hardening ]; then
   test_managed_shell_and_server_certificate_close_startup_before_bash
-  test_managed_shell_certificate_rejects_release_and_artifact_drift
+  test_managed_shell_certificate_reconciles_artifact_identity_and_rejects_release_drift
+  test_closed_shell_readiness_rebuilds_owned_artifacts
   test_managed_artifact_candidate_recovery_is_guarded
   test_managed_artifact_recovers_every_published_pair_crash_boundary
   test_attributed_cleanup_recovers_nlink1_and_exact_lock_release_phases
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = managed-shell-selfheal ]; then
+  test_closed_shell_readiness_rebuilds_owned_artifacts
   exit 0
 fi
 
@@ -4555,7 +4710,8 @@ test_herdr_binary_revalidates_leaf_and_physical_ancestry
 test_server_launch_scrubs_hostile_perl_and_control_environment
 test_server_launch_preserves_only_safe_worker_tool_paths
 test_managed_shell_and_server_certificate_close_startup_before_bash
-test_managed_shell_certificate_rejects_release_and_artifact_drift
+test_managed_shell_certificate_reconciles_artifact_identity_and_rejects_release_drift
+test_closed_shell_readiness_rebuilds_owned_artifacts
 test_managed_artifact_candidate_recovery_is_guarded
 test_managed_artifact_recovers_every_published_pair_crash_boundary
 test_attributed_cleanup_recovers_nlink1_and_exact_lock_release_phases
