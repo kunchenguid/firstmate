@@ -29,6 +29,18 @@ test_matching_head_and_completed_steps_pass() {
   pass "shared action accepts a matching head_sha with completed required steps"
 }
 
+test_nonstring_head_fails_closed_even_when_text_matches() {
+  local body output rc
+  body="$SIGNATURE
+<!-- no-mistakes-pipeline-attestation:v1 {\"head_sha\":2222,\"steps\":$COMPLETED_STEPS} -->"
+  rc=0
+  output=$(run_verifier "$body" 2222) || rc=$?
+  [ "$rc" -ne 0 ] || fail "shared action accepted a numeric head_sha matching the textual PR head"
+  assert_contains "$output" "structured pipeline step attestation" \
+    "numeric head_sha failure did not identify the invalid attestation"
+  pass "shared action rejects a non-string head_sha even when its text matches"
+}
+
 test_mismatched_head_fails_with_both_shas() {
   local body output rc
   body="$SIGNATURE
@@ -80,6 +92,7 @@ test_malformed_step_fails_closed() {
 }
 
 test_matching_head_and_completed_steps_pass
+test_nonstring_head_fails_closed_even_when_text_matches
 test_mismatched_head_fails_with_both_shas
 test_missing_head_fails
 test_duplicate_steps_fail_closed

@@ -104,7 +104,7 @@ jobs:
             # Bind the attestation to this PR's head: an attestation produced for an
             # earlier commit is not proof this head passed the pipeline. The
             # attestation's head_sha must exactly match the pull request head.
-            attestation_head=$(printf '%s' "$json" | jq -r '.head_sha // empty' 2>/dev/null) || attestation_head=''
+            attestation_head=$(printf '%s' "$json" | jq -er 'if (.head_sha | type) == "string" then .head_sha else empty end' 2>/dev/null) || attestation_head=''
             if [ -z "$attestation_head" ] || [ "$attestation_head" != "$PR_HEAD_SHA" ]; then
               {
                 echo "::error::The no-mistakes pipeline attestation is not bound to this pull request head."

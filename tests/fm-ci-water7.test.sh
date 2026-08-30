@@ -355,6 +355,17 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
 
 Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
 
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":2222,"steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
+  rc=0
+  out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=45 PR_HEAD_SHA=2222 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "workflow accepted a numeric head_sha matching the textual PR head: rc=$rc out=$out"
+  assert_contains "$out" "not bound to this pull request head" \
+    "workflow non-string head_sha failure was not explicit"
+
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
 <!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"review","status":"failed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
   rc=0
   out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=43 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
