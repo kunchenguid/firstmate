@@ -19,8 +19,12 @@
 #            It is read-only over the capture: it does not arm, poll, or change
 #            what Lavish delivered. The session-ending freeform message
 #            (tag=message) is its own labeled field, printed first and distinct
-#            from per-element annotations, followed by the declared item count
-#            so a partial read is obvious.
+#            from per-element annotations. Declared and presented item counts,
+#            plus a completeness verdict, follow before all annotations so a
+#            partial read is obvious. Each annotation retains its element uid,
+#            selector, tag, and text, and captain-supplied body lines are visibly
+#            prefixed so they cannot forge structural labels. Empty message and
+#            annotation sections are reported explicitly.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -68,12 +72,8 @@
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
 #
-# `read` is this adapter's presentation of the same captured result. It is the
-# command a handler runs instead of grepping the raw file. A `tag=message` row
-# is the session-ending freeform message and is printed as its own field first,
-# then a declared-item count line, then every remaining annotation. `answers`
-# still ignores those message rows, because keyed intake and complete
-# presentation are different jobs.
+# `read` is the presentation command summarized above; keyed intake remains
+# the separate `answers` contract described here.
 #
 # It wraps ONLY the currently published interface, verified against 0.1.45:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
