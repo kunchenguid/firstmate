@@ -435,7 +435,10 @@ test_busy_lifecycle_locks_never_hold_up_the_digest() {
     while [ ! -f "$ready" ]; do sleep 0.01; done
     run_notify "$home" "$fakebin" "busy-$label" "$snap" > "$home/notify.out" 2>&1 &
     notify=$!
-    sleep 0.2
+    for _ in $(seq 1 500); do
+      kill -0 "$notify" 2>/dev/null || break
+      sleep 0.01
+    done
     if kill -0 "$notify" 2>/dev/null; then
       : > "$release"
       wait "$notify" 2>/dev/null || true
