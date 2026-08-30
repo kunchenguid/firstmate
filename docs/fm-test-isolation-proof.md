@@ -6,15 +6,15 @@ This record is the concurrent isolation proof for the portable parallel candidat
 
 ## Verification
 
-- Date: 2026-08-20
-- Command: `bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-slack-isolation-addendum.json`
-- Result: `FM_ISOLATION_SUMMARY total=25 failed=0 concurrency=4 duration_ms=189201`
+- Date: 2026-08-30
+- Command: `LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 bin/fm-test-isolation-proof.sh --jobs 4 --json docs/fm-test-isolation-proof.json`
+- Result: `FM_ISOLATION_SUMMARY total=25 failed=0 concurrency=4 duration_ms=928563`
 
 | Field | Value |
 |---|---|
-| `run_id` | `fm-isolation-1787206852635-409475` |
-| `started_at` | `2026-08-20T06:20:52Z` |
-| `finished_at` | `2026-08-20T06:24:01Z` |
+| `run_id` | `fm-isolation-1788101811103-94956` |
+| `started_at` | `2026-08-30T14:56:51Z` |
+| `finished_at` | `2026-08-30T15:12:19Z` |
 | concurrency | 4 |
 | candidates | 25 |
 | failed | 0 |
@@ -29,7 +29,7 @@ This record is the concurrent isolation proof for the portable parallel candidat
 - `tests/fm-composer-ghost.test.sh`
 - `tests/fm-composer-lib.test.sh`
 - `tests/fm-crew-state.test.sh`
-- `tests/fm-decision-hold-lifecycle.test.sh`
+- `tests/fm-captain-hold-lifecycle.test.sh`
 - `tests/fm-ensure-agents-md.test.sh`
 - `tests/fm-grok-harness.test.sh`
 - `tests/fm-herdr-lab.test.sh`
@@ -52,37 +52,37 @@ This record is the concurrent isolation proof for the portable parallel candidat
 
 | duration_ms | exit | worker | script |
 |---:|---:|---:|---|
-| 44699 | 0 | 14 | `tests/fm-pr-merge.test.sh` |
-| 41422 | 0 | 1 | `tests/fm-arm-pretool-check.test.sh` |
-| 40136 | 0 | 25 | `tests/fm-x-mode.test.sh` |
-| 37725 | 0 | 8 | `tests/fm-decision-hold-lifecycle.test.sh` |
-| 32074 | 0 | 2 | `tests/fm-backend-herdr.test.sh` |
-| 29662 | 0 | 22 | `tests/fm-test-run.test.sh` |
-| 24513 | 0 | 19 | `tests/fm-slack-captain-channel.test.sh` |
-| 23769 | 0 | 4 | `tests/fm-cd-pretool-check.test.sh` |
-| 16205 | 0 | 7 | `tests/fm-crew-state.test.sh` |
-| 12196 | 0 | 11 | `tests/fm-herdr-lab.test.sh` |
-| 8576 | 0 | 10 | `tests/fm-grok-harness.test.sh` |
-| 8386 | 0 | 20 | `tests/fm-spawn-batch.test.sh` |
-| 5428 | 0 | 16 | `tests/fm-send-popup-settle.test.sh` |
-| 4438 | 0 | 15 | `tests/fm-review-diff.test.sh` |
-| 3409 | 0 | 17 | `tests/fm-send-settle.test.sh` |
-| 3321 | 0 | 18 | `tests/fm-send-strict.test.sh` |
-| 3239 | 0 | 3 | `tests/fm-brief.test.sh` |
-| 2586 | 0 | 5 | `tests/fm-composer-ghost.test.sh` |
-| 2086 | 0 | 23 | `tests/fm-tmux-submit-busy.test.sh` |
-| 1792 | 0 | 12 | `tests/fm-lint.test.sh` |
-| 442 | 0 | 21 | `tests/fm-supervision-instructions.test.sh` |
-| 312 | 0 | 9 | `tests/fm-ensure-agents-md.test.sh` |
-| 193 | 0 | 24 | `tests/fm-transition-lib.test.sh` |
-| 103 | 0 | 6 | `tests/fm-composer-lib.test.sh` |
-| 22 | 0 | 13 | `tests/fm-pi-primary-types.test.sh` |
+| 257371 | 0 | 14 | `tests/fm-pr-merge.test.sh` |
+| 405025 | 0 | 25 | `tests/fm-x-mode.test.sh` |
+| 356616 | 0 | 22 | `tests/fm-test-run.test.sh` |
+| 165241 | 0 | 19 | `tests/fm-slack-captain-channel.test.sh` |
+| 69791 | 0 | 4 | `tests/fm-captain-hold-lifecycle.test.sh` |
+| 67143 | 0 | 20 | `tests/fm-spawn-batch.test.sh` |
+| 62519 | 0 | 2 | `tests/fm-backend-herdr.test.sh` |
+| 42102 | 0 | 23 | `tests/fm-tmux-submit-busy.test.sh` |
+| 36760 | 0 | 1 | `tests/fm-arm-pretool-check.test.sh` |
+| 36102 | 0 | 12 | `tests/fm-lint.test.sh` |
+| 27791 | 0 | 8 | `tests/fm-crew-state.test.sh` |
+| 23417 | 0 | 5 | `tests/fm-cd-pretool-check.test.sh` |
+| 21747 | 0 | 18 | `tests/fm-send-strict.test.sh` |
+| 13267 | 0 | 11 | `tests/fm-herdr-lab.test.sh` |
+| 12618 | 0 | 10 | `tests/fm-grok-harness.test.sh` |
+| 7777 | 0 | 16 | `tests/fm-send-popup-settle.test.sh` |
+| 7197 | 0 | 6 | `tests/fm-composer-ghost.test.sh` |
+| 5487 | 0 | 7 | `tests/fm-composer-lib.test.sh` |
+| 4967 | 0 | 3 | `tests/fm-brief.test.sh` |
+| 4409 | 0 | 17 | `tests/fm-send-settle.test.sh` |
+| 4132 | 0 | 15 | `tests/fm-review-diff.test.sh` |
+| 3633 | 0 | 13 | `tests/fm-pi-primary-types.test.sh` |
+| 2842 | 0 | 24 | `tests/fm-transition-lib.test.sh` |
+| 788 | 0 | 21 | `tests/fm-supervision-instructions.test.sh` |
+| 770 | 0 | 9 | `tests/fm-ensure-agents-md.test.sh` |
 
-## 2026-08-20 refresh
+## 2026-08-30 refresh
 
-`tests/fm-slack-captain-channel.test.sh` joined the proven-isolated set after the previous 2026-07-29 proof, which covered only 24 candidates and so could not gate that member.
-Rather than graft one measurement onto another run's artifact, the whole proof was re-run at concurrency 4 to produce a single coherent 25-candidate archive.
-This run supersedes the 2026-07-29 proof (`FM_ISOLATION_SUMMARY total=24 failed=0 concurrency=4 duration_ms=149010`); every duration above comes from the one run recorded here.
+The candidate set now uses `tests/fm-captain-hold-lifecycle.test.sh` in place of the obsolete decision-hold lifecycle candidate.
+The whole proof was re-run at concurrency 4 to produce a single coherent 25-candidate archive.
+This run supersedes the 2026-08-20 proof (`FM_ISOLATION_SUMMARY total=25 failed=0 concurrency=4 duration_ms=189201`); every duration above comes from the one run recorded here.
 The candidate set is whatever `bin/fm-test-isolation-proof.sh --list` reports and is unchanged by this refresh.
 
 ## Scope

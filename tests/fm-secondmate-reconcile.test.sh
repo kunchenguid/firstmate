@@ -703,23 +703,32 @@ test_a_row_with_no_identity_at_all_fails_loudly() {
 }
 
 test_schema_valid_wrong_type_reconcile_collection_fails_loudly() {
-  local home mate fakebin snap out rc
-  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home malformed-collection mate)
-  snap="$home/snapshot.json"
-  jq -n '{schema:"fm-bearings.v1", secondmate_reconcile:"bad"}' > "$snap"
+  local label value home mate fakebin snap out rc
+  for label in false number object string; do
+    case "$label" in
+      false) value=false ;;
+      number) value=123 ;;
+      object) value='{}' ;;
+      string) value='"bad"' ;;
+    esac
+    { read -r home; read -r mate; read -r fakebin; } < <(make_main_home "malformed-collection-$label" mate)
+    snap="$home/snapshot.json"
+    jq -n --argjson collection "$value" \
+      '{schema:"fm-bearings.v1",secondmate_reconcile:$collection}' > "$snap"
 
-  set +e
-  out=$(run_notify "$home" "$fakebin" malformed-collection "$snap" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "a schema-valid wrong-type reconciliation collection reported success: $out"
-  assert_contains "$out" "malformed secondmate reconciliation collection" \
-    "wrong-type reconciliation input did not fail with an actionable diagnostic: $out"
-  [ "$(inbox_records "$home/state" mate)" -eq 0 ] \
-    || fail "malformed reconciliation input still sent a nudge"
-  assert_absent "$home/state/mate.reconcile-nudged" \
-    "malformed reconciliation input started a cooldown"
-  pass "schema-valid wrong-type reconciliation input fails closed before delivery"
+    set +e
+    out=$(run_notify "$home" "$fakebin" "malformed-collection-$label" "$snap" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "a schema-valid $label reconciliation collection reported success: $out"
+    assert_contains "$out" "malformed secondmate reconciliation collection" \
+      "$label reconciliation input did not fail with an actionable diagnostic: $out"
+    [ "$(inbox_records "$home/state" mate)" -eq 0 ] \
+      || fail "$label reconciliation input still sent a nudge"
+    assert_absent "$home/state/mate.reconcile-nudged" \
+      "$label reconciliation input started a cooldown"
+  done
+  pass "schema-valid wrong-type reconciliation collections fail closed before delivery"
 }
 
 test_malformed_reconcile_members_fail_closed() {

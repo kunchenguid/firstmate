@@ -264,15 +264,17 @@ cmd_notify() {
         and (.reconcile_inventory | valid_inventory)
       end;
     (if .schema == "fm-bearings.v1" then
-       (.secondmate_reconcile // []) as $members
-       | if ($members | type) != "array" then error("secondmate_reconcile is not an array")
+       .secondmate_reconcile as $members
+       | if $members == null then []
+         elif ($members | type) != "array" then error("secondmate_reconcile is not an array")
          elif any($members[]; (valid_bearings_member | not)) then error("secondmate_reconcile has a malformed member")
          else $members[]
          end
        | {id, spawn_gen:(.spawn_gen // ""), host:(.host // ""), kind:(.kind // ""), ids:(.ids // [])}
      else
-       (.secondmate_current.records // []) as $records
-       | if ($records | type) != "array" then error("secondmate_current.records is not an array")
+       .secondmate_current.records as $records
+       | if $records == null then []
+         elif ($records | type) != "array" then error("secondmate_current.records is not an array")
          elif any($records[]; (valid_fleet_record | not)) then error("secondmate_current.records has a malformed reconciliation member")
          else $records[]
          end
