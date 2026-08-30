@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# fm-forge-lib.sh — thin Firstmate forge provider boundary (bootstrap slice).
+# fm-forge-lib.sh - thin Firstmate forge provider boundary (bootstrap slice).
 #
 # Derives bootstrap CLI/auth requirements from registered project checkouts
 # so GitLab-only homes do not require gh/gh-axi/gh auth, and GitHub-only
 # homes do not require glab. Deliberately does NOT implement merge, teardown,
-# head-SHA, or review-diff parity — no-mistakes owns those for no-mistakes
+# head-SHA, or review-diff parity - no-mistakes owns those for no-mistakes
 # delivery mode via glab/gh.
 #
 #
 # Exit contract (subset actually used by the operations below):
 #   0 = success, normalized output on stdout
-#   1 = provider CLI / auth / network failure — no positive state may be inferred
-#   2 = invalid/unsafe input — caller error
+#   1 = provider CLI / auth / network failure - no positive state may be inferred
+#   2 = invalid/unsafe input - caller error
 #   5 = capability unsupported by this provider/topology (used for "local"/"unknown")
 
 set -u
