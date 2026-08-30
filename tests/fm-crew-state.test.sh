@@ -513,7 +513,22 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   pass "terminal no-checks ci-monitor marker surfaces done"
 }
 
-test_ci_monitoring_green_then_rearm_stays_working() {
+test_ci_monitoring_trusted_no_ci_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case ci-trusted-no-ci)
+  make_repo_on_branch "$d/wt" fm/feat-citrustednoci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-citrustednoci.meta" "window=fm:fm-feat-citrustednoci" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-citrustednoci)"
+  FM_FAKE_CI_LOGS="repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-citrustednoci)
+  assert_contains "$out" "state: done" "trusted no-ci monitor run -> done"
+  assert_contains "$out" "checks green" "trusted no-ci detail reports readiness"
+  assert_not_contains "$out" "state: working" "trusted no-ci monitor must not read as active work"
+  pass "trusted no-ci monitor marker surfaces done"
+}
+
+test_ci_monitoring_green_then_rearm_parks() {
   reset_fakes
   local d; d=$(new_case ci-green-then-rearm)
   make_repo_on_branch "$d/wt" fm/feat-cirearm
@@ -526,13 +541,14 @@ base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cirearm)
-  assert_contains "$out" "state: working" "base-advance rearm marker -> working"
+  assert_contains "$out" "state: parked" "base-advance rearm marker -> parked"
+  assert_contains "$out" "waiting for CI checks" "base-advance rearm names the external wait"
   assert_not_contains "$out" "state: done" "base-advance rearm marker must not read as done"
   assert_not_contains "$out" "checks green" "base-advance rearm marker must not read as checks green"
-  pass "base-advance rearm after green stays working"
+  pass "base-advance rearm after green parks while waiting"
 }
 
-test_ci_monitoring_no_checks_yet_stays_working() {
+test_ci_monitoring_no_checks_yet_parks() {
   reset_fakes
   local d; d=$(new_case ci-nochecks-yet)
   make_repo_on_branch "$d/wt" fm/feat-cinochecksyet
@@ -546,13 +562,14 @@ no CI checks reported yet, waiting for checks to register...
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cinochecksyet)
-  assert_contains "$out" "state: working" "pending no-checks marker -> working"
+  assert_contains "$out" "state: parked" "pending no-checks marker -> parked"
+  assert_contains "$out" "waiting for CI checks" "pending no-checks names the external wait"
   assert_not_contains "$out" "state: done" "pending no-checks marker must not read as done"
   assert_not_contains "$out" "checks green" "pending no-checks marker must not read as checks green"
-  pass "pending no-checks ci-monitor marker stays working"
+  pass "pending no-checks ci-monitor marker parks"
 }
 
-test_ci_monitoring_still_waiting_stays_working() {
+test_ci_monitoring_still_waiting_parks() {
   reset_fakes
   local d; d=$(new_case ci-waiting)
   make_repo_on_branch "$d/wt" fm/feat-ciwait
@@ -561,9 +578,10 @@ test_ci_monitoring_still_waiting_stays_working() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciwait)"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-ciwait)
-  assert_contains "$out" "state: working" "ci step still red -> working"
+  assert_contains "$out" "state: parked" "ci step waiting on results -> parked"
+  assert_contains "$out" "waiting for CI checks" "ci wait names the external dependency"
   assert_not_contains "$out" "checks green" "no green marker present -> no checks-green detail"
-  pass "ci-monitoring run with checks not yet green stays working"
+  pass "ci-monitoring run with checks not yet green parks"
 }
 
 # A later merge-conflict auto-fix round after an earlier green reading must
@@ -587,7 +605,7 @@ EOF
   pass "a fresh issue after an earlier green reading is not masked"
 }
 
-test_ci_ready_done_log_relapse_stays_working() {
+test_ci_ready_done_log_relapse_parks() {
   reset_fakes
   local d; d=$(new_case ci-ready-then-relapse)
   make_repo_on_branch "$d/wt" fm/feat-cireadyrelapse
@@ -602,10 +620,11 @@ CI checks running, waiting for results...
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cireadyrelapse)
-  assert_contains "$out" "state: working" "a stale ready status must not mask a later CI relapse"
+  assert_contains "$out" "state: parked" "a stale ready status must not mask a later CI relapse"
+  assert_contains "$out" "waiting for CI checks" "the later CI wait remains visible"
   assert_contains "$out" "source: run-step" "relapsed ci run remains run-step sourced"
   assert_not_contains "$out" "state: done" "relapsed ci run with stale done log must not read as done"
-  pass "stale checks-green status log does not mask CI relapse"
+  pass "stale checks-green status log does not mask a later CI wait"
 }
 
 test_ci_fixing_after_green_stays_working() {
@@ -1558,11 +1577,12 @@ test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
-test_ci_monitoring_green_then_rearm_stays_working
-test_ci_monitoring_no_checks_yet_stays_working
-test_ci_monitoring_still_waiting_stays_working
+test_ci_monitoring_trusted_no_ci_surfaces_done
+test_ci_monitoring_green_then_rearm_parks
+test_ci_monitoring_no_checks_yet_parks
+test_ci_monitoring_still_waiting_parks
 test_ci_monitoring_green_then_new_issue_stays_working
-test_ci_ready_done_log_relapse_stays_working
+test_ci_ready_done_log_relapse_parks
 test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
