@@ -46,7 +46,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
   A recorded deadline means the complete refresh did not finish inside `FM_HOME_SUMMARY_TIMEOUT`, so inspect lock acquisition and producer completion before validation or publication, and fix the blocked phase rather than raising this load-bearing bound.
 
 - `BACKLOG_RECONCILE: <id>: recorded backlog close could not be replayed: <reason>` - this session start found a pending-close record but could not land it.
-  For a valid teardown record, the endpoint and local copy are already gone; the task record is normally gone too, but remains paired with the marker when recovery could not remove it safely.
+  A valid teardown record proves the close was authorized and recorded, but physical cleanup may be partial: verify process reaping, the local-copy return, and endpoint closure before assuming those resources are gone.
   A validation error means the record cannot be trusted, so do not assume cleanup completed or follow any path or argument stored in it.
   Read the named reason, inspect the marker as inert data when validation failed, fix the record or backlog-file problem, and rerun session start so a valid recorded close replays.
   Never hand-close the item by deleting `state/<id>.backlog-close` - that can discard a completion link the cleanup captured, and the surviving marker prevents the record sweep from starting the item meanwhile.

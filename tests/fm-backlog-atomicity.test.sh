@@ -1126,6 +1126,24 @@ test_recovery_marks_an_owned_record_in_flight() {
   pass "session start marks an item In flight when this home already owns a worker for it"
 }
 
+test_recovery_ignores_a_symlinked_worker_record() {
+  local case_dir home id target out
+  id=atomic-heal-symlink-meta-b8
+  case_dir=$(make_home heal-symlink-meta)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  target="$case_dir/symlink-meta-target"
+  printf 'kind=ship\nspawn_gen=unpublished\n' > "$target"
+  ln -s "$target" "$home/state/$id.meta"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "session start treated a symlink as an owned worker record: $out"
+  [ -L "$home/state/$id.meta" ] \
+    || fail "session start replaced or removed the inert symlinked record"
+  pass "session start ignores symlinked worker records"
+}
+
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   local case_dir id out
   id=atomic-heal-b9
@@ -1691,6 +1709,7 @@ test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
 test_orca_cleanup_recovery_never_transitions_the_backlog
 test_recovery_marks_an_owned_record_in_flight
+test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
