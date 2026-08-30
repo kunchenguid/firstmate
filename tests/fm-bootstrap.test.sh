@@ -1148,6 +1148,72 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# Wake-delivery failures recorded by bin/fm-wake-delivery-alarm.sh surface as
+# one actionable WAKE_DELIVERY line at session start and are archived once
+# surfaced; a read-only (unlocked detect-only) session reports without
+# archiving so the session holding the fleet lock still surfaces them.
+test_wake_delivery_record_surfacing() {
+  local case_dir fakebin home out record
+  case_dir="$TMP_ROOT/wake-delivery-surface"
+  mkdir -p "$case_dir/home"
+  home="$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  record="$home/state/.wake-delivery-failures"
+  mkdir -p "$home/state"
+  printf '2026-08-30T09:00:00-0400\tOpenCode watcher (actionable wake) undelivered after 3 attempt(s): promptAsync rejected\n' > "$record"
+  printf '2026-08-30T09:07:12-0400\tOpenCode session-start (session-start nudge) undelivered after 3 attempt(s): promptAsync not accepted within 10000ms\n' >> "$record"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'WAKE_DELIVERY: 2 wake-delivery failure(s)' >/dev/null \
+    || fail "bootstrap did not report the wake-delivery failure count: $out"
+  printf '%s\n' "$out" | grep -F 'newest: OpenCode session-start (session-start nudge)' >/dev/null \
+    || fail "bootstrap did not surface the newest failure summary: $out"
+  printf '%s\n' "$out" | grep -F 'restart the stale OpenCode TUI' >/dev/null \
+    || fail "bootstrap WAKE_DELIVERY line lacks the actionable restart guidance: $out"
+  [ ! -e "$record" ] || fail "bootstrap left the record unarchived after surfacing"
+  [ -s "$record.surfaced" ] || fail "bootstrap did not archive the surfaced record"
+  # A fresh run after archiving is silent about it again.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'WAKE_DELIVERY' >/dev/null \
+    && fail "bootstrap re-reported an already-surfaced record: $out"
+  pass "bootstrap surfaces recorded wake-delivery failures once and archives them"
+}
+
+test_wake_delivery_record_readonly_leaves_record() {
+  local case_dir fakebin home out record
+  case_dir="$TMP_ROOT/wake-delivery-readonly"
+  mkdir -p "$case_dir/home"
+  home="$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  record="$home/state/.wake-delivery-failures"
+  mkdir -p "$home/state"
+  printf '2026-08-30T10:00:00-0400\tOpenCode watcher (watcher failure) undelivered after 3 attempt(s): client drifted\n' > "$record"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F '1 wake-delivery failure(s)' >/dev/null \
+    || fail "read-only bootstrap hid the wake-delivery record: $out"
+  [ -s "$record" ] || fail "read-only bootstrap archived a record it does not own"
+  [ ! -e "$record.surfaced" ] || fail "read-only bootstrap created a surfaced archive"
+  pass "read-only bootstrap reports wake-delivery failures without archiving"
+}
+
+test_wake_delivery_absent_record_stays_silent() {
+  local case_dir fakebin home out
+  case_dir="$TMP_ROOT/wake-delivery-absent"
+  mkdir -p "$case_dir/home"
+  home="$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  mkdir -p "$home/state"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'WAKE_DELIVERY' >/dev/null \
+    && fail "bootstrap invented a wake-delivery failure with no record: $out"
+  [ -z "$out" ] || fail "healthy bootstrap was not silent: $out"
+  pass "bootstrap stays silent with no wake-delivery record"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1176,3 +1242,6 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_wake_delivery_record_surfacing
+test_wake_delivery_record_readonly_leaves_record
+test_wake_delivery_absent_record_stays_silent

@@ -30,6 +30,7 @@ If the unready arm does not retire within that bound, the adapter keeps ownershi
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
+OpenCode's delivery of that wake (and of every other OpenCode wake prompt) is retried boundedly and declared loudly on failure through the contract in [`supervision-protocols/opencode.md`](supervision-protocols/opencode.md), so a stale TUI build cannot swallow the notification silently.
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding, so a finished, hung, or identity-mismatched claim cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).

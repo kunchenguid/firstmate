@@ -5,6 +5,8 @@ When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_a
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
 
+The channel machinery below lives in `bin/fm-wedge-alarm-lib.sh` and is shared by a second consumer: `bin/fm-wake-delivery-alarm.sh` declares failed OpenCode wake-delivery prompts through the same channels, with its own durable record (`state/.wake-delivery-failures`, surfaced by `bin/fm-bootstrap.sh` as the `WAKE_DELIVERY` diagnostic) and its own notification cooldown instead of the max-defer re-alarm window.
+
 ## Channels
 
 `config/wedge-alarm` is local and gitignored.
@@ -36,4 +38,5 @@ When the daemon is sourced as a library, that seam defaults to `discard`, so a t
 Production leaves the seam unset and uses the configured real channels.
 
 `tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, and safe `command:` summary delivery.
+`tests/fm-wake-delivery.test.sh` covers the shared wake-delivery consumer: every failure is recorded durably, active alerts respect its cooldown, and channels still route only through the recorder seam.
 [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) records the bounded manual macOS and Herdr channel proof.

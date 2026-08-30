@@ -76,7 +76,7 @@ config/stow-pass-horizon  optional presence flag opting this home in to /stow's 
 config/herdr-presentation-spaces  optional "off" opt-out from, or "on" opt-in to, Herdr's default-on disposable single-task visual projection, which is unconfigured-default-on only at or above a Herdr version floor; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Presentation spaces"
 config/trace-context  optional presence flag enabling default-off native W3C trace-context propagation to spawned agents; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Trace context propagation" and docs/trace-context.md
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
-config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/wedge-alarm  active-alert channel directives shared by the away-mode wedge alarm and OpenCode wake-delivery failures; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -135,6 +135,7 @@ state/               runtime records and signals; gitignored
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .writing-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
+  .wake-delivery-failures  durable OpenCode wake-delivery failure record owned by bin/fm-wake-delivery-alarm.sh, surfaced once by bootstrap as WAKE_DELIVERY then archived to .surfaced; the sibling .wake-delivery-alarm is its notification cooldown marker
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
@@ -534,7 +535,7 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 
 These skills are not captain-invocable; load them only at their precise triggers.
 
-- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
+- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, `WAKE_DELIVERY:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.

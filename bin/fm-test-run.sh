@@ -218,6 +218,7 @@ family_for_basename() {
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
+    fm-wake-delivery.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
@@ -614,6 +615,7 @@ tests/fm-wake-drain-open-decisions-cursor.test.sh 17357
 tests/fm-wake-drain-open-decisions.test.sh 11300
 tests/fm-wake-drain-unread-status.test.sh 25214
 tests/fm-wake-queue.test.sh 30887
+tests/fm-wake-delivery.test.sh 7000
 tests/fm-watch-arm.test.sh 53598
 tests/fm-watch-checkpoint.test.sh 5293
 tests/fm-watch-recovery-loop.test.sh 58721

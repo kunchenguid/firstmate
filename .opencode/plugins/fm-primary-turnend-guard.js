@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { effectiveHomePaths, sendWakePrompt } from "./lib/fm-wake-delivery.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
@@ -74,24 +74,20 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
       const result = await runGuard(root);
       if (result.code !== 2) return;
 
-      try {
-        const text = await encodeFirstmateOperationalInput(
-          root,
-          "turn-end-guard",
-          "TURN WOULD END BLIND - supervision is off. " +
-            "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-            result.stderr,
-        );
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text }],
-          },
-        });
-        skipNextIdle = true;
-      } catch {
-        skipNextIdle = false;
-      }
+      const delivered = await sendWakePrompt(
+        effectiveHomePaths(root),
+        client,
+        sessionID,
+        "turn-end-guard",
+        "TURN WOULD END BLIND - supervision is off. " +
+          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+          result.stderr,
+        "turn-end guard follow-up",
+      );
+      // An undelivered follow-up is itself recorded and alarmed by
+      // lib/fm-wake-delivery.js, and the latch stays open so the next idle
+      // retries the guard rather than ending the turn blind.
+      skipNextIdle = delivered;
     },
   };
 };

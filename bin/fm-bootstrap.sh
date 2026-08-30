@@ -13,6 +13,10 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
+#                 "WAKE_DELIVERY: <n> wake-delivery failure(s) recorded in
+#                 state/.wake-delivery-failures (newest: <summary>); OpenCode
+#                 wake injection is failing in the running build - restart the
+#                 stale OpenCode TUI, then rerun bin/fm-session-start.sh",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -1445,6 +1449,30 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_home_summary_publication
+  detect_wake_delivery_failures
+}
+
+# OpenCode wake-delivery failures land in state/.wake-delivery-failures through
+# bin/fm-wake-delivery-alarm.sh every time a wake-injection promptAsync exhausts
+# its bounded retry (.opencode/plugins/lib/fm-wake-delivery.js owns that path,
+# and the sessionstart nudge delivery doubles as the running-build self-check).
+# Surface the record here, once per session start, so a stale OpenCode TUI that
+# swallowed wakes is diagnosed at boot instead of by missed reports; bin/
+# fm-wake-delivery-alarm.sh owns the record format and the notification
+# cooldown. A read-only session prints the line but leaves the record for the
+# session holding the fleet lock to archive.
+detect_wake_delivery_failures() {
+  local record="$STATE/.wake-delivery-failures" count newest
+  [ -f "$record" ] && [ -r "$record" ] && [ ! -L "$record" ] || return 0
+  [ -s "$record" ] || return 0
+  count=$(wc -l < "$record" 2>/dev/null | tr -d '[:space:]') || return 0
+  case "$count" in ''|*[!0-9]*) return 0 ;; esac
+  newest=$(tail -n 1 "$record" 2>/dev/null | LC_ALL=C cut -f2- | cut -c1-200)
+  echo "WAKE_DELIVERY: $count wake-delivery failure(s) recorded in state/.wake-delivery-failures (newest: $newest); OpenCode wake injection is failing in the running build - restart the stale OpenCode TUI, then rerun bin/fm-session-start.sh"
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && [ "${FM_BOOTSTRAP_LOCKED:-0}" != 1 ]; then
+    return 0
+  fi
+  mv -f "$record" "$record.surfaced" 2>/dev/null || true
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle
