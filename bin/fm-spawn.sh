@@ -3005,7 +3005,8 @@ preserve_relaunch_meta() {
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
-{
+(
+  set -e
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
@@ -3054,7 +3055,7 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+) > "$SPAWN_META_PATH"
 SPAWN_META_STATUS=$?
 if [ "$SPAWN_META_STATUS" -ne 0 ]; then
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2

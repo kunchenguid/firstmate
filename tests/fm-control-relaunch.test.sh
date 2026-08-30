@@ -166,6 +166,7 @@ run_control() {  # <case-dir> <args...>
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_REAL_AWK="${FM_REAL_AWK:-}" FM_FAKE_AWK_FAIL_INPUT="${FM_FAKE_AWK_FAIL_INPUT:-}" \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
@@ -233,6 +234,19 @@ fi
 exec "$FM_REAL_MV" "$@"
 SH
   chmod +x "$1/fakebin/mv"
+}
+
+make_awk_failure_stub() {  # <case-dir>
+  cat > "$1/fakebin/awk" <<'SH'
+#!/usr/bin/env bash
+for path in "$@"; do
+  if [ -n "${FM_FAKE_AWK_FAIL_INPUT:-}" ] && [ "$path" = "$FM_FAKE_AWK_FAIL_INPUT" ]; then
+    exit 7
+  fi
+done
+exec "$FM_REAL_AWK" "$@"
+SH
+  chmod +x "$1/fakebin/awk"
 }
 
 make_rm_failure_stub() {  # <case-dir>
@@ -1092,6 +1106,28 @@ test_prepublication_abort_retires_replacement_wiring_and_busy_state() {
   pass "fm-spawn relaunch: prepublication abort removes replacement state"
 }
 
+test_metadata_generation_failure_keeps_the_prior_record() {
+  local dir out rc real_awk meta before
+  dir=$(new_case metadata-generation-fail rl31)
+  add_ship_task "$dir" rl31 claude
+  meta="$dir/home/state/rl31.meta"
+  before=$(cat "$meta")
+  real_awk=$(command -v awk)
+  make_awk_failure_stub "$dir"
+  out=$(FM_REAL_AWK="$real_awk" FM_FAKE_AWK_FAIL_INPUT="$meta" \
+    run_control "$dir" rl31 relaunch --note "retain complete metadata"); rc=$?
+  expect_code 1 "$rc" "a failed metadata generator should fail closed"$'\n'"$out"
+  [ "$(cat "$meta")" = "$before" ] \
+    || fail "a failed metadata generator replaced the prior durable record"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "the injected metadata failure did not occur after the prior agent stopped"
+  [ ! -e "$dir/wt/.claude/settings.local.json" ] \
+    || fail "a failed metadata generator retained replacement harness wiring"
+  [ "$(journal_field "$dir" rl31 rollback)" = prior-record-kept ] \
+    || fail "the failed metadata generator did not record a prepublication rollback"
+  pass "fm-spawn relaunch: metadata generation failure preserves the complete prior record"
+}
+
 test_journal_records_the_checkpoint_it_proved() {
   local dir head
   dir=$(new_case journal rl14)
@@ -1512,6 +1548,7 @@ test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
+test_metadata_generation_failure_keeps_the_prior_record
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home

@@ -687,6 +687,16 @@ test_claude_trust_dialog_yes_focused_after_navigation() {
   pass "fm_composer_claude_trust_dialog_state: focus on \"Yes, I trust this folder\" reads trust-focused"
 }
 
+test_claude_trust_dialog_uses_the_latest_yes_focus() {
+  local screen out
+  screen="$CLAUDE_TRUST_YES_FOCUSED
+
+$CLAUDE_TRUST_CANCEL_FOCUSED"
+  out=$(fm_composer_claude_trust_dialog_state "$screen")
+  [ "$out" = trust-unfocused ] || fail "a stale focused Yes row must not override the current cancel-focused dialog, got '$out'"
+  pass "fm_composer_claude_trust_dialog_state: the latest dialog's Yes row owns focus"
+}
+
 test_claude_trust_dialog_permissions_backstop_variant() {
   local out
   out=$(fm_composer_claude_trust_dialog_state "$CLAUDE_TRUST_PERMISSIONS_VARIANT")
@@ -731,6 +741,7 @@ test_claude_trust_dialog_state_survives_ansi_styling() {
 
 test_claude_trust_dialog_defaults_to_cancel_focused
 test_claude_trust_dialog_yes_focused_after_navigation
+test_claude_trust_dialog_uses_the_latest_yes_focus
 test_claude_trust_dialog_permissions_backstop_variant
 test_claude_trust_dialog_absent_on_ordinary_screens
 test_claude_trust_dialog_absent_when_only_in_scrollback

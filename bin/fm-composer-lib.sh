@@ -1392,7 +1392,7 @@ fm_composer_claude_trust_dialog_state() {  # <screen>
     if [ "$content" = "$FM_COMPOSER_CLAUDE_TRUST_YES_LABEL" ]; then
       yes_seen=1
       yes_row=$row
-      [ "$focus" = 1 ] && yes_focused=1
+      yes_focused=$focus
     fi
   done <<EOF
 $plain
