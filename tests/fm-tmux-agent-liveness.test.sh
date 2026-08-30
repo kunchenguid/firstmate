@@ -53,6 +53,7 @@ export PATH
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude/claude"
 ln -s "$SLEEP_BIN" "$LAB/bin/codex"
+ln -s "$SLEEP_BIN" "$LAB/bin/codex-aarch64-a"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
@@ -167,6 +168,32 @@ if fm_backend_agent_started tmux "$SESSION:wrong-harness" claude; then
   fail "a foreground codex executable must not prove a selected claude replacement start"
 fi
 pass "tmux liveness: replacement proof requires the selected foreground harness"
+
+new_window codex-artifact "$LAB/bin/codex-aarch64-a" 900
+wait_for_state "$SESSION:codex-artifact" alive \
+  || fail "the verified codex-aarch64-a artifact must classify alive"
+fm_backend_agent_started tmux "$SESSION:codex-artifact" codex \
+  || fail "the verified codex-aarch64-a artifact must prove a selected codex replacement start"
+pass "tmux liveness: the verified codex-aarch64-a artifact proves selected Codex startup"
+
+(
+  tmux() {
+    case "$1" in
+      list-windows) printf '%s\n' paired ;;
+      display-message) printf '%s\n' /dev/fm-cursor-pair ;;
+      *) return 1 ;;
+    esac
+  }
+  ps() {
+    case "$1" in
+      -t) printf '%s\n' '101 77 77 node' ;;
+      -p) printf '%s\n' '/opt/cursor-agent --model gpt' ;;
+      *) return 1 ;;
+    esac
+  }
+  fm_backend_agent_started tmux cursor-fixture:paired cursor
+) || fail "paired comm=node and argv0=/opt/cursor-agent must prove a selected Cursor replacement start"
+pass "tmux liveness: paired node and cursor-agent identity proves selected Cursor startup"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

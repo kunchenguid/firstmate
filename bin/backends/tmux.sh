@@ -271,6 +271,10 @@ fm_backend_tmux_agent_started() {  # <target> <harness>
     *:*) target="=${target%%:*}:=${target#*:}" ;;
     *) return 1 ;;
   esac
+  if [ "$harness" = cursor ] && fm_tmux_pane_is_cursor "$target"; then
+    fm_backend_tmux_window_exists "$requested"
+    return
+  fi
   names=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue

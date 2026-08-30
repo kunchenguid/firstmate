@@ -59,6 +59,7 @@ fm_harness_selected_executable_matches() {  # <harness> <comm> [argv0]
     case "$harness" in
       claude|codex|opencode|grok)
         [ "$base" = "$harness" ] && return 0
+        [ "$harness:$base" = codex:codex-aarch64-a ] && return 0
         name=$(fm_harness_path_name "$value" 2>/dev/null) || name=
         [ "$name" = "$harness" ] && return 0
         ;;
