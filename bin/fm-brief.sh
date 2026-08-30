@@ -6,8 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> --test-scope <scope> [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout --test-scope <scope> [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -22,6 +22,20 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --test-scope is REQUIRED on every crewmate brief and names the tests the worker
+#   may run. It exists because a worker with no named scope runs the whole suite,
+#   and suite time and model quota are both scarce. Pass the concrete suites,
+#   paths, or command for this task, e.g. --test-scope 'tests/panel/'. A
+#   genuinely broad task passes the reserved value `full` (or `full: <why>`),
+#   which renders the section as a deliberate full-suite choice rather than a
+#   narrow scope. Both spellings are a positive statement, so an unnamed scope
+#   cannot reach a worker as a silent default; there is no placeholder form,
+#   because a placeholder that survives into a dispatched brief is worth nothing.
+#   The scaffolded text stays generic and never names any repo's suites: this
+#   script is given a caller-supplied repo string it cannot resolve, so the
+#   concrete suite names belong in the value, supplied by whoever knows the project.
+#   --test-scope is refused on a secondmate charter, which dispatches no tests of
+#   its own and briefs its own crewmates.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -111,6 +125,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+TEST_SCOPE=
+TEST_SCOPE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -120,6 +136,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      test-scope) TEST_SCOPE=$a; TEST_SCOPE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -132,6 +149,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --test-scope) want_value=test-scope ;;
+    --test-scope=*) TEST_SCOPE=${a#--test-scope=}; TEST_SCOPE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -158,6 +177,25 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+# A crewmate with no named test scope runs everything, so the scope is a required
+# positive statement rather than a placeholder: `full` deliberately authorizes the
+# whole suite, and any other value names what to run instead.
+if [ "$KIND" = secondmate ]; then
+  [ "$TEST_SCOPE_SET" -eq 0 ] || {
+    echo "error: --test-scope applies only to crewmate ship and scout briefs; a charter dispatches no tests of its own and briefs its own crewmates" >&2
+    exit 1
+  }
+else
+  [ "$TEST_SCOPE_SET" -eq 1 ] || {
+    echo "error: crewmate briefs require --test-scope <scope>; name the tests this task should run (e.g. --test-scope 'tests/panel/'), or --test-scope full to deliberately authorize the whole suite" >&2
+    exit 1
+  }
+  case "$TEST_SCOPE" in
+    *[![:space:]]*) ;;
+    *) echo "error: --test-scope must name a scope; pass the tests to run, or --test-scope full to deliberately authorize the whole suite" >&2; exit 1 ;;
+  esac
 fi
 ID=${POS[0]}
 
@@ -289,6 +327,41 @@ fi
 
 REPO=${POS[1]}
 
+# Test scope, rendered for ship and scout alike. `full` and `full: <why>` are the
+# reserved broad spellings that make an intentional whole-suite run visible as a
+# choice; every other value is the concrete list of tests the worker may run.
+# The wording stays generic on purpose: this script cannot resolve the
+# caller-supplied repo string, so the suite names live in the value.
+TEST_SCOPE_LOWER=$(printf '%s' "$TEST_SCOPE" | tr '[:upper:]' '[:lower:]')
+TEST_SCOPE_REASON=
+case "$TEST_SCOPE_LOWER" in
+  full) TEST_SCOPE_BROAD=1 ;;
+  full:*)
+    TEST_SCOPE_BROAD=1
+    TEST_SCOPE_REASON=${TEST_SCOPE#*:}
+    TEST_SCOPE_REASON=${TEST_SCOPE_REASON#"${TEST_SCOPE_REASON%%[![:space:]]*}"}
+    ;;
+  *) TEST_SCOPE_BROAD=0 ;;
+esac
+
+if [ "$TEST_SCOPE_BROAD" -eq 1 ]; then
+IFS= read -r -d '' TEST_SCOPE_SECTION <<EOF || true
+# Test scope - FULL SUITE, deliberately
+This task runs the whole test suite.${TEST_SCOPE_REASON:+ Reason: $TEST_SCOPE_REASON}
+That is an explicit decision recorded for this task, not the default: every other brief names the specific tests to run, because suite time and model quota are both scarce.
+This governs the tests you run yourself; the delivery path still runs whatever it is configured to run.
+EOF
+else
+IFS= read -r -d '' TEST_SCOPE_SECTION <<EOF || true
+# Test scope - run ONLY these
+$TEST_SCOPE
+Do not run the full suite. Suite time and model quota are both scarce, and a change confined to this area does not need every unrelated suite run against it.
+This governs the tests you run yourself; the delivery path still runs whatever it is configured to run.
+If the work turns out to depend on something outside this scope, run the specific extra tests you actually need and say why in your final summary - never fall back to running everything.
+EOF
+fi
+TEST_SCOPE_SECTION=${TEST_SCOPE_SECTION%$'\n'}
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -329,6 +402,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$TEST_SCOPE_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -402,6 +477,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$TEST_SCOPE_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
