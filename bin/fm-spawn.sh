@@ -3054,10 +3054,12 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH" || {
+} > "$SPAWN_META_PATH"
+SPAWN_META_STATUS=$?
+if [ "$SPAWN_META_STATUS" -ne 0 ]; then
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
-  exit 1
-}
+  exit "$SPAWN_META_STATUS"
+fi
 if [ "$RELAUNCH" -eq 0 ]; then
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
