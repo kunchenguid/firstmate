@@ -89,6 +89,13 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
+  # fm-task-inbox-lib.sh (and the fm-line-cap-lib.sh it sources): teardown
+  # sources it to commit or name any deferred decision closure before the
+  # task's inbox is removed. This fixture's task never had an inbox, so the
+  # commit pass is a quiet no-op, but the sibling is now unconditionally
+  # required.
+  ln -s "$ROOT/bin/fm-task-inbox-lib.sh" "$fake/bin/fm-task-inbox-lib.sh"
+  ln -s "$ROOT/bin/fm-line-cap-lib.sh" "$fake/bin/fm-line-cap-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -176,6 +183,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
+  ln -s "$ROOT/bin/fm-task-inbox-lib.sh" "$fake/bin/fm-task-inbox-lib.sh"
+  ln -s "$ROOT/bin/fm-line-cap-lib.sh" "$fake/bin/fm-line-cap-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
