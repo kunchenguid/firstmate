@@ -88,6 +88,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const wakeLib = `${fmRoot}/bin/fm-wake-lib.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -103,6 +104,32 @@ const armReadyTimeoutMs = positiveInteger(
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
+const rearmResurfaceBody = "FIRSTMATE WATCHER WAKE: check: rearm-resurface\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
+const settledRecoveryProbe = String.raw`
+set -u
+. "$FM_PI_WAKE_LIB" || exit 1
+queue=$FM_PI_WAKE_QUEUE
+marker=$FM_PI_RECOVERY_MARKER
+queue_lock=$FM_WAKE_QUEUE_LOCK
+marker_lock="${marker}.lock"
+release_probe_locks() {
+  fm_lock_release "$marker_lock"
+  fm_lock_release "$queue_lock"
+}
+trap release_probe_locks EXIT
+trap 'exit 1' HUP INT TERM
+fm_lock_acquire_wait "$queue_lock" || exit 1
+fm_lock_acquire_wait "$marker_lock" || exit 1
+[ -e "$queue" ] && [ ! -L "$queue" ] && [ -f "$queue" ] && [ -r "$queue" ] || exit 1
+[ ! -s "$queue" ] || exit 1
+cat -- "$queue" >/dev/null || exit 1
+fm_recovery_marker_read "$marker" || exit 1
+case "$FM_RECOVERY_MARKER_TOKEN" in
+  acked:handling:*|acked:downtime:*) ;;
+  *) exit 1 ;;
+esac
+printf 'settled\n'
+`;
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
@@ -114,6 +141,25 @@ function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
+}
+
+function recoveryFollowUpIsSettled(): boolean {
+  const result = spawnSync("bash", ["-lc", settledRecoveryProbe], {
+    cwd: fmRoot,
+    encoding: "utf8",
+    timeout: 1500,
+    killSignal: "SIGTERM",
+    env: {
+      ...process.env,
+      FM_HOME: fmHome,
+      FM_ROOT_OVERRIDE: fmRoot,
+      FM_STATE_OVERRIDE: state,
+      FM_PI_WAKE_LIB: wakeLib,
+      FM_PI_WAKE_QUEUE: `${state}/.wake-queue`,
+      FM_PI_RECOVERY_MARKER: `${state}/.watcher-down`,
+    },
+  });
+  return !result.error && result.status === 0 && result.stdout === "settled\n";
 }
 
 function parentPid(pid: string): string {
@@ -242,6 +288,31 @@ export default function (pi: ExtensionAPI) {
     calmPresentation.active &&
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
+
+  let canonicalRearmResurfaceInput: string | null = null;
+  pi.on("input", async (event, ctx) => {
+    if (
+      event.source !== "extension" ||
+      event.streamingBehavior !== "followUp" ||
+      Boolean(event.images?.length) ||
+      !event.text.includes(rearmResurfaceBody)
+    ) {
+      return { action: "continue" };
+    }
+    try {
+      canonicalRearmResurfaceInput ??= encodeFirstmateOperationalInput("watcher", rearmResurfaceBody);
+    } catch {
+      return { action: "continue" };
+    }
+    if (event.text !== canonicalRearmResurfaceInput) {
+      return { action: "continue" };
+    }
+    while (!ctx.isIdle()) {
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    if (!recoveryFollowUpIsSettled()) return { action: "continue" };
+    return { action: "handled" };
+  });
 
   async function sendWake(
     owner: SessionGeneration,

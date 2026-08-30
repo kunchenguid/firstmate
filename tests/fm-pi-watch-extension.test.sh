@@ -37,7 +37,8 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
-  chmod +x "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-wake-lib.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
@@ -70,6 +71,233 @@ export const Type = {
   },
 };
 JS
+}
+
+test_pi_stale_rearm_follow_up_filter() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-stale-rearm-filter-root"
+  home="$TMP_ROOT/pi-stale-rearm-filter-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : > "$repo/bin/fm-watch-arm.sh"
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { spawn } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { pathToFileURL } from "node:url";
+import { encodeFirstmateOperationalInput } from "./.pi/extensions/lib/fm-operational-input.ts";
+
+const state = `${process.env.FM_HOME}/state`;
+const queue = `${state}/.wake-queue`;
+const marker = `${state}/.watcher-down`;
+const body = "FIRSTMATE WATCHER WAKE: check: rearm-resurface\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
+const canonical = encodeFirstmateOperationalInput("watcher", body);
+let inputHandler = null;
+let providerTurns = 0;
+let idle = true;
+const pi = {
+  on(event, handler) {
+    if (event === "input") inputHandler = handler;
+  },
+  events: { on() {} },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!inputHandler) throw new Error("Pi watcher input handler was not registered");
+
+function resetState(markerText = "acked:handling:generation-1\n", queueText = "") {
+  rmSync(marker, { force: true, recursive: true });
+  rmSync(queue, { force: true, recursive: true });
+  writeFileSync(marker, markerText);
+  writeFileSync(queue, queueText);
+}
+
+async function dispatch(overrides = {}) {
+  const result = await inputHandler({
+    type: "input",
+    text: canonical,
+    source: "extension",
+    streamingBehavior: "followUp",
+    ...overrides,
+  }, { isIdle: () => idle });
+  if (result?.action !== "handled") providerTurns += 1;
+  return result?.action ?? "continue";
+}
+
+async function expectHandled(label, overrides = {}) {
+  const before = providerTurns;
+  const action = await dispatch(overrides);
+  if (action !== "handled") throw new Error(`${label} reached provider dispatch`);
+  if (providerTurns !== before) throw new Error(`${label} incremented provider turns`);
+}
+
+async function expectDelivered(label, overrides = {}) {
+  const before = providerTurns;
+  const action = await dispatch(overrides);
+  if (action !== "continue") throw new Error(`${label} was swallowed`);
+  if (providerTurns !== before + 1) throw new Error(`${label} did not reach provider dispatch`);
+}
+
+resetState(
+  "announced:handling:generation-1\n",
+  "1\t1\tcheck\trecovery\tcheck: recovery work\n",
+);
+idle = false;
+const settleCurrentTurn = setTimeout(() => {
+  writeFileSync(marker, "acked:handling:generation-1\n");
+  writeFileSync(queue, "");
+  idle = true;
+}, 40);
+await expectHandled("queued recovery settled by the active turn");
+clearTimeout(settleCurrentTurn);
+resetState();
+await expectHandled("acked handling with empty queue");
+resetState("acked:downtime:generation-2\n");
+await expectHandled("acked downtime with empty queue");
+
+for (const token of [
+  "pending:downtime:generation-3",
+  "announced:downtime:generation-3",
+  "pending:handling:generation-3",
+  "announced:handling:generation-3",
+]) {
+  resetState(`${token}\n`);
+  await expectDelivered(token);
+}
+
+resetState();
+rmSync(marker);
+await expectDelivered("missing recovery marker");
+resetState();
+rmSync(queue);
+await expectDelivered("missing wake queue");
+resetState("not-a-recovery-marker\n");
+await expectDelivered("malformed recovery marker");
+resetState("acked:handling:generation-4\nextra\n");
+await expectDelivered("multi-line recovery marker");
+resetState("acked:handling:generation-4\n", "1\t1\tcheck\tconcurrent\tcheck: concurrent work\n");
+await expectDelivered("nonempty wake queue");
+
+resetState();
+writeFileSync(`${state}/marker-target`, "acked:handling:generation-5\n");
+rmSync(marker);
+symlinkSync(`${state}/marker-target`, marker);
+await expectDelivered("symlinked recovery marker");
+rmSync(`${state}/marker-target`);
+resetState();
+writeFileSync(`${state}/queue-target`, "");
+rmSync(queue);
+symlinkSync(`${state}/queue-target`, queue);
+await expectDelivered("symlinked wake queue");
+rmSync(`${state}/queue-target`);
+
+resetState();
+chmodSync(marker, 0o000);
+try {
+  await expectDelivered("unreadable recovery marker");
+} finally {
+  chmodSync(marker, 0o600);
+}
+resetState();
+chmodSync(queue, 0o000);
+try {
+  await expectDelivered("unreadable wake queue");
+} finally {
+  chmodSync(queue, 0o600);
+}
+
+resetState();
+await expectDelivered("interactive captain text", { source: "interactive" });
+await expectDelivered("rpc captain text", { source: "rpc" });
+await expectDelivered("steering extension input", { streamingBehavior: "steer" });
+await expectDelivered("idle extension input", { streamingBehavior: undefined });
+await expectDelivered("extension input with an image", {
+  images: [{ type: "image", source: { type: "base64", mediaType: "image/png", data: "AA==" } }],
+});
+await expectDelivered("captain text containing the reason", {
+  source: "interactive",
+  text: "please investigate check: rearm-resurface without swallowing this",
+});
+for (const reason of [
+  "signal: worker.status",
+  "stale: worker-window",
+  "check: startup-network",
+  "heartbeat",
+  "watcher: FAILED - recovery needs attention",
+]) {
+  await expectDelivered(`other watcher reason ${reason}`, {
+    text: encodeFirstmateOperationalInput(
+      "watcher",
+      body.replace("check: rearm-resurface", reason),
+    ),
+  });
+}
+await expectDelivered("near-miss watcher body", { text: `${canonical} ` });
+await expectDelivered("other operational kind", {
+  text: encodeFirstmateOperationalInput("session-start", body),
+});
+
+resetState("acked:handling:generation-race\n");
+const ready = `${state}/race-marker-ready`;
+const done = `${state}/race-append-done`;
+const holderScript = String.raw`
+set -eu
+. "$FM_ROOT_OVERRIDE/bin/fm-wake-lib.sh"
+marker="$FM_HOME/state/.watcher-down"
+marker_lock="${marker}.lock"
+fm_lock_acquire_wait "$marker_lock"
+trap 'fm_lock_release "$marker_lock"' EXIT
+: > "$FM_RACE_READY"
+while [ ! -L "$FM_WAKE_QUEUE_LOCK" ]; do sleep 0.01; done
+(
+  fm_wake_append check concurrent-race 'check: concurrent race work'
+  : > "$FM_RACE_DONE"
+) &
+appender=$!
+sleep 0.05
+fm_lock_release "$marker_lock"
+wait "$appender"
+`;
+const holder = spawn("bash", ["-lc", holderScript], {
+  stdio: ["ignore", "pipe", "pipe"],
+  env: {
+    ...process.env,
+    FM_HOME: process.env.FM_HOME,
+    FM_ROOT_OVERRIDE: process.env.FM_ROOT_OVERRIDE,
+    FM_STATE_OVERRIDE: state,
+    FM_RACE_READY: ready,
+    FM_RACE_DONE: done,
+  },
+});
+let holderError = "";
+holder.stderr.on("data", (chunk) => { holderError += chunk.toString(); });
+for (let i = 0; i < 200 && !existsSync(ready); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(ready)) throw new Error(`race marker lock was not acquired: ${holderError}`);
+await expectHandled("settled prompt racing a concurrent append");
+await new Promise((resolve, reject) => {
+  holder.on("error", reject);
+  holder.on("close", (code) => code === 0 ? resolve() : reject(new Error(`race holder exited ${code}: ${holderError}`)));
+});
+if (!existsSync(done)) throw new Error("concurrent append did not complete");
+await expectDelivered("re-dispatch after concurrent append");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi stale recovery filter must suppress only settled canonical follow-ups and preserve a concurrent append"
+  [ -z "$out" ] || fail "Pi stale recovery filter test printed output: $out"
+  pass "Pi stale recovery follow-up filter fails toward delivery without losing a concurrent append"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -2804,6 +3032,7 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_stale_rearm_follow_up_filter
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
