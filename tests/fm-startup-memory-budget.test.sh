@@ -229,7 +229,7 @@ make_unix_socket() {
 
 wait_for_socket_ready() {
   local ready=$1 attempts=0
-  while [ "$attempts" -lt 10 ]; do
+  while [ "$attempts" -lt 50 ]; do
     [ -e "$ready" ] && return 0
     sleep 0.1
     attempts=$((attempts + 1))
