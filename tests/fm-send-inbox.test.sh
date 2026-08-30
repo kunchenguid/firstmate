@@ -660,6 +660,44 @@ EOF
   pass "fm-send inbox: origin captain holds are revalidated at publication"
 }
 
+test_linked_captain_hold_is_revalidated_at_publication() {
+  local dir err expected_status rc
+  dir=$(setup_case linked-captain-hold-publication); err="$dir/send.err"
+  cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
+  mkdir -p "$dir/home/data"
+  cat > "$dir/home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$dir/home" && tasks-axi add t1 "Validate delivery" --kind ship --repo sample >/dev/null) \
+    || fail "could not create the linked-hold origin fixture"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_DATA_OVERRIDE="$dir/home/data" "$ROOT/bin/fm-captain-hold.sh" hold captain-call \
+    --title "Choose validation timing" --reason "captain owns validation timing" \
+    --repo sample --origin t1 >/dev/null \
+    || fail "could not create the linked captain-hold fixture"
+  printf 'done: committed-ready\n' > "$dir/home/state/t1.status"
+  expected_status=$(bash -c '. "$1"; status_observed_signature "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$dir/home/state/t1.status") \
+    || fail "could not sample the linked-hold origin status"
+  run_send "$dir" "$err" \
+    FM_SEND_IDEMPOTENT=1 \
+    FM_SEND_EXPECTED_STATUS_SIGNATURE="$expected_status" \
+    FM_SEND_VALIDATE_CAPTAIN_HOLD_STATE=1 \
+    FM_SEND_EXPECTED_ORIGIN_CAPTAIN_HOLD_STATE=clear \
+    FM_SEND_EXPECTED_DECISION_KEYS= \
+    FM_SEND_EXPECTED_CAPTAIN_HOLD_STATE= \
+    -- t1 "must refuse the linked captain hold"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a linked captain hold reached durable publication"
+  [ ! -f "$dir/home/state/t1.inbox/001.msg" ] \
+    || fail "a linked captain hold published an inbox record"
+  pass "fm-send inbox: linked captain holds are revalidated at publication"
+}
+
 test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable); err="$dir/send.err"
@@ -693,4 +731,5 @@ test_expected_status_signature_is_revalidated_at_publication
 test_status_append_is_linearized_with_publication
 test_captain_hold_is_linearized_with_publication
 test_origin_captain_hold_is_revalidated_at_publication
+test_linked_captain_hold_is_revalidated_at_publication
 test_unwritable_inbox_fails_loudly

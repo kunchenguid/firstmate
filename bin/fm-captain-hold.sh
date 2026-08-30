@@ -383,7 +383,7 @@ verify_hold_durable() {  # <task-id>
 }
 
 captain_hold_origin_state() {  # <origin-id>
-  local origin=$1 show state hold_kind
+  local origin=$1 show state hold_kind meta keys entry id linked_state
   validate_slug origin-id "$origin"
   require_tasks_axi
   show=$(task_show "$origin") || fail "origin task $origin is absent from $FM_HOME/data/backlog.md"
@@ -392,9 +392,45 @@ captain_hold_origin_state() {  # <origin-id>
   hold_kind=$(show_field_value "$show" hold_kind)
   if [ "$state" != done ] && [ "$hold_kind" = captain ]; then
     printf 'open\n'
-  else
-    printf 'clear\n'
+    return 0
   fi
+  meta="$STATE/$origin.meta"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] || fail "origin metadata is unsafe: $meta"
+    keys=$(meta_value "$meta" captain_hold_keys)
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      id=$(resolve_entry "$origin" "$entry")
+      linked_state=$(hold_durable_state "$id")
+      if [ "$linked_state" = open ]; then
+        printf 'open\n'
+        return 0
+      fi
+    done <<EOF
+$(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
+  fi
+  printf 'clear\n'
+}
+
+link_captain_hold_to_origin() {  # <origin-id> <task-id>
+  local origin=$1 id=$2 meta previous keys
+  [ "$origin" != "$id" ] || return 0
+  meta="$STATE/$origin.meta"
+  [ -e "$meta" ] || [ -L "$meta" ] || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || fail "origin metadata is unsafe: $meta"
+  CAPTAIN_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
+  fm_lock_acquire_wait "$CAPTAIN_META_LOCK" || fail "could not lock origin metadata"
+  CAPTAIN_META_LOCK_HELD=1
+  [ -f "$meta" ] && [ ! -L "$meta" ] || fail "origin metadata disappeared while linking captain hold"
+  previous=$(meta_value "$meta" captain_hold_keys)
+  keys=$(sorted_key_union "$previous" "$id")
+  if [ "$previous" != "$keys" ]; then
+    printf 'captain_hold_keys=%s\n' "$keys" >> "$meta" \
+      || fail "could not link captain-held task $id to origin $origin"
+  fi
+  fm_lock_release "$CAPTAIN_META_LOCK"
+  CAPTAIN_META_LOCK_HELD=0
 }
 
 # Resolve one inventory entry or channel key to the task that carries it: the
@@ -470,6 +506,9 @@ command_hold() {
       tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
         || fail "could not create task $id"
     fi
+  fi
+  if [ -n "$origin" ]; then
+    link_captain_hold_to_origin "$origin" "$id"
   fi
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \

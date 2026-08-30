@@ -473,6 +473,23 @@ test_origin_captain_hold_stops_delivery_without_decision_keys() {
   pass "origin captain holds block delivery without transferred decision keys"
 }
 
+test_linked_captain_hold_stops_before_inventory_completion() {
+  local dir home send state out
+  dir="$TMP_ROOT/linked-captain-hold"; mkdir -p "$dir"
+  home=$(make_fixture "$dir")
+  send="$dir/send"; state="$dir/state"; make_send_stub "$send"; make_state_stub "$state" absent
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" hold ship-route \
+      --title "Choose the delivery route" --reason "captain route decision pending" \
+      --repo sample --origin ship >/dev/null \
+    || fail "could not create the linked captain-held task"
+  out=$(run_continue "$home" "$send" "$state") || fail "linked-hold continuation execution failed"
+  [ "$out" = 'result=refused task=ship reason=open-decision-or-blocker' ] \
+    || fail "linked captain hold did not stop validation before inventory completion: $out"
+  [ ! -d "$home/state/ship.inbox" ] || fail "linked captain-held task received validation delivery"
+  pass "linked captain holds block delivery before inventory completion"
+}
+
 test_durable_only_producer_refusal_is_visible_once_per_preflight() {
   local dir home stub log out count
   dir="$TMP_ROOT/durable-producer-refusal"; mkdir -p "$dir"
@@ -729,6 +746,7 @@ test_pi_empty_drain_recovers_unqueued_durable_candidate
 test_non_pi_empty_drain_initializes_missing_queue
 test_transferred_captain_hold_stops_delivery
 test_origin_captain_hold_stops_delivery_without_decision_keys
+test_linked_captain_hold_stops_before_inventory_completion
 test_durable_only_producer_refusal_is_visible_once_per_preflight
 test_fleet_and_bearings_project_pending_continuation
 test_advanced_head_surfaces_continuation_conflict
