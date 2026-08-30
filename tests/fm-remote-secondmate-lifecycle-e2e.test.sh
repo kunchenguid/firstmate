@@ -773,6 +773,20 @@ assert_grep 'lacks a matching launch-complete receipt' "$TMP_ROOT/incomplete-rou
   "incomplete remote Codex route refusal did not name its missing completion evidence"
 remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh capture ios 1 >/dev/null \
   || fail "incomplete remote Codex endpoint lost bounded diagnostic access"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh send ios probe \
+  > "$TMP_ROOT/incomplete-send.out" 2>&1; then
+  fail "incomplete remote Codex endpoint accepted a steer"
+fi
+assert_grep 'lacks a matching launch-complete receipt' "$TMP_ROOT/incomplete-send.out" \
+  "incomplete remote Codex send refusal did not name its missing completion evidence"
+assert_absent "$REMOTE_HOME/state/parent-route/ios.inbox" \
+  "incomplete remote Codex send wrote a steering record"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh key ios Enter \
+  > "$TMP_ROOT/incomplete-key.out" 2>&1; then
+  fail "incomplete remote Codex endpoint accepted a key"
+fi
+assert_grep 'lacks a matching launch-complete receipt' "$TMP_ROOT/incomplete-key.out" \
+  "incomplete remote Codex key refusal did not name its missing completion evidence"
 
 set +e
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \

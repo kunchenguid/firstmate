@@ -308,6 +308,8 @@ case "$pid:$field" in
     case "${FM_TEST_CODEX_SHAPE:-exact}" in
       decoy) printf '%s\n' node ;;
       helper) printf '%s\n' codex-helper ;;
+      login) printf '%s\n' -codex ;;
+      double-login) printf '%s\n' --codex ;;
       *) printf '%s\n' codex ;;
     esac
     ;;
@@ -315,6 +317,8 @@ case "$pid:$field" in
     case "${FM_TEST_CODEX_SHAPE:-exact}" in
       decoy) printf '%s\n' 'node -e noop /tmp/codex/data' ;;
       helper) printf '%s\n' 'codex-helper --serve' ;;
+      login) printf '%s\n' '-codex --interactive' ;;
+      double-login) printf '%s\n' '--codex --interactive' ;;
       *) printf '%s\n' 'codex --interactive' ;;
     esac
     ;;
@@ -346,6 +350,13 @@ SH
   fi
   [ ! -e "$home/state/.fm-codex-session-binding" ] \
     || fail "rejected Codex helper evidence published a binding"
+  FM_TEST_CODEX_SHAPE=login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB" \
+    || fail "a single-dash Codex login process lost its supported identity"
+  if FM_TEST_CODEX_SHAPE=double-login FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    bash -c '. "$1"; kill() { return 0; }; fm_codex_host_agent_matches 4242' _ "$LIB"; then
+    fail "more than one leading dash became Codex identity authority"
+  fi
   out=$(FM_PROC_ROOT_OVERRIDE="$proc" PATH="$fakebin:$PATH" FM_HOME="$home" \
     bash -c '
       . "$1"

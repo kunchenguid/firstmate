@@ -236,6 +236,10 @@ cmd_send() {
     fm_lock_release "$meta_lock"
     die "$REMOTE_ENDPOINT_ERROR"
   fi
+  if ! remote_endpoint_launch_complete; then
+    fm_lock_release "$meta_lock"
+    die "remote Codex endpoint lacks a matching launch-complete receipt"
+  fi
   # A remote steer is delivered by durable record, never by typing its payload
   # into the pane: write it into this secondmate's host-local steering inbox,
   # then ring the constant self-describing doorbell into the recorded pane,
@@ -266,12 +270,25 @@ cmd_send() {
 }
 
 cmd_key() {
-  local id=$1 key=$2
+  local id=$1 key=$2 meta meta_lock status=0
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  meta=$(meta_path "$id")
+  meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
+  fm_task_inbox_lock_acquire "$meta_lock" \
+    || die "remote secondmate endpoint metadata could not be locked for final delivery validation"
+  if ! remote_endpoint_load "$id"; then
+    fm_lock_release "$meta_lock"
+    die "$REMOTE_ENDPOINT_ERROR"
+  fi
+  if ! remote_endpoint_launch_complete; then
+    fm_lock_release "$meta_lock"
+    die "remote Codex endpoint lacks a matching launch-complete receipt"
+  fi
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
-    "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" --key "$key"
+    "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" --key "$key" || status=$?
+  fm_lock_release "$meta_lock" || status=1
+  return "$status"
 }
 
 cmd_capture() {
