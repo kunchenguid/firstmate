@@ -1103,6 +1103,52 @@ test_secondmate_spawn_refuses_cmux_backend() {
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
+# --- endpoint-blocks-respawn: the workspace title, not the surface ----------
+
+# cmux gates a fresh task on the workspace TITLE (fm_backend_cmux_create_task),
+# so a surface-scoped liveness read can report the endpoint gone while the
+# workspace that refuses the next spawn is still listed.
+test_endpoint_blocks_respawn_sees_the_workspace_a_surface_read_misses() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn"; mkdir -p "$dir/responses"
+  cmux_panes_empty_response "$dir" 1
+  cmux_workspace_list_response "$dir" 2 \
+    aaaaaaaa-0000-0000-0000-000000000000 "$(cmux_expected_scoped_title fm-corph "$dir")"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_target_exists cmux "$t"; then echo liveness=present; else echo liveness=gone; fi
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "liveness=gone" \
+    "the surface-scoped liveness read should report a closed surface gone"
+  assert_contains "$out" "blocks=yes" \
+    "a workspace still carrying this task's title refuses the next spawn, so the endpoint is not retired"
+  pass "fm_backend_endpoint_blocks_respawn: a cmux workspace outliving its surface still blocks a respawn"
+}
+
+# And it must not invent a collision from another task's workspace.
+test_endpoint_blocks_respawn_clear_when_no_workspace_carries_the_title() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-clear"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 \
+    aaaaaaaa-0000-0000-0000-000000000000 "$(cmux_expected_scoped_title fm-other "$dir")"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=no" \
+    "an unrelated workspace title must not be reported as this task's leftover endpoint"
+  pass "fm_backend_endpoint_blocks_respawn: an unrelated cmux workspace leaves the slot retryable"
+}
+
 test_version_check_accepts_current_version
 test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
@@ -1134,6 +1180,7 @@ test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
 test_capture_trims_locally
+
 test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready
 test_send_key_normalizes_and_targets
@@ -1164,3 +1211,5 @@ test_kill_is_best_effort_when_close_workspace_fails
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend
+test_endpoint_blocks_respawn_sees_the_workspace_a_surface_read_misses
+test_endpoint_blocks_respawn_clear_when_no_workspace_carries_the_title

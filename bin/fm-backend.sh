@@ -756,6 +756,33 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# fm_backend_endpoint_blocks_respawn: after a best-effort close, would a
+# leftover endpoint still refuse the NEXT spawn of <label>? This is not
+# liveness. Every backend gates a fresh task on a NAME it already holds - a
+# tmux window name, a herdr tab label, a zellij tab title, a cmux workspace
+# title - so the only sound proof that a close left the slot retryable is the
+# very predicate that backend's create_task refuses on. Asking
+# fm_backend_target_exists instead asks whether a pane/surface id is alive,
+# which can report "gone" while the named container survives and collides:
+# closing a zellij tab's only pane leaves the empty tab in list-tabs.
+# herdr routes through its own fm_backend_herdr_endpoint_confirmed_gone, which
+# is deliberately stricter than a liveness read - only a structured
+# pane_not_found proves absence, and an unknown or unreadable pane refuses -
+# and its duplicate gate prunes husk tabs, so a confirmed-gone pane is exactly
+# a non-colliding tab. Orca has no such name gate; it keeps the liveness read.
+# Conservative by construction: anything short of proof reads as "still there".
+fm_backend_endpoint_blocks_respawn() {  # <backend> <target> <label>
+  local backend=$1 target=$2 label=$3
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_window_exists "${target%%:*}" "${target#*:}" ;;
+    herdr) ! fm_backend_herdr_endpoint_confirmed_gone "$target" ;;
+    zellij) fm_backend_zellij_tab_exists "${target%%:*}" "$label" ;;
+    cmux) fm_backend_cmux_workspace_exists "$label" ;;
+    *) fm_backend_target_exists "$backend" "$target" ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

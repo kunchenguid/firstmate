@@ -335,6 +335,17 @@ fm_backend_cmux_workspace_id_for_label() {  # <label>
     | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1
 }
 
+# fm_backend_cmux_workspace_exists: does a live workspace already carry the
+# title <label> resolves to? This is the exact predicate
+# fm_backend_cmux_create_task refuses on, so it is also the only honest answer
+# to "would a leftover workspace refuse the next spawn of this task?" - a
+# surface-scoped liveness read answers a different question.
+fm_backend_cmux_workspace_exists() {  # <fm-task-label>
+  local label=$1
+  [ -n "$label" ] || return 1
+  [ -n "$(fm_backend_cmux_workspace_id_for_label "$(fm_backend_cmux_scoped_title "$label")")" ]
+}
+
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
   local wsid=$1
   fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
@@ -351,10 +362,9 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title out wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")
-  dup=$(fm_backend_cmux_workspace_id_for_label "$title")
-  if [ -n "$dup" ]; then
+  if fm_backend_cmux_workspace_exists "$label"; then
     echo "error: cmux workspace '$title' already exists" >&2
     return 1
   fi

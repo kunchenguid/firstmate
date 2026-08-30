@@ -224,8 +224,14 @@ test_spawn_durable_worktree_claims() {
     run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
   status=$?
   expect_code 1 "$status" "spawn into another live task's worktree should refuse"
-  assert_contains "$out" "already claimed by live task incumbent" \
-    "the collision refusal did not name the incumbent task"
+  assert_contains "$out" "claimed by task incumbent in $home/state/incumbent.meta" \
+    "the collision refusal must name the owning task and the durable record it read"
+  assert_contains "$out" "does not prove a live worker" \
+    "the refusal must not present a durable claim as proof that a worker is running"
+  assert_contains "$out" "leftover from an incomplete cleanup and must be removed" \
+    "the refusal must tell the operator how to clear a stale claim"
+  assert_not_contains "$out" "claimed by live task" \
+    "the refusal must not assert liveness the record cannot prove"
   assert_absent "$home/state/collision-gg7.meta" "a collision refusal must not publish contender metadata"
   assert_grep 'kill-window -t =firstmate:=fm-collision-gg7' "$rec" \
     "a collision refusal must retire the new endpoint so treehouse can reallocate the slot"
@@ -242,7 +248,7 @@ test_spawn_durable_worktree_claims() {
     run_spawn "$home" stuck-jj0 "$proj" "$claimed" "$fakebin")
   status=$?
   expect_code 1 "$status" "spawn into another live task's worktree should refuse"
-  assert_contains "$out" "endpoint firstmate:fm-stuck-jj0 survived" \
+  assert_contains "$out" "endpoint firstmate:fm-stuck-jj0 named fm-stuck-jj0 survived" \
     "a surviving endpoint must be named so the operator can retire it"
   out=$(FM_TMUX_REC="$rec" run_spawn "$home" stuck-jj0 "$proj" "$claimed" "$fakebin")
   status=$?
@@ -282,7 +288,7 @@ test_spawn_durable_worktree_claims() {
   status=$?
   expect_code 0 "$status" "a relaunch into the task's own recorded worktree should remain allowed"
   assert_contains "$out" 'spawned own-ii9' "the own-worktree relaunch did not report success"
-  assert_not_contains "$out" 'already claimed by live task' \
+  assert_not_contains "$out" 'is already claimed by task' \
     "the own-worktree relaunch treated its own metadata as a collision"
   pass "fm-spawn: durable canonical worktree claims refuse collisions, release retries, and leave free slots launchable"
 }

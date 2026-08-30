@@ -1333,6 +1333,54 @@ test_expected_label_allows_matching_task_tab
 test_expected_label_rejects_reused_pane_id
 test_current_path_probes_with_marker_and_ignores_prompt_paths
 test_current_path_ignores_tilde_prefixed_banner_lines
+# --- endpoint-blocks-respawn: the tab, not the pane -------------------------
+
+# Closing a tab's only pane does NOT close the now-empty tab (this adapter's
+# header, verified against real zellij 0.44.0). A pane-scoped liveness read
+# therefore reports the endpoint gone while the tab that refuses the next
+# spawn is still listed, so the respawn-blocking read has to ask about the TAB.
+test_endpoint_blocks_respawn_sees_the_tab_a_pane_read_misses() {
+  local dir fb title out
+  dir="$TMP_ROOT/blocks-respawn"; mkdir -p "$dir/responses"
+  title=$(zellij_expected_scoped_title fm-zorph "$dir")
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[{"tab_id":4,"name":"%s"}]\n' "$title" > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_target_exists zellij firstmate:7; then echo liveness=present; else echo liveness=gone; fi
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zorph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "liveness=gone" \
+    "the pane-scoped liveness read should report a closed pane gone"
+  assert_contains "$out" "blocks=yes" \
+    "an empty tab that outlived its pane still refuses the next spawn, so the endpoint is not retired"
+  pass "fm_backend_endpoint_blocks_respawn: a zellij tab outliving its pane still blocks a respawn"
+}
+
+# The same read must not invent a collision: with no tab carrying this task's
+# scoped title, the slot is genuinely retryable.
+test_endpoint_blocks_respawn_clear_when_no_tab_carries_the_title() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-clear"; mkdir -p "$dir/responses"
+  printf '[{"tab_id":4,"name":"%s"}]\n' "$(zellij_expected_scoped_title fm-other "$dir")" \
+    > "$dir/responses/1.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zorph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=no" \
+    "an unrelated tab title must not be reported as this task's leftover endpoint"
+  pass "fm_backend_endpoint_blocks_respawn: an unrelated zellij tab leaves the slot retryable"
+}
+
+test_endpoint_blocks_respawn_sees_the_tab_a_pane_read_misses
+test_endpoint_blocks_respawn_clear_when_no_tab_carries_the_title
 test_kill_resolves_tab_and_closes_by_id
 test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone

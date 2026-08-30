@@ -136,9 +136,14 @@
 #   git worktree root distinct from the primary project checkout.
 #   They also refuse when another task's durable metadata already claims that
 #   resolved worktree, without consulting process or treehouse occupancy state.
+#   The refusal names the owning task AND the record file it read, because a
+#   claim is not proof of a live worker: a teardown that aborted after
+#   returning the lease leaves a record whose worktree is genuinely free, and
+#   only removing that record clears the slot.
 #   That refusal retires the endpoint it just created. For every backend but
 #   orca - whose terminal and worktree are retired by the orca abort path
-#   instead - it then reads the endpoint back, because a backend close is only
+#   instead - it then reads back the NAME its next spawn would collide on
+#   (fm_backend_endpoint_blocks_respawn), because a backend close is only
 #   best-effort, and names a survivor so the operator can retire the one thing
 #   that would refuse the retry.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
@@ -763,19 +768,6 @@ parse_orca_worktree_result() {
   fi
 }
 
-# Is <target> still present on <backend> after a best-effort close? tmux gets
-# the window-name inventory (fm_backend_tmux_window_exists) rather than the
-# generic fm_backend_target_exists probe: only the inventory is exact, and only
-# the exact window name is what refuses the next spawn. Every other backend has
-# no such name-collision gate, so the shared liveness read is the best answer
-# available there.
-spawn_endpoint_survives() {  # <backend> <target>
-  case "$1" in
-    tmux) fm_backend_tmux_window_exists "${2%%:*}" "${2#*:}" ;;
-    *) fm_backend_target_exists "$1" "$2" 2>/dev/null ;;
-  esac
-}
-
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -863,11 +855,12 @@ spawn_abort_cleanup() {
     SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=0
     # Every backend's kill is contractually best-effort (fm_backend_kill), so
     # its exit status alone never proves the endpoint is gone. Retryability is
-    # what this cleanup owes the caller, and only a read-back can establish it;
-    # a survivor is named so it can be retired by hand.
+    # what this cleanup owes the caller, and only a read-back of the name that
+    # gates the next spawn can establish it; a survivor is named so it can be
+    # retired by hand.
     if ! fm_backend_kill "$BACKEND" "$T" \
-       || spawn_endpoint_survives "$BACKEND" "$T"; then
-      echo "warning: the new $BACKEND endpoint $T survived the refusal of claimed worktree '$WT'; retire it before retrying task $ID, or the next spawn will refuse the leftover endpoint" >&2
+       || fm_backend_endpoint_blocks_respawn "$BACKEND" "$T" "$W" 2>/dev/null; then
+      echo "warning: the new $BACKEND endpoint $T named $W survived the refusal of claimed worktree '$WT'; retire it before retrying task $ID, or the next spawn will refuse the leftover $W" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1872,7 +1865,7 @@ assert_spawn_worktree_unclaimed() {
       if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
         SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=1
       fi
-      echo "error: allocated worktree '$WT' is already claimed by live task $owner; refusing to launch task $ID" >&2
+      echo "error: allocated worktree '$WT' is already claimed by task $owner in $meta; refusing to launch task $ID. That record claims the worktree; it does not prove a live worker. If $owner has already finished, the record is a leftover from an incomplete cleanup and must be removed before this worktree can be used." >&2
       return 1
     }
   done

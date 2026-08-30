@@ -166,6 +166,26 @@ fm_backend_zellij_scoped_title() {  # <fm-task-label>
   printf 'fm-%s-%s' "$home" "$rest"
 }
 
+# fm_backend_zellij_tab_id_in_list: the first tab id in a `list-tabs --json`
+# payload whose name equals <title>, or empty. One matcher so the duplicate
+# refusal below and the leftover-tab probe cannot drift apart.
+fm_backend_zellij_tab_id_in_list() {  # <tabs-json> <title>
+  printf '%s' "$1" | jq -r --arg want "$2" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null | head -1
+}
+
+# fm_backend_zellij_tab_exists: does <session> already hold a tab titled for
+# <label>? This is the exact predicate fm_backend_zellij_create_task refuses
+# on, so it is also the only honest answer to "would a leftover tab refuse the
+# next spawn of this task?". Pane liveness cannot answer that: closing a tab's
+# only pane leaves the now-empty tab in list-tabs (see this file's header), so
+# a pane-scoped read reports the endpoint gone while the tab still collides.
+fm_backend_zellij_tab_exists() {  # <session> <label>
+  local session=$1 label=$2 tabs
+  [ -n "$session" ] && [ -n "$label" ] || return 1
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+  [ -n "$(fm_backend_zellij_tab_id_in_list "$tabs" "$(fm_backend_zellij_scoped_title "$label")")" ]
+}
+
 # fm_backend_zellij_tool_check: refuse loudly if zellij or jq is missing.
 fm_backend_zellij_tool_check() {
   command -v zellij >/dev/null 2>&1 || { echo "error: backend=zellij selected but the 'zellij' CLI is not installed (https://zellij.dev)" >&2; return 1; }
@@ -335,7 +355,7 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   fm_backend_zellij_session_exists "$session" || { echo "error: zellij session '$session' does not exist; run container_ensure first" >&2; return 1; }
   title=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
-  dup=$(printf '%s' "$tabs" | jq -r --arg want "$title" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null | head -1)
+  dup=$(fm_backend_zellij_tab_id_in_list "$tabs" "$title")
   if [ -n "$dup" ]; then
     echo "error: zellij tab '$title' already exists in session '$session'" >&2
     return 1
