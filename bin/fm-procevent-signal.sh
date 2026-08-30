@@ -66,7 +66,7 @@ usage() { sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
 
 signal_path_is_home_local() {
-  FM_SIGNAL_HOME="$FM_HOME" FM_SIGNAL_PATH="$1" FM_SIGNAL_RAW= python3 -c '
+  FM_SIGNAL_HOME="$FM_HOME" FM_SIGNAL_PATH="$1" FM_SIGNAL_RAW='' python3 -c '
 import os
 
 home = os.path.realpath(os.environ["FM_SIGNAL_HOME"])
@@ -80,10 +80,11 @@ raise SystemExit(0 if inside else 1)
 }
 
 require_signal_home_paths() {
-  [ -d "$FM_HOME" ] \
-    && signal_path_is_home_local "$CONFIG" \
-    && signal_path_is_home_local "$STATE" \
-    || die "Signal paths must stay beneath the effective home"
+  if ! [ -d "$FM_HOME" ] \
+    || ! signal_path_is_home_local "$CONFIG" \
+    || ! signal_path_is_home_local "$STATE"; then
+    die "Signal paths must stay beneath the effective home"
+  fi
 }
 
 ensure_private_directory() {
@@ -365,7 +366,7 @@ open_message_file() {
   local path=$1
   [ -f "$path" ] && [ ! -L "$path" ] || die "message file is not a regular file"
   exec 8< "$path" || die "message file is not a regular file"
-  if ! FM_SIGNAL_OPEN_MESSAGE="$path" FM_SIGNAL_RAW= python3 -c '
+  if ! FM_SIGNAL_OPEN_MESSAGE="$path" FM_SIGNAL_RAW='' python3 -c '
 import os
 import stat
 
