@@ -24,7 +24,7 @@ A factor test needs no strategy, no entry rule, and no exit rule.
 Specifying entry or exit rules for one is an attribution error.
 
 A gate test asks whether trading only in a stated condition improves a stated strategy.
-Run the factor test first when the proposed gate contains a new feature.
+Run the factor test first.
 Then implement the gate as an explicit custom state strategy with stated transitions, decision time, execution time, and exposure.
 Compare it to the same ungated strategy with exposure-matched and volatility-matched controls.
 Inheriting a framework strategy for a gate test is worse than adding entry or exit rules to a factor test because it answers an unstated trading question.
@@ -66,7 +66,9 @@ Per-signal support is the number of dates on which that signal has both comparis
 Report both quantities for every signal and never use one as a proxy for the other.
 
 Collapse cross-sectional results to one statistic per date before inference.
-Correct the resulting series for serial dependence and for overlap in forward-return windows.
+Use serial-dependence- and overlapping-window-robust standard errors on that dated series.
+Name the estimator and predeclare a lag or block length that covers the forward-return overlap and any additional serial dependence.
+Do not thin the series or report naive uncertainty as a substitute.
 Naive standard errors were 1.7x to 2.9x too narrow in prior real-data checks, so estimate the correction instead of applying a fixed multiplier.
 Use walk-forward splits for research selection and reserve a sealed holdout, frozen specification, predefined metrics, and selection-aware inference for confirmation.
 
@@ -109,7 +111,7 @@ The tenth traversal should be impossible to fool by any failure that fooled one 
 
 ## Sources consulted
 
-- Qlib source: `/Users/sz/github/qlib/qlib/contrib/strategy/signal_strategy.py`, `/Users/sz/github/qlib/qlib/contrib/strategy/cost_control.py`, `/Users/sz/github/qlib/qlib/strategy/base.py`, and `/Users/sz/github/qlib/qlib/backtest/executor.py`.
-- RD-Agent source: `/Users/sz/github/rd-agent/rdagent/scenarios/qlib/developer/factor_runner.py` and its `scenarios/qlib/experiment/factor_template/` configurations.
-- R&D-Agent(Q) paper: `projects/BlackPearl/doctrine/sources/rdagent-quant-2505.15155v2.md`, especially its factor-fixed evaluation and factor/model pairing description.
-- *Machine Learning for Trading*, 3rd ed.: `projects/BlackPearl/doctrine/sources/machine-learning-for-trading-3e.md`, especially decision-time correctness, walk-forward validation, and its exploration/confirmation evidence boundary.
+- Qlib source snapshot [`79633dd`](https://github.com/microsoft/qlib/commit/79633dd9506ea689e5400dea0197717b5b3d74b7): [`signal_strategy.py`](https://github.com/microsoft/qlib/blob/79633dd9506ea689e5400dea0197717b5b3d74b7/qlib/contrib/strategy/signal_strategy.py), [`base.py`](https://github.com/microsoft/qlib/blob/79633dd9506ea689e5400dea0197717b5b3d74b7/qlib/strategy/base.py), and [`executor.py`](https://github.com/microsoft/qlib/blob/79633dd9506ea689e5400dea0197717b5b3d74b7/qlib/backtest/executor.py).
+- RD-Agent source snapshot [`6762f84`](https://github.com/microsoft/RD-Agent/commit/6762f84f9bc0f5c6486c50a00e128a57ac6c3683): [`factor_runner.py`](https://github.com/microsoft/RD-Agent/blob/6762f84f9bc0f5c6486c50a00e128a57ac6c3683/rdagent/scenarios/qlib/developer/factor_runner.py) and the [`factor_template` configurations](https://github.com/microsoft/RD-Agent/tree/6762f84f9bc0f5c6486c50a00e128a57ac6c3683/rdagent/scenarios/qlib/experiment/factor_template).
+- [R&D-Agent(Q) paper v2](https://arxiv.org/html/2505.15155v2), especially its factor-fixed evaluation and factor/model pairing description.
+- *Machine Learning for Trading*, 3rd edition source snapshot [`47e2c44`](https://github.com/stefan-jansen/machine-learning-for-trading/commit/47e2c442d85f17166a8e31e08ac5085bb68dbca3): [point-in-time validation](https://github.com/stefan-jansen/machine-learning-for-trading/blob/47e2c442d85f17166a8e31e08ac5085bb68dbca3/02_financial_data_universe/14_point_in_time_validation.py), [IC inference](https://github.com/stefan-jansen/machine-learning-for-trading/blob/47e2c442d85f17166a8e31e08ac5085bb68dbca3/07_defining_the_learning_task/06_ic_inference.py), and [holdout mechanics](https://github.com/stefan-jansen/machine-learning-for-trading/blob/47e2c442d85f17166a8e31e08ac5085bb68dbca3/20_strategy_synthesis/holdout.py).
