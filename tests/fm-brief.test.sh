@@ -914,6 +914,21 @@ test_status_protocol_rejects_a_done_with_nothing_behind_it() {
     # shellcheck disable=SC2016  # literal backticks in the brief text, not expansion
     assert_grep 'Before you write a `done:` line, check it against Definition of done' "$brief" \
       "$kind: status protocol did not point the done line at the definition of done"
+    # The status protocol text is shared across modes and must defer to each mode's own
+    # Definition of done rather than hardcoding a requirement of its own: a prior version
+    # hardcoded "no pushed branch" here, contradicting local-only's committed-only bar.
+    case "$kind" in
+      no-mistakes|direct-PR)
+        assert_grep "PUSHED branch" "$brief" \
+          "$kind: brief has no pushed-branch requirement for the status protocol to defer to"
+        ;;
+      local-only)
+        assert_no_grep "with no pushed" "$brief" \
+          "local-only brief's status protocol hardcodes a pushed-branch requirement that contradicts its committed-only Definition of done"
+        assert_grep "COMMITTED" "$brief" \
+          "local-only brief has no committed-branch requirement for the status protocol to defer to"
+        ;;
+    esac
   done
   pass "fm-brief.sh: the status protocol rejects a done line with no delivery behind it"
 }
