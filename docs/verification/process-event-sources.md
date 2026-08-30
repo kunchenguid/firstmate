@@ -162,7 +162,7 @@ Run the focused periodic-check adapter evidence with:
 bin/fm-test-run.sh tests/fm-procevent-periodic.test.sh
 ```
 
-The task crew observed this suite pass all 12 scenarios (final line `all periodic-check adapter tests passed`), the baseline `tests/fm-procevent.test.sh` pass unmodified (final line `all procevent tests passed`), and `bin/fm-lint.sh` report ShellCheck 0.11.0 and actionlint 1.7.12 clean with 3 workflow files valid.
+The task crew observed this suite pass all 16 scenarios (final line `all periodic-check adapter tests passed`), the baseline `tests/fm-procevent.test.sh` pass unmodified (final line `all procevent tests passed`), and `bin/fm-lint.sh` report ShellCheck 0.11.0 and actionlint 1.7.12 clean with 3 workflow files valid.
 These suites require a state root whose resolved physical path equals its literal path, because `fm_procevent_claim_state_root_identity` compares the two, so on macOS a test home under a symlinked temp path - including `/tmp` (-> `/private/tmp`) and the default `TMPDIR` `/var/folders/...` (-> `/private/var/folders/...`) - refuses claim acquisition with "cannot claim source".
 This is pre-existing and independent of this branch: the same check is present at commit `1fbc7bb`, before this branch.
 
