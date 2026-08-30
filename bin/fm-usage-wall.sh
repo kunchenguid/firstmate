@@ -460,6 +460,21 @@ cmd_headroom() {
   fi
   build_note=$(headroom_build_note "$build_state")
 
+  # A below-floor gauge is REFUSED here rather than parsed. This command reads
+  # the table layout a floor-compliant build emits; older builds emit a
+  # different one entirely, so parsing them would mean declaring a build
+  # unsupported and then reading it anyway. Refusing loudly - naming the
+  # installed version and the floor - is the honest answer, because a reading
+  # that looks fine from a build we reject is the exact failure this surface
+  # exists to prevent.
+  if [ "$build_state" = below-floor ]; then
+    headroom_unmeasurable \
+      "quota-axi ${quota_version} is below the supported floor ${FM_QUOTA_AXI_MIN}, and its report layout is not the one this gauge reads" \
+      "upgrade quota-axi to ${FM_QUOTA_AXI_MIN} or newer, then re-read; until then no provider headroom is measured" \
+      "$json" "$quota_version" "$build_state"
+    return 0
+  fi
+
   report_bound=$((QUOTA_TIMEOUT - spent))
   if [ "$report_bound" -le 0 ]; then
     headroom_unmeasurable "quota-axi did not answer within ${QUOTA_TIMEOUT}s" \
@@ -481,27 +496,33 @@ cmd_headroom() {
     return 0
   fi
 
-  local effective providers
-  # Two different windows answer two different questions, so both are read.
-  # `limitingWindowIds` bounds the PERCENTAGE; `limitingWindowId` bounds the
-  # RUNWAY. They usually agree, which is why pairing the percentage with the
-  # runway's window stayed invisible - until a five-hour window at 85% sat
-  # beside a seven-day window at 35% and the line claimed the five-hour window
-  # was the one at 35%.
-  effective=$(printf '%s\n' "$out" | toon_block effective \
-    'provider,scope,effectivePercentRemaining,limitingWindowIds,runway,usableRunwaySeconds,projectionConfidence,limitingWindowId')
-  providers=$(printf '%s\n' "$out" | toon_block providers 'provider,status,authStatus,plan,source')
-  if [ -z "$effective" ]; then
-    headroom_unmeasurable 'quota-axi printed no effective-headroom block' \
+  # The floor-compliant layout. Two different windows answer two different
+  # questions and each number carries its own: `limitedBy` with `resetsAt`
+  # bounds the PERCENTAGE, and exhaustion's `limitingWindowId` with
+  # `usableRunwaySeconds` bounds the RUNWAY. They usually agree, which is why
+  # pairing the percentage with the runway's window stayed invisible until a
+  # five-hour window at 85% sat beside a seven-day window at 35%.
+  #
+  # `exhaustion` and `attention` are SPARSE: an empty table renders with count
+  # zero and no row fields, and a provider with no row is simply absent. A
+  # missing exhaustion row therefore means an UNKNOWN runway, never a zero one,
+  # and must never let a provider read as healthy on evidence nobody produced.
+  # `quota` lists only providers with a measurable window; every other provider
+  # appears in `attention` alone, which is where its reason and remedy live.
+  local quota exhaustion attention
+  quota=$(printf '%s\n' "$out" | toon_block quota \
+    'provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt')
+  exhaustion=$(printf '%s\n' "$out" | toon_block exhaustion \
+    'provider,scope,usableRunwaySeconds,limitingWindowId')
+  attention=$(printf '%s\n' "$out" | toon_block attention 'provider,scope,kind,detail,remedy')
+  if [ -z "$quota" ] && [ -z "$attention" ]; then
+    headroom_unmeasurable 'quota-axi printed no quota or attention block' \
       'treat every provider as unproven when deciding what to dispatch' "$json" "$quota_version" "$build_state"
     return 0
   fi
 
-  local windows
-  windows=$(printf '%s\n' "$out" | toon_block windows 'provider,id,resetsAt')
-
   local measured=0 tight=0 wall=0 unknown=0 rows='' summary_verdict
-  while IFS="$(printf '\t')" read -r provider scope pct win runway runway_s conf runway_win; do
+  while IFS="$(printf '\t')" read -r provider scope pct runway conf win resets; do
     [ -n "$provider" ] || continue
     # One account-level reading per provider. A model-scoped row bounds only that
     # model (quota-axi owns that relationship) and is not the dispatch gauge.
@@ -509,60 +530,64 @@ cmd_headroom() {
       all_models|unresolved) ;;
       *) continue ;;
     esac
-    local pstatus pauth resets verdict detail hint='' runway_resets
-    # A gauge that emits only the singular field bounds both answers with it,
-    # which is the case this labelling was correct for all along. The marker for
-    # an absent field is "-", never an empty string, so a `[ -n ... ]` guard here
-    # is always true and leaves the percentage with no window and no reset - the
-    # same absent-field idiom the runway branch below already uses.
+    local verdict detail hint='' runway_s runway_win
+    # Sparse by design: a provider with no exhaustion row has an UNKNOWN runway,
+    # never a zero one, so the lookup misses rather than defaulting.
+    runway_s=$(printf '%s\n' "$exhaustion" | awk -F'\t' -v p="$provider" -v sc="$scope" '$1 == p && $2 == sc { print $3; exit }')
+    runway_win=$(printf '%s\n' "$exhaustion" | awk -F'\t' -v p="$provider" -v sc="$scope" '$1 == p && $2 == sc { print $4; exit }')
+    [ -n "$runway_s" ] || runway_s='-'
+    [ -n "$runway_win" ] || runway_win='-'
+    [ -n "$resets" ] || resets='-'
     case "$win" in ''|'-') win=$runway_win ;; esac
-    pstatus=$(printf '%s\n' "$providers" | awk -F'\t' -v p="$provider" '$1 == p { print $2; exit }')
-    pauth=$(printf '%s\n' "$providers" | awk -F'\t' -v p="$provider" '$1 == p { print $3; exit }')
-    [ -n "$pstatus" ] || pstatus='-'
-    [ -n "$pauth" ] || pauth='-'
-    case "$pct" in
-      ''|*[!0-9]*)
-        unknown=$((unknown + 1))
-        verdict=unknown
-        detail="reason=$(headroom_unknown_reason "$scope" "$pstatus") status=$pstatus auth=$pauth"
-        case "$pstatus" in
-          auth_required) hint=" - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read" ;;
-        esac
-        ;;
-      *)
-        measured=$((measured + 1))
-        resets=$(printf '%s\n' "$windows" | awk -F'\t' -v p="$provider" -v w="$win" '$1 == p && $2 == w { print $3; exit }')
-        [ -n "$resets" ] || resets='-'
-        if [ "$pct" -eq 0 ]; then
-          verdict=wall; wall=$((wall + 1))
-        elif [ "$pct" -le "$TIGHT_PCT" ]; then
-          verdict=tight; tight=$((tight + 1))
-        elif [ "$runway_s" != '-' ] && [ -z "${runway_s//[0-9]/}" ] && [ "$runway_s" -le "$TIGHT_RUNWAY" ]; then
-          verdict=tight; tight=$((tight + 1))
-        else
-          verdict=ok
-        fi
-        detail="pct=$pct bound=$win resets=$resets"
-        if [ "$runway_s" != '-' ] && [ -z "${runway_s//[0-9]/}" ]; then
-          detail="$detail runway=$(humanize_secs "$runway_s")"
-        else
-          detail="$detail runway=unknown($runway)"
-        fi
-        # The reset time is the half that bites: paired with the wrong window it
-        # makes an operator wait out a window that is not the one holding them
-        # up. So the runway's window is named whenever it is not the one that
-        # bounds the percentage, with its own reset beside it.
-        if [ -n "$runway_win" ] && [ "$runway_win" != '-' ] && [ "$runway_win" != "$win" ]; then
-          runway_resets=$(printf '%s\n' "$windows" | awk -F'\t' -v p="$provider" -v w="$runway_win" '$1 == p && $2 == w { print $3; exit }')
-          [ -n "$runway_resets" ] || runway_resets='-'
-          detail="$detail runway_bound=$runway_win runway_resets=$runway_resets"
-        fi
-        detail="$detail confidence=$conf"
-        ;;
-    esac
+    measured=$((measured + 1))
+    if [ "$pct" -eq 0 ]; then
+      verdict=wall; wall=$((wall + 1))
+    elif [ "$pct" -le "$TIGHT_PCT" ]; then
+      verdict=tight; tight=$((tight + 1))
+    elif [ "$runway_s" != '-' ] && [ -z "${runway_s//[0-9]/}" ] && [ "$runway_s" -le "$TIGHT_RUNWAY" ]; then
+      verdict=tight; tight=$((tight + 1))
+    else
+      verdict=ok
+    fi
+    detail="pct=$pct bound=$win resets=$resets"
+    if [ "$runway_s" != '-' ] && [ -z "${runway_s//[0-9]/}" ]; then
+      detail="$detail runway=$(humanize_secs "$runway_s")"
+    else
+      detail="$detail runway=unknown($runway)"
+    fi
+    # The reset time is the half that bites: paired with the wrong window it
+    # makes an operator wait out a window that is not the one holding them up.
+    # So the runway's window is named whenever it differs from the one bounding
+    # the percentage. This layout carries a reset only for the percentage's own
+    # window, so the runway's is reported as unknown rather than borrowed from
+    # the other window or quietly left out - naming what is not known is the
+    # whole contract here.
+    if [ "$runway_win" != '-' ] && [ "$runway_win" != "$win" ]; then
+      detail="$detail runway_bound=$runway_win runway_resets=unknown"
+    fi
+    detail="$detail confidence=$conf"
     rows="$rows$provider	$verdict	$detail$hint"$'\n'
   done <<EOF
-$effective
+$quota
+EOF
+
+  # Providers with no measurable window never appear in `quota` at all - they
+  # exist only in `attention`, which is where their reason and remedy live. A
+  # provider missing from `quota` is UNMEASURED, and saying so is the point.
+  while IFS="$(printf '\t')" read -r provider scope kind reason remedy; do
+    [ -n "$provider" ] || continue
+    case "$scope" in all|all_models|unresolved) ;; *) continue ;; esac
+    printf '%s\n' "$quota" | awk -F'\t' -v p="$provider" '$1 == p { found = 1 } END { exit !found }' && continue
+    local ahint='' areason
+    unknown=$((unknown + 1))
+    areason=$(headroom_unknown_reason "$scope" "$kind")
+    case "$kind" in
+      auth_required) ahint=" - approve local credential access once with quota-axi --allow-keychain-prompt, then re-read" ;;
+    esac
+    case "$remedy" in ''|'-'|none) ;; *) ahint=" - $remedy" ;; esac
+    rows="$rows$provider	unknown	reason=$areason status=$kind detail=$reason$ahint"$'\n'
+  done <<EOF
+$attention
 EOF
 
   # Verdict precedence: wall > tight > partial > ok, with unknown reserved for a
