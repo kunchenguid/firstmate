@@ -17,21 +17,26 @@
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
-#   --relaunch launches a replacement agent for an EXISTING task into that
-#   task's own recorded endpoint and worktree instead of creating either. It is
-#   the launch half of the control plane (bin/fm-control.sh relaunch), which
-#   owns the checkpoint, the progress note, stopping the previous agent, and the
-#   transaction; call fm-control rather than this flag directly unless you are
-#   deliberately re-launching an already-stopped task. Every identity axis -
+#   --relaunch launches a replacement agent for an EXISTING task. An ordinary
+#   relaunch adopts that task's own recorded endpoint and worktree instead of
+#   creating either; the only exception is an authenticated child of the owning
+#   fm-control transaction recreating an authoritatively missing local Herdr
+#   ship/scout endpoint in an existing named session/workspace and the recorded
+#   worktree. It is the launch half of the control plane (bin/fm-control.sh
+#   relaunch), which owns the checkpoint, the progress note, stopping the
+#   previous agent, and the transaction; direct invocation cannot bypass missing
+#   endpoint authorization, so call fm-control rather than this flag unless you
+#   are deliberately re-launching an already-stopped task. Every identity axis -
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free on a backend with a recovery-grade agent-state classifier (tmux
-#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
-#   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   ordinary relaunch. For an ordinary relaunch it refuses unless the recorded
+#   endpoint is positively agent-free on a backend with a recovery-grade agent-
+#   state classifier (tmux or herdr), and refuses unless the endpoint's shell is
+#   sitting in the recorded worktree. A missing endpoint is accepted only for
+#   the authenticated Herdr ship/scout exception above. It clears the previous
+#   harness's per-task wiring before arming the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile

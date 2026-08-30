@@ -604,10 +604,10 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; the output below was reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results.
 
 ```sh
-tests/fm-control-herdr-smoke.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-control-herdr-smoke.test.sh
 ```
 
 Observed output:
@@ -621,6 +621,8 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 ```
 
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
+The current smoke also exercises authenticated recovery of a missing local Herdr ship/scout endpoint and refusal of a direct `fm-spawn --relaunch` bypass.
+Those cases were added after the dated run above, so their observed output is not recorded here until the guarded command is rerun.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
 ### Away-mode transport

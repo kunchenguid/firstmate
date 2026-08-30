@@ -32,7 +32,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
-| `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `relaunch` | Replace a running agent with a new one in the same worktree, normally reusing the recorded endpoint, on the exact recorded adapter or an explicitly chosen harness, model, and effort, while an authenticated control transaction may recreate an authoritatively missing local Herdr ship or scout endpoint. | The new agent is alive on the reused or narrowly recreated endpoint, and the durable record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -60,6 +60,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
    Otherwise a `kind=secondmate` task re-resolves its durable `config/secondmate-harness` pin, including that file's optional model and effort tokens, exactly as every other respawn does - so setting the pin and relaunching is the ordinary way to move a secondmate's runtime.
    A ship or scout keeps the harness already recorded for it, because that harness comes from firstmate's dispatch-profile judgment at intake and must not be silently re-read from configuration.
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
+   For an authoritatively missing local Herdr ship or scout endpoint, an explicit verified `--harness` may replace a recorded harness whose old control mechanics are unavailable, because there is no old agent to control; the replacement harness must still be verified for that task kind.
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
 2. **Safe checkpoint.**
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
@@ -68,15 +69,15 @@ It is not deterministic across the verified adapters: codex and grok resume only
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
-4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+4. **Stop the old agent** through the `exit` verb, with its postcondition, unless the recorded endpoint is already authoritatively missing, in which case the transaction records that no lifecycle command was sent.
+5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which normally adopts the recorded endpoint and worktree instead of creating either, but may recreate one authoritatively missing local Herdr ship or scout endpoint under the authenticated control transaction; it then clears the previous harness's per-task wiring and arms a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
 ### Failure and rollback
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
-- A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
+- A launch failure **after the old agent is stopped, or after a missing endpoint is accepted for authenticated recovery,** keeps the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no replacement agent is confirmed and where the work is preserved.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
@@ -88,7 +89,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - A remotely placed secondmate is refused by name.
   Its agent runs on another host, so none of the postconditions this plane verifies could be read for it here; local endpoint validation would refuse the record regardless, because `window=remote:<id>` can never match a local backend's required shape.
   Drive that lifecycle on its own host and reconcile it through the secondmate recovery path.
-- An unverified harness is refused rather than guessed at.
+- An unverified replacement harness is refused rather than guessed at.
 - An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
@@ -98,7 +99,9 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree for an ordinary relaunch, so a replacement can never join a live agent or start outside the copy holding the work.
+  The sole exception is an authoritatively missing local Herdr ship or scout endpoint when the process is the authenticated child of its owning `fm-control` relaunch transaction with matching journal, prior metadata, endpoint, worktree, and transaction identity; it may then create one response-verified replacement in an existing named Herdr workspace and session.
+  A direct `fm-spawn --relaunch`, or any live, remote, malformed, ambiguous, unsupported, or otherwise non-authoritatively-missing endpoint, is refused.
 
 ## Capability matrix
 

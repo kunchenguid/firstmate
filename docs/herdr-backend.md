@@ -261,7 +261,8 @@ No Herdr-specific copy of that protocol exists.
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
-Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
+Ordinary create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
+A structurally missing task endpoint is not repaired by ordinary create or session-start recovery; authenticated control-plane recovery for a local ship or scout is defined in [agent-control.md](agent-control.md#transactional-relaunch), while direct spawn relaunch remains refused.
 This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
