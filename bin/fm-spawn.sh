@@ -1376,6 +1376,30 @@ resolve_codex_binary() {
   return 1
 }
 
+replace_raw_harness_binary() {
+  local command=$1 selected=$2 replacement=$3 remainder prefix='' leading word
+  remainder=$command
+  while [ -n "$remainder" ]; do
+    leading=${remainder%%[![:space:]]*}
+    prefix=$prefix$leading
+    remainder=${remainder#"$leading"}
+    [ -n "$remainder" ] || break
+    word=${remainder%%[[:space:]]*}
+    case "$word" in
+      [A-Za-z_]*=*)
+        prefix=$prefix$word
+        remainder=${remainder#"$word"}
+        ;;
+      *)
+        [ "$word" = "$selected" ] || return 1
+        printf '%s%s%s\n' "$prefix" "$replacement" "${remainder#"$word"}"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 # muse_credential_present: 0 when a launched muse pane can reach its provider
 # without an interactive login. muse offers exactly two credential paths
 # (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
@@ -1494,7 +1518,10 @@ if [ "$HARNESS" = codex ] && [ "$EFFORT" = max ]; then
     exit 1
   fi
   if [ -n "$RAW_HARNESS_BIN" ]; then
-    LAUNCH=${LAUNCH/"$RAW_HARNESS_BIN"/__CODEXBIN__}
+    LAUNCH=$(replace_raw_harness_binary "$LAUNCH" "$RAW_HARNESS_BIN" __CODEXBIN__) || {
+      echo "error: could not replace the parsed Codex executable in the raw launch command" >&2
+      exit 1
+    }
   fi
 fi
 

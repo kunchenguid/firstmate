@@ -482,6 +482,29 @@ SH
   pass "raw Codex max probes the executable named by the launch command"
 }
 
+test_assignment_prefixed_raw_codex_max_replaces_the_command_word() {
+  local rec id out status launch probe_log probed_binary
+  id=profile-assignment-raw-codex-max-z4aa
+  rec=$(make_spawn_case profile-assignment-raw-codex-max codex "$id")
+  read_case_record "$rec"
+  probe_log="$CASE_DIR/raw-codex-probe.log"
+
+  out=$(FM_TEST_CODEX_PROBE_LOG="$probe_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "CODEX_BIN=codex codex __EFFORTFLAG__--raw" --effort max)
+  status=$?
+  expect_code 0 "$status" "assignment-prefixed raw Codex max should launch the probed executable"
+  probed_binary=$(cat "$probe_log")
+  [ "$probed_binary" = "$FAKEBIN_DIR/codex" ] \
+    || fail "assignment-prefixed raw Codex max probed a different executable: $probed_binary"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_BIN=codex '$probed_binary' -c 'model_reasoning_effort=\"max\"' --raw" \
+    "assignment-prefixed raw Codex max did not replace the parsed command word"
+  assert_not_contains "$launch" "CODEX_BIN='$probed_binary' codex" \
+    "assignment-prefixed raw Codex max replaced an assignment value instead of the command word"
+  pass "assignment-prefixed raw Codex max launches the same executable it probes"
+}
+
 test_old_codex_refuses_max_effort() {
   local rec id out status launch
   id=profile-codex-old-max-z4b
@@ -893,6 +916,7 @@ test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_max_effort
 test_raw_codex_max_probes_the_named_executable
+test_assignment_prefixed_raw_codex_max_replaces_the_command_word
 test_old_codex_refuses_max_effort
 test_unparseable_codex_refuses_max_effort
 test_grok_threads_model_and_reasoning_effort
