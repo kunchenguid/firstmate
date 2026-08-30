@@ -109,12 +109,9 @@ fm_forge_detect_provider() {
 }
 
 # fm_forge_resolve_host <remote-url-or-ssh-alias> [resolve-ssh]
-# Resolves HTTPS, Git, SSH, and git+{http,https,ssh} remote URLs to a lowercase
-# hostname. The optional second
-# argument defaults to following SSH config aliases; callers can pass 0 to
-# preserve the raw host for provider classification.
+# Resolves HTTPS, Git, and SSH remote URLs to a lowercase hostname.
 fm_forge_resolve_host() {
-  local remote_url=${1:-} host="" resolve_ssh=${2:-1}
+  local remote_url=${1:-} host=""
 
   [ -n "$remote_url" ] || return 1
   case "$remote_url" in
@@ -132,7 +129,6 @@ fm_forge_resolve_host() {
         \[*\]*) host=${host#\[}; host=${host%%\]*} ;;
         *:*) host=${host%%:*} ;;
       esac
-      resolve_ssh=0
       ;;
     *:*)
       host=${remote_url%%:*}
@@ -141,11 +137,6 @@ fm_forge_resolve_host() {
     *) return 1 ;;
   esac
   [ -n "$host" ] || return 1
-  if [ "$resolve_ssh" -eq 1 ] && command -v ssh >/dev/null 2>&1; then
-    local resolved
-    resolved=$(ssh -G -- "$host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')
-    [ -n "$resolved" ] && host=$resolved
-  fi
   # A fully-qualified DNS name may carry its optional root label (for
   # example, github.com.).  Forge host policy stores canonical names without
   # that label, so normalize it before provider classification and auth.
