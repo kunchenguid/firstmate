@@ -40,22 +40,18 @@ esac
 exec /bin/ln "$@"
 SH
   chmod +x "$fakebin/ln"
-  cat > "$fakebin/mv" <<'SH'
+  local real_python
+  real_python=$(command -v python3)
+  cat > "$fakebin/python3" <<SH
 #!/usr/bin/env bash
 set -u
-source_path=
-for arg in "$@"; do
-  case "$arg" in
-    */.fm-node-modules.*/node_modules) source_path=$arg ;;
-  esac
-done
-if [ -n "$source_path" ] && [ -n "${FM_NODE_MODULES_RACE_TARGET:-}" ]; then
-  mkdir -p "$FM_NODE_MODULES_RACE_TARGET/node_modules"
-  printf 'worker install\n' > "$FM_NODE_MODULES_RACE_TARGET/node_modules/owned.txt"
+if [ "\${1:-}" = - ] && [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ]; then
+  mkdir -p "\$FM_NODE_MODULES_RACE_TARGET/node_modules"
+  printf 'worker install\n' > "\$FM_NODE_MODULES_RACE_TARGET/node_modules/owned.txt"
 fi
-exec /bin/mv "$@"
+exec "$real_python" "\$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/python3"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }

@@ -1297,7 +1297,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 share_beeline_node_modules() {
   local source source_real target staging_root staging entry name entry_real link_target
-  local has_beeline_workspace
+  local has_beeline_workspace publish_status
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
 
@@ -1363,9 +1363,38 @@ share_beeline_node_modules() {
       done
     fi
 
-    if ! mv -n "$staging" "$WT"; then
-      [ -e "$target" ] || [ -L "$target" ]
-    fi
+    publish_status=0
+    python3 - "$staging" "$target" <<'PY' || publish_status=$?
+import ctypes
+import errno
+import os
+import sys
+
+source = os.fsencode(sys.argv[1])
+target = os.fsencode(sys.argv[2])
+libc = ctypes.CDLL(None, use_errno=True)
+
+if sys.platform == "darwin":
+    rename_exclusive = libc.renamex_np
+    rename_exclusive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    result = rename_exclusive(source, target, 0x00000004)
+elif sys.platform.startswith("linux"):
+    rename_exclusive = libc.renameat2
+    rename_exclusive.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    result = rename_exclusive(-100, source, -100, target, 0x00000001)
+else:
+    sys.exit(1)
+
+if result == 0:
+    sys.exit(0)
+if ctypes.get_errno() == errno.EEXIST:
+    sys.exit(3)
+sys.exit(1)
+PY
+    case "$publish_status" in
+      0|3) : ;;
+      *) exit 1 ;;
+    esac
   ); then
     rm -rf -- "$staging_root" || true
     return 1
