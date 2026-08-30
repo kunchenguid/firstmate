@@ -8,10 +8,10 @@ The Water 7 timing-summary regression behavior is covered by `tests/fm-ci-water7
 
 ## 2026-08-30 current-candidate equivalence refresh
 
-The lane-1 serial-versus-parallel oracle was rerun at commit `5a3a56f2` after replacing the obsolete decision-hold candidate with `tests/fm-captain-hold-lifecycle.test.sh` and rebalancing the lane order.
+The lane-1 serial-versus-parallel oracle was rerun at commit `b01228dc` after replacing the obsolete decision-hold candidate with `tests/fm-captain-hold-lifecycle.test.sh`, rebalancing the lane order, and completing the merge-composition fixes.
 Both commands selected the same 12 scripts, and every script produced the same `{exit=0, gate_skip=false}` result in serial and under `--jobs 2`.
-The serial run completed in 291596 ms with load averages `{ 2.56 3.64 3.45 }` before and `{ 3.97 3.25 3.26 }` after.
-The parallel run completed in 163757 ms with load averages `{ 3.89 3.24 3.26 }` before and `{ 6.83 5.13 4.05 }` after.
+The serial run completed in 311655 ms with load averages `{ 3.90 4.23 4.51 }` before and `{ 3.51 3.97 4.31 }` after.
+The parallel run completed in 155463 ms with load averages `{ 3.51 3.97 4.31 }` before and `{ 5.57 4.54 4.48 }` after.
 This current exact-candidate result supersedes the historical `f2fc52e` oracle below for CI admission; the older repeated-run record remains as provenance for the original policy.
 
 ```sh
