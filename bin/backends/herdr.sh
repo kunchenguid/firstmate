@@ -1225,7 +1225,8 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   shell_pid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.shell_pid' 2>/dev/null) || return 1
   foreground_pgid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+    '.result.process_info.foreground_process_group_id
+      | select(type == "number" and . > 1 and . == floor)' 2>/dev/null) || return 1
   [ "$foreground_pgid" = "$shell_pid" ] || return 1
   count=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes | length' 2>/dev/null) || return 1
