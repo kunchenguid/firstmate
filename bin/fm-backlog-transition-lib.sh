@@ -191,7 +191,7 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 file id=$2 out state held command_status
+  local data authorized_data=$1 file id=$2 out state held blocked command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -224,16 +224,17 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   fi
   state=$(printf '%s\n' "$out" | sed -n 's/^  state: *//p' | head -1)
   held=$(printf '%s\n' "$out" | sed -n 's/^  held: *//p' | head -1)
+  blocked=$(printf '%s\n' "$out" | sed -n 's/^  blocked: *//p' | head -1)
   if [ -z "$state" ]; then
     FM_BACKLOG_ROW_ERROR="tasks-axi show $id returned no state"
     return 1
   fi
   FM_BACKLOG_ROW_RESULT=found
-  FM_BACKLOG_ROW_STATE="$state ${held:-no}"
+  FM_BACKLOG_ROW_STATE="$state ${held:-no} ${blocked:-no}"
   return 0
 }
 
-# Echo "<state> <held>" for one row, e.g. "queued no" / "in_flight yes".
+# Echo "<state> <held> <blocked>" for one row, e.g. "queued no no".
 # Returns 1 when the row does not exist or cannot be read.
 fm_backlog_row_state() {  # <data-dir> <id>
   fm_backlog_row_probe "$1" "$2" || return 1
@@ -403,7 +404,7 @@ fm_backlog_meta_spawn_gen() {
 
 fm_backlog_row_dispatchable() {
   case "$1" in
-    in_flight\ *|queued\ no) return 0 ;;
+    in_flight\ no\ no|queued\ no\ no) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -427,8 +428,8 @@ fm_backlog_dispatch_transition() {
     return 1
   fi
   case "$row" in
-    in_flight\ *) return 0 ;;
-    queued\ no) fm_backlog_start "$data" "$id" ;;
+    in_flight\ no\ no) return 0 ;;
+    queued\ no\ no) fm_backlog_start "$data" "$id" ;;
   esac
 }
 

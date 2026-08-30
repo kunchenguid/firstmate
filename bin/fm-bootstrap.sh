@@ -1282,7 +1282,7 @@ backlog_record_reconcile() {
       # Heal only the unambiguous case: a queued row for a record this home
       # already owns. A held row is the captain's to move, and a closed row is a
       # contradiction this sweep must not resolve by resurrecting the item.
-      if [ "$row" = "queued no" ]; then
+      if [ "$row" = "queued no no" ]; then
         if fm_backlog_start "$DATA" "$id"; then
           echo "BOOTSTRAP_INFO: marked $id in flight to match the worker this home already owns"
         else

@@ -451,6 +451,76 @@ SH
   pass "dispatch refuses held rows before creating resources"
 }
 
+test_dispatch_refuses_a_blocked_row_before_creating_resources() {
+  local case_dir id blocker out rc=0
+  id=atomic-dispatch-blocked-b16
+  blocker=atomic-dispatch-blocker-b16
+  case_dir=$(make_home dispatch-blocked "$id" "$blocker")
+  add_item "$case_dir" "$blocker"
+  tasks-axi add "$id" "item for $id" --kind ship --blocked-by "$blocker" \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *new-window*) : > "$case_dir/task-endpoint-created" ;;
+  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted a dependency-blocked backlog row"
+  assert_contains "$out" "state queued no yes" \
+    "blocked-row refusal did not name the actual ineligible state"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "blocked-row refusal published a task record"
+  assert_absent "$case_dir/task-endpoint-created" \
+    "blocked-row refusal created an unowned endpoint"
+  assert_absent "$case_dir/local-copy-requested" \
+    "blocked-row refusal requested an unowned local copy"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "blocked-row refusal changed the backlog state"
+  pass "dispatch refuses dependency-blocked rows before creating resources"
+}
+
+test_dispatch_refuses_a_held_in_flight_row_before_relaunch() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-held-in-flight-b16
+  case_dir=$(make_home dispatch-held-in-flight "$id")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *new-window*) : > "$case_dir/task-endpoint-created" ;;
+  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted a held In-flight backlog row"
+  assert_contains "$out" "state in_flight yes no" \
+    "held In-flight refusal did not name the actual ineligible state"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "held In-flight refusal published a task record"
+  assert_absent "$case_dir/task-endpoint-created" \
+    "held In-flight refusal created a replacement endpoint"
+  assert_absent "$case_dir/local-copy-requested" \
+    "held In-flight refusal requested a replacement local copy"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "held In-flight refusal changed the backlog state"
+  pass "dispatch refuses held In-flight rows before relaunch"
+}
+
 test_dispatch_reads_the_row_from_the_backlog_root() {
   local case_dir id out
   id=atomic-dispatch-root-b2
@@ -2155,6 +2225,8 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
 test_dispatch_moves_the_item_in_flight_in_the_same_run
 test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_refuses_a_held_row_before_creating_resources
+test_dispatch_refuses_a_blocked_row_before_creating_resources
+test_dispatch_refuses_a_held_in_flight_row_before_relaunch
 test_dispatch_reads_the_row_from_the_backlog_root
 test_recovery_uses_the_parent_of_a_trailing_slash_data_record
 test_completion_targets_a_nested_relative_data_directory
