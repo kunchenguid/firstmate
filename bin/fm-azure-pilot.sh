@@ -29,6 +29,7 @@
 #
 # Usage:
 #   fm-azure-pilot.sh help
+#   fm-azure-pilot.sh controller-environment-check
 #   fm-azure-pilot.sh local-validate
 #   fm-azure-pilot.sh validate
 #   fm-azure-pilot.sh preview
@@ -54,8 +55,9 @@ usage() {
 Firstmate Azure pilot
 
 Read-only:
-  help             Show this help. This is the default.
-  local-validate   Parse the template and enforce static safety invariants.
+  help                         Show this help. This is the default.
+  controller-environment-check Validate controller values without Azure access.
+  local-validate               Parse the template and enforce static safety invariants.
   validate         Run every live gate, then Azure subscription validation.
   preview          Run every live gate, then a sanitized Azure what-if summary.
   status           Show a redacted deployment/resource/power-state summary.
@@ -764,6 +766,11 @@ run_bounded_az_capture() {
   return "$status"
 }
 
+run_controller_environment_check() {
+  require_cloud_environment
+  printf 'Azure pilot controller environment is valid\n'
+}
+
 run_validate() {
   require_cloud_environment
   live_gates
@@ -1070,6 +1077,10 @@ PY
 
 case "$COMMAND" in
   help|-h|--help) usage ;;
+  controller-environment-check)
+    [ "$#" -eq 0 ] || refuse "controller-environment-check accepts no arguments"
+    run_controller_environment_check
+    ;;
   local-validate)
     [ "$#" -eq 0 ] || refuse "local-validate accepts no arguments"
     local_validate

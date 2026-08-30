@@ -171,6 +171,33 @@ Nothing else is relaxed: tracked changes and every other untracked path, includi
 An existing linked-worktree home that predates one of these rules advances through its artifact-only state during its next bootstrap or spawn local sync, after which Git ignores the artifacts normally.
 A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rules through `/updatefirstmate`'s origin refresh instead; an already-stale updater needs the bootstrap step in the `/updatefirstmate` skill.
 
+## Azure worker controller environment (config/azure-controller.env)
+
+`config/azure-controller.env` is the one durable private source for the allowlisted `FM_AZURE_*` values used by primary Azure worker placement and recovery.
+The path is under the effective configuration directory, `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}`, whose normal Firstmate-home location is gitignored.
+Do not populate it from `state/<task>.cloud-env`, another task record, an OAuth store, or a generated brief.
+Create it deliberately from the accepted installation values and keep it owner-only with `chmod 600`.
+
+The file is required for `fm-spawn.sh` whenever cloud placement resolves to `azure` and for `fm-worker-lifecycle.sh` whenever it uses the default Azure provider.
+An explicit alternate `FM_WORKER_PROVIDER_COMMAND` keeps the provider-neutral lifecycle path compatible when the file is absent, while an existing file is still loaded.
+Cloud placement that resolves to `off` or `local` never reads or validates this file.
+
+Each non-empty, non-comment line is one literal `FM_AZURE_NAME=value` assignment.
+The value is every byte after the first `=` on that line, so spaces need no quoting and quotes, escapes, substitutions, `export`, and inline comments have no shell meaning.
+Its immediate config directory must be a current-operator-owned real directory that is not group or world writable, and the file must be a current-operator-owned regular non-symlink file with one filesystem link, no group or world permissions, at most 65,536 bytes, and UTF-8 values without control characters.
+Duplicate names, empty declared values, malformed lines, and any name outside the existing explicit allowlist fail closed.
+[`bin/fm-cloud-env-contract.py`](../bin/fm-cloud-env-contract.py) mechanically owns that allowlist and derives the required deployment subset from the Azure pilot's enforcing loop, so this configuration source does not broaden either set.
+
+Values explicitly present in the invoking environment win over values in the file, including an explicitly empty value, which then fails the ordinary required-value validation instead of falling back silently.
+The loader requires the effective environment to contain every Azure pilot controller value before re-executing the requested command.
+It passes loaded values only through the child environment, never command arguments or output.
+A missing or invalid source therefore refuses before Azure placement can acquire a worktree, create a backend endpoint, write controller state, or reach the provider.
+
+After a successful dispatch, `fm-spawn.sh` continues to write only the existing allowlisted non-credential values into owner-private `state/<task>.cloud-env` for the closed monitor pane.
+`fm-spawn-cloud-monitor.sh` continues to source that task-specific file in a subshell for execute, result return, release, and reconcile.
+Those already-exported task values have explicit precedence over the current durable source, so recovery stays bound to the dispatched environment rather than being inferred from another task or silently retargeted by a later config edit.
+No loaded value belongs in task `.meta` files, reports, logs, generated briefs, or any new persistence channel.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.

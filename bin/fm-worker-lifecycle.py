@@ -3416,6 +3416,10 @@ def parser():
     status.add_argument("--live", action="store_true")
     status.add_argument("--json", action="store_true")
 
+    sub.add_parser(
+        "environment-check",
+        help="validate the effective controller identity and policy without reading or writing state",
+    )
     sub.add_parser("acceptance-plan", help="print the isolated post-release acceptance checklist")
     return top
 
@@ -5540,7 +5544,9 @@ def main(argv=None):
         acceptance_plan()
         return 0
     env = environment()
-    if args.command == "request":
+    if args.command == "environment-check":
+        print("elastic worker controller environment is valid")
+    elif args.command == "request":
         command_request(env, args)
     elif args.command == "capacity-reserve":
         command_capacity_reserve(env, args)

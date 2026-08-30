@@ -36,6 +36,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-worker-authority.py` | Issue release receipts from ordinary endpoint, report, landing, account, and worktree authorities |
 | `fm-azure-worker-provider.py` | Reconcile exact Azure worker generations through the landed private foundation    |
 | `fm-cloud-env-contract.py` | Derive the FM_AZURE_* names a cloud placement must persist for the closed monitor pane |
+| `fm-azure-controller-env.py` | Validate and load the private allowlisted Azure controller environment without rendering values into argv or output |
 | `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crewmates while recording pre-metadata Treehouse acquisition ownership |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule through quota or the deferred legacy pool-summary branch |
 | `fm-account-directory.sh` | Select a direct Claude/Codex account directory and install its per-profile Herdr hook |

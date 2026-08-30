@@ -39,9 +39,12 @@
 #   endpoint, credential-copy, or cloud-capacity mutation. The recorded
 #   metadata carries placement=azure plus the account_home and
 #   worktree_git_dir_identity bindings that lifecycle derives its request from,
-#   and window= stays empty so local endpoint probes fail closed. Cloud spawns
-#   run ENTIRELY on the pi-codex runtime: harness dispatch and claude profile
-#   routing are bypassed. account_home comes from
+#   and window= stays empty so local endpoint probes fail closed. Before any
+#   Azure worktree, endpoint, controller, or cloud mutation, primary placement
+#   loads the private config/azure-controller.env contract owned by
+#   docs/configuration.md; explicit invocation values win. Cloud spawns run
+#   ENTIRELY on the pi-codex runtime: harness dispatch and claude profile routing
+#   are bypassed. account_home comes from
 #   config/azure-worker-account-home when that file exists, otherwise from the
 #   pi coding-agent directory for backward compatibility. The controller
 #   load-balances usable profiles and gives each assignment one private
@@ -767,6 +770,20 @@ if [ "$SPAWN_CLOUD" = azure ] && [ "$STATE" != "$TASK_HOME/state" ]; then
   # already refuses to be combined with any state/data/projects override.
   echo "error: cloud placement requires the task home's own state directory ($TASK_HOME/state), not an override" >&2
   exit 1
+fi
+if [ "$SPAWN_CLOUD" = azure ]; then
+  # Re-exec through the bounded parser before cloud account validation and long
+  # before Treehouse/backend/controller mutation. Values stay in the process
+  # environment; the helper never renders them into argv or output. The marker
+  # is path-bound so the lifecycle wrapper and a nested different home cannot
+  # silently mistake some other config for this one.
+  AZURE_CONTROLLER_ENV_FILE="$CONFIG/azure-controller.env"
+  if [ "${FM_CONTROLLER_AZURE_ENV_LOADED_FROM:-}" != "$AZURE_CONTROLLER_ENV_FILE" ]; then
+    FM_SPAWN_NO_GUARD=1
+    export FM_SPAWN_NO_GUARD
+    exec python3 "$SCRIPT_DIR/fm-azure-controller-env.py" \
+      --config "$AZURE_CONTROLLER_ENV_FILE" -- "$0" "$@"
+  fi
 fi
 CLOUD_ACCOUNT_HOME=
 CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS=43200

@@ -5,13 +5,18 @@
 # work. The exact lifecycle, Azure setup, release receipt, recovery, cost, and
 # acceptance contracts live in docs/azure-workers.md.
 #
-# Required environment:
+# Required effective environment:
 #   FM_HOME
 #   FM_AZURE_SUBSCRIPTION_ID
 #   FM_AZURE_DEPLOYMENT_GENERATION
 #   FM_AZURE_OWNER_TAG
 #   FM_AZURE_NAMING_PREFIX
 #   FM_AZURE_STORAGE_NAME (Azure adapter)
+#
+# Primary default-Azure commands automatically load the private controller
+# environment before validation or mutation. docs/configuration.md owns its
+# config/azure-controller.env format and precedence. A monitor's already-exported
+# task-specific cloud environment remains explicit input and therefore wins.
 #
 # Optional policy:
 #   FM_AZURE_WORKER_POLICY_PHASE=commissioning|steady
@@ -28,6 +33,7 @@
 #   FM_WORKER_PROVIDER_COMMAND='python3 <provider-adapter>'
 #
 # Usage:
+#   fm-worker-lifecycle.sh environment-check
 #   fm-worker-lifecycle.sh request <exact identity flags> --eligible
 #   fm-worker-lifecycle.sh reconcile [--apply --confirm-subscription <uuid>]
 #   fm-worker-lifecycle.sh capacity-reserve <exact specialized reservation flags>
@@ -53,6 +59,26 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=bin/fm-cloud-state-lib.sh
 . "$SCRIPT_DIR/fm-cloud-state-lib.sh"
+
+# The wrapper is provider-neutral when an alternate provider is explicit, so an
+# absent Azure config keeps that existing path compatible. The default provider
+# is Azure and requires the durable source. When the source does exist, every
+# direct entry - including resume and existing-task-disk recovery - loads it.
+# Re-exec preserves this wrapper's withdraw/surrender cleanup ownership instead
+# of jumping straight to the Python controller.
+case "${1:-}" in
+  help|-h|--help|acceptance-plan|"") : ;;
+  *)
+    CONTROLLER_CONFIG_DIR=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd -P)}/config}
+    CONTROLLER_ENV_FILE="$CONTROLLER_CONFIG_DIR/azure-controller.env"
+    if [ "${FM_CONTROLLER_AZURE_ENV_LOADED_FROM:-}" != "$CONTROLLER_ENV_FILE" ] \
+      && { [ -e "$CONTROLLER_ENV_FILE" ] || [ -L "$CONTROLLER_ENV_FILE" ] \
+        || [ -z "${FM_WORKER_PROVIDER_COMMAND+x}" ]; }; then
+      exec python3 "$SCRIPT_DIR/fm-azure-controller-env.py" \
+        --config "$CONTROLLER_ENV_FILE" -- "$0" "$@"
+    fi
+    ;;
+esac
 
 # The state directory a receipted task's cloud state was staged in.
 #

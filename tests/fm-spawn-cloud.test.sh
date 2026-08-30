@@ -39,6 +39,29 @@ PY
   chmod 600 "$1"
 }
 SUB=11111111-1111-4111-8111-111111111111
+OTHER_SUB=22222222-2222-4222-8222-222222222222
+PRIVATE_ADMIN_EMAIL=autoload-private@example.invalid
+
+write_azure_controller_config() {  # <path> [subscription] [prefix]
+  local path=$1 subscription=${2:-$SUB} prefix=${3:-fmtest}
+  cat > "$path" <<EOF
+# Literal private controller values for this hermetic Firstmate home.
+FM_AZURE_TENANT_ID=33333333-3333-4333-8333-333333333333
+FM_AZURE_SUBSCRIPTION_ID=$subscription
+FM_AZURE_ADMIN_EMAIL=$PRIVATE_ADMIN_EMAIL
+FM_AZURE_ADMIN_USERNAME=fmfixture
+FM_AZURE_ADMIN_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFirstmateFixtureKey fixture@example.invalid
+FM_AZURE_RUNNER_OPERATOR_OBJECT_ID=44444444-4444-4444-8444-444444444444
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_NAMING_PREFIX=$prefix
+FM_AZURE_STORAGE_NAME=fmteststorage001
+FM_AZURE_KEY_VAULT_NAME=fmtest-key-vault-001
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_BUDGET_START_DATE=2026-01-01
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+EOF
+  chmod 600 "$path"
+}
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -400,6 +423,7 @@ make_cloud_case() {
   fm_spawn_cloud_write_pi_pool "$case_dir/pi-agent-home/auth.json"
   printf '%s\n' codex > "$home/config/crew-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  write_azure_controller_config "$home/config/azure-controller.env"
   fm_git_init_commit "$project"
   git -C "$project" worktree add --quiet --detach "$worktree"
   touch "$home/state/.last-watcher-beat"
@@ -449,11 +473,6 @@ run_cloud_spawn() {
   local case_dir=$1 home=$2 worktree=$3 fakebin=$4
   shift 4
   FM_SPAWN_CLOUD=azure \
-    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
-    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
-    FM_AZURE_OWNER_TAG=owner \
-    FM_AZURE_NAMING_PREFIX=fmtest \
-    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
     FM_WORKER_PROVIDER_COMMAND="python3 $case_dir/provider.py" \
     FIXTURE_STATE="$case_dir/provider-state.json" \
     run_spawn "$case_dir" "$home" "$worktree" "$fakebin" "$@"
@@ -482,6 +501,8 @@ test_cloud_switch_off_keeps_the_local_path_and_metadata_shape() {
   id=cloud-off-c1
   record=$(make_cloud_case off-lane "$id")
   read_cloud_case "$record"
+  printf 'this is deliberately invalid Azure config\n' > "$HOME_DIR/config/azure-controller.env"
+  chmod 600 "$HOME_DIR/config/azure-controller.env"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
   status=$?
   expect_code 0 "$status" "a default spawn with the cloud switch off should succeed: $out"
@@ -496,7 +517,7 @@ test_cloud_switch_off_keeps_the_local_path_and_metadata_shape() {
   assert_no_grep 'worker_assignment_generation=' "$meta" "an off-switch spawn recorded a worker assignment"
   assert_grep 'LAUNCH' "$CASE_DIR/launch.log" "the local spawn never typed its launch command"
   assert_absent "$HOME_DIR/state/azure-workers/controller.json" "an off-switch spawn touched the worker controller state"
-  pass "cloud switch off keeps the spawn on the local lane with unchanged metadata keys"
+  pass "cloud switch off ignores even an invalid Azure config and keeps local metadata unchanged"
 }
 
 test_cloud_spawn_places_worker_and_runs_the_entrypoint() {
@@ -504,7 +525,12 @@ test_cloud_spawn_places_worker_and_runs_the_entrypoint() {
   id=cloud-on-c2
   record=$(make_cloud_case assigned-lane "$id")
   read_cloud_case "$record"
-  out=$(run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  # The durable source deliberately disagrees on two controller identities.
+  # Explicit invocation values must win without preventing config-only values
+  # from loading, and none of those private values may leak into user surfaces.
+  write_azure_controller_config "$HOME_DIR/config/azure-controller.env" "$OTHER_SUB" filecfg
+  out=$(FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_NAMING_PREFIX=fmtest \
+    run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
   status=$?
   expect_code 0 "$status" "a cloud spawn against an admitting provider should succeed: $out"
   assert_contains "$out" "spawned $id" "the cloud spawn did not complete: $out"
@@ -514,6 +540,18 @@ test_cloud_spawn_places_worker_and_runs_the_entrypoint() {
   assert_contains "$out" "harness=pi" "the cloud spawn did not select the pi-codex runtime: $out"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'placement=azure' "$meta" "the cloud spawn did not record placement=azure"
+  assert_grep "export FM_AZURE_SUBSCRIPTION_ID=$SUB" "$HOME_DIR/state/$id.cloud-env" \
+    "the explicit subscription did not win over the durable source"
+  assert_grep 'export FM_AZURE_NAMING_PREFIX=fmtest' "$HOME_DIR/state/$id.cloud-env" \
+    "the explicit naming prefix did not win over the durable source"
+  assert_grep "export FM_AZURE_ADMIN_EMAIL=$PRIVATE_ADMIN_EMAIL" "$HOME_DIR/state/$id.cloud-env" \
+    "a config-only allowlisted value was not loaded for the dispatched monitor"
+  assert_not_contains "$out" "$PRIVATE_ADMIN_EMAIL" "spawn output leaked a private controller value: $out"
+  assert_no_grep "$PRIVATE_ADMIN_EMAIL" "$meta" "task metadata leaked a private controller value"
+  assert_no_grep "$PRIVATE_ADMIN_EMAIL" "$HOME_DIR/state/$id.cloud-payload/brief.md" \
+    "the generated worker brief leaked a private controller value"
+  assert_no_grep "$PRIVATE_ADMIN_EMAIL" "$CASE_DIR/herdr.log" \
+    "the backend launch log leaked a private controller value"
   assert_grep 'harness=pi' "$meta" "the cloud spawn did not record the pi-codex runtime"
   assert_grep "account_home=$CASE_DIR/pi-agent-home" "$meta" "the cloud spawn did not record the pi coding-agent account home"
   assert_grep '--fast' "$HOME_DIR/state/$id.cloud-entrypoint" "the cloud worker entrypoint did not force Fast Mode"
@@ -919,49 +957,83 @@ test_cloud_spawn_refuses_unknown_switch_value() {
   pass "an unknown cloud placement value fails closed before any mutation"
 }
 
-test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request() {
-  local record id out status
+test_cloud_spawn_requires_safe_durable_controller_config_before_mutation() {
+  local record id out status help
   id=cloud-noenv-c7
   record=$(make_cloud_case refused-request "$id")
   read_cloud_case "$record"
-  # FM_SPAWN_CLOUD=azure without the FM_AZURE_* identity environment: the
-  # lifecycle refuses the request, so the spawn must roll back rather than
-  # leave a lane that exists nowhere.
-  #
-  # THIS UNIT IS WHY THE CLOUD SEAL EXISTS. Omitting the identity is the whole
-  # point of the case, and until 2026-08-20 the omission was only ever a local
-  # fact: run it in a shell with the operator's fleet.env sourced and the
-  # ambient FM_AZURE_* satisfied the very identity check this asserts is
-  # missing, the lifecycle resolved the REAL Azure provider by default, and the
-  # request was SERVED. It created billable VMs tagged with this fixture's own
-  # id, tracked by no controller record and released by nothing.
-  #
-  # Two independent defenses, deliberately kept together. The explicit unset
-  # below states this unit's premise locally, so it holds even if the ambient
-  # seal in tests/run.sh is ever weakened. The seal itself covers every OTHER
-  # test, which is what a per-unit unset can never do.
-  #
-  # The provider is deliberately NOT pinned to the case fixture here. Under the
-  # seal the unbound provider IS the refusing one, so a request that reaches any
-  # provider at all is recorded and fm_assert_no_cloud_reach below catches it.
-  # Pinning a working fixture would make a reach unrecorded and silently neuter
-  # that assertion: this unit must prove it reached NO provider, not that the
-  # provider it reached was a safe one.
-  out=$(
-    unset FM_AZURE_SUBSCRIPTION_ID FM_AZURE_TENANT_ID \
-      FM_AZURE_DEPLOYMENT_GENERATION FM_AZURE_OWNER_TAG FM_AZURE_NAMING_PREFIX \
-      FM_AZURE_RESOURCE_GROUP FM_AZURE_STORAGE_NAME FM_AZURE_WORKER_STATE_DIR \
-      FM_AZURE_VM_IMAGE_ID FM_AZURE_WORKER_IMAGE_ID
-    FM_SPAWN_CLOUD=azure \
-      run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR"
-  )
+
+  rm -f "$HOME_DIR/config/azure-controller.env"
+  out=$(FM_SPAWN_CLOUD=azure \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
   status=$?
-  expect_code 1 "$status" "a cloud spawn whose worker request is refused should fail: $out"
-  assert_contains "$out" "cloud worker request was refused" "the refusal did not surface the request failure: $out"
-  assert_absent "$HOME_DIR/state/$id.meta" "a refused cloud spawn left task metadata behind"
-  assert_no_grep 'LAUNCH' "$CASE_DIR/launch.log" "a refused cloud spawn launched a local lane anyway"
-  fm_assert_no_cloud_reach "the identity-less cloud spawn reached a worker provider instead of being refused before one"
-  pass "a refused worker request rolls the spawn back instead of stranding the task"
+  expect_code 1 "$status" "a cloud spawn with no durable controller config should fail: $out"
+  assert_contains "$out" "private config is missing" "the refusal did not name the missing durable source: $out"
+  assert_absent "$HOME_DIR/state/$id.meta" "a missing config still wrote task metadata"
+  assert_absent "$HOME_DIR/state/azure-workers/controller.json" "a missing config still wrote controller state"
+  test -z "$(find "$HOME_DIR/treehouse-pools" -mindepth 1 -print -quit 2>/dev/null)" \
+    || fail "a missing config mutated the Treehouse pool"
+  test ! -s "$CASE_DIR/herdr.log" || fail "a missing config created a backend endpoint: $(cat "$CASE_DIR/herdr.log")"
+  test ! -s "$CASE_DIR/tmux-calls.log" || fail "a missing config reached tmux: $(cat "$CASE_DIR/tmux-calls.log")"
+  fm_assert_no_cloud_reach "a missing controller config reached a worker provider"
+
+  out=$(env -u FM_WORKER_PROVIDER_COMMAND FM_HOME="$HOME_DIR" \
+    "$ROOT/bin/fm-worker-lifecycle.sh" resume \
+      --task "$id" --task-generation gen-missing \
+      --repository-binding "$(printf '%064x' 9)" \
+      --confirm-resume --confirm-subscription "$SUB" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a primary recovery with no durable config should fail: $out"
+  assert_contains "$out" "private config is missing" \
+    "the primary recovery route did not autoload and reject its missing durable source: $out"
+  assert_absent "$HOME_DIR/state/azure-workers/controller.json" \
+    "a missing recovery config still wrote controller state"
+  fm_assert_no_cloud_reach "a missing recovery config reached a worker provider"
+
+  write_azure_controller_config "$HOME_DIR/config/azure-controller.env"
+  printf 'FM_AZURE_CLIENT_SECRET=must-never-be-allowlisted\n' >> "$HOME_DIR/config/azure-controller.env"
+  out=$(FM_SPAWN_CLOUD=azure \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a controller config with a non-allowlisted name should fail: $out"
+  assert_contains "$out" "names non-allowlisted FM_AZURE_CLIENT_SECRET" \
+    "the invalid config refusal did not name the allowlist boundary: $out"
+  assert_not_contains "$out" "must-never-be-allowlisted" "the invalid config refusal printed its value: $out"
+  assert_absent "$HOME_DIR/state/$id.meta" "an invalid config still wrote task metadata"
+  assert_absent "$HOME_DIR/state/azure-workers/controller.json" "an invalid config still wrote controller state"
+  test -z "$(find "$HOME_DIR/treehouse-pools" -mindepth 1 -print -quit 2>/dev/null)" \
+    || fail "an invalid config mutated the Treehouse pool"
+  test ! -s "$CASE_DIR/herdr.log" || fail "an invalid config created a backend endpoint: $(cat "$CASE_DIR/herdr.log")"
+  fm_assert_no_cloud_reach "an invalid controller config reached a worker provider"
+
+  write_azure_controller_config "$HOME_DIR/config/azure-controller.env" not-a-private-uuid
+  out=$(FM_SPAWN_CLOUD=azure \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a semantically invalid controller identity should fail early: $out"
+  assert_contains "$out" "elastic worker controller values are invalid" \
+    "the semantic config refusal did not name controller validation: $out"
+  assert_not_contains "$out" "not-a-private-uuid" \
+    "semantic validation printed the private invalid value: $out"
+  assert_absent "$HOME_DIR/state/$id.meta" "a semantically invalid config still wrote task metadata"
+  assert_absent "$HOME_DIR/state/azure-workers/controller.json" \
+    "a semantically invalid config still wrote controller state"
+
+  write_azure_controller_config "$HOME_DIR/config/azure-controller.env"
+  chmod 644 "$HOME_DIR/config/azure-controller.env"
+  out=$(FM_SPAWN_CLOUD=azure \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a non-private controller source should fail: $out"
+  assert_contains "$out" "must have no group/world permissions (use chmod 600)" \
+    "the permissions refusal did not explain the private-file requirement: $out"
+  assert_absent "$HOME_DIR/state/$id.meta" "a non-private config still wrote task metadata"
+  fm_assert_no_cloud_reach "a non-private controller config reached a worker provider"
+
+  help=$($SPAWN --help)
+  assert_contains "$help" "config/azure-controller.env" \
+    "fm-spawn help does not point to the durable Azure controller source: $help"
+  pass "missing and invalid durable controller config refuse before worktree, backend, or cloud mutation"
 }
 
 test_the_pool_is_never_staged_in_the_request_to_narrow_window() {
@@ -1113,10 +1185,23 @@ cloud_env_contract_sentinel() {  # <name>
   case $1 in
     # Mirrors of the values the rest of this suite's cloud lane runs with, so
     # the fixture provider and the controller still agree with each other.
+    FM_AZURE_TENANT_ID) printf '33333333-3333-4333-8333-333333333333' ;;
     FM_AZURE_SUBSCRIPTION_ID) printf '%s' "$SUB" ;;
+    FM_AZURE_ADMIN_EMAIL) printf 'contract@example.invalid' ;;
+    FM_AZURE_ADMIN_USERNAME) printf 'fmcontract' ;;
+    FM_AZURE_ADMIN_SSH_PUBLIC_KEY) printf 'ssh-ed25519 AAAAC3NzaFixture contract@example.invalid' ;;
+    FM_AZURE_RUNNER_OPERATOR_OBJECT_ID) printf '44444444-4444-4444-8444-444444444444' ;;
     FM_AZURE_DEPLOYMENT_GENERATION) printf 'dep-one' ;;
     FM_AZURE_OWNER_TAG) printf 'owner' ;;
     FM_AZURE_NAMING_PREFIX) printf 'fmtest' ;;
+    FM_AZURE_STORAGE_NAME) printf 'fmteststorage001' ;;
+    FM_AZURE_KEY_VAULT_NAME) printf 'fmtest-key-vault-001' ;;
+    FM_AZURE_BUDGET_START_DATE) printf '2026-01-01' ;;
+    FM_AZURE_OPERATOR_DATA_PLANE_IP) printf '203.0.113.10' ;;
+    FM_AZURE_RUNNER_VALIDATION_SKU) printf 'Standard_D4as_v6' ;;
+    FM_AZURE_VM_FAMILY) printf 'Dasv6' ;;
+    FM_AZURE_WORKER_SLOTS) printf '1' ;;
+    FM_AZURE_WORKER_SKUS) printf 'Standard_D4as_v6' ;;
     FM_AZURE_WORKER_STATE_DIR) printf '%s' "$HOME_DIR/state/azure-workers" ;;
     *_STATE_DIR) printf '%s' "$CASE_DIR/contract-state" ;;
     *_POLICY_PHASE) printf 'commissioning' ;;
@@ -1355,10 +1440,9 @@ test_queued_spawn_converges_through_the_monitor() {
   assert_absent "$HOME_DIR/state/$id.worker-result.json" "a queued spawn started an execution"
   # Later operator reconcile with healthy admission evidence: converges to
   # assigned, but (by design) runs no entrypoint itself.
+  # This direct primary recovery/convergence entry has no explicit Azure
+  # identity. The lifecycle wrapper must load the same durable home config.
   out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-    FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
-    FM_AZURE_OWNER_TAG=owner FM_AZURE_NAMING_PREFIX=fmtest \
-    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
     FM_WORKER_PROVIDER_COMMAND="python3 $CASE_DIR/provider.py" \
     FIXTURE_STATE="$CASE_DIR/provider-state.json" \
     "$ROOT/bin/fm-worker-lifecycle.sh" reconcile --apply --confirm-subscription "$SUB" 2>&1)
@@ -1377,6 +1461,10 @@ test_queued_spawn_converges_through_the_monitor() {
   grep -v '^export FM_SPAWN_CLOUD_RETURN_KIND=' "$HOME_DIR/state/$id.cloud-env" \
     > "$HOME_DIR/state/$id.cloud-env.tmp"
   mv "$HOME_DIR/state/$id.cloud-env.tmp" "$HOME_DIR/state/$id.cloud-env"
+  # A later durable edit must not retarget an already-dispatched task. The
+  # monitor exports its persisted values before the lifecycle wrapper reloads
+  # the home source, so task-specific explicit precedence keeps this on SUB.
+  write_azure_controller_config "$HOME_DIR/config/azure-controller.env" "$OTHER_SUB"
   env -u FM_WORKER_PROVIDER_COMMAND FM_HOME="$HOME_DIR" \
     FIXTURE_STATE="$CASE_DIR/provider-state.json" \
     FM_SPAWN_CLOUD_MONITOR_INTERVAL_SECONDS=1 \
@@ -1599,6 +1687,7 @@ make_child_case() {  # <name> <child-id> <parent-id> -> record
   fm_spawn_cloud_write_pi_pool "$case_dir/pi-agent-home/auth.json"
   printf '%s\n' codex > "$primary/config/crew-harness"
   printf '%s\n' manual > "$primary/config/backlog-backend"
+  write_azure_controller_config "$primary/config/azure-controller.env"
   fm_git_init_commit "$project"
   git -C "$project" worktree add --quiet --detach "$worktree"
   fm_git_init_commit "$foreign_project"
@@ -2062,7 +2151,7 @@ test_azure_only_precedence_cannot_be_loosened_and_environment_can_tighten
 test_azure_only_refuses_incompatible_and_recovery_routes_before_mutation
 test_azure_only_preserves_existing_local_and_unlanded_work
 test_cloud_spawn_refuses_unknown_switch_value
-test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request
+test_cloud_spawn_requires_safe_durable_controller_config_before_mutation
 test_a_spawn_that_cannot_stage_its_snapshot_removes_projection
 test_the_pool_is_never_staged_in_the_request_to_narrow_window
 test_cloud_switch_refuses_non_pi_harness

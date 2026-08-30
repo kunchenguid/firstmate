@@ -67,6 +67,7 @@ READERS = (
 # are read out of that call rather than listed here, so the subtraction cannot
 # drift from it either.
 SUPPLIER = "bin/fm-azure-worker-provider.py"
+PILOT = "bin/fm-azure-pilot.sh"
 
 # Reviewed exclusions: a FM_AZURE_* name a reader takes from the environment that
 # must still NEVER be written to disk, because its VALUE is a credential (or
@@ -195,6 +196,58 @@ def run_pilot_create_body(source: str) -> str:
         "run_pilot_create is not defined at module level in {}; the "
         "provider-supplied subtraction cannot be derived".format(SUPPLIER)
     )
+
+
+def pilot_required() -> set[str]:
+    """Derive the pilot's required controller values from its enforcing loop.
+
+    The private controller config loader needs this exact subset before a spawn
+    can acquire a worktree or create an endpoint. The pilot remains the owner:
+    this reads its first require_cloud_environment loop instead of copying the
+    twelve names into a second list that can drift.
+    """
+    lines = read(PILOT).splitlines()
+    function_start = None
+    loop_start = None
+    for index, line in enumerate(lines):
+        if line == "require_cloud_environment() {":
+            function_start = index
+            break
+    if function_start is None:
+        raise ContractError(
+            "require_cloud_environment is unavailable in {}; required controller values cannot be derived".format(
+                PILOT
+            )
+        )
+    for index in range(function_start + 1, len(lines)):
+        if lines[index].strip() == "for name in \\":
+            loop_start = index
+            break
+        if lines[index] == "}":
+            break
+    if loop_start is None:
+        raise ContractError(
+            "require_cloud_environment has no required-value loop in {}; required controller values cannot be derived".format(
+                PILOT
+            )
+        )
+    block = []
+    terminated = False
+    for line in lines[loop_start:]:
+        block.append(line)
+        if line.rstrip().endswith("; do"):
+            terminated = True
+            break
+    if not terminated:
+        raise ContractError(
+            "require_cloud_environment's required-value loop is unterminated in {}".format(PILOT)
+        )
+    names = set(NAME.findall("\n".join(block)))
+    if not names:
+        raise ContractError(
+            "require_cloud_environment yielded no required controller values in {}".format(PILOT)
+        )
+    return names
 
 
 def provider_supplied() -> set[str]:

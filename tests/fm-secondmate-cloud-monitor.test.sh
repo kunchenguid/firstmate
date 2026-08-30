@@ -2678,6 +2678,30 @@ PY
   chmod +x "$1"
 }
 
+write_gate_azure_controller_config() {  # <main-home>
+  local home=$1
+  mkdir -p "$home/config"
+  (
+    umask 077
+    cat > "$home/config/azure-controller.env" <<EOF
+# Literal private controller values for this hermetic Firstmate home.
+FM_AZURE_TENANT_ID=33333333-3333-4333-8333-333333333333
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_ADMIN_EMAIL=compartment-fixture@example.invalid
+FM_AZURE_ADMIN_USERNAME=fmfixture
+FM_AZURE_ADMIN_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFirstmateFixtureKey fixture@example.invalid
+FM_AZURE_RUNNER_OPERATOR_OBJECT_ID=44444444-4444-4444-8444-444444444444
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_AZURE_STORAGE_NAME=fmteststorage001
+FM_AZURE_KEY_VAULT_NAME=fmtest-key-vault-001
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_BUDGET_START_DATE=2026-01-01
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+EOF
+  )
+}
+
 write_fake_herdr() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/herdr" <<'SH'
@@ -2805,6 +2829,11 @@ setup_spawn_world() {
   PATH="$SP_FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$SPAWN_PRIMARY_ROOT" FM_HOME="$SP_HOME" \
     "$ROOT/bin/fm-home-seed.sh" "$id" "$SP_SUB" alpha >/dev/null \
     || fail "home seed failed for $id"
+  # Cloud-gate cases enter through fm-spawn's production contract, so the
+  # primary home declares the same private controller source production uses.
+  # A sealed fixture provider changes where lifecycle actions go, not whether
+  # the default Azure controller must be configured before mutation.
+  write_gate_azure_controller_config "$SP_HOME"
 }
 
 run_gate_spawn() {  # <id> [VAR=value ...] -- <spawn args...>
