@@ -698,6 +698,8 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
     FM_REMOTE_JOB_ERROR="cannot allocate and publish a remote job staging sequence"
     return 1
   fi
+  # Sourced entrypoints consume this publication boundary after stage returns.
+  # shellcheck disable=SC2034
   FM_REMOTE_JOB_PUBLISHED=1
   if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
     ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
