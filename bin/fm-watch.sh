@@ -430,7 +430,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
   local queue=$1
   [ -f "$queue" ] && [ ! -L "$queue" ] || return 0
   awk -F '\t' '
-    NF >= 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+    NF == 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
       if (!found || $2 < seq) {
         found = 1
         seq = $2

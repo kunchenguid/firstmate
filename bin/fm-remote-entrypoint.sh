@@ -106,7 +106,8 @@ entrypoint_cleanup() {
   local cancel_id=${JOB_ID:-${FM_REMOTE_JOB_ID:-}}
   rm -rf -- "$TMP"
   if [ -n "$cancel_id" ] && [ "$JOB_COMPLETED" -eq 0 ] && [ -n "$ACCOUNT_HOME" ]; then
-    fm_remote_job_cancel "$ACCOUNT_HOME" "$cancel_id" 2>/dev/null || true
+    fm_remote_job_cancel "$ACCOUNT_HOME" "$cancel_id" 2>/dev/null \
+      || printf 'error: remote job %s cancellation remains unconfirmed; its record is retained for retry\n' "$cancel_id" >&2
   fi
 }
 trap entrypoint_cleanup EXIT

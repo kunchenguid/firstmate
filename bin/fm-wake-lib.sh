@@ -15,10 +15,9 @@ fm_wake_queue_sequences_unique() {
   [ -n "$queue" ] || return 1
   [ -e "$queue" ] || return 0
   awk -F '\t' '
-    NF == 5 && $2 ~ /^[0-9]+$/ {
-      if (++seen[$2] > 1) duplicate=1
-    }
-    END { exit duplicate ? 1 : 0 }
+    NF != 5 || $2 !~ /^[0-9]+$/ { invalid=1; next }
+    { if (++seen[$2] > 1) duplicate=1 }
+    END { exit (invalid || duplicate) ? 1 : 0 }
   ' "$queue"
 }
 

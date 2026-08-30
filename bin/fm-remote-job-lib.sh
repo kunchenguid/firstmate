@@ -744,7 +744,10 @@ fm_remote_job_wait() { # <account-home> <id>; honors FM_REMOTE_JOB_DISCONNECT_PR
     if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] && [ "$now" -ge "$next_probe" ]; then
       next_probe=$((now + 1))
       if ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
-        fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || true
+        if ! fm_remote_job_cancel "$account_home" "$id" 2>/dev/null; then
+          FM_REMOTE_JOB_ERROR="remote job caller disconnected; cancellation failed and job $id remains recorded for retry"
+          return 1
+        fi
         FM_REMOTE_JOB_ERROR="remote job caller disconnected; the job was cancelled"
         return 1
       fi
