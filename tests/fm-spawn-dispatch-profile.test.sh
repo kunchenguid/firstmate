@@ -463,6 +463,7 @@ test_old_codex_refuses_max_effort() {
   expect_code 1 "$status" "older Codex spawn must refuse an explicit unsupported max effort"
   assert_contains "$out" "refusing to launch without the explicitly selected effort" \
     "older Codex max refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "older Codex refusal must happen before metadata publication"
   launch=$(cat "$LAUNCH_LOG")
   [ -z "$launch" ] || fail "older Codex launched after refusing max effort: $launch"
   pass "older Codex refuses to launch without explicit max effort"
@@ -481,6 +482,7 @@ test_unparseable_codex_refuses_max_effort() {
   expect_code 1 "$status" "unparseable Codex version must refuse an explicit max effort"
   assert_contains "$out" "requires codex-cli 0.149.1 or newer with a parseable version" \
     "unparseable Codex max refusal did not identify the compatibility boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "unparseable Codex refusal must happen before metadata publication"
   launch=$(cat "$LAUNCH_LOG")
   [ -z "$launch" ] || fail "unparseable Codex launched after refusing max effort: $launch"
   pass "unparseable Codex version refuses to launch without explicit max effort"

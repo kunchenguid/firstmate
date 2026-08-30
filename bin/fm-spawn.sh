@@ -1439,14 +1439,7 @@ effort_flag_for_harness() {
     codex)
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-        max)
-          if codex_supports_max_effort "$CODEX_BIN"; then
-            printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
-          else
-            echo "error: Codex max effort requires codex-cli 0.149.1 or newer with a parseable version; refusing to launch without the explicitly selected effort" >&2
-            return 1
-          fi
-          ;;
+        max) printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')" ;;
       esac
       ;;
     grok)
@@ -1488,6 +1481,15 @@ effort_flag_for_harness() {
     # effort flag.
   esac
 }
+
+CODEX_BIN=codex
+if [ "$HARNESS" = codex ] && [ "$EFFORT" = max ]; then
+  CODEX_BIN=$(resolve_codex_binary) || exit 1
+  if ! codex_supports_max_effort "$CODEX_BIN"; then
+    echo "error: Codex max effort requires codex-cli 0.149.1 or newer with a parseable version; refusing to launch without the explicitly selected effort" >&2
+    exit 1
+  fi
+fi
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -2823,10 +2825,6 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-CODEX_BIN=codex
-if [ "$HARNESS" = codex ] && [ "$EFFORT" = max ]; then
-  CODEX_BIN=$(resolve_codex_binary) || exit 1
-fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}

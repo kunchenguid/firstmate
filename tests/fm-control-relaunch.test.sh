@@ -1312,6 +1312,32 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_spawn_relaunch_preserves_metadata_when_codex_max_is_unsupported() {
+  local dir out rc before
+  dir=$(new_case codexmax rl36)
+  add_ship_task "$dir" rl36 claude
+  printf 'zsh' > "$dir/fake/command"
+  cat > "$dir/fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'codex-cli 0.142.1'
+fi
+SH
+  chmod +x "$dir/fakebin/codex"
+  before=$(cat "$dir/home/state/rl36.meta")
+
+  out=$(run_spawn "$dir" rl36 --relaunch --harness codex --effort max); rc=$?
+
+  expect_code 1 "$rc" "unsupported Codex max relaunch should refuse"
+  assert_contains "$out" "refusing to launch without the explicitly selected effort" \
+    "unsupported Codex max relaunch should name the refusal"
+  [ "$(cat "$dir/home/state/rl36.meta")" = "$before" ] \
+    || fail "unsupported Codex max relaunch must preserve the prior task record"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "unsupported Codex max relaunch must deliver no launch bytes"
+  pass "fm-spawn --relaunch: unsupported Codex max preserves prior metadata"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1358,3 +1384,4 @@ test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_spawn_relaunch_preserves_metadata_when_codex_max_is_unsupported
