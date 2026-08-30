@@ -32,7 +32,7 @@ EOF
 #!/usr/bin/env bash
 case " $* " in
   *' pane process-info '*)
-    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"shell_pid":701,"foreground_processes":[{"pid":702}]}}}'
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701,"foreground_processes":[{"pid":702}]}}}'
     ;;
   *) exit 1 ;;
 esac
@@ -78,4 +78,48 @@ SH
   pass "remote harness diagnostic: Herdr foreground process ancestry is inspected without a remote write"
 }
 
+test_remote_harness_diagnostic_rejects_invalid_process_info_envelopes() {
+  local dir home fakebin response out status
+  dir="$TMP_ROOT/invalid-envelope"
+  home="$dir/home"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$home/state/parent-route"
+  cat > "$home/state/parent-route/alienware-ml.meta" <<'EOF'
+window=fm-remote:w3:p2
+endpoint_task_id=alienware-ml
+worktree=/home/think/fm-homes/alienware-ml
+project=/home/think/firstmate
+backend=herdr
+herdr_session=fm-remote
+herdr_workspace_id=w3
+herdr_tab_id=t3
+herdr_pane_id=w3:p2
+harness=codex
+EOF
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$FM_TEST_HERDR_RESPONSE"
+SH
+  chmod +x "$fakebin/herdr"
+
+  for response in \
+    '{"result":{"type":"other","process_info":{"pane_id":"w3:p2","shell_pid":701,"foreground_processes":[]}}}' \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w9:p9","shell_pid":701,"foreground_processes":[]}}}' \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701}}}' \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701,"foreground_processes":{}}}}'
+  do
+    status=0
+    out=$(FM_TEST_HERDR_RESPONSE="$response" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-remote-harness-diagnostic.sh" alienware-ml 2>&1) \
+      || status=$?
+    [ "$status" -ne 0 ] || fail "diagnostic accepted an invalid Herdr process-info envelope"
+    assert_contains "$out" 'error: Herdr process information envelope did not match pane w3:p2' \
+      "diagnostic names the rejected Herdr pane-process envelope"
+    assert_not_contains "$out" 'schema=fm-remote-harness-diagnostic.v1' \
+      "diagnostic emits no evidence for an invalid Herdr process-info envelope"
+  done
+  pass "remote harness diagnostic: malformed or mismatched Herdr process-info envelopes are rejected"
+}
+
 test_remote_harness_diagnostic_reports_herdr_foreground_ancestry
+test_remote_harness_diagnostic_rejects_invalid_process_info_envelopes
