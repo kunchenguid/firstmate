@@ -118,7 +118,7 @@ PY
     --task task-5 --verdict captain --summary 'must remain unrecorded' 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "append accepted a malformed outcome-store tail"
-  assert_contains "$out" "malformed final record" "torn-tail refusal lost its diagnostic"
+  assert_contains "$out" "malformed or non-sequential" "torn-tail refusal lost its diagnostic"
   [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the torn outcome store"
   pass "outcome store is append-only and refuses sequence reuse after a torn tail"
 }
@@ -191,7 +191,44 @@ test_outcome_cursor_corruption_fails_closed() {
   assert_contains "$out" "outcome cursor is malformed" "malformed cursor refusal lost its diagnostic"
   [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1x2 ] || fail "failed unread rewrote the malformed cursor"
   [ "$(cat "$store")" = "$snapshot" ] || fail "failed unread changed the append-only outcome store"
-  pass "malformed cursor state fails closed before any outcome can be skipped"
+
+  printf '2\n' > "$home/state/.branch-outcomes-cursor"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted a cursor beyond the outcome-store tail"
+  assert_contains "$out" "cursor is ahead of the store" "ahead-of-store refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'must not remain hidden behind the cursor' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted a cursor beyond the outcome-store tail"
+  assert_contains "$out" "cursor is invalid or ahead of the store" "append cursor refusal lost its diagnostic"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the store behind an invalid cursor"
+  pass "malformed and ahead-of-store cursor state fail closed before any outcome can be skipped"
+}
+
+test_outcome_sequence_conflicts_fail_closed() {
+  local home store snapshot out status
+  home="$TMP_ROOT/store-sequence-conflict-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  printf '%s\n' \
+    '{"seq":1,"epoch":1,"task":"task-1","wake":"","verdict":"routine","summary":"first","silent":false}' \
+    '{"seq":1,"epoch":2,"task":"task-conflict","wake":"","verdict":"captain","summary":"conflict","silent":false}' \
+    '{"seq":3,"epoch":3,"task":"task-3","wake":"","verdict":"routine","summary":"third","silent":false}' \
+    > "$store"
+  snapshot=$(cat "$store")
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread skipped over a conflicting middle sequence"
+  assert_contains "$out" "malformed or non-sequential" "sequence-conflict read refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-4 --verdict routine --summary 'must remain unrecorded' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append continued after a conflicting middle sequence"
+  assert_contains "$out" "malformed or non-sequential" "sequence-conflict append refusal lost its diagnostic"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "sequence-conflict refusal changed the durable store"
+  pass "middle sequence conflicts fail closed for reads and appends"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -591,6 +628,7 @@ test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
+test_outcome_sequence_conflicts_fail_closed
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

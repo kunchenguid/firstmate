@@ -7,6 +7,8 @@
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false}.
 #     Legacy rows without `silent` remain valid and are treated as visible.
+#     Every read and append validates the complete log as a gap-free sequence;
+#     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
 #     subcommand; the read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
@@ -18,6 +20,7 @@
 #     there because `silent` is true. Records above the cursor are unread.
 #     A captain row advances only after its matching visible entry exists in
 #     Pi's session, so reload recovery is idempotent across that crash window.
+#     A cursor beyond the validated store tail fails closed.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -90,37 +93,45 @@ read_cursor() {
 }
 
 last_seq() {
-  local value
   [ -s "$STORE" ] || { printf '0\n'; return 0; }
-  value=$(tail -n 1 "$STORE" 2>/dev/null | jq -er '
-    select(type == "object")
-    | select(
+  jq -es '
+    def valid:
+      type == "object"
+      and (
         keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
         or (keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean")
       )
-    | select((.seq | type) == "number" and .seq >= 1 and .seq == (.seq | floor))
-    | select((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
-    | select((.task | type) == "string" and (.wake | type) == "string")
-    | select((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
-    | .seq
-  ') || return 1
-  printf '%s\n' "$value"
+      and ((.seq | type) == "number" and .seq >= 1 and .seq == (.seq | floor))
+      and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
+      and ((.task | type) == "string" and (.wake | type) == "string")
+      and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"));
+    . as $rows
+    | if reduce range(0; length) as $i
+        (true; . and ($rows[$i] | valid and .seq == ($i + 1)))
+      then .[-1].seq
+      else error("malformed or non-sequential outcome store")
+      end
+  ' "$STORE" 2>/dev/null
 }
 
 record_seq() { # <jsonl-line>
-  printf '%s\n' "$1" | sed -n 's/^{"seq":\([0-9]*\),.*/\1/p'
+  [ -n "$1" ] || return 0
+  printf '%s\n' "$1" | jq -er '.seq'
 }
 
 print_unread() {
-  local cursor seq line
+  local cursor last
   cursor=$(read_cursor)
+  if ! last=$(last_seq); then
+    echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
+    return 1
+  fi
+  if [ "$cursor" -gt "$last" ]; then
+    echo "error: refusing read because the outcome cursor is ahead of the store" >&2
+    return 1
+  fi
   [ -s "$STORE" ] || return 0
-  while IFS= read -r line; do
-    seq=$(record_seq "$line")
-    [ -n "$seq" ] || continue
-    [ "$seq" -gt "$cursor" ] || continue
-    printf '%s\n' "$line"
-  done < "$STORE"
+  jq -c --argjson cursor "$cursor" 'select(.seq > $cursor)' "$STORE"
 }
 
 advance_cursor() { # <seq>
@@ -159,7 +170,12 @@ case "$CMD" in
     fm_lock_acquire_wait "$LOCK"
     if ! LAST_SEQ=$(last_seq); then
       fm_lock_release "$LOCK"
-      echo "error: refusing append because the outcome store has a malformed final record" >&2
+      echo "error: refusing append because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if ! CURSOR_SEQ=$(read_cursor) || [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing append because the outcome cursor is invalid or ahead of the store" >&2
       exit 1
     fi
     SEQ=$(( LAST_SEQ + 1 ))
@@ -181,6 +197,11 @@ case "$CMD" in
     case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
     [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
+    if ! LAST_SEQ=$(last_seq) || [ "$THROUGH" -gt "$LAST_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing cursor advancement beyond a valid stored outcome" >&2
+      exit 1
+    fi
     advance_cursor "$THROUGH"
     fm_lock_release "$LOCK"
     ;;
