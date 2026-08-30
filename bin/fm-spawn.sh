@@ -288,6 +288,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+RAW_HARNESS_BIN=
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -1211,7 +1212,10 @@ case "$ARG3" in
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      case "$word" in
+        [A-Za-z_]*=*) continue ;;
+        *) RAW_HARNESS_BIN=$word; HARNESS=$(basename "$word"); break ;;
+      esac
     done
     ;;
   '')
@@ -1354,8 +1358,8 @@ resolve_muse_binary() {
 }
 
 resolve_codex_binary() {
-  local candidate dir
-  candidate=$(command -v codex 2>/dev/null || true)
+  local selected=${1:-codex} candidate dir
+  candidate=$(command -v -- "$selected" 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
     case "$candidate" in
       /*) printf '%s\n' "$candidate"; return 0 ;;
@@ -1484,10 +1488,13 @@ effort_flag_for_harness() {
 
 CODEX_BIN=codex
 if [ "$HARNESS" = codex ] && [ "$EFFORT" = max ]; then
-  CODEX_BIN=$(resolve_codex_binary) || exit 1
+  CODEX_BIN=$(resolve_codex_binary "${RAW_HARNESS_BIN:-codex}") || exit 1
   if ! codex_supports_max_effort "$CODEX_BIN"; then
     echo "error: Codex max effort requires codex-cli 0.149.1 or newer with a parseable version; refusing to launch without the explicitly selected effort" >&2
     exit 1
+  fi
+  if [ -n "$RAW_HARNESS_BIN" ]; then
+    LAUNCH=${LAUNCH/"$RAW_HARNESS_BIN"/__CODEXBIN__}
   fi
 fi
 
