@@ -110,10 +110,9 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 #   A fresh Beeline worktree shares the primary checkout's third-party npm
-#   dependencies through a symlink farm. Its @beeline workspace links retain
-#   their relative targets, so they resolve to the spawned worktree's own source.
-#   Existing dependency trees and projects without primary @beeline dependencies
-#   are left untouched.
+#   dependencies through a symlink farm. Its @beeline workspace links and npm
+#   binaries resolve to the spawned worktree's own source. Existing dependency
+#   trees and projects without primary @beeline workspace links are left untouched.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1297,47 +1296,86 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 share_beeline_node_modules() {
-  local source target staging entry name entry_real link_target
+  local source source_real target staging_root staging entry name entry_real link_target
+  local has_beeline_workspace
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
 
-  # This is deliberately scoped to the known npm workspace shape. A generic
-  # node_modules link would make unknown workspaces resolve against the primary
-  # checkout, while projects without Beeline's workspace scope need no change.
   [ -d "$source/@beeline" ] || return 0
   [ ! -e "$target" ] && [ ! -L "$target" ] || return 0
 
-  # Build beside the destination, then rename it into place. A failed setup
-  # must not leave a partial dependency tree that blocks a later npm install.
-  staging="$WT/.fm-node-modules.$$.tmp"
-  rm -rf -- "$staging"
-  mkdir "$staging"
-  for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    name=$(basename "$entry")
-    [ "$name" = '@beeline' ] && continue
-    ln -s "$entry" "$staging/$name"
-  done
-
-  mkdir "$staging/@beeline"
+  source_real=$(real_path_or_raw "$source")
+  has_beeline_workspace=0
   for entry in "$source/@beeline"/* "$source/@beeline"/.[!.]* "$source/@beeline"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    name=$(basename "$entry")
+    [ -L "$entry" ] || continue
     entry_real=$(real_path_or_raw "$entry")
-    if [ -L "$entry" ] && [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]]; then
-      # npm creates relative workspace links. Reusing that target under the
-      # worktree is what makes @beeline/foo load the worker's edited package.
-      link_target=$(readlink "$entry")
-      case "$link_target" in
-        /*) ln -s "$WT${entry_real#"$PROJ_ABS_REAL"}" "$staging/@beeline/$name" ;;
-        *) ln -s "$link_target" "$staging/@beeline/$name" ;;
-      esac
-    else
-      ln -s "$entry" "$staging/@beeline/$name"
+    if [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] && [[ "$entry_real" != "$source_real"/* ]]; then
+      has_beeline_workspace=1
+      break
     fi
   done
+  [ "$has_beeline_workspace" = 1 ] || return 0
 
-  mv "$staging" "$target"
+  staging_root=$(mktemp -d "$WT/.fm-node-modules.XXXXXX") || return 1
+  staging="$staging_root/node_modules"
+  if ! (
+    mkdir "$staging" || exit 1
+    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name=$(basename "$entry")
+      case "$name" in
+        '@beeline'|.bin) continue ;;
+      esac
+      ln -s "$entry" "$staging/$name" || exit 1
+    done
+
+    mkdir "$staging/@beeline" || exit 1
+    for entry in "$source/@beeline"/* "$source/@beeline"/.[!.]* "$source/@beeline"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name=$(basename "$entry")
+      entry_real=$(real_path_or_raw "$entry")
+      if [ -L "$entry" ] && [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]]; then
+        link_target=$(readlink "$entry")
+        case "$link_target" in
+          /*) ln -s "$WT${entry_real#"$PROJ_ABS_REAL"}" "$staging/@beeline/$name" || exit 1 ;;
+          *) ln -s "$link_target" "$staging/@beeline/$name" || exit 1 ;;
+        esac
+      else
+        ln -s "$entry" "$staging/@beeline/$name" || exit 1
+      fi
+    done
+
+    if [ -d "$source/.bin" ]; then
+      mkdir "$staging/.bin" || exit 1
+      for entry in "$source/.bin"/* "$source/.bin"/.[!.]* "$source/.bin"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        name=$(basename "$entry")
+        if [ -L "$entry" ]; then
+          link_target=$(readlink "$entry")
+          case "$link_target" in
+            "$PROJ_ABS"/*) ln -s "$WT${link_target#"$PROJ_ABS"}" "$staging/.bin/$name" || exit 1 ;;
+            "$PROJ_ABS_REAL"/*) ln -s "$WT${link_target#"$PROJ_ABS_REAL"}" "$staging/.bin/$name" || exit 1 ;;
+            *) ln -s "$link_target" "$staging/.bin/$name" || exit 1 ;;
+          esac
+        else
+          ln -s "$entry" "$staging/.bin/$name" || exit 1
+        fi
+      done
+    fi
+
+    if ! mv -n "$staging" "$WT"; then
+      [ -e "$target" ] || [ -L "$target" ]
+    fi
+  ); then
+    rm -rf -- "$staging_root" || true
+    return 1
+  fi
+
+  if [ -e "$staging" ] || [ -L "$staging" ]; then
+    rm -rf -- "$staging_root" || true
+    return 0
+  fi
+  rmdir "$staging_root"
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
