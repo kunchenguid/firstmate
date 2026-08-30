@@ -44,10 +44,10 @@ INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE" 2>/dev/n
 fm_backend_herdr_pane_process_info_envelope_valid "$INFO" "$PANE" \
   || die "Herdr process information envelope did not match pane $PANE"
 SHELL_PID=$(printf '%s' "$INFO" | jq -er \
-  '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) \
+  '.result.process_info.shell_pid' 2>/dev/null) \
   || die "Herdr did not report a valid pane shell PID"
 FOREGROUND=$(printf '%s' "$INFO" | jq -r \
-  '.result.process_info.foreground_processes[]?.pid | select(type == "number" and . > 1) | floor' 2>/dev/null) \
+  '.result.process_info.foreground_processes[].pid' 2>/dev/null) \
   || die "Herdr did not report foreground process IDs"
 HARNESS=$(fm_meta_get "$META" harness)
 

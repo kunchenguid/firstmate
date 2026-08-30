@@ -20,6 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-session-lock-ancestry)
 fm_git_identity fmtest fmtest@example.invalid
 
 LIB="$ROOT/bin/fm-session-lock-lib.sh"
+FAKE_PROC_ROOT="$TMP_ROOT/fixture-proc-unavailable"
 
 # Claude Code's native installer names the per-session executable by its version,
 # so the harness identity has to survive a basename that says nothing.
@@ -38,7 +39,7 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # liveness questions are decided by the process table alone.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  FM_PROC_ROOT_OVERRIDE="$FAKE_PROC_ROOT" PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
@@ -135,7 +136,7 @@ SH
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
-  local dir fakebin got
+  local dir fakebin got diagnostic
   dir="$TMP_ROOT/gap"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state"
@@ -176,6 +177,12 @@ SH
   printf '900\n' > "$dir/state/.lock"
   lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "the contiguous harness run did not recognize its own lock"
+  diagnostic=$(lib_eval "$fakebin" 'fm_harness_ancestry_diagnostic 900') \
+    || fail "the gap diagnostic could not inspect the contiguous harness run"
+  assert_contains "$diagnostic" 'pid=910' \
+    "diagnostic reports the non-harness gap that ends the contiguous run"
+  assert_not_contains "$diagnostic" 'hop=3 pid=920' \
+    "diagnostic does not cross the non-harness gap into an unrelated harness"
   pass "session-lock: ownership stops at the first non-harness gap above the contiguous run"
 }
 
@@ -251,7 +258,8 @@ esac
 SH
   chmod +x "$fakebin/ps"
 
-  out=$(PATH="$fakebin:$PATH" bash -c '. "$0"; fm_harness_ancestry_diagnostic 701' "$LIB") \
+  out=$(FM_PROC_ROOT_OVERRIDE="$FAKE_PROC_ROOT" PATH="$fakebin:$PATH" \
+    bash -c '. "$0"; fm_harness_ancestry_diagnostic 701' "$LIB") \
     || fail "the read-only ancestry diagnostic failed"
   assert_contains "$out" 'pid=701' "diagnostic names the inspected pid"
   assert_contains "$out" 'comm=herdr-worker' "diagnostic names the observed command"
@@ -261,7 +269,8 @@ SH
   assert_contains "$out" 'result=no-verified-harness' "diagnostic preserves fail-closed absence of identity"
 
   err="$dir/fm-lock.err"
-  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-lock.sh" >"$dir/fm-lock.out" 2>"$err"
+  FM_PROC_ROOT_OVERRIDE="$FAKE_PROC_ROOT" PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-lock.sh" >"$dir/fm-lock.out" 2>"$err"
   status=$?
   expect_code 1 "$status" "unrecognized ancestry must still refuse the session lock"
   assert_contains "$(cat "$err")" 'inspected process evidence follows' \

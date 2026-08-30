@@ -9,6 +9,7 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the Herdr diagnosti
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-harness-diagnostic)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+export FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/fixture-proc-unavailable"
 
 test_remote_harness_diagnostic_reports_herdr_foreground_ancestry() {
   local dir home fakebin out
@@ -106,7 +107,11 @@ SH
     '{"result":{"type":"other","process_info":{"pane_id":"w3:p2","shell_pid":701,"foreground_processes":[]}}}' \
     '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w9:p9","shell_pid":701,"foreground_processes":[]}}}' \
     '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701}}}' \
-    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701,"foreground_processes":{}}}}'
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701,"foreground_processes":{}}}}' \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701.9,"foreground_processes":[]}}}' \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":1,"foreground_processes":[]}}}' \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701,"foreground_processes":[{"pid":702.9}]}}}' \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w3:p2","shell_pid":701,"foreground_processes":[{"pid":1}]}}}'
   do
     status=0
     out=$(FM_TEST_HERDR_RESPONSE="$response" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \

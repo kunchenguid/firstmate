@@ -117,7 +117,7 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
 # A successful diagnostic means the inspection completed; result=none remains
 # a fail-closed absence of verified harness evidence.
 fm_harness_ancestry_diagnostic() {  # [pid]
-  local pid=${1:-$$} comm args ppid hop=0 matched=0 argv0
+  local pid=${1:-$$} comm args ppid hop=0 matched=0 extending=0 argv0
   case "$pid" in ''|*[!0-9]*|0|1) printf 'result=invalid-start-pid pid=%q\n' "$pid"; return 1 ;; esac
   printf 'schema=fm-harness-ancestry-diagnostic.v1 start_pid=%s max_hops=16\n' "$pid"
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -134,9 +134,11 @@ fm_harness_ancestry_diagnostic() {  # [pid]
         "$hop" "$pid" "$ppid" "$comm" "$argv0" "$args" "$FM_HARNESS_MATCH_REASON"
       matched=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
     else
       printf 'hop=%s pid=%s ppid=%q comm=%q argv0=%q args=%q match=%q\n' \
         "$hop" "$pid" "$ppid" "$comm" "$argv0" "$args" "$FM_HARNESS_MATCH_REASON"
+      [ "$extending" -eq 0 ] || break
     fi
     case "$ppid" in ''|*[!0-9]*|0|1) break ;; esac
     pid=$ppid
