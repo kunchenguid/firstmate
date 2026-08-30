@@ -1099,10 +1099,6 @@ shell_quote() {
   printf "'"
 }
 
-spawn_clear_launch_traceparent() {
-  LAUNCH="env -u TRACEPARENT \"\$SHELL\" -c $(shell_quote "$LAUNCH")"
-}
-
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -2183,6 +2179,45 @@ spawn_send_text_line() {  # <target> <text>
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
   esac
 }
+spawn_clear_pane_traceparent() {
+  local probe="$TASK_TMP/pane-shell.$SPAWN_GEN" proof="$TASK_TMP/traceparent-cleared.$SPAWN_GEN"
+  local command pane_shell i=0 status=1
+  rm -f "$probe" "$proof"
+  command="sh -c 'ps -p \"\$PPID\" -o comm= > \"\$1\"' sh $(shell_quote "$probe")"
+  spawn_send_text_line "$T" "$command" || return 1
+  while [ ! -s "$probe" ] && [ "$i" -lt 20 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$probe" ] || { rm -f "$probe" "$proof"; return 1; }
+  pane_shell=$(tr -d '[:space:]' < "$probe")
+  pane_shell=${pane_shell##*/}
+  pane_shell=${pane_shell#-}
+  case "$pane_shell" in
+    fish)
+      command="set -e TRACEPARENT; and sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"
+      ;;
+    sh|bash|zsh|dash|ash|ksh|mksh)
+      command="unset TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"
+      ;;
+    csh|tcsh)
+      command="unsetenv TRACEPARENT && sh -c 'test -z \"\${TRACEPARENT+x}\" && : > \"\$1\"' sh $(shell_quote "$proof")"
+      ;;
+    *)
+      rm -f "$probe" "$proof"
+      return 1
+      ;;
+  esac
+  spawn_send_text_line "$T" "$command" || { rm -f "$probe" "$proof"; return 1; }
+  i=0
+  while [ ! -e "$proof" ] && [ "$i" -lt 20 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$proof" ] && status=0
+  rm -f "$probe" "$proof"
+  return "$status"
+}
 spawn_current_path() {  # <target>
   case "$BACKEND" in
     tmux) fm_backend_tmux_current_path "$1" ;;
@@ -2691,6 +2726,7 @@ else
     SPAWN_TRACEPARENT=
   fi
 fi
+SPAWN_CLEAR_TRACEPARENT=0
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
@@ -2837,7 +2873,7 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
-  spawn_clear_launch_traceparent
+  SPAWN_CLEAR_TRACEPARENT=1
 fi
 
 spawn_record_traceparent() {
@@ -2869,7 +2905,7 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
-      spawn_clear_launch_traceparent
+      SPAWN_CLEAR_TRACEPARENT=1
     fi
   else
     TRACE_SEND_STATUS=$?
@@ -2877,8 +2913,12 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
       exit 1
     fi
-    spawn_clear_launch_traceparent
+    SPAWN_CLEAR_TRACEPARENT=1
   fi
+fi
+if [ "$SPAWN_CLEAR_TRACEPARENT" -eq 1 ] && ! spawn_clear_pane_traceparent; then
+  echo "error: could not verify TRACEPARENT was cleared in $W; refusing to append the launch command" >&2
+  exit 1
 fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"

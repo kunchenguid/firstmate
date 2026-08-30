@@ -345,7 +345,7 @@ wait_agent_state() {  # <timeout> <wanted>...
 wait_replacement_agent() {  # <timeout>
   local timeout=$1 state elapsed=0 confirmations=0
   while :; do
-    if fm_backend_agent_started "$BACKEND" "$T"; then
+    if fm_backend_agent_started "$BACKEND" "$T" "$TARGET_HARNESS"; then
       confirmations=$((confirmations + 1))
       if [ "$confirmations" -ge 2 ]; then
         printf 'alive'

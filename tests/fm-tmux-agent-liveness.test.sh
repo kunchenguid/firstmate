@@ -153,7 +153,7 @@ assert_sources_disagree() {  # <target> <label>
 new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
-fm_backend_agent_started tmux "$SESSION:agent" \
+fm_backend_agent_started tmux "$SESSION:agent" claude \
   || fail "a running harness-named foreground process must prove replacement start"
 pass "tmux liveness: a harness-named foreground process classifies alive and proves replacement start"
 
@@ -241,7 +241,7 @@ kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process is not running, so this case would prove nothing"
 wait_for_state "$SESSION:background" dead \
   || fail "a pane whose only harness-named process is backgrounded must classify dead"
-if fm_backend_agent_started tmux "$SESSION:background"; then
+if fm_backend_agent_started tmux "$SESSION:background" claude; then
   fail "a background harness process over a live shell must not prove replacement start"
 fi
 kill -0 "$bg_pid" 2>/dev/null \
@@ -257,7 +257,7 @@ pass "tmux liveness: a harness-named background process in an idle pane still cl
 fm_backend_tmux_foreground_comms "$SESSION:no-such-window" >/dev/null \
   || fail "the foreground-comms read must stay best-effort for an absent window"
 "$REAL_TMUX" -L "$SOCKET" select-window -t "$SESSION:agent"
-if fm_backend_agent_started tmux "$SESSION:no-such-window"; then
+if fm_backend_agent_started tmux "$SESSION:no-such-window" claude; then
   fail "an absent target must not inherit positive replacement proof from the active agent window"
 fi
 [ "$(fm_backend_agent_state tmux "$SESSION:no-such-window")" = missing ] \

@@ -165,6 +165,16 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      - name: Install Fish for shell regressions
+        run: |
+          set -eu
+          lane="portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}"
+          if bin/fm-test-run.sh --list --lane "$lane" \
+            | grep -Eq 'tests/(fm-control-relaunch|fm-trace-context-spawn)\.test\.sh'; then
+            sudo apt-get update
+            sudo apt-get install -y fish
+            fish --version
+          fi
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix

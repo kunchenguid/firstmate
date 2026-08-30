@@ -2939,27 +2939,47 @@ test_current_path_reads_cwd() {
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
 }
 
-test_agent_started_rejects_a_registered_shell_and_accepts_a_foreground_agent() {
+test_agent_started_rejects_unrelated_foreground_processes_and_accepts_the_registered_agent() {
   local dir log resp fb
   dir="$TMP_ROOT/agent-started-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":42}}}\n' > "$resp/3.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":42,"foreground_processes":[{"name":"zsh","argv0":"zsh"}]}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2' "$ROOT"; then
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 pi' "$ROOT"; then
     fail "a registered Herdr agent over the endpoint shell must not prove replacement start"
+  fi
+
+  dir="$TMP_ROOT/agent-started-unrelated"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"sleep","argv0":"sleep"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 pi' "$ROOT"; then
+    fail "a stale pi registration over a foreground sleep process must not prove replacement start"
+  fi
+
+  dir="$TMP_ROOT/agent-started-wrong-harness"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"pi","argv0":"/usr/local/bin/pi"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 claude' "$ROOT"; then
+    fail "a foreground pi process must not prove a selected claude replacement start"
   fi
 
   dir="$TMP_ROOT/agent-started-live"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43}}}\n' > "$resp/3.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_process_group_id":43,"foreground_processes":[{"name":"pi","argv0":"/usr/local/bin/pi"}]}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2' "$ROOT" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_started default:w1:p2 pi' "$ROOT" \
     || fail "a registered Herdr agent in its own foreground process group should prove replacement start"
-  pass "fm_backend_herdr_agent_started: a live shell is not a replacement agent, while a genuine foreground agent is"
+  pass "fm_backend_herdr_agent_started: only the registered foreground agent proves replacement start"
 }
 
 # --- busy_state (semantic agent state) ---------------------------------------
@@ -4556,7 +4576,7 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
-test_agent_started_rejects_a_registered_shell_and_accepts_a_foreground_agent
+test_agent_started_rejects_unrelated_foreground_processes_and_accepts_the_registered_agent
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent

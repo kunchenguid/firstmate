@@ -1922,13 +1922,53 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 }
 
 # fm_backend_herdr_agent_started: positive replacement-launch proof. Native
-# registration must name a live agent, and process-info must show a foreground
-# process group distinct from the endpoint shell. This rejects a surviving
-# fish, bash, or zsh prompt even when native agent registration is stale.
-fm_backend_herdr_agent_started() {  # <target>
-  local target=$1 info shell_pid foreground_pgid
+# registration must name a live agent, and process-info must show that agent in
+# a foreground process group distinct from the endpoint shell.
+fm_backend_herdr_process_matches_agent() {  # <harness> <process>
+  local harness=$1 process=$2 name=${2##*/} family
+  case "$harness" in
+    pi|pi-signed)
+      case "$name" in
+        pi|pi-signed|pi-launcher|Pi) return 0 ;;
+      esac
+      return 1
+      ;;
+    claude*) family=claude ;;
+    codex*) family=codex ;;
+    opencode*) family=opencode ;;
+    grok*) family=grok ;;
+    kimi*) family=kimi ;;
+    cursor*) family=cursor ;;
+    muse*)
+      case "$name" in
+        muse|muse-bin-*) return 0 ;;
+      esac
+      case "/$process/" in
+        */muse/*) return 0 ;;
+      esac
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+  case "$process" in
+    *"$family"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_herdr_agent_started() {  # <target> <harness>
+  local target=$1 harness=$2 agent_info agent info shell_pid foreground_pgid processes process
   fm_backend_herdr_parse_target "$target" || return 1
-  [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = live ] || return 1
+  [ "$(fm_backend_herdr_pane_presence_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = present ] || return 1
+  agent_info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  agent=$(printf '%s' "$agent_info" | jq -er '
+    .result.agent
+    | select(.agent_status == "working" or .agent_status == "idle"
+      or .agent_status == "done" or .agent_status == "blocked")
+    | .agent
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null) || return 1
+  fm_backend_herdr_process_matches_agent "$harness" "$agent" || return 1
   info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
   printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" '
     .result.type == "pane_process_info"
@@ -1938,7 +1978,20 @@ fm_backend_herdr_agent_started() {  # <target>
     '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
   foreground_pgid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
-  [ "$foreground_pgid" != "$shell_pid" ]
+  [ "$foreground_pgid" != "$shell_pid" ] || return 1
+  processes=$(printf '%s' "$info" | jq -er '
+    .result.process_info.foreground_processes
+    | select(type == "array" and length > 0)
+    | .[]
+    | (.name, .argv0, .argv[]?)
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null) || return 1
+  while IFS= read -r process; do
+    fm_backend_herdr_process_matches_agent "$harness" "$process" && return 0
+  done <<EOF
+$processes
+EOF
+  return 1
 }
 
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start

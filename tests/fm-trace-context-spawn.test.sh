@@ -10,6 +10,7 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+FISH_BIN=$(command -v fish) || fail "fish is required for trace-context spawn regressions"
 TMP_ROOT=$(fm_test_tmproot fm-trace-context-spawn)
 
 # Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
@@ -62,15 +63,21 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       shift
       skip_next=
+      payload=
       for a in "$@"; do
         if [ -n "$skip_next" ]; then skip_next=; continue; fi
         case "$a" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
           Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *) payload=$a; printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
       done
+      case "$payload" in
+        *'/pane-shell.'*|*'/traceparent-cleared.'*)
+          TRACEPARENT=stale fish -c "$payload" >/dev/null 2>&1 || true
+          ;;
+      esac
     fi
     exit 0
     ;;
@@ -287,7 +294,7 @@ test_disabled_writes_and_injects_neither() {
 }
 
 test_failed_delivery_omits_metadata_and_still_launches() {
-  local rec out status meta launch raw result
+  local rec out status meta program raw result
   rec=$(make_spawn_case tc-send-failure)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
@@ -315,13 +322,11 @@ SH
     || fail "failed traceparent delivery must not leave a traceparent= claim in meta"
   ! grep -q '^export TRACEPARENT=' "$LAUNCH_LOG" \
     || fail "the failed TRACEPARENT export must not be recorded as delivered"
-  launch=$(tail -1 "$LAUNCH_LOG")
-  if command -v fish >/dev/null 2>&1; then
-    TRACEPARENT=stale FM_RAW_RESULT="$result" PATH="$FAKEBIN_DIR:$PATH" \
-      SHELL="$(command -v fish)" fish -c "$launch" >/dev/null 2>&1
-    [ "$(cat "$result")" = 'unset|ready' ] \
-      || fail "failed trace delivery must clear TRACEPARENT without bypassing fish parsing"
-  fi
+  program=$(cat "$LAUNCH_LOG")
+  TRACEPARENT=stale FM_RAW_RESULT="$result" PATH="$FAKEBIN_DIR:$PATH" \
+    "$FISH_BIN" -c "$program" >/dev/null 2>&1
+  [ "$(cat "$result")" = 'unset|ready' ] \
+    || fail "failed trace delivery must clear TRACEPARENT without bypassing fish parsing"
   pass "failed TRACEPARENT delivery omits metadata and preserves raw fish shell programs"
 }
 
@@ -344,7 +349,7 @@ test_unsafe_delivery_refuses_to_append_launch() {
 }
 
 test_failed_metadata_append_unsets_carrier_and_still_launches() {
-  local rec out status meta
+  local rec out status meta program result
   rec=$(make_spawn_case tc-metadata-failure)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
@@ -359,8 +364,17 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
 
   ! grep -q '^traceparent=' "$meta" \
     || fail "failed metadata append must not leave a traceparent= claim in meta"
-  grep -q '^env -u TRACEPARENT "\$SHELL" -c .*claude' "$LAUNCH_LOG" \
-    || fail "failed metadata append must clear TRACEPARENT portably in the launch command"
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s' "${TRACEPARENT-unset}" > "$FM_RAW_RESULT"
+SH
+  chmod +x "$FAKEBIN_DIR/claude"
+  result="$HOME_DIR/metadata-result"
+  program=$(cat "$LAUNCH_LOG")
+  TRACEPARENT=stale FM_RAW_RESULT="$result" PATH="$FAKEBIN_DIR:$PATH" \
+    "$FISH_BIN" -c "$program" >/dev/null 2>&1
+  [ "$(cat "$result")" = unset ] \
+    || fail "failed metadata append must clear TRACEPARENT in the existing fish pane"
   pass "failed traceparent metadata append removes the carrier from the launched task"
 }
 
