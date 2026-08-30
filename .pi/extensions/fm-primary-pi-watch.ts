@@ -144,22 +144,28 @@ function positiveInteger(name: string, fallback: number): number {
 }
 
 function recoveryFollowUpIsSettled(): boolean {
-  const result = spawnSync("bash", ["-lc", settledRecoveryProbe], {
-    cwd: fmRoot,
-    encoding: "utf8",
-    timeout: 1500,
-    killSignal: "SIGTERM",
-    env: {
-      ...process.env,
-      FM_HOME: fmHome,
-      FM_ROOT_OVERRIDE: fmRoot,
-      FM_STATE_OVERRIDE: state,
-      FM_PI_WAKE_LIB: wakeLib,
-      FM_PI_WAKE_QUEUE: `${state}/.wake-queue`,
-      FM_PI_RECOVERY_MARKER: `${state}/.watcher-down`,
-    },
-  });
-  return !result.error && result.status === 0 && result.stdout === "settled\n";
+  try {
+    const result = spawnSync("bash", ["-lc", settledRecoveryProbe], {
+      cwd: fmRoot,
+      encoding: "utf8",
+      timeout: 1500,
+      killSignal: "SIGTERM",
+      env: {
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_ROOT_OVERRIDE: fmRoot,
+        FM_STATE_OVERRIDE: state,
+        FM_PI_WAKE_LIB: wakeLib,
+        FM_PI_WAKE_QUEUE: `${state}/.wake-queue`,
+        FM_PI_RECOVERY_MARKER: `${state}/.watcher-down`,
+        FM_WAKE_QUEUE: `${state}/.wake-queue`,
+        FM_WAKE_QUEUE_LOCK: `${state}/.wake-queue.lock`,
+      },
+    });
+    return !result.error && result.status === 0 && result.stdout === "settled\n";
+  } catch {
+    return false;
+  }
 }
 
 function parentPid(pid: string): string {
