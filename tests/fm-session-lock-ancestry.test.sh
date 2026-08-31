@@ -172,6 +172,13 @@ SH
     "the session lock did not fail closed at PID 1"
   assert_absent "$dir/state/.lock" \
     "the session lock persisted namespace-local PID 1 as authoritative ownership"
+
+  # A stale PID-1 lock from an earlier process must not continue to block the
+  # home as if the namespace-local sandbox were authoritative ownership.
+  printf '1\n' > "$dir/state/.lock"
+  out=$(FM_HOME="$dir" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = 'lock: stale (pid 1 dead or not a harness)' ] \
+    || fail "PID-1 lock status resolved '$out', expected a stale lock"
   pass "session-lock: PID 1 classifies Codex but never becomes authoritative ownership"
 }
 

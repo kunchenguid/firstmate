@@ -146,6 +146,13 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  # PID 1 can be a namespace-local Codex sandbox and is useful only for
+  # non-authoritative harness attribution.  It is never valid session-lock
+  # ownership, including when inspecting a lock left by an older process.
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$pid" -gt 1 ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
