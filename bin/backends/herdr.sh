@@ -826,23 +826,32 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 
 # fm_backend_herdr_projection_pane_focus_precheck: read-only check for
 # whether closing <pane-id> could preserve focus. Sets
-# FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE and
-# FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS on success for a caller that
-# goes on to perform the close. Callers that only need to know whether a
+# FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE, FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS,
+# and FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_TAB on success for a caller
+# that goes on to perform the close. Callers that only need to know whether a
 # later close would refuse - for example a teardown preflight run before any
 # destructive step - can call this alone and act on its exit status.
+# Every failure here is specifically "focus safety could not be established" -
+# ambiguous evidence or a genuinely focused target - never a close-command
+# failure, so FM_BACKEND_HERDR_PROJECTION_FOCUS_UNSAFE distinguishes this
+# class of refusal from one that fails later while attempting the close
+# itself.
 fm_backend_herdr_projection_pane_focus_precheck() {  # <session> <pane-id>
   local session=$1 pane_id=$2
   local before active_tab info target_pane target_tab target_ws
   FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE=""
   FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS=""
+  FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_TAB=""
+  FM_BACKEND_HERDR_PROJECTION_FOCUS_UNSAFE=""
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe pane close" >&2
+    FM_BACKEND_HERDR_PROJECTION_FOCUS_UNSAFE=1
     return 1
   }
   active_tab=${before#*$'\t'}
   info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
     echo "warning: herdr presentation cleanup could not verify the exact pane; refusing focus-unsafe pane close" >&2
+    FM_BACKEND_HERDR_PROJECTION_FOCUS_UNSAFE=1
     return 1
   }
   target_pane=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
@@ -850,14 +859,18 @@ fm_backend_herdr_projection_pane_focus_precheck() {  # <session> <pane-id>
   target_ws=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
   if [ "$target_pane" != "$pane_id" ] || [ -z "$target_tab" ]; then
     echo "warning: herdr presentation cleanup received an ambiguous exact-pane response; refusing focus-unsafe pane close" >&2
+    FM_BACKEND_HERDR_PROJECTION_FOCUS_UNSAFE=1
     return 1
   fi
   if [ "$target_tab" = "$active_tab" ]; then
     echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
+    # shellcheck disable=SC2034  # caller (bin/fm-teardown.sh) consumes this global
+    FM_BACKEND_HERDR_PROJECTION_FOCUS_UNSAFE=1
     return 1
   fi
   FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE=$before
   FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS=$target_ws
+  FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_TAB=$target_tab
   return 0
 }
 
@@ -878,12 +891,13 @@ fm_backend_herdr_projection_pane_focus_precheck() {  # <session> <pane-id>
 # exactly as before this hardening.
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
   local session=$1 pane_id=$2 required_agent_state=${3:-}
-  local before target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
+  local before target_ws target_tab close_status state plan plan_shell_pid plan_move_record workspace_presence
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
   fm_backend_herdr_projection_pane_focus_precheck "$session" "$pane_id" || return 1
   before=$FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE
   target_ws=$FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS
+  target_tab=$FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_TAB
   if [ -n "$required_agent_state" ]; then
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state

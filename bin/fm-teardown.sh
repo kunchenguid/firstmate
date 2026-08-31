@@ -60,9 +60,19 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
-# The active-tab refusal is checked before the pool worktree is returned, so it
-# always refuses the entire teardown with the slot, backlog record, and every
-# other durable record still intact, never after the slot is already reclaimed.
+# The active-tab refusal is checked before the pool worktree is returned, so the
+# common case (the tab was already focused when teardown started) refuses the
+# entire teardown with the slot, backlog record, and every other durable
+# record still intact. That precheck cannot close the window between it and
+# the actual close, so if the captain refocuses the exact tab while the
+# destructive steps in between run, the close still fails after the slot is
+# already reclaimed - there, teardown finishes cleanly and removes every
+# record instead of retaining them, since a retained record now would only
+# invite a rerun that could reset a slot already reassigned to a new task.
+# Any other unconfirmed-close reason once the slot is reclaimed (an ambiguous
+# post-close presence read, an actual close-command failure) keeps the
+# ordinary retain-for-retry behavior, since only the focus-unsafe refusal
+# reproduces that unsafe rerun.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, locks each
@@ -2734,6 +2744,15 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ] \
   exit 1
 fi
 
+# This precheck cannot close the window between it and the actual close
+# further down: the captain can refocus that exact tab in the time the
+# destructive steps below take to run. TEARDOWN_WORKTREE_POOL_RECLAIMED marks
+# once that window has produced an unconditional pool-slot reclaim, so the
+# late close-failure gate near the bottom of this script can tell "nothing
+# irreversible happened yet, retaining records is safe" from "the slot is
+# already gone, retaining records now would only invite an unsafe rerun."
+TEARDOWN_WORKTREE_POOL_RECLAIMED=0
+
 BACKLOG_CLOSED=0
 BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
@@ -2811,8 +2830,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  TEARDOWN_WORKTREE_POOL_RECLAIMED=1
 fi
 
+TEARDOWN_HERDR_PRESENTATION_CLOSE_FOCUS_UNSAFE=0
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
@@ -2827,6 +2848,8 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
     # gate below is what decides whether any durable record may be removed.
     fm_backend_herdr_projection_close_pane_focus_preserving \
       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
+    [ -z "$FM_BACKEND_HERDR_PROJECTION_FOCUS_UNSAFE" ] \
+      || TEARDOWN_HERDR_PRESENTATION_CLOSE_FOCUS_UNSAFE=1
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
@@ -2842,6 +2865,19 @@ fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
+  elif [ "$TEARDOWN_WORKTREE_POOL_RECLAIMED" = 1 ] && [ "$TEARDOWN_HERDR_PRESENTATION_CLOSE_FOCUS_UNSAFE" = 1 ]; then
+    # The up-front precheck cannot close the window between it and this
+    # close attempt (the captain can refocus the exact tracked tab while the
+    # destructive steps in between run), and the pool slot is unconditionally
+    # reclaimed before this point is ever reached. Retaining the journal here
+    # for "a later rerun" would only invite the exact unsafe rerun this
+    # ordering exists to remove, so finish cleanly instead: this outcome
+    # is terminal, not retryable. Scoped to a focus-unsafe refusal only - an
+    # unconfirmed close for any other reason (an ambiguous post-close presence
+    # read, ordinary API failure) keeps the existing retain-for-retry behavior
+    # below, since that failure is not the timing race this exists to close.
+    echo "warning: exact herdr task-pane close could not be confirmed for $ID after the pool worktree slot was already reclaimed; retiring the presentation journal anyway - close the captain's tab by hand if it is still open" >&2
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
@@ -2855,6 +2891,14 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
+# The one exception is a focus-unsafe presentation-close refusal once the
+# pool slot is already reclaimed (TEARDOWN_WORKTREE_POOL_RECLAIMED and
+# TEARDOWN_HERDR_PRESENTATION_CLOSE_FOCUS_UNSAFE): retaining records there for
+# a rerun is exactly the unsafe state this ordering removes, since that rerun
+# could reset a slot already reassigned to a new task. That refusal is
+# finished cleanly above; this gate must not re-refuse it. Any other
+# unconfirmed-close reason - an ambiguous post-close presence read, an actual
+# close-command failure - keeps the retain-for-retry behavior below.
 if [ "$BACKEND" = herdr ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
@@ -2862,8 +2906,12 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
   if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
-    echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
-    exit 1
+    if [ "$TEARDOWN_WORKTREE_POOL_RECLAIMED" = 1 ] && [ "$TEARDOWN_HERDR_PRESENTATION_CLOSE_FOCUS_UNSAFE" = 1 ]; then
+      echo "warning: herdr pane $T for $ID could not be confirmed gone after the pool worktree slot was already reclaimed; finishing teardown and removing every durable record instead of retaining them for an unsafe rerun - close the pane by hand if it is still open" >&2
+    else
+      echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
+      exit 1
+    fi
   fi
 fi
 if [ "$KIND" = secondmate ]; then

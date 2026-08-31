@@ -2132,6 +2132,114 @@ test_herdr_projection_teardown_refuses_before_reclaiming_pool_slot_when_pane_is_
   pass "herdr projection teardown refuses up front, before reclaiming the pool slot, when the tracked pane is the captain's active tab, and reruns stay a safe refusal"
 }
 
+# The up-front precheck cannot close the window between it and the actual
+# close: the captain can refocus the tracked tab while the destructive steps
+# in between (backlog close, no-mistakes conclude, process reap, pool return)
+# run. This fixture reports the tab as safe (unfocused) for the first two
+# `workspace list` queries - the presentation-journal token correlation and
+# the up-front precheck itself, both of which happen before the pool slot is
+# touched - then reports it as the captain's now-focused active tab for every
+# query after that, simulating a mid-teardown refocus discovered only once
+# the actual close runs.
+configure_herdr_projection_focus_changes_after_preflight_case() {  # <case-dir>
+  local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
+  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t2' \
+    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'version=1' \
+    'task_id=task-x1' \
+    "projection_id=$token" > "$case_dir/state/task-x1.herdr-presentation"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "workspace list")
+    count_file="${FM_FAKE_HERDR_WS_LIST_COUNT:?}"
+    count=0
+    [ ! -f "$count_file" ] || count=$(cat "$count_file")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [ "$count" -ge 3 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false}]}}'
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true}]}}'
+    fi
+    ;;
+  "tab list")
+    case "$*" in
+      *"--workspace w1"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","focused":true}]}}' ;;
+      *"--workspace w2"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' ;;
+      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    esac
+    ;;
+  "status --json")
+    printf '%s\n' '{"server":{"running":true}}'
+    ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}'
+    ;;
+  "pane get")
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
+    ;;
+  "pane close")
+    : > "${FM_FAKE_HERDR_CLOSE_ATTEMPTED:?}"
+    ;;
+  "agent get")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
+test_herdr_projection_teardown_finishes_cleanly_when_focus_changes_after_preflight() {
+  local case_dir log returned closed count_file rc
+  case_dir=$(make_case herdr-projection-focus-changes-after-preflight)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_focus_changes_after_preflight_case "$case_dir"
+  add_marker_treehouse "$case_dir"
+  log="$case_dir/herdr.log"; returned="$case_dir/treehouse-returned"; closed="$case_dir/pane-closed"
+  count_file="$case_dir/ws-list-count"
+  : > "$log"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSE_ATTEMPTED="$closed" TREEHOUSE_RETURN_MARKER="$returned" \
+  FM_FAKE_HERDR_WS_LIST_COUNT="$count_file" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" \
+    "herdr-projection-focus-changes-after-preflight: teardown should finish cleanly once the slot is already reclaimed, not fail leaving retained records"
+  [ -e "$returned" ] \
+    || fail "herdr-projection-focus-changes-after-preflight: fixture bug, the pool worktree slot was never reclaimed"
+  [ ! -e "$closed" ] \
+    || fail "herdr-projection-focus-changes-after-preflight: teardown attempted to close the now-focused captain's active tab"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-projection-focus-changes-after-preflight: task records were retained despite the slot already being reclaimed"
+  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-projection-focus-changes-after-preflight: the presentation journal was retained despite the slot already being reclaimed"
+  assert_grep "already reclaimed" "$case_dir/stderr" \
+    "herdr-projection-focus-changes-after-preflight: teardown did not explain the finish-cleanly fallback"
+
+  # A rerun against an already-retired task must be a no-op, never a slot reset.
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSE_ATTEMPTED="$closed" TREEHOUSE_RETURN_MARKER="$returned" \
+  FM_FAKE_HERDR_WS_LIST_COUNT="$count_file" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-projection-focus-changes-after-preflight: a rerun against a retired task unexpectedly reported success"
+  ! grep -q "treehouse return" "$case_dir/stdout" "$case_dir/stderr" 2>/dev/null \
+    || fail "herdr-projection-focus-changes-after-preflight: the rerun attempted another pool-slot operation instead of a no-op"
+  pass "herdr projection teardown finishes cleanly and removes every record when focus changes between the preflight and the actual close, and a rerun stays a no-op"
+}
+
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
 # worker is removed, and Fix 2: reap leaked descendant processes rooted under
 # the task's own worktree/tasktmp - both exercised through the real teardown
@@ -2742,6 +2850,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_herdr_projection_teardown_refuses_before_reclaiming_pool_slot_when_pane_is_focused
+test_herdr_projection_teardown_finishes_cleanly_when_focus_changes_after_preflight
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
