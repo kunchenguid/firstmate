@@ -153,30 +153,26 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
 
 # --- fm-backend.sh unit tests ------------------------------------------------
 
-test_backend_name_precedence() {
+test_backend_name_is_always_tmux() {
   local dir cfg
   dir="$TMP_ROOT/name-precedence"; cfg="$dir/config"
   mkdir -p "$cfg"
 
-  # TMUX/HERDR_ENV/CMUX_WORKSPACE_ID explicitly unset in a subshell so this
-  # stays deterministic regardless of the runtime this test suite itself
-  # happens to execute inside (e.g. a real tmux pane, which is the normal case
-  # for a captain's session).
-  # fm_backend_name reads FM_BACKEND_CONFIG_DIR (bound once, at fm-backend.sh
-  # source time, from FM_CONFIG_OVERRIDE); a later FM_CONFIG_OVERRIDE=... prefix
-  # on the function call itself does not re-bind it, so these calls set
-  # FM_BACKEND_CONFIG_DIR directly.
-  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
-    || fail "fm_backend_name should default to tmux with no env/config/detection markers"
+  printf 'herdr\n' > "$cfg/backend"
+  out=$(FM_BACKEND=herdr FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  [ "$out" = tmux ] \
+    || fail "backend must stay tmux even when legacy config/env names another backend, got '$out'"
 
-  printf 'tmux\n' > "$cfg/backend"
-  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
-    || fail "fm_backend_name should read config/backend"
+  pass "backend selection is tmux-only"
+}
 
-  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
-    || fail "FM_BACKEND env should win over config/backend"
-
-  pass "fm_backend_name: FM_BACKEND env > config/backend > default tmux"
+test_unknown_backend_flag_is_removed_from_spawn_help() {
+  local help
+  help=$("$ROOT/bin/fm-spawn.sh" --help)
+  assert_not_contains "$help" "--backend" "spawn help must not advertise backend selection"
+  assert_not_contains "$help" "herdr" "spawn help must not advertise removed Herdr backend"
+  assert_not_contains "$help" "orca" "spawn help must not advertise removed Orca backend"
+  pass "spawn help no longer advertises backend selection"
 }
 
 # fm_backend_detect: environment-marker runtime auto-detection (mirrors
@@ -192,43 +188,19 @@ test_backend_detect_precedence() {
     fail "fm_backend_detect should return 1 (undetected) with no markers set, got '$out'"
   fi
 
-  out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 fm_backend_detect) \
-    || fail "fm_backend_detect should succeed when HERDR_ENV=1"
-  [ "$out" = herdr ] || fail "fm_backend_detect should report herdr for HERDR_ENV=1 alone, got '$out'"
-
   out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' fm_backend_detect) \
     || fail "fm_backend_detect should succeed when \$TMUX is set"
   [ "$out" = tmux ] || fail "fm_backend_detect should report tmux for \$TMUX alone, got '$out'"
 
-  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
-    || fail "fm_backend_detect should succeed when CMUX_WORKSPACE_ID is set"
-  [ "$out" = cmux ] || fail "fm_backend_detect should report cmux for CMUX_WORKSPACE_ID alone, got '$out'"
-
-  # Nesting: tmux started inside a herdr pane carries BOTH markers. Innermost
-  # (tmux) must win, since that is the surface firstmate is actually running on.
   out=$(unset CMUX_WORKSPACE_ID; TMUX='fake,1,0' HERDR_ENV=1 fm_backend_detect) \
-    || fail "fm_backend_detect should succeed with both markers present"
-  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over herdr), got '$out'"
+    || fail "fm_backend_detect should still report tmux when legacy markers are also present"
+  [ "$out" = tmux ] || fail "fm_backend_detect should ignore legacy HERDR_ENV when \$TMUX is present, got '$out'"
 
-  # Nesting: tmux started inside a cmux-provided shell carries BOTH markers.
-  # cmux is a terminal application, not a nestable multiplexer, so the
-  # innermost multiplexer (tmux) must still win.
-  out=$(unset HERDR_ENV; TMUX='fake,1,0' CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
-    || fail "fm_backend_detect should succeed with tmux and cmux markers present"
-  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over cmux), got '$out'"
+  if out=$(unset TMUX; HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect); then
+    fail "fm_backend_detect should ignore removed non-tmux runtime markers, got '$out'"
+  fi
 
-  # Nesting: herdr started inside a cmux-provided shell carries BOTH markers.
-  # Same reasoning: herdr (the innermost multiplexer) must win over cmux.
-  out=$(unset TMUX; HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
-    || fail "fm_backend_detect should succeed with herdr and cmux markers present"
-  [ "$out" = herdr ] || fail "fm_backend_detect should resolve nesting innermost-first (herdr over cmux), got '$out'"
-
-  # Pathological: all three markers present. tmux still wins (innermost of all).
-  out=$(TMUX='fake,1,0' HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
-    || fail "fm_backend_detect should succeed with all three markers present"
-  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first with all three markers (tmux wins), got '$out'"
-
-  pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, \$TMUX -> tmux, CMUX_WORKSPACE_ID -> cmux, nested combinations resolve innermost-first"
+  pass "fm_backend_detect: only \$TMUX detects a backend"
 }
 
 # fm_backend_detect's cmux FALLBACK signals (docs/cmux-backend.md "Runtime
@@ -465,17 +437,14 @@ test_backend_name_explicit_beats_detection() {
 
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
-  fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
   local out
-  # bogus names a backend with no adapter at all; tmux, herdr, zellij, orca,
-  # and cmux are all known adapters and spawn-supported.
   out=$(fm_backend_validate bogus 2>&1) && fail "fm_backend_validate should refuse bogus (no such adapter)"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate did not name the rejected backend"
-  out=$(fm_backend_validate codex-app 2>&1) && fail "fm_backend_validate should refuse codex-app"
-  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate accepted codex-app"
+  out=$(fm_backend_validate herdr 2>&1) && fail "fm_backend_validate should refuse removed herdr"
+  assert_contains "$out" "unknown backend 'herdr'" "fm_backend_validate accepted removed herdr"
   out=$(fm_backend_validate "tmux herdr" 2>&1) && fail "fm_backend_validate should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate accepted a multi-token backend name"
-  pass "fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly"
+  pass "fm_backend_validate: tmux accepted and removed backends refused loudly"
 }
 
 test_backend_source_shell_portable() {
@@ -483,44 +452,40 @@ test_backend_source_shell_portable() {
   # zsh does not word-split unquoted expansions; sourcing fm-backend.sh from
   # an interactive zsh session must still recognize known backend names.
   if command -v zsh >/dev/null 2>&1; then
-    zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && whence -w fm_backend_herdr_capture >/dev/null" 2>/dev/null \
-      || fail "zsh: fm_backend_source herdr should load the adapter when sourced"
+    zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source tmux && whence -w fm_backend_tmux_capture >/dev/null" 2>/dev/null \
+      || fail "zsh: fm_backend_source tmux should load the adapter when sourced"
     out=$(zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
       && fail "zsh: fm_backend_source bogus should fail"
     assert_contains "$out" "unknown backend 'bogus'" \
       "zsh: fm_backend_source did not reject bogus with the expected error"
-    pass "zsh: fm_backend_source recognizes known backends and rejects unknown ones"
+    pass "zsh: fm_backend_source recognizes tmux and rejects unknown ones"
   else
     pass "zsh: shell-portable backend matching skipped (zsh not found)"
   fi
 
-  bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && declare -F fm_backend_herdr_capture >/dev/null" 2>/dev/null \
-    || fail "bash: fm_backend_source herdr should load the adapter when sourced"
+  bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source tmux && declare -F fm_backend_tmux_capture >/dev/null" 2>/dev/null \
+    || fail "bash: fm_backend_source tmux should load the adapter when sourced"
   out=$(bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
     && fail "bash: fm_backend_source bogus should fail"
   assert_contains "$out" "unknown backend 'bogus'" \
     "bash: fm_backend_source did not reject bogus with the expected error"
-  pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
+  pass "bash: fm_backend_source recognizes tmux and rejects unknown ones"
 }
 
-test_backend_validate_spawn_accepts_orca() {
+test_backend_validate_spawn_tmux_only() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
-  fm_backend_validate_spawn herdr 2>/dev/null || fail "fm_backend_validate_spawn should accept herdr"
-  fm_backend_validate_spawn zellij 2>/dev/null || fail "fm_backend_validate_spawn should accept zellij"
-  fm_backend_validate_spawn orca 2>/dev/null || fail "fm_backend_validate_spawn should accept orca"
-  fm_backend_validate_spawn cmux 2>/dev/null || fail "fm_backend_validate_spawn should accept cmux"
   out=$(fm_backend_validate_spawn bogus 2>&1) && fail "fm_backend_validate_spawn should still refuse unknown backends"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate_spawn did not preserve unknown-backend validation"
-  out=$(fm_backend_validate_spawn codex-app 2>&1) && fail "fm_backend_validate_spawn should refuse codex-app"
-  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate_spawn accepted codex-app"
+  out=$(fm_backend_validate_spawn orca 2>&1) && fail "fm_backend_validate_spawn should refuse removed orca"
+  assert_contains "$out" "unknown backend 'orca'" "fm_backend_validate_spawn accepted removed orca"
   out=$(fm_backend_validate_spawn "tmux herdr" 2>&1) && fail "fm_backend_validate_spawn should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate_spawn accepted a multi-token backend name"
-  pass "fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported"
+  pass "fm_backend_validate_spawn: only tmux is spawn-supported"
 }
 
 test_meta_get_and_backend_of_meta() {
-  local meta=$TMP_ROOT/meta-get.meta
+  local meta=$TMP_ROOT/meta-get.meta out
   fm_write_meta "$meta" "window=firstmate:fm-x1" "harness=claude"
   [ "$(fm_meta_get "$meta" window)" = "firstmate:fm-x1" ] || fail "fm_meta_get did not read window="
   [ "$(fm_meta_get "$meta" missing)" = "" ] || fail "fm_meta_get should print nothing for an absent key"
@@ -529,29 +494,33 @@ test_meta_get_and_backend_of_meta() {
   printf 'backend=tmux\n' >> "$meta"
   [ "$(fm_backend_of_meta "$meta")" = tmux ] || fail "fm_backend_of_meta should read an explicit backend=tmux"
 
-  pass "fm_meta_get / fm_backend_of_meta: read key=value, default backend to tmux"
+  fm_write_meta "$meta" "window=firstmate:fm-x1" "backend=herdr"
+  out=$(fm_backend_of_meta "$meta" 2>&1) && fail "fm_backend_of_meta should refuse stale non-tmux metadata"
+  assert_contains "$out" "stale non-tmux backend 'herdr'" "stale backend refusal did not name backend"
+
+  pass "fm_meta_get / fm_backend_of_meta: read key=value, default backend to tmux, refuse stale non-tmux metadata"
 }
 
 test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
   fm_write_meta "$state/task1.meta" "window=firstmate:fm-task1"
-  fm_write_meta "$state/dotfiles-d6.meta" "window=default:wA:p2" "backend=herdr"
-  fm_write_meta "$state/fm-turnend-all-harnesses-v9.meta" "window=default:wB:p3" "backend=herdr"
+  fm_write_meta "$state/dotfiles-d6.meta" "window=default:wA:p2" "backend=tmux"
+  fm_write_meta "$state/fm-turnend-all-harnesses-v9.meta" "window=default:wB:p3" "backend=tmux"
 
   [ "$(fm_backend_resolve_selector 'sess:win' "$state")" = "sess:win" ] \
     || fail "explicit session:window should be used as-is"
 
   [ "$(fm_backend_resolve_selector 'dotfiles-d6' "$state")" = "default:wA:p2" ] \
     || fail "bare non-fm task id should resolve through exact metadata"
-  [ "$(fm_backend_of_selector 'dotfiles-d6' 'default:wA:p2' "$state")" = herdr ] \
+  [ "$(fm_backend_of_selector 'dotfiles-d6' 'default:wA:p2' "$state")" = tmux ] \
     || fail "bare non-fm task id should use its recorded backend"
   [ "$(fm_backend_expected_label_of_selector 'dotfiles-d6' "$state")" = "fm-dotfiles-d6" ] \
     || fail "bare non-fm task id should report the spawned fm-<id> label"
 
   [ "$(fm_backend_resolve_selector 'fm-turnend-all-harnesses-v9' "$state")" = "default:wB:p3" ] \
     || fail "exact fm-* task id should resolve through its exact metadata"
-  [ "$(fm_backend_of_selector 'fm-turnend-all-harnesses-v9' 'default:wB:p3' "$state")" = herdr ] \
+  [ "$(fm_backend_of_selector 'fm-turnend-all-harnesses-v9' 'default:wB:p3' "$state")" = tmux ] \
     || fail "exact fm-* task id should use exact metadata without stripping fm-"
   [ "$(fm_backend_expected_label_of_selector 'fm-turnend-all-harnesses-v9' "$state")" = "fm-fm-turnend-all-harnesses-v9" ] \
     || fail "exact fm-* task id should report the spawned fm-<id> label"
@@ -1003,15 +972,13 @@ test_teardown_conformance_old_vs_new() {
 
 test_spawn_refuses_unknown_backend_flag() {
   local out status
-  # bogus names a backend with no adapter at all; zellij and orca both
-  # graduated to real adapters and have their own spawn tests.
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --mode no-mistakes --yolo off --backend bogus 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn --backend bogus should refuse"
-  assert_contains "$out" "unknown backend 'bogus'" "fm-spawn did not name the rejected backend"
-  pass "fm-spawn.sh --backend bogus is refused loudly"
+  assert_contains "$out" "--backend was removed" "fm-spawn did not report the removed backend flag"
+  pass "fm-spawn.sh refuses the removed --backend flag"
 }
 
 test_spawn_refuses_codex_app_backend_flag() {
@@ -1051,12 +1018,12 @@ test_spawn_default_backend_writes_no_meta_field() {
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
-  expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  expect_code 0 $? "default tmux spawn should succeed"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
-    "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
+    "the default tmux backend must not write backend= to meta"
   rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
+  pass "fm-spawn.sh: default tmux resolves silently and writes no backend= (missing means tmux)"
 }
 
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
@@ -1113,30 +1080,17 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
-test_backend_name_precedence
+test_backend_name_is_always_tmux
+test_unknown_backend_flag_is_removed_from_spawn_help
 test_backend_detect_precedence
-test_backend_detect_cmux_fallback_bundle_id
-test_backend_detect_cmux_fallback_requires_darwin
-test_backend_detect_cmux_fallback_tmux_nested_false_positive
-test_backend_detect_cmux_fallback_ancestry_pid_match
-test_backend_detect_cmux_fallback_ancestry_comm_match
-test_backend_detect_cmux_fallback_ancestry_stops_at_launchd
-test_backend_name_cmux_fallback_notice
-test_backend_name_autodetect_notice
-test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
-test_backend_validate_spawn_accepts_orca
+test_backend_validate_spawn_tmux_only
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
-test_backend_of_selector_matches_explicit_target_meta
 test_send_tmux_contract
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
-test_spawn_refuses_codex_app_backend_flag
-test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
-test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
-test_spawn_autodetect_nesting_resolves_tmux_silently
