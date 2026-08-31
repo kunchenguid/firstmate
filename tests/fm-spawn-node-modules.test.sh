@@ -11,6 +11,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-node-modules)
+SYSTEM_NODE=$(command -v node)
 
 make_fakebin() {
   local dir=$1 fakebin
@@ -49,15 +50,28 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/ln"
-  local real_node
-  real_node=$(command -v node)
   cat > "$fakebin/node" <<SH
 #!/usr/bin/env bash
 set -u
-if [ "\${1:-}" = - ] && [ "\${FM_REJECT_PATH_NODE_PUBLISHER:-0}" = 1 ]; then
+if [ "\${FM_REJECT_PATH_NODE_PUBLISHER:-0}" = 1 ]; then
   exit 99
 fi
-exec "$real_node" "\$@"
+if [ -n "\${FM_NODE_SHIM_MUTATION_TARGET:-}" ]; then
+  (
+    candidate=
+    while [ -z "\$candidate" ]; do
+      for candidate in "\$FM_NODE_SHIM_MUTATION_TARGET"/.fm-node-modules.*; do
+        [ -d "\$candidate" ] || { candidate=; continue; }
+        break
+      done
+    done
+    publication=\${candidate##*/}
+    /bin/ln -s "\$publication" "\$FM_NODE_SHIM_MUTATION_TARGET/node_modules" || exit 0
+    /bin/rm -f "\$candidate/@beeline/lib"
+    /bin/ln -s "\$FM_NODE_SHIM_MUTATION_PRIMARY" "\$candidate/@beeline/lib"
+  ) >/dev/null 2>&1 &
+fi
+exec "$SYSTEM_NODE" "\$@"
 SH
   chmod +x "$fakebin/node"
   fm_fake_exit0 "$fakebin" treehouse
@@ -88,8 +102,8 @@ add_dependency_volume() {
 start_publication_contender() {
   local target=$1 primary=${2:-}
   (
-    local candidate
-    while :; do
+    local candidate attempts=0
+    while [ "$attempts" -lt 2000 ]; do
       for candidate in "$target"/.fm-node-modules.*; do
         [ -d "$candidate" ] || continue
         if [ -n "$primary" ]; then
@@ -104,9 +118,30 @@ start_publication_contender() {
         fi
         exit 0
       done
+      attempts=$((attempts + 1))
+      sleep 0.005
     done
+    exit 124
   ) &
   PUBLICATION_CONTENDER_PID=$!
+}
+
+wait_publication_contender() {
+  local status=0
+  wait "$PUBLICATION_CONTENDER_PID" || status=$?
+  if [ "$status" -ne 0 ]; then
+    kill "$PUBLICATION_CONTENDER_PID" 2>/dev/null || true
+    wait "$PUBLICATION_CONTENDER_PID" 2>/dev/null || true
+  fi
+  PUBLICATION_CONTENDER_PID=
+  return "$status"
+}
+
+stop_publication_contender() {
+  [ -n "${PUBLICATION_CONTENDER_PID:-}" ] || return 0
+  kill "$PUBLICATION_CONTENDER_PID" 2>/dev/null || true
+  wait "$PUBLICATION_CONTENDER_PID" 2>/dev/null || true
+  PUBLICATION_CONTENDER_PID=
 }
 
 make_case() {
@@ -148,12 +183,14 @@ EOF
 
 run_spawn() {
   local id=$1
-  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  HOME="${FM_TEST_ACCOUNT_HOME:-$HOME}" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' FM_FAKE_PANE_PATH="$WORKTREE_DIR" \
     FM_NODE_MODULES_MUTATION_TARGET="${FM_NODE_MODULES_MUTATION_TARGET:-}" \
     FM_NODE_MODULES_MUTATION_PRIMARY="${FM_NODE_MODULES_MUTATION_PRIMARY:-}" \
+    FM_NODE_SHIM_MUTATION_TARGET="${FM_NODE_SHIM_MUTATION_TARGET:-}" \
+    FM_NODE_SHIM_MUTATION_PRIMARY="${FM_NODE_SHIM_MUTATION_PRIMARY:-}" \
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
     PATH="${FM_SPAWN_TEST_PATH:-$FAKEBIN_DIR:$PATH}" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
@@ -225,13 +262,17 @@ test_spawn_publication_is_independent_of_path_node_wrappers() {
 }
 
 test_spawn_resolves_script_managed_node_runtime() {
-  local rec id out status publication toolbin
+  local rec id out status publication toolbin account_home
   id=node-modules-script-node-z1c
   rec=$(make_case script-node "$id")
   read_case "$rec"
   toolbin=$(make_toolbin_without_node "$TMP_ROOT/script-node-tools")
+  account_home="$TMP_ROOT/script-node-account"
+  mkdir -p "$account_home/.asdf/installs/nodejs/test/bin"
+  /bin/ln -s "$SYSTEM_NODE" "$account_home/.asdf/installs/nodejs/test/bin/node"
 
   out=$(FM_REJECT_PATH_NODE_PUBLISHER=1 \
+    FM_TEST_ACCOUNT_HOME="$account_home" \
     FM_SPAWN_TEST_PATH="$FAKEBIN_DIR:$toolbin" run_spawn "$id")
   status=$?
   expect_code 0 "$status" "spawn should resolve a script-managed Node runtime"
@@ -240,6 +281,24 @@ test_spawn_resolves_script_managed_node_runtime() {
   publication=$(readlink "$WORKTREE_DIR/node_modules")
   [ -d "$WORKTREE_DIR/$publication" ] || fail "script-managed Node runtime left dependency backing unavailable"
   pass "fm-spawn resolves script-managed Node runtimes before publication"
+}
+
+test_spawn_does_not_accept_unvalidated_exact_contention() {
+  local rec id out status workspace_real expected_real
+  id=node-modules-exact-contention-z1cc
+  rec=$(make_case exact-contention "$id")
+  read_case "$rec"
+
+  out=$(FM_NODE_SHIM_MUTATION_TARGET="$WORKTREE_DIR" \
+    FM_NODE_SHIM_MUTATION_PRIMARY="$PROJECT_DIR/packages/lib" run_spawn "$id")
+  status=$?
+  sleep 0.5
+  expect_code 0 "$status" "spawn should avoid PATH shim interference with dependency publication"
+  assert_contains "$out" "spawned $id" "safe dependency publication did not launch the worker"
+  workspace_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/lib" && pwd -P)
+  expected_real=$(cd "$WORKTREE_DIR/packages/lib" && pwd -P)
+  [ "$workspace_real" = "$expected_real" ] || fail "exact publication contention bypassed workspace validation"
+  pass "fm-spawn avoids and validates exact dependency publication contention"
 }
 
 test_spawn_prevents_path_link_mutation_after_validation() {
@@ -400,6 +459,27 @@ test_spawn_ignores_published_beeline_consumers() {
   pass "fm-spawn scopes dependency sharing to Beeline workspaces"
 }
 
+test_spawn_shares_published_beeline_dependencies_with_workspaces() {
+  local rec id out status published_real expected_real workspace_real expected_workspace_real
+  id=node-modules-mixed-beeline-z3b
+  rec=$(make_case mixed-beeline "$id")
+  read_case "$rec"
+  mkdir "$PROJECT_DIR/node_modules/@beeline/published"
+  printf 'published package\n' > "$PROJECT_DIR/node_modules/@beeline/published/index.js"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should share published @beeline dependencies alongside workspaces"
+  assert_contains "$out" "spawned $id" "mixed @beeline dependency tree did not launch the worker"
+  published_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/published" && pwd -P)
+  expected_real=$(cd "$PROJECT_DIR/node_modules/@beeline/published" && pwd -P)
+  [ "$published_real" = "$expected_real" ] || fail "published @beeline dependency was not shared from primary"
+  workspace_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/lib" && pwd -P)
+  expected_workspace_real=$(cd "$WORKTREE_DIR/packages/lib" && pwd -P)
+  [ "$workspace_real" = "$expected_workspace_real" ] || fail "mixed @beeline workspace did not resolve to worktree source"
+  pass "fm-spawn shares published @beeline dependencies while isolating workspaces"
+}
+
 test_spawn_preserves_tree_created_during_publication() {
   local rec id out status candidate
   id=node-modules-race-z4
@@ -410,7 +490,11 @@ test_spawn_preserves_tree_created_during_publication() {
 
   out=$(run_spawn "$id")
   status=$?
-  wait "$PUBLICATION_CONTENDER_PID" \
+  if [ "$status" -ne 0 ]; then
+    stop_publication_contender
+    expect_code 0 "$status" "spawn should preserve a dependency tree created during publication"
+  fi
+  wait_publication_contender \
     || fail "publication contender did not create its dependency tree"
   expect_code 0 "$status" "spawn should preserve a dependency tree created during publication"
   assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
@@ -434,7 +518,11 @@ test_spawn_rejects_primary_dependency_link_created_during_publication() {
 
   out=$(run_spawn "$id")
   status=$?
-  wait "$PUBLICATION_CONTENDER_PID" \
+  if [ "$status" -eq 0 ]; then
+    stop_publication_contender
+    fail "spawn accepted a contended dependency link to primary source"
+  fi
+  wait_publication_contender \
     || fail "primary publication contender did not create its dependency link"
   [ "$status" -ne 0 ] || fail "spawn accepted a contended dependency link to primary source"
   assert_not_contains "$out" "spawned $id" "contended primary dependency link launched a worker"
@@ -490,6 +578,7 @@ test_spawn_rejects_dangling_staged_workspace_link() {
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_resolves_script_managed_node_runtime
+test_spawn_does_not_accept_unvalidated_exact_contention
 test_spawn_prevents_path_link_mutation_after_validation
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_rejects_existing_primary_dependency_link
@@ -498,6 +587,7 @@ test_spawn_rejects_dangling_existing_workspace_link
 test_spawn_rejects_workspace_link_from_another_worktree
 test_spawn_rejects_worktree_workspace_alias
 test_spawn_ignores_published_beeline_consumers
+test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_validates_staging_before_publication

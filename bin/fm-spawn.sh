@@ -1325,27 +1325,49 @@ exclude_path() {
   /usr/bin/grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 
-native_node_executable() {
-  local shim candidate magic
-  shim=$(command -v node 2>/dev/null) || return 1
-  candidate=$(NODE_OPTIONS= "$shim" -p 'process.execPath' 2>/dev/null) || return 1
-  [ -n "$candidate" ] || return 1
-  case "$candidate" in
-    /*) ;;
-    *) return 1 ;;
-  esac
-  case "$candidate" in
-    *$'\n'*) return 1 ;;
-  esac
+native_node_candidate() {
+  local candidate=$1 magic
+  case "$candidate" in /*) ;; *) return 1 ;; esac
   [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
   magic=
   IFS= LC_ALL=C read -r -n 4 magic < "$candidate" || true
   case "$magic" in
     $'\x7fELF'|$'\xce\xfa\xed\xfe'|$'\xcf\xfa\xed\xfe'|$'\xfe\xed\xfa\xce'|$'\xfe\xed\xfa\xcf'|$'\xca\xfe\xba\xbe'|$'\xbe\xba\xfe\xca'|$'\xca\xfe\xba\xbf'|$'\xbf\xba\xfe\xca')
-      printf '%s\n' "$candidate"
+      return 0
       ;;
     *) return 1 ;;
   esac
+}
+
+native_node_executable() {
+  local candidate directory old_ifs account_home
+  old_ifs=$IFS
+  IFS=:
+  for directory in $PATH; do
+    [ -n "$directory" ] || directory=.
+    candidate="$directory/node"
+    case "$candidate" in /*) ;; *) candidate="$PWD/$candidate" ;; esac
+    if native_node_candidate "$candidate"; then
+      IFS=$old_ifs
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  IFS=$old_ifs
+
+  account_home=${HOME:-}
+  [ -n "$account_home" ] || return 1
+  for candidate in \
+    "$account_home"/.nvm/versions/node/*/bin/node \
+    "$account_home"/.asdf/installs/*/*/bin/node \
+    "$account_home"/.local/share/mise/installs/*/*/bin/node \
+    "$account_home"/.mise/installs/*/*/bin/node; do
+    if native_node_candidate "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 beeline_workspace_links_match_worktree() {
@@ -1374,15 +1396,19 @@ beeline_workspace_links_match_worktree() {
       [ -L "$candidate" ] || continue
       name=${candidate##*/}
       entry="$source/@beeline/$name"
-      [ -L "$entry" ] || return 1
+      [ -e "$entry" ] || [ -L "$entry" ] || return 1
       entry_real=$(cd "$entry" 2>/dev/null && pwd -P) || return 1
-      [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] || return 1
-      [[ "$entry_real" != "$source_real"/* ]] || return 1
-      expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
-      expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
-      [[ "$expected_real" == "$wt_real"/* ]] || return 1
       candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
-      [ "$candidate_real" = "$expected_real" ] || return 1
+      if [ -L "$entry" ] \
+         && [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] \
+         && [[ "$entry_real" != "$source_real"/* ]]; then
+        expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
+        expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
+        [[ "$expected_real" == "$wt_real"/* ]] || return 1
+        [ "$candidate_real" = "$expected_real" ] || return 1
+      else
+        [ "$candidate_real" = "$entry_real" ] || return 1
+      fi
     done
   fi
   [ "$found" = 1 ]
@@ -1449,7 +1475,9 @@ share_beeline_node_modules() {
       [ -e "$entry" ] || [ -L "$entry" ] || continue
       name=${entry##*/}
       entry_real=$(real_path_or_raw "$entry")
-      if [ -L "$entry" ] && [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]]; then
+      if [ -L "$entry" ] \
+         && [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] \
+         && [[ "$entry_real" != "$source_real"/* ]]; then
         link_target=$(/usr/bin/readlink "$entry")
         case "$link_target" in
           /*) /bin/ln -s "$WT${entry_real#"$PROJ_ABS_REAL"}" "$staging/@beeline/$name" || exit 1 ;;
@@ -1541,7 +1569,11 @@ JS
     *)
       if [ -L "$target" ] \
          && [ "$(/usr/bin/readlink "$target" 2>/dev/null || true)" = "$publication_link" ]; then
-        NODE_MODULES_ABORT_STAGING=
+        if beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+          NODE_MODULES_ABORT_STAGING=
+        else
+          publish_status=5
+        fi
       else
         NODE_MODULES_ABORT_CLEANUP=1
         cleanup_status=0
