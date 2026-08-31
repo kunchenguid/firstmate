@@ -43,6 +43,7 @@ TMP_ROOT=$(fm_test_tmproot context-handoff)
 FIXED_NOW=2026-08-30T20:00:00Z
 CAPABILITY=claude-process-generation-1
 PROCESS_GENERATION=1
+PROCESS_BOOT_ID=synthetic-boot-1
 REGISTRATION_ENABLED=true
 SEALING_ENABLED=true
 DELIVERY_ENABLED=false
@@ -157,6 +158,7 @@ new_env() {
   ENDPOINT_PANE=pane-1
   CAPABILITY=claude-process-generation-1
   PROCESS_GENERATION=1
+  PROCESS_BOOT_ID=synthetic-boot-1
   LIVE_PROCESS_CAPABILITY=
   REGISTRATION_ENABLED=true
   SEALING_ENABLED=true
@@ -236,6 +238,7 @@ cli() {
       FM_HANDOFF_TEST_NOW="$FIXED_NOW" \
       FM_HANDOFF_TEST_PROCESS_CAPABILITY="$CAPABILITY" \
       FM_HANDOFF_TEST_PROCESS_GENERATION="$PROCESS_GENERATION" \
+      FM_HANDOFF_TEST_PROCESS_BOOT_ID="$PROCESS_BOOT_ID" \
       FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY="${LIVE_PROCESS_CAPABILITY:-}" \
       FM_HANDOFF_TEST_FAILPOINT="${FM_HANDOFF_TEST_FAILPOINT:-}" \
       FM_HANDOFF_TEST_PAUSEPOINT="${FM_HANDOFF_TEST_PAUSEPOINT:-}" \
@@ -276,6 +279,7 @@ plugin_cli() {
       FM_HANDOFF_TEST_NOW="$FIXED_NOW" \
       FM_HANDOFF_TEST_PROCESS_CAPABILITY="$CAPABILITY" \
       FM_HANDOFF_TEST_PROCESS_GENERATION="$PROCESS_GENERATION" \
+      FM_HANDOFF_TEST_PROCESS_BOOT_ID="$PROCESS_BOOT_ID" \
       PI_SESSION_ID=pi-session-1 \
       FAKE_HERDR_LOG="$HERDR_LOG" \
       FAKE_HERDR_PID="$HERDR_PID" \
@@ -716,6 +720,12 @@ test_monotonic_claude_binding() {
   PROCESS_GENERATION=2
   current=$(mcp_content next_curated_handoff)
   [ "$(printf '%s' "$current" | jq -r .status)" = empty ] || fail "current replacement generation lost MCP authority"
+  CAPABILITY=claude-process-generation-after-reboot
+  PROCESS_GENERATION=1
+  PROCESS_BOOT_ID=synthetic-boot-2
+  bind_claude >/dev/null || fail "lower generation from a new boot did not replace the dead prior owner"
+  current=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$current" | jq -r .status)" = empty ] || fail "new-boot replacement generation lost MCP authority"
   pass "replacement-monotonic Claude session binding"
 }
 
@@ -1233,11 +1243,10 @@ if [ "$1" = seal ]; then
 fi
 if [ "$1" = compaction-outcome ] && [ "$(cat "$FM_STALE_BINDING_MODE")" = outcome-ok ]; then
   if [ "$2" = success ]; then
-    status=compaction-succeeded
+    printf '{"status":"compaction-succeeded","record_ids":["handoff-111111111111111111111111111111111111111111111111"],"delivery":"nothing-pending"}\n'
   else
-    status=compaction-failed
+    printf '{"status":"compaction-failed","record_ids":["handoff-111111111111111111111111111111111111111111111111"]}\n'
   fi
-  printf '{"status":"%s","record_ids":["handoff-111111111111111111111111111111111111111111111111"]}\n' "$status"
   exit 0
 fi
 exit 7
@@ -1314,6 +1323,16 @@ const failurePayload = JSON.parse(failureCalls.at(-1).split("\t")[1]);
 if (failurePayload.bindings?.[0]?.record_id !== "handoff-111111111111111111111111111111111111111111111111") throw new Error("retried Pi outcome lost its exact seal binding");
 const calls = fs.readFileSync(process.env.FM_STALE_BINDING_LOG, "utf8").trim().split("\n").filter(line => line.startsWith("compaction-outcome success"));
 if (calls.length !== 0) throw new Error("later no-op attempt emitted an unbound Pi outcome");
+fs.writeFileSync(process.env.FM_STALE_BINDING_MODE, "sealed\n");
+if ((await stale.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("synthetic success-retry binding did not seal");
+await stale.get("session_compact")({reason:"threshold"});
+if (!(await stale.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("unpersisted success outcome did not cancel the next attempt");
+await stale.get("session_compact_failed")({reason:"threshold"});
+fs.writeFileSync(process.env.FM_STALE_BINDING_MODE, "outcome-ok\n");
+if ((await stale.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("persisted success outcome did not release the next attempt");
+const terminalCalls = fs.readFileSync(process.env.FM_STALE_BINDING_LOG, "utf8").trim().split("\n").filter(line => line.startsWith("compaction-outcome "));
+if (terminalCalls.filter(line => line.startsWith("compaction-outcome failure")).length !== 2) throw new Error("new-attempt cancellation reversed a known Pi success outcome");
+if (terminalCalls.filter(line => line.startsWith("compaction-outcome success")).length !== 3) throw new Error("known Pi success outcome was not retried immutably");
 EOF
   pass "model-free Pi lifecycle and fail-closed adapter validation"
 }
@@ -1891,7 +1910,7 @@ test_claude_terminal_outcome_uses_durable_binding() {
 }
 
 test_sessionstart_contains_invalid_compaction_bindings() {
-  local statement arguments registered record i foreign_key foreign_cap output result
+  local statement arguments registered record i foreign_key foreign_cap output result binding
   new_env sessionstart-invalid-compaction-bindings
   enable_consumer
   bind_claude >/dev/null || fail "invalid-binding fixture did not bind Claude"
@@ -1919,6 +1938,27 @@ test_sessionstart_contains_invalid_compaction_bindings() {
   jq -se 'any(.[]; .reason=="compaction-binding-record-invalid" and .failure_code=="RECORD_UNREADABLE")' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "unreadable target binding left no quarantine evidence"
   result=$(mcp_content next_curated_handoff)
   [ "$(printf '%s' "$result" | jq -r .status)" = empty ] || fail "replacement SessionStart did not restore exact consumer authority"
+
+  new_env sessionstart-invalid-terminal-binding
+  enable_consumer
+  bind_claude >/dev/null || fail "invalid-terminal fixture did not bind Claude"
+  statement='A replacement session must contain malformed terminal evidence.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "invalid-terminal fixture did not register"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "invalid-terminal fixture did not seal"
+  binding=$(find "$FM_HOME/state/context-handoff/bindings" -name 'compaction-*.json' -print -quit)
+  jq '.terminal_outcome="bogus" | .terminal_reason="malformed terminal evidence" | .terminal_at="not-a-timestamp"' "$binding" > "$binding.tmp" || fail "could not create malformed terminal evidence"
+  chmod 600 "$binding.tmp"
+  mv "$binding.tmp" "$binding"
+  CAPABILITY=claude-process-generation-2
+  PROCESS_GENERATION=2
+  bind_claude >/dev/null || fail "replacement SessionStart wedged on malformed terminal evidence"
+  [ ! -e "$binding" ] || fail "malformed terminal binding was not retired"
+  jq -se 'any(.[]; .reason=="compaction-binding-record-invalid" and .failure_code=="COMPACTION_BINDING")' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "malformed terminal binding left no quarantine evidence"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "replacement PreCompact could not recover malformed terminal evidence"
+  [ -z "$output" ] || fail "replacement PreCompact did not recover malformed terminal evidence"
   pass "SessionStart contains invalid compaction binding evidence"
 }
 

@@ -198,6 +198,7 @@ ok - foreign candidate ownership isolation
 ok - global active-state caps and stale-session recovery
 ok - candidate identity binds its exact source session
 ok - durable receipt for unhealthy seal-time bindings
+ok - orphan active state blocks Pi and Claude compaction
 ok - durable compaction attempt result replay
 ok - fail-closed Claude generation and probe budget margin
 ok - SessionStart announces only consumable records
@@ -229,6 +230,7 @@ ok - complete transaction dependency manifest binding
 ok - orphan apply remains behind durable execution authority
 ok - Claude lifecycle and model-free plugin discovery
 ok - probe-independent authenticated Claude terminal outcome
+ok - SessionStart contains invalid compaction binding evidence
 ok - same-capability Claude PreCompact retry binding
 ```
 
