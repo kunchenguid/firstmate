@@ -388,20 +388,30 @@ nm_ci_checks_state() {
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+nm_runs_list_row_parse() {  # <row> -> "<status> <branch> <sha>"
+  local row=$1 st rest br sha
+  row=$(trim "$row")
+  [ -n "$row" ] || return 1
+  st=${row%% *}
+  rest=${row#* }
+  rest=$(trim "$rest")
+  br=${rest%% *}
+  rest=${rest#* }
+  rest=$(trim "$rest")
+  sha=${rest%% *}
+  printf '%s %s %s' "$st" "$br" "$sha"
+}
+
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row parsed st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
-    row=$(trim "$row")
-    [ -n "$row" ] || continue
-    st=${row%% *}
-    rest=${row#* }
-    rest=$(trim "$rest")
+    parsed=$(nm_runs_list_row_parse "$row") || continue
+    st=${parsed%% *}
+    rest=${parsed#* }
     br=${rest%% *}
-    rest=${rest#* }
-    rest=$(trim "$rest")
-    sha=${rest%% *}
+    sha=${rest#* }
     if [ "$br" = "$branch" ]; then
       # Same code-identity rule as axi status: skip a same-branch row whose
       # short-sha does not match this worktree (rewritten or advanced tip).
@@ -427,18 +437,14 @@ nm_runs_status_for_branch() {  # <branch>
 # local git state, so resolvability has no bearing here. Prints
 # "<status> <sha>"; prints nothing when the branch has no row at all.
 nm_runs_list_top_for_branch() {  # <runs-list-output> <branch>
-  local out=$1 branch=$2 row st rest br sha
+  local out=$1 branch=$2 row parsed st rest br sha
   [ -n "$out" ] || return 1
   while IFS= read -r row; do
-    row=$(trim "$row")
-    [ -n "$row" ] || continue
-    st=${row%% *}
-    rest=${row#* }
-    rest=$(trim "$rest")
+    parsed=$(nm_runs_list_row_parse "$row") || continue
+    st=${parsed%% *}
+    rest=${parsed#* }
     br=${rest%% *}
-    rest=${rest#* }
-    rest=$(trim "$rest")
-    sha=${rest%% *}
+    sha=${rest#* }
     if [ "$br" = "$branch" ]; then
       printf '%s %s' "$st" "$sha"
       return 0
@@ -500,6 +506,16 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# 1 only when RUN_SOURCE=coarse was produced by the supersession guard below
+# folding a done/failed verdict to a live run's state - NOT when it was coarse
+# from the start (the nm_runs_status_for_branch cross-branch/head-mismatch
+# fallback above). The CI-ready-log shortcut further down trusts RUN_SOURCE=
+# coarse to mean "no TOON detail available, so read the log instead", which is
+# true for the original coarse path but wrong here: a fold already computed a
+# corrected working verdict from real TOON detail, and the shortcut must not
+# discard it for a stale status-log line. Tracked as its own flag rather than
+# inferred from RUN_DETAIL text so the two origins never get conflated.
+RUN_SOURCE_SUPERSEDED_FOLD=0
 # Set when a run lookup was ATTEMPTED but produced nothing to read at all -
 # never when it succeeded and simply found no attributable run. The real CLI
 # always answers in text even when a repo genuinely has no runs yet
@@ -649,13 +665,14 @@ if [ "$HAVE_RUN" = 1 ]; then
             RUN_STATE=${coarse_map%%$'\t'*}
             RUN_DETAIL="${coarse_map#*$'\t'}${SEP}superseded a terminal run for this branch"
             RUN_SOURCE=coarse
+            RUN_SOURCE_SUPERSEDED_FOLD=1
           fi
         fi
       fi
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE_SUPERSEDED_FOLD" != 1 ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi

@@ -1562,6 +1562,34 @@ EOF
   pass "a superseded failed run bound by head equality is not surfaced over a live retry"
 }
 
+# A stale "done: ... checks green" status-log line left over from an earlier
+# CI-green pass, combined with the head-equality supersession fold above: the
+# pre-existing CI-ready-log shortcut (RUN_SOURCE=coarse -> trust the log) must
+# not fire here, because this coarse comes from the supersession fold
+# reporting a freshly-computed working verdict, not from "no TOON detail was
+# ever available". If the shortcut fired, it would reproduce the exact bug
+# this change fixes via a different path.
+test_head_equal_superseded_stale_ci_ready_log_does_not_override_fold() {
+  reset_fakes
+  local d short; d=$(new_case gov-custody-recovered-stale-log)
+  make_repo_on_branch "$d/wt" fm/infra_q-phase0-governance
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gov.meta" "window=fm:fm-gov" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$d/state/gov.status"
+  FM_FAKE_AXI_STATUS="$(run_failed_custody_recovered fm/infra_q-phase0-governance "$short")"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/infra_q-phase0-governance f0f0f0f0  2026-08-31 05:10
+  failed     fm/infra_q-phase0-governance ${short}  2026-08-31 04:52
+EOF
+)"
+  local out; out=$(run_crew_state "$d" gov)
+  assert_not_contains "$out" "state: failed" "a superseded failed run whose head equals the worktree must not surface as failed"
+  assert_contains "$out" "state: working" "the live retry must be reported, not the stale checks-green log line"
+  assert_contains "$out" "source: run-step" "the live retry must remain run-step sourced, not overridden to status-log"
+  pass "a stale checks-green log line does not undo the supersession fold"
+}
+
 # Negative control: the SAME superseded-looking TOON, but the runs list
 # proves there really is no later run - the guard must not manufacture a
 # live run that does not exist.
@@ -1726,6 +1754,7 @@ test_local_advanced_past_run_head_invalidates
 test_pipeline_owned_active_run_beats_superseded_failed_row
 test_failed_run_with_no_later_run_still_surfaces
 test_head_equal_superseded_failed_run_beats_live_run
+test_head_equal_superseded_stale_ci_ready_log_does_not_override_fold
 test_head_equal_genuinely_failed_no_later_run_still_surfaces
 test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_non_pipeline_owned_unresolvable_head_not_attributed
