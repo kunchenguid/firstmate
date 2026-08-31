@@ -832,6 +832,40 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
 }
 
+test_scout_teardown_accepts_realistic_orca_worktree_id_shape() {
+  local proj wt data state config id out rc neutral wtid
+  id="orcarealisticidz9"
+  proj="$TMP_ROOT/realistic-id-project"
+  wt="$TMP_ROOT/realistic-id-wt"
+  data="$TMP_ROOT/realistic-id-data"
+  state="$TMP_ROOT/realistic-id-state"
+  config="$TMP_ROOT/realistic-id-config"
+  wtid="52b0c3a4-2ea8-4c0e-961b-70dd4688180a::$wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term_3f214667-03c3-4ca8-bfd8-95d9f668c4fa" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$wtid" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case teardown-realistic-id
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$wtid" "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "Orca teardown should accept a realistic '<repo-id>::<path>' worktree id"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$wtid"$'\x1f''--force'$'\x1f''--json' \
+    "teardown did not remove the Orca worktree through orca worktree rm"
+  assert_absent "$state/$id.meta" "teardown should remove task metadata"
+  pass "fm-teardown.sh backend=orca: accepts a realistic repo-id::path worktree id"
+}
+
 test_scout_teardown_refuses_orca_id_path_mismatch() {
   local proj wt other_wt data state config id out rc neutral
   id="orcascoutmismatchz5"
@@ -1342,6 +1376,7 @@ test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
+test_scout_teardown_accepts_realistic_orca_worktree_id_shape
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json
