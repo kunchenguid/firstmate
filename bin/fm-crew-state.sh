@@ -34,7 +34,13 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. A
+#      done/failed verdict attributed straight from bare `axi status` is then
+#      cross-checked against the branch's own newest-first runs list: when a
+#      DIFFERENT, still-active run for the same branch outranks it there, that
+#      terminal verdict is a superseded run (the common shape right after
+#      custody recovery, where the crew's worktree HEAD equals the superseded
+#      run's own recorded head) and folds to the live run's state instead.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -42,7 +48,13 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. EXCEPT: a done/failed
+#      log line is reported only when the run lookup genuinely found no run
+#      for this crew (kind=ship); when the lookup itself never completed (a
+#      timeout or crash, distinct from the real CLI's own text answer for a
+#      genuinely run-free repo), that terminal log line is exactly what a live
+#      but unobserved run could contradict, so it reports unknown instead of a
+#      confident but possibly-stale terminal verdict.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -407,6 +419,60 @@ nm_runs_status_for_branch() {  # <branch>
   return 0
 }
 
+# The branch's topmost (most recent) row from a captured `no-mistakes runs
+# --limit N` listing - the same "<status> <branch> <short-sha> ..." shape
+# nm_runs_status_for_branch parses above, with no worktree/head validation:
+# the caller (the supersession guard below) compares the returned sha against
+# a value it already holds from a DIFFERENT axi-status call, never against
+# local git state, so resolvability has no bearing here. Prints
+# "<status> <sha>"; prints nothing when the branch has no row at all.
+nm_runs_list_top_for_branch() {  # <runs-list-output> <branch>
+  local out=$1 branch=$2 row st rest br sha
+  [ -n "$out" ] || return 1
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    st=${row%% *}
+    rest=${row#* }
+    rest=$(trim "$rest")
+    br=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    sha=${rest%% *}
+    if [ "$br" = "$branch" ]; then
+      printf '%s %s' "$st" "$sha"
+      return 0
+    fi
+  done <<< "$out"
+  return 1
+}
+
+# 0 if <a> and <b> are the same reported commit under short-sha truncation -
+# either string is a literal prefix of the other. Purely a string comparison
+# between two daemon-reported values (never local git), so it works
+# regardless of which side happens to be the longer/shorter form.
+sha_prefix_match() {  # <a> <b>
+  local a=$1 b=$2
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  case "$a" in "$b"*) return 0 ;; esac
+  case "$b" in "$a"*) return 0 ;; esac
+  return 1
+}
+
+# Coarse status word ("running"/"completed"/"failed"/"cancelled" - the
+# vocabulary `no-mistakes runs` emits) -> "<state>\t<detail>". The single
+# owner so the RUN_SOURCE=coarse path below and the supersession guard fold
+# the same word to the same verdict instead of drifting apart.
+coarse_state_for_status() {  # <status-word>
+  case "$1" in
+    running)   printf 'working\tvalidating (background run)' ;;
+    completed) printf 'done\trun completed' ;;
+    failed)    printf 'failed\trun failed' ;;
+    cancelled) printf 'failed\trun cancelled' ;;
+    *)         printf 'unknown\truns list status: %s' "$1" ;;
+  esac
+}
+
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -434,10 +500,23 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# Set when a run lookup was ATTEMPTED but produced nothing to read at all -
+# never when it succeeded and simply found no attributable run. The real CLI
+# always answers in text even when a repo genuinely has no runs yet
+# ("runs: 0 runs yet in this repository", verified against the installed
+# no-mistakes v1.57.0), so a truly empty capture means the query itself did
+# not complete (a bounded timeout, or a crash whose stderr fm_nm_run_checked
+# discards) - not a confirmed absence of any run. The status-log fallback
+# below downgrades a terminal (done/failed) log verb to unknown in this case:
+# a live run could exist and simply not have been observed.
+RUN_LOOKUP_INCONCLUSIVE=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
+  if [ -z "$RUN_OUT" ]; then
+    RUN_LOOKUP_INCONCLUSIVE=1
+  fi
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     # Head equality, or the pipeline-owned-active exemption: while the
@@ -481,13 +560,9 @@ if [ "$HAVE_RUN" = 1 ]; then
     # surfaced by each supervisor's span classification (fm-classify-lib.sh's
     # status_span_first_actionable) regardless of this coarse-vs-full
     # distinction, so a real gate is never silently missed.
-    case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-      *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
-    esac
+    coarse_map=$(coarse_state_for_status "$COARSE_STATUS")
+    RUN_STATE=${coarse_map%%$'\t'*}
+    RUN_DETAIL=${coarse_map#*$'\t'}
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
@@ -544,6 +619,38 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=not-ready
             ;;
         esac
+      fi
+    fi
+
+    # Supersession guard: a done/failed verdict from THIS bare axi-status
+    # answer is authoritative only when it is genuinely the branch's most
+    # recent run. After custody recovery from an invalidated run, the crew's
+    # worktree HEAD sits exactly at that run's own recorded head - that is
+    # what "custody returned" means - so the head-equality match above binds
+    # it even while a fresh retry is already active on the same branch: bare
+    # `axi status` is documented as "active (or most recent)" but is not
+    # proven to always prefer a just-started active run over one whose head
+    # happens to equal the query context. Cross-check the actual newest-first
+    # runs list: when its topmost row for this branch names a DIFFERENT run
+    # that is still non-terminal, the verdict just computed is superseded -
+    # fold to that live run's state via the one coarse-mapping owner rather
+    # than trust a terminal verdict a fresher run has already moved past. No
+    # newer row, or an unreadable runs list, leaves the terminal verdict
+    # untouched: a genuinely failed run with nothing later still surfaces failed.
+    if [ "$RUN_STATE" = "done" ] || [ "$RUN_STATE" = failed ]; then
+      this_run_head=$(strip_quotes "$(nm_field head)")
+      if [ -n "$this_run_head" ]; then
+        run_top=$(nm_runs_list_top_for_branch "$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")" "$CREW_BRANCH") || run_top=""
+        if [ -n "$run_top" ]; then
+          run_top_status=${run_top%% *}
+          run_top_sha=${run_top#* }
+          if [ "$run_top_status" = running ] && ! sha_prefix_match "$this_run_head" "$run_top_sha"; then
+            coarse_map=$(coarse_state_for_status "$run_top_status")
+            RUN_STATE=${coarse_map%%$'\t'*}
+            RUN_DETAIL="${coarse_map#*$'\t'}${SEP}superseded a terminal run for this branch"
+            RUN_SOURCE=coarse
+          fi
+        fi
       fi
     fi
   fi
@@ -617,7 +724,16 @@ fi
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
-  if [ "$LOG_STATE" != unknown ]; then
+  if [ "$LOG_STATE" = "done" ] || [ "$LOG_STATE" = failed ]; then
+    # A terminal log line is exactly the verdict a live-but-unobserved run
+    # could contradict: when the run lookup above never completed (see
+    # RUN_LOOKUP_INCONCLUSIVE), trusting it risks the same confident-wrong
+    # terminal verdict as a superseded run-step, just from the weaker source.
+    if [ "$RUN_LOOKUP_INCONCLUSIVE" = 1 ]; then
+      emit unknown none "status-log reports $LOG_STATE but the no-mistakes run lookup did not complete; cannot confirm no run is live"
+    fi
+    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+  elif [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
 fi

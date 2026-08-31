@@ -1030,6 +1030,53 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+# --- inconclusive run lookup must not hand authority to a stale terminal log
+# line (the same failure family as the head-equality supersession above: weak
+# evidence winning because a stronger source's lookup did not complete,
+# rather than because it genuinely found no run). A truly empty `axi status`
+# capture is never what a real no-mistakes repo with zero runs returns (the
+# CLI answers in text, "runs: 0 runs yet in this repository", verified
+# against v1.57.0) - it is what a bounded timeout or a discarded-stderr crash
+# looks like, so it must not be read as "confirmed no run".
+test_inconclusive_run_lookup_does_not_trust_stale_done_log() {
+  reset_fakes
+  local d; d=$(new_case inconclusive-done)
+  make_repo_on_branch "$d/wt" fm/feat-inconclusive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/inc.meta" "window=fm:fm-inc" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: implemented X\n' > "$d/state/inc.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" inc
+  local out; out=$(run_crew_state "$d" inc)
+  assert_not_contains "$out" "state: done" "a stale done: line must not win over an inconclusive run lookup"
+  assert_contains "$out" "state: unknown" "an inconclusive lookup is reported as unknown, not a confident verdict"
+  assert_not_contains "$out" "source: status-log" "the stale log line is not used as the state source here"
+  pass "an inconclusive run lookup does not let a stale done: log outrank a possibly-live run"
+}
+
+# Negative control: when the CLI genuinely and definitively reports no runs
+# for the repository at all (the real "runs: 0 runs yet" shape, not an empty
+# capture), the status-log fallback is unaffected - the guard must not turn
+# every ordinary pre-validation crew into `unknown`.
+test_genuinely_no_runs_repo_still_uses_status_log() {
+  reset_fakes
+  local d; d=$(new_case genuinely-no-runs)
+  make_repo_on_branch "$d/wt" fm/feat-norun
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/norun.meta" "window=fm:fm-norun" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: implemented X\n' > "$d/state/norun.status"
+  FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" norun
+  local out; out=$(run_crew_state "$d" norun)
+  assert_contains "$out" "state: done" "a genuinely run-free repo still trusts the status log"
+  assert_contains "$out" "source: status-log" "the done verdict is status-log sourced"
+  pass "a definitive no-runs answer still uses the status-log fallback"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -1459,6 +1506,80 @@ test_failed_run_with_no_later_run_still_surfaces() {
   pass "a genuinely failed run with no later run is not hidden"
 }
 
+# --- Supersession by head EQUALITY (the 2026-08-31 infra_q-phase0-governance
+# incident) --------------------------------------------------------------
+# T1 (above) covers a live run whose head does NOT match the worktree (the
+# pipeline-owned exemption). This is the other direction: after custody
+# recovery from an invalidated run, "custody returned" means the crew's
+# worktree HEAD sits exactly at the invalidated run's own recorded head - so
+# a bare `axi status` answer for that TERMINAL run binds through ordinary
+# head EQUALITY, no exemption involved, while a fresh retry is already active
+# on the very same branch. Fixture is the verbatim `no-mistakes axi status
+# --run 01M1B2K2D07DB510ZW478TDX4V` capture from the real incident (head
+# replaced with the worktree's own HEAD, which is what custody return means),
+# confirmed against the real installed no-mistakes CLI (v1.57.0) rather than
+# assumed from field names.
+run_failed_custody_recovered() {  # <branch> <head>
+  cat <<EOF
+run:
+  id: "01M1B2K2D07DB510ZW478TDX4V"
+  branch: $1
+  status: failed
+  head: $2
+  findings: 1 auto-fix
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,16
+    rebase,completed,0,984
+    review,skipped,1,601802
+    test,completed,0,216541
+    document,completed,0,157146
+    lint,completed,0,21
+    push,failed,0,22
+    pr,pending,0,0
+    ci,pending,0,0
+outcome: failed
+error: "step push failed: refusing to push: run has no durably recorded review-approved head"
+EOF
+}
+
+test_head_equal_superseded_failed_run_beats_live_run() {
+  reset_fakes
+  local d short; d=$(new_case gov-custody-recovered)
+  make_repo_on_branch "$d/wt" fm/infra_q-phase0-governance
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gov.meta" "window=fm:fm-gov" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_custody_recovered fm/infra_q-phase0-governance "$short")"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/infra_q-phase0-governance f0f0f0f0  2026-08-31 05:10
+  failed     fm/infra_q-phase0-governance ${short}  2026-08-31 04:52
+EOF
+)"
+  local out; out=$(run_crew_state "$d" gov)
+  assert_not_contains "$out" "state: failed" "a superseded failed run whose head equals the worktree must not surface as failed"
+  assert_contains "$out" "state: working" "the live retry on the same branch must be reported instead"
+  assert_contains "$out" "source: run-step" "the live retry is still run-step sourced"
+  pass "a superseded failed run bound by head equality is not surfaced over a live retry"
+}
+
+# Negative control: the SAME superseded-looking TOON, but the runs list
+# proves there really is no later run - the guard must not manufacture a
+# live run that does not exist.
+test_head_equal_genuinely_failed_no_later_run_still_surfaces() {
+  reset_fakes
+  local d short; d=$(new_case gov-genuine-failure)
+  make_repo_on_branch "$d/wt" fm/infra_q-phase0-governance
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gov.meta" "window=fm:fm-gov" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_custody_recovered fm/infra_q-phase0-governance "$short")"
+  FM_FAKE_RUNS_LIST="  failed     fm/infra_q-phase0-governance ${short}  2026-08-31 04:52"
+  local out; out=$(run_crew_state "$d" gov)
+  assert_contains "$out" "state: failed" "with no later run on the branch the terminal verdict still surfaces"
+  assert_contains "$out" "source: run-step" "the genuine failure is run-step sourced"
+  pass "the supersession guard does not hide a genuine failure with no later run"
+}
+
 # The coarse runs-list scan: an ACTIVE row for this branch at an unresolvable
 # head is unknown attribution and must STOP the scan, never fall through onto
 # the older failed row (axi status answers another branch here, so attribution
@@ -1583,6 +1704,8 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_inconclusive_run_lookup_does_not_trust_stale_done_log
+test_genuinely_no_runs_repo_still_uses_status_log
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
@@ -1602,6 +1725,8 @@ test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_pipeline_owned_active_run_beats_superseded_failed_row
 test_failed_run_with_no_later_run_still_surfaces
+test_head_equal_superseded_failed_run_beats_live_run
+test_head_equal_genuinely_failed_no_later_run_still_surfaces
 test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_non_pipeline_owned_unresolvable_head_not_attributed
 test_pipeline_owned_terminal_run_not_exempt
