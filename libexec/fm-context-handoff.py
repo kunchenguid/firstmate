@@ -16,6 +16,7 @@ capture, ordinary Vault note during sealing, credential store, or auth state.
 from __future__ import annotations
 
 import argparse
+import ast
 import ctypes
 import errno
 import fcntl
@@ -61,11 +62,13 @@ MAX_HOOK_BYTES = 1024 * 1024
 MAX_CORE_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_TRANSACTION_BUNDLE_BYTES = 128 * 1024
 MAX_TRANSACTION_DEPENDENCY_BYTES = 8 * 1024 * 1024
+MAX_ORPHAN_TRANSACTION_RUNTIMES = 8
 MAX_TRANSACTION_WRITES = 16
 MAX_COMPACTION_RECORDS = 32
 HERDR_PROBE_TIMEOUT_SECONDS = 3.0
 HERDR_CAPABILITY_TIMEOUT_SECONDS = 1.0
 HERDR_PROMPT_TIMEOUT_SECONDS = 3.0
+DELIVERY_ACK_MARGIN_SECONDS = 1.5
 PROMPT_TEXT = "/firstmate-context-handoff:consume"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 RECORD_ID = re.compile(r"^handoff-[0-9a-f]{48}$")
@@ -79,6 +82,7 @@ ELIGIBLE_SENSITIVITY_CLASS = "ordinary-project-context"
 TRIGGERS = {"manual", "threshold", "overflow"}
 SOURCE_HARNESSES = {"pi", "claude"}
 DISPOSITIONS = {"duplicate", "not-durable", "not-allowed", "needs-captain"}
+SYNTHETIC_TRANSACTION_FIXTURE = ROOT / "tests" / "fixtures" / "context-handoff-transaction-core.sh"
 FORBIDDEN_SOURCE_PARTS = {
     ".raw",
     "attachments",
@@ -518,6 +522,7 @@ def state_lock(layout: StateLayout) -> Iterator[None]:
     try:
         checkpoint("before-state-lock")
         fcntl.flock(fd, fcntl.LOCK_EX)
+        recover_transaction_runtime_snapshots(layout)
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1738,7 +1743,11 @@ def command_compaction_outcome(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "unbound-outcome"}
     result = mark_compaction(home, bindings, args.outcome == "success", trigger, str(event.get("reason") or args.outcome))
     if args.outcome == "success":
-        delivery = deliver_pending(home)
+        raw_deadline = event.get("adapter_deadline_epoch_ms")
+        deadline: float | None = None
+        if isinstance(raw_deadline, (int, float)):
+            deadline = float(raw_deadline) / 1000.0 if float(raw_deadline) <= time.time() * 1000.0 + 15_000.0 else time.time()
+        delivery = deliver_pending(home, deadline_epoch=deadline)
         result["delivery"] = delivery.get("status")
     return result
 
@@ -1971,7 +1980,7 @@ def supports_atomic_generation_prompt(herdr: Path) -> bool:
     return "--expected-agent-session" in help_text.replace(",", " ").split()
 
 
-def deliver_pending(home: Path) -> dict[str, Any]:
+def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[str, Any]:
     config = load_config(home)
     if not config_enabled(config, "delivery_enabled"):
         return {"status": "disabled"}
@@ -1987,6 +1996,12 @@ def deliver_pending(home: Path) -> dict[str, Any]:
         if not pending:
             return {"status": "nothing-pending"}
         record_id = pending[0]
+        minimum_budget = HERDR_PROBE_TIMEOUT_SECONDS + HERDR_CAPABILITY_TIMEOUT_SECONDS + HERDR_PROMPT_TIMEOUT_SECONDS + DELIVERY_ACK_MARGIN_SECONDS
+        if deadline_epoch is not None and deadline_epoch - time.time() < minimum_budget:
+            reason = "delivery-deadline-insufficient"
+            update_queue(layout, record_id, reason=reason)
+            write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
+            return {"status": "pending", "reason": reason, "pending_count": len(pending)}
         ready, reason, herdr, session_value = probe_recipient(config)
         if not ready:
             update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
@@ -1995,6 +2010,11 @@ def deliver_pending(home: Path) -> dict[str, Any]:
         if not session_value or not supports_atomic_generation_prompt(herdr):
             reason = "recipient-atomic-generation-prompt-unsupported"
             update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
+            write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
+            return {"status": "pending", "reason": reason, "pending_count": len(pending)}
+        if deadline_epoch is not None and deadline_epoch - time.time() < HERDR_PROMPT_TIMEOUT_SECONDS + DELIVERY_ACK_MARGIN_SECONDS:
+            reason = "delivery-deadline-insufficient"
+            update_queue(layout, record_id, reason=reason)
             write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
             return {"status": "pending", "reason": reason, "pending_count": len(pending)}
         recipient = config["recipient"]
@@ -2188,8 +2208,15 @@ def require_consumer_binding(home: Path, config: Mapping[str, Any]) -> None:
     require_active_process_binding(config, layout)
 
 
-def compaction_binding_path(layout: StateLayout, config: Mapping[str, Any]) -> Path:
-    return layout.bindings / f"compaction-{endpoint_binding_key(config)}.json"
+def compaction_binding_path(layout: StateLayout, config: Mapping[str, Any], capability: str | None = None) -> Path:
+    process_capability = capability or current_process_capability()
+    if not HEX64.fullmatch(process_capability):
+        raise HandoffError("PROCESS_CAPABILITY", "Claude compaction capability is invalid")
+    return layout.bindings / f"compaction-{endpoint_binding_key(config)}-{process_capability}.json"
+
+
+def outstanding_compaction_bindings(layout: StateLayout, config: Mapping[str, Any]) -> list[Path]:
+    return sorted(layout.bindings.glob(f"compaction-{endpoint_binding_key(config)}-*.json"))
 
 
 def durable_unlink(path: Path) -> None:
@@ -2211,6 +2238,14 @@ def _persist_compaction_binding_locked(layout: StateLayout, config: Mapping[str,
         envelope, actual = read_envelope(layout, item["record_id"], config, verify_sources=False)
         if actual != item["envelope_sha256"] or envelope.get("source_harness") != "claude" or envelope.get("source_session_hash") != config["recipient"]["agent_session_sha256"]:
             raise HandoffError("COMPACTION_BINDING", "Claude PreCompact seal binding is inconsistent")
+    existing_paths = outstanding_compaction_bindings(layout, config)
+    if existing_paths:
+        if existing_paths != [path]:
+            raise HandoffError("GENERATION_REPLACED", "another Claude process generation has an unresolved compaction attempt")
+        existing = read_json_file(path, max_bytes=16 * 1024)
+        if not isinstance(existing, dict) or existing.get("process_capability_sha256") != current_process_capability() or normalize_compaction_bindings(existing.get("bindings")) != bindings or existing.get("trigger") != trigger:
+            raise HandoffError("COMPACTION_BINDING", "current Claude process generation already binds another compaction attempt")
+        return
     binding = {
         "schema": COMPACTION_BINDING_SCHEMA,
         "binding_key": endpoint_binding_key(config),
@@ -2444,6 +2479,77 @@ def guard_deny(reason: str) -> dict[str, Any]:
     }
 
 
+def validate_guard_tool_authority(
+    config: Mapping[str, Any],
+    layout: StateLayout,
+    tool_name: str,
+    tool_input: Any,
+) -> None:
+    if not isinstance(tool_input, dict):
+        raise HandoffError("GUARD_INPUT", "mutation-capable MCP tool input must be an object")
+    short_name = tool_name.removeprefix("mcp__firstmate-context-handoff__")
+    if short_name == "register_curated_candidate":
+        if not config_enabled(config, "registration_enabled"):
+            raise HandoffError("REGISTER_DISABLED", "candidate registration is disabled")
+        statement = tool_input.get("statement")
+        source_record = tool_input.get("source_record")
+        source_sha = tool_input.get("source_sha256")
+        supersedes = tool_input.get("supersedes")
+        if not isinstance(statement, str) or not isinstance(source_record, str) or not isinstance(source_sha, str) or not isinstance(supersedes, list):
+            raise HandoffError("GUARD_INPUT", "candidate registration input is incomplete")
+        validate_statement(statement)
+        validate_source_path(config, source_record, source_sha)
+        eligibility_contract(
+            config,
+            source_record=source_record,
+            source_sha256=source_sha,
+            statement=statement,
+            kind=str(tool_input.get("kind", "")),
+            confidence=str(tool_input.get("confidence", "")),
+            sphere=str(tool_input.get("sphere", "")),
+            sensitivity_class=str(tool_input.get("sensitivity_class", "")),
+            provider_class=str(tool_input.get("provider_class", "")),
+            supersedes=[str(value) for value in supersedes],
+        )
+        return
+    record_id = tool_input.get("record_id")
+    if not isinstance(record_id, str) or not RECORD_ID.fullmatch(record_id):
+        raise HandoffError("GUARD_INPUT", "mutation-capable handoff input lacks a valid record ID")
+    envelope, digest = read_envelope(layout, record_id, config)
+    queue = read_queue(layout, record_id)
+    if queue.get("envelope_sha256") != digest or any(item["provider_class"] not in config["allowed_provider_classes"] for item in envelope["items"]):
+        raise HandoffError("PAYLOAD_MISMATCH", "guard record authority no longer matches the durable envelope")
+    require_active_save_authority(layout, record_id, queue)
+    if short_name == "prepare_handoff_save":
+        duplicate_check = tool_input.get("duplicate_check")
+        searched = duplicate_check.get("searched_paths") if isinstance(duplicate_check, dict) else None
+        if not isinstance(duplicate_check, dict) or duplicate_check.get("result") != "no-match" or not isinstance(searched, list) or not searched or len(searched) > 5 or not all(safe_relative_path(path) for path in searched):
+            raise HandoffError("DUPLICATE_CHECK", "Save guard requires the current bounded duplicate-search authority")
+        normalized = validate_save_bundle(config, record_id, tool_input.get("bundle"))
+        reviewed_paths = [write["path"] for write in normalized["writes"]]
+        content_sensitivity = tool_input.get("content_sensitivity")
+        if not isinstance(content_sensitivity, dict) or set(content_sensitivity) != set(reviewed_paths) or any(value != ELIGIBLE_SENSITIVITY_CLASS for value in content_sensitivity.values()):
+            raise HandoffError("SENSITIVITY_CLASSIFICATION", "Save guard requires current ordinary-context authority for every path")
+        return
+    if short_name == "record_curation_disposition":
+        disposition = tool_input.get("disposition")
+        rationale = tool_input.get("rationale")
+        if disposition not in DISPOSITIONS or not isinstance(rationale, str) or not 1 <= len(rationale) <= 500:
+            raise HandoffError("DISPOSITION_INPUT", "curation disposition guard input is invalid")
+        validate_statement(rationale)
+        return
+    if short_name != "commit_handoff_save":
+        raise HandoffError("MCP_TOOL", "unknown mutation-capable handoff tool")
+    approval_sha = tool_input.get("approval_sha256")
+    if not isinstance(approval_sha, str) or not HEX64.fullmatch(approval_sha):
+        raise HandoffError("GUARD_INPUT", "Save commit lacks a valid approval binding")
+    approval = load_approval(layout, record_id, approval_sha)
+    require_active_save_authority(layout, record_id, queue, approval)
+    bundle_path = Path(str(approval.get("bundle_path", "")))
+    if approval.get("dependency_manifest_sha256") != validate_transaction_manifest(config["transaction"])[2] or sha256_file(bundle_path, max_bytes=MAX_TRANSACTION_BUNDLE_BYTES) != approval.get("bundle_file_sha256"):
+        raise HandoffError("SAVE_AUTHORITY_REVOKED", "Save commit approval no longer binds current reviewed bytes")
+
+
 def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any] | None:
     if not config_enabled(config, "consumer_enabled"):
         return None
@@ -2462,9 +2568,15 @@ def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, 
         try:
             if not isinstance(session_id, str) or hash_session("claude", session_id) != config["recipient"]["agent_session_sha256"]:
                 raise HandoffError("CONSUMER_SESSION", "hook session is not the configured Claude generation")
-            require_consumer_binding(home, config)
+            layout = StateLayout(home)
+            with state_lock(layout):
+                current_config = current_consumer_config(home)
+                if current_config != config:
+                    raise HandoffError("CONFIG_CHANGED", "guard configuration changed before authority validation")
+                require_consumer_binding(home, current_config)
+                validate_guard_tool_authority(current_config, layout, tool_name, payload.get("tool_input"))
         except HandoffError:
-            return guard_deny("The mutation-capable handoff tool is not bound to this exact live hook session and process generation.")
+            return guard_deny("The mutation-capable handoff tool is not bound to current source, queue, approval, hook, and recipient authority.")
     return None
 
 
@@ -2505,8 +2617,25 @@ def validate_transaction_manifest(transaction: Mapping[str, Any]) -> tuple[Path,
     required = {core_relative}
     if not (root / core_relative).is_file() or not (root / module_relative).is_file():
         raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint or module is not a regular file")
-    if core_relative != module_relative:
+    if core_relative == module_relative:
+        if os.environ.get("FM_HANDOFF_TESTING") != "1" or core.resolve(strict=True) != SYNTHETIC_TRANSACTION_FIXTURE.resolve(strict=True):
+            raise HandoffError("CONFIG_TRANSACTION", "same-file transaction authority is limited to the tracked synthetic fixture")
+    else:
+        if core_relative != "scripts/claude-obsidian.py" or module_relative != "claude_obsidian/transaction.py":
+            raise HandoffError("CONFIG_TRANSACTION", "production transaction paths must bind the installed claude-obsidian entrypoint and package")
         module_root = (root / module_relative).parent
+        try:
+            parsed_core = ast.parse((root / core_relative).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SyntaxError) as exc:
+            raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint cannot be structurally validated") from exc
+        imports_cli = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "claude_obsidian.cli"
+            and any(alias.name == "main" for alias in node.names)
+            for node in ast.walk(parsed_core)
+        )
+        if not imports_cli or module_root.name != "claude_obsidian":
+            raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint does not execute the configured package closure")
         for path in sorted(module_root.rglob("*.py")):
             if path.is_symlink() or not path.is_file():
                 raise HandoffError("CONFIG_TRANSACTION", "transaction package contains an unsafe Python dependency")
@@ -2519,6 +2648,28 @@ def validate_transaction_manifest(transaction: Mapping[str, Any]) -> tuple[Path,
     return root, entries, sha256_bytes(canonical_json(normalized)), core_relative, module_relative
 
 
+def recover_transaction_runtime_snapshots(layout: StateLayout) -> None:
+    candidates = sorted(
+        path
+        for path in layout.bindings.iterdir()
+        if re.fullmatch(r"\.transaction-runtime-[a-z0-9_]+", path.name)
+    )
+    overflow = len(candidates) > MAX_ORPHAN_TRANSACTION_RUNTIMES
+    changed = False
+    for path in candidates[:MAX_ORPHAN_TRANSACTION_RUNTIMES]:
+        if path.is_symlink() or not path.is_dir():
+            raise HandoffError("TRANSACTION_RUNTIME_UNSAFE", "orphan transaction runtime is not a private directory")
+        info = path.stat()
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise HandoffError("TRANSACTION_RUNTIME_UNSAFE", "orphan transaction runtime is not private")
+        shutil.rmtree(path)
+        changed = True
+    if changed:
+        fsync_directory(layout.bindings)
+    if overflow:
+        raise HandoffError("TRANSACTION_RUNTIME_BACKPRESSURE", "orphan transaction runtime recovery exceeded its bounded batch")
+
+
 @contextmanager
 def transaction_runtime(config: Mapping[str, Any], layout: StateLayout) -> Iterator[tuple[Path, Path, Path, str]]:
     transaction = config["transaction"]
@@ -2526,6 +2677,7 @@ def transaction_runtime(config: Mapping[str, Any], layout: StateLayout) -> Itera
     if not python_path.is_absolute() or path_has_symlink(python_path) or not python_path.resolve(strict=True).is_file():
         raise HandoffError("PYTHON_IDENTITY", "transaction interpreter binding is unavailable")
     root, entries, manifest_sha, core_relative, module_relative = validate_transaction_manifest(transaction)
+    recover_transaction_runtime_snapshots(layout)
     snapshot = Path(tempfile.mkdtemp(prefix=".transaction-runtime-", dir=layout.bindings))
     os.chmod(snapshot, 0o700)
     total = 0
@@ -2810,10 +2962,9 @@ def verify_completed_transaction(home: Path, config: Mapping[str, Any], record_i
     result = read_json_file(result_path, max_bytes=8 * 1024 * 1024, require_private=False)
     if not isinstance(journal, dict) or not isinstance(result, dict):
         raise HandoffError("TRANSACTION_RESULT", "transaction journal or result is invalid")
-    common = (
+    correlated = (
         journal.get("schema") == TRANSACTION_JOURNAL_SCHEMA
         and result.get("schema") == TRANSACTION_RESULT_SCHEMA
-        and journal.get("state") == "complete"
         and result.get("status") == "complete"
         and journal.get("operation_id") == result.get("operation_id") == operation_id
         and journal.get("operation_type") == result.get("operation_type") == "save"
@@ -2821,7 +2972,9 @@ def verify_completed_transaction(home: Path, config: Mapping[str, Any], record_i
         and journal.get("approval_sha256") == result.get("approval_sha256") == approval.get("approval_sha256")
         and journal.get("expanded_bundle_sha256") == result.get("expanded_bundle_sha256")
     )
-    if not common:
+    if correlated and journal.get("state") != "complete":
+        raise HandoffError("TRANSACTION_RECOVERY_PENDING", "transaction result is durable before its correlated journal completion")
+    if not correlated or journal.get("state") != "complete":
         raise HandoffError("TRANSACTION_BINDING", "transaction result does not match its reviewed approval binding")
     changed = result.get("changed_paths")
     hashes = result.get("hashes")
@@ -2906,7 +3059,7 @@ def find_completed_approval(home: Path, config: Mapping[str, Any], record_id: st
     try:
         return verify_completed_transaction(home, config, record_id, approval)
     except HandoffError as exc:
-        if exc.code in {"TRANSACTION_INCOMPLETE", "TRANSACTION_LOCK"}:
+        if exc.code in {"TRANSACTION_INCOMPLETE", "TRANSACTION_LOCK", "TRANSACTION_RECOVERY_PENDING"}:
             return None
         raise
 
