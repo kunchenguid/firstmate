@@ -629,7 +629,7 @@ const r1 = await report.execute("call-1", { task: "task-9", verdict: "routine", 
 if (r1.isError) throw new Error(`routine report failed: ${JSON.stringify(r1)}`);
 if (sentToMain.length !== 1) throw new Error("routine report did not merge exactly one note");
 if (sentToMain[0].message.customType !== "fm-branch-merge") throw new Error("merge note has the wrong custom type");
-if (sentToMain[0].options.triggerTurn) throw new Error("routine idle merge must not trigger a turn");
+if (sentToMain[0].options.triggerTurn !== false) throw new Error("routine idle merge must explicitly disable turn triggering");
 if (sentToMain[0].options.deliverAs) throw new Error("routine idle merge must append immediately");
 fire("agent_start", {});
 await report.execute("call-2", { task: "task-9", verdict: "routine", summary: "still healthy" }, undefined, undefined, {});
@@ -640,8 +640,8 @@ if (sentToMain.length !== 1) {
 }
 fire("agent_end", {});
 fire("agent_settled", {}, { isIdle: () => true });
-if (sentToMain[1].options.deliverAs || sentToMain[1].options.triggerTurn) {
-  throw new Error(`a released routine note must append without steering or opening a turn: ${JSON.stringify(sentToMain[1].options)}`);
+if (sentToMain[1].options.deliverAs || sentToMain[1].options.triggerTurn !== false) {
+  throw new Error(`a released routine note must explicitly disable turn triggering so it cannot steer or open a turn: ${JSON.stringify(sentToMain[1].options)}`);
 }
 await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "PR https://example.com/pr/9 checks green, ready for review" }, undefined, undefined, {});
 if (sentToMain[2].options.triggerTurn !== true || sentToMain[2].options.deliverAs !== "followUp") {
