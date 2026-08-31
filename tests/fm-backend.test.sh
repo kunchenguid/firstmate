@@ -143,29 +143,16 @@ resolve_permissive_tmux_kill_ref() {
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
 # when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-cursor-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-timeout-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-lease-lib.sh fm-decision-hold.sh fm-captain-hold.sh fm-backend.sh fm-backend-hometag-lib.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
-# A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
-OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
-OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
-
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root bin f
+  local name=$1 root archive
   root="$TMP_ROOT/$name"
-  bin="$root/bin"
-  mkdir -p "$bin"
-  for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    cp "$ROOT/bin/$f" "$bin/$f"
-  done
-  for f in $OLD_BIN_OPTIONAL_SIBLINGS; do
-    [ -f "$ROOT/bin/$f" ] || continue
-    cp "$ROOT/bin/$f" "$bin/$f"
-  done
-  cp -R "$ROOT/bin/backends" "$bin/backends"
-  git -C "$ROOT" show "$BASE_REF:bin/backends/tmux.sh" > "$bin/backends/tmux.sh"
-  for f in $OLD_BIN_REFACTORED; do
-    git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
-    chmod +x "$bin/$f"
-  done
+  archive="$root/bin.tar"
+  mkdir -p "$root"
+  git -C "$ROOT" archive --format=tar "$BASE_REF" bin > "$archive" \
+    || fail "old-bin shim: could not archive bin/ from $BASE_REF"
+  tar -xf "$archive" -C "$root" \
+    || fail "old-bin shim: could not extract bin/ from $BASE_REF"
+  rm -f "$archive"
   printf '%s\n' "$root"
 }
 

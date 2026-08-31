@@ -1279,14 +1279,14 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         currentState: "captain hold open",
         blocker: cleanProse(record.hold_reason),
         recommendation: looksAnswered
-          ? "Confirm the recorded answer so decision-hold-lifecycle can reconcile the still-open hold."
+          ? "Confirm the recorded answer so captain-hold-lifecycle can reconcile the still-open call."
           : aged
             ? "Re-evaluate this aged captain hold and answer it or explicitly keep it open."
             : "Answer the recorded captain hold.",
         why: looksAnswered
-          ? "the open hold's own text carries an explicit answer marker; decision lifecycle still owns closure"
+          ? "the open hold's own text carries an explicit answer marker; captain-hold-lifecycle still owns closure"
           : aged
-            ? "captain hold remains open but is at least seven days old; decision lifecycle still owns closure"
+            ? "captain hold remains open but is at least seven days old; captain-hold-lifecycle still owns closure"
             : "captain hold with no unresolved blockers - only Pedro can clear it",
       });
     }

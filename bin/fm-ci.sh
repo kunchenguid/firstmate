@@ -187,7 +187,15 @@ ensure_tools() {
 
 run_invariants() {
   local tracked
-  [ "$(readlink CLAUDE.md)" = AGENTS.md ] || die 'CLAUDE.md must link to AGENTS.md'
+  [ -f CLAUDE.md ] && [ ! -L CLAUDE.md ] \
+    || die 'CLAUDE.md must be a regular @AGENTS.md pointer'
+  if ! cmp -s CLAUDE.md - <<'EOF'
+<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
+@AGENTS.md
+EOF
+  then
+    die 'CLAUDE.md must contain the canonical @AGENTS.md pointer'
+  fi
   [ "$(readlink .claude/skills)" = ../.agents/skills ] \
     || die '.claude/skills must link to ../.agents/skills'
   tracked=$(git ls-files -- data state config projects .no-mistakes)

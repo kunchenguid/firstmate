@@ -10,7 +10,11 @@ fm_ensure_pyyaml || fail "python3 PyYAML is required to parse workflow policy"
 test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback() {
   if ! python3 - "$ROOT" <<'PY'
 import pathlib
+import os
+import re
+import subprocess
 import sys
+import tempfile
 
 try:
     import yaml
@@ -133,6 +137,61 @@ for job_id in (
 ):
     assert ci["jobs"][job_id]["if"] == full_ci_gate, job_id
 assert ci["jobs"]["tests-timing-aggregate"]["if"] == f"always() && ({full_ci_gate})"
+for job_id in ("tests-portable-parallel-1", "tests-portable-parallel-2"):
+    assert ci["jobs"][job_id]["timeout-minutes"] == 15, job_id
+portable_commands = {
+    job_id: next(
+        step["run"]
+        for step in ci["jobs"][job_id]["steps"]
+        if step.get("name", "").startswith("Run portable parallel shard")
+    )
+    for job_id in ("tests-portable-parallel-1", "tests-portable-parallel-2")
+}
+
+def execute_portable_command(job_id, expected_lane, expected_index, expected_jobs):
+    with tempfile.TemporaryDirectory(prefix="fm-water7-command-") as directory:
+        root = pathlib.Path(directory)
+        runner = root / "bin/fm-test-run.sh"
+        runner.parent.mkdir()
+        args_file = root / "runner-args"
+        runner.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "printf '%s\\0' \"$@\" > \"$FM_WATER7_ARGS\"\n",
+            encoding="utf-8",
+        )
+        runner.chmod(0o755)
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        env = os.environ.copy()
+        env.update({"RUNNER_TEMP": str(runner_temp), "FM_WATER7_ARGS": str(args_file)})
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", portable_commands[job_id]],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (job_id, result.stdout, result.stderr)
+        args = args_file.read_bytes().split(b"\0")[:-1]
+        args = [arg.decode() for arg in args]
+        expected_json = runner_temp / "fm-test" / f"fm-test-timing-{expected_lane}.json"
+        expected_args = ["--lane", expected_lane, "--json", str(expected_json)]
+        if expected_jobs != 1:
+            expected_args[0:0] = ["--jobs", str(expected_jobs)]
+        assert args == expected_args, (job_id, args)
+        assert expected_json.parent.is_dir(), (job_id, expected_json)
+        match = re.fullmatch(r"portable-parallel-(\d+)", args[args.index("--lane") + 1])
+        assert match and int(match.group(1)) == expected_index, (job_id, args)
+        return expected_lane
+
+
+executed_lanes = [
+    execute_portable_command("tests-portable-parallel-1", "portable-parallel-1", 1, 2),
+    execute_portable_command("tests-portable-parallel-2", "portable-parallel-2", 2, 1),
+]
+assert sorted(executed_lanes) == ["portable-parallel-1", "portable-parallel-2"]
+assert [ci["jobs"][job_id]["timeout-minutes"] for job_id in portable_commands] == [15, 15]
 
 required_tool_step = {
     "name": "Install required test tools",
@@ -346,10 +405,65 @@ Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
 
 <!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
 
-  out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=42 bash -c "$script" 2>&1) || rc=$?
+  out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=42 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
   rc=${rc:-0}
   [ "$rc" -eq 0 ] || fail "signed no-mistakes PR body was rejected: rc=$rc out=$out"
   assert_contains "$out" "Found no-mistakes signature in PR #42 body."
+
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"stale123","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
+  rc=0
+  out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=45 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "workflow accepted a stale string head_sha: rc=$rc out=$out"
+  assert_contains "$out" "not bound to this pull request head" \
+    "workflow stale-string head_sha failure was not explicit"
+
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
+  rc=0
+  out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=46 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "workflow accepted an attestation without head_sha: rc=$rc out=$out"
+  assert_contains "$out" "not bound to this pull request head" \
+    "workflow missing-head_sha failure was not explicit"
+
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":2222,"steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
+  rc=0
+  out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=45 PR_HEAD_SHA=2222 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "workflow accepted a numeric head_sha matching the textual PR head: rc=$rc out=$out"
+  assert_contains "$out" "not bound to this pull request head" \
+    "workflow non-string head_sha failure was not explicit"
+
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"review","status":"failed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
+  rc=0
+  out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=43 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "workflow accepted duplicate attestation steps: rc=$rc out=$out"
+  assert_contains "$out" "duplicate step names" \
+    "workflow duplicate-step failure was not explicit"
+
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"},{"status":"completed"}]} -->'
+  rc=0
+  out=$(cd "$ROOT" && PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=44 PR_HEAD_SHA=abc123 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "workflow accepted a malformed attestation step: rc=$rc out=$out"
+  assert_contains "$out" "malformed steps member" \
+    "workflow malformed-step failure was not explicit"
 
   tmp=$(fm_test_tmproot fm-ci-water7-unsigned)
   fakebin="$tmp/fakebin"
@@ -388,10 +502,7 @@ runs = [
     if "run" in step
 ]
 assert len(runs) == 1
-text = runs[0]
-assert "gh api" in text
-assert "attempt" in text
-print(text, end="")
+print(runs[0], end="")
 PY
   ); then
     fail "workflow must poll the live PR body before declaring a signature violation"
@@ -414,12 +525,14 @@ EOF
 
   rc=0
   out=$(
-    PATH="$fakebin:$PATH" \
-    GITHUB_REPOSITORY=pedromuller-del/firstmate \
-    PR_BODY='opened-event snapshot without the signature yet' \
-    PR_AUTHOR=test \
-    PR_NUMBER=88 \
-    bash -c "$script" 2>&1
+    cd "$ROOT" && \
+      PATH="$fakebin:$PATH" \
+      GITHUB_REPOSITORY=pedromuller-del/firstmate \
+      PR_BODY='opened-event snapshot without the signature yet' \
+      PR_AUTHOR=test \
+      PR_NUMBER=88 \
+      PR_HEAD_SHA=abc123 \
+      bash -c "$script" 2>&1
   ) || rc=$?
   [ "$rc" -eq 0 ] || fail "stale opened payload should pass after live poll: rc=$rc out=$out"
   assert_contains "$out" "Live PR body includes the no-mistakes signature"
@@ -437,7 +550,9 @@ make_policy_fixture() {
   cp "$ROOT/bin/fm-composer-lib.sh" "$repo/bin/fm-composer-lib.sh"
   cp "$ROOT/bin/fm-transition-lib.sh" "$repo/bin/fm-transition-lib.sh"
   chmod +x "$repo/bin/fm-ci.sh"
-  ln -s AGENTS.md "$repo/CLAUDE.md"
+  printf '%s\n' \
+    '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
+    '@AGENTS.md' > "$repo/CLAUDE.md"
   ln -s ../.agents/skills "$repo/.claude/skills"
   : > "$repo/AGENTS.md"
 
@@ -687,6 +802,74 @@ EOF
   [ "$(cat "$calls")" = "$expected" ] \
     || fail "Water 7 command policy changed its complete serial order: $(cat "$calls")"
   pass "the command owner runs lint, coverage, portable-parallel-1 with --jobs 2, serial remainder lanes, then real Herdr"
+}
+
+test_policy_requires_a_regular_claude_pointer() {
+  local tmp repo fakebin calls out rc
+  tmp=$(fm_test_tmproot fm-ci-water7-pointer)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  rm "$repo/CLAUDE.md"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  rc=0
+  out=$(run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Water 7 command policy accepted a CLAUDE.md symlink"
+  assert_contains "$out" 'CLAUDE.md must be a regular @AGENTS.md pointer' \
+    "symlink refusal did not name the regular pointer contract"
+  [ ! -e "$calls" ] || fail "an invalid CLAUDE.md pointer reached the test suite"
+
+  rm "$repo/CLAUDE.md"
+  printf '%s\n' '@OTHER.md' > "$repo/CLAUDE.md"
+  rc=0
+  out=$(run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Water 7 command policy accepted a non-canonical pointer"
+  assert_contains "$out" 'CLAUDE.md must contain the canonical @AGENTS.md pointer' \
+    "non-canonical pointer refusal did not name the exact pointer contract"
+  pass "the command owner requires CLAUDE.md to be a regular canonical pointer"
+}
+
+test_workflow_invariant_step_executes_the_regular_claude_pointer_contract() {
+  local tmp repo command out rc
+  tmp=$(fm_test_tmproot fm-ci-workflow-pointer)
+  repo="$tmp/repo"
+  mkdir -p "$repo/.claude" "$repo/.agents/skills"
+  printf '%s\n' 'Project memory.' > "$repo/AGENTS.md"
+  printf '%s\n' \
+    '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
+    '@AGENTS.md' > "$repo/CLAUDE.md"
+  ln -s ../.agents/skills "$repo/.claude/skills"
+  git -C "$repo" init -q
+  command=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import sys
+import yaml
+
+workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+steps = workflow["jobs"]["invariants"]["steps"]
+print(next(step["run"] for step in steps if step.get("name") == "Compatibility pointers must stay intact"), end="")
+PY
+  ) || fail "could not extract the hosted invariant step"
+  out=$(cd "$repo" && bash -c "$command" 2>&1) || rc=$?
+  rc=${rc:-0}
+  [ "$rc" -eq 0 ] || fail "hosted invariant step rejected the canonical pointer: rc=$rc out=$out"
+
+  rm "$repo/CLAUDE.md"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  rc=0
+  out=$(cd "$repo" && bash -c "$command" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "hosted invariant step accepted a CLAUDE.md symlink"
+  assert_contains "$out" 'CLAUDE.md must be a regular @AGENTS.md pointer' \
+    "hosted symlink refusal did not name the regular pointer contract"
+
+  rm "$repo/CLAUDE.md"
+  printf '%s\n' '@OTHER.md' > "$repo/CLAUDE.md"
+  rc=0
+  out=$(cd "$repo" && bash -c "$command" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "hosted invariant step accepted a non-canonical pointer"
+  assert_contains "$out" 'CLAUDE.md must contain the canonical @AGENTS.md pointer' \
+    "hosted non-canonical pointer refusal did not name the exact pointer contract"
+  pass "the hosted invariant step executes the regular canonical CLAUDE.md pointer contract"
 }
 
 test_policy_publishes_nonblocking_timing_summary() {
@@ -1019,7 +1202,9 @@ test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback
 test_herdr_installer_matches_the_presentation_floor
 test_body_compliance_command_distinguishes_signed_from_unsigned_bodies
 test_body_compliance_polls_live_pr_body_when_opened_payload_is_stale
+test_workflow_invariant_step_executes_the_regular_claude_pointer_contract
 test_policy_runs_every_family_serially
+test_policy_requires_a_regular_claude_pointer
 test_policy_runs_lint_serially
 test_policy_runs_pr_fast_lane_before_complete_suite
 test_policy_publishes_nonblocking_timing_summary

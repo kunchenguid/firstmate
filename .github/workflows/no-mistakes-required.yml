@@ -34,6 +34,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
@@ -98,6 +99,49 @@ jobs:
                 echo
                 echo "PR author: ${PR_AUTHOR}"
               } >&2
+              exit 1
+            fi
+            attestation_head=$(printf '%s' "$json" | jq -er 'if (.head_sha | type) == "string" then .head_sha else empty end' 2>/dev/null) || attestation_head=''
+            if [ -z "$attestation_head" ] || [ "$attestation_head" != "$PR_HEAD_SHA" ]; then
+              {
+                echo "::error::The no-mistakes pipeline attestation is not bound to this pull request head."
+                echo
+                echo "The attestation's head_sha (${attestation_head:-missing}) must exactly match the"
+                echo "pull request head (${PR_HEAD_SHA}). An attestation produced for an earlier"
+                echo "commit does not prove this head passed review, test, and document."
+                echo
+                echo "Re-run the pipeline with 'git push no-mistakes' at the current head."
+                echo "See CONTRIBUTING.md for setup and the full workflow."
+                echo
+                echo "PR author: ${PR_AUTHOR}"
+              } >&2
+              exit 1
+            fi
+            echo "Attestation is bound to pull request head ${PR_HEAD_SHA}."
+            malformed_steps=$(printf '%s' "$json" | jq -r '
+              if (.steps | type) != "array" then
+                "steps"
+              elif any(.steps[]; (type != "object") or
+                ((.step | type) != "string") or (.step == "") or
+                ((.status | type) != "string")) then
+                "steps"
+              else
+                empty
+              end
+            ' 2>/dev/null) || malformed_steps='invalid'
+            if [ -n "$malformed_steps" ]; then
+              echo "::error::The no-mistakes pipeline attestation contains a malformed steps member." >&2
+              exit 1
+            fi
+            duplicate_steps=$(printf '%s' "$json" | jq -r '
+              if (.steps | type) == "array" then
+                ([.steps[] | select(type == "object") | .step] | group_by(.)[] | select(length > 1) | .[0])
+              else
+                empty
+              end
+            ' 2>/dev/null) || duplicate_steps='invalid'
+            if [ -n "$duplicate_steps" ]; then
+              echo "::error::The no-mistakes pipeline attestation contains duplicate step names: ${duplicate_steps}." >&2
               exit 1
             fi
             incomplete=''

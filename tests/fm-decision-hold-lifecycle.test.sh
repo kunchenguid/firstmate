@@ -358,7 +358,7 @@ test_visual_review_uses_shared_completion_owner() {
   ' >/dev/null || fail "ended visual review did not leave its durable Captain Call: $json"
   [ ! -e "$home/data/visual-review-decisions.json" ] \
     || fail "visual review created a second decision database"
-  pass "ended visual review follows the same decision-hold completion owner"
+  pass "ended visual review follows the same captain-hold completion owner"
 }
 
 test_none_inventory_and_resolved_prose_do_not_create_holds() {

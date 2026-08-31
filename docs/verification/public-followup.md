@@ -8,7 +8,7 @@ This record supports three active guarantees for promised public replies made th
 2. A home that never opted into the relay pays nothing for any of it.
 3. Delivering a final does not close the public loop: the registration is retained as `state=delivered` until `retire --reason`, session start surfaces an `open-loop` line, and `rechain` can bind follow-on work to the same thread.
 
-[`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-x-mode) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
+[`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
 
 ## Environment

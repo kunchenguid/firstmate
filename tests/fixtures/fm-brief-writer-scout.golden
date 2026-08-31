@@ -56,6 +56,12 @@ The report is the only thing that survives, so anything worth keeping must be in
    The wrapper serializes heavy suites across worktrees; if it reports another suite is running, it is waiting by design, not failing, so do not bypass it or start a duplicate.
 
 # Definition of done
+# Firstmate instruction inbox
+Firstmate steers you through durable message files in '{{FM_HOME}}/state/access-writer-w1.inbox'.
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list '{{FM_HOME}}/state/access-writer-w1.inbox'/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: `mv '{{FM_HOME}}/state/access-writer-w1.inbox'/NNN.msg '{{FM_HOME}}/state/access-writer-w1.inbox'/handled/`.
+The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
+
+# Definition of done
 Write your findings to `{{FM_HOME}}/data/access-writer-w1/report.md`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 When the investigation follows diagnostic-reasoning, include the bounded two-row table contract from `{{FM_ROOT}}/.agents/skills/diagnostic-reasoning/SKILL.md`.

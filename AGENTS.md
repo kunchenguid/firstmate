@@ -52,6 +52,8 @@ Rebuild an absent or stale project registry from the clones before dispatch.
 
 If the session lock cannot be verified, report the exact diagnostic and remain read-only: do not spawn, steer, merge, drain, repair, or otherwise mutate fleet state.
 When locked, reconcile the raw wake records and every `OPEN DECISIONS` entry before continuing; liveness summaries are presence checks, so use `bin/fm-crew-state.sh` when current state matters.
+If the harness shows only a preview and persists the full output to a file, read that file before acting.
+When the digest's `NETWORK CHECKS` section reports checks still in progress, treat none of those as passed until `bin/fm-startup-network.sh report` returns the finished result, while a failed or otherwise actionable result also arrives as a `check: startup-network` wake.
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
@@ -83,6 +85,7 @@ A secondmate's scope drives routing, its project list is non-exclusive, `local-o
 Load `firstmate-coding-guidelines` before routing durable knowledge; it owns placement.
 Firstmate never writes a project's `AGENTS.md`.
 Load `stow` for `/stow` and `gather` only on the captain's explicit request.
+When loaded for `/stow`, it files and corrects only the open work that session is holding, and never reconciles the backlog against repository or PR reality.
 
 ## 7. Task lifecycle
 
@@ -128,6 +131,9 @@ After spawning, confirm the worker is processing the brief, handle any trust dia
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
+`fm-send` is the data plane for text the worker should read; never use its key or text paths for interrupt, exit, or other lifecycle control, because routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
+Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics and never tears down or discards anything.
+When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record at answer time, identically for local and remote workers.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
 Supervise all live work under section 8.
@@ -153,7 +159,7 @@ Complexity alone is not expansion: a difficult correction genuinely required by 
 Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
-Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate
@@ -167,7 +173,10 @@ Load `delivery-completion` before handling a ready PR, landing or cleaning up a 
 ## 8. Supervision protocol
 
 Whenever work is under way, keep exactly one live supervision cycle using the session-start protocol; never use shell `&`, duplicate a healthy cycle, or end a turn blind.
-At the start of each wake-handling turn, drain the durable wake queue before other action, reconcile `OPEN DECISIONS`, and use `bin/fm-crew-state.sh` rather than status history when current state matters.
+At the start of each wake-handling turn, present the durable wake queue before other action; the records remain durable until the handling turn runs the generation-bound `WAKE_ACK_REQUIRED` acknowledgement, and reconcile `OPEN DECISIONS` before continuing.
+Treat any `UNREAD STATUS` section as newly surfaced status that must be read this turn; those lines are not re-printed after that presentation.
+Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
+Use `bin/fm-crew-state.sh` rather than status history when current state matters.
 Follow the emitted wake-specific action, loading `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker.
 Waiting on healthy supervision is silent; no change is not progress, and an idle secondmate is healthy.
 Never broadly kill watchers; repair only through the emitted home-scoped path and never touch unlanded work.
@@ -196,7 +205,7 @@ When the startup reminder says the weekly `/what-to-learn` ritual is overdue, me
 
 `data/backlog.md` is the durable work-item queue; agents and persistent secondmates are not items, and secondmate work belongs in that home's backlog.
 Update it on dispatch, completion, and decisions, then reconsider dependency- or time-blocked work after cleanup and fleet review.
-`decision-hold-lifecycle` owns unresolved investigation or visual-review decisions; `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff.
+`captain-hold-lifecycle` owns unresolved investigation or visual-review captain calls and their completion gate; `decision-hold-lifecycle` remains only a compatibility shim for legacy decision-hold references; load the captain-hold skill before treating an investigation or visual review as complete and before ending a visual review that exposed a captain call; `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff.
 `.tasks.toml`, `docs/configuration.md`, and `tasks-axi --help` own schema and mechanics.
 Notes retain durable identifiers, dependencies, and artifact links, omit volatile copied state, and route reusable knowledge to section 6.
 

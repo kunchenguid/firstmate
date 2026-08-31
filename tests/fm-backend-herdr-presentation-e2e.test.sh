@@ -603,6 +603,7 @@ normalize_meta() {  # <meta>
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
     -e 's|^telemetry_attempt=.*$|telemetry_attempt=<per-attempt-id>|' \
     -e 's|^telemetry_task_root=.*$|telemetry_task_root=<per-attempt-id>|' \
+    -e 's|^spawn_gen=.*$|spawn_gen=<per-spawn-id>|' \
     "$1"
 }
 

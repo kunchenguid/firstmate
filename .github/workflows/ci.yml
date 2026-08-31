@@ -139,9 +139,9 @@ jobs:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
-    # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
-    # a hang tripwire with margin, not the expected healthy end of the lane.
-    timeout-minutes: 10
+    # Measured two-worker wall is ~9 min on the current proven scripts; this cap
+    # is a hang tripwire with margin, not the expected healthy end of the lane.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -169,7 +169,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
+          bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
@@ -183,7 +183,7 @@ jobs:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -466,7 +466,11 @@ jobs:
       - name: Compatibility pointers must stay intact
         run: |
           set -eu
-          [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+          [ -f CLAUDE.md ] && [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a regular @AGENTS.md pointer"; exit 1; }
+          cmp -s CLAUDE.md - <<'EOF' || { echo "::error::CLAUDE.md must contain the canonical @AGENTS.md pointer"; exit 1; }
+          <!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
+          @AGENTS.md
+          EOF
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |

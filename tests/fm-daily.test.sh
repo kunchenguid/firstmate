@@ -338,7 +338,7 @@ test_absent_and_malformed_sources_are_reported_without_failure() {
   mkdir -p "$home/data" "$home/state"
   mkdir "$home/data/backlog.md"
   : > "$home/data/routing-outcomes.jsonl"
-  printf 'not a status event\nworking [key=valid] [corr=123]: correlated event\n' > "$home/state/bad.status"
+  printf 'not a status event\nworking [key=valid] [corr=123]: correlated event\nneeds-decision corr=0123456789abcdef [key=valid]: choose\nresolved corr=0123456789abcdef [key=valid]: chosen\n' > "$home/state/bad.status"
   out=$(FM_ROOT_OVERRIDE="$fixture_root" FM_HOME="$home" FM_TEST_TELEMETRY_FAIL=1 "$DAILY" 2026-08-02) \
     || fail "malformed-source daily report failed"
   assert_contains "$out" "backlog source is unreadable or malformed" "malformed backlog"

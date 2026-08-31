@@ -6,49 +6,49 @@
 ## Verification inputs
 
 The current candidate timings came from the concurrent proof archive recorded in [fm-test-isolation-proof.md](fm-test-isolation-proof.md).
-The 2026-08-20 proof ran 25 candidates with four workers and no failures.
+The 2026-08-30 proof ran 25 candidates with four workers and no failures.
 
 | duration_ms | script |
 |---:|---|
-| 44699 | `tests/fm-pr-merge.test.sh` |
-| 41422 | `tests/fm-arm-pretool-check.test.sh` |
-| 40136 | `tests/fm-x-mode.test.sh` |
-| 37725 | `tests/fm-decision-hold-lifecycle.test.sh` |
-| 32074 | `tests/fm-backend-herdr.test.sh` |
-| 29662 | `tests/fm-test-run.test.sh` |
-| 24513 | `tests/fm-slack-captain-channel.test.sh` |
-| 23769 | `tests/fm-cd-pretool-check.test.sh` |
-| 16205 | `tests/fm-crew-state.test.sh` |
-| 12196 | `tests/fm-herdr-lab.test.sh` |
-| 8576 | `tests/fm-grok-harness.test.sh` |
-| 8386 | `tests/fm-spawn-batch.test.sh` |
-| 5428 | `tests/fm-send-popup-settle.test.sh` |
-| 4438 | `tests/fm-review-diff.test.sh` |
-| 3409 | `tests/fm-send-settle.test.sh` |
-| 3321 | `tests/fm-send-strict.test.sh` |
-| 3239 | `tests/fm-brief.test.sh` |
-| 2586 | `tests/fm-composer-ghost.test.sh` |
-| 2086 | `tests/fm-tmux-submit-busy.test.sh` |
-| 1792 | `tests/fm-lint.test.sh` |
-| 442 | `tests/fm-supervision-instructions.test.sh` |
-| 312 | `tests/fm-ensure-agents-md.test.sh` |
-| 193 | `tests/fm-transition-lib.test.sh` |
-| 103 | `tests/fm-composer-lib.test.sh` |
-| 22 | `tests/fm-pi-primary-types.test.sh` |
+| 257371 | `tests/fm-pr-merge.test.sh` |
+| 405025 | `tests/fm-x-mode.test.sh` |
+| 356616 | `tests/fm-test-run.test.sh` |
+| 165241 | `tests/fm-slack-captain-channel.test.sh` |
+| 69791 | `tests/fm-captain-hold-lifecycle.test.sh` |
+| 67143 | `tests/fm-spawn-batch.test.sh` |
+| 62519 | `tests/fm-backend-herdr.test.sh` |
+| 42102 | `tests/fm-tmux-submit-busy.test.sh` |
+| 36760 | `tests/fm-arm-pretool-check.test.sh` |
+| 36102 | `tests/fm-lint.test.sh` |
+| 27791 | `tests/fm-crew-state.test.sh` |
+| 23417 | `tests/fm-cd-pretool-check.test.sh` |
+| 21747 | `tests/fm-send-strict.test.sh` |
+| 13267 | `tests/fm-herdr-lab.test.sh` |
+| 12618 | `tests/fm-grok-harness.test.sh` |
+| 7777 | `tests/fm-send-popup-settle.test.sh` |
+| 7197 | `tests/fm-composer-ghost.test.sh` |
+| 5487 | `tests/fm-composer-lib.test.sh` |
+| 4967 | `tests/fm-brief.test.sh` |
+| 4409 | `tests/fm-send-settle.test.sh` |
+| 4132 | `tests/fm-review-diff.test.sh` |
+| 3633 | `tests/fm-pi-primary-types.test.sh` |
+| 2842 | `tests/fm-transition-lib.test.sh` |
+| 788 | `tests/fm-supervision-instructions.test.sh` |
+| 770 | `tests/fm-ensure-agents-md.test.sh` |
 
 ## Parallel lanes
 
-The lane membership partition is the 2026-07-29 longest-processing-time assignment over the 24 candidates proven at that time, plus `tests/fm-slack-captain-channel.test.sh`, which was added to the proven set and inserted into `portable-parallel-1` afterwards without a rebalance.
-The 2026-08-20 archive refresh extends concurrent-proof coverage to that member and restates every per-script duration in the table above; it changes no lane membership.
-The estimates below therefore apply the current durations to that fixed partition; they are not a fresh longest-processing-time balance, and neither the partition nor the listed execution order is sorted by the current durations.
+The lane membership partition is the proven-isolated set reported by `bin/fm-test-isolation-proof.sh --list`.
+The 2026-08-30 archive refresh records the current candidate set after replacing the obsolete decision-hold lifecycle candidate with the canonical captain-hold lifecycle candidate.
+`portable-parallel-1` is ordered by the current measured durations so its `--jobs 2` scheduler balances the two workers.
 
-| Lane | Script count | Estimated duration |
-|---|---:|---:|
-| `portable-parallel-1` | 12 | 176651 ms (~176.7 s) |
-| `portable-parallel-2` | 13 | 170083 ms (~170.1 s) |
-| imbalance | | 6568 ms |
+| Lane | Script count | Serial sum | Estimated `--jobs 2` wall |
+|---|---:|---:|---:|
+| `portable-parallel-1` | 12 | 1091581 ms | 546416 ms (~546.4 s) |
+| `portable-parallel-2` | 13 | 547931 ms | 321922 ms (~321.9 s) |
 
 `bin/fm-test-run.sh` contains the exact ordered memberships in `list_portable_parallel_1` and `list_portable_parallel_2`.
+Water 7 invokes `--jobs 2` only for `portable-parallel-1`; `portable-parallel-2` remains serial because its concurrency oracle was rejected.
 
 ## Portable serial remainder
 
@@ -58,9 +58,9 @@ Membership is derived rather than enumerated, so a newly added test lands here b
 
 ## Hosted CI and Water 7 fallback
 
-`.github/workflows/ci.yml` runs the two portable parallel lanes, four serial shards, and real-Herdr family as separate GitHub-hosted `ubuntu-latest` jobs.
+`.github/workflows/ci.yml` runs `portable-parallel-1` with `--jobs 2`, `portable-parallel-2` serially, four serial shards, and the real-Herdr family as separate GitHub-hosted `ubuntu-latest` jobs.
 Shard membership and count remain owned by `bin/fm-test-run.sh`, and CI refuses a matrix count that disagrees with that owner.
-See [verification/ci-portable-parallel-jobs.md](verification/ci-portable-parallel-jobs.md) for the measured oracle evidence.
+The superseded historical Water 7 oracle is retained in [verification/ci-portable-parallel-jobs.md](verification/ci-portable-parallel-jobs.md); current candidate-set evidence is in [fm-test-isolation-proof.md](fm-test-isolation-proof.md).
 If primary CI fails, `.github/workflows/ci-water7-fallback.yml` runs `bin/fm-ci.sh` as one self-hosted Water 7 `Suite`; maintainers may also dispatch it manually.
 That fallback discovers and executes the serial shards sequentially, and admits and validates its verdict through the shared-host load guard.
 Static portability checks run on Linux, while [CONTRIBUTING.md](../CONTRIBUTING.md) records the required local stock-macOS Bash lane rather than adding a hosted macOS dependency.
