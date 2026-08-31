@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
@@ -329,6 +331,35 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_keeps_the_pr_identity_line_terminal() {
+  local dir out rc url head
+  dir=$(new_case poll-identity rl20)
+  add_ship_task "$dir" rl20 claude
+  url=https://github.com/example/repo/pull/20
+  head=0123456789abcdef0123456789abcdef01234567
+  # The exact shape fm-pr-check.sh leaves behind: the armed poll's pr= and
+  # pr_head= identity lines terminate the record, and the watcher's merge
+  # poll validates that identity every cycle. A relaunch rewrite that lets
+  # any non-identity field land after them breaks that validation.
+  {
+    printf '%s\n' "pr=$url"
+    printf '%s\n' "pr_head=$head"
+  } >> "$dir/home/state/rl20.meta"
+
+  out=$(run_control "$dir" rl20 relaunch --note "mid-review relaunch"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a PR-armed task should succeed"$'\n'"$out"
+  fm_pr_metadata_identity_parse "$dir/home/state/rl20.meta" \
+    || fail "the relaunched task record no longer parses as a PR identity, so the armed merge poll is rejected every cycle"
+  [ "$FM_PR_META_URL" = "$url" ] \
+    || fail "the relaunched task record reports the wrong PR identity URL"
+  [ "$FM_PR_META_PROVIDER" = github ] \
+    && [ "$FM_PR_META_HOST" = github.com ] \
+    && [ "$FM_PR_META_PATH" = example/repo ] \
+    && [ "$FM_PR_META_NUMBER" = 20 ] \
+    || fail "the relaunched task record reports the wrong PR identity fields"
+  pass "fm-control relaunch: the replacement record keeps the armed poll's pr identity terminal"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1479,6 +1510,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_the_pr_identity_line_terminal
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

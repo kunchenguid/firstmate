@@ -384,6 +384,38 @@ EOF
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
 }
 
+test_meta_identity_orders_relaunch_fields_before_pr() {
+  local dir state url head
+  dir=$(make_case relaunch-identity-order)
+  state="$dir/home/state"
+  url=https://github.com/example/repo/pull/21
+  head=0123456789abcdef0123456789abcdef01234567
+  # A relaunch rewrite records its transaction marker before the preserved
+  # identity lines, so the armed poll's terminal pr= shape survives and the
+  # merge poll keeps validating the record every cycle. The same marker
+  # landing after pr= is the rejected pollution shape, because anything
+  # other than pr_head= and the x-mode fields after pr= could be a field an
+  # unrelated writer appended to a validated identity.
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    'control_relaunch_tx=3181152.20260831T104354Z.25096' \
+    "pr=$url" \
+    "pr_head=$head"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a relaunch transaction marker before pr= broke the PR identity parse"
+  [ "$FM_PR_META_URL" = "$url" ] \
+    || fail "the pre-pr transaction marker changed the parsed PR identity"
+
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    "pr=$url" \
+    "pr_head=$head" \
+    'control_relaunch_tx=3181152.20260831T104354Z.25096'
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    && fail "a relaunch transaction marker after pr= was accepted into the PR identity"
+  pass "the PR identity parse accepts relaunch fields before pr= and rejects them after"
+}
+
 test_invalid_entrypoints_have_zero_side_effects() {
   local dir before after value rc
   dir=$(make_case invalid-entrypoints)
@@ -2112,6 +2144,7 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_parser_matrix
+test_meta_identity_orders_relaunch_fields_before_pr
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
