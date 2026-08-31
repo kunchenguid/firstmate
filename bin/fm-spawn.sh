@@ -655,7 +655,7 @@ cleanup_beeline_node_modules_staging() {
   staging=$NODE_MODULES_ABORT_STAGING
   if ! (
     trap '' INT TERM HUP
-    exec rm -rf -- "$staging"
+    exec /bin/rm -rf -- "$staging"
   ); then
     return 1
   fi
@@ -1317,11 +1317,12 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 exclude_path() {
-  local rel=$1 EXCL
+  local rel=$1 EXCL excl_dir
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
-  mkdir -p "$(dirname "$EXCL")"
-  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+  excl_dir=${EXCL%/*}
+  /bin/mkdir -p "$excl_dir"
+  /usr/bin/grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 
 native_node_executable() {
@@ -1358,7 +1359,7 @@ beeline_workspace_links_match_worktree() {
     if [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] && [[ "$entry_real" != "$source_real"/* ]]; then
       found=1
       [ -n "$target" ] || continue
-      name=$(basename "$entry")
+      name=${entry##*/}
       candidate="$target/@beeline/$name"
       [ -e "$candidate" ] || [ -L "$candidate" ] || return 1
       expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
@@ -1371,7 +1372,7 @@ beeline_workspace_links_match_worktree() {
   if [ -n "$target" ]; then
     for candidate in "$target/@beeline"/* "$target/@beeline"/.[!.]* "$target/@beeline"/..?*; do
       [ -L "$candidate" ] || continue
-      name=$(basename "$candidate")
+      name=${candidate##*/}
       entry="$source/@beeline/$name"
       [ -L "$entry" ] || return 1
       entry_real=$(cd "$entry" 2>/dev/null && pwd -P) || return 1
@@ -1417,7 +1418,7 @@ share_beeline_node_modules() {
   NODE_MODULES_ABORT_STAGING=$staging_root
   NODE_MODULES_ABORT_CLEANUP=1
   mkdir_status=0
-  mkdir -- "$staging_root" || mkdir_status=$?
+  /bin/mkdir -- "$staging_root" || mkdir_status=$?
   if [ "$mkdir_status" -ne 0 ]; then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
@@ -1436,43 +1437,43 @@ share_beeline_node_modules() {
   if ! (
     for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
-      name=$(basename "$entry")
+      name=${entry##*/}
       case "$name" in
         '@beeline'|.bin) continue ;;
       esac
-      ln -s "$entry" "$staging/$name" || exit 1
+      /bin/ln -s "$entry" "$staging/$name" || exit 1
     done
 
-    mkdir "$staging/@beeline" || exit 1
+    /bin/mkdir "$staging/@beeline" || exit 1
     for entry in "$source/@beeline"/* "$source/@beeline"/.[!.]* "$source/@beeline"/..?*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
-      name=$(basename "$entry")
+      name=${entry##*/}
       entry_real=$(real_path_or_raw "$entry")
       if [ -L "$entry" ] && [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]]; then
-        link_target=$(readlink "$entry")
+        link_target=$(/usr/bin/readlink "$entry")
         case "$link_target" in
-          /*) ln -s "$WT${entry_real#"$PROJ_ABS_REAL"}" "$staging/@beeline/$name" || exit 1 ;;
-          *) ln -s "$link_target" "$staging/@beeline/$name" || exit 1 ;;
+          /*) /bin/ln -s "$WT${entry_real#"$PROJ_ABS_REAL"}" "$staging/@beeline/$name" || exit 1 ;;
+          *) /bin/ln -s "$link_target" "$staging/@beeline/$name" || exit 1 ;;
         esac
       else
-        ln -s "$entry" "$staging/@beeline/$name" || exit 1
+        /bin/ln -s "$entry" "$staging/@beeline/$name" || exit 1
       fi
     done
 
     if [ -d "$source/.bin" ]; then
-      mkdir "$staging/.bin" || exit 1
+      /bin/mkdir "$staging/.bin" || exit 1
       for entry in "$source/.bin"/* "$source/.bin"/.[!.]* "$source/.bin"/..?*; do
         [ -e "$entry" ] || [ -L "$entry" ] || continue
-        name=$(basename "$entry")
+        name=${entry##*/}
         if [ -L "$entry" ]; then
-          link_target=$(readlink "$entry")
+          link_target=$(/usr/bin/readlink "$entry")
           case "$link_target" in
-            "$PROJ_ABS"/*) ln -s "$WT${link_target#"$PROJ_ABS"}" "$staging/.bin/$name" || exit 1 ;;
-            "$PROJ_ABS_REAL"/*) ln -s "$WT${link_target#"$PROJ_ABS_REAL"}" "$staging/.bin/$name" || exit 1 ;;
-            *) ln -s "$link_target" "$staging/.bin/$name" || exit 1 ;;
+            "$PROJ_ABS"/*) /bin/ln -s "$WT${link_target#"$PROJ_ABS"}" "$staging/.bin/$name" || exit 1 ;;
+            "$PROJ_ABS_REAL"/*) /bin/ln -s "$WT${link_target#"$PROJ_ABS_REAL"}" "$staging/.bin/$name" || exit 1 ;;
+            *) /bin/ln -s "$link_target" "$staging/.bin/$name" || exit 1 ;;
           esac
         else
-          ln -s "$entry" "$staging/.bin/$name" || exit 1
+          /bin/ln -s "$entry" "$staging/.bin/$name" || exit 1
         fi
       done
     fi
@@ -1504,7 +1505,7 @@ share_beeline_node_modules() {
   fi
 
   exclude_path '.fm-node-modules.*/'
-  publication_link=$(basename "$staging_root")
+  publication_link=${staging_root##*/}
   if [ -n "$setup_signal_status" ]; then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
@@ -1529,11 +1530,17 @@ try {
 JS
   case "$publish_status" in
     0)
-      NODE_MODULES_ABORT_STAGING=
+      if [ -L "$target" ] \
+         && [ "$(/usr/bin/readlink "$target" 2>/dev/null || true)" = "$publication_link" ] \
+         && beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+        NODE_MODULES_ABORT_STAGING=
+      else
+        publish_status=5
+      fi
       ;;
     *)
       if [ -L "$target" ] \
-         && [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ]; then
+         && [ "$(/usr/bin/readlink "$target" 2>/dev/null || true)" = "$publication_link" ]; then
         NODE_MODULES_ABORT_STAGING=
       else
         NODE_MODULES_ABORT_CLEANUP=1

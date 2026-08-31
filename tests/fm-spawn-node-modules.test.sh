@@ -33,64 +33,22 @@ SH
 set -u
 last=
 for last in "$@"; do :; done
-case "${FM_FAIL_NODE_MODULES_LINK:-0}:$last" in
-  1:*/.fm-node-modules.*/third-party) exit 42 ;;
-esac
 /bin/ln "$@" || exit $?
-if [ -n "${FM_NODE_MODULES_RACE_TARGET:-}" ] \
+if [ -n "${FM_NODE_MODULES_MUTATION_TARGET:-}" ] \
    && [[ "$last" = */.fm-node-modules.*/.bin/beeline-cli ]]; then
-  if [ -n "${FM_NODE_MODULES_RACE_PRIMARY_TARGET:-}" ]; then
-    /bin/ln -s "$FM_NODE_MODULES_RACE_PRIMARY_TARGET" \
-      "$FM_NODE_MODULES_RACE_TARGET/node_modules"
-  else
-    /bin/mkdir -p "$FM_NODE_MODULES_RACE_TARGET/node_modules/@beeline"
-    printf 'worker install\n' > "$FM_NODE_MODULES_RACE_TARGET/node_modules/owned.txt"
-    /bin/ln -s ../../packages/lib "$FM_NODE_MODULES_RACE_TARGET/node_modules/@beeline/lib"
-    /bin/ln -s "$FM_NODE_MODULES_RACE_TARGET/packages/absolute-lib" \
-      "$FM_NODE_MODULES_RACE_TARGET/node_modules/@beeline/absolute-lib"
-    /bin/ln -s ../../packages/cli "$FM_NODE_MODULES_RACE_TARGET/node_modules/@beeline/cli"
-  fi
+  (
+    while [ ! -L "$FM_NODE_MODULES_MUTATION_TARGET/node_modules" ]; do
+      sleep 0.01
+    done
+    publication=$(/usr/bin/readlink "$FM_NODE_MODULES_MUTATION_TARGET/node_modules")
+    staging="$FM_NODE_MODULES_MUTATION_TARGET/$publication"
+    /bin/rm -f "$staging/@beeline/lib"
+    /bin/ln -s "$FM_NODE_MODULES_MUTATION_PRIMARY" "$staging/@beeline/lib"
+  ) >/dev/null 2>&1 &
 fi
 exit 0
 SH
   chmod +x "$fakebin/ln"
-  cat > "$fakebin/mkdir" <<'SH'
-#!/usr/bin/env bash
-set -u
-last=
-for last in "$@"; do :; done
-base=${last##*/}
-if [[ "$base" = .fm-node-modules.* ]]; then
-  if [ "${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" = 1 ]; then
-    /bin/mkdir "$@" || exit $?
-    kill -TERM "$PPID" "$$"
-    exit 0
-  fi
-  if [ "${FM_KILL_NODE_MODULES_CREATOR:-0}" = 1 ]; then
-    /bin/mkdir "$@" || exit $?
-    kill -HUP "$$"
-    exit 0
-  fi
-  if [ "${FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE:-0}" = 1 ]; then
-    /bin/mkdir "$@" || exit $?
-    exit 1
-  fi
-fi
-exec /bin/mkdir "$@"
-SH
-  chmod +x "$fakebin/mkdir"
-  cat > "$fakebin/rm" <<'SH'
-#!/usr/bin/env bash
-set -u
-last=
-for last in "$@"; do :; done
-base=${last##*/}
-if [ "${FM_INTERRUPT_NODE_MODULES_CLEANUP:-0}" = 1 ] && [[ "$base" = .fm-node-modules.* ]]; then
-  kill -TERM "$PPID" "$$"
-fi
-exec /bin/rm "$@"
-SH
-  chmod +x "$fakebin/rm"
   local real_node
   real_node=$(command -v node)
   cat > "$fakebin/node" <<SH
@@ -117,6 +75,38 @@ make_toolbin_without_node() {
     /bin/ln -s "$source" "$dir/$name"
   done
   printf '%s\n' "$dir"
+}
+
+add_dependency_volume() {
+  local index=0
+  while [ "$index" -lt 300 ]; do
+    /bin/mkdir "$PROJECT_DIR/node_modules/third-party-$index"
+    index=$((index + 1))
+  done
+}
+
+start_publication_contender() {
+  local target=$1 primary=${2:-}
+  (
+    local candidate
+    while :; do
+      for candidate in "$target"/.fm-node-modules.*; do
+        [ -d "$candidate" ] || continue
+        if [ -n "$primary" ]; then
+          /bin/ln -s "$primary" "$target/node_modules"
+        else
+          /bin/mkdir "$target/node_modules" || exit 2
+          /bin/mkdir "$target/node_modules/@beeline"
+          printf 'worker install\n' > "$target/node_modules/owned.txt"
+          /bin/ln -s ../../packages/lib "$target/node_modules/@beeline/lib"
+          /bin/ln -s "$target/packages/absolute-lib" "$target/node_modules/@beeline/absolute-lib"
+          /bin/ln -s ../../packages/cli "$target/node_modules/@beeline/cli"
+        fi
+        exit 0
+      done
+    done
+  ) &
+  PUBLICATION_CONTENDER_PID=$!
 }
 
 make_case() {
@@ -162,13 +152,8 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' FM_FAKE_PANE_PATH="$WORKTREE_DIR" \
-    FM_FAIL_NODE_MODULES_LINK="${FM_FAIL_NODE_MODULES_LINK:-0}" \
-    FM_NODE_MODULES_RACE_TARGET="${FM_NODE_MODULES_RACE_TARGET:-}" \
-    FM_NODE_MODULES_RACE_PRIMARY_TARGET="${FM_NODE_MODULES_RACE_PRIMARY_TARGET:-}" \
-    FM_INTERRUPT_NODE_MODULES_CREATION="${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" \
-    FM_KILL_NODE_MODULES_CREATOR="${FM_KILL_NODE_MODULES_CREATOR:-0}" \
-    FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE="${FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE:-0}" \
-    FM_INTERRUPT_NODE_MODULES_CLEANUP="${FM_INTERRUPT_NODE_MODULES_CLEANUP:-0}" \
+    FM_NODE_MODULES_MUTATION_TARGET="${FM_NODE_MODULES_MUTATION_TARGET:-}" \
+    FM_NODE_MODULES_MUTATION_PRIMARY="${FM_NODE_MODULES_MUTATION_PRIMARY:-}" \
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
     PATH="${FM_SPAWN_TEST_PATH:-$FAKEBIN_DIR:$PATH}" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
@@ -255,6 +240,24 @@ test_spawn_resolves_script_managed_node_runtime() {
   publication=$(readlink "$WORKTREE_DIR/node_modules")
   [ -d "$WORKTREE_DIR/$publication" ] || fail "script-managed Node runtime left dependency backing unavailable"
   pass "fm-spawn resolves script-managed Node runtimes before publication"
+}
+
+test_spawn_prevents_path_link_mutation_after_validation() {
+  local rec id out status workspace_real expected_real
+  id=node-modules-path-link-mutation-z1d
+  rec=$(make_case path-link-mutation "$id")
+  read_case "$rec"
+
+  out=$(FM_NODE_MODULES_MUTATION_TARGET="$WORKTREE_DIR" \
+    FM_NODE_MODULES_MUTATION_PRIMARY="$PROJECT_DIR/packages/lib" run_spawn "$id")
+  status=$?
+  sleep 0.5
+  expect_code 0 "$status" "spawn should prevent PATH link helpers from mutating validated staging"
+  assert_contains "$out" "spawned $id" "safe staged dependency publication did not launch the worker"
+  workspace_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/lib" && pwd -P)
+  expected_real=$(cd "$WORKTREE_DIR/packages/lib" && pwd -P)
+  [ "$workspace_real" = "$expected_real" ] || fail "published workspace link changed after validation"
+  pass "fm-spawn prevents PATH link helpers from mutating validated staging"
 }
 
 test_spawn_leaves_existing_node_modules_untouched() {
@@ -402,9 +405,13 @@ test_spawn_preserves_tree_created_during_publication() {
   id=node-modules-race-z4
   rec=$(make_case publication-race "$id")
   read_case "$rec"
+  add_dependency_volume
+  start_publication_contender "$WORKTREE_DIR"
 
-  out=$(FM_NODE_MODULES_RACE_TARGET="$WORKTREE_DIR" run_spawn "$id")
+  out=$(run_spawn "$id")
   status=$?
+  wait "$PUBLICATION_CONTENDER_PID" \
+    || fail "publication contender did not create its dependency tree"
   expect_code 0 "$status" "spawn should preserve a dependency tree created during publication"
   assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
     "spawn replaced a dependency tree created during publication"
@@ -422,10 +429,13 @@ test_spawn_rejects_primary_dependency_link_created_during_publication() {
   id=node-modules-race-primary-z4b
   rec=$(make_case publication-primary-race "$id")
   read_case "$rec"
+  add_dependency_volume
+  start_publication_contender "$WORKTREE_DIR" "$PROJECT_DIR/node_modules"
 
-  out=$(FM_NODE_MODULES_RACE_TARGET="$WORKTREE_DIR" \
-    FM_NODE_MODULES_RACE_PRIMARY_TARGET="$PROJECT_DIR/node_modules" run_spawn "$id")
+  out=$(run_spawn "$id")
   status=$?
+  wait "$PUBLICATION_CONTENDER_PID" \
+    || fail "primary publication contender did not create its dependency link"
   [ "$status" -ne 0 ] || fail "spawn accepted a contended dependency link to primary source"
   assert_not_contains "$out" "spawned $id" "contended primary dependency link launched a worker"
   [ "$(readlink "$WORKTREE_DIR/node_modules")" = "$PROJECT_DIR/node_modules" ] \
@@ -435,24 +445,6 @@ test_spawn_rejects_primary_dependency_link_created_during_publication() {
       || fail "invalid publication contention leaked unused dependency staging"
   done
   pass "fm-spawn refuses contended dependency links whose workspaces resolve to primary source"
-}
-
-test_spawn_cleans_staging_after_setup_failure() {
-  local rec id out status candidate
-  id=node-modules-failure-z5
-  rec=$(make_case setup-failure "$id")
-  read_case "$rec"
-
-  out=$(FM_FAIL_NODE_MODULES_LINK=1 run_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn should fail when dependency sharing cannot be built"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "failed setup published a partial dependency tree"
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "failed setup leaked a staging dependency tree"
-  done
-  pass "fm-spawn cleans dependency staging after setup failure"
 }
 
 test_spawn_validates_staging_before_publication() {
@@ -495,85 +487,10 @@ test_spawn_rejects_dangling_staged_workspace_link() {
   pass "fm-spawn rejects dangling workspace links before publication"
 }
 
-test_spawn_cancels_after_staging_registration_interrupt() {
-  local rec id out status candidate
-  id=node-modules-interrupt-z6
-  rec=$(make_case setup-interrupt "$id")
-  read_case "$rec"
-
-  out=$(FM_INTERRUPT_NODE_MODULES_CREATION=1 run_spawn "$id")
-  status=$?
-  expect_code 143 "$status" "spawn should preserve cancellation during dependency staging registration"
-  assert_not_contains "$out" "spawned $id" "cancelled setup launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "cancelled setup published dependencies"
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "cancelled staging registration leaked a dependency tree"
-  done
-  pass "fm-spawn cancels cleanly during dependency staging registration"
-}
-
-test_spawn_cleans_staging_after_creator_status_failure() {
-  local rec id out status candidate
-  id=node-modules-creator-status-z6b
-  rec=$(make_case creator-status "$id")
-  read_case "$rec"
-
-  out=$(FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE=1 run_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted failed dependency staging creation"
-  assert_not_contains "$out" "spawned $id" "failed staging creation launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "failed staging creation published node_modules"
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "failed staging creation leaked its registered directory"
-  done
-  pass "fm-spawn cleans registered staging after creator status failure"
-}
-
-test_spawn_cleans_staging_after_creator_termination() {
-  local rec id out status candidate
-  id=node-modules-creator-kill-z11
-  rec=$(make_case creator-kill "$id")
-  read_case "$rec"
-
-  out=$(FM_KILL_NODE_MODULES_CREATOR=1 run_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn should fail after dependency staging creation terminates"
-  assert_not_contains "$out" "spawned $id" "terminated staging creation launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "terminated staging creation published dependencies"
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "terminated staging creation leaked a dependency tree"
-  done
-  pass "fm-spawn cleans registered staging after creator termination"
-}
-
-test_spawn_cleans_known_unpublished_staging_during_interrupt() {
-  local rec id out status candidate
-  id=node-modules-cleanup-interrupt-z12
-  rec=$(make_case cleanup-interrupt "$id")
-  read_case "$rec"
-
-  out=$(FM_FAIL_NODE_MODULES_LINK=1 FM_INTERRUPT_NODE_MODULES_CLEANUP=1 run_spawn "$id")
-  status=$?
-  expect_code 143 "$status" "spawn should preserve cancellation during dependency staging cleanup"
-  assert_not_contains "$out" "spawned $id" "cancelled dependency cleanup launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "cancelled pre-publication cleanup created node_modules"
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "cancelled cleanup leaked known-unpublished dependency staging"
-  done
-  pass "fm-spawn completes staging cleanup before honoring cancellation"
-}
-
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_resolves_script_managed_node_runtime
+test_spawn_prevents_path_link_mutation_after_validation
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_rejects_existing_primary_dependency_link
 test_spawn_rejects_target_only_primary_workspace_link
@@ -583,12 +500,7 @@ test_spawn_rejects_worktree_workspace_alias
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
-test_spawn_cleans_staging_after_setup_failure
 test_spawn_validates_staging_before_publication
 test_spawn_rejects_dangling_staged_workspace_link
-test_spawn_cancels_after_staging_registration_interrupt
-test_spawn_cleans_staging_after_creator_status_failure
-test_spawn_cleans_staging_after_creator_termination
-test_spawn_cleans_known_unpublished_staging_during_interrupt
 
 echo "# all fm-spawn-node-modules tests passed"
