@@ -269,6 +269,55 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- oversized-payload fixtures ---------------------------------------------
+#
+# A firstmate home whose backlog has grown past the kernel's per-argument limit
+# used to lose the whole fleet snapshot, because a jq argument carrying the
+# serialized backlog could not be exec'd at all (bin/fm-jq-arg-lib.sh owns the
+# mechanism and the fix). These primitives let a size-dependent regression size
+# its fixture from the host's REAL limit instead of a hardcoded guess, so the
+# case stays meaningful on Linux (a 128 KiB per-argument cap far below ARG_MAX)
+# and on macOS (no separate per-argument cap, so the whole ~1 MiB ARG_MAX must
+# be crossed instead).
+
+# fm_max_single_arg_bytes: print the smallest power-of-two argument size this
+# host REFUSES to exec, probed with a real exec rather than assumed. Prints 0
+# when no ceiling appears below 16 MiB, so a caller can tell "no observable
+# limit" apart from a small one.
+fm_max_single_arg_bytes() {
+  local n=65536 pad
+  while [ "$n" -le 16777216 ]; do
+    pad=$(printf '%*s' "$n" '')
+    if ! /usr/bin/env true "$pad" 2>/dev/null; then
+      printf '%s\n' "$n"
+      return 0
+    fi
+    n=$((n * 2))
+  done
+  printf '0\n'
+}
+
+# fm_write_oversized_backlog <backlog-path> <min-bytes>: write a canonical
+# tasks-axi backlog of landed work whose own text is at least <min-bytes>, so
+# the snapshot's serialized backlog - which carries every row's title - is
+# larger still. Landed rows keep the fixture a HEALTHY home that simply grew,
+# which is the shape a long-running fleet actually reaches. Prints the row count.
+fm_write_oversized_backlog() {  # <backlog-path> <min-bytes>
+  local file=$1 min=$2 filler row i=0 written=0
+  filler=$(printf 'detail %.0s' $(seq 1 120))
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    while [ "$written" -lt "$min" ]; do
+      i=$((i + 1))
+      row=$(printf -- '- [x] bulk-%04d - Bulk task %d %s https://github.com/acme/repo/pull/%d (repo: alpha) (kind: ship) (merged 2026-07-06)' \
+        "$i" "$i" "$filler" "$i")
+      printf '%s\n' "$row"
+      written=$((written + ${#row} + 1))
+    done
+  } > "$file"
+  printf '%s\n' "$i"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

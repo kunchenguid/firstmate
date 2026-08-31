@@ -799,8 +799,36 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# Size-dependent regression: a home whose backlog outgrew the kernel's
+# per-argument limit used to lose the ENTIRE snapshot, because jq could not be
+# exec'd with the serialized backlog on argv ("Argument list too long"). The
+# fixture is sized from the host's real limit so the case cannot go vacuous on a
+# platform with a different ceiling, and the payload size is asserted so a
+# shrunken fixture fails loudly instead of passing without testing anything.
+test_oversized_backlog_survives_argument_limit() {
+  local home fakebin out limit rows payload
+  limit=$(fm_max_single_arg_bytes)
+  [ "$limit" -gt 0 ] || limit=131072
+  home=$(make_home oversized)
+  rows=$(fm_write_oversized_backlog "$home/data/backlog.md" "$limit")
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a backlog larger than the $limit-byte argument limit"
+  payload=$(printf '%s' "$out" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$payload" -gt "$limit" ] \
+    || fail "fixture is too small to test the argument limit: backlog payload $payload bytes, limit $limit"
+  printf '%s' "$out" | jq -e --argjson rows "$rows" '
+    (.backlog.records | length) == $rows
+      and (.backlog.records | all(.structured and .state == "done"))
+      and (.backlog.records[-1].pr_url != null)
+      and .main_inventory.valid == true
+  ' >/dev/null || fail "oversized backlog must still parse into complete records"
+  pass "a backlog larger than the host argument limit still produces a complete snapshot"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_oversized_backlog_survives_argument_limit
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

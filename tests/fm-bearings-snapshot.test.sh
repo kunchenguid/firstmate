@@ -1963,6 +1963,33 @@ test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_default_balances_dominant_and_sparse_homes
+# The reported failure, end to end: in a home whose backlog has outgrown the
+# kernel's per-argument limit, `/bearings` returned NOTHING at all, because the
+# canonical snapshot underneath could not exec jq with the serialized backlog on
+# argv. The fixture is sized from the host's real limit, and the size is
+# asserted, so the case cannot pass without actually crossing that limit.
+test_oversized_backlog_still_renders_bearings() {
+  local home fakebin out json limit rows
+  limit=$(fm_max_single_arg_bytes)
+  [ "$limit" -gt 0 ] || limit=131072
+  home=$(make_home oversized-backlog)
+  rows=$(fm_write_oversized_backlog "$home/data/backlog.md" "$limit")
+  fakebin=$(make_fakebin "$home")
+  out=$(run "$home" "$fakebin") \
+    || fail "bearings must still render with a backlog past the $limit-byte argument limit"
+  assert_contains "$out" "schema: fm-bearings.v1" "oversized-backlog bearings lost its projection"
+  assert_contains "$out" "landed[" "oversized-backlog bearings lost its landed section"
+  json=$(run "$home" "$fakebin" --json) || fail "bearings --json must survive the same backlog"
+  printf '%s' "$json" | jq -e --argjson rows "$rows" '
+    .schema == "fm-bearings.v1"
+      and (.landed | length) > 0
+      and (.gates | length) == 0
+      and ([.omitted[] | select(.surface | test("landed"))] | length) == 1
+  ' >/dev/null || fail "oversized-backlog bearings model is incomplete: $json"
+  [ "$rows" -gt 0 ] || fail "oversized backlog fixture wrote no rows"
+  pass "bearings renders its normal projection when the backlog outgrows the argument limit"
+}
+
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
 test_landed_default_preserves_internal_order_for_ties
@@ -1988,3 +2015,4 @@ test_collapsed_captain_call_deferral_and_landed
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+test_oversized_backlog_still_renders_bearings
