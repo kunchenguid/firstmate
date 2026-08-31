@@ -129,6 +129,22 @@ registered_worktree_validate() {  # <metadata>
   REGISTERED_WORKTREE=$worktree_real
 }
 
+registered_route_validate() {  # <metadata>
+  local meta=$1 route expected_hash recorded_model recorded_effort recorded_id actual_hash
+  route=$(exact_meta_value "$meta" model_route_record) || return 1
+  expected_hash=$(exact_meta_value "$meta" model_route_sha256) || return 1
+  recorded_id=$(exact_meta_value "$meta" endpoint_task_id) || return 1
+  recorded_model=$(exact_meta_value "$meta" model) || return 1
+  recorded_effort=$(exact_meta_value "$meta" effort) || return 1
+  [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+  actual_hash=$(fm_task_route_sha256 "$route") || return 1
+  [ "$actual_hash" = "$expected_hash" ] || return 1
+  fm_task_route_record_parse "$route" || return 1
+  [ "$FM_TASK_ROUTE_ID" = "$recorded_id" ] \
+    && [ "$FM_TASK_ROUTE_RESOLVED_MODEL" = "$recorded_model" ] \
+    && [ "$FM_TASK_ROUTE_RESOLVED_EFFORT" = "$recorded_effort" ]
+}
+
 write_current() {  # <task-id> <thread> <host> <state> <detail>
   local id=$1 thread=$2 host=$3 current_state=$4 detail=$5 tmp current
   current="$STATE/$id.codex-app-current"
@@ -150,7 +166,7 @@ register_task() {
   shift
   local thread='' host='' project='' worktree='' kind='' model='' effort='' mode='' yolo=''
   local route_record='' envelope=''
-  local project_real worktree_real git_common_dir route_real
+  local project_real worktree_real git_common_dir route_real route_hash
   local meta current status meta_tmp status_tmp current_tmp
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -197,9 +213,11 @@ register_task() {
     || die_usage "model route record must be a regular file"
   fm_task_route_record_parse "$route_real" \
     || die_usage "model route record does not satisfy the complete routing contract"
-  [ "$FM_TASK_ROUTE_ID" = "$id" ] && [ "$FM_TASK_ROUTE_MODEL" = "$model" ] \
-    && [ "$FM_TASK_ROUTE_EFFORT" = "$effort" ] \
+  [ "$FM_TASK_ROUTE_ID" = "$id" ] && [ "$FM_TASK_ROUTE_RESOLVED_MODEL" = "$model" ] \
+    && [ "$FM_TASK_ROUTE_RESOLVED_EFFORT" = "$effort" ] \
     || die_usage "model route record does not match task, model, and effort"
+  route_hash=$(fm_task_route_sha256 "$route_real") \
+    || die_usage "cannot hash model route record: $route_real"
 
   require_owner
   meta="$STATE/$id.meta"
@@ -228,6 +246,7 @@ register_task() {
     printf 'model=%s\n' "$model"
     printf 'effort=%s\n' "$effort"
     printf 'model_route_record=%s\n' "$route_real"
+    printf 'model_route_sha256=%s\n' "$route_hash"
     printf 'session_envelope=%s\n' "$envelope"
     printf 'session_generation=1\n'
     printf 'session_cost_telemetry=unsupported\n'
@@ -291,6 +310,8 @@ reconcile_task() {
     || die "task $id is not a Codex Desktop host task"
   fm_backend_validate_task_endpoint "$meta" "$id" \
     || die "task $id has invalid Desktop endpoint metadata"
+  registered_route_validate "$meta" \
+    || die "task $id no longer matches its immutable model route evidence"
   thread=$(exact_meta_value "$meta" codex_app_thread_id) \
     || die "task $id has no exact Desktop thread binding"
   host=$(exact_meta_value "$meta" codex_app_host_id) \
@@ -308,11 +329,43 @@ resolve_existing_file() {  # <path>
   printf '%s\n' "$resolved"
 }
 
+HARD_STOP_PRE_HEAD=
+HARD_STOP_INDEX_TREE=
+HARD_STOP_REASON=
+HARD_STOP_HANDOFF=
+HARD_STOP_THREAD=
+HARD_STOP_HOST=
+HARD_STOP_ENVELOPE=
+HARD_STOP_GENERATION=
+HARD_STOP_WORKTREE=
+hard_stop_journal_parse() {  # <journal>
+  local journal=$1 key lines
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  lines=$(wc -l < "$journal" | tr -d ' ')
+  [ "$lines" = 10 ] || return 1
+  [ "$(exact_meta_value "$journal" version)" = 1 ] || return 1
+  for key in pre_head index_tree reason handoff thread host envelope generation worktree; do
+    exact_meta_value "$journal" "$key" >/dev/null || return 1
+  done
+  HARD_STOP_PRE_HEAD=$(exact_meta_value "$journal" pre_head)
+  HARD_STOP_INDEX_TREE=$(exact_meta_value "$journal" index_tree)
+  HARD_STOP_REASON=$(exact_meta_value "$journal" reason)
+  HARD_STOP_HANDOFF=$(exact_meta_value "$journal" handoff)
+  HARD_STOP_THREAD=$(exact_meta_value "$journal" thread)
+  HARD_STOP_HOST=$(exact_meta_value "$journal" host)
+  HARD_STOP_ENVELOPE=$(exact_meta_value "$journal" envelope)
+  HARD_STOP_GENERATION=$(exact_meta_value "$journal" generation)
+  HARD_STOP_WORKTREE=$(exact_meta_value "$journal" worktree)
+  printf '%s' "$HARD_STOP_PRE_HEAD" | grep -Eq '^[0-9a-f]{40,64}$' || return 1
+  printf '%s' "$HARD_STOP_INDEX_TREE" | grep -Eq '^[0-9a-f]{40,64}$' || return 1
+  case "$HARD_STOP_GENERATION" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 hard_stop_task() {
   local id=$1
   shift
-  local reason='' handoff='' meta worktree_real handoff_parent handoff_real
-  local thread host envelope generation checkpoint tmp
+  local reason='' handoff='' meta worktree_real handoff_parent handoff_real journal
+  local thread host envelope generation checkpoint tmp pre_head index_tree head parent commit_tree subject
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --reason) [ "$#" -ge 2 ] || usage; reason=$2; shift 2 ;;
@@ -333,6 +386,8 @@ hard_stop_task() {
   [ -f "$meta" ] || die "no metadata for Desktop task $id"
   [ "$(fm_backend_of_meta "$meta")" = codex-app-host ] \
     || die "task $id is not a Codex Desktop host task"
+  registered_route_validate "$meta" \
+    || die "task $id no longer matches its immutable model route evidence"
   registered_worktree_validate "$meta" \
     || die "task $id no longer matches its registered Git checkout identity"
   worktree_real=$REGISTERED_WORKTREE
@@ -346,14 +401,6 @@ hard_stop_task() {
       die "handoff must be outside the Desktop worktree: $handoff_real"
       ;;
   esac
-  [ ! -e "$handoff_real" ] && [ ! -L "$handoff_real" ] \
-    || die "handoff already exists; refusing to overwrite it: $handoff_real"
-  git -C "$worktree_real" diff --cached --quiet --exit-code \
-    && die "hard stop requires staged intended changes for the checkpoint commit"
-  git -C "$worktree_real" commit -m "checkpoint: $id session envelope" >/dev/null \
-    || die "could not create staged-only checkpoint commit for $id"
-  checkpoint=$(git -C "$worktree_real" rev-parse HEAD) \
-    || die "could not read checkpoint commit for $id"
   thread=$(exact_meta_value "$meta" codex_app_thread_id) \
     || die "task $id has no exact Desktop thread binding"
   host=$(exact_meta_value "$meta" codex_app_host_id) \
@@ -363,6 +410,65 @@ hard_stop_task() {
   generation=$(exact_meta_value "$meta" session_generation) \
     || die "task $id has no session generation"
   case "$generation" in ''|*[!0-9]*) die "task $id has invalid session generation" ;; esac
+  journal="$STATE/$id.hard-stop-journal"
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    hard_stop_journal_parse "$journal" \
+      || die "task $id has an invalid hard-stop recovery journal"
+    [ "$HARD_STOP_REASON" = "$reason" ] && [ "$HARD_STOP_HANDOFF" = "$handoff_real" ] \
+      && [ "$HARD_STOP_THREAD" = "$thread" ] && [ "$HARD_STOP_HOST" = "$host" ] \
+      && [ "$HARD_STOP_ENVELOPE" = "$envelope" ] \
+      && [ "$HARD_STOP_GENERATION" = "$generation" ] \
+      && [ "$HARD_STOP_WORKTREE" = "$worktree_real" ] \
+      || die "task $id hard-stop retry does not match its recovery journal"
+    pre_head=$HARD_STOP_PRE_HEAD
+    index_tree=$HARD_STOP_INDEX_TREE
+  else
+    [ ! -e "$handoff_real" ] && [ ! -L "$handoff_real" ] \
+      || die "handoff already exists; refusing to overwrite it: $handoff_real"
+    git -C "$worktree_real" diff --cached --quiet --exit-code \
+      && die "hard stop requires staged intended changes for the checkpoint commit"
+    pre_head=$(git -C "$worktree_real" rev-parse HEAD) \
+      || die "could not read the pre-checkpoint commit for $id"
+    index_tree=$(git -C "$worktree_real" write-tree) \
+      || die "could not record the staged checkpoint tree for $id"
+    tmp=$(umask 077; mktemp "$STATE/.$id.hard-stop-journal.XXXXXX") \
+      || die "cannot stage hard-stop recovery journal for $id"
+    {
+      printf 'version=1\n'
+      printf 'pre_head=%s\n' "$pre_head"
+      printf 'index_tree=%s\n' "$index_tree"
+      printf 'reason=%s\n' "$reason"
+      printf 'handoff=%s\n' "$handoff_real"
+      printf 'thread=%s\n' "$thread"
+      printf 'host=%s\n' "$host"
+      printf 'envelope=%s\n' "$envelope"
+      printf 'generation=%s\n' "$generation"
+      printf 'worktree=%s\n' "$worktree_real"
+    } > "$tmp" || { rm -f -- "$tmp"; die "cannot write hard-stop recovery journal for $id"; }
+    mv -f -- "$tmp" "$journal" \
+      || { rm -f -- "$tmp"; die "cannot publish hard-stop recovery journal for $id"; }
+  fi
+  head=$(git -C "$worktree_real" rev-parse HEAD) \
+    || die "could not read checkpoint state for $id"
+  if [ "$head" = "$pre_head" ]; then
+    [ "$(git -C "$worktree_real" write-tree)" = "$index_tree" ] \
+      || die "task $id staged checkpoint changed after its recovery journal was written"
+    git -C "$worktree_real" commit -m "checkpoint: $id session envelope" >/dev/null \
+      || die "could not create staged-only checkpoint commit for $id"
+    checkpoint=$(git -C "$worktree_real" rev-parse HEAD) \
+      || die "could not read checkpoint commit for $id"
+  else
+    checkpoint=$head
+  fi
+  parent=$(git -C "$worktree_real" rev-parse "$checkpoint^") \
+    || die "task $id checkpoint has no exact parent"
+  commit_tree=$(git -C "$worktree_real" rev-parse "$checkpoint^{tree}") \
+    || die "task $id checkpoint tree is unreadable"
+  subject=$(git -C "$worktree_real" log -1 --format=%s "$checkpoint") \
+    || die "task $id checkpoint message is unreadable"
+  [ "$parent" = "$pre_head" ] && [ "$commit_tree" = "$index_tree" ] \
+    && [ "$subject" = "checkpoint: $id session envelope" ] \
+    || die "task $id checkpoint does not match its recovery journal"
   tmp=$(umask 077; mktemp "$handoff_parent/.session-handoff.XXXXXX") \
     || die "cannot stage session handoff for $id"
   {
@@ -381,8 +487,17 @@ hard_stop_task() {
     printf 'session_output_telemetry: unsupported\n'
     printf 'continuation: create a fresh Codex Desktop task for this exact worktree and resume from this checkpoint.\n'
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write session handoff for $id"; }
-  mv -- "$tmp" "$handoff_real" \
-    || { rm -f -- "$tmp"; die "cannot publish session handoff for $id"; }
+  if [ -e "$handoff_real" ] || [ -L "$handoff_real" ]; then
+    if [ ! -f "$handoff_real" ] || [ -L "$handoff_real" ] \
+      || ! cmp -s "$tmp" "$handoff_real"; then
+      rm -f -- "$tmp"
+      die "existing session handoff does not match recovery journal for $id"
+    fi
+    rm -f -- "$tmp"
+  else
+    mv -- "$tmp" "$handoff_real" \
+      || { rm -f -- "$tmp"; die "cannot publish session handoff for $id"; }
+  fi
   tmp=$(umask 077; mktemp "$STATE/.$id.meta.XXXXXX") \
     || die "cannot stage checkpoint metadata for $id"
   grep -v -e '^session_checkpoint=' -e '^session_handoff=' "$meta" > "$tmp" || true
@@ -392,6 +507,7 @@ hard_stop_task() {
   } >> "$tmp"
   mv -f -- "$tmp" "$meta" || die "cannot publish checkpoint metadata for $id"
   write_current "$id" "$thread" "$host" paused "hard session boundary; checkpoint $checkpoint"
+  rm -f -- "$journal" || die "cannot retire hard-stop recovery journal for $id"
   printf 'hard-stop: %s checkpoint=%s handoff=%s\n' "$id" "$checkpoint" "$handoff_real"
 }
 
@@ -423,6 +539,8 @@ resume_task() {
   [ -f "$meta" ] && [ -f "$current" ] || die "task $id has incomplete Desktop state"
   [ "$(fm_backend_of_meta "$meta")" = codex-app-host ] \
     || die "task $id is not a Codex Desktop host task"
+  registered_route_validate "$meta" \
+    || die "task $id no longer matches its immutable model route evidence"
   [ "$(exact_meta_value "$current" state)" = paused ] \
     || die "task $id must be paused at a hard session boundary before resume"
   registered_worktree_validate "$meta" \
@@ -483,6 +601,8 @@ archive_preflight_task() {
     || die "task $id is not a Codex Desktop host task"
   fm_backend_validate_task_endpoint "$meta" "$id" \
     || die "task $id has invalid Desktop endpoint metadata"
+  registered_route_validate "$meta" \
+    || die "task $id no longer matches its immutable model route evidence"
 
   state=$(exact_meta_value "$current" state) \
     || die "task $id has no exact reconciled current state"

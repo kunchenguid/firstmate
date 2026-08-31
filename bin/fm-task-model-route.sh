@@ -6,7 +6,7 @@
 # An explicit captain model/effort override has highest precedence.
 # Otherwise a declared hard floor raises, but never lowers, the scored tier.
 # The inspectable record is written to data/<task-id>/model-routing.tsv.
-# Usage: fm-task-model-route.sh <task-id> <five score/evidence pairs> [--floor <name>] [--override-model <slug> --override-effort <effort>]
+# Usage: fm-task-model-route.sh <task-id> <five score/evidence pairs> [routing options]
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +18,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-task-model-route-lib.sh"
 
 usage() {
-  echo "usage: fm-task-model-route.sh <task-id> --ambiguity <0-2> --ambiguity-evidence <text> --boundary-clarity <0-2> --boundary-clarity-evidence <text> --risk <0-2> --risk-evidence <text> --diagnosis <0-2> --diagnosis-evidence <text> --verification <0-2> --verification-evidence <text> [--floor <none|architecture|security|data-migration|unknown-production-incident|user-behavior|multi-module>] [--override-model <slug> --override-effort <effort>]" >&2
+  echo "usage: fm-task-model-route.sh <task-id> --ambiguity <0-2> --ambiguity-evidence <text> --boundary-clarity <0-2> --boundary-clarity-evidence <text> --risk <0-2> --risk-evidence <text> --diagnosis <0-2> --diagnosis-evidence <text> --verification <0-2> --verification-evidence <text> [--floor <name>] [--override-model <slug> --override-effort <effort>] [--quota-candidates <model:effort,...> --quota-evidence <text> --resolved-model <slug> --resolved-effort <effort>]" >&2
   exit 2
 }
 
@@ -34,6 +34,8 @@ DIAGNOSIS='' DIAGNOSIS_EVIDENCE=''
 VERIFICATION='' VERIFICATION_EVIDENCE=''
 FLOOR=none
 OVERRIDE_MODEL='' OVERRIDE_EFFORT=''
+QUOTA_CANDIDATES=none QUOTA_EVIDENCE=not-applied
+RESOLVED_MODEL='' RESOLVED_EFFORT=''
 while [ "$#" -gt 0 ]; do
   [ "$#" -ge 2 ] || usage
   case "$1" in
@@ -50,6 +52,10 @@ while [ "$#" -gt 0 ]; do
     --floor) FLOOR=$2 ;;
     --override-model) OVERRIDE_MODEL=$2 ;;
     --override-effort) OVERRIDE_EFFORT=$2 ;;
+    --quota-candidates) QUOTA_CANDIDATES=$2 ;;
+    --quota-evidence) QUOTA_EVIDENCE=$2 ;;
+    --resolved-model) RESOLVED_MODEL=$2 ;;
+    --resolved-effort) RESOLVED_EFFORT=$2 ;;
     *) usage ;;
   esac
   shift 2
@@ -97,13 +103,32 @@ else
   fi
 fi
 
+if [ "$QUOTA_CANDIDATES" = none ] && [ "$QUOTA_EVIDENCE" = not-applied ] \
+  && [ -z "$RESOLVED_MODEL" ] && [ -z "$RESOLVED_EFFORT" ]; then
+  RESOLVED_MODEL=$MODEL
+  RESOLVED_EFFORT=$EFFORT
+  RESOLUTION=deterministic
+else
+  [ "$OVERRIDE_MODEL" = none ] && [ "$OVERRIDE_EFFORT" = none ] || usage
+  [ "$QUOTA_CANDIDATES" != none ] && [ "$QUOTA_EVIDENCE" != not-applied ] \
+    && [ -n "$RESOLVED_MODEL" ] && [ -n "$RESOLVED_EFFORT" ] || usage
+  valid_evidence "$QUOTA_EVIDENCE" || usage
+  fm_task_route_quota_candidates_valid "$QUOTA_CANDIDATES" "$MINIMUM_TIER" \
+    "$RESOLVED_MODEL" "$RESOLVED_EFFORT" || usage
+  RESOLUTION=quota_profile
+fi
+
 DIR="$DATA/$ID"
 mkdir -p "$DIR" || exit 1
 RECORD="$DIR/model-routing.tsv"
+[ ! -e "$RECORD" ] && [ ! -L "$RECORD" ] || {
+  echo "error: model route record already exists for $ID" >&2
+  exit 1
+}
 TMP=$(mktemp "$DIR/.model-routing.XXXXXX") || exit 1
 trap 'rm -f -- "$TMP"' EXIT HUP INT TERM
 {
-  printf 'version\t1\n'
+  printf 'version\t2\n'
   printf 'task_id\t%s\n' "$ID"
   printf 'ambiguity\t%s\t%s\n' "$AMBIGUITY" "$AMBIGUITY_EVIDENCE"
   printf 'boundary_clarity\t%s\t%s\n' "$BOUNDARY" "$BOUNDARY_EVIDENCE"
@@ -120,6 +145,11 @@ trap 'rm -f -- "$TMP"' EXIT HUP INT TERM
   printf 'selected_tier\t%s\n' "$SELECTED_TIER"
   printf 'model\t%s\n' "$MODEL"
   printf 'effort\t%s\n' "$EFFORT"
+  printf 'quota_candidates\t%s\n' "$QUOTA_CANDIDATES"
+  printf 'quota_evidence\t%s\n' "$QUOTA_EVIDENCE"
+  printf 'resolved_model\t%s\n' "$RESOLVED_MODEL"
+  printf 'resolved_effort\t%s\n' "$RESOLVED_EFFORT"
+  printf 'resolution\t%s\n' "$RESOLUTION"
   printf 'quota_policy\tquota may choose credentials or equivalent candidates but must not lower minimum_tier\n'
 } > "$TMP" || exit 1
 chmod 0600 "$TMP" || exit 1
@@ -130,4 +160,4 @@ fm_task_route_record_parse "$TMP" || {
 mv -f -- "$TMP" "$RECORD" || exit 1
 trap - EXIT HUP INT TERM
 printf 'routed: %s model=%s effort=%s total=%s precedence=%s record=%s\n' \
-  "$ID" "$MODEL" "$EFFORT" "$TOTAL" "$PRECEDENCE" "$RECORD"
+  "$ID" "$RESOLVED_MODEL" "$RESOLVED_EFFORT" "$TOTAL" "$PRECEDENCE" "$RECORD"

@@ -105,6 +105,13 @@ test_exact_head_green_contract() {
   assert_contains "$out" "expected head $sha" "wrong-head refusal omitted the expected SHA"
 
   printf '%s\n' "$sha" > "$dir/head"
+  printf '%s\n' $'summary: 1 passed, 0 failed, 1 total\nsummary: 0 passed, 1 failed, 1 total' > "$dir/checks"
+  status=0
+  out=$(run_pr_ci "$dir" "$sha") || status=$?
+  expect_code 1 "$status" "duplicate check summaries must be ambiguous"
+  assert_contains "$out" "ambiguous check summary count=2" \
+    "duplicate-summary refusal did not identify ambiguity"
+
   printf '%s\n' 'checks: 0 passed, 0 failed - this PR has no CI checks configured' > "$dir/checks"
   status=0
   out=$(run_pr_ci "$dir" "$sha") || status=$?

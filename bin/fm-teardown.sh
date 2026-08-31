@@ -1548,6 +1548,7 @@ task_status_is_run_not_found() {  # <status-error> <run-id>
 # a run not attributed to this exact branch+head is left completely alone.
 conclude_task_no_mistakes_run() {  # <worktree>
   local wt=$1 out run_id
+  [ "${FM_INACTIVE_NO_MISTAKES_COMPAT:-0}" = 1 ] || return 0
   [ "$KIND" = ship ] || return 0
   [ -d "$wt" ] || return 0
   command -v no-mistakes >/dev/null 2>&1 || return 0

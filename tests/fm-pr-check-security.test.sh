@@ -76,6 +76,9 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *" state,headRefOid "*)
+    printf '%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -119,10 +122,12 @@ write_task_meta() {
 
 # shellcheck disable=SC2329
 write_poll_meta() {
-  local state=$1 id=$2 url=$3
+  local state=$1 id=$2 url=$3 head=${4:-0123456789abcdef0123456789abcdef01234567}
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
-    "pr=$url"
+    "pr=$url" \
+    "pr_head=$head" \
+    "pr_green_head=$head"
 }
 
 write_ambiguous_poll() {
@@ -141,13 +146,14 @@ write_v1_x_shim() {
 
 write_manual_poll_pair() {
   local state=$1 url=${2:-https://github.com/o/r/pull/10} provider host path number
+  local head=0123456789abcdef0123456789abcdef01234567
   fm_pr_url_parse "$url" || fail "manual poll fixture URL was invalid"
   provider=$FM_PR_PROVIDER
   host=$FM_PR_HOST
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
   cp "$POLL" "$state/task-a.check.sh"
-  printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" "$head" > "$state/task-a.pr-poll"
   chmod 0600 "$state/task-a.check.sh" "$state/task-a.pr-poll"
 }
 
@@ -284,6 +290,9 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
+  *" state,headRefOid "*)
+    printf '%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -336,10 +345,12 @@ write_task_meta() {
 }
 
 write_poll_meta() {
-  local state=$1 id=$2 url=$3
+  local state=$1 id=$2 url=$3 head=${4:-0123456789abcdef0123456789abcdef01234567}
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
-    "pr=$url"
+    "pr=$url" \
+    "pr_head=$head" \
+    "pr_green_head=$head"
 }
 
 
@@ -648,7 +659,7 @@ test_valid_recording_and_merge_derivation() {
   fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
     || fail "published poll provenance or metadata binding was invalid"
   sidecar=$(cat "$dir/home/state/task-a.pr-poll")
-  [ "$sidecar" = $'github\nhttps://github.com/my-org/repo_name.with-dots/pull/37\ngithub.com\nmy-org/repo_name.with-dots\n37' ] \
+  [ "$sidecar" = $'github\nhttps://github.com/my-org/repo_name.with-dots/pull/37\ngithub.com\nmy-org/repo_name.with-dots\n37\n0123456789abcdef0123456789abcdef01234567' ] \
     || fail "published sidecar bytes were not exact"
 
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
@@ -661,7 +672,7 @@ test_valid_recording_and_merge_derivation() {
   : > "$dir/gh-axi.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
+  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --match-head-commit 0123456789abcdef0123456789abcdef01234567 --merge' "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve repository derivation and method"
   # A merge this home performed leaves its own durable outcome, so the poll's
   # confirmation is no longer the first the captain hears of it. Acknowledge that
@@ -795,7 +806,7 @@ test_rejected_metacharacter_bytes_are_inert() {
     [ "$rc" -ne 0 ] || fail "rejected metacharacter byte was accepted"
     [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "rejected input left a runnable task check"
     [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "rejected input left a sidecar"
-    fm_pr_poll_prepare "$dir/home/state" safe-check github https://github.com/o/r/pull/99 github.com o/r 99 "$POLL" \
+    fm_pr_poll_prepare "$dir/home/state" safe-check github https://github.com/o/r/pull/99 github.com o/r 99 0123456789abcdef0123456789abcdef01234567 "$POLL" \
       || fail "could not prepare bounded watcher poll"
     fm_pr_poll_publish_prepared || fail "could not publish bounded watcher poll"
 
@@ -823,8 +834,9 @@ test_rejected_metacharacter_bytes_are_inert() {
 make_poll_fixture() {
   local dir=$1
   cp "$POLL" "$dir/home/state/task-a.check.sh"
-  printf '%s\n%s\n%s\n%s\n%s\n' \
-    github https://github.com/o/r/pull/1 github.com o/r 1 > "$dir/home/state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    github https://github.com/o/r/pull/1 github.com o/r 1 \
+    0123456789abcdef0123456789abcdef01234567 > "$dir/home/state/task-a.pr-poll"
   chmod 0600 "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll"
 }
 
@@ -851,6 +863,8 @@ test_static_poll_contract() {
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_HEAD=1111111111111111111111111111111111111111 run_poll "$dir")
+  [ -z "$out" ] || fail "static poll emitted for a merged different head"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
 
@@ -858,10 +872,10 @@ test_static_poll_contract() {
   out=$(run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted with missing sidecar"
   mv "$dir/home/state/task-a.pr-poll.missing" "$dir/home/state/task-a.pr-poll"
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/1 github.com o/r 1 extra > "$dir/home/state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/1 github.com o/r 1 0123456789abcdef0123456789abcdef01234567 extra > "$dir/home/state/task-a.pr-poll"
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted with multiline sidecar"
-  printf '%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/1x github.com o/r 1x > "$dir/home/state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/1x github.com o/r 1x 0123456789abcdef0123456789abcdef01234567 > "$dir/home/state/task-a.pr-poll"
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted with malformed numeric data"
 
@@ -876,7 +890,7 @@ test_static_poll_contract() {
   [ -z "$out" ] || fail "timed-out static poll emitted output"
 
   write_poll_meta "$dir/home/state" task-a https://github.com/o/r/pull/1
-  fm_pr_poll_prepare "$dir/home/state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+  fm_pr_poll_prepare "$dir/home/state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 0123456789abcdef0123456789abcdef01234567 "$POLL" \
     || fail "could not prepare authenticated watcher poll"
   fm_pr_poll_publish_prepared || fail "could not publish authenticated watcher poll"
   rm -f "$dir/home/state/.last-check"
@@ -969,7 +983,7 @@ test_poll_publication_refuses_unsafe_destinations() {
     for kind in regular dangling directory; do
       dir=$(make_case "poll-path-${artifact//./-}-$kind")
       state="$dir/home/state"
-      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 0123456789abcdef0123456789abcdef01234567 "$POLL" \
         || fail "could not stage poll symlink refusal fixture"
       destination="$state/$artifact"
       make_private_symlink "$dir" "$destination" "$kind"
@@ -984,7 +998,7 @@ test_poll_publication_refuses_unsafe_destinations() {
 
     dir=$(make_case "poll-path-${artifact//./-}-direct-directory")
     state="$dir/home/state"
-    fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+    fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 0123456789abcdef0123456789abcdef01234567 "$POLL" \
       || fail "could not stage poll directory refusal fixture"
     destination="$state/$artifact"
     mkdir "$destination"
@@ -1120,11 +1134,11 @@ test_postrename_poll_validation_revokes_and_retries() {
       dir=$(make_case "poll-final-$artifact-$action")
       state="$dir/home/state"
       write_poll_meta "$state" task-a https://github.com/o/r/pull/1
-      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 0123456789abcdef0123456789abcdef01234567 "$POLL" \
         || fail "could not prepare prior poll"
       fm_pr_poll_publish_prepared || fail "could not publish prior poll"
       write_poll_meta "$state" task-a https://github.com/o/r/pull/2
-      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/2 github.com o/r 2 "$POLL" \
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/2 github.com o/r 2 0123456789abcdef0123456789abcdef01234567 "$POLL" \
         || fail "could not stage replacement poll"
       case "$artifact" in
         data) destination="$state/task-a.pr-poll" ;;
@@ -1147,7 +1161,7 @@ test_postrename_poll_validation_revokes_and_retries() {
       [ "$(cat "$link_target")" = 'external sentinel' ] || fail "poll type fault changed an external target"
       [ "$(file_mode "$link_target")" = 644 ] || fail "poll type fault changed an external target mode"
 
-      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/2 github.com o/r 2 "$POLL" \
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/2 github.com o/r 2 0123456789abcdef0123456789abcdef01234567 "$POLL" \
         || fail "could not prepare poll retry"
       PATH="$BASE_PATH" fm_pr_poll_publish_prepared || fail "poll retry did not recover after final validation fault"
       fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "poll retry did not publish a valid pair"
@@ -1363,7 +1377,9 @@ SH
     "project=$dir/project" \
     'kind=ship' \
     'mode=local-only' \
-    'pr=https://github.com/o/r/pull/18'
+    'pr=https://github.com/o/r/pull/18' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'pr_green_head=0123456789abcdef0123456789abcdef01234567'
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/18
   fm_pr_poll_snapshot_capture "$dir/home/state" task-a "$POLL" \
     || fail "could not snapshot teardown receipt fixture"
@@ -1436,14 +1452,14 @@ test_gitlab_delivery_is_inactive() {
 
   fm_pr_url_parse "$url" || fail "inactive GitLab identity was no longer recognizable"
   [ "$FM_PR_PROVIDER" = gitlab ] || fail "inactive GitLab identity lost its provider tag"
-  fm_pr_poll_prepare "$state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 "$POLL" \
+  fm_pr_poll_prepare "$state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 0123456789abcdef0123456789abcdef01234567 "$POLL" \
     && fail "inactive GitLab delivery prepared a new poll"
   [ ! -e "$state/task-a.pr-poll" ] || fail "refused GitLab poll preparation left an artifact"
 
   : > "$dir/glab.log"
   out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --validated \
-      gitlab "$url" gitlab.example group/subgroup/project 7)
+      gitlab "$url" gitlab.example group/subgroup/project 7 0123456789abcdef0123456789abcdef01234567)
   [ -z "$out" ] || fail "inactive GitLab poll emitted a merged result"
   [ ! -s "$dir/glab.log" ] || fail "inactive GitLab poll invoked glab"
 
@@ -1475,14 +1491,16 @@ test_gitlab_delivery_is_inactive() {
 }
 
 seed_canonical_poll() {
-  local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
+  local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number head
   state="$dir/home/state"
   fm_pr_url_parse "$url" || fail "retirement fixture URL was invalid"
   provider=$FM_PR_PROVIDER
   host=$FM_PR_HOST
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
-  fm_pr_poll_prepare "$state" "$id" "$provider" "$url" "$host" "$path" "$number" "$template" \
+  head=$(sed -n 's/^pr_green_head=//p' "$state/$id.meta")
+  fm_pr_head_valid "$head" || fail "retirement fixture metadata had no exact green head"
+  fm_pr_poll_prepare "$state" "$id" "$provider" "$url" "$host" "$path" "$number" "$head" "$template" \
     || fail "could not prepare retirement fixture"
   fm_pr_poll_publish_prepared || fail "could not publish retirement fixture"
 }
@@ -1843,7 +1861,8 @@ test_persistent_secondmate_retirement_is_poll_only() {
     'backend=tmux' \
     "home=$dir/secondmate-home" \
     'pr=https://github.com/o/r/pull/2' \
-    'pr_head=0123456789abcdef0123456789abcdef01234567'
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'pr_green_head=0123456789abcdef0123456789abcdef01234567'
   mkdir -p "$dir/secondmate-home"
   printf 'working: persistent endpoint remains healthy\n' > "$state/domain.status"
   printf -- '- domain | scope: test | home: %s\n' "$dir/secondmate-home" > "$dir/home/data/secondmates.md"

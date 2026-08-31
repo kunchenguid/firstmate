@@ -44,19 +44,43 @@ fm_pid_exists_for_signal() {  # <pid>
   return 1
 }
 
-fm_codex_desktop_new_lock_record() {
-  local thread pid=${FM_CODEX_DESKTOP_LEASE_PID:-}
-  thread=$(fm_codex_desktop_thread_id) || return 1
-  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+fm_codex_desktop_lease_identity() {  # <pid>
+  local pid=$1 args started digest
   fm_pid_exists_for_signal "$pid" || return 1
-  printf 'codex-desktop:%s:%s\n' "$thread" "$pid"
+  args=$(ps -ww -o args= -p "$pid" 2>/dev/null) || return 1
+  case "$args" in *fm-session-start.sh*) ;; *) return 1 ;; esac
+  started=$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null) || return 1
+  started=$(printf '%s\n' "$started" | awk '{$1=$1; print}')
+  [ -n "$started" ] || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s\n%s\n' "$started" "$args" \
+      | env -u LC_CTYPE LC_ALL=C LANG=C shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s\n%s\n' "$started" "$args" \
+      | env -u LC_CTYPE LC_ALL=C LANG=C sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    return 1
+  fi
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$digest"
 }
 
-# Split a Desktop record into FM_CODEX_DESKTOP_RECORD_THREAD and
-# FM_CODEX_DESKTOP_RECORD_PID, rejecting every non-canonical shape.
+fm_codex_desktop_new_lock_record() {
+  local thread identity pid=${FM_CODEX_DESKTOP_LEASE_PID:-}
+  thread=$(fm_codex_desktop_thread_id) || return 1
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  identity=$(fm_codex_desktop_lease_identity "$pid") || return 1
+  printf 'codex-desktop:%s:%s:%s\n' "$thread" "$pid" "$identity"
+}
+
+# Split a Desktop record into its thread, pid, and process identity globals,
+# rejecting every non-canonical shape.
+FM_CODEX_DESKTOP_RECORD_THREAD=
+FM_CODEX_DESKTOP_RECORD_PID=
+FM_CODEX_DESKTOP_RECORD_IDENTITY=
 fm_codex_desktop_parse_lock_record() {
-  local record=$1 kind thread pid extra
-  IFS=: read -r kind thread pid extra <<EOF
+  local record=$1 kind thread pid identity extra
+  IFS=: read -r kind thread pid identity extra <<EOF
 $record
 EOF
   [ "$kind" = codex-desktop ] && [ -z "$extra" ] || return 1
@@ -64,9 +88,11 @@ EOF
     | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
     || return 1
   case "$pid" in ''|*[!0-9]*|0|1|0*) return 1 ;; esac
-  [ "$record" = "codex-desktop:$thread:$pid" ] || return 1
+  [[ "$identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [ "$record" = "codex-desktop:$thread:$pid:$identity" ] || return 1
   FM_CODEX_DESKTOP_RECORD_THREAD=$thread
   FM_CODEX_DESKTOP_RECORD_PID=$pid
+  FM_CODEX_DESKTOP_RECORD_IDENTITY=$identity
 }
 
 fm_session_lock_record_valid() {
@@ -223,7 +249,8 @@ fm_session_lock_owner_alive() {
   case "$record" in
     codex-desktop:*)
       fm_codex_desktop_parse_lock_record "$record" || return 1
-      fm_pid_exists_for_signal "$FM_CODEX_DESKTOP_RECORD_PID"
+      [ "$(fm_codex_desktop_lease_identity "$FM_CODEX_DESKTOP_RECORD_PID")" \
+        = "$FM_CODEX_DESKTOP_RECORD_IDENTITY" ]
       ;;
     *) fm_session_lock_record_valid "$record" && fm_harness_pid_alive "$record" ;;
   esac

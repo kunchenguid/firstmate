@@ -24,6 +24,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$ROOT/bin/fm-session-lock-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
@@ -935,7 +937,7 @@ SH
 }
 
 test_network_sweeps_recheck_lock_ownership() {
-  local case_dir fakebin fake_root marker out typed_lock
+  local case_dir fakebin fake_root marker out typed_lock lease rc
   case_dir="$TMP_ROOT/network-lock-handoff"
   mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
@@ -963,13 +965,42 @@ SH
     "the stale worker did not report the refused handoff sweep"
   assert_contains "$out" "changed before project clone refresh" \
     "the stale worker did not report the refused clone refresh"
-  typed_lock="codex-desktop:019ff1ae-966b-7643-ba01-48811234656e:$$"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" = -p ] && pid=$argument
+  previous=$argument
+done
+if [ "$pid" = "${FM_FAKE_DESKTOP_PID:-}" ]; then
+  case "$*" in
+    *args=*) printf 'bash /fixture/bin/fm-session-start.sh\n' ;;
+    *lstart=*) printf 'Mon Aug 31 10:00:00 2026\n' ;;
+  esac
+else
+  /bin/ps "$@"
+fi
+SH
+  chmod +x "$fakebin/ps"
+  sleep 30 &
+  lease=$!
+  typed_lock=$(CODEX_THREAD_ID=019ff1ae-966b-7643-ba01-48811234656e \
+    CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+    FM_CODEX_DESKTOP_LEASE_PID="$lease" FM_FAKE_DESKTOP_PID="$lease" \
+    PATH="$fakebin:$BASE_PATH" fm_codex_desktop_new_lock_record) \
+    || fail "could not create a live typed Desktop lock fixture"
   printf '%s\n' "$typed_lock" > "$case_dir/home/state/.lock"
   rm -f "$marker"
+  rc=0
   PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only \
+    FM_FAKE_DESKTOP_PID="$lease" \
     FM_BOOTSTRAP_NETWORK_LOCK_PID="$typed_lock" FM_FAKE_FLEET_SYNC_STARTED_MARKER="$marker" \
-    "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+    "$ROOT/bin/fm-bootstrap.sh" >/dev/null || rc=$?
+  kill "$lease" 2>/dev/null || true
+  wait "$lease" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "the live typed Desktop lock bootstrap worker failed"
   [ -f "$marker" ] \
     || fail "the exact typed Desktop owner was denied the deferred mutating sweeps"
   pass "bootstrap: every deferred mutating sweep rechecks fleet-lock ownership"

@@ -123,6 +123,7 @@ git_common_dir=<registered-project-git-common-directory>
 mode=<direct-PR-or-local-only>
 yolo=<on-or-off>
 model_route_record=<absolute-routing-record>
+model_route_sha256=<routing-record-digest>
 session_envelope=<small-or-normal-or-research>
 session_generation=<positive-integer>
 session_cost_telemetry=unsupported
@@ -133,15 +134,19 @@ session_output_telemetry=unsupported
 
 Endpoint validation requires one exact value for every binding and refuses a mismatched task id, thread id, host id, project, worktree, or Git common-directory identity before mutation.
 Registration refuses to overwrite pre-existing task records, accepts only `direct-PR` or `local-only` with an explicit `on` or `off` project `yolo` posture, and refuses a worktree that resolves to the saved project checkout.
-The shared routing parser requires the ordered five factors and their evidence, recomputes the score, floor, override, precedence, supported Desktop model, and effort, and rejects missing, duplicate, extra, or inconsistent rows.
+The shared routing parser requires the ordered five factors and their evidence, recomputes the score, floor, override, and deterministic selection, and rejects missing, duplicate, extra, or inconsistent rows.
+Quota candidates, quota evidence, and the final resolved model and effort are separate fields, and every quota candidate must remain at or above the recorded minimum tier.
+Registration binds the exact routing record digest and every later host mutation refuses changed routing evidence.
 
 ## Session envelope boundary
 
 Codex Desktop does not currently expose reliable exact per-task cost, remaining-context, compaction-count, or output-token metrics to Firstmate.
 The envelope classes therefore provide qualitative soft boundaries and never claim exact enforcement or savings from those signals.
 At an explicit hard boundary, the worker stages intended changes and `fm-codex-app-task.sh hard-stop` creates a staged-only checkpoint commit plus a structured handoff outside the app-owned worktree.
+The hard-stop recovery journal binds the pre-checkpoint commit, staged tree, requested handoff, and endpoint generation before the commit, so an interrupted publication retries from that exact checkpoint.
 The primary creates a fresh Desktop task for the retained worktree, then `fm-codex-app-task.sh resume` verifies the exact checkpoint and handoff before replacing endpoint identity and advancing `session_generation`.
 Unstaged and untracked artifacts remain preserved throughout this transition.
+Reconciled `working` state is authoritative only for a bounded age, after which crew-state reports it as stale instead of suppressing later supervision signals.
 
 ## Standalone shell boundary
 

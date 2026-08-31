@@ -118,6 +118,7 @@ SH
   # path override FM_FAKE_AXI_STATUS/FM_FAKE_NM_ABORT_LOG before run_teardown.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_NM_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_NM_CALL_LOG"
 case "${1:-}" in
   axi)
     shift
@@ -2062,6 +2063,25 @@ land_shippable_commit() {
   git -C "$case_dir/project" fetch -q origin
 }
 
+test_normal_teardown_skips_inactive_no_mistakes() {
+  local case_dir rc head
+  case_dir=$(make_case inactive-run-skipped)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_CALL_LOG="$case_dir/nm-calls.log" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "inactive-run-skipped: normal teardown should succeed"
+  assert_absent "$case_dir/nm-calls.log" \
+    "inactive-run-skipped: normal teardown invoked inactive no-mistakes compatibility"
+  pass "normal teardown never invokes inactive no-mistakes compatibility"
+}
+
 test_parked_own_run_is_aborted_before_teardown() {
   local case_dir rc head
   case_dir=$(make_case parked-run-abort)
@@ -2072,6 +2092,7 @@ test_parked_own_run_is_aborted_before_teardown() {
   local rc=0
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "parked-run-abort: teardown should still succeed"
@@ -2095,6 +2116,7 @@ test_mismatched_run_after_abort_refuses_unconfirmed() {
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01RUN)" \
   FM_FAKE_AXI_STATUS_AFTER_ABORT="$(parked_axi_status_toon fm/task-x1 "$head" 02RUN)" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 1 "$rc" "parked-run-replaced: a different run does not confirm the targeted abort"
@@ -2115,6 +2137,7 @@ test_empty_status_after_abort_refuses_unconfirmed() {
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
   FM_FAKE_NM_EMPTY_AFTER_ABORT=1 \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 1 "$rc" "parked-run-empty-confirmation: empty status should refuse"
@@ -2133,6 +2156,7 @@ test_not_found_status_after_abort_confirms_completion() {
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
   FM_FAKE_NM_NOT_FOUND_AFTER_ABORT=1 \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "parked-run-not-found-confirmation: explicit not-found should confirm completion"
@@ -2159,6 +2183,7 @@ EOF
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
   FM_FAKE_NM_ABORT_NOOP=1 \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 1 "$rc" "parked-run-abort-unconfirmed: teardown should refuse"
@@ -2187,6 +2212,7 @@ test_another_branchs_parked_run_is_never_touched() {
   # teardown.
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/some-other-task deadbeef)" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "parked-run-not-ours: teardown should still succeed"
@@ -2207,6 +2233,7 @@ test_own_autonomous_run_is_left_alone() {
   rc=0
   FM_FAKE_AXI_STATUS="$(running_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "autonomous-run-left-alone: teardown should still succeed"
@@ -2592,6 +2619,7 @@ EOF
   rc=0
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$abort_log" \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 0 "$rc" "abort-then-reap-then-remove-order: teardown should still succeed"
   kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null || true; }
@@ -2647,6 +2675,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
+test_normal_teardown_skips_inactive_no_mistakes
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed

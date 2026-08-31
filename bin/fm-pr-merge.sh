@@ -73,6 +73,8 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
 fi
 URL=$FM_PR_URL
 PROVIDER=$FM_PR_PROVIDER
+PR_HOST=$FM_PR_HOST
+PR_PATH=$FM_PR_PATH
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
@@ -140,6 +142,10 @@ reject_repo_overrides() {
     case "$arg" in
       --repo|--repo=*)
         echo "error: extra merge arguments must not override the repository" >&2
+        return 1
+        ;;
+      --match-head-commit|--match-head-commit=*)
+        echo "error: extra merge arguments must not override the verified PR head" >&2
         return 1
         ;;
       --*) ;;
@@ -340,10 +346,18 @@ record_pr_metadata() {
   if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
     return 1
   fi
-  grep -qxF "pr=$URL" "$META" || {
+  fm_pr_metadata_identity_parse "$META" \
+    && [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] \
+    && [ "$FM_PR_META_URL" = "$URL" ] \
+    && [ "$FM_PR_META_HOST" = "$PR_HOST" ] \
+    && [ "$FM_PR_META_PATH" = "$PR_PATH" ] \
+    && [ "$FM_PR_META_NUMBER" = "$PR_NUMBER" ] \
+    && fm_pr_head_valid "$FM_PR_META_HEAD" \
+    && [ "$FM_PR_META_GREEN_HEAD" = "$FM_PR_META_HEAD" ] || {
     echo "error: PR metadata recording failed" >&2
     return 1
   }
+  FM_PR_MERGE_HEAD=$FM_PR_META_HEAD
 }
 
 FM_PR_GITHUB_AUTO_REQUESTED=false
@@ -466,6 +480,7 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+      --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
     else

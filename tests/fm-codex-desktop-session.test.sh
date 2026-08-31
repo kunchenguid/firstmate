@@ -10,18 +10,21 @@ TMP_ROOT=$(fm_test_tmproot fm-codex-desktop-session)
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 SYSTEM_PATH=$PATH
+REAL_GIT=$(command -v git)
 mkdir -p "$HOME_DIR/state"
 
 cat > "$FAKEBIN/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
   *"comm="*) printf '%s\n' bash ;;
-  *"args="*) printf '%s\n' 'bash -c fixture' ;;
+  *"args="*) printf '%s\n' "${FM_TEST_PS_ARGS:-bash /fixture/bin/fm-session-start.sh}" ;;
+  *"lstart="*) printf '%s\n' "${FM_TEST_PS_START:-Mon Aug 31 10:00:00 2026}" ;;
   *"ppid="*) printf '%s\n' 1 ;;
   *) exit 1 ;;
 esac
 SH
 chmod +x "$FAKEBIN/ps"
+export PATH="$FAKEBIN:$SYSTEM_PATH"
 
 THREAD_A=019ff1ae-966b-7643-ba01-48811234656e
 THREAD_B=019ff1ae-966b-7643-ba01-48811234656f
@@ -29,11 +32,11 @@ THREAD_B=019ff1ae-966b-7643-ba01-48811234656f
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$ROOT/bin/fm-session-lock-lib.sh"
 
-fm_session_lock_record_valid "codex-desktop:$THREAD_A:2" \
+fm_session_lock_record_valid "codex-desktop:$THREAD_A:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
   || fail "canonical Desktop lock record was rejected"
-! fm_session_lock_record_valid "codex-desktop:$THREAD_A:2:" \
+! fm_session_lock_record_valid "codex-desktop:$THREAD_A:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:" \
   || fail "Desktop lock record with trailing fields was accepted"
-! fm_session_lock_record_valid "codex-desktop:$THREAD_A:02" \
+! fm_session_lock_record_valid "codex-desktop:$THREAD_A:02:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
   || fail "Desktop lock record with a non-canonical pid was accepted"
 
 sleep 300 &
@@ -54,6 +57,11 @@ assert_contains "$out" "lock acquired: Codex Desktop thread $THREAD_A" \
 record=$(cat "$HOME_DIR/state/.lock")
 assert_contains "$record" "codex-desktop:$THREAD_A:" \
   "session lock did not persist the Desktop thread identity"
+! FM_TEST_PS_START='Mon Aug 31 10:00:01 2026' \
+  fm_session_lock_owner_alive "$record" \
+  || fail "a reused Desktop lease pid with a different process identity remained live"
+! FM_TEST_PS_ARGS='sleep 300' fm_session_lock_owner_alive "$record" \
+  || fail "an unrelated process remained a valid Desktop lease owner"
 
 CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
@@ -142,13 +150,20 @@ FM_HOME="$TASK_HOME" "$ROOT/bin/fm-task-model-route.sh" "$TASK_ID" \
   --risk 0 --risk-evidence low \
   --diagnosis 0 --diagnosis-evidence none \
   --verification 0 --verification-evidence focused \
-  --floor architecture >/dev/null \
+  --quota-candidates gpt-5.6-sol:high \
+  --quota-evidence 'current profile selected the available Sol candidate' \
+  --resolved-model gpt-5.6-sol --resolved-effort high >/dev/null \
   || fail "could not create the Desktop task model route"
 ROUTE_REAL=$(realpath "$ROUTE_RECORD")
+ROUTE_HASH=$(shasum -a 256 "$ROUTE_RECORD" | awk '{print $1}')
 TASK_GIT_COMMON=$(realpath "$TASK_PROJECT/.git")
 sleep 300 &
 TASK_LEASE=$!
-printf 'codex-desktop:%s:%s\n' "$THREAD_A" "$TASK_LEASE" > "$TASK_HOME/state/.lock"
+TASK_LOCK=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_CODEX_DESKTOP_LEASE_PID="$TASK_LEASE" PATH="$FAKEBIN:$SYSTEM_PATH" \
+  fm_codex_desktop_new_lock_record) || fail "could not create the Desktop task lease record"
+printf '%s\n' "$TASK_LOCK" > "$TASK_HOME/state/.lock"
 
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
@@ -185,6 +200,12 @@ assert_grep "codex_app_host_id=$HOST_ID" "$META" \
   "metadata did not persist the exact Desktop host id"
 assert_grep "model_route_record=$ROUTE_REAL" "$META" \
   "metadata did not persist the inspected model route"
+assert_grep "model_route_sha256=$ROUTE_HASH" "$META" \
+  "metadata did not digest-bind the inspected model route"
+assert_grep $'model\tgpt-5.6-luna' "$ROUTE_RECORD" \
+  "quota-aware registration lost the deterministic five-factor result"
+assert_grep $'resolved_model\tgpt-5.6-sol' "$ROUTE_RECORD" \
+  "quota-aware registration did not retain the resolved Desktop model"
 assert_grep "session_envelope=research" "$META" \
   "metadata did not persist the selected session envelope"
 assert_grep 'mode=direct-PR' "$META" \
@@ -207,6 +228,26 @@ assert_grep "state=working" "$CURRENT" \
 state=$(FM_HOME="$TASK_HOME" "$ROOT/bin/fm-crew-state.sh" "$TASK_ID")
 assert_contains "$state" "state: working · source: codex-app-host" \
   "crew-state did not read the Desktop host's authoritative current-state record"
+
+sed 's/^updated_at=.*/updated_at=2000-01-01T00:00:00Z/' "$CURRENT" > "$CURRENT.stale"
+mv "$CURRENT.stale" "$CURRENT"
+state=$(FM_HOME="$TASK_HOME" FM_CODEX_APP_CURRENT_MAX_AGE=1 \
+  "$ROOT/bin/fm-crew-state.sh" "$TASK_ID")
+assert_contains "$state" "state: unknown · source: none · stale Codex Desktop working state" \
+  "stale Desktop working evidence remained suppressive"
+
+cp "$ROUTE_RECORD" "$ROUTE_RECORD.saved"
+printf '%s\n' 'tampered' >> "$ROUTE_RECORD"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
+    --state blocked --detail 'must not publish' 2>&1) || status=$?
+expect_code 1 "$status" "changed route evidence must invalidate the task binding"
+assert_contains "$out" "immutable model route evidence" \
+  "changed route evidence refusal did not name the durable binding"
+mv "$ROUTE_RECORD.saved" "$ROUTE_RECORD"
 
 CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
@@ -348,6 +389,31 @@ printf '%s\n' 'checkpointed work' > "$SHIP_WORKTREE/checkpoint.txt"
 git -C "$SHIP_WORKTREE" add checkpoint.txt
 printf '%s\n' 'leave unstaged' > "$SHIP_WORKTREE/unstaged.txt"
 SHIP_HANDOFF="$TASK_HOME/data/$SHIP_ID/session-handoff-1.md"
+mkdir -p "$TMP_ROOT/fail-git"
+cat > "$TMP_ROOT/fail-git/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" commit "*)
+    "$FM_TEST_REAL_GIT" "$@" || exit $?
+    exit 1
+    ;;
+esac
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod +x "$TMP_ROOT/fail-git/git"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" FM_TEST_REAL_GIT="$REAL_GIT" \
+  PATH="$TMP_ROOT/fail-git:$FAKEBIN:$SYSTEM_PATH" \
+  "$ROOT/bin/fm-codex-app-task.sh" hard-stop "$SHIP_ID" \
+    --reason 'session envelope hard boundary' --handoff "$SHIP_HANDOFF" 2>&1) \
+  || status=$?
+expect_code 1 "$status" "an interrupted checkpoint publication must remain retryable"
+[ -f "$TASK_HOME/state/$SHIP_ID.hard-stop-journal" ] \
+  || fail "interrupted hard stop left no recovery journal"
+[ ! -e "$SHIP_HANDOFF" ] \
+  || fail "interrupted checkpoint fixture unexpectedly published the handoff"
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \

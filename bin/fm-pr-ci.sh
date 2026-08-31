@@ -54,14 +54,15 @@ read_head() {
   gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null
 }
 
+FM_PR_CI_TOTAL=
 summary_is_green() {  # <summary>
   local summary=$1 passed failed total
-  case "$summary" in
-    *pending*|*skipped*) return 1 ;;
-  esac
-  passed=$(printf '%s\n' "$summary" | sed -n 's/^\([0-9][0-9]*\) passed,.*$/\1/p')
-  failed=$(printf '%s\n' "$summary" | sed -n 's/^[0-9][0-9]* passed, \([0-9][0-9]*\) failed,.*$/\1/p')
-  total=$(printf '%s\n' "$summary" | sed -n 's/^.* \([0-9][0-9]*\) total$/\1/p')
+  [[ "$summary" =~ ^([0-9]+)[[:space:]]passed,[[:space:]]([0-9]+)[[:space:]]failed,[[:space:]]([0-9]+)[[:space:]]total$ ]] \
+    || return 1
+  passed=${BASH_REMATCH[1]}
+  failed=${BASH_REMATCH[2]}
+  total=${BASH_REMATCH[3]}
+  FM_PR_CI_TOTAL=$total
   [ -n "$passed" ] && [ -n "$failed" ] && [ -n "$total" ] \
     && [ "$passed" -gt 0 ] && [ "$failed" -eq 0 ] && [ "$passed" -eq "$total" ]
 }
@@ -82,13 +83,18 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
       echo "error: PR $URL changed head while checks were read; expected head $EXPECTED_HEAD, observed ${head_after:-unknown}" >&2
       exit 1
     fi
-    summary=$(printf '%s\n' "$checks" | sed -n 's/^summary:[[:space:]]*//p' | head -1)
-    if [ "$checks_status" -eq 0 ] && summary_is_green "$summary"; then
-      total=$(printf '%s\n' "$summary" | sed -n 's/^.* \([0-9][0-9]*\) total$/\1/p')
+    summary_rows=$(printf '%s\n' "$checks" | grep -c '^summary:[[:space:]]*' || true)
+    summary=$(printf '%s\n' "$checks" | sed -n 's/^summary:[[:space:]]*//p')
+    if [ "$checks_status" -eq 0 ] && [ "$summary_rows" -eq 1 ] && summary_is_green "$summary"; then
+      total=$FM_PR_CI_TOTAL
       echo "green: $URL head=$EXPECTED_HEAD checks=$total"
       exit 0
     fi
-    if [ -z "$summary" ]; then
+    if [ "$summary_rows" -eq 0 ]; then
+      echo "not-green: attempt=$attempt/$ATTEMPTS no terminal successful checks for head $EXPECTED_HEAD" >&2
+    elif [ "$summary_rows" -ne 1 ]; then
+      echo "not-green: attempt=$attempt/$ATTEMPTS ambiguous check summary count=$summary_rows for head $EXPECTED_HEAD" >&2
+    elif [ -z "$summary" ]; then
       echo "not-green: attempt=$attempt/$ATTEMPTS no terminal successful checks for head $EXPECTED_HEAD" >&2
     else
       echo "not-green: attempt=$attempt/$ATTEMPTS head=$EXPECTED_HEAD $summary" >&2

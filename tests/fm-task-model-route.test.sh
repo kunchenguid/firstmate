@@ -112,6 +112,58 @@ test_floors_and_user_override_precedence() {
   pass "hard floors and explicit user override have deterministic precedence"
 }
 
+test_quota_resolution_and_record_immutability() {
+  local out record before status
+  out=$(route quota-task \
+    --ambiguity 0 --ambiguity-evidence a \
+    --boundary-clarity 0 --boundary-clarity-evidence b \
+    --risk 0 --risk-evidence c \
+    --diagnosis 0 --diagnosis-evidence d \
+    --verification 0 --verification-evidence e \
+    --quota-candidates gpt-5.6-terra:high,gpt-5.6-sol:high \
+    --quota-evidence 'current profiles favor Terra runway' \
+    --resolved-model gpt-5.6-terra --resolved-effort high) \
+    || fail "quota-aware route failed: $out"
+  assert_contains "$out" "model=gpt-5.6-terra effort=high" \
+    "quota-aware route did not expose the final resolved selection"
+  record="$HOME_DIR/data/quota-task/model-routing.tsv"
+  assert_grep $'model\tgpt-5.6-luna' "$record" \
+    "quota resolution replaced the deterministic five-factor result"
+  assert_grep $'quota_candidates\tgpt-5.6-terra:high,gpt-5.6-sol:high' "$record" \
+    "quota resolution omitted its complete candidate set"
+  assert_grep $'resolved_model\tgpt-5.6-terra' "$record" \
+    "quota resolution omitted its final model"
+  assert_grep $'resolution\tquota_profile' "$record" \
+    "quota resolution was mislabeled as a user override"
+
+  status=0
+  out=$(route below-floor \
+    --ambiguity 0 --ambiguity-evidence a \
+    --boundary-clarity 0 --boundary-clarity-evidence b \
+    --risk 0 --risk-evidence c \
+    --diagnosis 0 --diagnosis-evidence d \
+    --verification 0 --verification-evidence e \
+    --floor architecture \
+    --quota-candidates gpt-5.6-luna:medium \
+    --quota-evidence 'candidate is below the floor' \
+    --resolved-model gpt-5.6-luna --resolved-effort medium 2>&1) || status=$?
+  expect_code 2 "$status" "quota resolution must not lower the minimum tier"
+
+  before=$(shasum -a 256 "$record" | awk '{print $1}')
+  status=0
+  out=$(route quota-task \
+    --ambiguity 0 --ambiguity-evidence changed \
+    --boundary-clarity 0 --boundary-clarity-evidence b \
+    --risk 0 --risk-evidence c \
+    --diagnosis 0 --diagnosis-evidence d \
+    --verification 0 --verification-evidence e 2>&1) || status=$?
+  expect_code 1 "$status" "an existing routing record must not be replaced"
+  [ "$(shasum -a 256 "$record" | awk '{print $1}')" = "$before" ] \
+    || fail "refused rerouting changed the recorded evidence"
+  pass "quota resolution is separate, floor-safe, and immutable"
+}
+
 test_score_bands_and_evidence_record
 test_floors_and_user_override_precedence
+test_quota_resolution_and_record_immutability
 echo "# all task model route tests passed"

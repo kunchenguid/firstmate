@@ -20,6 +20,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$ROOT/bin/fm-session-lock-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests)
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
@@ -71,7 +73,12 @@ for argument in "$@"; do
   [ "$previous" = -p ] && pid=$argument
   previous=$argument
 done
-if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then
+if [ "$pid" = "${FM_FAKE_DESKTOP_PID:-}" ]; then
+  case "$*" in
+    *args=*) printf 'bash /fixture/bin/fm-session-start.sh\n' ;;
+    *lstart=*) printf 'Mon Aug 31 10:00:00 2026\n' ;;
+  esac
+elif [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then
   case "$*" in
     *comm=*) printf '/usr/local/bin/claude\n' ;;
     *args=*) printf 'claude\n' ;;
@@ -347,7 +354,7 @@ EOF
 # lock meanwhile, running the mutating sweeps would sweep underneath that
 # session, so they are refused - and the refusal is reported, not silent.
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands() {
-  local rec home root log report typed_lock
+  local rec home root log report typed_lock lease rc
   rec=$(new_world lock-changed)
   IFS='|' read -r home root log <<EOF
 $rec
@@ -370,11 +377,22 @@ EOF
     "the worker refused sweeps for the very session that still holds the lock"
 
   : > "$log"
-  typed_lock="codex-desktop:019ff1ae-966b-7643-ba01-48811234656e:$$"
+  sleep 30 &
+  lease=$!
+  typed_lock=$(CODEX_THREAD_ID=019ff1ae-966b-7643-ba01-48811234656e \
+    CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+    FM_CODEX_DESKTOP_LEASE_PID="$lease" FM_FAKE_DESKTOP_PID="$lease" \
+    PATH="$root/bin:$PATH" fm_codex_desktop_new_lock_record) \
+    || fail "could not create a live typed Desktop lock fixture"
   printf '%s\n' "$typed_lock" > "$home/state/.lock"
+  rc=0
   CODEX_THREAD_ID=019ff1ae-966b-7643-ba01-48811234656e \
-    CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' FM_FAKE_BOOTSTRAP_LOG="$log" \
-    run_stage "$home" "$root" run --locked 1 --lock-pid "$typed_lock"
+    CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+    FM_FAKE_DESKTOP_PID="$lease" FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" run --locked 1 --lock-pid "$typed_lock" || rc=$?
+  kill "$lease" 2>/dev/null || true
+  wait "$lease" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "the live typed Desktop lock worker failed"
   assert_grep 'network=only detect_only=0' "$log" \
     "the worker downgraded the exact live Codex Desktop lock to detect-only"
   pass "fm-startup-network: manual callers cannot forge mutation authority"

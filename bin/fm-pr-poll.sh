@@ -9,12 +9,13 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+if [ "$#" -eq 7 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  expected_head=$7
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -28,6 +29,7 @@ elif [ "$#" -eq 0 ]; then
   IFS= read -r host <&3 || exit 0
   IFS= read -r path <&3 || exit 0
   IFS= read -r number <&3 || exit 0
+  IFS= read -r expected_head <&3 || exit 0
   if IFS= read -r _extra <&3; then
     exit 0
   fi
@@ -40,6 +42,12 @@ case "$number" in
   [1-9]*) ;;
   *) exit 0 ;;
 esac
+case "$expected_head" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+  *) exit 0 ;;
+esac
+case "${#expected_head}" in 40|64) ;; *) exit 0 ;; esac
+case "$expected_head" in *[!0-9a-f]*) exit 0 ;; esac
 case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
@@ -61,8 +69,12 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    snapshot=$(gh pr view "$url" --json state,headRefOid --jq '[.state,.headRefOid] | @tsv' 2>/dev/null) || exit 0
+    case "$snapshot" in *$'\n'*) exit 0 ;; esac
+    state=${snapshot%%$'\t'*}
+    head=${snapshot#*$'\t'}
+    [ "$head" != "$snapshot" ] || exit 0
+    [ "$state" = MERGED ] && [ "$head" = "$expected_head" ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

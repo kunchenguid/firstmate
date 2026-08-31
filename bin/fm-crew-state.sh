@@ -225,6 +225,19 @@ if [ "$TASK_BACKEND" = codex-app-host ]; then
   esac
   [ -n "$CURRENT_UPDATED" ] \
     || emit unknown none "Codex Desktop current state has no reconciliation timestamp"
+  CURRENT_EPOCH=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$CURRENT_UPDATED" +%s 2>/dev/null \
+    || date -u -d "$CURRENT_UPDATED" +%s 2>/dev/null) \
+    || emit unknown none "Codex Desktop current state has an invalid reconciliation timestamp"
+  CURRENT_NOW=$(date -u +%s)
+  CURRENT_MAX_AGE=${FM_CODEX_APP_CURRENT_MAX_AGE:-300}
+  case "$CURRENT_MAX_AGE" in ''|*[!0-9]*|0) CURRENT_MAX_AGE=300 ;; esac
+  if [ "$CURRENT_EPOCH" -gt "$CURRENT_NOW" ]; then
+    emit unknown none "Codex Desktop current state has a future reconciliation timestamp"
+  fi
+  if [ "$CURRENT_STATE" = working ] \
+    && [ "$((CURRENT_NOW - CURRENT_EPOCH))" -gt "$CURRENT_MAX_AGE" ]; then
+    emit unknown none "stale Codex Desktop working state last reconciled at $CURRENT_UPDATED"
+  fi
   emit "$CURRENT_STATE" codex-app-host "$CURRENT_DETAIL"
 fi
 
