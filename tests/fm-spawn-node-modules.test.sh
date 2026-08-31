@@ -39,22 +39,39 @@ esac
 exec /bin/ln "$@"
 SH
   chmod +x "$fakebin/ln"
-  local real_mktemp
-  real_mktemp=$(command -v mktemp)
-  cat > "$fakebin/mktemp" <<SH
+  cat > "$fakebin/mkdir" <<'SH'
 #!/usr/bin/env bash
 set -u
 last=
-for last in "\$@"; do :; done
-if [ "\${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" = 1 ] && [[ "\$last" = */.fm-node-modules.XXXXXX ]]; then
-  out=\$("$real_mktemp" "\$@") || exit \$?
-  kill -TERM "\$PPID" "\$\$"
-  printf '%s\n' "\$out"
-  exit 0
+for last in "$@"; do :; done
+base=${last##*/}
+if [[ "$base" = .fm-node-modules.* ]]; then
+  if [ "${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" = 1 ]; then
+    /bin/mkdir "$@" || exit $?
+    kill -TERM "$PPID" "$$"
+    exit 0
+  fi
+  if [ "${FM_KILL_NODE_MODULES_CREATOR:-0}" = 1 ]; then
+    /bin/mkdir "$@" || exit $?
+    kill -HUP "$$"
+    exit 0
+  fi
 fi
-exec "$real_mktemp" "\$@"
+exec /bin/mkdir "$@"
 SH
-  chmod +x "$fakebin/mktemp"
+  chmod +x "$fakebin/mkdir"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+last=
+for last in "$@"; do :; done
+base=${last##*/}
+if [ "${FM_INTERRUPT_NODE_MODULES_CLEANUP:-0}" = 1 ] && [[ "$base" = .fm-node-modules.* ]]; then
+  kill -TERM "$PPID" "$$"
+fi
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/rm"
   cat > "$fakebin/node-race-hook.cjs" <<'JS'
 const fs = require('node:fs');
 const symlinkSync = fs.symlinkSync;
@@ -149,6 +166,8 @@ run_spawn() {
     FM_FAIL_NODE_MODULES_LINK="${FM_FAIL_NODE_MODULES_LINK:-0}" \
     FM_NODE_MODULES_RACE_TARGET="${FM_NODE_MODULES_RACE_TARGET:-}" \
     FM_INTERRUPT_NODE_MODULES_CREATION="${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" \
+    FM_KILL_NODE_MODULES_CREATOR="${FM_KILL_NODE_MODULES_CREATOR:-0}" \
+    FM_INTERRUPT_NODE_MODULES_CLEANUP="${FM_INTERRUPT_NODE_MODULES_CLEANUP:-0}" \
     FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
     FM_KILL_NODE_MODULES_PUBLISHER="${FM_KILL_NODE_MODULES_PUBLISHER:-0}" \
     FM_FAIL_NODE_PUBLISHER_EXEC="${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" \
@@ -362,6 +381,44 @@ test_spawn_cleans_staging_after_publisher_exec_failure() {
   pass "fm-spawn cleans staging after publisher execution failure"
 }
 
+test_spawn_cleans_staging_after_creator_termination() {
+  local rec id out status candidate
+  id=node-modules-creator-kill-z11
+  rec=$(make_case creator-kill "$id")
+  read_case "$rec"
+
+  out=$(FM_KILL_NODE_MODULES_CREATOR=1 run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should fail after dependency staging creation terminates"
+  assert_not_contains "$out" "spawned $id" "terminated staging creation launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "terminated staging creation published dependencies"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "terminated staging creation leaked a dependency tree"
+  done
+  pass "fm-spawn cleans registered staging after creator termination"
+}
+
+test_spawn_cleans_known_unpublished_staging_during_interrupt() {
+  local rec id out status candidate
+  id=node-modules-cleanup-interrupt-z12
+  rec=$(make_case cleanup-interrupt "$id")
+  read_case "$rec"
+
+  out=$(FM_NODE_MODULES_RACE_TARGET="$WORKTREE_DIR" FM_INTERRUPT_NODE_MODULES_CLEANUP=1 run_spawn "$id")
+  status=$?
+  expect_code 143 "$status" "spawn should preserve cancellation during dependency staging cleanup"
+  assert_not_contains "$out" "spawned $id" "cancelled dependency cleanup launched a worker"
+  assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
+    "cancelled cleanup removed the concurrently created dependency tree"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "cancelled cleanup leaked known-unpublished dependency staging"
+  done
+  pass "fm-spawn completes staging cleanup before honoring cancellation"
+}
+
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_ignores_published_beeline_consumers
@@ -372,5 +429,7 @@ test_spawn_preserves_publication_after_interrupt
 test_spawn_preserves_backing_after_ambiguous_publisher_exit
 test_spawn_isolates_publisher_from_ambient_node_options
 test_spawn_cleans_staging_after_publisher_exec_failure
+test_spawn_cleans_staging_after_creator_termination
+test_spawn_cleans_known_unpublished_staging_during_interrupt
 
 echo "# all fm-spawn-node-modules tests passed"

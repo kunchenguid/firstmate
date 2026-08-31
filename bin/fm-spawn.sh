@@ -649,16 +649,26 @@ parse_orca_worktree_result() {
 }
 
 cleanup_beeline_node_modules_staging() {
-  if [ "$NODE_MODULES_ABORT_CLEANUP" = 1 ] && [ -n "$NODE_MODULES_ABORT_STAGING" ]; then
-    rm -rf -- "$NODE_MODULES_ABORT_STAGING" 2>/dev/null || true
+  local staging
+  [ "$NODE_MODULES_ABORT_CLEANUP" = 1 ] || return 0
+  [ -n "$NODE_MODULES_ABORT_STAGING" ] || return 1
+  staging=$NODE_MODULES_ABORT_STAGING
+  if ! (
+    trap '' INT TERM HUP
+    exec rm -rf -- "$staging"
+  ); then
+    return 1
   fi
+  [ ! -e "$staging" ] && [ ! -L "$staging" ] || return 1
   NODE_MODULES_ABORT_CLEANUP=0
   NODE_MODULES_ABORT_STAGING=
 }
 
 spawn_abort_cleanup() {
   local status=$?
-  cleanup_beeline_node_modules_staging
+  if ! cleanup_beeline_node_modules_staging; then
+    echo "warning: failed to remove dependency staging at $NODE_MODULES_ABORT_STAGING" >&2
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -1316,7 +1326,7 @@ exclude_path() {
 
 share_beeline_node_modules() {
   local source source_real target staging_root staging entry name entry_real link_target publication_link publisher_node
-  local has_beeline_workspace publish_status creation_signal_status publication_signal_status
+  local has_beeline_workspace publish_status setup_signal_status mkdir_status cleanup_status
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
 
@@ -1337,24 +1347,44 @@ share_beeline_node_modules() {
   publisher_node=$(command -v node 2>/dev/null) || return 1
   [ -x "$publisher_node" ] || return 1
 
-  creation_signal_status=
-  trap 'creation_signal_status=130' INT
-  trap 'creation_signal_status=143' TERM
-  if ! staging_root=$(
-    trap '' INT TERM
-    exec mktemp -d "$WT/.fm-node-modules.XXXXXX"
-  ); then
-    trap - INT TERM
-    [ -z "$creation_signal_status" ] || return "$creation_signal_status"
-    return 1
-  fi
+  setup_signal_status=
+  trap 'setup_signal_status=130' INT
+  trap 'setup_signal_status=143' TERM
+  while :; do
+    staging_root="$WT/.fm-node-modules.$$.$RANDOM.$RANDOM"
+    [ ! -e "$staging_root" ] && [ ! -L "$staging_root" ] && break
+    if [ -n "$setup_signal_status" ]; then
+      trap - INT TERM
+      return "$setup_signal_status"
+    fi
+  done
   staging="$staging_root"
   NODE_MODULES_ABORT_STAGING=$staging_root
   NODE_MODULES_ABORT_CLEANUP=1
-  trap - INT TERM
-  if [ -n "$creation_signal_status" ]; then
-    cleanup_beeline_node_modules_staging
-    return "$creation_signal_status"
+  mkdir_status=0
+  mkdir -- "$staging_root" || mkdir_status=$?
+  if [ "$mkdir_status" -ne 0 ]; then
+    cleanup_status=0
+    case "$mkdir_status:$setup_signal_status" in
+      1:|126:|127:)
+        NODE_MODULES_ABORT_CLEANUP=0
+        NODE_MODULES_ABORT_STAGING=
+        ;;
+      *)
+        cleanup_beeline_node_modules_staging || cleanup_status=$?
+        ;;
+    esac
+    trap - INT TERM
+    [ -z "$setup_signal_status" ] || return "$setup_signal_status"
+    [ "$cleanup_status" -eq 0 ] || return 1
+    return 1
+  fi
+  if [ -n "$setup_signal_status" ]; then
+    cleanup_status=0
+    cleanup_beeline_node_modules_staging || cleanup_status=$?
+    trap - INT TERM
+    [ "$cleanup_status" -eq 0 ] || return 1
+    return "$setup_signal_status"
   fi
   if ! (
     for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
@@ -1401,15 +1431,24 @@ share_beeline_node_modules() {
     fi
 
   ); then
-    cleanup_beeline_node_modules_staging
+    cleanup_status=0
+    cleanup_beeline_node_modules_staging || cleanup_status=$?
+    trap - INT TERM
+    [ -z "$setup_signal_status" ] || return "$setup_signal_status"
+    [ "$cleanup_status" -eq 0 ] || return 1
     return 1
+  fi
+
+  if [ -n "$setup_signal_status" ]; then
+    cleanup_status=0
+    cleanup_beeline_node_modules_staging || cleanup_status=$?
+    trap - INT TERM
+    [ "$cleanup_status" -eq 0 ] || return 1
+    return "$setup_signal_status"
   fi
 
   exclude_path '.fm-node-modules.*/'
   publication_link=$(basename "$staging_root")
-  publication_signal_status=
-  trap 'publication_signal_status=130' INT
-  trap 'publication_signal_status=143' TERM
   NODE_MODULES_ABORT_CLEANUP=0
   publish_status=0
   NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" <<'JS' || publish_status=$?
@@ -1431,13 +1470,15 @@ JS
       ;;
     3|4|126|127)
       NODE_MODULES_ABORT_CLEANUP=1
-      cleanup_beeline_node_modules_staging
+      cleanup_status=0
+      cleanup_beeline_node_modules_staging || cleanup_status=$?
+      [ "$cleanup_status" -eq 0 ] || publish_status=5
       ;;
     *)
       ;;
   esac
   trap - INT TERM
-  [ -z "$publication_signal_status" ] || return "$publication_signal_status"
+  [ -z "$setup_signal_status" ] || return "$setup_signal_status"
   case "$publish_status" in
     0|3) ;;
     *) return 1 ;;
