@@ -1315,7 +1315,7 @@ exclude_path() {
 }
 
 share_beeline_node_modules() {
-  local source source_real target staging_root staging entry name entry_real link_target publication_link
+  local source source_real target staging_root staging entry name entry_real link_target publication_link publisher_node
   local has_beeline_workspace publish_status creation_signal_status publication_signal_status
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
@@ -1334,6 +1334,8 @@ share_beeline_node_modules() {
     fi
   done
   [ "$has_beeline_workspace" = 1 ] || return 0
+  publisher_node=$(command -v node 2>/dev/null) || return 1
+  [ -x "$publisher_node" ] || return 1
 
   creation_signal_status=
   trap 'creation_signal_status=130' INT
@@ -1410,7 +1412,7 @@ share_beeline_node_modules() {
   trap 'publication_signal_status=143' TERM
   NODE_MODULES_ABORT_CLEANUP=0
   publish_status=0
-  env -u NODE_OPTIONS node - "$publication_link" "$target" <<'JS' || publish_status=$?
+  NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" <<'JS' || publish_status=$?
 const fs = require('node:fs');
 
 process.on('SIGINT', () => {});
@@ -1427,7 +1429,7 @@ JS
     0)
       NODE_MODULES_ABORT_STAGING=
       ;;
-    3|4)
+    3|4|126|127)
       NODE_MODULES_ABORT_CLEANUP=1
       cleanup_beeline_node_modules_staging
       ;;
