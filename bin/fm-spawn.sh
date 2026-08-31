@@ -486,7 +486,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
-  local remote_exemption_note
+  local remote_exemption_note remote_launch_refusal
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -547,19 +547,15 @@ spawn_remote_secondmate() {
   # a non-cursor harness HERE, before the round trip, for the same reason the
   # local path refuses it: forwarding it would both record a stale cursor grant
   # in this parent's task meta and hand the remote host a flag its own fm-spawn.sh
-  # refuses anyway. Both routes ask about the EFFECTIVE grant rather than about
-  # how it arrived, so neither can be walked around by a future source the way
-  # the flag-keyed form was.
-  if [ -n "$CURSOR_EXEMPTION" ] && ! fm_control_cursor_exemption_applies "$harness"; then
+  # refuses anyway. This route asks the shared composite rather than its
+  # constituent predicates, so a policy rule added to the owner reaches the remote
+  # route too - the local-versus-remote asymmetry has produced two real defects on
+  # this branch already, and a route standing outside the owner is how a third
+  # would arrive.
+  if ! remote_launch_refusal=$(fm_control_launch_refusal "$harness" secondmate "$CURSOR_EXEMPTION"); then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: $(fm_control_cursor_exemption_harness_refusal "$harness")" >&2
-    return 1
-  fi
-  if ! fm_control_harness_supports_kind "$harness" secondmate "$CURSOR_EXEMPTION"; then
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: $(fm_control_harness_kind_refusal "$harness" secondmate)" >&2
+    echo "error: $remote_launch_refusal" >&2
     return 1
   fi
   # `attended` asserts that a person is at THIS pane, which says nothing about a
@@ -1527,12 +1523,18 @@ if [ "$CURSOR_EXEMPTION_SET" -eq 0 ] &&
     "$(spawn_recorded_cursor_exemption "$STATE" "$ID")" "$HARNESS")
 fi
 
-# Every launch-admissibility rule is composed by fm_control_launch_refusal in
+# Every POLICY admissibility rule is composed by fm_control_launch_refusal in
 # bin/fm-control-lib.sh, asked here with the EFFECTIVE grant rather than with how
 # the grant arrived, so flag, inheritance, and any later source go through one
 # check. bin/fm-control.sh's relaunch asks the SAME function before it stops
-# anything, which is what keeps a refusal on the pre-stop side of that
+# anything, which is what keeps a policy refusal on the pre-stop side of that
 # transaction instead of stranding a task whose replacement is then refused.
+#
+# The environmental refusals BELOW this point are deliberately outside it: they
+# resolve an executable on PATH and probe cursor's live model catalog, which the
+# control plane cannot ask without running the harness binary. A new rule that is
+# answerable from harness, kind, and grant alone belongs in the composite; one
+# that needs this machine belongs here and can strand a relaunch.
 if ! SPAWN_LAUNCH_REFUSAL=$(fm_control_launch_refusal "$HARNESS" "$KIND" "$CURSOR_EXEMPTION"); then
   echo "error: $SPAWN_LAUNCH_REFUSAL" >&2
   exit 1
