@@ -110,6 +110,12 @@ apply_bundle() {
     jq -cS . "$result_path"
     return
   fi
+  if [ -n "${FM_FIXTURE_APPLY_PAUSE_MARKER:-}" ]; then
+    printf 'paused\n' > "$FM_FIXTURE_APPLY_PAUSE_MARKER"
+    while [ ! -e "${FM_FIXTURE_APPLY_PAUSE_RELEASE:?}" ]; do
+      sleep 0.01
+    done
+  fi
   mkdir -p "$vault/.vault-meta"
   lock="$vault/.vault-meta/mutation.lock"
   (set -C; umask 077; : > "$lock") 2>/dev/null || return 75
