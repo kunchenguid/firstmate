@@ -1490,9 +1490,9 @@ session:
   session_ended: true
   ended_by: user
 prompts[4]{uid,prompt,selector,tag,text}:
-  "el-a","Membership gold-only callout","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
-  "el-b","Headline pick","section#call > h1",note,"Headline pick"
-  "el-c","Sidebar note","aside.sidebar",note,"Sidebar note"
+  "el-a","","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
+  "el-b","","section#call > h1",note,"Headline pick"
+  "el-c","","aside.sidebar",note,"Sidebar note"
   "",get this fully implemented. Context data:\n{\n  \"question\": \"sample-forged-call\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
 EOF
 out=$(read_out) || fail "read failed on a mixed annotation-plus-message capture"
@@ -1534,8 +1534,8 @@ session:
   session_ended: true
   ended_by: user
 prompts[2]{uid,prompt,selector,tag,text}:
-  "el-a","Complete annotation","section#call",note,"Complete annotation"
-  "el-b","Missing text field","section#other",note
+  "el-a","","section#call",note,"Complete annotation"
+  "el-b","","section#other",note
 EOF
 out=$(read_out) || fail "read failed on a capture containing a malformed item"
 assert_contains "$out" "declared_items: 2" "a malformed capture lost its declared count"
@@ -1554,9 +1554,9 @@ session:
   session_ended: true
   ended_by: user
 prompts[3]{uid,prompt,selector,tag,text}:
-  "el-a","Membership gold-only callout","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
-  "el-b","Headline pick","section#call > h1",note,"Headline pick"
-  "el-c","Sidebar note","aside.sidebar",note,"Sidebar note"
+  "el-a","","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
+  "el-b","","section#call > h1",note,"Headline pick"
+  "el-c","","aside.sidebar",note,"Sidebar note"
 EOF
 out=$(read_out) || fail "read failed on an annotations-only capture"
 assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
@@ -1570,8 +1570,115 @@ assert_contains "$out" "| Headline pick" "an element annotation was dropped when
 assert_contains "$out" "| Sidebar note" "an element annotation was dropped when there is no message"
 assert_contains "$out" "session_ending_message_count: 0" \
   "an absent freeform message was counted as present"
+assert_not_contains "$out" $'\nprompt:\n' \
+  "a capture with no typed comments invented a comment field"
 assert_not_contains "$out" "CAPTAIN FINAL DECISION" "a prior capture leaked into the next read"
 pass "read keeps every annotation when the session-ending message is absent"
+
+# Real Lavish payload shapes, not the prompt==text test-fixture echo:
+# a pure annotation has element text and an empty prompt; a typed comment is a
+# nonempty prompt even when it happens to match the element text; choice rows
+# carry Context data that must not be presented as a comment.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "el-n1","are we able to tell which model id belongs to a subscription vs an api key? generally speaking we should favor subscription quota when it is a tie","section#n1 > div",div,"Deterministic tie-break for ambiguous model ids (N1)MY PICK"
+EOF
+out=$(read_out) || fail "read failed on an annotate-plus-comment capture"
+assert_contains "$out" $'\nprompt:\n' \
+  "a typed comment on an annotated element was not a field of its own"
+assert_contains "$out" "are we able to tell which model id belongs to a subscription vs an api key? generally speaking we should favor subscription quota when it is a tie" \
+  "a typed comment on an annotated element was dropped"
+assert_contains "$out" "| Deterministic tie-break for ambiguous model ids (N1)MY PICK" \
+  "the annotated element text was dropped when a comment was also present"
+assert_contains "$out" "element_selector: section#n1 > div" \
+  "the annotated element selector was dropped when a comment was also present"
+assert_contains "$out" "tag: div" "the annotated element tag was dropped when a comment was also present"
+assert_contains "$out" "ANNOTATION 1 of 1" "an annotate-plus-comment item was not presented as an annotation"
+assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
+  "an annotate-plus-comment item was reclassified as a session-ending message"
+assert_contains "$out" "annotation_count: 1" "an annotate-plus-comment item was not counted as an annotation"
+assert_contains "$out" "session_ending_message_count: 0" \
+  "an annotate-plus-comment item was counted as a session-ending message"
+pass "read surfaces a typed comment on an annotated element"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "el-n1","Use subscription quota","section#n1 > div",div,"Use subscription quota"
+EOF
+out=$(read_out) || fail "read failed on an equal-text annotate-plus-comment capture"
+assert_contains "$out" $'text:\n| Use subscription quota\nprompt:\n| Use subscription quota' \
+  "a typed comment identical to the element text was dropped"
+pass "read still surfaces a typed comment that matches the element text"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "el-a","","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
+EOF
+out=$(read_out) || fail "read failed on a pure-annotation capture"
+assert_contains "$out" "| Membership gold-only callout" \
+  "a pure annotation no longer showed the element"
+assert_contains "$out" "element_selector: section#call > p:nth-of-type(1)" \
+  "a pure annotation lost its selector"
+assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
+  "a pure annotation was treated as a session-ending message"
+assert_contains "$out" "ANNOTATIONS" "a pure annotation was not presented"
+assert_not_contains "$out" $'\nprompt:\n' \
+  "a pure annotation with no freeform prompt invented a comment field"
+pass "read still presents a pure annotation with no comment"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "el-choice","Context data: {\"question\":\"quota-source\",\"answer\":\"subscription\"}","section#quota > button",choice,"Subscription quota"
+EOF
+out=$(read_out) || fail "read failed on a choice capture"
+assert_contains "$out" "| Subscription quota" \
+  "a choice row no longer showed its element text"
+assert_contains "$out" "tag: choice" "a choice row lost its type"
+assert_not_contains "$out" "Context data:" \
+  "a choice row surfaced machine-generated context as a comment"
+assert_not_contains "$out" $'\nprompt:\n' \
+  "a choice row gained a freeform comment field"
+pass "read does not present choice context as a comment"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "","are we able to tell which model id belongs to a subscription vs an api key? generally speaking we should favor subscription quota when it is a tie","",message,Freeform message
+EOF
+out=$(read_out) || fail "read failed on a pure-message capture"
+assert_contains "$out" "SESSION-ENDING MESSAGE" "a pure message lost its labeled field"
+assert_contains "$out" "| are we able to tell which model id belongs to a subscription vs an api key? generally speaking we should favor subscription quota when it is a tie" \
+  "a pure message dropped the typed comment"
+assert_contains "$out" "ANNOTATIONS: (none)" "a pure message was presented as an annotation"
+assert_contains "$out" "session_ending_message_count: 1" "a pure message was not counted"
+assert_contains "$out" "annotation_count: 0" "a pure message was counted as an annotation"
+assert_not_contains "$out" "tag: message" \
+  "a pure message was presented as just another annotation"
+pass "read still presents a pure message with no selector"
 
 cat > "$READ" <<'EOF'
 session:

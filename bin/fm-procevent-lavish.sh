@@ -22,9 +22,13 @@
 #            from per-element annotations. Declared and presented item counts,
 #            plus a completeness verdict, follow before all annotations so a
 #            partial read is obvious. Each annotation retains its element uid,
-#            selector, tag, and text, and captain-supplied body lines are visibly
-#            prefixed so they cannot forge structural labels. Empty message and
-#            annotation sections are reported explicitly.
+#            selector, tag, and text. A non-choice freeform comment (`prompt`)
+#            is printed as its own field even when a selector is also present
+#            and even when that comment matches the element text, so typed
+#            words are never dropped. Choice Context data is not a comment.
+#            Captain-supplied body lines are visibly prefixed so they cannot
+#            forge structural labels. Empty message and annotation sections
+#            are reported explicitly.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -119,7 +123,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,107p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -474,6 +478,10 @@ cmd_answers() {
 # so a captain-supplied string cannot forge a section label. The session-ending
 # message is printed before the count line and before any annotation, because
 # that is the field a truncated grep of the raw capture historically dropped.
+# A non-choice annotation that carries a freeform `prompt` prints that comment
+# as its own field; a selector must not hide the typed words, even when the
+# comment matches the captured element text. Choice rows keep Context data
+# out of that field. A pure annotation has no prompt.
 cmd_read() {
   local file=${1-} lifecycle session_ended
   [ -n "$file" ] || usage
@@ -588,10 +596,14 @@ cmd_read() {
         print "element_selector: $selector\n";
         print "tag: $tag\n";
         print "text:\n";
-        my $body = defined $f->{text} && length $f->{text}
-          ? $f->{text}
-          : (defined $f->{prompt} ? $f->{prompt} : "");
+        my $elem = defined $f->{text} ? $f->{text} : "";
+        my $comment = defined $f->{prompt} ? $f->{prompt} : "";
+        my $body = length $elem ? $elem : $comment;
         emit_body($body);
+        if ($tag ne "choice" && length $comment) {
+          print "prompt:\n";
+          emit_body($comment);
+        }
       }
       print "END ANNOTATIONS\n";
     } else {
