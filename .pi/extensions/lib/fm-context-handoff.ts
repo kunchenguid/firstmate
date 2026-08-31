@@ -223,7 +223,7 @@ export function registerContextHandoff(
 
   pi.on("session_compact", async () => {
     const binding = pendingSeal;
-    if (!binding) return;
+    if (!binding || binding.terminal) return;
     binding.terminal = "success";
     binding.terminalReason = "pi-session-compact-succeeded";
     await persistPendingOutcome();
@@ -231,7 +231,7 @@ export function registerContextHandoff(
 
   pi.on("session_compact_failed", async () => {
     const binding = pendingSeal;
-    if (!binding) return;
+    if (!binding || binding.terminal) return;
     binding.terminal = "failure";
     binding.terminalReason = "pi-session-compact-failed";
     await persistPendingOutcome();

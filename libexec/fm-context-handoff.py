@@ -87,6 +87,7 @@ main = importlib.import_module("claude_obsidian.cli").main
 raise SystemExit(main())
 """
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+LINUX_BOOT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 RECORD_ID = re.compile(r"^handoff-[0-9a-f]{48}$")
 CANDIDATE_ID = re.compile(r"^candidate-[0-9a-f]{48}$")
 PROVIDER_CLASS = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
@@ -2264,6 +2265,7 @@ def command_deliver(args: argparse.Namespace) -> dict[str, Any]:
 def linux_process_claim(process_group: int) -> dict[str, Any]:
     try:
         info = (Path("/proc") / str(process_group) / "stat").read_text(encoding="utf-8")
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
         close = info.rfind(")")
         fields = info[close + 1 :].split() if close >= 0 else []
         start_time = fields[19]
@@ -2272,13 +2274,14 @@ def linux_process_claim(process_group: int) -> dict[str, Any]:
         owner = (Path("/proc") / str(process_group)).stat().st_uid
     except (OSError, IndexError, ValueError) as exc:
         raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is unavailable") from exc
-    if recorded_group != process_group or owner != os.getuid() or not start_time.isdigit():
+    if recorded_group != process_group or owner != os.getuid() or not start_time.isdigit() or not LINUX_BOOT_ID.fullmatch(boot_id):
         raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is inconsistent")
-    identity = f"linux\0{process_group}\0{recorded_session}\0{start_time}\0{owner}"
+    identity = f"linux\0{boot_id}\0{process_group}\0{recorded_session}\0{start_time}\0{owner}"
     return {
         "process_capability_sha256": sha256_bytes(identity.encode("utf-8")),
         "process_generation": int(start_time),
         "process_platform": "linux",
+        "process_boot_id": boot_id,
         "process_group": process_group,
         "process_session": recorded_session,
         "process_start_token": start_time,
@@ -2331,6 +2334,7 @@ def darwin_process_claim(process_group: int) -> dict[str, Any]:
         "process_capability_sha256": sha256_bytes(identity.encode("utf-8")),
         "process_generation": int(value.pbi_start_tvsec) * 1_000_000 + int(value.pbi_start_tvusec),
         "process_platform": "darwin",
+        "process_boot_id": None,
         "process_group": process_group,
         "process_session": session,
         "process_start_token": start_token,
@@ -2341,12 +2345,14 @@ def current_process_claim() -> dict[str, Any]:
     test_value = os.environ.get("FM_HANDOFF_TEST_PROCESS_CAPABILITY")
     if os.environ.get("FM_HANDOFF_TESTING") == "1" and test_value is not None:
         generation_text = os.environ.get("FM_HANDOFF_TEST_PROCESS_GENERATION", "1")
-        if not test_value or len(test_value.encode("utf-8")) > 256 or not generation_text.isdigit() or int(generation_text) < 1:
+        boot_id = os.environ.get("FM_HANDOFF_TEST_PROCESS_BOOT_ID", "synthetic-boot-1")
+        if not test_value or len(test_value.encode("utf-8")) > 256 or not boot_id or len(boot_id.encode("utf-8")) > 256 or not generation_text.isdigit() or int(generation_text) < 1:
             raise HandoffError("PROCESS_CAPABILITY", "the synthetic hook process capability is invalid")
         return {
-            "process_capability_sha256": sha256_bytes(f"test\0{test_value}".encode("utf-8")),
+            "process_capability_sha256": sha256_bytes(f"test\0{boot_id}\0{test_value}".encode("utf-8")),
             "process_generation": int(generation_text),
             "process_platform": "test",
+            "process_boot_id": boot_id,
             "process_group": int(generation_text),
             "process_session": int(generation_text),
             "process_start_token": test_value,
@@ -2371,7 +2377,8 @@ def process_binding_owner_is_live(value: Mapping[str, Any]) -> bool:
         return True
     if platform == "test" and os.environ.get("FM_HANDOFF_TESTING") == "1":
         live = os.environ.get("FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY")
-        return bool(live) and value.get("process_capability_sha256") == sha256_bytes(f"test\0{live}".encode("utf-8"))
+        boot_id = value.get("process_boot_id")
+        return isinstance(boot_id, str) and bool(live) and value.get("process_capability_sha256") == sha256_bytes(f"test\0{boot_id}\0{live}".encode("utf-8"))
     if platform not in {"linux", "darwin"}:
         return True
     if platform == "linux" and not (Path("/proc") / str(process_group)).exists():
@@ -2391,10 +2398,21 @@ def process_binding_owner_is_live(value: Mapping[str, Any]) -> bool:
         "process_capability_sha256",
         "process_generation",
         "process_platform",
+        "process_boot_id",
         "process_group",
         "process_session",
         "process_start_token",
     ))
+
+
+def process_generations_are_comparable(existing: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    platform = current.get("process_platform")
+    if existing.get("process_platform") != platform:
+        return False
+    if platform in {"linux", "test"}:
+        boot_id = current.get("process_boot_id")
+        return isinstance(boot_id, str) and bool(boot_id) and existing.get("process_boot_id") == boot_id
+    return platform == "darwin"
 
 
 def current_process_capability() -> str:
@@ -2437,7 +2455,7 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
             existing_capability = existing.get("process_capability_sha256") if isinstance(existing, dict) else None
             if not isinstance(existing_generation, int):
                 raise HandoffError("CONSUMER_SESSION", "consumer session generation claim is invalid")
-            if existing_capability != capability and (existing_generation >= generation or process_binding_owner_is_live(existing)):
+            if existing_capability != capability and (process_binding_owner_is_live(existing) or (process_generations_are_comparable(existing, process_claim) and existing_generation >= generation)):
                 return False
             if existing_capability == capability and existing_generation != generation:
                 return False
@@ -2448,6 +2466,7 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
             "process_capability_sha256": capability,
             "process_generation": generation,
             "process_platform": process_claim["process_platform"],
+            "process_boot_id": process_claim["process_boot_id"],
             "process_group": process_claim["process_group"],
             "process_session": process_claim["process_session"],
             "process_start_token": process_claim["process_start_token"],
@@ -2483,7 +2502,7 @@ def require_active_process_binding(
         or value.get("session_hash") != config["recipient"]["agent_session_sha256"]
         or value.get("process_capability_sha256") != capability
         or value.get("process_generation") != generation
-        or any(value.get(name) != process_claim[name] for name in ("process_platform", "process_group", "process_session", "process_start_token"))
+        or any(value.get(name) != process_claim[name] for name in ("process_platform", "process_boot_id", "process_group", "process_session", "process_start_token"))
         or value.get("config_sha256") != config_identity(config)
         or value.get("state") != "active"
         or value.get("vault_path") != (str(validate_vault_binding(config)) if validate_live_vault else str(config["vault"]["path"]))
@@ -2554,9 +2573,26 @@ def read_compaction_binding_header(path: Path) -> dict[str, Any]:
         or not HEX64.fullmatch(str(value.get("config_sha256", "")))
         or path.name != f"compaction-{binding_key}-{bound_capability}.json"
         or value.get("trigger") not in TRIGGERS
+        or not valid_compaction_terminal_tuple(value)
     ):
         raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding is invalid")
     return value
+
+
+def valid_compaction_terminal_tuple(value: Mapping[str, Any]) -> bool:
+    fields = {"terminal_outcome", "terminal_reason", "terminal_at"}
+    if not fields.intersection(value):
+        return True
+    outcome = value.get("terminal_outcome")
+    reason = value.get("terminal_reason")
+    recorded_at = value.get("terminal_at")
+    if outcome not in {"succeeded", "failed"} or not isinstance(reason, str) or not reason or len(reason.encode("utf-8")) > 512 or not isinstance(recorded_at, str) or len(recorded_at) > 64:
+        return False
+    try:
+        parsed = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
 
 
 def read_compaction_binding_locked(
