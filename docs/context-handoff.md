@@ -24,6 +24,8 @@ A producer response that identifies a non-empty register that could not be seale
 A Pi adapter launch, nonzero-exit, malformed-output, output-cap, or ten-second timeout failure also terminates the child and stops compaction even when no receipt can be written.
 Empty and disabled registers do not stop compaction when the adapter completes successfully, including when the active Vault or endpoint binding is unhealthy and nothing is pending.
 The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the complete bounded set of retryable and newly sealed records in that attempt and never infer success from the success event alone.
+A locked durable Pi attempt binding grants one exact session, operating-system process generation, and server-created attempt ID exclusive authority over those records.
+Concurrent processes, mismatched attempts, and opposite terminal outcomes are rejected, while an identical authenticated terminal retry remains idempotent and a dead unfinished owner can be retired before resealing.
 A configuration or active-binding failure at seal time still writes the durable non-empty failure receipt before cancelling compaction.
 Each terminal outcome persists the complete attempt result before any per-record queue transition, so a crash mid-attempt is replayed idempotently instead of leaving records reachable by an opposite outcome.
 An attempt journal that no longer reads back as its own exact record is quarantined with its observed digest and retired, so a corrupt artifact cannot wedge sealing, outcome recording, or delivery.

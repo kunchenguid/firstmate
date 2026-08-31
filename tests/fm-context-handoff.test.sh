@@ -335,7 +335,7 @@ seal_pi() {
 
 complete() {
   local seal=${1:?} outcome=${2:-success} payload
-  payload=$(printf '%s' "$seal" | jq -c '{bindings:(.bindings // [{record_id:.record_id,envelope_sha256:.envelope_sha256}]),trigger:"threshold",reason:"synthetic-result"}') || fail "could not build compaction outcome"
+  payload=$(printf '%s' "$seal" | jq -c '{attempt_id:.attempt_id,bindings:(.bindings // [{record_id:.record_id,envelope_sha256:.envelope_sha256}]),session_id:"pi-session-1",trigger:"threshold",reason:"synthetic-result"}') || fail "could not build compaction outcome"
   printf '%s\n' "$payload" | cli compaction-outcome "$outcome"
 }
 
@@ -1068,7 +1068,7 @@ test_bounded_transports_and_delivery() {
   DELIVERY_ENABLED=true
   printf 'idempotent\n' > "$HERDR_MODE"
   write_config
-  payload=$(printf '%s' "$seal" | jq -c '{bindings:.bindings,trigger:"threshold",reason:"synthetic-deadline",adapter_deadline_epoch_ms:1}')
+  payload=$(printf '%s' "$seal" | jq -c '{attempt_id:.attempt_id,bindings:.bindings,session_id:"pi-session-1",trigger:"threshold",reason:"synthetic-deadline",adapter_deadline_epoch_ms:1}')
   delivery=$(printf '%s\n' "$payload" | cli compaction-outcome success) || fail "deadline outcome did not persist"
   [ "$(printf '%s' "$delivery" | jq -r .delivery)" = pending ] || fail "unsafe deadline did not defer notification"
   [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "unsafe notification deadline lost the successful compaction outcome"
@@ -1240,7 +1240,7 @@ payload=$(cat)
 printf '%s\t%s\n' "$*" "$payload" >> "$FM_STALE_BINDING_LOG"
 if [ "$1" = seal ]; then
   if [ "$(cat "$FM_STALE_BINDING_MODE")" = sealed ]; then
-    printf '{"status":"sealed","record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222","bindings":[{"record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}]}\n'
+    printf '{"status":"sealed","attempt_id":"pi-attempt-333333333333333333333333333333333333333333333333","record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222","bindings":[{"record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}]}\n'
   else
     printf '{"status":"empty"}\n'
   fi
@@ -2223,6 +2223,41 @@ test_durable_compaction_attempt() {
   pass "durable compaction attempt result replay"
 }
 
+test_pi_attempt_authority_and_immutable_outcome() {
+  local seal conflict rejected succeeded duplicate opposite record
+  new_env pi-attempt-authority
+  CAPABILITY=pi-process-one
+  PROCESS_GENERATION=101
+  LIVE_PROCESS_CAPABILITY=pi-process-one
+  register_statement 'Only one exact Pi process generation may own a compaction attempt.' >/dev/null || fail "Pi authority fixture did not register"
+  seal=$(seal_pi) || fail "first Pi process did not seal"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+
+  CAPABILITY=pi-process-two
+  PROCESS_GENERATION=202
+  conflict=$(seal_pi) || fail "duplicate Pi process conflict escaped bounded transport"
+  [ "$(printf '%s' "$conflict" | jq -r .status)" = attempt-conflict ] || fail "second live Pi process received the first process attempt"
+  rejected=$(complete "$seal" failure) || fail "mismatched Pi outcome escaped bounded transport"
+  [ "$(printf '%s' "$rejected" | jq -r .status)" = outcome-rejected ] || fail "mismatched Pi process assigned a terminal outcome"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "mismatched Pi process changed the sealed queue"
+
+  CAPABILITY=pi-process-one
+  PROCESS_GENERATION=101
+  succeeded=$(complete "$seal" success) || fail "owning Pi process could not persist success"
+  [ "$(printf '%s' "$succeeded" | jq -r .status)" = compaction-succeeded ] || fail "owning Pi process success was not applied"
+  duplicate=$(complete "$seal" success) || fail "duplicate matching Pi outcome was not idempotent"
+  [ "$(printf '%s' "$duplicate" | jq -r .status)" = compaction-succeeded ] || fail "duplicate matching Pi outcome changed its terminal result"
+  opposite=$(complete "$seal" failure) || fail "opposite Pi outcome escaped bounded transport"
+  [ "$(printf '%s' "$opposite" | jq -r .status)" = outcome-rejected ] || fail "opposite Pi outcome replaced the first terminal assignment"
+
+  CAPABILITY=pi-process-two
+  PROCESS_GENERATION=202
+  rejected=$(complete "$seal" failure) || fail "late duplicate-process outcome escaped bounded transport"
+  [ "$(printf '%s' "$rejected" | jq -r .status)" = outcome-rejected ] || fail "late duplicate process replaced the terminal assignment"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "rejected Pi outcomes made a successful record unclaimable"
+  pass "exclusive Pi attempt authority and immutable terminal outcome"
+}
+
 test_precompact_generation_and_timeout_margin() {
   local statement arguments registered marker release paused_pid paused_status blocked started elapsed budget i
   new_env precompact-generation-at-seal
@@ -2340,12 +2375,14 @@ test_empty_register_binding_noop() {
 }
 
 test_missing_record_is_classified() {
-  local payload status journal
+  local seal record status journal
   new_env missing-record-classification
   register_statement 'Bounded classification survives a missing durable record.' >/dev/null || fail "missing record fixture did not register"
-  payload=$(jq -nc '{bindings:[{record_id:"handoff-000000000000000000000000000000000000000000000000",envelope_sha256:"1111111111111111111111111111111111111111111111111111111111111111"}],trigger:"threshold",reason:"synthetic-missing-record"}') || fail "could not build the missing-record outcome"
+  seal=$(seal_pi) || fail "missing record fixture did not seal"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  rm "$FM_HOME/state/context-handoff/records/$record.json"
   status=0
-  printf '%s\n' "$payload" | cli compaction-outcome success > "$EROOT/missing-out" 2> "$EROOT/missing-error" || status=$?
+  complete "$seal" success > "$EROOT/missing-out" 2> "$EROOT/missing-error" || status=$?
   [ "$status" -eq 2 ] || fail "a missing durable record did not fail with a classified handoff status"
   grep -q '^context handoff: RECORD_UNREADABLE: ' "$EROOT/missing-error" || fail "a missing durable record was not classified as a bounded handoff error"
   if grep -q 'Traceback' "$EROOT/missing-error"; then
@@ -2402,6 +2439,7 @@ test_seal_binding_failure_receipt
 test_orphan_active_state_blocks_compaction
 test_foreign_candidate_never_blocks_compaction
 test_durable_compaction_attempt
+test_pi_attempt_authority_and_immutable_outcome
 test_precompact_generation_and_timeout_margin
 test_sessionstart_pending_eligibility
 test_empty_register_binding_noop
