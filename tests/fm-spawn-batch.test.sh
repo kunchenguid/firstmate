@@ -14,16 +14,19 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+mkdir -p "$TMP_ROOT/config"
 export FM_BACKEND=tmux
 
-# Clear ambient firstmate overrides so the behavior test owns its environment.
+# Clear ambient firstmate overrides and use an empty config directory so the
+# behavior test owns its environment even when the invoking worktree has a
+# local crew-dispatch profile.
 run_spawn() {
   FM_ROOT_OVERRIDE='' \
     FM_HOME='' \
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE="$TMP_ROOT/config" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
 }

@@ -200,8 +200,11 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
-The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
-Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
+For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root distinct from both the spawning project and its repository's primary checkout, including spawns from linked homes, and belongs to the requested project's absolute Git common directory.
+The common-directory check is the single post-allocation owner shared by Treehouse-backed tmux, Herdr, Zellij, and cmux tasks and by Orca-owned task worktrees.
+A mismatched allocation is refused before worker launch and preserved in place because neither provider exposes a supported non-cleaning quarantine or return operation.
+`fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn; relaunch preserves the recorded copy without fetching or resetting it.
+Its header owns the exact refusal mechanics, `tests/fm-spawn-common-dir.test.sh` owns portable mixed-clone preservation coverage, `tests/fm-spawn-pool-base-freshen.test.sh` owns portable isolation and base-freshness coverage, and `tests/fm-control-relaunch.test.sh` owns preserving the recorded copy on relaunch.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
