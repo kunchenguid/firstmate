@@ -63,9 +63,17 @@ case "${1:-}" in
         "$FM_TEST_LN_BIN" -s "$FM_INVALIDATE_OWNED_PUBLICATION_PRIMARY" \
           "$FM_INVALIDATE_OWNED_PUBLICATION_TARGET/node_modules/@beeline/lib"
       fi
-    elif [ "${4:-}" = Enter ] && [ "${FM_SIGNAL_ON_LAUNCH_SUBMIT:-0}" = 1 ]; then
-      kill -TERM "$PPID"
-      sleep 0.05
+    elif [ "${4:-}" = Enter ]; then
+      if [ -n "${FM_REPLACE_ON_LAUNCH_SUBMIT_TARGET:-}" ]; then
+        "$FM_TEST_RM_BIN" -f "$FM_REPLACE_ON_LAUNCH_SUBMIT_TARGET/node_modules"
+        "$FM_TEST_MKDIR_BIN" "$FM_REPLACE_ON_LAUNCH_SUBMIT_TARGET/node_modules"
+        printf 'competing install\n' \
+          > "$FM_REPLACE_ON_LAUNCH_SUBMIT_TARGET/node_modules/owned.txt"
+      fi
+      if [ "${FM_SIGNAL_ON_LAUNCH_SUBMIT:-0}" = 1 ]; then
+        kill -TERM "$PPID"
+        sleep 0.05
+      fi
     elif [ "${4:-}" = C-c ] && [ -n "${FM_FAKE_LAUNCH_SCRIPT:-}" ]; then
       : > "$FM_FAKE_LAUNCH_SCRIPT"
     fi
@@ -336,11 +344,13 @@ run_spawn() {
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
     FM_SIGNAL_AFTER_LAUNCH_PAYLOAD="${FM_SIGNAL_AFTER_LAUNCH_PAYLOAD:-0}" \
     FM_SIGNAL_ON_LAUNCH_SUBMIT="${FM_SIGNAL_ON_LAUNCH_SUBMIT:-0}" \
+    FM_REPLACE_ON_LAUNCH_SUBMIT_TARGET="${FM_REPLACE_ON_LAUNCH_SUBMIT_TARGET:-}" \
     FM_SWAP_NODE_RUNTIME_PATH="${FM_SWAP_NODE_RUNTIME_PATH:-}" \
     FM_SWAP_NODE_RUNTIME_REPLACEMENT="${FM_SWAP_NODE_RUNTIME_REPLACEMENT:-}" \
     FM_INVALIDATE_OWNED_PUBLICATION_TARGET="${FM_INVALIDATE_OWNED_PUBLICATION_TARGET:-}" \
     FM_INVALIDATE_OWNED_PUBLICATION_PRIMARY="${FM_INVALIDATE_OWNED_PUBLICATION_PRIMARY:-}" \
-    FM_TEST_LN_BIN="$LN_BIN" FM_TEST_MV_BIN="$MV_BIN" FM_TEST_RM_BIN="$RM_BIN" \
+    FM_TEST_LN_BIN="$LN_BIN" FM_TEST_MKDIR_BIN="$MKDIR_BIN" \
+    FM_TEST_MV_BIN="$MV_BIN" FM_TEST_RM_BIN="$RM_BIN" \
     FM_TEST_READLINK_BIN="$READLINK_BIN" \
     FM_FAKE_LAUNCH_SCRIPT="$HOME_DIR/state/fake-pane-launch.sh" \
     PATH="${FM_SPAWN_TEST_PATH:-$FAKEBIN_DIR:$PATH}" \
@@ -369,6 +379,7 @@ run_beeline_esm() {
 
 test_spawn_shares_dependencies_and_repoints_workspace_links() {
   local rec id out status node_modules_link workspace_link absolute_workspace_link bin_link bin_out
+  local candidate pinned_runtime= runtime_count=0
   id=node-modules-share-z1
   rec=$(make_case shared-dependencies "$id")
   read_case "$rec"
@@ -392,6 +403,15 @@ test_spawn_shares_dependencies_and_repoints_workspace_links() {
   printf 'worker dependency patch\n' > "$WORKTREE_DIR/node_modules/third-party/index.js"
   [ "$(cat "$PROJECT_DIR/node_modules/third-party/index.js")" = 'worker dependency patch' ] \
     || fail "trusted worker dependency write did not reach the shared primary installation"
+  for candidate in "$WORKTREE_DIR"/.fm-node-runtime.*; do
+    [ -f "$candidate" ] || continue
+    case "$candidate" in *.fm-node-runtime-probe.*) continue ;; esac
+    pinned_runtime=$candidate
+    runtime_count=$((runtime_count + 1))
+  done
+  [ "$runtime_count" -eq 1 ] || fail "spawn did not retain exactly one pinned Node runtime"
+  [ "$pinned_runtime" -ef "$SYSTEM_NODE" ] \
+    || fail "same-filesystem Node runtime pin was copied instead of hard-linked"
 
   workspace_link=$(readlink "$WORKTREE_DIR/node_modules/@beeline/lib")
   [ "$workspace_link" = '../../packages/lib' ] \
@@ -907,7 +927,7 @@ test_spawn_rejects_stale_primary_workspace_link() {
 }
 
 test_spawn_ignores_published_beeline_consumers() {
-  local rec id out status
+  local rec id out status candidate
   id=node-modules-consumer-z3
   rec=$(make_case published-consumer "$id")
   read_case "$rec"
@@ -928,6 +948,10 @@ test_spawn_ignores_published_beeline_consumers() {
   expect_code 0 "$status" "spawn should ignore a non-workspace Beeline consumer"
   [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
     || fail "spawn shared dependencies for a non-workspace Beeline consumer"
+  for candidate in "$WORKTREE_DIR"/.fm-node-runtime.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "non-workspace Beeline consumer retained a runtime artifact"
+  done
   pass "fm-spawn scopes dependency sharing to Beeline workspaces"
 }
 
@@ -1085,6 +1109,26 @@ test_spawn_rejects_replacement_after_owned_publication() {
   pass "fm-spawn rejects replacement of its validated publication before launch"
 }
 
+test_spawn_rejects_replacement_during_submission() {
+  local rec id out status
+  id=node-modules-submit-replacement-z4daa
+  rec=$(make_case submit-replacement "$id")
+  read_case "$rec"
+
+  out=$(FM_REPLACE_ON_LAUNCH_SUBMIT_TARGET="$WORKTREE_DIR" run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted dependency replacement during submission"
+  assert_contains "$out" "replaced during worker launch" \
+    "submission-boundary replacement was not diagnosed"
+  assert_not_contains "$out" "spawned $id" \
+    "submission-boundary replacement reported a launched worker"
+  [ ! -s "$HOME_DIR/state/fake-pane-launch.sh" ] \
+    || fail "submission-boundary replacement left a runnable pane command"
+  assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
+    "submission-boundary validation mutated the competing dependency tree"
+  pass "fm-spawn validates publication ownership through submission"
+}
+
 test_spawn_retains_invalid_owned_publication_safely() {
   local rec id out status candidate
   id=node-modules-owned-invalid-z4da
@@ -1228,6 +1272,7 @@ test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_rejects_invalid_candidate_before_competing_publication
 test_spawn_rejects_replacement_after_owned_publication
+test_spawn_rejects_replacement_during_submission
 test_spawn_retains_invalid_owned_publication_safely
 test_spawn_preserves_presubmission_cancellation
 test_spawn_preserves_submission_transition_cancellation

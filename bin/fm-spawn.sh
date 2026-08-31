@@ -1518,7 +1518,7 @@ native_node_realpath() {
 
 native_node_identity() {
   NODE_OPTIONS= "$1" -e \
-    'const s=require("fs").statSync(process.argv[1],{bigint:true});process.stdout.write([s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].join(":"));' \
+    'const s=require("fs").statSync(process.argv[1],{bigint:true});process.stdout.write([s.dev,s.ino,s.size,s.mtimeNs].join(":"));' \
     "$1" </dev/null 2>/dev/null
 }
 
@@ -1546,11 +1546,16 @@ process.once('SIGTERM', () => cleanup(143));
 process.once('SIGHUP', () => cleanup(129));
 try {
   try {
-    fs.copyFileSync(source, target, fs.constants.COPYFILE_FICLONE);
-  } catch (_) {
-    fs.copyFileSync(source, target);
+    fs.linkSync(source, target);
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+    try {
+      fs.copyFileSync(source, target, fs.constants.COPYFILE_FICLONE);
+    } catch (_) {
+      fs.copyFileSync(source, target);
+    }
+    fs.chmodSync(target, fs.statSync(source).mode);
   }
-  fs.chmodSync(target, fs.statSync(source).mode);
   created = true;
 } catch (_) {
   cleanup(1);
@@ -1581,7 +1586,7 @@ beeline_node_runtime_ready_for_launch() {
 }
 
 native_node_executable() {
-  local candidate resolved directory old_ifs account_home
+  local require_probe=${1:-1} candidate resolved directory old_ifs account_home
   old_ifs=$IFS
   IFS=:
   for directory in $PATH; do
@@ -1593,7 +1598,7 @@ native_node_executable() {
       resolved=$(native_node_realpath "$candidate") || resolved=
     fi
     if [ -n "$resolved" ] && native_node_candidate "$resolved" \
-       && native_node_supports_publication "$resolved"; then
+       && { [ "$require_probe" = 0 ] || native_node_supports_publication "$resolved"; }; then
       IFS=$old_ifs
       printf '%s\n' "$resolved"
       return 0
@@ -1613,7 +1618,7 @@ native_node_executable() {
       resolved=$(native_node_realpath "$candidate") || resolved=
     fi
     if [ -n "$resolved" ] && native_node_candidate "$resolved" \
-       && native_node_supports_publication "$resolved"; then
+       && { [ "$require_probe" = 0 ] || native_node_supports_publication "$resolved"; }; then
       printf '%s\n' "$resolved"
       return 0
     fi
@@ -1708,10 +1713,20 @@ share_beeline_node_modules() {
   target="$WT/node_modules"
 
   [ -d "$source/@beeline" ] || return 0
-  publisher_node=$(native_node_executable) || {
+  publisher_node=$(native_node_executable 0) || {
     echo "error: Beeline dependency sharing requires a compatible native Node runtime" >&2
     return 1
   }
+  workspace_status=0
+  beeline_workspace_links_match_worktree "$publisher_node" "$source" || workspace_status=$?
+  case "$workspace_status" in
+    0) ;;
+    2) return 0 ;;
+    *)
+      echo "error: primary Beeline workspace links failed validation" >&2
+      return 1
+      ;;
+  esac
   if ! pin_native_node_runtime "$publisher_node"; then
     echo "error: Beeline dependency sharing could not pin its selected Node runtime" >&2
     return 1
@@ -1727,16 +1742,6 @@ share_beeline_node_modules() {
     echo "error: Beeline dependency sharing could not resolve its ESM loader" >&2
     return 1
   }
-  workspace_status=0
-  beeline_workspace_links_match_worktree "$publisher_node" "$source" || workspace_status=$?
-  case "$workspace_status" in
-    0) ;;
-    2) return 0 ;;
-    *)
-      echo "error: primary Beeline workspace links failed validation" >&2
-      return 1
-      ;;
-  esac
   if [ -e "$target" ] || [ -L "$target" ]; then
     if beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
       BEELINE_NODE_MODULES_ACTIVE=1
@@ -2190,7 +2195,7 @@ JS
 }
 
 beeline_node_modules_ready_for_launch() {
-  local node target source anchor owned status cleanup_status
+  local phase=${1:-retain} node target source anchor owned status cleanup_status
   [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ] || return 0
   node=$NODE_MODULES_ABORT_NODE
   target="$WT/node_modules"
@@ -2282,11 +2287,17 @@ try {
 JS
   case "$status" in
     0)
-      cleanup_beeline_node_modules_probe || return 1
-      BEELINE_NODE_PUBLICATION_OWNED=0
+      if [ "$phase" = release ]; then
+        cleanup_beeline_node_modules_probe || return 1
+        BEELINE_NODE_PUBLICATION_OWNED=0
+      fi
       return 0
       ;;
     2)
+      if [ "$phase" = accepted ]; then
+        echo "error: worktree node_modules was replaced during worker launch" >&2
+        return 1
+      fi
       cleanup_status=0
       cleanup_beeline_node_modules_probe || cleanup_status=$?
       if [ "$cleanup_status" -eq 0 ]; then
@@ -2298,11 +2309,19 @@ JS
       return 1
       ;;
     3)
+      if [ "$phase" = accepted ]; then
+        echo "error: worktree node_modules ownership became ambiguous during worker launch" >&2
+        return 1
+      fi
       cleanup_beeline_node_modules_probe || true
       echo "error: worktree node_modules ownership became ambiguous before worker launch" >&2
       return 1
       ;;
     4)
+      if [ "$phase" = accepted ]; then
+        echo "error: owned worktree node_modules became invalid during worker launch" >&2
+        return 1
+      fi
       cleanup_beeline_node_modules_probe || true
       BEELINE_NODE_PUBLICATION_OWNED=0
       echo "error: owned worktree node_modules failed final Beeline workspace validation" >&2
@@ -2310,6 +2329,10 @@ JS
       return 1
       ;;
     *)
+      if [ "$phase" = accepted ]; then
+        echo "error: worktree node_modules failed validation during worker launch" >&2
+        return 1
+      fi
       cleanup_beeline_node_modules_probe || true
       echo "error: worktree node_modules failed final Beeline workspace validation" >&2
       return 1
@@ -3167,10 +3190,34 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 sleep 0.3
 launch_signal_status=
+launch_submission_pid=
+launch_submission_previous_pid=
+launch_submission_started=0
+retain_launch_runtime_and_projection() {
+  NODE_RUNTIME_ABORT_CLEANUP=0
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+  fi
+}
+retain_launch_anchor() {
+  NODE_MODULES_ABORT_PROBE=
+  BEELINE_NODE_PUBLICATION_OWNED=0
+}
 cancel_unsubmitted_launch() {
-  local status=$1
+  local status=$1 child
   launch_signal_status=$status
   trap - INT TERM HUP
+  child=$launch_submission_pid
+  if [ -z "$child" ] && [ "$launch_submission_started" = 1 ]; then
+    child=${!:-}
+    [ "$child" != "$launch_submission_previous_pid" ] || child=
+  fi
+  if [ -n "$child" ]; then
+    retain_launch_runtime_and_projection
+    retain_launch_anchor
+    kill -TERM -- "-$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+  fi
   spawn_send_key "$T" C-c || true
   exit "$status"
 }
@@ -3213,18 +3260,6 @@ if [ "$launch_runtime_status" -ne 0 ]; then
   echo "error: selected Beeline Node runtime changed before worker launch" >&2
   exit "$launch_runtime_status"
 fi
-launch_validation_status=0
-beeline_node_modules_ready_for_launch || launch_validation_status=$?
-if [ -n "$launch_signal_status" ]; then
-  spawn_send_key "$T" C-c || true
-  trap - INT TERM HUP
-  exit "$launch_signal_status"
-fi
-if [ "$launch_validation_status" -ne 0 ]; then
-  spawn_send_key "$T" C-c || true
-  trap - INT TERM HUP
-  exit "$launch_validation_status"
-fi
 launch_runtime_status=0
 beeline_node_runtime_ready_for_launch || launch_runtime_status=$?
 if [ -n "$launch_signal_status" ]; then
@@ -3238,15 +3273,51 @@ if [ "$launch_runtime_status" -ne 0 ]; then
   echo "error: selected Beeline Node runtime changed before worker launch" >&2
   exit "$launch_runtime_status"
 fi
+launch_validation_status=0
+beeline_node_modules_ready_for_launch retain || launch_validation_status=$?
+if [ -n "$launch_signal_status" ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_signal_status"
+fi
+if [ "$launch_validation_status" -ne 0 ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_validation_status"
+fi
 begin_launch_submission() {
-  NODE_RUNTIME_ABORT_CLEANUP=0
-  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-  fi
-  spawn_send_key "$T" Enter
+  local monitor_was_on=0 status=0
+  case $- in *m*) monitor_was_on=1 ;; esac
+  [ "$monitor_was_on" = 1 ] || set -m
+  launch_submission_previous_pid=${!:-}
+  launch_submission_started=1
+  spawn_send_key "$T" Enter &
+  launch_submission_pid=$!
+  [ "$monitor_was_on" = 1 ] || set +m
+  wait "$launch_submission_pid" || status=$?
+  return "$status"
 }
 launch_submit_status=0
 begin_launch_submission || launch_submit_status=$?
+if [ "$launch_submit_status" -eq 0 ]; then
+  retain_launch_runtime_and_projection
+  launch_validation_status=0
+  beeline_node_modules_ready_for_launch accepted || launch_validation_status=$?
+  if [ "$launch_validation_status" -eq 0 ]; then
+    cleanup_beeline_node_modules_probe || launch_validation_status=$?
+    BEELINE_NODE_PUBLICATION_OWNED=0
+  else
+    retain_launch_anchor
+  fi
+  if [ "$launch_validation_status" -ne 0 ]; then
+    spawn_send_key "$T" C-c || true
+    trap - INT TERM HUP
+    exit "$launch_validation_status"
+  fi
+else
+  spawn_send_key "$T" C-c || true
+fi
+launch_submission_pid=
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
