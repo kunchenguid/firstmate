@@ -294,8 +294,11 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
+const handlers = new Map();
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
@@ -322,14 +325,32 @@ if (!redundant.content[0]?.text.includes("only after a later notification says t
   throw new Error(`scheduled retry call omitted the repair-only condition: ${redundant.content[0]?.text}`);
 }
 await new Promise((resolve) => setTimeout(resolve, 100));
-const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+let rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 1) throw new Error(`scheduled retry call spawned ${rows.length} arm children`);
+
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+const replacement = await tool.execute("tool-call-after-replacement", {}, undefined, undefined, {});
+if (!replacement.content[0]?.text.includes("started Pi extension arm child 1")) {
+  throw new Error(`replacement retained retry, sequence, or stopping state: ${replacement.content[0]?.text}`);
+}
+for (let i = 0; i < 100; i += 1) {
+  rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+  if (rows.length >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (rows.length !== 2) throw new Error(`replacement did not launch one clean arm child: ${rows.length}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`retired retry state launched ${rows.length} arm children`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
 EOF
 )
   status=$?
   expect_code 0 "$status" "Pi scheduled-retry call must not duplicate the extension-owned retry"
   [ -z "$out" ] || fail "Pi scheduled-retry test printed output: $out"
-  pass "Pi scheduled retry remains extension-owned after another tool call"
+  pass "Pi scheduled retry remains extension-owned and resets for a replacement session"
 }
 
 test_pi_actionable_close_starts_single_successor_before_delivery() {
@@ -1692,6 +1713,45 @@ if (!redundant.details?.ok || !String(redundant.details.message).includes("uncha
   throw new Error(`active generation lost single-flight ownership: ${JSON.stringify(redundant.details)}`);
 }
 
+// An unexpected factory bind before shutdown must preserve the unambiguous live owner.
+const unexpected = makePi();
+mod.default(unexpected.pi);
+await unexpected.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+const ambiguous = await unexpected.getTool().execute("ambiguous-overlap", {}, undefined, undefined, {});
+if (ambiguous.details?.ok !== false || String(ambiguous.details.message) !== "watcher: not armed - another live Pi session generation owns watcher supervision; this binding stays idle until that session ends") {
+  throw new Error(`ambiguous factory overlap acquired arm authority: ${JSON.stringify(ambiguous.details)}`);
+}
+if (!pidAlive(activeChild) || liveArmPids().length !== 1 || liveArmPids()[0] !== activeChild) {
+  throw new Error(`ambiguous factory overlap disturbed the live arm: ${liveArmPids().join(",")}`);
+}
+await unexpected.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+const stillOwned = await current.getTool().execute("after-ambiguous-overlap", {}, undefined, undefined, {});
+if (!stillOwned.details?.ok || !String(stillOwned.details.message).includes("unchanged")) {
+  throw new Error(`ambiguous factory cleanup disturbed the live owner: ${JSON.stringify(stillOwned.details)}`);
+}
+
+// A binding deferred behind a live owner must not claim a live owner once that owner ends.
+const deferred = makePi();
+mod.default(deferred.pi);
+await deferred.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+const incumbentChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+await waitFor(() => !pidAlive(incumbentChild), "incumbent owner child exit");
+const orphaned = await deferred.getTool().execute("deferred-after-owner-end", {}, undefined, undefined, {});
+if (orphaned.details?.ok !== false || String(orphaned.details.message) !== "watcher: not armed - this Pi session binding is inactive and does not own watcher supervision; it stays idle until it receives its own session start") {
+  throw new Error(`deferred binding misreported a live owner after the incumbent ended: ${JSON.stringify(orphaned.details)}`);
+}
+if (liveArmPids().length !== 0) {
+  throw new Error(`deferred binding armed without ownership: ${liveArmPids().join(",")}`);
+}
+await deferred.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+const adopted = await deferred.getTool().execute("deferred-own-session-start", {}, undefined, undefined, {});
+if (!adopted.details?.ok || !String(adopted.details.message).includes("started Pi extension arm child")) {
+  throw new Error(`deferred binding could not arm through its own session start: ${JSON.stringify(adopted.details)}`);
+}
+await waitFor(() => liveArmPids().length === 1, "deferred binding own arm child");
+current = deferred;
+
 // Repeated transitions keep exactly one live cycle and never revive the refusal.
 for (const reason of ["resume", "fork", "new", "resume"]) {
   current = await replaceSession(current, reason);
@@ -1743,20 +1803,36 @@ mod.default(pi);
 if (process.listenerCount("exit") !== before + 1) {
   throw new Error("Pi extension did not install exactly one process-exit fallback");
 }
-await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
-if (process.listenerCount("exit") !== before + 1) {
-  throw new Error("session_shutdown removed the process-lifetime exit fallback");
+for (let i = 0; i < 2; i += 1) {
+  await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+  if (process.listenerCount("exit") !== before + 1) {
+    throw new Error("repeated session_start duplicated the process-exit fallback");
+  }
 }
-await handlers.get("session_start")?.({ type: "session_start" }, {});
-if (process.listenerCount("exit") !== before + 1) {
-  throw new Error("replacement activation duplicated the process-exit fallback");
+for (const reason of ["new", "resume", "fork"]) {
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason }, {});
+  if (process.listenerCount("exit") !== before) {
+    throw new Error(`${reason} shutdown did not remove the ended session's process-exit fallback`);
+  }
+  await handlers.get("session_start")?.({ type: "session_start", reason }, {});
+  if (process.listenerCount("exit") !== before + 1) {
+    throw new Error(`${reason} replacement did not restore exactly one process-exit fallback`);
+  }
+  await handlers.get("session_start")?.({ type: "session_start", reason }, {});
+  if (process.listenerCount("exit") !== before + 1) {
+    throw new Error(`${reason} repeated session_start duplicated the process-exit fallback`);
+  }
+}
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+if (process.listenerCount("exit") !== before) {
+  throw new Error("terminal shutdown left the ended session's process-exit fallback installed");
 }
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi cleanup fallback listener must remain singular across session replacement"
+  expect_code 0 "$status" "Pi cleanup fallback listener must track each active replacement session exactly once"
   [ -z "$out" ] || fail "Pi listener-lifecycle test printed output: $out"
-  pass "Pi process-exit cleanup listener remains singular across session replacement"
+  pass "Pi process-exit cleanup listener tracks each active replacement session exactly once"
 }
 
 test_pi_process_exit_cleanup_stops_arm_child() {

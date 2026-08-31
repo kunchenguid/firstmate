@@ -10,6 +10,8 @@ When this session owns supervision and away mode is not active:
 4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_pi` again.
 5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and owns every later successor launch.
 6. Ordinary same-process session replacement (`/new`, `/resume`, `/fork`, reload) retires only the prior generation; call `fm_watch_arm_pi` once for the first cycle of the replacement session without restarting Pi.
+   A `watcher: not armed - another live Pi session generation owns watcher supervision` result is not a repair condition: a still-live generation already owns the cycle, so do not retry the call or restart Pi.
+   A `watcher: not armed - this Pi session binding is inactive` result instead means the calling binding never took ownership and no generation is live; retrying that call cannot arm it, so wait for the replacement session's own first cycle.
    The generation-owner contract lives in `.pi/extensions/fm-primary-pi-watch.ts`.
 7. After an actionable child close, the extension rechecks session-lock ownership and verifies one successor before it delivers the follow-up wake; its bounded fallback is defined in `docs/watcher-continuity.md`.
 8. Ordinary work, turn completion, and ordinary signal, stale, check, heartbeat, or other wake handling: do not call `fm_watch_arm_pi` again because continuity is extension-owned rather than model-memory-owned.
