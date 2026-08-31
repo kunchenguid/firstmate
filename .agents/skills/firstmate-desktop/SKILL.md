@@ -2,6 +2,8 @@
 name: firstmate-desktop
 description: >-
   Automatically run non-trivial repository implementation, continuation, debugging, review, and autonomous multi-step work through the user's Firstmate fleet inside Codex Desktop. Use when the user names Firstmate, asks to continue or work autonomously on a codebase, requests delegated or parallel engineering work, or expects Codex Desktop to manage project discovery, isolated workers, supervision, validation, and safe result retention without manual Firstmate setup. Do not use for trivial questions or one-line edits that need no orchestration.
+metadata:
+  internal: true
 ---
 
 # Firstmate Desktop

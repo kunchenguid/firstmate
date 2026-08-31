@@ -12,9 +12,9 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables plus their pure artifact-path tables
-# and nothing else. It has no side effects, runs no backend command, and reads
-# no state, so it can be sourced by a test as a pure contract:
+# This file owns the lifecycle capability and delivery contracts plus their
+# pure artifact-path tables. It has no side effects, runs no backend command,
+# and reads no state, so it can be sourced by a test as a pure contract:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
@@ -33,6 +33,8 @@
 #      (bin/fm-backend.sh's fm_backend_agent_state) able to PROVE that an agent
 #      stopped. A verb whose postcondition cannot be proven on the recorded
 #      backend is refused rather than performed blind.
+#   4. Active ship delivery modes and yolo postures accepted by fresh and
+#      replacement workers.
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
 # verified adapters: codex and grok resume only from a session id printed at
@@ -104,6 +106,32 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
     muse) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
+}
+
+fm_control_ship_delivery_validate() {  # <mode> <yolo> <source>
+  local mode=${1-} yolo=${2-} source=${3-}
+  case "$mode" in
+    direct-PR|local-only) ;;
+    no-mistakes|no-mistakes-prod-only)
+      echo "error: no-mistakes is retired; use direct-PR" >&2
+      return 1
+      ;;
+    *)
+      echo "error: $source must be one of direct-PR, local-only (got '$mode')" >&2
+      return 1
+      ;;
+  esac
+  case "$yolo" in
+    on|off) ;;
+    *)
+      if [ "$source" = "--mode" ]; then
+        echo "error: --yolo must be on or off (got '$yolo')" >&2
+      else
+        echo "error: $source has invalid yolo posture '$yolo'; expected on or off" >&2
+      fi
+      return 1
+      ;;
+  esac
 }
 
 # The key that cancels a running turn. Escape for every adapter except grok,

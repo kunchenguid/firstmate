@@ -136,9 +136,9 @@ new_case() {
   printf '%s\n' "$dir"
 }
 
-# add_ship_task <case-dir> <id> [harness]
+# add_ship_task <case-dir> <id> [harness] [mode]
 add_ship_task() {
-  local dir=$1 id=$2 harness=${3:-claude}
+  local dir=$1 id=$2 harness=${3:-claude} mode=${4:-direct-PR}
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
@@ -150,7 +150,7 @@ add_ship_task() {
     echo "project=$proj"
     echo "harness=$harness"
     echo "kind=ship"
-    echo "mode=no-mistakes"
+    echo "mode=$mode"
     echo "yolo=off"
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
@@ -1307,7 +1307,25 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
   pass "fm-promote: promotion participates in lifecycle serialization"
 }
 
-# --- 6. fm-spawn --relaunch's own refusals -----------------------------------
+# --- 6. relaunch boundary refusals -------------------------------------------
+
+test_relaunch_refuses_a_retired_delivery_mode() {
+  local dir out rc
+  dir=$(new_case retired-mode rl42)
+  add_ship_task "$dir" rl42 claude no-mistakes
+  out=$(run_control "$dir" rl42 relaunch --note "continue from the preserved copy"); rc=$?
+  expect_code 1 "$rc" "control relaunching a retired delivery mode should refuse"
+  assert_contains "$out" "no-mistakes is retired; use direct-PR" \
+    "the control refusal should name the active delivery replacement"
+  [ ! -s "$dir/fake/literal" ] || fail "retired-mode control relaunch touched the running agent"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl42 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "directly relaunching a retired delivery mode should refuse"
+  assert_contains "$out" "no-mistakes is retired; use direct-PR" \
+    "the launch-owner refusal should name the active delivery replacement"
+  [ ! -s "$dir/fake/literal" ] || fail "retired-mode relaunch attempted to launch a replacement"
+  pass "relaunch: retired delivery modes are refused before stop and replacement launch"
+}
 
 test_spawn_relaunch_refuses_a_live_agent() {
   local dir out rc
@@ -1519,6 +1537,7 @@ test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
+test_relaunch_refuses_a_retired_delivery_mode
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous

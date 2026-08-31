@@ -126,7 +126,7 @@ make_spawn_case() {
   id="muse-$name-x1"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" \
     "$home/xdgconfig" "$home/xdgdata"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf 'Delivery contract: mode=direct-PR\nbrief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$id"
@@ -209,7 +209,7 @@ EOF
   out=$(CLAUDECODE=1 PI_CODING_AGENT=true GROK_AGENT=1 FM_PI_HARNESS=pi-signed \
     CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
     FM_FAKE_EXECUTE_MUSE_LAUNCH=1 FM_FAKE_HARNESS_RESULT="$result" \
-    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "muse spawn from a marked backend should succeed: $out"
   [ -f "$result" ] || fail "the generated muse launch never executed its harness probe"
@@ -226,7 +226,7 @@ test_spawn_launch_shape() {
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
-  out=$(run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+  out=$(run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "muse spawn should succeed"
   assert_contains "$out" "spawned $id harness=muse" "muse spawn did not report success"
@@ -274,7 +274,7 @@ test_spawn_maps_effort_and_model() {
 $rec
 EOF
     run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
-      --mode no-mistakes --yolo off --model muse-spark-1.2 --effort "$effort" >/dev/null \
+      --mode direct-PR --yolo off --model muse-spark-1.2 --effort "$effort" >/dev/null \
       || fail "muse spawn with effort $effort failed"
     launch=$(cat "$home/launch.log")
     assert_contains "$launch" "$expect" "muse effort $effort did not map to '$expect'"
@@ -286,7 +286,7 @@ EOF
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
-  run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off >/dev/null \
+  run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode direct-PR --yolo off >/dev/null \
     || fail "muse spawn without an effort axis failed"
   launch=$(cat "$home/launch.log")
   assert_not_contains "$launch" '--reasoning-effort' "muse spawn invented an effort when none was chosen"
@@ -304,7 +304,7 @@ $rec
 EOF
   mkdir -p "$home/xdgconfig/muse"
   out=$(FM_TEST_MUSE_KEY='' FM_TEST_MUSE_WORKER_KEY='' run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
-    --mode no-mistakes --yolo off)
+    --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "muse spawn succeeded with no credential available"
   assert_contains "$out" "no worker-reachable credential" "muse spawn did not name the missing credential"
@@ -319,7 +319,7 @@ test_spawn_refuses_caller_only_environment_credential() {
 $rec
 EOF
   out=$(FM_TEST_MUSE_KEY='caller-only-secret' FM_TEST_MUSE_WORKER_KEY='' \
-    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "muse spawn accepted a caller-only META_API_KEY"
   assert_contains "$out" "set for fm-spawn but cannot be proven present" \
@@ -340,7 +340,7 @@ EOF
   printf '{"schema_version":1}\n' > "$home/xdgconfig/muse/auth.json"
   FM_TEST_MUSE_KEY='' FM_TEST_MUSE_WORKER_KEY='' \
     run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
-    --mode no-mistakes --yolo off >/dev/null
+    --mode direct-PR --yolo off >/dev/null
   status=$?
   expect_code 0 "$status" "muse spawn should accept a stored credential"
   pass "muse spawn accepts a stored credential without META_API_KEY"
@@ -358,7 +358,7 @@ EOF
   printf '{"schema_version":1}\n' > "$caller/cfg/muse/auth.json"
   out=$(cd "$caller" && FM_TEST_MUSE_KEY='' FM_TEST_MUSE_WORKER_KEY='' \
     FM_TEST_MUSE_CONFIG_HOME=cfg FM_TEST_MUSE_DATA_HOME=data \
-    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "muse spawn with relative XDG roots should succeed: $out"
   launch=$(cat "$home/launch.log")
@@ -404,7 +404,7 @@ EOF
   prior=$(write_session_log "$case_dir/xdgdata/muse/sessions" 2026 08 05 prior "$wt" </dev/null)
   prior=$(printf '%s\n' "$prior" | sed 's://*:/:g')
   FM_TEST_MUSE_DATA_HOME="$case_dir/xdgdata" \
-    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off >/dev/null \
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode direct-PR --yolo off >/dev/null \
     || fail "muse spawn failed"
 
   binding="$home/state/$id.muse-session"

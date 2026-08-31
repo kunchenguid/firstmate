@@ -53,7 +53,7 @@ make_home() {  # <name> [task-id...]
     > "$home/data/backlog.md"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'Delivery contract: mode=no-mistakes\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
+    printf 'Delivery contract: mode=direct-PR\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
   done
 
   cat > "$fakebin/tmux" <<'SH'
@@ -342,7 +342,7 @@ run_spawn() {  # <case-dir> <args...>
 
 run_ship_spawn() {  # <case-dir> <id>
   local case_dir=$1 id=$2
-  run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off
+  run_spawn "$case_dir" "$id" "$case_dir/project" --mode direct-PR --yolo off
 }
 
 # Teardown against a recorded worktree that no longer exists: the landed-work and
@@ -915,7 +915,7 @@ test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
 
   out=$(HOME="$home" FM_KIMI_READY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     run_spawn "$case_dir" "$id" "$case_dir/project" --harness kimi \
-      --mode no-mistakes --yolo off) || rc=$?
+      --mode direct-PR --yolo off) || rc=$?
   [ "$rc" -ne 0 ] || fail "Kimi readiness interruption was reported as success"
   assert_absent "$home/state/$id.meta" \
     "Kimi readiness interruption retained an unconfirmed task record"

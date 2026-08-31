@@ -74,7 +74,7 @@ test_fm_home_parameterization() {
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
   mkdir -p "$home_one/worktree"
-  printf 'project=x\nworktree=%s\n' "$home_one/worktree" > "$home_one/state/task-a.meta"
+  printf 'project=x\nworktree=%s\nmode=direct-PR\nyolo=off\n' "$home_one/worktree" > "$home_one/state/task-a.meta"
   chmod 0600 "$home_one/state/task-a.meta"
   fakebin="$TMP_ROOT/home-parameterization-fakebin"
   mkdir -p "$fakebin"
@@ -2393,7 +2393,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   printf '%s|%s\n' "$home" "$subhome"
