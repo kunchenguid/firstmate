@@ -256,7 +256,7 @@ test_ship_mode_is_required_and_closed_set() {
 missing --mode||ship briefs require --mode
 empty --mode value|--mode|requires a value
 unknown mode value|--mode nope|must be one of direct-PR, local-only
-retired mode|--mode direct-PR-prod-only|no-mistakes is retired
+inactive compatibility mode|--mode no-mistakes-prod-only|no-mistakes is retired
 ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
 }
