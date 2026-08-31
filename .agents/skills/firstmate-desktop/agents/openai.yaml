@@ -1,0 +1,6 @@
+interface:
+  display_name: "Firstmate Desktop"
+  short_description: "Automatic Firstmate orchestration in Codex Desktop"
+  default_prompt: "Use $firstmate-desktop to run this project task autonomously through Firstmate in Codex Desktop."
+policy:
+  allow_implicit_invocation: true

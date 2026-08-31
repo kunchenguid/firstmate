@@ -825,7 +825,7 @@ test_unmarked_captain_input_creates_no_expectation() {
   # Crewmate target stays unmarked and creates no pending-reply record.
   fm_write_meta "$home/state/build.meta" \
     "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
-    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "harness=echo" "kind=ship" "mode=direct-PR" "yolo=off"
   run_send "$fb" "$home" "$log" "build" "captain says hello"; rc=$?
   expect_code 0 "$rc" "unmarked crewmate send should succeed"
   [ "$(latest_record_body "$home" build)" = "captain says hello" ] \

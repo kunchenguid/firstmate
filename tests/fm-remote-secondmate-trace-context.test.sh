@@ -295,7 +295,7 @@ try_flag() { # <expect-substring> <message> [extra args...]
 }
 try_flag 'applies only to --secondmate spawns' \
   "a ship spawn must refuse a caller-supplied carrier" \
-  --mode no-mistakes --yolo off --traceparent "$VALID"
+  --mode direct-PR --yolo off --traceparent "$VALID"
 try_flag 'not a valid W3C traceparent' \
   "a shell-metacharacter carrier must be refused before any pane export" \
   --secondmate --traceparent 'bogus; rm -rf /'

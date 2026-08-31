@@ -97,12 +97,13 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$fakebin"
+  chmod 0700 "$case_dir/state"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   printf '%s\n' \
     'state=MERGED' \
     'merged=true' \
@@ -110,6 +111,7 @@ make_case() {
     'base=main' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
   : > "$case_dir/gh.log"
+  chmod 0600 "$case_dir/state/task-x1.meta"
   # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
   # stat and simply skips the pr_head lookup via `gh` in that case, so give it
   # one that resolves for cases that want pr_head recorded.
@@ -124,6 +126,11 @@ add_gh_mocks() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
+  "pr checks")
+    printf '%s\n' 'summary: 1 passed, 0 failed, 1 total'
+    printf '%s\n' 'checks[1]{name,conclusion}:'
+    printf '%s\n' '  Verify exact PR head,pass'
+    ;;
   "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "pr view")
     [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
@@ -155,6 +162,27 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+add_gh_mocks_pending() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr checks")
+    printf '%s\n' 'summary: 0 passed, 0 failed, 1 pending, 1 total'
+    printf '%s\n' 'checks[1]{name,conclusion}:'
+    printf '%s\n' '  Verify exact PR head,pending'
+    ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$head'
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
 # gh-axi mock that fails the merge call but succeeds everything else, so a
 # real merge failure is distinguishable from the recording step.
 add_gh_mocks_merge_fails() {
@@ -163,6 +191,12 @@ add_gh_mocks_merge_fails() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
+  "pr checks")
+    printf '%s\n' 'summary: 1 passed, 0 failed, 1 total'
+    printf '%s\n' 'checks[1]{name,conclusion}:'
+    printf '%s\n' '  Verify exact PR head,pass'
+    exit 0
+    ;;
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
   esac
   exit 0
@@ -171,6 +205,11 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *headRefOid*) printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; exit 0 ;;
+    esac
+    ;;
   "api graphql")
     cat "$FM_TEST_GH_OUTCOME"
     exit 0
@@ -364,6 +403,7 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  FM_PR_CI_ATTEMPTS=1 FM_PR_CI_INTERVAL=0 \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -381,6 +421,28 @@ write_github_outcome() {
     "merged=$merged" \
     "queued=$queued" \
     "base=$base" > "$case_dir/github-outcome"
+}
+
+test_pending_checks_refuse_merge() {
+  local case_dir rc sha
+  sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  case_dir=$(make_case pending-checks)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_pending "$case_dir" "$sha"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/41 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pending-checks: merge must refuse a non-terminal exact head"
+  assert_grep 'pending' "$case_dir/stderr" \
+    "pending-checks: refusal did not explain the non-terminal check"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "pending-checks: gh-axi merge ran without exact-head green checks"
+  pass "fm-pr-merge refuses pending checks for the exact PR head"
 }
 
 test_verified_merge_records_pr_and_head() {
@@ -2078,6 +2140,7 @@ test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
 test_pr_metadata_is_recorded_before_the_forge_call
+test_pending_checks_refuse_merge
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
 test_github_unreadable_outcome_keeps_pr_bookkeeping

@@ -1,0 +1,35 @@
+name: Canonical PR verification
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify exact PR head
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+      - name: Refuse a different checkout
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          actual=$(git rev-parse HEAD)
+          test "$actual" = "$EXPECTED_HEAD" || {
+            echo "expected exact PR head $EXPECTED_HEAD, got $actual" >&2
+            exit 1
+          }
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Run canonical zero-token verification
+        run: bin/fm-verify.sh

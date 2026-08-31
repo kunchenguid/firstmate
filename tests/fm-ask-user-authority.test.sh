@@ -14,17 +14,12 @@ test_primary_and_secondmate_instruction_generation() {
   mkdir -p "$home/data"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$BRIEF" authority-worker sample --mode no-mistakes >/dev/null 2>&1
+    "$BRIEF" authority-worker sample --mode direct-PR >/dev/null 2>&1
   ship="$home/data/authority-worker/brief.md"
-  assert_grep 'ask-user findings are never yours to answer' "$ship" \
+  assert_grep 'If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings)' "$ship" \
     "generated implementation brief lets the worker own an ask-user decision"
-  assert_grep "Firstmate applies \`ask-user-authority\` and obtains any required captain decision" "$ship" \
+  assert_grep 'Firstmate will apply the configured authority and reply with the decision.' "$ship" \
     "generated implementation brief bypasses the primary authority owner"
-  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'NEVER pass `--yes` (or `-y`) to `no-mistakes axi run` or `no-mistakes axi respond`' "$ship" \
-    "generated implementation brief does not prohibit silent ask-user auto-resolution"
-  assert_grep 'It auto-resolves every gate including ask-user findings with no escalation' "$ship" \
-    "generated implementation brief does not explain the ask-user authority bypass"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"
 

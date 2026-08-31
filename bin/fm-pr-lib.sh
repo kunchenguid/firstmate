@@ -34,6 +34,8 @@ FM_PR_META_URL=
 FM_PR_META_HOST=
 FM_PR_META_PATH=
 FM_PR_META_NUMBER=
+FM_PR_META_HEAD=
+FM_PR_META_GREEN_HEAD=
 FM_PR_REG_ID=
 FM_PR_REG_PROVIDER=
 FM_PR_REG_URL=
@@ -255,9 +257,9 @@ fm_pr_file_identity() {
 
 fm_pr_sha256() {
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    env -u LC_CTYPE LC_ALL=C LANG=C shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    env -u LC_CTYPE LC_ALL=C LANG=C sha256sum "$1" 2>/dev/null | awk '{print $1}'
   else
     return 1
   fi
@@ -292,6 +294,8 @@ fm_pr_metadata_identity_parse() {
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
+  FM_PR_META_HEAD=
+  FM_PR_META_GREEN_HEAD=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -312,7 +316,17 @@ fm_pr_metadata_identity_parse() {
       pr_head=*)
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
+          if fm_pr_head_valid "$value"; then FM_PR_META_HEAD=$value
+          else post_pr_invalid=1
+          fi
+        fi
+        ;;
+      pr_green_head=*)
+        if [ "$seen_pr" -eq 1 ]; then
+          value=${line#pr_green_head=}
+          if fm_pr_head_valid "$value"; then FM_PR_META_GREEN_HEAD=$value
+          else post_pr_invalid=1
+          fi
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
@@ -324,6 +338,7 @@ fm_pr_metadata_identity_parse() {
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
   [ "$post_pr_invalid" -eq 0 ] || return 1
+  [ -z "$FM_PR_META_GREEN_HEAD" ] || [ "$FM_PR_META_GREEN_HEAD" = "$FM_PR_META_HEAD" ] || return 1
   [ -n "$FM_PR_META_URL" ]
 }
 

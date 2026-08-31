@@ -145,6 +145,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/firstmate-desktop/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/firstmate-development-loop/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
       "audience": "agent-runtime"
     },

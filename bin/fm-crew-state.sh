@@ -5,11 +5,9 @@
 # Crews append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
-# or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
-# re-validates), the log's last line stays stale. This helper never infers the
-# current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
-# the pane busy-signature) and reconciles the possibly-stale log against it.
+# or blocked and the crew resumes, the log's last line stays stale. This helper
+# reads the authoritative Desktop current-state record or shell-backend busy
+# signature and reconciles the possibly-stale log against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -26,8 +24,11 @@
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
-#   2. Attribute an active or terminal no-mistakes run under the branch, head,
-#      pipeline-custody, and newest-first rules owned by bin/fm-nm-run-lib.sh.
+#   1. Resolve worktree + backend target + kind from state/<id>.meta.
+#   2. Inactive migration compatibility only: when
+#      FM_INACTIVE_NO_MISTAKES_COMPAT=1, attribute a matching legacy run under
+#      the branch, head, custody, and newest-first rules owned by
+#      bin/fm-nm-run-lib.sh; branch name alone is never sufficient.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -39,7 +40,7 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
+#   4. In the active workflow, fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
@@ -189,6 +190,44 @@ fi
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
+
+# Codex Desktop tasks have no shell-readable pane or run-step. Their current
+# state is reconciled explicitly from the app host into a separate exact record;
+# the append-only worker status log remains an event/wake channel only.
+if [ "$TASK_BACKEND" = codex-app-host ]; then
+  CURRENT="$STATE/$ID.codex-app-current"
+  [ -f "$CURRENT" ] && [ ! -L "$CURRENT" ] \
+    || emit unknown none "no reconciled Codex Desktop current state"
+  current_value() {
+    local key=$1 count
+    count=$(grep -c "^$key=" "$CURRENT" 2>/dev/null || true)
+    [ "$count" -eq 1 ] || return 1
+    grep "^$key=" "$CURRENT" | cut -d= -f2-
+  }
+  CURRENT_THREAD=$(current_value thread_id) \
+    || emit unknown none "invalid Codex Desktop current-state record"
+  CURRENT_HOST=$(current_value host_id) \
+    || emit unknown none "invalid Codex Desktop current-state record"
+  CURRENT_STATE=$(current_value state) \
+    || emit unknown none "invalid Codex Desktop current-state record"
+  CURRENT_UPDATED=$(current_value updated_at) \
+    || emit unknown none "invalid Codex Desktop current-state record"
+  CURRENT_DETAIL=$(current_value detail) \
+    || emit unknown none "invalid Codex Desktop current-state record"
+  META_THREAD=$(fm_meta_get "$META" codex_app_thread_id)
+  META_HOST=$(fm_meta_get "$META" codex_app_host_id)
+  if [ "$CURRENT_THREAD" != "$META_THREAD" ] || [ "$CURRENT_HOST" != "$META_HOST" ]; then
+    emit unknown none "Codex Desktop current state does not match endpoint metadata"
+  fi
+  case "$CURRENT_STATE" in
+    working|parked|done|blocked|paused|failed|unknown) ;;
+    *) emit unknown none "invalid Codex Desktop current state" ;;
+  esac
+  [ -n "$CURRENT_UPDATED" ] \
+    || emit unknown none "Codex Desktop current state has no reconciliation timestamp"
+  emit "$CURRENT_STATE" codex-app-host "$CURRENT_DETAIL"
+fi
+
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
@@ -210,7 +249,7 @@ crew_busy_verdict() {  # <target>
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
-# --- no-mistakes run lookup (authoritative when a run matches this branch) --
+# --- inactive no-mistakes migration compatibility --------------------------
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
 # attribution helpers below are thin wrappers over the ONE owner in
 # bin/fm-nm-run-lib.sh, shared with fm-teardown.sh's pre-teardown run abort.
@@ -436,7 +475,7 @@ RUN_SOURCE=full
 COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+if [ "${FM_INACTIVE_NO_MISTAKES_COMPAT:-0}" = 1 ] && [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")

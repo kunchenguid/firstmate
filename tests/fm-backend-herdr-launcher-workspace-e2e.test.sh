@@ -209,7 +209,7 @@ focused_workspace() {
 
 # --- 1. unique label, no herdr ancestry: the per-home container still works --
 
-spawn_from_launcher "" "$PRIMARY_HOME" uniqA "$PROJ" --mode no-mistakes --yolo off
+spawn_from_launcher "" "$PRIMARY_HOME" uniqA "$PROJ" --mode direct-PR --yolo off
 [ "$SPAWN_RC" -eq 0 ] || fail "a primary-shaped spawn with no herdr parent failed"$'\n'"$(cat "$SPAWN_ERR")"
 UNIQA_META="$PRIMARY_HOME/state/uniqA.meta"
 record_worktree "$UNIQA_META"
@@ -229,7 +229,7 @@ $(lab tab create --workspace "$WS_PRIMARY" --cwd "$TMP_ROOT" --label captain-she
 EOF
 [ -n "$LAUNCH_PRIMARY_PANE" ] || fail "could not create a launcher pane inside the 'firstmate' workspace"
 
-spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$PRIMARY_HOME" uniqB "$PROJ" --mode no-mistakes --yolo off
+spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$PRIMARY_HOME" uniqB "$PROJ" --mode direct-PR --yolo off
 [ "$SPAWN_RC" -eq 0 ] || fail "a primary spawn from a launcher pane failed"$'\n'"$(cat "$SPAWN_ERR")"
 UNIQB_META="$PRIMARY_HOME/state/uniqB.meta"
 record_worktree "$UNIQB_META"
@@ -241,7 +241,7 @@ pass "real herdr E2E: the normal unique-label path is unchanged when the launche
 # --- 2b. presentation spaces ON: the projected child is created and bound
 #         UNDER the launcher's exact workspace, not collapsed into it ---------
 
-spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$PRES_HOME" presU "$PROJ" --mode no-mistakes --yolo off
+spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$PRES_HOME" presU "$PROJ" --mode direct-PR --yolo off
 [ "$SPAWN_RC" -eq 0 ] || fail "a presentation-enabled spawn from a launcher pane failed"$'\n'"$(cat "$SPAWN_ERR")"
 PRESU_META="$PRES_HOME/state/presU.meta"
 record_worktree "$PRESU_META"
@@ -281,7 +281,7 @@ cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
-  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --mode no-mistakes --yolo off --backend herdr \\
+  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --mode direct-PR --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"
 SPAWN
@@ -316,7 +316,7 @@ pass "real herdr E2E: the duplicate-labeled sibling workspace is left entirely u
 # --- 3b. presentation spaces ON with a duplicated parent label: the projection
 #         still hangs off the launcher's exact workspace ---------------------
 
-spawn_from_launcher "$LAUNCH_DUP_PANE" "$PRES_HOME" presD "$PROJ" --mode no-mistakes --yolo off
+spawn_from_launcher "$LAUNCH_DUP_PANE" "$PRES_HOME" presD "$PROJ" --mode direct-PR --yolo off
 [ "$SPAWN_RC" -eq 0 ] || fail "a projected spawn under a duplicated parent label failed"$'\n'"$(cat "$SPAWN_ERR")"
 PRESD_META="$PRES_HOME/state/presD.meta"
 record_worktree "$PRESD_META"
@@ -343,7 +343,7 @@ pass "real herdr E2E: with a duplicated home label, a projected worker still han
 
 # --- 4. duplicate label with NO launcher identity refuses before publishing --
 
-spawn_from_launcher "" "$PRIMARY_HOME" dupD "$PROJ" --mode no-mistakes --yolo off
+spawn_from_launcher "" "$PRIMARY_HOME" dupD "$PROJ" --mode direct-PR --yolo off
 [ "$SPAWN_RC" -ne 0 ] || fail "a duplicate-labeled home workspace with no herdr parent must refuse, not guess"
 assert_contains_local "$(cat "$SPAWN_ERR")" "labeled 'firstmate'" \
   "the refusal did not name the duplicated home label"
@@ -367,7 +367,7 @@ if lab pane get "$STALE_PANE" >/dev/null 2>&1; then
   fail "the launcher pane did not actually go away"
 fi
 
-spawn_from_launcher "$STALE_PANE" "$PRIMARY_HOME" staleF "$PROJ" --mode no-mistakes --yolo off
+spawn_from_launcher "$STALE_PANE" "$PRIMARY_HOME" staleF "$PROJ" --mode direct-PR --yolo off
 [ "$SPAWN_RC" -ne 0 ] || fail "a launcher pane that no longer exists must refuse, not fall back to a label search"
 assert_contains_local "$(cat "$SPAWN_ERR")" "$STALE_PANE" \
   "the stale-identity refusal did not name the launcher pane it could not resolve"
@@ -387,7 +387,7 @@ EOF
 [ -n "$WS_SM_DECOY" ] && [ -n "$WS_SM_LAUNCH" ] || fail "could not create the two secondmate-labeled workspaces"
 WS_SM_DECOY_TABS_BEFORE=$(tab_labels_of_workspace "$WS_SM_DECOY")
 
-spawn_from_launcher "$LAUNCH_SM_PANE" "$SM_HOME" smE "$PROJ" --mode no-mistakes --yolo off
+spawn_from_launcher "$LAUNCH_SM_PANE" "$SM_HOME" smE "$PROJ" --mode direct-PR --yolo off
 [ "$SPAWN_RC" -eq 0 ] || fail "a secondmate-owned crewmate spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
 SME_META="$SM_HOME/state/smE.meta"
 record_worktree "$SME_META"

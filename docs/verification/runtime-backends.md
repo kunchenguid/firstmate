@@ -1020,3 +1020,15 @@ The focused extension suite also exercised the installed Pi 0.84.4 picker and ou
 
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running the live guard, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+
+The 2026-08 Desktop integration adds a host-managed Firstmate lifecycle around
+those proven tools: a live Desktop primary owns a thread-bound Firstmate lease,
+registers exact `threadId`/`hostId`/worktree identity as
+`backend=codex-app-host`, and reconciles host-observed current state separately
+from the append-only status event log. The behavior suite is
+`tests/fm-codex-desktop-session.test.sh`.
+
+The remaining boundary is standalone shell spawning. The documented App Server
+now exposes thread and turn lifecycle methods, but Firstmate does not ship a
+maintained standalone client or `bin/backends/codex-app.sh`; raw Desktop socket
+experiments still do not satisfy that contract.

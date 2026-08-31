@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+# Behavior tests for a Codex Desktop primary session owning Firstmate through
+# the app-provided thread identity and one live tracked lease process.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-codex-desktop-session)
+HOME_DIR="$TMP_ROOT/home"
+FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
+SYSTEM_PATH=$PATH
+mkdir -p "$HOME_DIR/state"
+
+cat > "$FAKEBIN/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash ;;
+  *"args="*) printf '%s\n' 'bash -c fixture' ;;
+  *"ppid="*) printf '%s\n' 1 ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN/ps"
+
+THREAD_A=019ff1ae-966b-7643-ba01-48811234656e
+THREAD_B=019ff1ae-966b-7643-ba01-48811234656f
+
+sleep 300 &
+LEASE_A=$!
+LEASE_B=
+TASK_LEASE=
+trap 'kill "$LEASE_A" ${LEASE_B:+"$LEASE_B"} ${TASK_LEASE:+"$TASK_LEASE"} 2>/dev/null || true; wait "$LEASE_A" ${LEASE_B:+"$LEASE_B"} ${TASK_LEASE:+"$TASK_LEASE"} 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
+
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_CODEX_DESKTOP_LEASE_PID="$LEASE_A" \
+  FM_HOME="$HOME_DIR" PATH="$FAKEBIN:$SYSTEM_PATH" \
+  "$ROOT/bin/fm-lock.sh" 2>&1) \
+  || fail "Codex Desktop primary could not acquire the Firstmate lock: $out"
+assert_contains "$out" "lock acquired: Codex Desktop thread $THREAD_A" \
+  "lock acquisition did not identify the owning Desktop thread"
+
+record=$(cat "$HOME_DIR/state/.lock")
+assert_contains "$record" "codex-desktop:$THREAD_A:" \
+  "session lock did not persist the Desktop thread identity"
+
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$HOME_DIR" PATH="$FAKEBIN:$SYSTEM_PATH" \
+  "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1 \
+  || fail "a later shell call from the same Desktop thread did not retain ownership"
+
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_B" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_CODEX_DESKTOP_LEASE_PID="$$" \
+  FM_HOME="$HOME_DIR" PATH="$FAKEBIN:$SYSTEM_PATH" \
+  "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+expect_code 1 "$status" "a competing Desktop thread must not acquire a live session's home"
+assert_contains "$out" "another live firstmate session holds the lock" \
+  "competing Desktop thread refusal did not name the live-owner boundary"
+
+kill "$LEASE_A" 2>/dev/null || true
+wait "$LEASE_A" 2>/dev/null || true
+
+sleep 300 &
+LEASE_B=$!
+out=$(CODEX_THREAD_ID="$THREAD_B" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_CODEX_DESKTOP_LEASE_PID="$LEASE_B" \
+  FM_HOME="$HOME_DIR" PATH="$FAKEBIN:$SYSTEM_PATH" \
+  "$ROOT/bin/fm-lock.sh" 2>&1) \
+  || fail "a new Desktop thread could not reclaim a dead lease: $out"
+assert_contains "$out" "lock acquired: Codex Desktop thread $THREAD_B" \
+  "dead-lease recovery did not publish the new Desktop owner"
+
+detected=$(CODEX_THREAD_ID="$THREAD_B" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  PATH="$FAKEBIN:$SYSTEM_PATH" "$ROOT/bin/fm-harness.sh")
+[ "$detected" = codex ] \
+  || fail "Codex Desktop environment marker resolved harness '$detected', expected codex"
+
+pass "Codex Desktop primary owns one Firstmate home through a live thread-bound lease"
+
+SESSION_HOME="$TMP_ROOT/session-home"
+mkdir -p "$SESSION_HOME/data" "$SESSION_HOME/state" "$SESSION_HOME/config"
+case "$(uname -s)" in
+  Darwin)
+    out=$(printf 'stop\n' | script -q /dev/null \
+      env CODEX_THREAD_ID="$THREAD_A" \
+        CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+        FM_HOME="$SESSION_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+        "$ROOT/bin/fm-session-start.sh" 2>&1)
+    ;;
+  *)
+    command="env CODEX_THREAD_ID=$THREAD_A CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' FM_HOME='$SESSION_HOME' FM_ROOT_OVERRIDE='$ROOT' '$ROOT/bin/fm-session-start.sh'"
+    out=$(printf 'stop\n' | script -q -c "$command" /dev/null 2>&1)
+    ;;
+esac
+assert_contains "$out" "lock acquired: Codex Desktop thread $THREAD_A" \
+  "session start did not establish its own Desktop lease in a tracked PTY"
+assert_contains "$out" "DESKTOP SESSION LEASE" \
+  "session start did not keep the Desktop lease active after printing the digest"
+
+pass "Codex Desktop session start holds the thread-bound lease in its tracked PTY"
+
+TASK_HOME="$TMP_ROOT/task-home"
+TASK_PROJECT="$TMP_ROOT/task-project"
+TASK_WORKTREE="$TMP_ROOT/task-worktree"
+TASK_ID=desktop-scout
+HOST_ID=local-host-123
+ROUTE_RECORD="$TASK_HOME/data/$TASK_ID/model-routing.tsv"
+mkdir -p "$TASK_HOME/state" "$(dirname "$ROUTE_RECORD")" "$TASK_PROJECT" "$TASK_WORKTREE"
+cat > "$ROUTE_RECORD" <<'EOF'
+version	1
+task_id	desktop-scout
+model	gpt-5.6-sol
+effort	high
+EOF
+ROUTE_REAL=$(realpath "$ROUTE_RECORD")
+sleep 300 &
+TASK_LEASE=$!
+printf 'codex-desktop:%s:%s\n' "$THREAD_A" "$TASK_LEASE" > "$TASK_HOME/state/.lock"
+
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" register "$TASK_ID" \
+    --thread "$THREAD_B" \
+    --host "$HOST_ID" \
+    --project "$TASK_PROJECT" \
+    --worktree "$TASK_WORKTREE" \
+    --kind scout \
+    --model gpt-5.6-sol \
+    --effort high \
+    --route-record "$ROUTE_RECORD" \
+    --session-envelope research 2>&1) \
+  || fail "Codex Desktop task registration failed: $out"
+assert_contains "$out" "registered: $TASK_ID -> Codex Desktop task $THREAD_B" \
+  "task registration did not report the durable task binding"
+
+META="$TASK_HOME/state/$TASK_ID.meta"
+CURRENT="$TASK_HOME/state/$TASK_ID.codex-app-current"
+[ -f "$META" ] || fail "Codex Desktop task registration did not create metadata"
+[ -f "$TASK_HOME/state/$TASK_ID.status" ] \
+  || fail "Codex Desktop task registration did not create the worker return channel"
+[ -f "$CURRENT" ] \
+  || fail "Codex Desktop task registration did not create the current-state record"
+assert_grep "backend=codex-app-host" "$META" \
+  "metadata did not identify the host-tool Desktop backend"
+assert_grep "window=$THREAD_B" "$META" \
+  "metadata did not bind the Desktop task id as its endpoint"
+assert_grep "codex_app_thread_id=$THREAD_B" "$META" \
+  "metadata did not persist the exact Desktop thread id"
+assert_grep "codex_app_host_id=$HOST_ID" "$META" \
+  "metadata did not persist the exact Desktop host id"
+assert_grep "model_route_record=$ROUTE_REAL" "$META" \
+  "metadata did not persist the inspected model route"
+assert_grep "session_envelope=research" "$META" \
+  "metadata did not persist the selected session envelope"
+assert_grep "session_cost_telemetry=unsupported" "$META" \
+  "metadata fabricated exact Codex Desktop cost telemetry"
+assert_grep "session_context_telemetry=unsupported" "$META" \
+  "metadata fabricated exact Codex Desktop context telemetry"
+assert_grep "session_compaction_telemetry=unsupported" "$META" \
+  "metadata fabricated exact Codex Desktop compaction telemetry"
+assert_grep "session_output_telemetry=unsupported" "$META" \
+  "metadata fabricated exact Codex Desktop output telemetry"
+assert_grep "state=working" "$CURRENT" \
+  "newly registered Desktop task did not start in working state"
+
+state=$(FM_HOME="$TASK_HOME" "$ROOT/bin/fm-crew-state.sh" "$TASK_ID")
+assert_contains "$state" "state: working · source: codex-app-host" \
+  "crew-state did not read the Desktop host's authoritative current-state record"
+
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
+    --state blocked --detail 'needs exact captain decision' \
+    --event 'blocked: needs exact captain decision' >/dev/null \
+  || fail "Codex Desktop task current-state reconciliation failed"
+state=$(FM_HOME="$TASK_HOME" "$ROOT/bin/fm-crew-state.sh" "$TASK_ID")
+assert_contains "$state" "state: blocked · source: codex-app-host · needs exact captain decision" \
+  "crew-state inferred from an event log instead of the reconciled Desktop state"
+assert_grep 'blocked: needs exact captain decision' "$TASK_HOME/state/$TASK_ID.status" \
+  "verified Desktop host event did not reach the Firstmate return channel"
+
+status=0
+printf '%s\n' '# doomed in-worktree report' > "$TASK_WORKTREE/report.md"
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
+    --state invented 2>&1) || status=$?
+expect_code 2 "$status" "Desktop state reconciliation must reject an unknown state"
+assert_contains "$out" "invalid current state 'invented'" \
+  "unknown Desktop state refusal did not identify the invalid value"
+
+# Host ownership is metadata-only. It must never become selectable through
+# FM_BACKEND/config/backend or fm-spawn's shell dispatcher.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
+status=0
+out=$(fm_backend_validate codex-app-host 2>&1) || status=$?
+expect_code 1 "$status" "codex-app-host must not be a selectable runtime backend"
+assert_contains "$out" "unknown backend 'codex-app-host'" \
+  "runtime backend refusal did not keep host ownership metadata-only"
+
+status=0
+out=$(FM_HOME="$TASK_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-teardown.sh" "$TASK_ID" 2>&1) || status=$?
+expect_code 1 "$status" "generic teardown must not destroy a Desktop-host-owned task"
+assert_contains "$out" "owned by the Codex Desktop host" \
+  "generic teardown refusal did not name the host ownership boundary"
+[ -f "$META" ] \
+  || fail "generic teardown removed Desktop task metadata before host archival"
+
+pass "Codex Desktop tasks have durable endpoint identity and reconciled current state"
+
+# Desktop archive removes the app-owned worktree. Firstmate must therefore
+# expose a fail-closed preflight instead of treating terminal state alone as
+# permission to destroy an uncommitted ship artifact.
+SCOUT_REPORT="$TMP_ROOT/reports/$TASK_ID.md"
+mkdir -p "$(dirname "$SCOUT_REPORT")"
+printf '%s\n' '# retained scout report' > "$SCOUT_REPORT"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
+    --state 'done' --detail 'report retained outside Desktop worktree' >/dev/null \
+  || fail "could not make the Desktop scout terminal for archive preflight"
+
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" archive-preflight "$TASK_ID" \
+    --report "$SCOUT_REPORT" 2>&1) \
+  || fail "terminal Desktop scout with a retained external report was not archive-safe: $out"
+assert_contains "$out" "archive-safe: $TASK_ID scout report retained" \
+  "scout archive preflight did not name the retained deliverable"
+
+SHIP_ID=desktop-ship
+SHIP_THREAD=019ff1ae-966b-7643-ba01-488112346570
+SHIP_PROJECT="$TMP_ROOT/ship-project"
+SHIP_WORKTREE="$TMP_ROOT/ship-worktree"
+SHIP_ROUTE="$TASK_HOME/data/$SHIP_ID/model-routing.tsv"
+mkdir -p "$SHIP_PROJECT" "$SHIP_WORKTREE" "$(dirname "$SHIP_ROUTE")"
+git -C "$SHIP_WORKTREE" init -q -b main
+git -C "$SHIP_WORKTREE" config user.name 'FirstMate Test'
+git -C "$SHIP_WORKTREE" config user.email 'firstmate-test@example.invalid'
+printf '%s\n' 'initial' > "$SHIP_WORKTREE/initial.txt"
+git -C "$SHIP_WORKTREE" add initial.txt
+git -C "$SHIP_WORKTREE" commit -q -m initial
+cat > "$SHIP_ROUTE" <<'EOF'
+version	1
+task_id	desktop-ship
+model	gpt-5.6-sol
+effort	high
+EOF
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" register "$SHIP_ID" \
+    --thread "$SHIP_THREAD" --host "$HOST_ID" \
+    --project "$SHIP_PROJECT" --worktree "$SHIP_WORKTREE" \
+    --kind ship --model gpt-5.6-sol --effort high \
+    --route-record "$SHIP_ROUTE" --session-envelope normal >/dev/null \
+  || fail "could not register Desktop ship archive-preflight fixture"
+
+# A hard envelope boundary commits staged intended work only, writes a structured
+# handoff outside the app-owned worktree, and pauses the old endpoint. A fresh
+# Desktop task can resume only from that exact checkpoint and handoff.
+printf '%s\n' 'checkpointed work' > "$SHIP_WORKTREE/checkpoint.txt"
+git -C "$SHIP_WORKTREE" add checkpoint.txt
+printf '%s\n' 'leave unstaged' > "$SHIP_WORKTREE/unstaged.txt"
+SHIP_HANDOFF="$TASK_HOME/data/$SHIP_ID/session-handoff-1.md"
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" hard-stop "$SHIP_ID" \
+    --reason 'session envelope hard boundary' --handoff "$SHIP_HANDOFF" 2>&1) \
+  || fail "Desktop envelope hard stop failed: $out"
+SHIP_CHECKPOINT=$(git -C "$SHIP_WORKTREE" rev-parse HEAD)
+assert_contains "$out" "checkpoint=$SHIP_CHECKPOINT" \
+  "hard stop did not report the exact checkpoint commit"
+assert_grep "checkpoint_sha: $SHIP_CHECKPOINT" "$SHIP_HANDOFF" \
+  "structured handoff did not bind the exact checkpoint"
+assert_grep 'reason: session envelope hard boundary' "$SHIP_HANDOFF" \
+  "structured handoff did not record the hard-stop reason"
+assert_grep 'session_cost_telemetry: unsupported' "$SHIP_HANDOFF" \
+  "structured handoff fabricated exact cost telemetry"
+[ -f "$SHIP_WORKTREE/unstaged.txt" ] \
+  || fail "hard stop discarded an unstaged task artifact"
+git -C "$SHIP_WORKTREE" ls-files --error-unmatch checkpoint.txt >/dev/null 2>&1 \
+  || fail "hard stop did not commit staged intended work"
+if git -C "$SHIP_WORKTREE" ls-files --error-unmatch unstaged.txt >/dev/null 2>&1; then
+  fail "hard stop committed an unstaged artifact"
+fi
+assert_grep 'state=paused' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "hard stop did not pause the old Desktop endpoint"
+
+SHIP_THREAD_2=019ff1ae-966b-7643-ba01-488112346571
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" resume "$SHIP_ID" \
+    --thread "$SHIP_THREAD_2" --host "$HOST_ID" \
+    --checkpoint "$SHIP_CHECKPOINT" --handoff "$SHIP_HANDOFF" 2>&1) \
+  || fail "fresh Desktop session could not resume the checkpoint: $out"
+assert_contains "$out" "generation=2" \
+  "resume did not report the fresh session generation"
+assert_grep "codex_app_thread_id=$SHIP_THREAD_2" "$TASK_HOME/state/$SHIP_ID.meta" \
+  "resume did not bind the fresh Desktop task"
+assert_grep 'session_generation=2' "$TASK_HOME/state/$SHIP_ID.meta" \
+  "resume did not advance the session generation"
+assert_grep 'state=working' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "resume did not reconcile the fresh Desktop task as working"
+
+printf '%s\n' 'uncommitted ship artifact' > "$SHIP_WORKTREE/result.txt"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
+    --state 'done' --detail 'uncommitted artifact retained' >/dev/null \
+  || fail "could not make the Desktop ship terminal for archive preflight"
+
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" archive-preflight "$SHIP_ID" 2>&1) \
+  || status=$?
+expect_code 1 "$status" \
+  "terminal state alone must not make a Desktop ship worktree archive-safe"
+assert_contains "$out" "archive would delete the retained ship worktree" \
+  "ship archive refusal did not name the destructive Desktop boundary"
+[ -f "$SHIP_WORKTREE/result.txt" ] \
+  || fail "archive preflight itself removed the ship artifact"
+
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" archive-preflight "$TASK_ID" \
+    --report "$TASK_WORKTREE/report.md" 2>&1) || status=$?
+expect_code 1 "$status" \
+  "a scout report inside the Desktop worktree must not authorize archival"
+assert_contains "$out" "report is inside the Desktop worktree" \
+  "scout archive refusal did not identify the report-loss risk"
+
+pass "Codex Desktop archive preflight preserves ship artifacts and requires external scout reports"

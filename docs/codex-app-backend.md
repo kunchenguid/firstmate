@@ -1,57 +1,160 @@
-# Codex App backend boundary
+# Codex Desktop host lifecycle
 
-Codex App is not a selectable Firstmate runtime backend.
-Codex Desktop host tools can create and supervise visible threads and those threads can write Firstmate status files when given an authorized path, but Firstmate has no supported shell-callable bridge to those host tools.
-A manual thread ledger is not a backend.
+Codex Desktop can run Firstmate-managed ship and scout tasks natively when the
+primary is itself a Desktop task and uses the app host tools for task lifecycle.
+This is recorded as `backend=codex-app-host` in task metadata.
 
-## Acceptance contract
+`codex-app-host` is deliberately not a value for `FM_BACKEND`,
+`config/backend`, or `fm-spawn.sh --backend`. The Desktop host creates, sends,
+reads, waits for, and archives the visible task; Firstmate's shell helpers own
+the durable identity and reconciled state. The unsupported value `codex-app`
+continues to be refused by the normal spawn dispatcher.
 
-A future Codex App backend must satisfy the same lifecycle contract as terminal-backed adapters:
+## Ownership split
 
-1. Create a task endpoint and return a durable thread id.
-2. Send the initial instructions and later operator messages to that endpoint.
-3. Read enough live state or bounded transcript to supervise the task.
-4. Archive, kill, or otherwise stop the exact endpoint.
-5. Let the thread append Firstmate's normal lifecycle lines to `state/<id>.status`.
+The Desktop host owns:
 
-The status return channel is mandatory.
-A visible thread that cannot report into Firstmate's normal lifecycle is not a complete backend.
+1. creating a task in an exact saved project and isolated Desktop worktree;
+2. returning the task's durable `threadId`, `hostId`, and worktree path;
+3. sending initial and follow-up turns;
+4. reading bounded transcript/state and waiting for attention or completion;
+5. archiving the exact task only after Firstmate's archive preflight succeeds.
 
-## Current blocker
+Firstmate owns:
 
-Firstmate backend scripts are shell entry points and can call tmux, Herdr, Zellij, Orca, and cmux directly.
-Codex Desktop host tools are available to a Desktop conversation, not to arbitrary Firstmate subprocesses.
-The missing component is a Codex Desktop-supported shell-callable transport, not another local ledger.
+1. the task id and exact task/worktree metadata binding;
+2. `state/<id>.status` as the append-only return/wake event log;
+3. `state/<id>.codex-app-current` as the current-state record;
+4. translating host observations into Firstmate lifecycle events;
+5. refusing mutations outside the live session lock.
 
-`codex app-server --stdio` exposes useful JSON-RPC pieces such as thread start, turn start, thread read, and thread archive.
-A one-process probe could create and archive a thread record, but no supported bridge was found that lets Firstmate create, continue, read, and archive the same visible Desktop-owned endpoint over its full lifetime.
-A raw Desktop control-socket proxy is not a supported transport.
-These partial pieces do not authorize adding `codex-app` to the known or spawn-capable backend registries.
+The event log and current state are intentionally separate. A last status line
+can remain historical after a task resumes; `fm-crew-state.sh` reads the exact
+current-state record for `codex-app-host` and never infers current state from
+the log tail.
 
-## Required bridge
+## Cross-project permission boundary
 
-Implementation can begin after Codex Desktop exposes one supported interface:
+Codex Desktop derives a repository task's writable filesystem scope from the
+saved project that created the task.
+Discovering a global skill through a readable symlink does not add the skill's
+source repository as another writable project.
+An external repository task that starts the installed
+`bin/fm-session-start.sh` directly therefore reaches the Firstmate lock path in
+a read-only permission context, even when Unix mode bits show that the account
+owns the directory.
 
-- a CLI wrapper for create, send, read, and archive host-tool operations;
-- a documented JSON-RPC or MCP transport with stable framing; or
-- a maintained helper that speaks the supported transport and returns plain JSON to a shell adapter.
+`bin/fm-desktop-entry.sh` is the read-only routing boundary.
+It compares Git common-directory identity and reports `mode=direct` only for a
+task already running in the Firstmate repository or one of its worktrees.
+Every other repository gets `mode=coordinator`: the source task creates one
+visible Desktop-owned Firstmate worktree, passes the complete request and exact
+source project to it, then waits for and relays that coordinator's result.
+The coordinator uses its own writable top level as `FM_HOME`, starts the
+session exactly once, and owns every target ship or scout through the host
+lifecycle below.
+The source task never substitutes ordinary subagents or project work of its
+own.
 
-The bridge must provide these semantics:
+## Desktop workflow
+
+Preflight must prove that the current primary is Codex Desktop and the task host
+tools are exposed. If an exact known local checkout is absent from Desktop's
+project list, the primary opens that path with Codex Desktop and refreshes the
+list; project registration is not a routine captain step. Start the Firstmate
+session in a tracked PTY so the thread-bound lease remains live.
+
+For each task:
+
+1. Create the visible task with the Desktop host tool in an isolated worktree.
+2. Record the exactly five routing factors with `bin/fm-task-model-route.sh` and select a `small`, `normal`, or `research` envelope.
+3. Read the returned task identity and actual worktree path.
+4. While holding the Firstmate session lock, register that exact identity:
+
+   ```sh
+   bin/fm-codex-app-task.sh register <id> \
+     --thread <thread-id> --host <host-id> \
+     --project <saved-project-checkout> --worktree <desktop-worktree> \
+     --kind <ship-or-scout> --model <model> --effort <effort> \
+     --route-record <absolute-routing-record> \
+     --session-envelope <small|normal|research>
+   ```
+
+5. Verify `state/<id>.meta`, the writable status file, and
+   `bin/fm-crew-state.sh <id>` before treating the task as supervised.
+6. Use the Desktop wait/read tools for host truth. Reconcile every meaningful
+   state transition and optionally append its verified lifecycle event:
+
+   ```sh
+   bin/fm-codex-app-task.sh reconcile <id> \
+     --state <working-or-terminal-state> --detail '<bounded evidence>' \
+     --event '<working|needs-decision|blocked|paused|done|failed>: <detail>'
+   ```
+
+7. Use the Desktop send tool for follow-ups. Never imitate a send by editing a
+   transcript or local ledger.
+8. Reconcile the final state, then run
+   `bin/fm-codex-app-task.sh archive-preflight <id>`. Desktop archive removes
+   its app-owned worktree. The preflight allows a completed scout only when a
+   non-empty report is retained outside that worktree, and refuses ship tasks
+   until their implementation is independently landed or explicit discard is
+   authorized. Call the Desktop archive tool only after a successful
+   preflight. Generic `fm-teardown.sh` still refuses host-owned tasks and
+   preserves their Firstmate records.
+
+Worker-written status lines are valid when Desktop permissions allow the exact
+Firstmate state path. When they do not, the primary records only transitions it
+has actually observed through the host wait/read tools. It must never invent a
+worker event from an old status tail.
+
+## Durable metadata
+
+A registered host task carries the normal task fields plus:
 
 ```text
-create: task id, worktree request, initial instructions -> thread id, cwd, state
-send: thread id, text -> accepted or rejected
-read: thread id, bounded cursor -> transcript and live state
-archive: thread id -> archived or stopped
-return: thread appends state/<id>.status lifecycle lines
+backend=codex-app-host
+endpoint_task_id=<firstmate-task-id>
+window=<desktop-thread-id>
+codex_app_thread_id=<desktop-thread-id>
+codex_app_host_id=<desktop-host-id>
+worktree=<actual-desktop-worktree>
+model_route_record=<absolute-routing-record>
+session_envelope=<small-or-normal-or-research>
+session_generation=<positive-integer>
+session_cost_telemetry=unsupported
+session_context_telemetry=unsupported
+session_compaction_telemetry=unsupported
+session_output_telemetry=unsupported
 ```
 
-Once available, Firstmate should add a real `bin/backends/codex-app.sh`, persist `backend=codex-app` and `codex_app_thread_id=`, and route spawn, send, peek, watch, and cleanup through the shared dispatcher.
+Endpoint validation requires one exact value for every binding and refuses a
+mismatched task id, thread id, host id, project, or worktree before mutation.
+Registration refuses to overwrite pre-existing task records and refuses a
+worktree that resolves to the saved project checkout.
 
-## Rollout
+## Session envelope boundary
 
-Ship and scout tasks come first.
-Secondmate support remains out of scope until create, send, read, status return, and archive are proven through the normal backend dispatcher.
-Until then, Codex App remains a blocked backend boundary with a verified host-tool capability record, not a selectable backend.
+Codex Desktop does not currently expose reliable exact per-task cost, remaining-context, compaction-count, or output-token metrics to Firstmate.
+The envelope classes therefore provide qualitative soft boundaries and never claim exact enforcement or savings from those signals.
+At an explicit hard boundary, the worker stages intended changes and `fm-codex-app-task.sh hard-stop` creates a staged-only checkpoint commit plus a structured handoff outside the app-owned worktree.
+The primary creates a fresh Desktop task for the retained worktree, then `fm-codex-app-task.sh resume` verifies the exact checkpoint and handoff before replacing endpoint identity and advancing `session_generation`.
+Unstaged and untracked artifacts remain preserved throughout this transition.
 
-[`verification/runtime-backends.md`](verification/runtime-backends.md#codex-app-host-tools) owns the active Desktop host-tool smoke without exposing task-specific thread ids or local paths.
+## Standalone shell boundary
+
+The documented Codex App Server exposes thread and turn lifecycle methods, but
+Firstmate does not yet ship a standalone `bin/backends/codex-app.sh` client.
+A primary outside Codex Desktop therefore cannot select this host lifecycle,
+and `fm-spawn.sh --backend codex-app` remains blocked. Implementing that later
+requires one maintained App Server process plus proven create/resume/read/wait/
+archive semantics; it must not be approximated with raw Desktop sockets.
+
+## Rollout limits
+
+Ship and scout tasks are supported through a live Desktop primary. Secondmate
+support remains out of scope until its home provisioning, nested ownership,
+and recovery semantics are designed for the host lifecycle.
+
+[`verification/runtime-backends.md`](verification/runtime-backends.md#codex-app-host-tools)
+owns the active host-tool evidence. The `firstmate-codexapp` skill owns the
+operator sequence.

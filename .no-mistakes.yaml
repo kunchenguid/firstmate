@@ -1,4 +1,6 @@
-# Per-repo no-mistakes overrides.
+# Inactive migration compatibility only.
+# This file supports already-running legacy migrations and the final migration validation run.
+# It is not an active delivery mode, bootstrap dependency, CI signature, or merge prerequisite.
 
 # firstmate is an agent-orchestration repo: its AGENTS.md installs a fleet-captain
 # identity. Disable project-level agent settings/instructions for gate agents so a
@@ -22,18 +24,15 @@ document:
     evidence destination, and unique safety facts, then review the complete
     branch diff again after every documentation or lint fix.
 
-# Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
+# Pin lint for the legacy migration validator to the canonical owner instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
 # `bin/fm-lint.sh` owns the complete lint definition, including GitHub workflow
-# lint via pinned actionlint in `bin/fm-lint-workflows.sh`, and
-# `.github/workflows/ci.yml` invokes it directly, with parity asserted by
-# `tests/fm-lint.test.sh` and `tests/fm-lint-workflows.test.sh`.
+# lint via pinned actionlint in `bin/fm-lint-workflows.sh`.
+# `bin/fm-verify.sh` invokes that owner for both local work and GitHub Actions,
+# with parity asserted by `tests/fm-lint.test.sh` and `tests/fm-lint-workflows.test.sh`.
 #
-# Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
-# Test is intent-targeted validation of whether the change meets its brief;
-# .github/workflows/ci.yml owns broad regression (behavior suite, platform,
-# security, Herdr, tmux, and lifecycle coverage). A full-suite override here
-# would duplicate CI and defeat the targeted Test contract.
+# Do not set commands.test to a complete tests/*.test.sh walk.
+# The behavioral corpus remains a deliberate targeted or full validation outside the routine gate.
 commands:
   lint: 'bin/fm-lint.sh'
 

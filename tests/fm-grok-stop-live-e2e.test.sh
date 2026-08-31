@@ -146,7 +146,7 @@ worktree=$lab/project
 project=$lab/project
 harness=grok
 kind=scout
-mode=no-mistakes
+mode=direct-PR
 EOF
   cat > "$lab/run.sh" <<EOF
 #!/usr/bin/env bash

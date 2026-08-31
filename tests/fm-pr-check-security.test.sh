@@ -47,6 +47,156 @@ file_mode() {
   fi
 }
 
+# Inactive migration compatibility fixtures retained on disk for legacy
+# quarantine evidence; the active suite below owns current PR-check behavior.
+state_snapshot() {
+  local state=$1 file
+  (
+    cd "$state" || exit 1
+    find . \( -type f -o -type l \) -print | LC_ALL=C sort | while IFS= read -r file; do
+      if [ -L "$file" ]; then
+        printf 'link %s %s\n' "$file" "$(readlink "$file")"
+      else
+        printf 'file %s %s ' "$file" "$(file_mode "$file")"
+        shasum -a 256 "$file" | awk '{print $1}'
+      fi
+    done
+  )
+}
+
+make_case() {
+  local name=$1 dir fakebin fake_root
+  dir="$TMP_ROOT/$name"
+  fakebin="$dir/fakebin"
+  fake_root="$dir/root"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  cat > "$fake_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
+SH
+  chmod +x "$fake_root/bin/fm-guard.sh"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case " $* " in
+  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" state "*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+    printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
+    ;;
+esac
+SH
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit "${FM_TEST_GH_AXI_RC:-0}"
+SH
+  # Plain glab, reproducing the real CLI's contract: its field output on stdout
+  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
+[ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
+[ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  : > "$dir/gh.log"
+  : > "$dir/gh-axi.log"
+  : > "$dir/glab.log"
+  : > "$dir/guard.log"
+  printf '%s\n' "$dir"
+}
+
+write_task_meta() {
+  local dir=$1 id=${2:-task-a}
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "kind=ship" \
+    "mode=direct-PR"
+}
+
+write_poll_meta() {
+  local state=$1 id=$2 url=$3
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" \
+    "pr=$url"
+}
+
+write_ambiguous_poll() {
+  local dir=$1 id=${2:-task-a}
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" \
+    'pr=https://github.com/o/r/pull/10' \
+    'window=unexpected-after-pr'
+  printf 'legacy ambiguous bytes\n' > "$dir/home/state/$id.check.sh"
+}
+
+write_v1_x_shim() {
+  local file=$1 home=$2 root=$3
+  fmx_poll_shim_v1_content "$home" "$root" > "$file"
+}
+
+write_manual_poll_pair() {
+  local state=$1 url=${2:-https://github.com/o/r/pull/10} provider host path number
+  fm_pr_url_parse "$url" || fail "manual poll fixture URL was invalid"
+  provider=$FM_PR_PROVIDER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
+  cp "$POLL" "$state/task-a.check.sh"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$state/task-a.pr-poll"
+  chmod 0600 "$state/task-a.check.sh" "$state/task-a.pr-poll"
+}
+
+start_ambiguous_pending_repair() {
+  local dir=$1 state rc
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  mkdir "$state/task-a.pr-poll"
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ambiguous pending-repair fixture unexpectedly completed"
+  rmdir "$state/task-a.pr-poll"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/10
+  [ -f "$state/.pr-check-quarantine/task-a.diagnostic.pending-ambiguous" ] \
+    || fail "ambiguous pending-repair fixture lost its pending obligation"
+}
+
+write_watcher_lock() {
+  local state=$1 home=$2 pid=$3 identity
+  rm -rf "$state/.watch.lock"
+  mkdir "$state/.watch.lock"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid")
+  [ -n "$identity" ] || fail "could not capture fake older-watcher identity"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+}
+
+assert_valid_migration_marker() {
+  local marker=$1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || fail "migration success did not publish an ordinary marker"
+  [ "$(file_mode "$marker")" = 600 ] || fail "migration marker mode was not 0600"
+  grep -qxF fm-pr-check-migration-v1 "$marker" || fail "migration marker bytes were not exact"
+  [ "$(awk 'END { print NR + 0 }' "$marker")" -eq 1 ] || fail "migration marker had extra records"
+}
+
+assert_valid_scan_marker() {
+  local marker=$1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || fail "migration success did not publish an ordinary scan marker"
+  [ "$(file_mode "$marker")" = 600 ] || fail "migration scan marker mode was not 0600"
+  grep -qxF fm-pr-check-migration-scan-v1 "$marker" || fail "migration scan marker bytes were not exact"
+  [ "$(awk 'END { print NR + 0 }' "$marker")" -eq 1 ] || fail "migration scan marker had extra records"
+}
+
 LINK_KIND=
 LINK_TARGET=
 LINK_CONTENT=
@@ -180,7 +330,7 @@ write_task_meta() {
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
 }
 
 write_poll_meta() {

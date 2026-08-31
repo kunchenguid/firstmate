@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes either the harness process PID found by walking shell ancestry or a
+# Codex Desktop thread id bound to the live foreground lease held by
+# fm-session-start.sh. Both identities outlive transient tool subprocesses.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -29,11 +29,28 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_session_lock_owner_alive "$old"; then
+    case "$old" in
+      codex-desktop:*)
+        fm_codex_desktop_parse_lock_record "$old"
+        echo "lock: held by live Codex Desktop thread $FM_CODEX_DESKTOP_RECORD_THREAD"
+        ;;
+      *) echo "lock: held by live harness pid $old" ;;
+    esac
+  else
+    echo "lock: stale (owner dead or invalid)"
+  fi
   exit 0
 fi
 
-me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_session_identity_for_state "$STATE") || {
+  if fm_codex_desktop_thread_id >/dev/null 2>&1; then
+    echo "error: Codex Desktop requires bin/fm-session-start.sh in a tracked PTY to hold the session lease" >&2
+  else
+    echo "error: cannot locate harness process in ancestry" >&2
+  fi
+  exit 1
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -86,8 +103,8 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+  if [ "$old" != "$me" ] && fm_session_lock_owner_alive "$old"; then
+    echo "error: another live firstmate session holds the lock; operate read-only until resolved" >&2
     exit 1
   fi
 fi
@@ -104,4 +121,10 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   exit 1
 fi
 release_claim_lock
-echo "lock acquired: harness pid $me"
+case "$me" in
+  codex-desktop:*)
+    fm_codex_desktop_parse_lock_record "$me"
+    echo "lock acquired: Codex Desktop thread $FM_CODEX_DESKTOP_RECORD_THREAD"
+    ;;
+  *) echo "lock acquired: harness pid $me" ;;
+esac
