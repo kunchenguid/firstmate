@@ -118,6 +118,29 @@ fs.symlinkSync = function (source, target, type) {
   throw new Error('ambient preload ran');
 };
 JS
+  cat > "$fakebin/node-invalid-publication-hook.cjs" <<'JS'
+const fs = require('node:fs');
+const path = require('node:path');
+const symlinkSync = fs.symlinkSync;
+
+fs.symlinkSync = function (source, target, type) {
+  const result = symlinkSync.call(this, source, target, type);
+  const backing = path.resolve(path.dirname(target), source);
+  if (process.env.FM_INVALID_NODE_MODULES_PUBLICATION === 'workspace') {
+    fs.unlinkSync(`${backing}/@beeline/lib`);
+    symlinkSync.call(
+      this,
+      process.env.FM_NODE_MODULES_PRIMARY_WORKSPACE,
+      `${backing}/@beeline/lib`,
+      'dir'
+    );
+  }
+  if (process.env.FM_INVALID_NODE_MODULES_PUBLICATION === 'backing') {
+    fs.rmSync(backing, { recursive: true, force: true });
+  }
+  return result;
+};
+JS
   local real_node
   real_node=$(command -v node)
   cat > "$fakebin/node" <<SH
@@ -131,6 +154,9 @@ if [ "\${1:-}" = - ] && [ -n "\${FM_NODE_PUBLISHER_EARLY_STATUS:-}" ]; then
 fi
 if [ "\${1:-}" = - ] && [ "\${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" = 1 ]; then
   exec "$real_node" --require="$fakebin/node-ambient-hook.cjs" "\$@"
+fi
+if [ "\${1:-}" = - ] && [ -n "\${FM_INVALID_NODE_MODULES_PUBLICATION:-}" ]; then
+  exec "$real_node" --require="$fakebin/node-invalid-publication-hook.cjs" "\$@"
 fi
 if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_HUP_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_KILL_NODE_MODULES_PUBLISHER:-0}" = 1 ]; }; then
   exec "$real_node" --require="$fakebin/node-race-hook.cjs" "\$@"
@@ -198,6 +224,8 @@ run_spawn() {
     FM_FAIL_NODE_PUBLISHER_EXEC="${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" \
     FM_NODE_PUBLISHER_EARLY_STATUS="${FM_NODE_PUBLISHER_EARLY_STATUS:-}" \
     FM_INJECT_NODE_PUBLISHER_HOOK="${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" \
+    FM_INVALID_NODE_MODULES_PUBLICATION="${FM_INVALID_NODE_MODULES_PUBLICATION:-}" \
+    FM_NODE_MODULES_PRIMARY_WORKSPACE="${FM_NODE_MODULES_PRIMARY_WORKSPACE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -308,6 +336,26 @@ test_spawn_rejects_target_only_primary_workspace_link() {
   pass "fm-spawn refuses target-only workspace links to primary source"
 }
 
+test_spawn_rejects_dangling_existing_workspace_link() {
+  local rec id out status
+  id=node-modules-dangling-existing-z2d
+  rec=$(make_case dangling-existing "$id")
+  read_case "$rec"
+  mkdir -p "$WORKTREE_DIR/node_modules/@beeline"
+  ln -s ../../packages/lib "$WORKTREE_DIR/node_modules/@beeline/lib"
+  ln -s "$WORKTREE_DIR/packages/absolute-lib" "$WORKTREE_DIR/node_modules/@beeline/absolute-lib"
+  ln -s ../../packages/cli "$WORKTREE_DIR/node_modules/@beeline/cli"
+  ln -s ../../packages/missing "$WORKTREE_DIR/node_modules/@beeline/legacy"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a dangling existing workspace link"
+  assert_not_contains "$out" "spawned $id" "dangling existing workspace link launched a worker"
+  [ "$(readlink "$WORKTREE_DIR/node_modules/@beeline/legacy")" = '../../packages/missing' ] \
+    || fail "spawn mutated the dangling existing workspace link"
+  pass "fm-spawn refuses dangling existing workspace links without mutation"
+}
+
 test_spawn_ignores_published_beeline_consumers() {
   local rec id out status
   id=node-modules-consumer-z3
@@ -403,6 +451,26 @@ test_spawn_validates_staging_before_publication() {
       || fail "invalid dependency staging survived validation failure"
   done
   pass "fm-spawn validates workspace links before dependency publication"
+}
+
+test_spawn_rejects_dangling_staged_workspace_link() {
+  local rec id out status candidate
+  id=node-modules-dangling-staging-z5c
+  rec=$(make_case dangling-staging "$id")
+  read_case "$rec"
+  ln -s ../../packages/missing "$PROJECT_DIR/node_modules/@beeline/legacy"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn published a dangling staged workspace link"
+  assert_not_contains "$out" "spawned $id" "dangling staged workspace link launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "dangling staged workspace link published node_modules"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "dangling staged workspace link leaked dependency staging"
+  done
+  pass "fm-spawn rejects dangling workspace links before publication"
 }
 
 test_spawn_cancels_after_staging_registration_interrupt() {
@@ -618,15 +686,39 @@ test_spawn_rejects_wrapper_status_without_dependency_tree() {
   pass "fm-spawn rejects wrapper statuses without a valid dependency tree"
 }
 
+test_spawn_retracts_invalid_owned_publication() {
+  local rec id out status candidate mode
+  for mode in workspace backing; do
+    id="node-modules-invalid-owned-$mode-z15"
+    rec=$(make_case "invalid-owned-$mode" "$id")
+    read_case "$rec"
+
+    out=$(FM_INVALID_NODE_MODULES_PUBLICATION="$mode" \
+      FM_NODE_MODULES_PRIMARY_WORKSPACE="$PROJECT_DIR/packages/lib" run_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn accepted invalid owned publication mode $mode"
+    assert_not_contains "$out" "spawned $id" "invalid owned publication mode $mode launched a worker"
+    [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+      || fail "invalid owned publication mode $mode left node_modules"
+    for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+      [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+        || fail "invalid owned publication mode $mode leaked dependency staging"
+    done
+  done
+  pass "fm-spawn retracts invalid owned dependency publications"
+}
+
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_rejects_existing_primary_dependency_link
 test_spawn_rejects_target_only_primary_workspace_link
+test_spawn_rejects_dangling_existing_workspace_link
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_cleans_staging_after_setup_failure
 test_spawn_validates_staging_before_publication
+test_spawn_rejects_dangling_staged_workspace_link
 test_spawn_cancels_after_staging_registration_interrupt
 test_spawn_cleans_staging_after_creator_status_failure
 test_spawn_preserves_publication_after_interrupt
@@ -638,5 +730,6 @@ test_spawn_cleans_staging_after_creator_termination
 test_spawn_cleans_known_unpublished_staging_during_interrupt
 test_spawn_retains_backing_after_wrapper_postpublication_failure
 test_spawn_rejects_wrapper_status_without_dependency_tree
+test_spawn_retracts_invalid_owned_publication
 
 echo "# all fm-spawn-node-modules tests passed"

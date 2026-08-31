@@ -664,6 +664,19 @@ cleanup_beeline_node_modules_staging() {
   NODE_MODULES_ABORT_STAGING=
 }
 
+retract_beeline_node_modules_publication() {
+  local target=$1 publication_link=$2
+  [ -L "$target" ] || return 1
+  [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ] || return 1
+  if ! (
+    trap '' INT TERM HUP
+    exec rm -f -- "$target"
+  ); then
+    return 1
+  fi
+  [ ! -e "$target" ] && [ ! -L "$target" ]
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if ! cleanup_beeline_node_modules_staging; then
@@ -1338,15 +1351,15 @@ beeline_workspace_links_match_worktree() {
       candidate="$target/@beeline/$name"
       [ -e "$candidate" ] || [ -L "$candidate" ] || return 1
       expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
-      expected_real=$(real_path_or_raw "$expected")
-      candidate_real=$(real_path_or_raw "$candidate")
+      expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
+      candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
       [ "$candidate_real" = "$expected_real" ] || return 1
     fi
   done
   if [ -n "$target" ]; then
     for candidate in "$target/@beeline"/* "$target/@beeline"/.[!.]* "$target/@beeline"/..?*; do
       [ -L "$candidate" ] || continue
-      candidate_real=$(real_path_or_raw "$candidate")
+      candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
       if [[ "$candidate_real" == "$PROJ_ABS_REAL"/* ]] \
          && [[ "$candidate_real" != "$source_real"/* ]]; then
         return 1
@@ -1502,10 +1515,17 @@ JS
     0)
       if [ -L "$target" ] \
          && [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ] \
-         && [ -d "$target" ]; then
+         && [ -d "$target" ] \
+         && beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
         NODE_MODULES_ABORT_STAGING=
       else
         publish_status=5
+        if retract_beeline_node_modules_publication "$target" "$publication_link"; then
+          NODE_MODULES_ABORT_CLEANUP=1
+          cleanup_status=0
+          cleanup_beeline_node_modules_staging || cleanup_status=$?
+          [ "$cleanup_status" -eq 0 ] || publish_status=6
+        fi
       fi
       ;;
     3)
