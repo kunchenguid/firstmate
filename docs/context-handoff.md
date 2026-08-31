@@ -42,8 +42,8 @@ It additionally verifies the selected Vault's canonical path and directory objec
 A cwd match alone never selects a recipient.
 Unavailable, busy, dead, changed, or ambiguous recipients leave the record pending with a reason.
 The bridge never starts, restarts, substitutes, discovers, or inspects a Claude process.
-A notification may submit only the constant `/firstmate-context-handoff:consume`, never a record ID or record content, through a Herdr operation that atomically rejects a changed agent-session generation and deduplicates one stable record-bound idempotency key.
-When the installed Herdr protocol exposes no exact-generation precondition and acknowledged idempotency identity together, delivery retains the record pending without submitting a prompt.
+A notification may submit only the constant `/firstmate-context-handoff:consume`, never a record ID or record content, through a Herdr operation that atomically requires an idle exact agent-session generation and deduplicates one stable record-bound idempotency key.
+When the installed Herdr protocol exposes no atomic idle, exact-generation, and acknowledged-idempotency precondition together, delivery retains the record pending without submitting a prompt.
 
 ## Claude consumer
 
@@ -54,7 +54,8 @@ Claude `PreCompact` seals only the separately registered Claude candidates for t
 An exact matching session with an unhealthy endpoint or Vault binding writes a failure receipt and blocks compaction while genuinely foreign sessions remain ignored.
 The exact live Claude generation is revalidated inside the same serialized transition that seals and publishes the attempt binding, so an endpoint replaced after the initial probe blocks without sealing.
 The Herdr probe budget stays materially shorter than the `PreCompact` hook timeout, leaving margin to publish the failure receipt and return the block decision before Claude can terminate the hook.
-Session-start publication is serialized and generation-monotonic, so a retired hook process cannot replace a newer process capability or restore stale MCP authority.
+Session-start publication uses a collision-safe platform process generation and replaces another capability only after proving its prior process owner dead, so a retired or concurrent hook process cannot restore stale MCP authority.
+Claude terminal hooks authenticate the durable attempt by hook-session hash and exact process capability and apply its bound envelope snapshot without depending on later configuration or endpoint liveness.
 Post-compact and session-start reporting exposes only bounded counts and generic next action, not record contents, and counts only the records the MCP consumer can actually claim.
 
 The consumer revalidates the canonical envelope, item and byte caps, source hashes, source allowlist, provider class, sensitive categories, exact Vault object, queue hash, exact Herdr environment, and Claude session binding before showing one record to Claude.
@@ -63,7 +64,7 @@ Automatic apply authority covers exactly one new note under a configured create 
 Deletion, move, canonical note replacement, merge, `.obsidian`, Git, GitHub, executable installation, credentials, sensitive content, ambiguity, and out-of-contract paths are quarantined.
 
 The consumer deterministically maps the handoff record ID to one transaction operation ID.
-It stages canonical bundle bytes privately, verifies a reviewed manifest covering the entrypoint and every Python file in the installed transaction package, executes that package from a private snapshot through an isolated wrapper that places the verified package first and excludes ambient site packages, and stores the returned Vault-bound approval SHA-256 plus manifest identity.
+It stages canonical bundle bytes privately, verifies a reviewed manifest covering the entrypoint and every Python file in the installed transaction package, executes that package from a private snapshot through an isolated wrapper that places the verified package first and excludes ambient site packages, releases apply through a non-Python gate that cannot run ambient Python startup code, and stores the returned Vault-bound approval SHA-256 plus manifest identity.
 Commit accepts only the currently active bundle and approval while the record is pending or notified, invokes `claude-obsidian.transaction.v1` once, verifies the complete mode-0600 journal and result, every changed-path hash, complete journal state, exact bundle and approval correlation, and the absent mutation lock, and only then writes the source acknowledgement before transitioning the queue terminal.
 An identical retry is idempotent, changed handoff payload bytes quarantine, terminal dispositions revoke every prepared Save, and apply-complete-before-ack or acknowledgement-before-queue crashes heal from the verified transaction result or durable acknowledgement before any conflicting disposition can publish.
 Exit 75 leaves the record pending for a fresh read, rebuild, and inspect.
