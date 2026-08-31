@@ -47,6 +47,16 @@ State all five of these elements in one concise, evidence-first escalation:
 
 Do not relay reviewer labels or gate output as if they settled the decision.
 
+## Deliver the decision
+
+This skill also owns how a decided finding reaches the worker, because the delivery step is what makes the decision stick.
+
+Send the same worker one exact decision naming the decision key, the step, the action, the affected finding IDs, instructions where they are needed, and the exact response command to run.
+Pass `fm-send`'s `--resolve-key` so the worker's open decision record closes at answer time rather than staying open behind a later `working:` or `done:` line.
+Require the matching `resolved` event before treating the decision as landed.
+Forbid `--yes`: it would silently bypass firstmate's authority check and any required captain escalation.
+Require the worker to process every synchronous return until completion or a genuinely new escalation, rather than stopping at the first gate response.
+
 ## Classification examples
 
 - Fixing a concrete defect that violates an original acceptance criterion is firstmate's to decide, regardless of implementation difficulty.

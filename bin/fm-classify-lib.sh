@@ -585,6 +585,12 @@ EOF
 # persisted open-set carries every still-open key forward across calls
 # regardless of how much new unrelated log content has since been folded in.
 #
+# The cursor lives at state/.<id>.open-decisions-cursor, is written only here,
+# and is removed by fm-teardown.sh with the rest of the task's records. Because
+# any invalidation signal already falls back to a clean whole-file re-fold, the
+# cursor file is also safe to delete by hand: the only cost is one full re-fold
+# of that task's status log on the next call.
+#
 # The cursor format is `version`, `offset`, `ident`, then the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
 # _fm_decision_fold_line semantics change, so persisted state from an older
