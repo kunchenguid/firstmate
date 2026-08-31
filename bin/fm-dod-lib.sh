@@ -19,11 +19,15 @@
 # line. A project's own committed AGENTS.md or CLAUDE.md binds the work done in
 # it, so every worker that edits files - freshly briefed or promoted in place -
 # must be told to read it and to stop on a conflict rather than choose silently.
+# It also owns the one moment an issue can be linked: firstmate creates or reuses
+# the issue before the spawn, and only the worker is present once a pull request
+# exists, on every delivery mode including the pipeline's.
 fm_project_instructions_block() {
   cat <<'EOF'
 # Project instructions
 If the project carries its own `AGENTS.md` or `CLAUDE.md`, read it before you edit any file and follow it for this task, including any issue, branch, evidence, and review requirements it states.
 Where it conflicts with the task instructions firstmate gave you, append `needs-decision: {the conflict}` and stop as rule 6 requires, rather than choosing between them yourself.
+If firstmate named an issue for this task, make sure any pull request this task produces links that issue before you report that pull request done.
 EOF
 }
 

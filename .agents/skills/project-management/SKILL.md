@@ -95,7 +95,8 @@ The generated ship brief already tells the crewmate to read and follow the proje
 Requirements on the dispatcher must be satisfied before the spawn, not left for the worker to discover.
 Where the project mandates an issue-first intake, search that project's open issues with `gh-axi` first and reuse a matching open issue rather than creating a second one for work already tracked.
 Only when no open issue covers the scope, create it with `gh-axi` using the issue form that project names.
-Either way, pass the issue number into the brief so the worker can claim it and link it from the pull request.
+Either way, pass the issue number into the brief so the worker can claim it.
+Linking is not satisfiable before the spawn because no pull request exists yet, so the generated brief's project-instructions block owns that moment and requires the worker to link the named issue from any pull request this task produces.
 Where the project mandates scanning open pull requests for overlapping scope, run that scan and reconcile the overlap under `AGENTS.md` section 7's serialization rules before dispatching.
 
 Never copy a project's rules into firstmate's own instructions, and never carry one project's workflow to another project.

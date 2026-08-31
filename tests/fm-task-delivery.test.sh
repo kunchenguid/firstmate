@@ -353,8 +353,8 @@ STUB
     # block a briefed worker gets; both come from the same owner in fm-dod-lib.sh.
     brief_project="$TMP_ROOT/promote-dod/brief-project-$id"
     delivered_project="$TMP_ROOT/promote-dod/delivered-project-$id"
-    awk '/^# Project instructions$/ { emit=3 } emit > 0 { print; emit-- }' "$home/data/$id/brief.md" > "$brief_project"
-    awk '/^# Project instructions$/ { emit=3 } emit > 0 { print; emit-- }' "$payload" > "$delivered_project"
+    awk '/^# Project instructions$/ { emit=1 } emit && /^$/ { exit } emit { print }' "$home/data/$id/brief.md" > "$brief_project"
+    awk '/^# Project instructions$/ { emit=1 } emit && /^$/ { exit } emit { print }' "$payload" > "$delivered_project"
     [ -s "$delivered_project" ] \
       || fail "$mode: promoted worker was not told to read the project's own agent instructions"
     cmp -s "$brief_project" "$delivered_project" \

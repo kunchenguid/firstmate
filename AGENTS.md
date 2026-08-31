@@ -300,7 +300,7 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 A project's own committed agent instructions bind the work firstmate dispatches into it.
-Read them at intake, carry what they require of the work into the brief, and satisfy what they require of the dispatcher before spawning, including creating and linking the issue where the project mandates issue-first.
+Read them at intake, carry what they require of the work into the brief, and satisfy what they require of the dispatcher before spawning, including creating or reusing the issue and passing its number where the project mandates issue-first.
 Load `project-management` before dispatching into a project that carries its own agent instructions.
 Write the task-specific brief under section 11 before spawning.
 

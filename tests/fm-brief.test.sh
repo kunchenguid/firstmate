@@ -377,6 +377,8 @@ test_ship_project_memory_wording() {
     "ship brief must instruct the crewmate to read and follow the project's own instructions"
   assert_grep 'Where it conflicts with the task instructions firstmate gave you, append `needs-decision: {the conflict}` and stop' "$brief" \
     "ship brief must stop and route a project-instruction conflict back to firstmate"
+  assert_grep 'make sure any pull request this task produces links that issue before you report that pull request done' "$brief" \
+    "ship brief must name when a project-mandated issue gets linked"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
