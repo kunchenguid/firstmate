@@ -108,6 +108,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
+  # A namespace-local PID 1 may be a verified Codex sandbox for advisory
+  # harness attribution, but it must never enter the authoritative lock-owner
+  # candidate set.
+  [ "$pid" -gt 1 ] || return 1
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
