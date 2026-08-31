@@ -1324,26 +1324,41 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 
-share_beeline_node_modules() {
-  local source source_real target staging_root staging entry name entry_real link_target publication_link publisher_node
-  local has_beeline_workspace publish_status setup_signal_status mkdir_status cleanup_status
-  source="$PROJ_ABS/node_modules"
-  target="$WT/node_modules"
-
-  [ -d "$source/@beeline" ] || return 0
-  [ ! -e "$target" ] && [ ! -L "$target" ] || return 0
-
-  source_real=$(real_path_or_raw "$source")
-  has_beeline_workspace=0
+beeline_workspace_links_match_worktree() {
+  local source=$1 source_real=$2 target=${3:-} entry entry_real name expected expected_real candidate candidate_real found
+  [ -z "$target" ] || [ -d "$target" ] || return 1
+  found=0
   for entry in "$source/@beeline"/* "$source/@beeline"/.[!.]* "$source/@beeline"/..?*; do
     [ -L "$entry" ] || continue
     entry_real=$(real_path_or_raw "$entry")
     if [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] && [[ "$entry_real" != "$source_real"/* ]]; then
-      has_beeline_workspace=1
-      break
+      found=1
+      [ -n "$target" ] || continue
+      name=$(basename "$entry")
+      candidate="$target/@beeline/$name"
+      [ -e "$candidate" ] || [ -L "$candidate" ] || return 1
+      expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
+      expected_real=$(real_path_or_raw "$expected")
+      candidate_real=$(real_path_or_raw "$candidate")
+      [ "$candidate_real" = "$expected_real" ] || return 1
     fi
   done
-  [ "$has_beeline_workspace" = 1 ] || return 0
+  [ "$found" = 1 ]
+}
+
+share_beeline_node_modules() {
+  local source source_real target target_real staging_root staging staging_real entry name entry_real link_target publication_link publisher_node
+  local publish_status setup_signal_status mkdir_status cleanup_status
+  source="$PROJ_ABS/node_modules"
+  target="$WT/node_modules"
+
+  [ -d "$source/@beeline" ] || return 0
+  source_real=$(real_path_or_raw "$source")
+  beeline_workspace_links_match_worktree "$source" "$source_real" || return 0
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    beeline_workspace_links_match_worktree "$source" "$source_real" "$target"
+    return $?
+  fi
   publisher_node=$(command -v node 2>/dev/null) || return 1
   [ -x "$publisher_node" ] || return 1
 
@@ -1468,14 +1483,25 @@ JS
     0)
       if [ -L "$target" ] \
          && [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ] \
-         && [ -d "$target" ]; then
+         && beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
         NODE_MODULES_ABORT_STAGING=
       else
         publish_status=5
       fi
       ;;
     3)
-      [ -d "$target" ] || publish_status=5
+      target_real=$(real_path_or_raw "$target")
+      staging_real=$(real_path_or_raw "$staging_root")
+      if [ ! -L "$target" ] || [ "$target_real" != "$staging_real" ]; then
+        NODE_MODULES_ABORT_CLEANUP=1
+        cleanup_status=0
+        cleanup_beeline_node_modules_staging || cleanup_status=$?
+        [ "$cleanup_status" -eq 0 ] || publish_status=5
+      fi
+      if [ "$publish_status" = 3 ] \
+         && ! beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+        publish_status=5
+      fi
       ;;
     *)
       ;;

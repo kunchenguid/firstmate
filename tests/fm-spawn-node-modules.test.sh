@@ -79,8 +79,16 @@ const symlinkSync = fs.symlinkSync;
 fs.symlinkSync = function (source, target, type) {
   const raceTarget = process.env.FM_NODE_MODULES_RACE_TARGET;
   if (raceTarget && target === `${raceTarget}/node_modules`) {
-    fs.mkdirSync(target, { recursive: true });
-    fs.writeFileSync(`${target}/owned.txt`, 'worker install\n');
+    const primaryTarget = process.env.FM_NODE_MODULES_RACE_PRIMARY_TARGET;
+    if (primaryTarget) {
+      symlinkSync(primaryTarget, target, 'dir');
+    } else {
+      fs.mkdirSync(`${target}/@beeline`, { recursive: true });
+      fs.writeFileSync(`${target}/owned.txt`, 'worker install\n');
+      symlinkSync('../../packages/lib', `${target}/@beeline/lib`, 'dir');
+      symlinkSync(`${raceTarget}/packages/absolute-lib`, `${target}/@beeline/absolute-lib`, 'dir');
+      symlinkSync('../../packages/cli', `${target}/@beeline/cli`, 'dir');
+    }
   }
   const result = symlinkSync.call(this, source, target, type);
   if (process.env.FM_INTERRUPT_NODE_MODULES_PUBLICATION === '1') {
@@ -171,6 +179,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' FM_FAKE_PANE_PATH="$WORKTREE_DIR" \
     FM_FAIL_NODE_MODULES_LINK="${FM_FAIL_NODE_MODULES_LINK:-0}" \
     FM_NODE_MODULES_RACE_TARGET="${FM_NODE_MODULES_RACE_TARGET:-}" \
+    FM_NODE_MODULES_RACE_PRIMARY_TARGET="${FM_NODE_MODULES_RACE_PRIMARY_TARGET:-}" \
     FM_INTERRUPT_NODE_MODULES_CREATION="${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" \
     FM_KILL_NODE_MODULES_CREATOR="${FM_KILL_NODE_MODULES_CREATOR:-0}" \
     FM_INTERRUPT_NODE_MODULES_CLEANUP="${FM_INTERRUPT_NODE_MODULES_CLEANUP:-0}" \
@@ -237,8 +246,11 @@ test_spawn_leaves_existing_node_modules_untouched() {
   id=node-modules-existing-z2
   rec=$(make_case existing-tree "$id")
   read_case "$rec"
-  mkdir -p "$WORKTREE_DIR/node_modules"
+  mkdir -p "$WORKTREE_DIR/node_modules/@beeline"
   printf 'worker install\n' > "$WORKTREE_DIR/node_modules/owned.txt"
+  ln -s ../../packages/lib "$WORKTREE_DIR/node_modules/@beeline/lib"
+  ln -s "$WORKTREE_DIR/packages/absolute-lib" "$WORKTREE_DIR/node_modules/@beeline/absolute-lib"
+  ln -s ../../packages/cli "$WORKTREE_DIR/node_modules/@beeline/cli"
 
   out=$(run_spawn "$id")
   status=$?
@@ -248,6 +260,22 @@ test_spawn_leaves_existing_node_modules_untouched() {
   [ ! -e "$WORKTREE_DIR/node_modules/third-party" ] \
     || fail "spawn overlaid primary dependencies onto an existing worktree tree"
   pass "fm-spawn leaves an existing worktree node_modules tree untouched"
+}
+
+test_spawn_rejects_existing_primary_dependency_link() {
+  local rec id out status
+  id=node-modules-existing-primary-z2b
+  rec=$(make_case existing-primary-link "$id")
+  read_case "$rec"
+  ln -s "$PROJECT_DIR/node_modules" "$WORKTREE_DIR/node_modules"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an existing dependency link to primary source"
+  assert_not_contains "$out" "spawned $id" "primary dependency link launched a worker"
+  [ "$(readlink "$WORKTREE_DIR/node_modules")" = "$PROJECT_DIR/node_modules" ] \
+    || fail "spawn mutated the existing primary dependency link"
+  pass "fm-spawn refuses existing dependency links whose workspaces resolve to primary source"
 }
 
 test_spawn_ignores_published_beeline_consumers() {
@@ -270,7 +298,7 @@ test_spawn_ignores_published_beeline_consumers() {
 }
 
 test_spawn_preserves_tree_created_during_publication() {
-  local rec id out status
+  local rec id out status candidate
   id=node-modules-race-z4
   rec=$(make_case publication-race "$id")
   read_case "$rec"
@@ -282,7 +310,31 @@ test_spawn_preserves_tree_created_during_publication() {
     "spawn replaced a dependency tree created during publication"
   [ ! -e "$WORKTREE_DIR/node_modules/third-party" ] \
     || fail "spawn overlaid dependencies onto a tree created during publication"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "publication contention leaked unused dependency staging"
+  done
   pass "fm-spawn publication does not replace a concurrently created dependency tree"
+}
+
+test_spawn_rejects_primary_dependency_link_created_during_publication() {
+  local rec id out status candidate
+  id=node-modules-race-primary-z4b
+  rec=$(make_case publication-primary-race "$id")
+  read_case "$rec"
+
+  out=$(FM_NODE_MODULES_RACE_TARGET="$WORKTREE_DIR" \
+    FM_NODE_MODULES_RACE_PRIMARY_TARGET="$PROJECT_DIR/node_modules" run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a contended dependency link to primary source"
+  assert_not_contains "$out" "spawned $id" "contended primary dependency link launched a worker"
+  [ "$(readlink "$WORKTREE_DIR/node_modules")" = "$PROJECT_DIR/node_modules" ] \
+    || fail "spawn mutated the contended primary dependency link"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "invalid publication contention leaked unused dependency staging"
+  done
+  pass "fm-spawn refuses contended dependency links whose workspaces resolve to primary source"
 }
 
 test_spawn_cleans_staging_after_setup_failure() {
@@ -470,17 +522,23 @@ test_spawn_rejects_wrapper_status_without_dependency_tree() {
       retained=$candidate
       count=$((count + 1))
     done
-    [ "$count" -eq 1 ] || fail "wrapper status $early_status did not retain exactly one backing tree"
-    assert_present "$retained/third-party/index.js" \
-      "wrapper status $early_status retained an incomplete dependency backing"
+    if [ "$early_status" = 0 ]; then
+      [ "$count" -eq 1 ] || fail "wrapper status 0 did not retain exactly one ambiguous backing tree"
+      assert_present "$retained/third-party/index.js" \
+        "wrapper status 0 retained an incomplete dependency backing"
+    else
+      [ "$count" -eq 0 ] || fail "wrapper status 3 leaked unused dependency staging"
+    fi
   done
   pass "fm-spawn rejects wrapper statuses without a valid dependency tree"
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
+test_spawn_rejects_existing_primary_dependency_link
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
+test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_cleans_staging_after_setup_failure
 test_spawn_cancels_after_staging_registration_interrupt
 test_spawn_preserves_publication_after_interrupt
