@@ -16,7 +16,6 @@ capture, ordinary Vault note during sealing, credential store, or auth state.
 from __future__ import annotations
 
 import argparse
-import ast
 import ctypes
 import errno
 import fcntl
@@ -70,6 +69,20 @@ HERDR_CAPABILITY_TIMEOUT_SECONDS = 1.0
 HERDR_PROMPT_TIMEOUT_SECONDS = 3.0
 DELIVERY_ACK_MARGIN_SECONDS = 1.5
 PROMPT_TEXT = "/firstmate-context-handoff:consume"
+TRANSACTION_RUNNER_BYTES = b"""from __future__ import annotations
+import importlib
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(root))
+package = importlib.import_module("claude_obsidian")
+if Path(package.__file__).resolve().parent != root / "claude_obsidian":
+    raise SystemExit(78)
+main = importlib.import_module("claude_obsidian.cli").main
+raise SystemExit(main())
+"""
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 RECORD_ID = re.compile(r"^handoff-[0-9a-f]{48}$")
 CANDIDATE_ID = re.compile(r"^candidate-[0-9a-f]{48}$")
@@ -1338,6 +1351,7 @@ def seal_candidates(
     trigger: str,
     *,
     verify_locked: Callable[[StateLayout, Mapping[str, Any]], None] | None = None,
+    reuse_locked: Callable[[StateLayout, Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     commit_locked: Callable[[StateLayout, Mapping[str, Any], Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     config = load_config(home)
@@ -1348,6 +1362,10 @@ def seal_candidates(
     with state_lock(layout):
         if verify_locked is not None:
             verify_locked(layout, config)
+        if reuse_locked is not None:
+            reused = reuse_locked(layout, config)
+            if reused is not None:
+                return dict(reused)
         result = _seal_candidates_locked(layout, config, source_harness, session_hash, trigger)
         if commit_locked is not None:
             commit_locked(layout, config, result)
@@ -1529,10 +1547,11 @@ def seal_with_failure_receipt(
     trigger: str,
     *,
     verify_locked: Callable[[StateLayout, Mapping[str, Any]], None] | None = None,
+    reuse_locked: Callable[[StateLayout, Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
     commit_locked: Callable[[StateLayout, Mapping[str, Any], Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     try:
-        return seal_candidates(home, source_harness, session_hash, trigger, verify_locked=verify_locked, commit_locked=commit_locked)
+        return seal_candidates(home, source_harness, session_hash, trigger, verify_locked=verify_locked, reuse_locked=reuse_locked, commit_locked=commit_locked)
     except HandoffError as exc:
         if exc.code == "GENERATION_REPLACED":
             raise
@@ -1969,7 +1988,7 @@ def probe_recipient(config: Mapping[str, Any], *, require_idle: bool = True) -> 
     return True, "recipient-ready", herdr, session_value
 
 
-def supports_atomic_generation_prompt(herdr: Path) -> bool:
+def supports_idempotent_generation_prompt(herdr: Path) -> bool:
     completed = run_bounded([str(herdr), "agent", "prompt", "--help"], timeout=HERDR_CAPABILITY_TIMEOUT_SECONDS)
     if completed.returncode != 0:
         return False
@@ -1977,7 +1996,21 @@ def supports_atomic_generation_prompt(herdr: Path) -> bool:
         help_text = (completed.stdout + b"\n" + completed.stderr).decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return False
-    return "--expected-agent-session" in help_text.replace(",", " ").split()
+    options = set(help_text.replace(",", " ").split())
+    return {"--expected-agent-session", "--idempotency-key"}.issubset(options)
+
+
+def delivery_idempotency_key(config: Mapping[str, Any], queue: Mapping[str, Any], record_id: str) -> str:
+    return sha256_bytes(
+        canonical_json(
+            {
+                "schema": "firstmate.context-handoff.delivery.v1",
+                "record_id": record_id,
+                "envelope_sha256": queue.get("envelope_sha256"),
+                "agent_session_sha256": config["recipient"]["agent_session_sha256"],
+            }
+        )
+    )
 
 
 def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[str, Any]:
@@ -2007,8 +2040,8 @@ def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[
             update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
             write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
             return {"status": "pending", "reason": reason, "pending_count": len(pending)}
-        if not session_value or not supports_atomic_generation_prompt(herdr):
-            reason = "recipient-atomic-generation-prompt-unsupported"
+        if not session_value or not supports_idempotent_generation_prompt(herdr):
+            reason = "recipient-idempotent-generation-prompt-unsupported"
             update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
             write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
             return {"status": "pending", "reason": reason, "pending_count": len(pending)}
@@ -2018,6 +2051,8 @@ def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[
             write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
             return {"status": "pending", "reason": reason, "pending_count": len(pending)}
         recipient = config["recipient"]
+        queue = read_queue(layout, record_id)
+        idempotency_key = delivery_idempotency_key(config, queue, record_id)
         completed = run_bounded(
             [
                 str(herdr),
@@ -2031,6 +2066,8 @@ def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[
                 recipient["session"],
                 "--timeout",
                 "2000",
+                "--idempotency-key",
+                idempotency_key,
             ],
             timeout=HERDR_PROMPT_TIMEOUT_SECONDS,
         )
@@ -2039,6 +2076,14 @@ def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[
             try:
                 response = json.loads(completed.stdout)
                 prompt_matches, _ = recipient_agent_matches(config, response["result"]["agent"], require_idle=False)
+                acknowledgement = response["result"]["delivery"]
+                prompt_matches = (
+                    prompt_matches
+                    and isinstance(acknowledgement, dict)
+                    and acknowledgement.get("accepted") is True
+                    and acknowledgement.get("idempotency_key") == idempotency_key
+                    and isinstance(acknowledgement.get("duplicate"), bool)
+                )
             except (KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
                 prompt_matches = False
         if not prompt_matches:
@@ -2046,6 +2091,7 @@ def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[
             update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
             write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
             return {"status": "pending", "reason": reason, "pending_count": len(pending)}
+        failpoint("after-recipient-ack-before-queue")
         update_queue(
             layout,
             record_id,
@@ -2053,8 +2099,9 @@ def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[
             reason="recipient-notified",
             attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1,
             notified_at=now_utc(),
+            delivery_idempotency_key=idempotency_key,
         )
-        write_receipt(layout, "delivery", "notified", "exact-recipient-generation-notified", record_id=record_id, pending_count=len(pending))
+        write_receipt(layout, "delivery", "notified", "exact-recipient-generation-notified", record_id=record_id, pending_count=len(pending), idempotency_key=idempotency_key)
         return {"status": "notified", "record_id": record_id, "pending_count": len(pending)}
 
 
@@ -2219,6 +2266,42 @@ def outstanding_compaction_bindings(layout: StateLayout, config: Mapping[str, An
     return sorted(layout.bindings.glob(f"compaction-{endpoint_binding_key(config)}-*.json"))
 
 
+def read_compaction_binding_locked(layout: StateLayout, config: Mapping[str, Any], path: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    value = read_json_file(path, max_bytes=16 * 1024)
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != COMPACTION_BINDING_SCHEMA
+        or value.get("binding_key") != endpoint_binding_key(config)
+        or value.get("session_hash") != config["recipient"]["agent_session_sha256"]
+        or value.get("process_capability_sha256") != current_process_capability()
+        or value.get("config_sha256") != config_identity(config)
+        or value.get("trigger") not in TRIGGERS
+    ):
+        raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding is invalid")
+    raw_bindings = value.get("bindings")
+    if raw_bindings is None and isinstance(value.get("record_id"), str) and isinstance(value.get("envelope_sha256"), str):
+        raw_bindings = [{"record_id": value["record_id"], "envelope_sha256": value["envelope_sha256"]}]
+    bindings = normalize_compaction_bindings(raw_bindings)
+    for item in bindings:
+        envelope, actual = read_envelope(layout, item["record_id"], config, verify_sources=False)
+        if actual != item["envelope_sha256"] or envelope.get("source_harness") != "claude" or envelope.get("source_session_hash") != config["recipient"]["agent_session_sha256"]:
+            raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding no longer matches its exact envelope")
+    return value, bindings
+
+
+def reuse_compaction_binding_locked(layout: StateLayout, config: Mapping[str, Any]) -> dict[str, Any] | None:
+    paths = outstanding_compaction_bindings(layout, config)
+    if not paths:
+        return None
+    path = compaction_binding_path(layout, config)
+    if paths != [path]:
+        raise HandoffError("GENERATION_REPLACED", "another Claude process generation has an unresolved compaction attempt")
+    value, bindings = read_compaction_binding_locked(layout, config, path)
+    if value.get("terminal_outcome") is not None:
+        raise HandoffError("COMPACTION_RECOVERY_PENDING", "the durable Claude compaction outcome must recover before another attempt")
+    return compaction_attempt_result("already-sealed", bindings)
+
+
 def durable_unlink(path: Path) -> None:
     try:
         path.unlink()
@@ -2265,21 +2348,7 @@ def load_compaction_binding(home: Path, config: Mapping[str, Any]) -> tuple[list
         path = compaction_binding_path(layout, config)
         if not path.exists():
             return None
-        value = read_json_file(path, max_bytes=16 * 1024)
-        if (
-            not isinstance(value, dict)
-            or value.get("schema") != COMPACTION_BINDING_SCHEMA
-            or value.get("binding_key") != endpoint_binding_key(config)
-            or value.get("session_hash") != config["recipient"]["agent_session_sha256"]
-            or value.get("process_capability_sha256") != current_process_capability()
-            or value.get("config_sha256") != config_identity(config)
-            or value.get("trigger") not in TRIGGERS
-        ):
-            raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding is invalid")
-        raw_bindings = value.get("bindings")
-        if raw_bindings is None and isinstance(value.get("record_id"), str) and isinstance(value.get("envelope_sha256"), str):
-            raw_bindings = [{"record_id": value["record_id"], "envelope_sha256": value["envelope_sha256"]}]
-        bindings = normalize_compaction_bindings(raw_bindings)
+        value, bindings = read_compaction_binding_locked(layout, config, path)
         return bindings, str(value["trigger"])
 
 
@@ -2303,18 +2372,7 @@ def consume_compaction_binding(
         path = compaction_binding_path(layout, config)
         if not path.exists():
             return None
-        value = read_json_file(path, max_bytes=16 * 1024)
-        if (
-            not isinstance(value, dict)
-            or value.get("schema") != COMPACTION_BINDING_SCHEMA
-            or value.get("binding_key") != endpoint_binding_key(config)
-            or value.get("session_hash") != config["recipient"]["agent_session_sha256"]
-            or value.get("process_capability_sha256") != current_process_capability()
-            or value.get("config_sha256") != config_identity(config)
-            or value.get("trigger") not in TRIGGERS
-        ):
-            raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding is invalid")
-        bindings = normalize_compaction_bindings(value.get("bindings"))
+        value, bindings = read_compaction_binding_locked(layout, config, path)
         terminal = value.get("terminal_outcome")
         if terminal is None:
             terminal = "succeeded" if succeeded else "failed"
@@ -2429,6 +2487,9 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
         def commit_live_binding(layout: StateLayout, locked_config: Mapping[str, Any], sealed: Mapping[str, Any]) -> None:
             _persist_compaction_binding_locked(layout, locked_config, sealed, precompact_trigger)
 
+        def reuse_live_binding(layout: StateLayout, locked_config: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            return reuse_compaction_binding_locked(layout, locked_config)
+
         pausepoint("before-compaction-binding-lock")
         try:
             result = seal_with_failure_receipt(
@@ -2437,11 +2498,10 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
                 config["recipient"]["agent_session_sha256"],
                 precompact_trigger,
                 verify_locked=verify_live_generation,
+                reuse_locked=reuse_live_binding,
                 commit_locked=commit_live_binding,
             )
         except HandoffError as exc:
-            if exc.code != "GENERATION_REPLACED":
-                raise
             return block_failed_claude_precompact(home, config, precompact_trigger, exc.code)
         if result.get("status") == "seal-failed" and result.get("had_candidates"):
             return {"decision": "block", "reason": "Already-curated handoff candidates could not be sealed durably; compaction was stopped."}
@@ -2624,18 +2684,8 @@ def validate_transaction_manifest(transaction: Mapping[str, Any]) -> tuple[Path,
         if core_relative != "scripts/claude-obsidian.py" or module_relative != "claude_obsidian/transaction.py":
             raise HandoffError("CONFIG_TRANSACTION", "production transaction paths must bind the installed claude-obsidian entrypoint and package")
         module_root = (root / module_relative).parent
-        try:
-            parsed_core = ast.parse((root / core_relative).read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, SyntaxError) as exc:
-            raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint cannot be structurally validated") from exc
-        imports_cli = any(
-            isinstance(node, ast.ImportFrom)
-            and node.module == "claude_obsidian.cli"
-            and any(alias.name == "main" for alias in node.names)
-            for node in ast.walk(parsed_core)
-        )
-        if not imports_cli or module_root.name != "claude_obsidian":
-            raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint does not execute the configured package closure")
+        if module_root.name != "claude_obsidian" or not (module_root / "__init__.py").is_file() or not (module_root / "cli.py").is_file():
+            raise HandoffError("CONFIG_TRANSACTION", "transaction package does not expose the pinned CLI closure")
         for path in sorted(module_root.rglob("*.py")):
             if path.is_symlink() or not path.is_file():
                 raise HandoffError("CONFIG_TRANSACTION", "transaction package contains an unsafe Python dependency")
@@ -2671,7 +2721,7 @@ def recover_transaction_runtime_snapshots(layout: StateLayout) -> None:
 
 
 @contextmanager
-def transaction_runtime(config: Mapping[str, Any], layout: StateLayout) -> Iterator[tuple[Path, Path, Path, str]]:
+def transaction_runtime(config: Mapping[str, Any], layout: StateLayout) -> Iterator[tuple[list[str], str]]:
     transaction = config["transaction"]
     python_path = Path(transaction["python_path"])
     if not python_path.is_absolute() or path_has_symlink(python_path) or not python_path.resolve(strict=True).is_file():
@@ -2691,7 +2741,13 @@ def transaction_runtime(config: Mapping[str, Any], layout: StateLayout) -> Itera
             target = snapshot.joinpath(*PurePosixPath(relative).parts)
             ensure_private_directory(target.parent)
             atomic_create(target, data)
-        yield python_path.resolve(strict=True), snapshot / core_relative, snapshot / module_relative, manifest_sha
+        if core_relative == module_relative:
+            command = [str(python_path.resolve(strict=True)), str(snapshot / core_relative)]
+        else:
+            runner = snapshot / ".firstmate-transaction-runner.py"
+            atomic_create(runner, TRANSACTION_RUNNER_BYTES)
+            command = [str(python_path.resolve(strict=True)), "-I", "-S", str(runner)]
+        yield command, manifest_sha
     finally:
         shutil.rmtree(snapshot, ignore_errors=True)
 
@@ -3244,8 +3300,8 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
     bundle_path = bundle_dir / f"{bundle_sha}.json"
     atomic_create(bundle_path, data)
     vault = validate_vault_binding(config)
-    with transaction_runtime(config, layout) as (python_path, core, _module, manifest_sha):
-        plan, code = core_json_call([str(python_path), str(core), "transaction", "inspect", str(bundle_path), "--vault", str(vault)])
+    with transaction_runtime(config, layout) as (transaction_command, manifest_sha):
+        plan, code = core_json_call([*transaction_command, "transaction", "inspect", str(bundle_path), "--vault", str(vault)])
     if code != 0 or plan is None:
         raise HandoffError("TRANSACTION_INSPECT", "transaction core refused the proposed Save plan")
     if plan.get("schema") != TRANSACTION_PLAN_SCHEMA or plan.get("operation_id") != deterministic_operation_id(record_id) or plan.get("operation_type") != "save" or not HEX64.fullmatch(str(plan.get("input_bundle_sha256", ""))) or not HEX64.fullmatch(str(plan.get("approval_sha256", ""))):
@@ -3382,11 +3438,11 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
             ),
         )
     try:
-        with transaction_runtime(config, layout) as (python_path, core, _module, manifest_sha):
+        with transaction_runtime(config, layout) as (transaction_command, manifest_sha):
             if approval.get("dependency_manifest_sha256") != manifest_sha:
                 raise HandoffError("SAVE_AUTHORITY_REVOKED", "reviewed Save plan does not bind the current transaction dependency manifest")
             result, code = core_json_call(
-                [str(python_path), str(core), "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
+                [*transaction_command, "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
                 expected_codes={0, 75},
                 on_spawn=bind_child,
                 release_gate=True,
