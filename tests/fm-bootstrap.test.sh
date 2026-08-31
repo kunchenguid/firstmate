@@ -551,9 +551,9 @@ make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
 
 test_session_provider_backends_do_not_require_tmux() {
   local backend cli case_dir fakebin out
-  # herdr/zellij/cmux are session providers only: they require their own CLI, jq,
-  # and treehouse, never tmux. With all genuine deps present and tmux absent,
-  # bootstrap must be silent.
+  # herdr/zellij/cmux are session providers only: their backend delta is their
+  # own CLI plus treehouse (jq is universal, not a delta), never tmux. With all
+  # genuine deps present and tmux absent, bootstrap must be silent.
   while IFS='^' read -r backend cli; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-no-tmux"
