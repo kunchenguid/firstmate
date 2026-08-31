@@ -269,8 +269,8 @@ test_completion_attestation_keeps_the_pr_identity_terminal() {
     || fail "the attested origin record reports the wrong PR identity fields"
   assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
 
-  # A later review pass grows the inventory: the new attestation must still
-  # land before the identity block, and the newest decision_keys must win.
+  # A later review pass grows the inventory: the fresh pair must still land
+  # before the identity block, and the record must carry exactly one pair.
   run_captain "$home" hold sample-armed-call \
     --title "Choose the armed poll fallback" --reason "captain fallback choice pending" \
     --repo sample >/dev/null \
@@ -279,8 +279,12 @@ test_completion_attestation_keeps_the_pr_identity_terminal() {
     || fail "an inventory-growing completion over the PR-armed origin failed: $(cat "$home/grow.err")"
   fm_pr_metadata_identity_parse "$home/state/$id.meta" \
     || fail "a grown attestation left the origin record unparseable as a PR identity"
-  [ "$(grep '^decision_keys=' "$home/state/$id.meta" | tail -1 | cut -d= -f2-)" = "sample-armed-call" ] \
-    || fail "the grown inventory was not recorded as the newest decision_keys"
+  [ "$(grep -c '^decisions_reviewed=' "$home/state/$id.meta")" = 1 ] \
+    || fail "an inventory-growing completion left more than one decisions_reviewed line"
+  [ "$(grep -c '^decision_keys=' "$home/state/$id.meta")" = 1 ] \
+    || fail "an inventory-growing completion left more than one decision_keys line"
+  [ "$(grep '^decision_keys=' "$home/state/$id.meta" | cut -d= -f2-)" = "sample-armed-call" ] \
+    || fail "the grown inventory was not recorded as the only decision_keys"
 
   # An idempotent re-run writes nothing, so the record stays byte-identical.
   before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
@@ -289,6 +293,51 @@ test_completion_attestation_keeps_the_pr_identity_terminal() {
   [ "$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')" = "$before" ] \
     || fail "an idempotent completion rewrote the origin record"
   pass "the completion attestation keeps a PR-armed origin's pr identity terminal"
+}
+
+# A record polluted by an older completion writer - its decisions_reviewed=/
+# decision_keys= pair stranded after the terminal pr= identity block, which
+# fm_pr_metadata_identity_parse rejects - must be repaired, not refused: the
+# rewrite drops the stranded pair and stages the single fresh one before the
+# identity block, so the armed merge poll validates again.
+test_completion_attestation_repairs_a_polluted_pr_record() {
+  local home id url head
+  home=$(make_home polluted-pr-completion)
+  id=sample-polluted-review
+  tasks_in "$home" add "$id" "Investigate polluted record repair" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create investigation backlog fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report and visual review complete\n' > "$home/state/$id.status"
+  url=https://github.com/example/repo/pull/21
+  head=fedcba9876543210fedcba9876543210fedcba98
+  # The pre-rewrite append shape: the identity block terminates the record and
+  # the attestation pair trails it, so the poll's identity parse already fails
+  # on this record before the completion under test.
+  {
+    printf '%s\n' "pr=$url"
+    printf '%s\n' "pr_head=$head"
+    printf '%s\n' "x_followups=0"
+    printf 'decisions_reviewed=1\n'
+    printf 'decision_keys=\n'
+  } >> "$home/state/$id.meta"
+
+  run_captain "$home" hold polluted-armed-call \
+    --title "Choose the polluted poll fallback" --reason "captain fallback choice pending" \
+    --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+  run_captain "$home" complete "$id" polluted-armed-call > "$home/repair.out" 2> "$home/repair.err" \
+    || fail "an inventory-growing completion over the polluted origin failed: $(cat "$home/repair.err")"
+  fm_pr_metadata_identity_parse "$home/state/$id.meta" \
+    || fail "the repaired origin record is still unparseable as a PR identity, so the armed merge poll stays broken"
+  [ "$FM_PR_META_URL" = "$url" ] \
+    || fail "the repaired origin record reports the wrong PR identity URL"
+  [ "$(grep -c '^decisions_reviewed=' "$home/state/$id.meta")" = 1 ] \
+    || fail "the repair left more than one decisions_reviewed line"
+  [ "$(grep -c '^decision_keys=' "$home/state/$id.meta")" = 1 ] \
+    || fail "the repair left more than one decision_keys line"
+  [ "$(grep '^decision_keys=' "$home/state/$id.meta" | cut -d= -f2-)" = "polluted-armed-call" ] \
+    || fail "the repaired inventory was not recorded as the only decision_keys"
+  pass "a completion repairs a polluted PR-armed origin's stranded attestation"
 }
 
 # The recorded-answer rule: answering closes with the captain's exact words, an
@@ -1236,6 +1285,7 @@ EOF
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_completion_attestation_keeps_the_pr_identity_terminal
+test_completion_attestation_repairs_a_polluted_pr_record
 test_answer_records_and_closes
 test_release_frees_held_work
 test_deferral_leaves_captains_call_until_due

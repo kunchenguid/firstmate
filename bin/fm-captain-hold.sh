@@ -297,7 +297,9 @@ meta_value() {  # <meta> <key>
 # cycle. A record with no pr= line is appended in place; with one, the record
 # is rewritten through a state-local temporary so the attestation lands before
 # the identity block, and the staged rewrite is validated by the same parser
-# before it replaces the live record.
+# before it replaces the live record. The rewrite drops every earlier
+# decisions_reviewed=/decision_keys= pair, even one stranded after the identity
+# block by an older append, so the record carries exactly one fresh pair.
 write_reviewed_attestation() {  # <meta> <keys>
   local meta=$1 keys=$2 line inserted=0
   if ! grep -q '^pr=' "$meta"; then
@@ -311,6 +313,9 @@ write_reviewed_attestation() {  # <meta> <keys>
   CAPTAIN_META_TMP=$(mktemp "$(dirname "$meta")/.fm-captain-hold-meta.XXXXXX") \
     || fail "could not stage the completion attestation for $meta"
   while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      decisions_reviewed=*|decision_keys=*) continue ;;
+    esac
     if [ "$inserted" = 0 ]; then
       case "$line" in
         pr=*)
