@@ -24,8 +24,11 @@ A producer response that identifies a non-empty register that could not be seale
 A Pi adapter launch, nonzero-exit, malformed-output, output-cap, or ten-second timeout failure also terminates the child and stops compaction even when no receipt can be written.
 Empty and disabled registers do not stop compaction when the adapter completes successfully.
 The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the complete bounded set of retryable and newly sealed records in that attempt and never infer success from the success event alone.
+A configuration or active-binding failure at seal time still writes the durable non-empty failure receipt before cancelling compaction.
+Each terminal outcome persists the complete attempt result before any per-record queue transition, so a crash mid-attempt is replayed idempotently instead of leaving records reachable by an opposite outcome.
 
 The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, serialized durable creation and fsync of every new state-directory entry, durable repair of non-private directory modes without repeatedly syncing unchanged directories, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
+A candidate record binds its own stable ID to the registering harness, session generation, and item bytes, so a retargeted candidate cannot be sealed into another session's attempt.
 A retry recovers valid orphan envelopes, missing queues for claimed records, and incomplete claim sets without resealing different bytes.
 Sealing selects the deterministic candidate-ID prefix that fits both caps, preserves every remaining candidate identity for a later attempt, and drains a full retry set before sealing more candidates.
 Registration applies bounded backpressure to retryable records and unsealed candidates, so a reachable sequence of successful attempts always drains the register.
@@ -48,8 +51,10 @@ It supplies `PreCompact`, `PostCompact`, `SessionStart`, `StopFailure`, and `Pre
 The lifecycle adapter ignores `transcript_path` and `compact_summary`.
 Claude `PreCompact` seals only the separately registered Claude candidates for the configured session generation, durably binds that exact attempt across hook processes and retries, and calls no model.
 An exact matching session with an unhealthy endpoint or Vault binding writes a failure receipt and blocks compaction while genuinely foreign sessions remain ignored.
+The exact live Claude generation is revalidated inside the same serialized transition that seals and publishes the attempt binding, so an endpoint replaced after the initial probe blocks without sealing.
+The Herdr probe budget stays materially shorter than the `PreCompact` hook timeout, leaving margin to publish the failure receipt and return the block decision before Claude can terminate the hook.
 Session-start publication is serialized and generation-monotonic, so a retired hook process cannot replace a newer process capability or restore stale MCP authority.
-Post-compact and session-start reporting exposes only bounded counts and generic next action, not record contents.
+Post-compact and session-start reporting exposes only bounded counts and generic next action, not record contents, and counts only the records the MCP consumer can actually claim.
 
 The consumer revalidates the canonical envelope, item and byte caps, source hashes, source allowlist, provider class, sensitive categories, exact Vault object, queue hash, exact Herdr environment, and Claude session binding before showing one record to Claude.
 Claude may record `duplicate`, `not-durable`, `not-allowed`, or `needs-captain` as durable dispositions.

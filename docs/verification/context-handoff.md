@@ -194,6 +194,12 @@ Result:
 ```text
 ok - required evidence prerequisite exit status
 ok - sensitive candidate and Save content rejection
+ok - foreign candidate ownership isolation
+ok - candidate identity binds its exact source session
+ok - durable receipt for unhealthy seal-time bindings
+ok - durable compaction attempt result replay
+ok - fail-closed Claude generation and probe budget margin
+ok - SessionStart announces only consumable records
 ok - single-note automatic Save boundary
 ok - queue-first orphan recovery
 ok - invalid candidate failures are durably receipted
@@ -209,6 +215,13 @@ ok - bounded transports and fail-closed delivery
 ok - durable private state directory creation
 ok - serialized durable state initialization
 ok - model-free Pi lifecycle and fail-closed adapter validation
+public:compaction_start:threshold:aborted=unset
+extension:session_before_compact:threshold
+persistence:appendCompaction
+extension:session_compact:persisted=true
+public:compaction_end:threshold:aborted=false
+continued=false
+ok - installed Pi persistence-before-success order
 ok - completed Save recovery before source validation
 ok - registration lifecycle and multi-record retry recovery
 ok - quarantine, disable, and disposition recovery
@@ -219,7 +232,7 @@ ok - Claude lifecycle and model-free plugin discovery
 
 The suite uses isolated temporary Firstmate homes, source roots, Vaults, Herdr adapters, Pi extension APIs, Claude hook payloads, MCP requests, and transaction state.
 The self-contained Bash suite executes the public CLI, Claude hook, MCP server, Pi extension, and transaction fixture against isolated synthetic homes and Vaults.
-It covers required-gate prerequisite exit status, category-sensitive rejection after eligibility authorization, exact one-create-plus-coupled Save authority, queue-before-claim crash recovery, corrupt-candidate receipts, locked and generation-monotonic process capability, deterministic byte-bounded subsets, retry backpressure and draining, fail-closed Claude endpoint binding, atomic terminal compaction recovery, exit-75 approval revocation and fresh inspect, exact MCP and shell guard confinement, bounded MCP and subprocess transport, fail-closed delivery, serialized durable state initialization, complete Pi lifecycle failure handling, completed-Save recovery before mutable-source validation, registration retry recovery, quarantine, disable and re-enable, disposition crash recovery, complete reviewed transaction-path verification, durable orphan-apply execution claims, transaction replay and rollback, and model-free Claude plugin discovery.
+It covers required-gate prerequisite exit status, category-sensitive rejection after eligibility authorization, session-bound candidate identity, durable receipts for unhealthy seal-time bindings, crash-durable compaction attempt replay, exact live-generation revalidation at the sealing boundary with a probe budget materially shorter than the PreCompact hook timeout, consumable-only SessionStart announcements, exact one-create-plus-coupled Save authority, queue-before-claim crash recovery, corrupt-candidate receipts, locked and generation-monotonic process capability, deterministic byte-bounded subsets, retry backpressure and draining, fail-closed Claude endpoint binding, atomic terminal compaction recovery, exit-75 approval revocation and fresh inspect, exact MCP and shell guard confinement, bounded MCP and subprocess transport, fail-closed delivery, serialized durable state initialization, complete Pi lifecycle failure handling, completed-Save recovery before mutable-source validation, registration retry recovery, quarantine, disable and re-enable, disposition crash recovery, complete reviewed transaction-path verification, durable orphan-apply execution claims, transaction replay and rollback, and model-free Claude plugin discovery.
 No test reads or mutates the real Vault, a live Claude session, a live Herdr process, credentials, auth state, transcripts, or provider data.
 No test invokes a model.
 
@@ -233,6 +246,7 @@ Its distinguishing final line was:
 
 ```text
 ok - exact-installed-transaction-core core=34f3030da4a0ebc223a5dfba7f7180638d08dffa3d044be33fa72234866900c2 module=e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2
+```
 
 ## Fresh-process model-free smokes
 

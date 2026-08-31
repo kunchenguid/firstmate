@@ -20,7 +20,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }
