@@ -605,6 +605,44 @@ test_cursor_unrecognized_exemption_still_refuses() {
   pass "only the recognized cursor exemption tokens open the bar"
 }
 
+# Record integrity, not cosmetics. The grant is written verbatim into the task
+# record as `cursor_exemption=<grant>`, and fm_meta_get resolves a key to its
+# LAST matching line, so a grant carrying a line break would append a second
+# `yolo=` line that wins - silently rewriting the task's recorded merge
+# authority. The envelope name is therefore whitelisted to a bounded single-line
+# charset like every other recorded posture field.
+test_cursor_exemption_rejects_a_record_injecting_grant() {
+  local rec id out status injected
+  id=profile-cursor-inject-z6m
+  rec=$(make_spawn_case profile-cursor-inject cursor "$id")
+  read_case_record "$rec"
+
+  injected=$'envelope:benchmark\nyolo=on'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption "$injected")
+  status=$?
+  expect_code 1 "$status" "a grant carrying a line break must be refused at parse time"
+  assert_contains "$out" "--cursor-exemption must be" \
+    "the refusal must say which grant forms are accepted"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a record-injecting grant must refuse before any launch is sent"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] || {
+    grep -q '^cursor_exemption=' "$HOME_DIR/state/$id.meta" \
+      && fail "a refused grant must not be recorded in the task meta"
+    grep -q '^yolo=on$' "$HOME_DIR/state/$id.meta" \
+      && fail "a refused grant must not have displaced the task's recorded merge authority"
+  }
+
+  # A grant whose envelope name carries only shell-inert but unauditable
+  # characters is refused on the same whitelist, so the bound is the charset and
+  # not a special case for newlines.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption 'envelope:routing benchmark')
+  status=$?
+  expect_code 1 "$status" "an envelope name outside the whitelisted charset must be refused"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unbounded envelope name must refuse before any launch is sent"
+  pass "a cursor grant that could inject a second record line is refused and alters no recorded field"
+}
+
 test_cursor_exemption_permits_an_attended_or_enveloped_spawn() {
   local rec id out status launch
   id=profile-cursor-exempt-z6g
@@ -976,6 +1014,7 @@ test_cursor_is_refused_for_every_unattended_kind
 test_cursor_exemption_is_refused_on_a_non_cursor_harness
 test_inherited_cursor_selection_is_barred_and_names_the_configuration_remedy
 test_cursor_unrecognized_exemption_still_refuses
+test_cursor_exemption_rejects_a_record_injecting_grant
 test_cursor_exemption_permits_an_attended_or_enveloped_spawn
 test_cursor_exemption_does_not_leak_to_a_later_spawn
 test_cursor_bar_ignores_an_ambient_environment_grant

@@ -326,18 +326,26 @@ assert_contains "$CURSOR_OUT" "--cursor-exemption" \
   || fail "the remote cursor refusal must land before any remote launch is dispatched"
 pass "remote route: an unattended cursor secondmate is refused before the remote host is reached"
 
-# The remote meta block records the grant, which is what makes the control
-# plane's pre-stop answer correct for a remote task. The grant is exercised on
-# codex because the launch verb's positional protocol carries no exemption to
-# the remote host, so a remote cursor secondmate cannot complete even when the
-# parent grants it.
+# A cursor exemption is meaningful only for a cursor launch, so the remote route
+# refuses it on any other harness rather than forwarding and RECORDING it. An
+# earlier revision of this test asserted the opposite - that a codex remote
+# secondmate launches and records the grant - which is the very stale-grant
+# hazard the rule exists to stop: a `cursor_exemption=` left in the parent's task
+# record would later be read back by fm-control.sh's pre-stop check as authority
+# nobody granted for cursor. The refusal lands locally, before the round trip.
 reset_remote_herdr_fixture "$HERDR_STATE"
 : > "$HERDR_LOG"
 printf 'codex\n' > "$PARENT/config/secondmate-harness"
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --cursor-exemption envelope:routing-benchmark >/dev/null 2>&1 \
-  || fail "a granted remote secondmate spawn should still launch"
-grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
-  || fail "the remote meta must record the grant this launch was made under"
-pass "remote route: the exemption grant is recorded in the published remote task record"
+if MISMATCH_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --cursor-exemption envelope:routing-benchmark 2>&1); then
+  fail "a cursor exemption on a codex remote secondmate must be refused, not launched"
+fi
+assert_contains "$MISMATCH_OUT" "applies only to a cursor launch" \
+  "the remote refusal must name why the grant cannot travel with a non-cursor harness"
+[ ! -f "$PARENT/state/ios.meta" ] || ! grep -q '^cursor_exemption=' "$PARENT/state/ios.meta" \
+  || fail "a refused remote spawn must record no cursor grant"
+! grep -q 'FM_TRACE_CONTEXT=' "$HERDR_LOG" \
+  || fail "the mismatch refusal must land before any remote launch is dispatched"
+pass "remote route: a cursor exemption is refused on a non-cursor harness rather than recorded"
 
 echo "ALL TESTS PASSED"

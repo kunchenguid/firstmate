@@ -202,6 +202,8 @@ The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `gr
 `cursor` is refused for every ordinary unattended kind (ship, scout, and secondmate), because its `--auto-review` classifier can park the pane on a prompt nobody is there to answer while the pane still reads as busy, so route unattended work to `codex` or `claude` instead.
 It stays available for exactly two cases, each requiring the per-spawn flag `--cursor-exemption attended` (a person is in the pane) or `--cursor-exemption envelope:<name>` (a worker governed by the named, separately proven outer isolation envelope).
 The flag is deliberately per invocation rather than an exported variable, so one attended launch cannot silently exempt a later unattended spawn, and the grant is recorded as `cursor_exemption=` in the task's meta for audit.
+An envelope name must be letters, digits, `.`, `_`, or `-` starting on a letter or digit, and a grant is refused outright on a non-cursor harness on the local and remote spawn routes alike rather than recorded where a later relaunch onto cursor could read it back.
+Across a relaunch an `envelope:<name>` grant is inherited and an `attended` one never is, and the control plane evaluates a relaunch against the grant that will really be in force so an unexemptable task is refused before its agent is stopped.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.

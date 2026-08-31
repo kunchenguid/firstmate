@@ -130,14 +130,71 @@ fm_control_harness_supports_kind() {  # <harness> <kind> [exemption]
   fm_control_harness_supported "$canonical" || return 1
   case "$canonical" in
     muse|gemini) [ "$kind" != secondmate ] || return 1 ;;
-    cursor)
-      case "$exemption" in
-        attended|envelope:?*) ;;
-        *) return 1 ;;
-      esac
-      ;;
+    cursor) fm_control_cursor_exemption_valid "$exemption" || return 1 ;;
   esac
   return 0
+}
+
+# The ONE owner of what a cursor exemption grant may say. `attended` is a fixed
+# token; an envelope grant must NAME its envelope in a bounded single-line
+# charset, exactly the way every other recorded posture field is whitelisted.
+# Two properties depend on that bound. An unnamed or free-form grant could not
+# be audited back to a real envelope later, and the grant is written verbatim
+# into the task record as `cursor_exemption=<grant>`, where a value carrying a
+# newline would append a second `key=` line that fm_meta_get's last-match
+# resolution would then prefer over the real one - a grant that could silently
+# rewrite the task's recorded merge authority. Both refusal sites ask here.
+fm_control_cursor_exemption_valid() {  # <grant>
+  local grant=${1-} name
+  case "$grant" in
+    attended) return 0 ;;
+    envelope:*)
+      name=${grant#envelope:}
+      case "$name" in
+        ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# The grant that is still in force for an UNATTENDED relaunch of a task whose
+# record holds <recorded-grant>. Prints that grant, or nothing when none
+# survives. envelope:<name> describes a mechanically proven outer isolation
+# envelope that still governs the replacement agent, so it carries over and
+# automatic recovery keeps working. `attended` asserts that a PERSON IS IN THE
+# PANE RIGHT NOW, which a later relaunch cannot inherit: the captain who
+# attested may have walked away hours before firstmate's own stuck-worker
+# recovery relaunches with nobody there.
+#
+# This is the ONE owner of that inheritance rule. bin/fm-spawn.sh's --relaunch
+# path asks it for the grant it will actually launch under, and the control
+# plane's PRE-STOP capability check in bin/fm-control.sh asks it for the grant
+# it must evaluate the relaunch against. Restating the rule at either site
+# would let the two answers disagree, and a disagreement here stops a running
+# agent for a launch the owner then refuses.
+fm_control_cursor_exemption_inherited() {  # <recorded-grant>
+  local grant=${1-}
+  fm_control_cursor_exemption_valid "$grant" || return 0
+  [ "$grant" != attended ] || return 0
+  printf '%s' "$grant"
+}
+
+# Whether a cursor exemption is meaningful for a launch on <harness>. A grant
+# accepted and RECORDED on another adapter would leave a stale cursor grant in
+# that task's meta, which a later relaunch onto cursor would read back as
+# authority nobody granted for cursor. Every spawn route - the local launch
+# owner and the remote secondmate route alike - asks this one predicate, so a
+# route cannot be the one that forgets the rule.
+fm_control_cursor_exemption_applies() {  # <harness>
+  local canonical
+  canonical=$(fm_control_harness_family "${1-}" 2>/dev/null) || return 1
+  [ "$canonical" = cursor ]
+}
+
+fm_control_cursor_exemption_harness_refusal() {  # <harness>
+  printf -- "--cursor-exemption applies only to a cursor launch, but this spawn resolved harness=%s; drop the flag rather than recording a cursor grant that would outlive it" "${1-}"
 }
 
 # The operator-facing reason a harness cannot run a kind. Both refusal sites -

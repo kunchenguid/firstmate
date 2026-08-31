@@ -862,6 +862,31 @@ test_relaunch_never_inherits_an_attended_cursor_grant() {
   pass "fm-spawn --relaunch: an attended cursor grant is never inherited and the relaunch is refused"
 }
 
+# The control plane's PRE-STOP capability check must ask about the grant the
+# relaunch will actually run under, not the raw recorded one. `relaunch` forwards
+# no --cursor-exemption, so an `attended` record leaves the replacement launch
+# with NO grant; if the pre-stop check accepted the record verbatim it would pass,
+# stop the running agent, and only then hit the launch owner's refusal - leaving
+# the task with no agent at all, which is precisely what the pre-stop check
+# exists to prevent.
+test_control_relaunch_refuses_an_attended_cursor_grant_before_stopping() {
+  local dir out rc
+  dir=$(new_case cursorattendedctl rl42)
+  add_ship_task "$dir" rl42 cursor
+  printf 'cursor_exemption=attended\n' >> "$dir/home/state/rl42.meta"
+  out=$(run_control "$dir" rl42 relaunch --note "stalled overnight"); rc=$?
+  expect_code 1 "$rc" "a relaunch that would launch unexempted onto cursor must be refused"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "the refusal should come from the shared capability table"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the running agent must not be stopped for a relaunch that must be refused"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a refused relaunch must send nothing, but the pane received: $(cat "$dir/fake/literal")"
+  [ "$(meta_field "$dir" rl42 cursor_exemption)" = attended ] \
+    || fail "a refused relaunch must leave the durable record untouched"
+  pass "fm-control relaunch: an attended cursor grant is refused before the agent is stopped"
+}
+
 test_relaunch_inherits_a_named_isolation_envelope_grant() {
   local dir out
   dir=$(new_case cursorenvelope rl41)
@@ -1558,6 +1583,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_relaunch_never_inherits_an_attended_cursor_grant
+test_control_relaunch_refuses_an_attended_cursor_grant_before_stopping
 test_relaunch_inherits_a_named_isolation_envelope_grant
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

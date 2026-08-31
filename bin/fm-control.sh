@@ -659,11 +659,17 @@ resolve_relaunch_profile() {
   # is only reached after the old agent has been stopped. Asking the same
   # capability table here keeps that refusal on the pre-stop side of the
   # transaction, where nothing has changed yet.
-  # A cursor exemption is recorded on the task itself, and fm-spawn.sh --relaunch
-  # reads it back from that same meta, so asking with the recorded grant is what
-  # makes this pre-stop answer match the launch owner's. The refusal text comes
-  # from the shared helper for the same reason.
-  RELAUNCH_EXEMPTION=$(fm_meta_get "$META" cursor_exemption)
+  # A cursor exemption is recorded on the task itself, but the RECORDED grant is
+  # not always the grant the relaunch will run under: this verb forwards no
+  # --cursor-exemption, so fm-spawn.sh --relaunch inherits only what survives an
+  # unattended relaunch. Asking with the raw record would let an `attended` task
+  # pass here, be stopped, and then be refused by the launch owner - the exact
+  # stranding this pre-stop check exists to prevent. Both sides therefore ask the
+  # one inheritance owner in bin/fm-control-lib.sh, so this question is the
+  # question the launch will actually be asked. The refusal text is shared for
+  # the same reason.
+  RELAUNCH_EXEMPTION=$(fm_control_cursor_exemption_inherited \
+    "$(fm_meta_get "$META" cursor_exemption)")
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" "$RELAUNCH_EXEMPTION" \
     || die "$(fm_control_harness_kind_refusal "$TARGET_HARNESS" "$KIND") Relaunching $ID onto it would stop the running agent for a launch that must be refused."
   # A model or effort chosen for the previous harness does not transfer to a

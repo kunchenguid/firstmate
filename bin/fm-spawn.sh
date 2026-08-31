@@ -401,11 +401,9 @@ done
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 [ "$CURSOR_EXEMPTION_SET" -eq 0 ] || [ -n "$CURSOR_EXEMPTION" ] || { echo "error: --cursor-exemption requires a non-empty value" >&2; exit 1; }
-if [ "$CURSOR_EXEMPTION_SET" -eq 1 ]; then
-  case "$CURSOR_EXEMPTION" in
-    attended|envelope:?*) ;;
-    *) echo "error: --cursor-exemption must be 'attended' (a person is in the pane) or 'envelope:<name>' (the named outer isolation envelope that governs this worker); '$CURSOR_EXEMPTION' names neither, and an unnamed grant could not be audited later" >&2; exit 1 ;;
-  esac
+if [ "$CURSOR_EXEMPTION_SET" -eq 1 ] && ! fm_control_cursor_exemption_valid "$CURSOR_EXEMPTION"; then
+  echo "error: --cursor-exemption must be 'attended' (a person is in the pane) or 'envelope:<name>' where <name> starts with a letter or digit and continues with letters, digits, '.', '_', or '-' (the named outer isolation envelope that governs this worker); '$CURSOR_EXEMPTION' names neither, and a grant that is unnamed, free-form, or carrying a line break could neither be audited later nor written into the task record without displacing another recorded field" >&2
+  exit 1
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -520,10 +518,20 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
     return 1
   fi
-  # This path launches and returns long before the shared capability guard below,
-  # so it asks the same owner rather than carrying its own copy of the rule: a
+  # This path launches and returns long before the shared guards below, so it
+  # asks the same owners rather than carrying its own copy of either rule: a
   # remote cursor secondmate is the least observable parked pane there is, and it
-  # must not be the one spawn that walks around the bar.
+  # must not be the one spawn that walks around the bar. The grant is refused on
+  # a non-cursor harness HERE, before the round trip, for the same reason the
+  # local path refuses it: forwarding it would both record a stale cursor grant
+  # in this parent's task meta and hand the remote host a flag its own fm-spawn.sh
+  # refuses anyway.
+  if [ "$CURSOR_EXEMPTION_SET" -eq 1 ] && ! fm_control_cursor_exemption_applies "$harness"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: $(fm_control_cursor_exemption_harness_refusal "$harness")" >&2
+    return 1
+  fi
   if ! fm_control_harness_supports_kind "$harness" secondmate "$CURSOR_EXEMPTION"; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1207,20 +1215,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
-  # An exemption is inherited across relaunch ONLY when it names a durable
-  # property of the environment. envelope:<name> is a mechanically proven outer
-  # isolation envelope that still governs the replacement agent, so it carries
-  # over and automatic recovery keeps working. `attended` asserts that a PERSON
-  # IS IN THE PANE RIGHT NOW, which a later relaunch cannot inherit: the captain
-  # who attested may have walked away hours ago, and firstmate's own stuck-worker
-  # recovery relaunches with nobody there. Inheriting it would let one attestation
-  # authorize unlimited unattended launches, so a relaunch needs a fresh one.
+  # Which recorded grant survives an unattended relaunch is owned by
+  # fm_control_cursor_exemption_inherited in bin/fm-control-lib.sh, not restated
+  # here: bin/fm-control.sh asks the SAME helper before it stops anything, so its
+  # pre-stop capability answer is computed against the grant this launch will
+  # really run under rather than the raw recorded value.
   if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
-    RELAUNCH_EXEMPTION=$(fm_meta_get "$RELAUNCH_META" cursor_exemption)
-    case "$RELAUNCH_EXEMPTION" in
-      envelope:?*) CURSOR_EXEMPTION=$RELAUNCH_EXEMPTION ;;
-      *) CURSOR_EXEMPTION= ;;
-    esac
+    CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
+      "$(fm_meta_get "$RELAUNCH_META" cursor_exemption)")
   fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
@@ -1496,8 +1498,8 @@ esac
 # RECORDING one on another harness would leave a stale attested grant in that
 # task's meta, which a later relaunch onto cursor would read back as authority
 # nobody granted for cursor, so refuse the combination outright instead.
-if [ "$CURSOR_EXEMPTION_SET" -eq 1 ] && [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" != cursor ]; then
-  echo "error: --cursor-exemption applies only to a cursor launch, but this spawn resolved harness=$HARNESS; drop the flag rather than recording a cursor grant that would outlive it" >&2
+if [ "$CURSOR_EXEMPTION_SET" -eq 1 ] && ! fm_control_cursor_exemption_applies "$HARNESS"; then
+  echo "error: $(fm_control_cursor_exemption_harness_refusal "$HARNESS")" >&2
   exit 1
 fi
 
