@@ -51,6 +51,7 @@ When the installed Herdr protocol exposes no atomic idle, exact-generation, and 
 It supplies `PreCompact`, `PostCompact`, `SessionStart`, `StopFailure`, and `PreToolUse` handlers, one disabled-by-default consume skill, and one local stdio MCP server.
 The lifecycle adapter ignores `transcript_path` and `compact_summary`.
 Claude `PreCompact` seals only the separately registered Claude candidates for the configured session generation, durably binds that exact attempt across hook processes and retries, and calls no model.
+Once a replacement process is proven live, it durably retires an unresolved dead-process attempt without assigning an outcome and rebinds the same sealed envelopes to one new exact attempt.
 An exact matching session with an unhealthy endpoint or Vault binding writes a failure receipt and blocks compaction while genuinely foreign sessions remain ignored.
 The exact live Claude generation is revalidated inside the same serialized transition that seals and publishes the attempt binding, so an endpoint replaced after the initial probe blocks without sealing.
 The Herdr probe budget stays materially shorter than the `PreCompact` hook timeout, leaving margin to publish the failure receipt and return the block decision before Claude can terminate the hook.
