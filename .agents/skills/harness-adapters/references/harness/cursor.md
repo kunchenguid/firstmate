@@ -63,7 +63,9 @@ Refresh with `FM_HARNESS_LIVENESS_DRIFT=1 ../../../bin/fm-test-run.sh ../../../t
 Firstmate enters its acquired worktree and passes the same absolute path through `--workspace`.
 Never pass Cursor `-w` or `--worktree`, which allocates a second copy under `~/.cursor/worktrees` and breaks isolation.
 The CLI supports repeatable `--add-dir`, but the adapter adds none; positional instructions need no grant to their private directory.
-Example, which needs the exemption flag because a scout pane is unattended: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high --cursor-exemption attended`.
+Example of the ordinary case, which is REFUSED because nobody is watching a scout pane: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high`.
+Pass a grant only when it is true of this launch, because `attended` is an attestation that a person is sitting in the pane and `envelope:<name>` names the outer isolation envelope an audit can go check.
+A captain who will watch the pane themself adds `--cursor-exemption attended`; a worker running inside the approved routing benchmark adds `--cursor-exemption envelope:routing-benchmark` instead.
 Without that flag the spawn is refused, so route ordinary unattended scouting to Codex or Claude instead.
 
 ## Primary integration
