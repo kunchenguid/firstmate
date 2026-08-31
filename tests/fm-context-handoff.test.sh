@@ -177,6 +177,9 @@ cli() {
       FM_HANDOFF_TEST_PAUSEPOINT="${FM_HANDOFF_TEST_PAUSEPOINT:-}" \
       FM_HANDOFF_TEST_PAUSE_MARKER="${FM_HANDOFF_TEST_PAUSE_MARKER:-$EROOT/pause-marker}" \
       FM_HANDOFF_TEST_PAUSE_RELEASE="${FM_HANDOFF_TEST_PAUSE_RELEASE:-$EROOT/pause-release}" \
+      FM_HANDOFF_TEST_EXIT_AFTER_APPLY_SPAWN="${FM_HANDOFF_TEST_EXIT_AFTER_APPLY_SPAWN:-}" \
+      FM_FIXTURE_APPLY_PAUSE_MARKER="${FM_FIXTURE_APPLY_PAUSE_MARKER:-}" \
+      FM_FIXTURE_APPLY_PAUSE_RELEASE="${FM_FIXTURE_APPLY_PAUSE_RELEASE:-}" \
       PI_SESSION_ID=pi-session-1 \
       FAKE_HERDR_LOG="$HERDR_LOG" \
       FAKE_HERDR_PID="$HERDR_PID" \
@@ -328,27 +331,35 @@ test_required_prerequisite_status() {
 test_sensitive_contracts() {
   local statement seal record bundle sensitive arguments result
   new_env sensitive
-  for statement in 'The taxpayer identifier is 123-45-6789.' 'Taxpayer identifier is 12345678901.' 'Alice Smith account balance is EUR 5,000.'; do
+  for statement in \
+    'The taxpayer identifier is 123-45-6789.' \
+    'Taxpayer identifier is 12345678901.' \
+    'Alice Smith account balance is EUR 5,000.' \
+    "The client's salary is EUR 120,000." \
+    'Home address: 12 Main St.'; do
     authorize "$statement"
     if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/error"; then
       fail "sensitive candidate passed an exact eligibility contract"
     fi
     grep -q 'SENSITIVE_CONTENT' "$EROOT/error" || fail "sensitive candidate failed for the wrong reason"
   done
-  enable_consumer
-  seal=$(make_ready) || fail "sensitive bundle fixture failed"
-  record=$(printf '%s' "$seal" | jq -r .record_id)
-  bind_claude >/dev/null || fail "Claude binding failed"
-  bundle=$(make_bundle "$record")
-  sensitive=$(printf '%s' "$bundle" | jq -c '.writes[0].content="# Account\n\nAccount balance is EUR 5,000.\n"')
-  arguments=$(jq -nc --arg record "$record" --argjson bundle "$sensitive" '{record_id:$record,duplicate_check:{result:"no-match",searched_paths:["wiki/index.md"]},bundle:$bundle}')
-  result=$(mcp_content prepare_handoff_save "$arguments")
-  [ "$(printf '%s' "$result" | jq -r .code)" = BUNDLE_CONTENT ] || fail "sensitive Save content was accepted"
+  for sensitive in 'Account balance is EUR 5,000.' "The client's salary is EUR 120,000." 'Home address: 12 Main St.'; do
+    new_env "sensitive-save-$(hash_text "$sensitive" | cut -c1-8)"
+    enable_consumer
+    seal=$(make_ready) || fail "sensitive bundle fixture failed"
+    record=$(printf '%s' "$seal" | jq -r .record_id)
+    bind_claude >/dev/null || fail "Claude binding failed"
+    bundle=$(make_bundle "$record")
+    bundle=$(printf '%s' "$bundle" | jq -c --arg sensitive "$sensitive" '.writes[0].content=("# Account\n\n"+$sensitive+"\n")')
+    arguments=$(jq -nc --arg record "$record" --argjson bundle "$bundle" '{record_id:$record,duplicate_check:{result:"no-match",searched_paths:["wiki/index.md"]},bundle:$bundle}')
+    result=$(mcp_content prepare_handoff_save "$arguments")
+    [ "$(printf '%s' "$result" | jq -r .code)" = BUNDLE_CONTENT ] || fail "sensitive Save content was accepted"
+  done
   pass "sensitive candidate and Save content rejection"
 }
 
 test_single_create_save() {
-  local seal record bundle expanded result
+  local seal record bundle expanded result extra_sha
   new_env single-create-save
   enable_consumer
   seal=$(make_ready) || fail "single-create Save fixture failed"
@@ -358,6 +369,20 @@ test_single_create_save() {
   expanded=$(printf '%s' "$bundle" | jq -c '.expected_hashes["wiki/concepts/Second note.md"]=null | .writes += [{path:"wiki/concepts/Second note.md",mode:"create",content:"# Second note\n\nThis must require separate review.\n"}]')
   result=$(prepare_save "$record" "$expanded")
   [ "$(printf '%s' "$result" | jq -r .code)" = BUNDLE_DESTRUCTIVE ] || fail "automatic Save accepted multiple new notes"
+  new_env extra-replacement-save
+  printf '# Extra\n' > "$VAULT/wiki/extra.md"
+  enable_consumer
+  seal=$(make_ready) || fail "extra replacement fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  jq '.consumer.replace_path_allowlist += ["wiki/extra.md"]' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
+  bind_claude >/dev/null || fail "Claude binding failed"
+  bundle=$(make_bundle "$record")
+  extra_sha=$(hash_file "$VAULT/wiki/extra.md")
+  expanded=$(printf '%s' "$bundle" | jq -c --arg sha "$extra_sha" '.expected_hashes["wiki/extra.md"]=$sha | .writes += [{path:"wiki/extra.md",mode:"replace",content:"# Extra updated\n"}]')
+  result=$(prepare_save "$record" "$expanded")
+  [ "$(printf '%s' "$result" | jq -r .code)" = BUNDLE_COUPLED ] || fail "automatic Save accepted an extra replacement"
   pass "single-note automatic Save boundary"
 }
 
@@ -379,6 +404,25 @@ test_queue_first_recovery() {
   [ "$(printf '%s' "$retry" | jq -r .status)" = already-sealed ] || fail "queue-first retry resealed different bytes"
   [ -n "$(find "$FM_HOME/state/context-handoff/claims" -type f -name 'candidate-*.json' -print -quit)" ] || fail "queue-first retry did not restore claims"
   pass "queue-first orphan recovery"
+}
+
+test_invalid_candidate_receipts() {
+  local case_name candidate result
+  for case_name in malformed wrong-mode symlink non-file; do
+    new_env "candidate-$case_name"
+    register_statement 'Invalid durable candidates must fail closed with a receipt.' >/dev/null || fail "candidate receipt fixture did not register"
+    candidate=$(find "$FM_HOME/state/context-handoff/candidates" -name 'candidate-*.json' -print -quit)
+    case "$case_name" in
+      malformed) printf '{' > "$candidate"; chmod 600 "$candidate" ;;
+      wrong-mode) chmod 644 "$candidate" ;;
+      symlink) rm "$candidate"; ln -s "$SOURCE_FILE" "$candidate" ;;
+      non-file) rm "$candidate"; mkdir "$candidate"; chmod 700 "$candidate" ;;
+    esac
+    result=$(seal_pi) || fail "invalid candidate escaped seal transport"
+    [ "$(printf '%s' "$result" | jq -r .status)" = seal-failed ] || fail "invalid candidate did not block compaction"
+    find "$FM_HOME/state/context-handoff/receipts" -name '*.json' -exec jq -e '.reason=="registered-candidate-validation-failed" and (.failure_code | type=="string")' {} \; | grep -q true || fail "invalid candidate failure lacked its durable receipt"
+  done
+  pass "invalid candidate failures are durably receipted"
 }
 
 test_registration_capability_lock() {
@@ -553,6 +597,9 @@ test_lifecycle_and_authority_snapshots() {
   register_statement 'Producer lifecycle transitions bind immutable envelope bytes.' >/dev/null || fail "immutable lifecycle fixture did not register"
   seal=$(seal_pi) || fail "immutable lifecycle fixture did not seal"
   printf 'Mutable source changed after durable sealing.\n' > "$SOURCE_FILE"
+  jq '.registration_allowlist=[] | .allowed_provider_classes=["retired-provider"]' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
   outcome=$(complete "$seal" success) || fail "mutable source stranded a successful compaction"
   [ "$(printf '%s' "$outcome" | jq -r .status)" = compaction-succeeded ] || fail "producer lifecycle revalidated mutable source state"
 
@@ -1020,7 +1067,7 @@ test_quarantine_disable_and_disposition_recovery() {
 }
 
 test_transaction_replay_and_rollback() {
-  local seal record bundle prepared approval result bundle_path
+  local seal record bundle prepared approval result bundle_path operation transaction_dir
   new_env transaction-replay
   enable_consumer
   seal=$(make_ready) || fail "transaction replay fixture failed"
@@ -1051,7 +1098,88 @@ test_transaction_replay_and_rollback() {
   [ ! -e "$FM_HOME/state/context-handoff/acks/$record.json" ] || fail "rolled-back transaction was acknowledged"
   result=$(commit_save "$record" "$approval")
   [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "rolled-back transaction did not recover on retry"
+
+  new_env reviewed-result-plan
+  enable_consumer
+  seal=$(make_ready 'Verify every reviewed changed path before acknowledgement.') || fail "reviewed result fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  bundle=$(make_bundle "$record")
+  prepared=$(prepare_save "$record" "$bundle") || fail "reviewed result inspect failed"
+  approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
+  bundle_path="$FM_HOME/state/context-handoff/bundles/$record/$(printf '%s' "$prepared" | jq -r .bundle_sha256).json"
+  "$TRANSACTION_INTERPRETER" "$TRANSACTION_CORE" transaction apply "$bundle_path" --vault "$VAULT" --approved-plan-sha256 "$approval" >/dev/null || fail "reviewed result apply failed"
+  operation="handoff-$(hash_text "$record" | cut -c1-32)"
+  transaction_dir="$VAULT/.vault-meta/transactions/$operation"
+  jq '.changed_paths=.changed_paths[0:1] | .hashes=(.hashes | to_entries[0:1] | from_entries)' "$transaction_dir/changed-paths.json" > "$transaction_dir/result.tmp" || fail "could not truncate synthetic result"
+  chmod 600 "$transaction_dir/result.tmp"
+  mv "$transaction_dir/result.tmp" "$transaction_dir/changed-paths.json"
+  jq '.applied=.applied[0:1] | .writes=.writes[0:1]' "$transaction_dir/journal.json" > "$transaction_dir/journal.tmp" || fail "could not truncate synthetic journal"
+  chmod 600 "$transaction_dir/journal.tmp"
+  mv "$transaction_dir/journal.tmp" "$transaction_dir/journal.json"
+  result=$(commit_save "$record" "$approval")
+  [ "$(printf '%s' "$result" | jq -r .code)" = TRANSACTION_PATHS ] || fail "truncated transaction evidence matched the reviewed plan"
+  [ ! -e "$FM_HOME/state/context-handoff/acks/$record.json" ] || fail "truncated transaction evidence was acknowledged"
   pass "transaction apply replay and rollback recovery"
+}
+
+test_orphan_apply_execution_claim() {
+  local seal record bundle prepared approval arguments marker release parent result i operation saved_core saved_module saved_interpreter
+  saved_core=$TRANSACTION_CORE
+  saved_module=$TRANSACTION_MODULE
+  saved_interpreter=$TRANSACTION_INTERPRETER
+  TRANSACTION_CORE=$CORE
+  TRANSACTION_MODULE=$CORE
+  TRANSACTION_INTERPRETER=$(realpath "$(command -v bash)")
+  new_env orphan-apply-claim
+  enable_consumer
+  seal=$(make_ready 'Keep terminal disposition behind the durable apply claim.') || fail "orphan apply fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  bundle=$(make_bundle "$record")
+  prepared=$(prepare_save "$record" "$bundle") || fail "orphan apply inspect failed"
+  approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
+  arguments=$(jq -nc --arg record "$record" --arg approval "$approval" '{record_id:$record,approval_sha256:$approval}')
+  marker="$EROOT/apply-child-paused"
+  release="$EROOT/apply-child-release"
+  (
+    export FM_HANDOFF_TEST_EXIT_AFTER_APPLY_SPAWN=1
+    export FM_FIXTURE_APPLY_PAUSE_MARKER="$marker"
+    export FM_FIXTURE_APPLY_PAUSE_RELEASE="$release"
+    mcp_response commit_handoff_save "$arguments"
+  ) > "$EROOT/orphan-parent-output" 2> "$EROOT/orphan-parent-error" &
+  parent=$!
+  if wait "$parent"; then
+    fail "synthetic MCP parent survived its post-spawn crash"
+  fi
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -e "$marker" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$marker" ] || fail "orphan transaction child did not reach its pre-mutation pause"
+  result=$(mcp_content record_curation_disposition "$(jq -nc --arg record "$record" '{record_id:$record,disposition:"duplicate",rationale:"The durable fact already exists."}')")
+  [ "$(printf '%s' "$result" | jq -r .code)" = TRANSACTION_RECOVERY_PENDING ] || fail "terminal disposition bypassed a live orphan apply claim"
+  : > "$release"
+  operation="handoff-$(hash_text "$record" | cut -c1-32)"
+  i=0
+  while [ "$i" -lt 500 ] && { [ ! -f "$VAULT/.vault-meta/transactions/$operation/changed-paths.json" ] || [ -e "$VAULT/.vault-meta/mutation.lock" ]; }; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt 200 ]; do
+    result=$(mcp_content record_curation_disposition "$(jq -nc --arg record "$record" '{record_id:$record,disposition:"duplicate",rationale:"The durable fact already exists."}')")
+    [ "$(printf '%s' "$result" | jq -r '.disposition // empty')" = saved ] && break
+    [ "$(printf '%s' "$result" | jq -r '.code // empty')" = TRANSACTION_RECOVERY_PENDING ] || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ "$(printf '%s' "$result" | jq -r .disposition)" = saved ] || fail "completed orphan apply did not recover before disposition"
+  TRANSACTION_CORE=$saved_core
+  TRANSACTION_MODULE=$saved_module
+  TRANSACTION_INTERPRETER=$saved_interpreter
+  pass "orphan apply remains behind durable execution authority"
 }
 
 test_claude_lifecycle_and_plugin_discovery() {
@@ -1067,8 +1195,17 @@ test_claude_lifecycle_and_plugin_discovery() {
   output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"manual",transcript_path:"/forbidden/transcript"}' | cli claude-hook) || fail "Claude PreCompact failed"
   [ -z "$output" ] || fail "successful Claude PreCompact emitted content"
   marker=COMPACT_SUMMARY_MUST_NOT_PERSIST
-  output=$(jq -nc --arg session "$CLAUDE_SESSION" --arg marker "$marker" '{hook_event_name:"PostCompact",session_id:$session,trigger:"manual",compact_summary:$marker,transcript_path:"/forbidden/transcript"}' | cli claude-hook) || fail "Claude PostCompact failed"
+  if (
+    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-terminal-before-queues
+    jq -nc --arg session "$CLAUDE_SESSION" --arg marker "$marker" '{hook_event_name:"PostCompact",session_id:$session,trigger:"manual",compact_summary:$marker,transcript_path:"/forbidden/transcript"}' | cli claude-hook
+  ) > "$EROOT/crash-post" 2> "$EROOT/crash-post-error"; then
+    fail "Claude terminal compaction failpoint unexpectedly completed"
+  fi
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"manual"}' | cli claude-hook) || fail "Claude terminal compaction recovery failed"
   [ -z "$output" ] || fail "successful Claude PostCompact emitted content"
+  if find "$FM_HOME/state/context-handoff/queue" -name 'handoff-*.json' -exec jq -e '.compaction!="succeeded"' {} \; | grep -q true; then
+    fail "opposite Claude outcome reversed a durable terminal result"
+  fi
   statement='Retry the exact Claude seal after a provider failure.'
   authorize "$statement" next-step
   arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"next-step",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
@@ -1104,6 +1241,7 @@ test_required_prerequisite_status
 test_sensitive_contracts
 test_single_create_save
 test_queue_first_recovery
+test_invalid_candidate_receipts
 test_registration_capability_lock
 test_compaction_backpressure
 test_envelope_subset_drain
@@ -1120,6 +1258,7 @@ test_completed_save_precedes_source_validation
 test_registration_lifecycle_retries
 test_quarantine_disable_and_disposition_recovery
 test_transaction_replay_and_rollback
+test_orphan_apply_execution_claim
 test_claude_lifecycle_and_plugin_discovery
 
 if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ]; then

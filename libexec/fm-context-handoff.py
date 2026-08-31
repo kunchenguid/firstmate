@@ -32,7 +32,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schemas" / "claude-obsidian.handoff.v1.schema.json"
@@ -45,6 +45,7 @@ APPROVAL_SCHEMA = "firstmate.context-handoff.approval.v1"
 BINDING_SCHEMA = "firstmate.context-handoff.consumer-binding.v1"
 STATE_INITIALIZED_BYTES = b"firstmate.context-handoff.state.v1\n"
 COMPACTION_BINDING_SCHEMA = "firstmate.context-handoff.compaction-binding.v1"
+EXECUTION_CLAIM_SCHEMA = "firstmate.context-handoff.execution-claim.v1"
 HANDOFF_SCHEMA = "claude-obsidian.handoff.v1"
 TRANSACTION_SCHEMA = "claude-obsidian.transaction.v1"
 TRANSACTION_PLAN_SCHEMA = "claude-obsidian.transaction-plan.v1"
@@ -112,6 +113,11 @@ SENSITIVE_PATTERNS = [
         r"\b\d{3}-\d{2}-\d{4}\b",
         r"\b(?:taxpayer|tax)(?:[_ -]?(?:id|identifier|identification|number))\b",
         r"\baccount balance\b",
+        r"\b(?:client|account holder|employee|patient)\b",
+        r"\b(?:salary|wages?|payroll|compensation|income|revenue|profit|invoice|financial (?:data|details?|records?))\b",
+        r"\b(?:home|residential|mailing|delivery)\s+address\b",
+        r"\b\d{1,6}\s+[A-Z0-9][A-Z0-9 .'-]{1,80}\s(?:st(?:reet)?|rd|road|ave(?:nue)?|blvd|lane|ln|drive|dr|court|ct)\b",
+        r"\b(?:USD|EUR|GBP|CAD|AUD|JPY|CHF)\s*[\d,.]+\b",
     )
 ]
 MUTATING_TOOL_NAMES = re.compile(
@@ -699,6 +705,29 @@ def normalize_registration_allowlist(config: Mapping[str, Any]) -> list[dict[str
     return sorted(normalized, key=canonical_json)
 
 
+def eligibility_payload(
+    *,
+    source_record: str,
+    source_sha256: str,
+    statement: str,
+    kind: str,
+    confidence: str,
+    sphere: str,
+    provider_class: str,
+    supersedes: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "source_record": source_record,
+        "source_sha256": source_sha256,
+        "statement_sha256": sha256_bytes(statement.encode("utf-8")),
+        "kind": kind,
+        "confidence": confidence,
+        "sphere": sphere,
+        "provider_class": provider_class,
+        "supersedes": sorted(supersedes),
+    }
+
+
 def eligibility_contract(
     config: Mapping[str, Any],
     *,
@@ -711,16 +740,16 @@ def eligibility_contract(
     provider_class: str,
     supersedes: Sequence[str],
 ) -> str:
-    expected = {
-        "source_record": source_record,
-        "source_sha256": source_sha256,
-        "statement_sha256": sha256_bytes(statement.encode("utf-8")),
-        "kind": kind,
-        "confidence": confidence,
-        "sphere": sphere,
-        "provider_class": provider_class,
-        "supersedes": sorted(supersedes),
-    }
+    expected = eligibility_payload(
+        source_record=source_record,
+        source_sha256=source_sha256,
+        statement=statement,
+        kind=kind,
+        confidence=confidence,
+        sphere=sphere,
+        provider_class=provider_class,
+        supersedes=supersedes,
+    )
     if expected not in config["registration_allowlist"]:
         raise HandoffError("ELIGIBILITY_CONTRACT", "candidate fields lack an exact reviewed eligibility contract")
     return sha256_bytes(canonical_json(expected))
@@ -763,29 +792,34 @@ def validate_item(item: Any, config: Mapping[str, Any], *, verify_source: bool =
         raise HandoffError("ITEM_ENUM", "handoff item has an invalid allowlisted classification")
     statement = validate_statement(item.get("statement"))
     provider = item.get("provider_class")
-    if not isinstance(provider, str) or not PROVIDER_CLASS.fullmatch(provider) or provider not in config["allowed_provider_classes"]:
+    if not isinstance(provider, str) or not PROVIDER_CLASS.fullmatch(provider):
+        raise HandoffError("PROVIDER_CLASS", "handoff item provider class is invalid")
+    if verify_source and provider not in config["allowed_provider_classes"]:
         raise HandoffError("PROVIDER_CLASS", "handoff item provider class is not authorized")
     supersedes = item.get("supersedes")
     if not isinstance(supersedes, list) or len(supersedes) > 16 or len(set(supersedes)) != len(supersedes) or not all(isinstance(value, str) and CANDIDATE_ID.fullmatch(value) for value in supersedes):
         raise HandoffError("SUPERSESSION", "handoff item supersession data is invalid")
     source_record = item.get("source_record")
     source_sha = item.get("source_sha256")
-    if not isinstance(source_record, str) or len(source_record.encode("utf-8")) > 4096 or not isinstance(source_sha, str):
+    if not isinstance(source_record, str) or len(source_record.encode("utf-8")) > 4096 or not isinstance(source_sha, str) or not HEX64.fullmatch(source_sha):
         raise HandoffError("SOURCE_FIELDS", "handoff item source fields are invalid")
     if verify_source:
         canonical_source, _ = validate_source_path(config, source_record, source_sha)
         source_record = str(canonical_source)
-    eligibility_sha = eligibility_contract(
-        config,
-        source_record=source_record,
-        source_sha256=source_sha,
-        statement=statement,
-        kind=item["kind"],
-        confidence=item["confidence"],
-        sphere=item["sphere"],
-        provider_class=provider,
-        supersedes=supersedes,
-    )
+    eligibility_args = {
+        "source_record": source_record,
+        "source_sha256": source_sha,
+        "statement": statement,
+        "kind": item["kind"],
+        "confidence": item["confidence"],
+        "sphere": item["sphere"],
+        "provider_class": provider,
+        "supersedes": supersedes,
+    }
+    if verify_source:
+        eligibility_sha = eligibility_contract(config, **eligibility_args)
+    else:
+        eligibility_sha = sha256_bytes(canonical_json(eligibility_payload(**eligibility_args)))
     if item.get("eligibility_sha256") != eligibility_sha:
         raise HandoffError("ELIGIBILITY_BINDING", "handoff item does not match its reviewed eligibility contract")
     return {
@@ -1142,9 +1176,25 @@ def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger:
         claimed = claimed_candidate_ids(layout)
         matching: dict[str, dict[str, Any]] = {}
         for path in sorted(layout.candidates.glob("candidate-*.json")):
-            candidate = read_candidate(path, config)
-            if candidate["candidate_id"] in claimed:
+            if path.stem in claimed:
                 continue
+            try:
+                candidate = read_candidate(path, config)
+            except HandoffError as exc:
+                write_receipt(
+                    layout,
+                    "seal",
+                    "failed",
+                    "registered-candidate-validation-failed",
+                    source_harness=source_harness,
+                    trigger=trigger,
+                    failure_code=exc.code,
+                )
+                return {
+                    "status": "seal-failed",
+                    "had_candidates": True,
+                    "reason": "registered-candidate-validation-failed",
+                }
             if candidate["source_harness"] == source_harness and candidate["source_session_hash"] == session_hash:
                 matching[candidate["candidate_id"]] = candidate
         recovered = recover_unclaimed_records(layout, config, matching)
@@ -1234,7 +1284,7 @@ def matching_candidate_present(layout: StateLayout, source_harness: str, session
         try:
             value = read_json_file(path, max_bytes=16 * 1024)
         except HandoffError:
-            continue
+            raise
         if (
             isinstance(value, dict)
             and value.get("schema") == CANDIDATE_SCHEMA
@@ -1249,7 +1299,12 @@ def block_failed_claude_precompact(home: Path, config: Mapping[str, Any], trigge
     layout = StateLayout(home)
     with state_lock(layout):
         session_hash = config["recipient"]["agent_session_sha256"]
-        if not matching_candidate_present(layout, "claude", session_hash) and not retryable_records(layout, "claude", session_hash, config):
+        try:
+            candidate_present = matching_candidate_present(layout, "claude", session_hash)
+        except HandoffError as exc:
+            write_receipt(layout, "seal", "failed", "registered-candidate-validation-failed", source_harness="claude", trigger=trigger, failure_code=exc.code)
+            return {"decision": "block", "reason": "A registered handoff candidate could not be validated; compaction was stopped."}
+        if not candidate_present and not retryable_records(layout, "claude", session_hash, config):
             return None
         write_receipt(layout, "seal", "failed", "claude-precompact-binding-failed", source_harness="claude", trigger=trigger, failure_code=failure_code)
     return {"decision": "block", "reason": "Already-curated handoff candidates could not be bound to the exact Claude endpoint; compaction was stopped."}
@@ -1260,9 +1315,14 @@ def seal_with_failure_receipt(home: Path, source_harness: str, session_hash: str
         return seal_candidates(home, source_harness, session_hash, trigger)
     except HandoffError as exc:
         layout = StateLayout(home)
-        if not matching_candidate_present(layout, source_harness, session_hash):
-            raise
         with state_lock(layout):
+            try:
+                candidate_present = matching_candidate_present(layout, source_harness, session_hash)
+            except HandoffError as candidate_exc:
+                candidate_present = True
+                exc = candidate_exc
+            if not candidate_present:
+                raise
             write_receipt(layout, "seal", "failed", "registered-candidate-validation-failed", source_harness=source_harness, trigger=trigger, failure_code=exc.code)
         return {"status": "seal-failed", "had_candidates": True, "reason": "registered-candidate-validation-failed"}
 
@@ -1295,29 +1355,40 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def _mark_compaction_locked(
+    layout: StateLayout,
+    config: Mapping[str, Any],
+    bindings: Sequence[Mapping[str, str]],
+    succeeded: bool,
+    trigger: str,
+    reason: str,
+) -> dict[str, Any]:
+    normalized = normalize_compaction_bindings([dict(item) for item in bindings])
+    verified: list[tuple[str, str]] = []
+    for item in normalized:
+        record_id = item["record_id"]
+        _, actual = read_envelope(layout, record_id, config, verify_sources=False)
+        queue = read_queue(layout, record_id)
+        if actual != item["envelope_sha256"] or queue.get("envelope_sha256") != actual:
+            quarantine(layout, record_id, "record-payload-mismatch", expected_sha256=str(queue.get("envelope_sha256", "")), observed_sha256=actual)
+            update_queue(layout, record_id, status="quarantined", reason="record-payload-mismatch")
+            raise HandoffError("PAYLOAD_MISMATCH", "stable record ID binds changed payload bytes")
+        verified.append((record_id, actual))
+    status = "succeeded" if succeeded else "failed"
+    queue_reason = "consumer-not-yet-notified" if succeeded else "source-compaction-failed"
+    for record_id, actual in verified:
+        update_queue(layout, record_id, status="pending", reason=queue_reason, compaction=status)
+        write_receipt(layout, "compaction", status, reason, record_id=record_id, envelope_sha256=actual, trigger=trigger, attempt_record_count=len(verified))
+    return {"status": f"compaction-{status}", "record_ids": [record_id for record_id, _ in verified]}
+
+
 def mark_compaction(home: Path, bindings: Sequence[Mapping[str, str]], succeeded: bool, trigger: str, reason: str) -> dict[str, Any]:
     config = load_config(home)
     if config is None:
         return {"status": "disabled"}
-    normalized = normalize_compaction_bindings([dict(item) for item in bindings])
     layout = StateLayout(home)
     with state_lock(layout):
-        verified: list[tuple[str, str]] = []
-        for item in normalized:
-            record_id = item["record_id"]
-            _, actual = read_envelope(layout, record_id, config, verify_sources=False)
-            queue = read_queue(layout, record_id)
-            if actual != item["envelope_sha256"] or queue.get("envelope_sha256") != actual:
-                quarantine(layout, record_id, "record-payload-mismatch", expected_sha256=str(queue.get("envelope_sha256", "")), observed_sha256=actual)
-                update_queue(layout, record_id, status="quarantined", reason="record-payload-mismatch")
-                raise HandoffError("PAYLOAD_MISMATCH", "stable record ID binds changed payload bytes")
-            verified.append((record_id, actual))
-        status = "succeeded" if succeeded else "failed"
-        queue_reason = "consumer-not-yet-notified" if succeeded else "source-compaction-failed"
-        for record_id, actual in verified:
-            update_queue(layout, record_id, status="pending", reason=queue_reason, compaction=status)
-            write_receipt(layout, "compaction", status, reason, record_id=record_id, envelope_sha256=actual, trigger=trigger, attempt_record_count=len(verified))
-        return {"status": f"compaction-{status}", "record_ids": [record_id for record_id, _ in verified]}
+        return _mark_compaction_locked(layout, config, bindings, succeeded, trigger, reason)
 
 
 def command_compaction_outcome(args: argparse.Namespace) -> dict[str, Any]:
@@ -1391,7 +1462,13 @@ def recipient_context_matches(config: Mapping[str, Any], *, require_environment:
     return True
 
 
-def run_bounded(command: Sequence[str], *, timeout: float = 15.0, input_bytes: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+def run_bounded(
+    command: Sequence[str],
+    *,
+    timeout: float = 15.0,
+    input_bytes: bytes | None = None,
+    on_spawn: Callable[[subprocess.Popen[bytes]], None] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
     process: subprocess.Popen[bytes] | None = None
     selector = selectors.DefaultSelector()
     stdout = bytearray()
@@ -1406,6 +1483,8 @@ def run_bounded(command: Sequence[str], *, timeout: float = 15.0, input_bytes: b
             stderr=subprocess.PIPE,
             env=os.environ.copy(),
         )
+        if on_spawn is not None:
+            on_spawn(process)
         assert process.stdout is not None and process.stderr is not None
         for stream, label in ((process.stdout, "stdout"), (process.stderr, "stderr")):
             os.set_blocking(stream.fileno(), False)
@@ -1737,6 +1816,57 @@ def clear_compaction_binding(home: Path, config: Mapping[str, Any]) -> None:
         durable_unlink(compaction_binding_path(layout, config))
 
 
+def consume_compaction_binding(
+    home: Path,
+    config: Mapping[str, Any],
+    succeeded: bool,
+    reason: str,
+) -> dict[str, Any] | None:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        current_config = load_config(home)
+        if current_config != config:
+            raise HandoffError("CONFIG_CHANGED", "handoff configuration changed during Claude compaction outcome")
+        require_active_process_binding(config, layout)
+        path = compaction_binding_path(layout, config)
+        if not path.exists():
+            return None
+        value = read_json_file(path, max_bytes=16 * 1024)
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != COMPACTION_BINDING_SCHEMA
+            or value.get("binding_key") != endpoint_binding_key(config)
+            or value.get("session_hash") != config["recipient"]["agent_session_sha256"]
+            or value.get("process_capability_sha256") != current_process_capability()
+            or value.get("trigger") not in TRIGGERS
+        ):
+            raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding is invalid")
+        bindings = normalize_compaction_bindings(value.get("bindings"))
+        terminal = value.get("terminal_outcome")
+        if terminal is None:
+            terminal = "succeeded" if succeeded else "failed"
+            value = {
+                **value,
+                "terminal_outcome": terminal,
+                "terminal_reason": reason,
+                "terminal_at": now_utc(),
+            }
+            atomic_replace(path, canonical_json(value))
+        elif terminal not in {"succeeded", "failed"} or not isinstance(value.get("terminal_reason"), str):
+            raise HandoffError("COMPACTION_BINDING", "durable Claude compaction outcome is invalid")
+        failpoint("after-compaction-terminal-before-queues")
+        result = _mark_compaction_locked(
+            layout,
+            config,
+            bindings,
+            terminal == "succeeded",
+            str(value["trigger"]),
+            str(value.get("terminal_reason") or reason),
+        )
+        durable_unlink(path)
+        return result
+
+
 def hook_output(value: Mapping[str, Any] | None = None, *, stderr: bool = False) -> None:
     if value:
         stream = sys.stderr if stderr else sys.stdout
@@ -1804,18 +1934,12 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
     if event_name == "PostCompact":
         if not config_enabled(config, "sealing_enabled") or not bind_claude_session(home, config, payload):
             return None
-        binding = load_compaction_binding(home, config)
-        if binding:
-            mark_compaction(home, binding[0], True, binding[1], "claude-post-compact")
-            clear_compaction_binding(home, config)
+        consume_compaction_binding(home, config, True, "claude-post-compact")
         return None
     if event_name == "StopFailure":
         if not config_enabled(config, "sealing_enabled") or not bind_claude_session(home, config, payload):
             return None
-        binding = load_compaction_binding(home, config)
-        if binding:
-            mark_compaction(home, binding[0], False, binding[1], "claude-provider-failure")
-            clear_compaction_binding(home, config)
+        consume_compaction_binding(home, config, False, "claude-provider-failure")
         return None
     return None
 
@@ -1942,8 +2066,9 @@ def validate_save_bundle(config: Mapping[str, Any], record_id: str, bundle: Any)
         raise HandoffError("BUNDLE_PATH_SET", "Save expected_hashes must bind every unique write path exactly")
     if len(create_paths) != 1:
         raise HandoffError("BUNDLE_DESTRUCTIVE", "automatic Save requires exactly one new non-canonical note")
-    if not set(consumer["required_coupled_paths"]).issubset(paths):
-        raise HandoffError("BUNDLE_COUPLED", "automatic Save lacks required coupled index, log, or hot updates")
+    required_paths = set(consumer["required_coupled_paths"])
+    if set(paths) != required_paths | {create_paths[0]}:
+        raise HandoffError("BUNDLE_COUPLED", "automatic Save must contain exactly one new note and only the required coupled replacements")
     normalized = {
         "schema": TRANSACTION_SCHEMA,
         "operation_id": operation_id,
@@ -1965,8 +2090,13 @@ def validate_statement_segments(content: str) -> None:
         raise HandoffError("BUNDLE_CONTENT", "Save content contains raw or sensitive material")
 
 
-def core_json_call(command: Sequence[str], *, expected_codes: set[int] = {0}) -> tuple[dict[str, Any] | None, int]:
-    completed = run_bounded(command, timeout=30.0)
+def core_json_call(
+    command: Sequence[str],
+    *,
+    expected_codes: set[int] = {0},
+    on_spawn: Callable[[subprocess.Popen[bytes]], None] | None = None,
+) -> tuple[dict[str, Any] | None, int]:
+    completed = run_bounded(command, timeout=30.0, on_spawn=on_spawn)
     if completed.returncode not in expected_codes:
         return None, completed.returncode
     if completed.returncode != 0:
@@ -1978,6 +2108,67 @@ def core_json_call(command: Sequence[str], *, expected_codes: set[int] = {0}) ->
     if not isinstance(value, dict):
         raise HandoffError("CORE_OUTPUT", "transaction core returned an invalid result")
     return value, completed.returncode
+
+
+def execution_claim_path(layout: StateLayout, record_id: str) -> Path:
+    if not RECORD_ID.fullmatch(record_id):
+        raise HandoffError("RECORD_ID", "record ID is invalid")
+    return layout.bindings / f"execution-{record_id}.json"
+
+
+def process_identity(pid: int) -> tuple[str, str] | None:
+    if pid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        except (FileNotFoundError, PermissionError, OSError):
+            return None
+        closing = raw.rfind(")")
+        fields = raw[closing + 2 :].split()
+        if closing < 0 or len(fields) < 20:
+            return None
+        return fields[19], fields[0]
+    ps = Path("/bin/ps")
+    if not ps.is_file():
+        return None
+    completed = subprocess.run(
+        [str(ps), "-p", str(pid), "-o", "lstart=", "-o", "state="],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=2,
+        check=False,
+    )
+    output = completed.stdout.decode("utf-8", "replace").strip()
+    if completed.returncode != 0 or not output:
+        return None
+    parts = output.rsplit(maxsplit=1)
+    return (parts[0], parts[1]) if len(parts) == 2 else None
+
+
+def require_no_active_execution_claim(layout: StateLayout, record_id: str) -> None:
+    path = execution_claim_path(layout, record_id)
+    if not path.exists():
+        return
+    claim = read_json_file(path, max_bytes=16 * 1024)
+    if not isinstance(claim, dict) or claim.get("schema") != EXECUTION_CLAIM_SCHEMA or claim.get("record_id") != record_id:
+        raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "durable transaction execution claim is invalid")
+    if claim.get("state") == "running":
+        pid = claim.get("child_pid")
+        token = claim.get("child_start_token")
+        identity = process_identity(pid) if isinstance(pid, int) else None
+        if identity is None and isinstance(pid, int):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                durable_unlink(path)
+                return
+            except PermissionError:
+                pass
+        elif identity is not None and (identity[0] != token or identity[1].upper().startswith("Z")):
+            durable_unlink(path)
+            return
+    raise HandoffError("TRANSACTION_RECOVERY_PENDING", "a claimed transaction child must be confirmed reaped before another consumer transition")
 
 
 def consumer_record(home: Path, config: Mapping[str, Any], record_id: str) -> tuple[dict[str, Any], dict[str, Any], str]:
@@ -2064,13 +2255,29 @@ def verify_completed_transaction(home: Path, config: Mapping[str, Any], record_i
         raise HandoffError("TRANSACTION_BINDING", "transaction result does not match its reviewed approval binding")
     changed = result.get("changed_paths")
     hashes = result.get("hashes")
-    if not isinstance(changed, list) or not isinstance(hashes, dict) or set(changed) != set(hashes):
+    reviewed_paths = approval.get("changed_paths")
+    reviewed_hashes = approval.get("hashes")
+    if (
+        not isinstance(changed, list)
+        or not isinstance(hashes, dict)
+        or not isinstance(reviewed_paths, list)
+        or not isinstance(reviewed_hashes, dict)
+        or len(reviewed_paths) != len(set(reviewed_paths))
+        or changed != reviewed_paths
+        or hashes != reviewed_hashes
+        or set(changed) != set(hashes)
+    ):
         raise HandoffError("TRANSACTION_PATHS", "transaction changed-path result is invalid")
-    if journal.get("applied") != changed:
+    journal_writes = journal.get("writes")
+    if (
+        journal.get("applied") != reviewed_paths
+        or not isinstance(journal_writes, list)
+        or [write.get("path") if isinstance(write, dict) else None for write in journal_writes] != reviewed_paths
+    ):
         raise HandoffError("TRANSACTION_APPLIED", "transaction journal does not prove every changed path was applied")
-    for relative in changed:
+    for relative in reviewed_paths:
         target = safe_vault_target(vault, relative)
-        if not target.is_file() or sha256_file(target) != hashes.get(relative):
+        if not target.is_file() or sha256_file(target) != reviewed_hashes.get(relative):
             raise HandoffError("TRANSACTION_HASH", "transaction changed-path hash verification failed")
     if (vault / ".vault-meta" / "mutation.lock").exists():
         raise HandoffError("TRANSACTION_LOCK", "transaction mutation lock remains held")
@@ -2216,6 +2423,7 @@ def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Ma
         raise HandoffError("DISPOSITION_INPUT", "consumer disposition input is invalid")
     validate_statement(rationale)
     require_consumer_binding(home, config)
+    require_no_active_execution_claim(layout, record_id)
     completed = find_completed_approval(home, config, record_id)
     if completed is not None:
         return {
@@ -2283,6 +2491,7 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
     if not isinstance(record_id, str):
         raise HandoffError("PREPARE_INPUT", "Save preparation input is invalid")
     require_consumer_binding(home, config)
+    require_no_active_execution_claim(layout, record_id)
     completed = find_completed_approval(home, config, record_id)
     if completed is not None:
         return {"status": "acknowledged", "record_id": record_id, "operation_id": completed["operation_id"], "changed_path_hashes": completed["changed_path_hashes"]}
@@ -2312,6 +2521,13 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
         raise HandoffError("TRANSACTION_INSPECT", "transaction core refused the proposed Save plan")
     if plan.get("schema") != TRANSACTION_PLAN_SCHEMA or plan.get("operation_id") != deterministic_operation_id(record_id) or plan.get("operation_type") != "save" or not HEX64.fullmatch(str(plan.get("input_bundle_sha256", ""))) or not HEX64.fullmatch(str(plan.get("approval_sha256", ""))):
         raise HandoffError("TRANSACTION_PLAN", "transaction inspect result does not match the proposed Save bundle")
+    reviewed_paths = [write["path"] for write in normalized["writes"]]
+    reviewed_hashes = {
+        write["path"]: sha256_bytes(write["content"].encode("utf-8"))
+        for write in normalized["writes"]
+    }
+    if plan.get("changed_paths") != reviewed_paths or plan.get("hashes") != reviewed_hashes:
+        raise HandoffError("TRANSACTION_PLAN", "transaction inspect did not bind the complete proposed path and hash plan")
     approval = {
         "schema": APPROVAL_SCHEMA,
         "record_id": record_id,
@@ -2322,8 +2538,8 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
         "approval_sha256": plan["approval_sha256"],
         "vault_path": str(vault),
         "vault_identity": plan.get("vault_identity"),
-        "changed_paths": plan.get("changed_paths"),
-        "hashes": plan.get("hashes"),
+        "changed_paths": reviewed_paths,
+        "hashes": {key: reviewed_hashes[key] for key in sorted(reviewed_hashes)},
         "core_path": str(core),
         "core_sha256": config["transaction"]["core_sha256"],
         "module_path": str(module),
@@ -2382,6 +2598,7 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
     if not isinstance(record_id, str) or not isinstance(approval_sha, str) or not HEX64.fullmatch(approval_sha):
         raise HandoffError("COMMIT_INPUT", "Save commit input is invalid")
     require_consumer_binding(home, config)
+    require_no_active_execution_claim(layout, record_id)
     completed = find_completed_approval(home, config, record_id)
     if completed is not None:
         return {"status": "acknowledged", "record_id": record_id, "operation_id": completed["operation_id"], "changed_path_hashes": completed["changed_path_hashes"]}
@@ -2402,10 +2619,44 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
         quarantine(layout, record_id, "approved-bundle-payload-mismatch")
         update_queue(layout, record_id, status="quarantined", reason="approved-bundle-payload-mismatch")
         raise HandoffError("BUNDLE_MISMATCH", "approved Save bundle bytes changed")
-    result, code = core_json_call(
-        [str(python_path), str(core), "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
-        expected_codes={0, 75},
-    )
+    claim_path = execution_claim_path(layout, record_id)
+    claim = {
+        "schema": EXECUTION_CLAIM_SCHEMA,
+        "record_id": record_id,
+        "operation_id": approval["operation_id"],
+        "approval_sha256": approval_sha,
+        "bundle_file_sha256": approval["bundle_file_sha256"],
+        "state": "spawning",
+        "claimed_at": now_utc(),
+    }
+    atomic_create(claim_path, canonical_json(claim))
+
+    def bind_child(process: subprocess.Popen[bytes]) -> None:
+        identity = process_identity(process.pid)
+        if identity is None:
+            raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "transaction child identity could not be bound")
+        atomic_replace(
+            claim_path,
+            canonical_json(
+                {
+                    **claim,
+                    "state": "running",
+                    "child_pid": process.pid,
+                    "child_start_token": identity[0],
+                }
+            ),
+        )
+        if os.environ.get("FM_HANDOFF_TESTING") == "1" and os.environ.get("FM_HANDOFF_TEST_EXIT_AFTER_APPLY_SPAWN") == "1":
+            os._exit(86)
+
+    try:
+        result, code = core_json_call(
+            [str(python_path), str(core), "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
+            expected_codes={0, 75},
+            on_spawn=bind_child,
+        )
+    finally:
+        durable_unlink(claim_path)
     if code == 75:
         update_queue(layout, record_id, status="pending", reason="fresh-inspect-required", active_bundle_sha256=None)
         write_receipt(layout, "consumer", "pending", "fresh-inspect-required", record_id=record_id, operation_id=approval["operation_id"])
