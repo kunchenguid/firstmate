@@ -146,6 +146,25 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+# A session that does not own this home's session lock cannot repair
+# supervision (AGENTS.md hard rule 3: a lock-refused session must not repair
+# supervision), and the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh)
+# goes fully inert in that same case (its own identity check, lines ~119-127),
+# so nothing would ever satisfy this guard's demand and it would otherwise
+# nag every single turn forever with no escape. Stand down exactly when a
+# DIFFERENT live harness holds the lock; a missing, malformed, or
+# stale/dead-owner lock leaves this check inert so the existing repair-or-
+# recover path below is unaffected.
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$LOCK_PID" in
+    ''|*[!0-9]*) : ;;
+    *) fm_harness_pid_alive "$LOCK_PID" && exit 0 ;;
+  esac
+fi
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"

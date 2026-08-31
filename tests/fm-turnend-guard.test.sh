@@ -116,6 +116,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1175,6 +1177,32 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   pass "fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent"
 }
 
+# A session that lost the fleet-lock race (state/.lock names a DIFFERENT live
+# harness process) cannot repair supervision - AGENTS.md hard rule 3 forbids
+# it, and the Stop-owned auto-arm goes fully inert for the same reason (its own
+# identity check in bin/fm-claude-stop-autoarm.sh). Before this guard also
+# checked lock identity, nothing ever satisfied its demand from such a session
+# and it re-blocked every single turn with no escape.
+test_hook_claude_mode_stands_down_when_another_live_session_holds_lock() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-other-session")
+  : > "$dir/state/task1.meta"
+  ln -s /bin/bash "$dir/fake-claude"
+  "$dir/fake-claude" -c 'printf "%s\n" "$$" > "'"$dir"'/state/.lock"; sleep 60; :' &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$dir/state/.lock" ] && break
+    sleep 0.1
+  done
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude mode must stand down, not block, when a different live session already owns the fleet lock"
+  [ -z "$out" ] || fail "read-only stand-down must be silent: $out"
+  [ ! -e "$dir/state/.turnend-claude-blocks" ] || fail "read-only stand-down must not consume the shared block budget"
+  pass "fm-turnend-guard --claude: stands down instead of re-blocking forever when a different live session owns the lock"
+}
+
 test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   local dir pid out out2 status status2 count count2
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
@@ -1798,6 +1826,7 @@ test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
+test_hook_claude_mode_stands_down_when_another_live_session_holds_lock
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
 test_hook_claude_mode_terminal_boundary_excludes_starting_owner
