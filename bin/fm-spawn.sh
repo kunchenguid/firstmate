@@ -632,7 +632,11 @@ NODE_MODULES_ABORT_STAGING=
 NODE_MODULES_ABORT_PROBE=
 NODE_MODULES_ABORT_CLEANUP=0
 NODE_MODULES_ABORT_NODE=
-BEELINE_NODE_RESOLVER=
+BEELINE_NODE_MODULES_ACTIVE=0
+BEELINE_NODE_PUBLICATION_OWNED=0
+BEELINE_NODE_RESOLVER_ROOT=
+BEELINE_NODE_RESOLVER_CLEANUP=0
+BEELINE_NODE_RESOLVER_NODE=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -712,10 +716,39 @@ JS
   NODE_MODULES_ABORT_PROBE=
 }
 
+cleanup_beeline_node_resolver() {
+  local resolver node
+  [ "$BEELINE_NODE_RESOLVER_CLEANUP" = 1 ] || return 0
+  resolver=$BEELINE_NODE_RESOLVER_ROOT
+  node=$BEELINE_NODE_RESOLVER_NODE
+  [ -n "$resolver" ] || return 1
+  [ -n "$node" ] || return 1
+  NODE_OPTIONS= "$node" - "$resolver" <<'JS' || return 1
+const fs = require('fs');
+const root = process.argv[2];
+try {
+  for (const name of fs.readdirSync(root)) fs.unlinkSync(`${root}/${name}`);
+  fs.rmdirSync(root);
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+JS
+  [ ! -e "$resolver" ] && [ ! -L "$resolver" ] || return 1
+  BEELINE_NODE_RESOLVER_ROOT=
+  BEELINE_NODE_RESOLVER_CLEANUP=0
+  BEELINE_NODE_RESOLVER_NODE=
+}
+
 spawn_abort_cleanup() {
   local status=$?
+  if ! cleanup_beeline_node_resolver; then
+    echo "warning: failed to remove Beeline resolver staging at $BEELINE_NODE_RESOLVER_ROOT" >&2
+  fi
   if ! cleanup_beeline_node_modules_staging; then
     echo "warning: failed to remove dependency staging at $NODE_MODULES_ABORT_STAGING" >&2
+  fi
+  if ! cleanup_beeline_node_modules_probe; then
+    echo "warning: failed to remove dependency publication anchor at $NODE_MODULES_ABORT_PROBE" >&2
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -1546,8 +1579,8 @@ share_beeline_node_modules() {
   esac
   if [ -e "$target" ] || [ -L "$target" ]; then
     if beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
-      [ ! -f "$target/__firstmate_beeline_workspace_resolver__.cjs" ] \
-        || BEELINE_NODE_RESOLVER="$target/__firstmate_beeline_workspace_resolver__.cjs"
+      BEELINE_NODE_MODULES_ACTIVE=1
+      NODE_MODULES_ABORT_NODE=$publisher_node
       return 0
     fi
     echo "error: existing worktree node_modules failed Beeline workspace validation" >&2
@@ -1680,7 +1713,7 @@ function materialize(sourcePath, targetPath, root = false) {
   }
   if (!stat.isFile()) throw new Error('unsupported dependency entry');
   try {
-    fs.linkSync(real, targetPath);
+    fs.copyFileSync(real, targetPath, fs.constants.COPYFILE_FICLONE);
   } catch (_) {
     fs.copyFileSync(real, targetPath);
   }
@@ -1689,7 +1722,7 @@ function materialize(sourcePath, targetPath, root = false) {
 const projectWorkspaces = workspaceMap(project);
 const worktreeWorkspaces = workspaceMap(worktree);
 for (const name of fs.readdirSync(source)) {
-  if (name === '@beeline' || name === '.bin' || name === '__firstmate_beeline_workspace_resolver__.cjs') continue;
+  if (name === '@beeline' || name === '.bin') continue;
   const sourceEntry = path.join(source, name);
   const targetEntry = path.join(staging, name);
   if (name.startsWith('@') && fs.statSync(sourceEntry).isDirectory()) {
@@ -1762,20 +1795,6 @@ try {
 } catch (error) {
   if (error.code !== 'ENOENT') throw error;
 }
-fs.writeFileSync(path.join(staging, '__firstmate_beeline_workspace_resolver__.cjs'), `
-const Module = require('module');
-const path = require('path');
-const originalResolveFilename = Module._resolveFilename;
-const workspaceParent = new Module(path.join(__dirname, '.fm-beeline-resolver-entry.cjs'));
-workspaceParent.filename = path.join(__dirname, '.fm-beeline-resolver-entry.cjs');
-workspaceParent.paths = [__dirname];
-Module._resolveFilename = function (request, parent, isMain, options) {
-  if (/^@beeline\\/[^/]+(?:\\/.*)?$/.test(request)) {
-    return Reflect.apply(originalResolveFilename, this, [request, workspaceParent, isMain, options]);
-  }
-  return Reflect.apply(originalResolveFilename, this, [request, parent, isMain, options]);
-};
-`);
 JS
   then
     cleanup_status=0
@@ -1932,7 +1951,7 @@ try {
 } catch (_) {
   status = targetUsesPublication() ? 10 : 4;
 } finally {
-  if (probeCreated) {
+  if (probeCreated && status !== 0) {
     try {
       fs.unlinkSync(probe);
     } catch (_) {
@@ -1943,19 +1962,27 @@ try {
 process.exit(status);
 JS
   case "$publish_status" in
-    0|8)
+    0)
       NODE_MODULES_ABORT_CLEANUP=0
-      NODE_MODULES_ABORT_STAGING=
+      BEELINE_NODE_MODULES_ACTIVE=1
+      BEELINE_NODE_PUBLICATION_OWNED=1
+      ;;
+    8)
+      cleanup_status=0
+      cleanup_beeline_node_modules_probe || cleanup_status=$?
+      NODE_MODULES_ABORT_CLEANUP=0
       NODE_MODULES_ABORT_PROBE=
-      NODE_MODULES_ABORT_NODE=
-      BEELINE_NODE_RESOLVER="$target/__firstmate_beeline_workspace_resolver__.cjs"
+      BEELINE_NODE_MODULES_ACTIVE=1
+      [ "$cleanup_status" -eq 0 ] || publish_status=10
       ;;
     3)
       cleanup_status=0
       cleanup_beeline_node_modules_staging || cleanup_status=$?
       [ "$cleanup_status" -eq 0 ] || publish_status=5
-      [ "$publish_status" -ne 3 ] || [ ! -f "$target/__firstmate_beeline_workspace_resolver__.cjs" ] \
-        || BEELINE_NODE_RESOLVER="$target/__firstmate_beeline_workspace_resolver__.cjs"
+      if [ "$publish_status" -eq 3 ]; then
+        BEELINE_NODE_MODULES_ACTIVE=1
+        NODE_MODULES_ABORT_NODE=$publisher_node
+      fi
       ;;
     4|5|6)
       cleanup_status=0
@@ -1977,7 +2004,8 @@ JS
         NODE_MODULES_ABORT_CLEANUP=0
         NODE_MODULES_ABORT_STAGING=
         NODE_MODULES_ABORT_NODE=
-        BEELINE_NODE_RESOLVER="$target/__firstmate_beeline_workspace_resolver__.cjs"
+        BEELINE_NODE_MODULES_ACTIVE=1
+        NODE_MODULES_ABORT_NODE=$publisher_node
         [ "$cleanup_status" -eq 0 ] || publish_status=10
       else
         cleanup_status=0
@@ -2002,6 +2030,177 @@ JS
     7) echo "error: Beeline dependency publication ownership became ambiguous; retained its backing tree" >&2; return 1 ;;
     10) echo "error: Beeline dependency publication probe cleanup failed; retained its backing tree" >&2; return 1 ;;
     *) echo "error: Beeline dependency publisher exited unexpectedly" >&2; return 1 ;;
+  esac
+}
+
+prepare_beeline_node_resolver() {
+  local node resolver status
+  [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ] || return 0
+  node=$NODE_MODULES_ABORT_NODE
+  [ -n "$node" ] || return 1
+  exclude_path '.fm-beeline-resolver.*/'
+  while :; do
+    resolver="$WT/.fm-beeline-resolver.$$.$RANDOM.$RANDOM"
+    [ ! -e "$resolver" ] && [ ! -L "$resolver" ] && break
+  done
+  BEELINE_NODE_RESOLVER_ROOT=$resolver
+  BEELINE_NODE_RESOLVER_CLEANUP=1
+  BEELINE_NODE_RESOLVER_NODE=$node
+  status=0
+  BEELINE_NODE_RESOLVER_ESM_URL=$(NODE_OPTIONS= "$node" - "$resolver" <<'JS') || status=$?
+const fs = require('fs');
+const path = require('path');
+const { pathToFileURL } = require('url');
+const root = process.argv[2];
+fs.mkdirSync(root);
+fs.writeFileSync(path.join(root, '__firstmate_beeline_workspace_resolver__.cjs'), `
+const Module = require('module');
+const path = require('path');
+const root = process.env.FM_BEELINE_NODE_MODULES;
+if (!root) throw new Error('FM_BEELINE_NODE_MODULES is required');
+const originalResolveFilename = Module._resolveFilename;
+const workspaceParent = new Module(path.join(path.dirname(root), '.fm-beeline-resolver-entry.cjs'));
+workspaceParent.filename = path.join(path.dirname(root), '.fm-beeline-resolver-entry.cjs');
+workspaceParent.paths = [root];
+Module._resolveFilename = function (request, parent, isMain, options) {
+  if (/^@beeline\\/[^/]+(?:\\/.*)?$/.test(request)) {
+    return Reflect.apply(originalResolveFilename, this, [request, workspaceParent, isMain, options]);
+  }
+  return Reflect.apply(originalResolveFilename, this, [request, parent, isMain, options]);
+};
+`);
+const loader = path.join(root, '__firstmate_beeline_workspace_resolver__.mjs');
+fs.writeFileSync(loader, `
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+export async function resolve(specifier, context, nextResolve) {
+  if (/^@beeline\\/[^/]+(?:\\/.*)?$/.test(specifier)) {
+    const root = process.env.FM_BEELINE_NODE_MODULES;
+    if (!root) throw new Error('FM_BEELINE_NODE_MODULES is required');
+    const parentURL = pathToFileURL(path.join(path.dirname(root), '.fm-beeline-resolver-entry.mjs')).href;
+    return nextResolve(specifier, { ...context, parentURL });
+  }
+  return nextResolve(specifier, context);
+}
+`);
+process.stdout.write(pathToFileURL(loader).href);
+JS
+  if [ "$status" -ne 0 ] || [ -z "$BEELINE_NODE_RESOLVER_ESM_URL" ]; then
+    cleanup_beeline_node_resolver || true
+    return 1
+  fi
+}
+
+beeline_node_modules_ready_for_launch() {
+  local node target source anchor owned status cleanup_status
+  [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ] || return 0
+  node=$NODE_MODULES_ABORT_NODE
+  target="$WT/node_modules"
+  source="$PROJ_ABS/node_modules"
+  anchor=$NODE_MODULES_ABORT_PROBE
+  owned=$BEELINE_NODE_PUBLICATION_OWNED
+  status=0
+  NODE_OPTIONS= "$node" - "$PROJ_ABS" "$WT" "$source" "$target" "$anchor" "$owned" <<'JS' || status=$?
+const fs = require('fs');
+const path = require('path');
+const [project, worktree, source, target, anchor, owned] = process.argv.slice(2);
+
+function inside(child, parent) {
+  return child === parent || child.startsWith(`${parent}${path.sep}`);
+}
+
+function workspaceMap(rootPath) {
+  const result = new Map();
+  const rootReal = fs.realpathSync(rootPath);
+  for (const rootName of ['packages', 'apps']) {
+    const root = path.join(rootPath, rootName);
+    let names;
+    try {
+      names = fs.readdirSync(root);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const directoryName of names) {
+      const directory = path.join(root, directoryName);
+      let manifest;
+      try {
+        manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+        throw error;
+      }
+      const match = typeof manifest.name === 'string' && manifest.name.match(/^@beeline\/([^/]+)$/);
+      if (!match) continue;
+      if (result.has(match[1])) throw new Error('duplicate workspace');
+      const real = fs.realpathSync(directory);
+      if (!inside(real, rootReal) || real === rootReal) throw new Error('workspace escaped project');
+      result.set(match[1], { real });
+    }
+  }
+  return result;
+}
+
+try {
+  if (owned === '1') {
+    const targetStat = fs.lstatSync(target);
+    const anchorStat = fs.lstatSync(anchor);
+    if (!targetStat.isSymbolicLink() || !anchorStat.isSymbolicLink() ||
+        targetStat.dev !== anchorStat.dev || targetStat.ino !== anchorStat.ino) {
+      process.exit(anchorStat.nlink === 1 ? 2 : 3);
+    }
+  }
+  const projectWorkspaces = workspaceMap(project);
+  const worktreeWorkspaces = workspaceMap(worktree);
+  const sourceScope = path.join(source, '@beeline');
+  const targetScope = path.join(target, '@beeline');
+  for (const [name, workspace] of worktreeWorkspaces) {
+    const projectWorkspace = projectWorkspaces.get(name);
+    if (projectWorkspace) {
+      const sourceEntry = path.join(sourceScope, name);
+      if (!fs.lstatSync(sourceEntry).isSymbolicLink()) throw new Error('workspace entry is not a link');
+      if (fs.realpathSync(sourceEntry) !== projectWorkspace.real) throw new Error('workspace entry is stale');
+    }
+    if (fs.realpathSync(path.join(targetScope, name)) !== workspace.real) {
+      throw new Error('target workspace is stale');
+    }
+  }
+  const sourceNames = new Set(fs.readdirSync(sourceScope));
+  for (const name of fs.readdirSync(targetScope)) {
+    if (worktreeWorkspaces.has(name)) continue;
+    if (projectWorkspaces.has(name) || !sourceNames.has(name)) throw new Error('target-only package');
+  }
+} catch (_) {
+  process.exit(1);
+}
+JS
+  case "$status" in
+    0)
+      cleanup_beeline_node_modules_probe || return 1
+      BEELINE_NODE_PUBLICATION_OWNED=0
+      return 0
+      ;;
+    2)
+      cleanup_status=0
+      cleanup_beeline_node_modules_probe || cleanup_status=$?
+      if [ "$cleanup_status" -eq 0 ]; then
+        NODE_MODULES_ABORT_CLEANUP=1
+        cleanup_beeline_node_modules_staging || cleanup_status=$?
+      fi
+      echo "error: worktree node_modules was replaced before worker launch" >&2
+      [ "$cleanup_status" -eq 0 ] || echo "warning: replaced dependency publication backing was retained" >&2
+      return 1
+      ;;
+    3)
+      cleanup_beeline_node_modules_probe || true
+      echo "error: worktree node_modules ownership became ambiguous before worker launch" >&2
+      return 1
+      ;;
+    *)
+      cleanup_beeline_node_modules_probe || true
+      echo "error: worktree node_modules failed final Beeline workspace validation" >&2
+      return 1
+      ;;
   esac
 }
 
@@ -2829,10 +3028,17 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-if [ -n "$BEELINE_NODE_RESOLVER" ]; then
+if [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ]; then
+  prepare_beeline_node_resolver || {
+    echo "error: failed to prepare Beeline workspace resolvers" >&2
+    exit 1
+  }
   beeline_node_path=$(shell_quote "$WT/node_modules")
-  spawn_send_text_line "$T" "export NODE_PATH=$beeline_node_path:\${NODE_PATH:-}"
-  spawn_send_text_line "$T" 'export NODE_OPTIONS="--require=__firstmate_beeline_workspace_resolver__.cjs ${NODE_OPTIONS:-}"'
+  beeline_resolver_path=$(shell_quote "$BEELINE_NODE_RESOLVER_ROOT")
+  beeline_node_options=$(shell_quote "--require=__firstmate_beeline_workspace_resolver__.cjs --experimental-loader=$BEELINE_NODE_RESOLVER_ESM_URL")
+  spawn_send_text_line "$T" "export FM_BEELINE_NODE_MODULES=$beeline_node_path"
+  spawn_send_text_line "$T" "export NODE_PATH=$beeline_resolver_path:$beeline_node_path:\${NODE_PATH:-}"
+  spawn_send_text_line "$T" "export NODE_OPTIONS=$beeline_node_options\" \${NODE_OPTIONS:-}\""
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -2851,6 +3057,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+beeline_node_modules_ready_for_launch || exit 1
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -2858,6 +3065,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+BEELINE_NODE_RESOLVER_CLEANUP=0
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

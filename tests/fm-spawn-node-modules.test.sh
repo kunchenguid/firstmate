@@ -15,7 +15,7 @@ if ! command -v node >/dev/null 2>&1; then
   echo "ok - fm-spawn node_modules behavior # SKIP node unavailable"
   exit 0
 fi
-for utility in ln mkdir rm readlink false; do
+for utility in ln mkdir mv rm readlink false; do
   if ! command -v "$utility" >/dev/null 2>&1; then
     echo "ok - fm-spawn node_modules behavior # SKIP $utility unavailable"
     exit 0
@@ -24,6 +24,7 @@ done
 SYSTEM_NODE=$(NODE_OPTIONS= node -p 'process.execPath')
 LN_BIN=$(command -v ln)
 MKDIR_BIN=$(command -v mkdir)
+MV_BIN=$(command -v mv)
 RM_BIN=$(command -v rm)
 READLINK_BIN=$(command -v readlink)
 FALSE_BIN=$(command -v false)
@@ -39,7 +40,13 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows|has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  send-keys)
+    if [ "${4:-}" != -l ] && [[ "${4:-}" = export\ * ]] && [ -n "${FM_FAKE_ENV_SCRIPT:-}" ]; then
+      printf '%s\n' "$4" >> "$FM_FAKE_ENV_SCRIPT"
+    fi
+    exit 0
+    ;;
+  list-windows|has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -187,6 +194,30 @@ start_postpublication_workspace_mutator() {
   PUBLICATION_CONTENDER_PID=$!
 }
 
+start_postpublication_replacer() {
+  local target=$1 replacement
+  replacement="$target/.fm-test-node-modules-replacement.$$"
+  mkdir -p "$replacement/@beeline"
+  printf 'competing install\n' > "$replacement/owned.txt"
+  ln -s ../../packages/lib "$replacement/@beeline/lib"
+  ln -s "$target/packages/absolute-lib" "$replacement/@beeline/absolute-lib"
+  ln -s ../../packages/cli "$replacement/@beeline/cli"
+  (
+    local attempts=0
+    while [ "$attempts" -lt 20000 ]; do
+      if [ -L "$target/node_modules" ]; then
+        "$RM_BIN" -f "$target/node_modules"
+        "$MV_BIN" "$replacement" "$target/node_modules"
+        exit 0
+      fi
+      attempts=$((attempts + 1))
+      sleep 0.001
+    done
+    exit 124
+  ) &
+  PUBLICATION_CONTENDER_PID=$!
+}
+
 wait_publication_contender() {
   local status=0
   wait "$PUBLICATION_CONTENDER_PID" || status=$?
@@ -251,6 +282,7 @@ EOF
 
 run_spawn() {
   local id=$1
+  : > "$HOME_DIR/state/fake-pane-env.sh"
   HOME="${FM_TEST_ACCOUNT_HOME:-$HOME}" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -262,8 +294,27 @@ run_spawn() {
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
     FM_TEST_LN_BIN="$LN_BIN" FM_TEST_RM_BIN="$RM_BIN" \
     FM_TEST_READLINK_BIN="$READLINK_BIN" \
+    FM_FAKE_ENV_SCRIPT="$HOME_DIR/state/fake-pane-env.sh" \
     PATH="${FM_SPAWN_TEST_PATH:-$FAKEBIN_DIR:$PATH}" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
+}
+
+run_beeline_cjs() {
+  local script=$1
+  shift
+  (
+    . "$HOME_DIR/state/fake-pane-env.sh"
+    "$SYSTEM_NODE" -e "$script" "$@"
+  )
+}
+
+run_beeline_esm() {
+  local script=$1
+  shift
+  (
+    . "$HOME_DIR/state/fake-pane-env.sh"
+    "$SYSTEM_NODE" --input-type=module -e "$script" "$@"
+  )
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links() {
@@ -285,9 +336,12 @@ test_spawn_shares_dependencies_and_repoints_workspace_links() {
     *) fail "worktree node_modules did not point to its local dependency link farm" ;;
   esac
   [ -d "$WORKTREE_DIR/$node_modules_link" ] || fail "worktree dependency link farm is missing"
-  [ "$WORKTREE_DIR/node_modules/third-party/index.js" -ef \
+  [ ! "$WORKTREE_DIR/node_modules/third-party/index.js" -ef \
     "$PROJECT_DIR/node_modules/third-party/index.js" ] \
-    || fail "third-party package file did not share the primary installation"
+    || fail "third-party package file shared a mutable inode with the primary installation"
+  printf 'worker dependency patch\n' > "$WORKTREE_DIR/node_modules/third-party/index.js"
+  [ "$(cat "$PROJECT_DIR/node_modules/third-party/index.js")" = 'shared dependency' ] \
+    || fail "worker dependency write mutated the primary installation"
 
   workspace_link=$(readlink "$WORKTREE_DIR/node_modules/@beeline/lib")
   [ "$workspace_link" = '../../packages/lib' ] \
@@ -373,16 +427,22 @@ test_spawn_preserves_shared_dependency_symlinks() {
 }
 
 test_spawn_preserves_external_package_root_symlinks() {
-  local rec id out status external first_link second_link result relative_link relative_target
+  local rec id out status external external_esm first_link second_link result relative_link relative_target
   id=node-modules-external-roots-z1aab
   rec=$(make_case external-roots "$id")
   read_case "$rec"
   external="$TMP_ROOT/external-linked-package"
+  external_esm="$TMP_ROOT/external-linked-esm-package"
   mkdir -p "$external"
+  mkdir -p "$external_esm"
   printf 'module.exports = { value: "initial", workspace: require("@beeline/lib") };\n' \
     > "$external/index.js"
+  printf '{"type":"module"}\n' > "$external_esm/package.json"
+  printf 'import workspace from "@beeline/lib"; export default workspace;\n' \
+    > "$external_esm/index.js"
   ln -s "$external" "$PROJECT_DIR/node_modules/external-first"
   ln -s "$external" "$PROJECT_DIR/node_modules/external-second"
+  ln -s "$external_esm" "$PROJECT_DIR/node_modules/external-esm"
   relative_target=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
     'process.stdout.write(require("path").relative(process.argv[1], process.argv[2]));' \
     "$PROJECT_DIR/node_modules/third-party" "$external/index.js")
@@ -400,8 +460,7 @@ test_spawn_preserves_external_package_root_symlinks() {
   relative_link=$(readlink "$WORKTREE_DIR/node_modules/third-party/external-resource")
   [ "$relative_link" = "$external/index.js" ] \
     || fail "escaping relative dependency link changed its external target"
-  result=$(NODE_PATH="$WORKTREE_DIR/node_modules" \
-    NODE_OPTIONS='--require=__firstmate_beeline_workspace_resolver__.cjs' "$SYSTEM_NODE" -e \
+  result=$(run_beeline_cjs \
     'const first = require(process.argv[1]); const second = require(process.argv[2]); process.stdout.write(`${first === second}:${first.workspace}:${first.value}`);' \
     "$WORKTREE_DIR/node_modules/external-first" \
     "$WORKTREE_DIR/node_modules/external-second")
@@ -409,11 +468,14 @@ test_spawn_preserves_external_package_root_symlinks() {
     || fail "external package identity or worktree workspace resolution changed"
   printf 'module.exports = { value: "updated", workspace: require("@beeline/lib") };\n' \
     > "$external/index.js"
-  result=$(NODE_PATH="$WORKTREE_DIR/node_modules" \
-    NODE_OPTIONS='--require=__firstmate_beeline_workspace_resolver__.cjs' "$SYSTEM_NODE" -e \
+  result=$(run_beeline_cjs \
     'process.stdout.write(require(process.argv[1]).value);' \
     "$WORKTREE_DIR/node_modules/external-first")
   [ "$result" = updated ] || fail "external package-root updates were not shared live"
+  result=$(run_beeline_esm \
+    'const { pathToFileURL } = await import("node:url"); const value = await import(pathToFileURL(process.argv[1]).href); process.stdout.write(value.default);' \
+    "$WORKTREE_DIR/node_modules/external-esm/index.js")
+  [ "$result" = worker ] || fail "external ESM package did not resolve the worktree workspace"
   pass "fm-spawn preserves external package-root sharing and identity"
 }
 
@@ -568,7 +630,7 @@ test_spawn_prevents_path_link_mutation_after_validation() {
 }
 
 test_spawn_leaves_existing_node_modules_untouched() {
-  local rec id out status
+  local rec id out status external external_esm result
   id=node-modules-existing-z2
   rec=$(make_case existing-tree "$id")
   read_case "$rec"
@@ -577,6 +639,16 @@ test_spawn_leaves_existing_node_modules_untouched() {
   ln -s ../../packages/lib "$WORKTREE_DIR/node_modules/@beeline/lib"
   ln -s "$WORKTREE_DIR/packages/absolute-lib" "$WORKTREE_DIR/node_modules/@beeline/absolute-lib"
   ln -s ../../packages/cli "$WORKTREE_DIR/node_modules/@beeline/cli"
+  external="$TMP_ROOT/existing-external-cjs"
+  external_esm="$TMP_ROOT/existing-external-esm"
+  mkdir -p "$external" "$external_esm"
+  printf 'module.exports = require("@beeline/lib");\n' > "$external/index.js"
+  printf '{"type":"module"}\n' > "$external_esm/package.json"
+  printf 'import workspace from "@beeline/lib"; export default workspace;\n' \
+    > "$external_esm/index.js"
+  ln -s "$external" "$WORKTREE_DIR/node_modules/external-cjs"
+  ln -s "$external_esm" "$WORKTREE_DIR/node_modules/external-esm"
+  printf 'module.exports = "worker";\n' > "$WORKTREE_DIR/packages/lib/index.js"
 
   out=$(run_spawn "$id")
   status=$?
@@ -585,6 +657,16 @@ test_spawn_leaves_existing_node_modules_untouched() {
     "spawn replaced an existing worktree node_modules tree"
   [ ! -e "$WORKTREE_DIR/node_modules/third-party" ] \
     || fail "spawn overlaid primary dependencies onto an existing worktree tree"
+  assert_absent "$WORKTREE_DIR/node_modules/__firstmate_beeline_workspace_resolver__.cjs" \
+    "spawn mutated the existing tree with a resolver"
+  result=$(run_beeline_cjs \
+    'process.stdout.write(require(process.argv[1]));' \
+    "$WORKTREE_DIR/node_modules/external-cjs")
+  [ "$result" = worker ] || fail "existing-tree external CommonJS import escaped the worktree"
+  result=$(run_beeline_esm \
+    'const { pathToFileURL } = await import("node:url"); const value = await import(pathToFileURL(process.argv[1]).href); process.stdout.write(value.default);' \
+    "$WORKTREE_DIR/node_modules/external-esm/index.js")
+  [ "$result" = worker ] || fail "existing-tree external ESM import escaped the worktree"
   pass "fm-spawn leaves an existing worktree node_modules tree untouched"
 }
 
@@ -770,9 +852,12 @@ test_spawn_shares_published_beeline_dependencies_with_workspaces() {
   status=$?
   expect_code 0 "$status" "spawn should share published @beeline dependencies alongside workspaces"
   assert_contains "$out" "spawned $id" "mixed @beeline dependency tree did not launch the worker"
-  [ "$WORKTREE_DIR/node_modules/@beeline/published/index.js" -ef \
+  [ ! "$WORKTREE_DIR/node_modules/@beeline/published/index.js" -ef \
     "$PROJECT_DIR/node_modules/@beeline/published/index.js" ] \
-    || fail "published @beeline dependency file was not shared from primary"
+    || fail "published @beeline dependency shared a mutable primary inode"
+  printf 'worker patch\n' > "$WORKTREE_DIR/node_modules/@beeline/published/index.js"
+  [ "$(cat "$PROJECT_DIR/node_modules/@beeline/published/index.js")" = 'published package' ] \
+    || fail "published @beeline dependency write mutated primary source"
   workspace_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/lib" && pwd -P)
   expected_workspace_real=$(cd "$WORKTREE_DIR/packages/lib" && pwd -P)
   [ "$workspace_real" = "$expected_workspace_real" ] || fail "mixed @beeline workspace did not resolve to worktree source"
@@ -863,6 +948,30 @@ test_spawn_rejects_invalid_candidate_before_competing_publication() {
   pass "fm-spawn rejects invalid candidates without touching non-cooperative replacements"
 }
 
+test_spawn_rejects_replacement_after_owned_publication() {
+  local rec id out status candidate
+  id=node-modules-launch-replacement-z4d
+  rec=$(make_case launch-replacement "$id")
+  read_case "$rec"
+  start_postpublication_replacer "$WORKTREE_DIR"
+
+  out=$(run_spawn "$id")
+  status=$?
+  wait_publication_contender \
+    || fail "post-publication contender did not replace node_modules"
+  [ "$status" -ne 0 ] || fail "spawn launched after its dependency publication was replaced"
+  assert_contains "$out" "replaced before worker launch" \
+    "publication identity replacement was not diagnosed"
+  assert_not_contains "$out" "spawned $id" "replaced dependency publication launched a worker"
+  assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
+    "publication validation mutated the competing dependency tree"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "replaced publication leaked its private dependency staging"
+  done
+  pass "fm-spawn rejects replacement of its validated publication before launch"
+}
+
 test_spawn_omits_worktree_deleted_workspace() {
   local rec id out status
   id=node-modules-deleted-workspace-z5b
@@ -951,6 +1060,7 @@ test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_rejects_invalid_candidate_before_competing_publication
+test_spawn_rejects_replacement_after_owned_publication
 test_spawn_omits_worktree_deleted_workspace
 test_spawn_rejects_missing_installed_workspace_link
 test_spawn_rejects_dangling_staged_workspace_link
