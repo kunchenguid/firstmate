@@ -263,6 +263,7 @@ family_for_basename() {
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
+    fm-session-lock-declaration-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
@@ -582,6 +583,7 @@ tests/fm-send-resolve-key.test.sh 13450
 tests/fm-send-secondmate-marker-herdr-e2e.test.sh 45
 tests/fm-send-secondmate-marker.test.sh 4439
 tests/fm-session-lock-ancestry.test.sh 1205
+tests/fm-session-lock-declaration-live-e2e.test.sh 21
 tests/fm-session-start.test.sh 144836
 tests/fm-sessionstart-hook-live-e2e.test.sh 21
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 21
@@ -1138,6 +1140,20 @@ families_for_changed_path() {
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-session-lock-lib.sh)
+      # Session-lock identity: the writer at session start (session-bootstrap),
+      # the Stop auto-arm's self-ownership check (watcher-wake-lock and its
+      # dedicated unclassified suite), the secondmate harness's own use of the
+      # ancestry pid (secondmate), and the harness-declared session pid the
+      # writer prefers, which only a real harness can prove (live-harness-optin).
+      # This must stay a superset of what the bin/*) reference scan below would
+      # select, per this map's over-select contract.
+      printf '%s\n' session-bootstrap
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' secondmate
+      printf '%s\n' unclassified
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

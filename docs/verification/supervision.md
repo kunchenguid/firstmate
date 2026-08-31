@@ -317,6 +317,30 @@ The current Stop-owned main/secondmate inclusion and child-worktree exclusion ar
 Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
+
+Which pid the lock RECORDS is a separate decision from how ownership is checked, and under a session-hosting daemon the process table cannot settle it.
+An async hook running for session X inside a daemon-hosted worker and a background session launched by X through that same daemon produce the identical chain: harness-named end to end, with no non-harness process between the caller and X.
+Resolving identity as the outermost pid of that chain is right for the worker and wrong for the background session, which then records X and, once the daemon between them exits, can no longer recognize its own lock while X still names a live harness.
+`bin/fm-session-lock-lib.sh` therefore prefers the harness's own declaration of its session process, accepted only when it names a live harness inside this contiguous run, and falls back to the outermost pid otherwise.
+`tests/fm-session-lock-ancestry.test.sh` drives that three-level launcher/daemon/session shape with real processes, the real `bin/fm-lock.sh`, the real Stop auto-arm, and the real turn-end guard, alongside the live-owner, dead-owner, away-mode, and inherited-declaration cases.
+
+Measured with Claude Code 2.1.241 on 2026-08-24, in both a print-mode session and a real background agent, each launched with a deliberately wrong `CLAUDE_PID=2147483646` in its environment.
+Both reported their OWN process to their own `SessionStart` hook, so the declaration is authoritative rather than inherited, which is the property the preference depends on.
+The background agent's hook sat two harness-named hops below the shared session-hosting daemon, whose pid the outermost-pid fallback would have recorded instead: a process every background session in the home shares and which outlives any one of them.
+Run the opt-in guard after every Claude Code upgrade and before trusting this result:
+
+```sh
+FM_SESSION_LOCK_DECLARATION_DRIFT=1 bin/fm-test-run.sh tests/fm-session-lock-declaration-live-e2e.test.sh
+```
+
+```text
+# claude: 2.1.241 (Claude Code)
+# print-mode session: declared 45547, ancestry [45547 ], planted 2147483646
+# background agent: declared 37066, ancestry [37066 36968 90256 ], planted 2147483646
+# background agent: without the declaration the writer would have recorded 90256, the shared plumbing above this session
+ok - session-lock: claude 2.1.241 (Claude Code) declares its own session process in both a print-mode and a daemon-hosted background session, and the writer records it
+```
+
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
