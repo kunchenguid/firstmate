@@ -143,6 +143,8 @@ new_env() {
   HERDR_MODE="$EROOT/herdr-mode"
   HERDR_LOG="$EROOT/herdr-log"
   HERDR_PID="$EROOT/herdr-pid"
+  HERDR_IDEMPOTENCY="$EROOT/herdr-idempotency"
+  HERDR_EFFECTS="$EROOT/herdr-effects"
   FAKE_HERDR="$EROOT/fake-herdr"
   CLAUDE_SESSION=claude-session-generation-1
   CAPABILITY=claude-process-generation-1
@@ -159,6 +161,8 @@ new_env() {
   printf '[]\n' > "$ALLOWLIST"
   printf 'ready\n' > "$HERDR_MODE"
   : > "$HERDR_LOG"
+  : > "$HERDR_IDEMPOTENCY"
+  : > "$HERDR_EFFECTS"
   cat > "$FAKE_HERDR" <<'EOF'
 #!/usr/bin/env bash
 set -u
@@ -183,14 +187,23 @@ if [ "$1 $2" = "agent get" ]; then
 fi
 if [ "$1 $2" = "agent prompt" ] && [ "${3:-}" = --help ]; then
   [ "$mode" = atomic ] && printf '%s\n' '      --expected-agent-session <SESSION>'
+  [ "$mode" = idempotent ] && printf '%s\n' '      --expected-agent-session <SESSION> --idempotency-key <KEY>'
   exit 0
 fi
 if [ "$1 $2" = "agent prompt" ]; then
-  [ "$mode" = atomic ] || exit 65
+  [ "$mode" = idempotent ] || exit 65
   [ "${3:-}" = pane-1 ] && [ "${4:-}" = /firstmate-context-handoff:consume ] || exit 66
   [ "${5:-}" = --expected-agent-session ] && [ "${6:-}" = "$FAKE_CLAUDE_SESSION" ] || exit 67
   [ "${7:-}" = --session ] && [ "${8:-}" = lab ] && [ "${9:-}" = --timeout ] && [ "${10:-}" = 2000 ] || exit 68
-  jq -nc --arg pane pane-1 --arg workspace workspace-1 --arg tab tab-1 --arg value "$FAKE_CLAUDE_SESSION" --arg cwd "$FAKE_VAULT" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:"working",cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}}}}'
+  [ "${11:-}" = --idempotency-key ] && [ -n "${12:-}" ] || exit 69
+  duplicate=false
+  if grep -Fx "${12}" "$FAKE_HERDR_IDEMPOTENCY_FILE" >/dev/null; then
+    duplicate=true
+  else
+    printf '%s\n' "${12}" >> "$FAKE_HERDR_IDEMPOTENCY_FILE"
+    printf '%s\n' "${12}" >> "$FAKE_HERDR_EFFECTS_FILE"
+  fi
+  jq -nc --arg pane pane-1 --arg workspace workspace-1 --arg tab tab-1 --arg value "$FAKE_CLAUDE_SESSION" --arg cwd "$FAKE_VAULT" --arg key "${12}" --argjson duplicate "$duplicate" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:"working",cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}},delivery:{accepted:true,idempotency_key:$key,duplicate:$duplicate}}}'
   exit 0
 fi
 exit 64
@@ -222,6 +235,8 @@ cli() {
       PI_SESSION_ID="${PI_SESSION_ID:-pi-session-1}" \
       FAKE_HERDR_LOG="$HERDR_LOG" \
       FAKE_HERDR_PID="$HERDR_PID" \
+      FAKE_HERDR_IDEMPOTENCY_FILE="$HERDR_IDEMPOTENCY" \
+      FAKE_HERDR_EFFECTS_FILE="$HERDR_EFFECTS" \
       FAKE_HERDR_MODE_FILE="$HERDR_MODE" \
       FAKE_CLAUDE_SESSION="$CLAUDE_SESSION" \
       FAKE_VAULT="$VAULT" \
@@ -892,27 +907,48 @@ test_exact_mcp_guard() {
 }
 
 test_bounded_transports_and_delivery() {
-  local seal delivery framed pid i record payload registered
+  local seal delivery framed pid i record payload registered idempotency_key first_prompt second_prompt
   new_env bounded-transport
   enable_consumer
   seal=$(make_ready 'Retain delivery until an exact atomic generation prompt exists.') || fail "delivery fixture failed"
   DELIVERY_ENABLED=true
   write_config
   delivery=$(cli deliver) || fail "unsupported atomic delivery did not stay pending"
-  [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-atomic-generation-prompt-unsupported ] || fail "delivery did not fail closed without an atomic generation precondition"
+  [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-idempotent-generation-prompt-unsupported ] || fail "delivery did not fail closed without an idempotent generation precondition"
   ! grep -q '^agent prompt pane-1 /firstmate-context-handoff:consume ' "$HERDR_LOG" || fail "delivery sent a probe-then-prompt notification"
 
-  new_env atomic-delivery
+  new_env generation-only-delivery
   enable_consumer
-  seal=$(make_ready 'Notify only through the exact generation-precondition capability.') || fail "atomic delivery fixture failed"
-  record=$(printf '%s' "$seal" | jq -r .record_id)
+  make_ready 'Keep delivery pending when Herdr binds generation but cannot deduplicate retries.' >/dev/null || fail "generation-only delivery fixture failed"
   DELIVERY_ENABLED=true
   printf 'atomic\n' > "$HERDR_MODE"
   write_config
-  delivery=$(cli deliver) || fail "atomic generation delivery failed"
-  [ "$(printf '%s' "$delivery" | jq -r .status)" = notified ] || fail "supported atomic generation delivery stayed pending"
-  [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = notified ] || fail "atomic notification did not transition one exact queue record"
-  grep -Fx "agent prompt pane-1 /firstmate-context-handoff:consume --expected-agent-session $CLAUDE_SESSION --session lab --timeout 2000" "$HERDR_LOG" >/dev/null || fail "delivery omitted the constant prompt or exact generation precondition"
+  delivery=$(cli deliver) || fail "generation-only delivery did not stay pending"
+  [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-idempotent-generation-prompt-unsupported ] || fail "generation-only delivery lacked its explicit idempotency capability reason"
+  ! grep -q '^agent prompt pane-1 /firstmate-context-handoff:consume ' "$HERDR_LOG" || fail "generation-only delivery risked a duplicate prompt"
+
+  new_env idempotent-delivery
+  enable_consumer
+  seal=$(make_ready 'Notify through exact generation and stable idempotency authority.') || fail "idempotent delivery fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  DELIVERY_ENABLED=true
+  printf 'idempotent\n' > "$HERDR_MODE"
+  write_config
+  if FM_HANDOFF_TEST_FAILPOINT=after-recipient-ack-before-queue cli deliver > "$EROOT/idempotent-crash-output" 2> "$EROOT/idempotent-crash-error"; then
+    fail "idempotent delivery failpoint did not interrupt queue publication"
+  fi
+  [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = pending ] || fail "interrupted idempotent delivery published a false queue acknowledgement"
+  [ "$(wc -l < "$HERDR_EFFECTS")" -eq 1 ] || fail "first idempotent delivery did not create exactly one recipient effect"
+  first_prompt=$(grep '^agent prompt pane-1 /firstmate-context-handoff:consume ' "$HERDR_LOG" | tail -1)
+  delivery=$(cli deliver) || fail "idempotent generation delivery retry failed"
+  [ "$(printf '%s' "$delivery" | jq -r .status)" = notified ] || fail "supported idempotent generation delivery stayed pending"
+  [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = notified ] || fail "idempotent notification did not transition one exact queue record"
+  [ "$(wc -l < "$HERDR_EFFECTS")" -eq 1 ] || fail "idempotent delivery retry created a duplicate recipient effect"
+  second_prompt=$(grep '^agent prompt pane-1 /firstmate-context-handoff:consume ' "$HERDR_LOG" | tail -1)
+  [ "$first_prompt" = "$second_prompt" ] || fail "idempotent delivery retry changed its exact recipient request"
+  idempotency_key=$(jq -r .delivery_idempotency_key "$FM_HOME/state/context-handoff/queue/$record.json")
+  [ "$idempotency_key" = "$(cat "$HERDR_EFFECTS")" ] || fail "durable delivery state did not bind the recipient idempotency identity"
+  grep -Fx "agent prompt pane-1 /firstmate-context-handoff:consume --expected-agent-session $CLAUDE_SESSION --session lab --timeout 2000 --idempotency-key $idempotency_key" "$HERDR_LOG" >/dev/null || fail "delivery omitted the constant prompt, exact generation, or idempotency identity"
 
   new_env delivery-deadline
   enable_consumer
@@ -921,7 +957,7 @@ test_bounded_transports_and_delivery() {
   seal=$(seal_pi) || fail "deadline delivery candidate did not seal"
   record=$(printf '%s' "$seal" | jq -r .record_id)
   DELIVERY_ENABLED=true
-  printf 'atomic\n' > "$HERDR_MODE"
+  printf 'idempotent\n' > "$HERDR_MODE"
   write_config
   payload=$(printf '%s' "$seal" | jq -c '{bindings:.bindings,trigger:"threshold",reason:"synthetic-deadline",adapter_deadline_epoch_ms:1}')
   delivery=$(printf '%s\n' "$payload" | cli compaction-outcome success) || fail "deadline outcome did not persist"
@@ -1484,7 +1520,7 @@ test_transaction_replay_and_rollback() {
 }
 
 test_transaction_dependency_manifest() {
-  local runtime saved_core saved_module saved_interpreter saved_dependency_root seal record bundle result orphan i remaining
+  local runtime ambient ambient_marker saved_core saved_module saved_interpreter saved_dependency_root seal record bundle result orphan i remaining
   saved_core=$TRANSACTION_CORE
   saved_module=$TRANSACTION_MODULE
   saved_interpreter=$TRANSACTION_INTERPRETER
@@ -1506,10 +1542,6 @@ test_transaction_dependency_manifest() {
 
   cat > "$runtime/scripts/claude-obsidian.py" <<'PY'
 #!/usr/bin/env python3
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from claude_obsidian.cli import main
 
 raise SystemExit(main())
@@ -1573,6 +1605,22 @@ PY
   record=$(printf '%s' "$seal" | jq -r .record_id)
   bind_claude >/dev/null || fail "transaction dependency fixture did not bind Claude"
   bundle=$(make_bundle "$record")
+  ambient="$EROOT/ambient"
+  ambient_marker="$EROOT/ambient-executed"
+  mkdir -p "$ambient/claude_obsidian"
+  printf '\n' > "$ambient/claude_obsidian/__init__.py"
+  cat > "$ambient/claude_obsidian/cli.py" <<'PY'
+import os
+from pathlib import Path
+
+Path(os.environ["FM_AMBIENT_TRANSACTION_MARKER"]).write_text("executed\n", encoding="utf-8")
+
+def main():
+    return 79
+PY
+  result=$(PYTHONPATH="$ambient" FM_AMBIENT_TRANSACTION_MARKER="$ambient_marker" prepare_save "$record" "$bundle")
+  [ "$(printf '%s' "$result" | jq -r .status)" = review-required ] || fail "isolated transaction wrapper did not execute the pinned snapshot package"
+  [ ! -e "$ambient_marker" ] || fail "transaction inspect imported ambient claude_obsidian code"
   printf '\nchanged = True\n' >> "$runtime/claude_obsidian/cli.py"
   result=$(prepare_save "$record" "$bundle")
   [ "$(printf '%s' "$result" | jq -r .code)" = TRANSACTION_DEPENDENCY_IDENTITY ] || fail "changed imported transaction dependency retained inspect authority"
@@ -1750,6 +1798,38 @@ test_claude_terminal_outcome_uses_durable_binding() {
   [ "$calls_after" -eq "$calls_before" ] || fail "terminal outcome performed a fresh Herdr probe"
   [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "terminal outcome did not consume its durable PreCompact binding"
   pass "probe-independent authenticated Claude terminal outcome"
+}
+
+test_claude_precompact_retry_binding() {
+  local i statement registered output records_before records_after claims_before claims_after
+  new_env claude-precompact-retry
+  enable_consumer
+  i=1
+  while [ "$i" -le 20 ]; do
+    statement="Exact Claude retry candidate $i $(printf '%01500d' 0)"
+    authorize "$statement"
+    registered=$(cli register --source-harness claude --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian) || fail "Claude retry candidate $i did not register"
+    [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude retry candidate $i returned an invalid status"
+    i=$((i + 1))
+  done
+  bind_claude >/dev/null || fail "Claude retry fixture did not bind its generation"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "initial bounded Claude PreCompact failed"
+  [ -z "$output" ] || fail "initial bounded Claude PreCompact emitted content"
+  records_before=$(find "$FM_HOME/state/context-handoff/records" -name 'handoff-*.json' | wc -l)
+  claims_before=$(find "$FM_HOME/state/context-handoff/claims" -name 'candidate-*.json' | wc -l)
+  [ "$records_before" -eq 1 ] && [ "$claims_before" -gt 0 ] && [ "$claims_before" -lt 20 ] || fail "Claude retry fixture did not leave a byte-bounded remainder"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"manual"}' | cli claude-hook) || fail "same-capability Claude PreCompact retry failed"
+  [ -z "$output" ] || fail "same-capability Claude PreCompact retry emitted content"
+  records_after=$(find "$FM_HOME/state/context-handoff/records" -name 'handoff-*.json' | wc -l)
+  claims_after=$(find "$FM_HOME/state/context-handoff/claims" -name 'candidate-*.json' | wc -l)
+  [ "$records_after" -eq "$records_before" ] && [ "$claims_after" -eq "$claims_before" ] || fail "same-capability retry sealed candidates outside its outstanding binding"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "same-capability retry binding did not accept its terminal outcome"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "next Claude attempt did not drain the bounded remainder"
+  records_after=$(find "$FM_HOME/state/context-handoff/records" -name 'handoff-*.json' | wc -l)
+  claims_after=$(find "$FM_HOME/state/context-handoff/claims" -name 'candidate-*.json' | wc -l)
+  [ "$records_after" -gt "$records_before" ] && [ "$claims_after" -gt "$claims_before" ] || fail "terminal persistence did not release the next bounded Claude seal"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "next bounded Claude attempt did not record its terminal failure"
+  pass "same-capability Claude PreCompact retry binding"
 }
 
 test_candidate_identity_binding() {
@@ -2017,6 +2097,7 @@ test_transaction_dependency_manifest
 test_orphan_apply_execution_claim
 test_claude_lifecycle_and_plugin_discovery
 test_claude_terminal_outcome_uses_durable_binding
+test_claude_precompact_retry_binding
 
 if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ]; then
   pass "exact-installed-transaction-core core=$(hash_file "$TRANSACTION_CORE") module=$(hash_file "$TRANSACTION_MODULE") manifest=$(hash_text "$(transaction_manifest)")"

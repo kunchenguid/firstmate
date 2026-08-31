@@ -42,8 +42,8 @@ It additionally verifies the selected Vault's canonical path and directory objec
 A cwd match alone never selects a recipient.
 Unavailable, busy, dead, changed, or ambiguous recipients leave the record pending with a reason.
 The bridge never starts, restarts, substitutes, discovers, or inspects a Claude process.
-A notification may submit only the constant `/firstmate-context-handoff:consume`, never a record ID or record content, through a Herdr operation that atomically rejects a changed agent-session generation.
-When the installed Herdr protocol exposes no such precondition, delivery retains the record pending without submitting a prompt.
+A notification may submit only the constant `/firstmate-context-handoff:consume`, never a record ID or record content, through a Herdr operation that atomically rejects a changed agent-session generation and deduplicates one stable record-bound idempotency key.
+When the installed Herdr protocol exposes no exact-generation precondition and acknowledged idempotency identity together, delivery retains the record pending without submitting a prompt.
 
 ## Claude consumer
 
@@ -63,7 +63,7 @@ Automatic apply authority covers exactly one new note under a configured create 
 Deletion, move, canonical note replacement, merge, `.obsidian`, Git, GitHub, executable installation, credentials, sensitive content, ambiguity, and out-of-contract paths are quarantined.
 
 The consumer deterministically maps the handoff record ID to one transaction operation ID.
-It stages canonical bundle bytes privately, verifies a reviewed manifest covering the entrypoint and every Python file in the installed transaction package, executes a private snapshot of those exact bytes for `inspect`, and stores the returned Vault-bound approval SHA-256 plus manifest identity.
+It stages canonical bundle bytes privately, verifies a reviewed manifest covering the entrypoint and every Python file in the installed transaction package, executes that package from a private snapshot through an isolated wrapper that places the verified package first and excludes ambient site packages, and stores the returned Vault-bound approval SHA-256 plus manifest identity.
 Commit accepts only the currently active bundle and approval while the record is pending or notified, invokes `claude-obsidian.transaction.v1` once, verifies the complete mode-0600 journal and result, every changed-path hash, complete journal state, exact bundle and approval correlation, and the absent mutation lock, and only then writes the source acknowledgement before transitioning the queue terminal.
 An identical retry is idempotent, changed handoff payload bytes quarantine, terminal dispositions revoke every prepared Save, and apply-complete-before-ack or acknowledgement-before-queue crashes heal from the verified transaction result or durable acknowledgement before any conflicting disposition can publish.
 Exit 75 leaves the record pending for a fresh read, rebuild, and inspect.
