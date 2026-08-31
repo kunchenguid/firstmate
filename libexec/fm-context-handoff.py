@@ -1552,15 +1552,28 @@ def matching_nonempty_state(layout: StateLayout, source_harness: str, session_ha
 
 
 def matching_record_present(layout: StateLayout, source_harness: str, session_hash: str) -> bool:
-    paths = sorted(layout.records.glob("handoff-*.json"))
-    if len(paths) > MAX_COMPACTION_RECORDS:
-        return True
-    for path in paths:
+    for path in sorted(layout.records.glob("handoff-*.json")):
         try:
             envelope, _digest = read_envelope(layout, path.stem, {}, verify_sources=False)
         except HandoffError:
+            continue
+        if envelope["source_harness"] != source_harness or envelope["source_session_hash"] != session_hash:
+            continue
+        try:
+            queue = read_queue(layout, path.stem)
+        except HandoffError:
             return True
-        if envelope["source_harness"] == source_harness and envelope["source_session_hash"] == session_hash:
+        terminal = (
+            queue.get("status") in {"acknowledged", "quarantined"}
+            and queue.get("compaction") in {"sealed", "succeeded", "failed"}
+            and isinstance(queue.get("reason"), str)
+            and isinstance(queue.get("attempts"), int)
+            and queue.get("attempts", -1) >= 0
+            and isinstance(queue.get("created_at"), str)
+            and isinstance(queue.get("updated_at"), str)
+            and HEX64.fullmatch(str(queue.get("envelope_sha256", ""))) is not None
+        )
+        if not terminal:
             return True
     return False
 
@@ -2652,6 +2665,18 @@ def apply_terminal_compaction_binding_locked(
     return result
 
 
+def replay_terminal_compaction_bindings_locked(layout: StateLayout) -> None:
+    owned_records: set[str] = set()
+    for path in outstanding_compaction_bindings(layout):
+        value, bindings = read_compaction_binding_locked(layout, path)
+        record_ids = {item["record_id"] for item in bindings}
+        if owned_records & record_ids:
+            raise HandoffError("COMPACTION_BINDING", "multiple durable Claude attempts own the same sealed record")
+        owned_records.update(record_ids)
+        if value.get("terminal_outcome") is not None:
+            apply_terminal_compaction_binding_locked(layout, path, value, bindings)
+
+
 def consume_compaction_binding(home: Path, session_hash: str, succeeded: bool, reason: str) -> dict[str, Any] | None:
     layout = StateLayout(home)
     with state_lock(layout):
@@ -3529,6 +3554,8 @@ def claimable_records_locked(
     *,
     suppress_invalid: bool = False,
 ) -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
+    replay_terminal_compaction_bindings_locked(layout)
+    replay_compaction_attempts(layout, config)
     require_consumer_binding(home, config)
     for ack_path in sorted(layout.acks.glob("handoff-*.json")):
         validate_private_file(ack_path)
