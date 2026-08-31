@@ -51,6 +51,57 @@ session_compact_failed
 threshold
 ```
 
+The installed Pi cancellation path was also executed without a model call. This bounded probe invokes the installed automatic-compaction method with a valid synthetic branch, makes the pre-compaction extension cancel, and installs throwing sentinels on summarization and compaction persistence:
+
+```sh
+pi_root=/var/home/sreazy/.local/share/node-v24.19.0/lib/node_modules/@earendil-works/pi-coding-agent
+PI_ROOT="$pi_root" node --input-type=module <<'EOF'
+import { pathToFileURL } from "node:url";
+const { AgentSession } = await import(pathToFileURL(`${process.env.PI_ROOT}/dist/core/agent-session.js`));
+const events = [];
+const entry = (id, parentId, text) => ({
+  type: "message",
+  id,
+  parentId,
+  timestamp: "2026-08-30T20:00:00.000Z",
+  message: { role: "user", content: text, timestamp: 1788120000000 },
+});
+const branch = [entry("old", null, "old ".repeat(5000)), entry("recent", "old", "recent")];
+const runner = {
+  hasHandlers: () => true,
+  async emit(event) {
+    events.push(`extension:${event.type}:${event.reason}`);
+    return event.type === "session_before_compact" ? { cancel: true } : undefined;
+  },
+};
+const probe = {
+  model: { provider: "synthetic" },
+  settingsManager: { getCompactionSettings: () => ({ keepRecentTokens: 1 }) },
+  sessionManager: {
+    getBranch: () => branch,
+    appendCompaction: () => { throw new Error("cancelled compaction persisted"); },
+  },
+  _extensionRunner: runner,
+  _getSummarizationRequestAuth: async () => ({ model: {}, apiKey: undefined, headers: undefined, env: undefined }),
+  _runDefaultCompaction: async () => { throw new Error("cancelled compaction summarized"); },
+  _emit: event => events.push(`public:${event.type}:${event.reason}:aborted=${event.aborted ?? "unset"}`),
+  _emitSessionCompactFailed: AgentSession.prototype._emitSessionCompactFailed,
+};
+const continued = await AgentSession.prototype._runAutoCompaction.call(probe, "threshold", false);
+console.log([...events, `continued=${continued}`].join("\n"));
+EOF
+```
+
+Its exact output was:
+
+```text
+public:compaction_start:threshold:aborted=unset
+extension:session_before_compact:threshold
+public:compaction_end:threshold:aborted=true
+extension:session_compact_failed:threshold
+continued=false
+```
+
 The normalized Claude strings output was:
 
 ```text
@@ -127,6 +178,7 @@ ok - required evidence prerequisite exit status
 ok - sensitive candidate and Save content rejection
 ok - single-note automatic Save boundary
 ok - queue-first orphan recovery
+ok - invalid candidate failures are durably receipted
 ok - locked registration capability snapshot
 ok - bounded compaction backpressure and drain
 ok - deterministic byte-bounded envelope draining
@@ -143,12 +195,13 @@ ok - completed Save recovery before source validation
 ok - registration lifecycle and multi-record retry recovery
 ok - quarantine, disable, and disposition recovery
 ok - transaction apply replay and rollback recovery
+ok - orphan apply remains behind durable execution authority
 ok - Claude lifecycle and model-free plugin discovery
 ```
 
 The suite uses isolated temporary Firstmate homes, source roots, Vaults, Herdr adapters, Pi extension APIs, Claude hook payloads, MCP requests, and transaction state.
 The self-contained Bash suite executes the public CLI, Claude hook, MCP server, Pi extension, and transaction fixture against isolated synthetic homes and Vaults.
-It covers required-gate prerequisite exit status, exact sensitive-data rejection after eligibility authorization, single-note Save authority, queue-before-claim crash recovery, locked and generation-monotonic process capability, deterministic byte-bounded subsets, retry backpressure and draining, fail-closed Claude endpoint binding, exit-75 approval revocation and fresh inspect, exact MCP and shell guard confinement, bounded MCP and subprocess transport, fail-closed delivery, serialized durable state initialization, complete Pi lifecycle failure handling, completed-Save recovery before mutable-source validation, registration retry recovery, quarantine, disable and re-enable, disposition crash recovery, transaction replay and rollback, and model-free Claude plugin discovery.
+It covers required-gate prerequisite exit status, category-sensitive rejection after eligibility authorization, exact one-create-plus-coupled Save authority, queue-before-claim crash recovery, corrupt-candidate receipts, locked and generation-monotonic process capability, deterministic byte-bounded subsets, retry backpressure and draining, fail-closed Claude endpoint binding, atomic terminal compaction recovery, exit-75 approval revocation and fresh inspect, exact MCP and shell guard confinement, bounded MCP and subprocess transport, fail-closed delivery, serialized durable state initialization, complete Pi lifecycle failure handling, completed-Save recovery before mutable-source validation, registration retry recovery, quarantine, disable and re-enable, disposition crash recovery, complete reviewed transaction-path verification, durable orphan-apply execution claims, transaction replay and rollback, and model-free Claude plugin discovery.
 No test reads or mutates the real Vault, a live Claude session, a live Herdr process, credentials, auth state, transcripts, or provider data.
 No test invokes a model.
 
