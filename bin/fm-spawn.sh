@@ -2239,17 +2239,17 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   proj_real=$PROJ_ABS_REAL
   if ! proj_common=$(resolve_absolute_git_common_dir "$proj_real"); then
     preserve_common_dir_mismatch_allocation
-    echo "error: $source allocated '$wt_real', but the requested project's absolute Git common directory could not be resolved from '$proj_real'; refusing before worker launch. No supported non-cleaning allocation return or quarantine operation is available, so the allocated local copy and endpoint are preserved in place. Inspect $inspect_target and reconcile the pool or provider through its guarded ownership path before retrying" >&2
+    echo "error: $source allocated '$wt_real', but the requested project's absolute Git common directory could not be resolved from '$proj_real'; refusing before worker launch. No supported non-cleaning allocation return or quarantine operation is available, so the allocated local copy and any existing endpoint are preserved in place. Inspect $inspect_target and reconcile the pool or provider through its guarded ownership path before retrying" >&2
     exit 1
   fi
   if ! wt_common=$(resolve_absolute_git_common_dir "$wt_real"); then
     preserve_common_dir_mismatch_allocation
-    echo "error: $source allocated '$wt_real', but its absolute Git common directory could not be resolved; the requested project '$proj_real' uses '$proj_common'. Refusing before worker launch. No supported non-cleaning allocation return or quarantine operation is available, so the allocated local copy and endpoint are preserved in place. Inspect $inspect_target and reconcile the pool or provider through its guarded ownership path before retrying" >&2
+    echo "error: $source allocated '$wt_real', but its absolute Git common directory could not be resolved; the requested project '$proj_real' uses '$proj_common'. Refusing before worker launch. No supported non-cleaning allocation return or quarantine operation is available, so the allocated local copy and any existing endpoint are preserved in place. Inspect $inspect_target and reconcile the pool or provider through its guarded ownership path before retrying" >&2
     exit 1
   fi
   if [ "$wt_common" != "$proj_common" ]; then
     preserve_common_dir_mismatch_allocation
-    echo "error: Git common-directory mismatch after $source: requested project '$proj_real' uses '$proj_common', but allocated worktree '$wt_real' uses '$wt_common'. Refusing before worker launch. No supported non-cleaning allocation return or quarantine operation is available, so the allocated local copy and endpoint are preserved in place. Inspect $inspect_target and reconcile the mixed clone-family pool or provider through its guarded ownership path before retrying; do not force-return, clean, reset, or remove this allocation" >&2
+    echo "error: Git common-directory mismatch after $source: requested project '$proj_real' uses '$proj_common', but allocated worktree '$wt_real' uses '$wt_common'. Refusing before worker launch. No supported non-cleaning allocation return or quarantine operation is available, so the allocated local copy and any existing endpoint are preserved in place. Inspect $inspect_target and reconcile the mixed clone-family pool or provider through its guarded ownership path before retrying; do not force-return, clean, reset, or remove this allocation" >&2
     exit 1
   fi
 }

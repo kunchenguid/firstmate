@@ -73,7 +73,7 @@ snapshot_mixed_slot() {  # <slot> <foreign-clone>
     GIT_OPTIONAL_LOCKS=0 git -C "$foreign" worktree list --porcelain
     printf '%s\n' '--- refs ---'
     GIT_OPTIONAL_LOCKS=0 git -C "$foreign" for-each-ref \
-      --format='%(refname)%09%(objectname)' refs/heads refs/remotes refs/stash
+      --format='%(refname)%09%(objectname)%09%(symref)'
     printf '%s\n' '--- worktree git pointer ---'
     cat "$slot/.git"
   }
@@ -104,6 +104,10 @@ EOF
   git clone --quiet --bare "$seed" "$origin"
   git clone --quiet "file://$origin" "$project"
   git clone --quiet "file://$origin" "$foreign"
+  printf 'stashed local evidence\n' >> "$foreign/tracked-staged.txt"
+  git -C "$foreign" stash push --quiet -m preserved-stash -- tracked-staged.txt
+  git -C "$foreign" tag -a preserved-tag -m preserved-tag HEAD
+  git -C "$foreign" update-ref refs/firstmate/preserved-custom HEAD
   git -C "$foreign" worktree add --quiet -b fm/mixed-slot "$slot" HEAD
 
   printf 'staged local change\n' > "$slot/tracked-staged.txt"
@@ -125,6 +129,12 @@ EOF
   before="$case_dir/before.snapshot"
   after="$case_dir/after.snapshot"
   snapshot_mixed_slot "$slot" "$foreign" > "$before"
+  assert_contains "$(cat "$before")" 'refs/stash' \
+    "mixed fixture did not seed a stash ref"
+  assert_contains "$(cat "$before")" 'refs/tags/preserved-tag' \
+    "mixed fixture did not seed a tag ref"
+  assert_contains "$(cat "$before")" 'refs/firstmate/preserved-custom' \
+    "mixed fixture did not seed a custom ref"
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
