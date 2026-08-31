@@ -650,6 +650,28 @@ test_cursor_exemption_does_not_leak_to_a_later_spawn() {
   pass "a cursor exemption does not leak from one spawn to the next in the same shell"
 }
 
+# The redesign replaced an inherited environment variable with a per-invocation
+# flag. Reintroducing any ambient fallback must fail CI, so drive the spawn with
+# plausible ambient grants (including the retired variable name) set in its
+# environment and require the refusal to hold.
+test_cursor_bar_ignores_an_ambient_environment_grant() {
+  local rec id out status ambient
+  id=profile-cursor-ambient-z6k
+  rec=$(make_spawn_case profile-cursor-ambient cursor "$id")
+  read_case_record "$rec"
+
+  for ambient in FM_CURSOR_UNATTENDED_EXEMPTION CURSOR_EXEMPTION FM_CURSOR_EXEMPTION; do
+    out=$(export "$ambient=attended"
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "an ambient $ambient must not grant the cursor exemption"
+    assert_contains "$out" "refused for an unattended ship launch" \
+      "an ambient $ambient must leave the unattended refusal in force"
+    [ ! -s "$LAUNCH_LOG" ] || fail "an ambient $ambient must refuse before any launch is sent"
+  done
+  pass "an ambient environment grant never opens the cursor bar"
+}
+
 test_opencode_threads_model_and_ignores_effort_axis() {
   local rec id out status launch
   id=profile-opencode-z7
@@ -906,6 +928,7 @@ test_cursor_is_refused_for_every_unattended_kind
 test_cursor_unrecognized_exemption_still_refuses
 test_cursor_exemption_permits_an_attended_or_enveloped_spawn
 test_cursor_exemption_does_not_leak_to_a_later_spawn
+test_cursor_bar_ignores_an_ambient_environment_grant
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis

@@ -93,6 +93,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
+  Cursor is the broader case: it is refused for ship, scout, and secondmate alike, because its `--auto-review` classifier can park an unattended pane on a prompt nobody answers while the pane still reads as busy.
+  That pre-stop answer is keyed on the `cursor_exemption=` grant recorded in the task's own meta, which is what the launch owner recorded when `--cursor-exemption attended` or `--cursor-exemption envelope:<name>` was passed, so an exempted task relaunches and an ordinary one is refused before its agent is stopped.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
 - `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
