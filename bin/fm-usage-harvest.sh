@@ -19,27 +19,42 @@
 #    "output_tokens":<int|null>,"reasoning_tokens":<int|null>,
 #    "source":<claude-projects|codex-sessions|pi-sessions|unavailable>}
 #
+# Row scope: a row describes the WHOLE task, spanning every relaunch, and
+# wall_secs, the session-log window and turns all report that one span. The
+# turn count dictates the scope because it can only be read from
+# state/<task-id>.status, which is appended to across relaunches and carries
+# no incarnation delimiter; per-incarnation turns are therefore not derivable
+# from durable data, and scoping only the window to an incarnation would
+# report whole-task turns against a one-incarnation window and token sum.
+#
 # Wall clock: task start epoch -> status-file mtime epoch; the meta file's
 # mtime is the fallback end when the status file is absent.
-# The start comes from the epoch embedded in the meta's
-# spawn_gen=s<epoch>.<pid>.<random> incarnation token, which fm-spawn writes
-# once per spawn or relaunch and never rewrites afterwards. The meta file's
-# own mtime is NOT a start source in its own right: later meta writes (PR
-# registration, busy-state updates) move it forward to near the end of the
-# task and collapse the window. Only when spawn_gen is absent or malformed
-# (a task spawned before that token existed) does the start fall back to the
-# status-file birth epoch, then the meta mtime, then the status mtime.
-# A start later than the end (a relaunch with no status append after it) is
+# The start is the EARLIEST durable evidence of the task's first spawn: the
+# status file's birth epoch (created on the first spawn, only appended to
+# afterwards, and removed only when teardown retires the task) and the epoch
+# embedded in the meta's spawn_gen=s<epoch>.<pid>.<random> incarnation token,
+# whichever of the two is earlier. fm-spawn writes spawn_gen once per spawn or
+# relaunch and never rewrites it afterwards, so it carries the start on a host
+# whose filesystem reports no usable birth time; because a relaunch replaces
+# it with the relaunch epoch, the status birth is what holds the window open
+# over the whole task. The meta file's own mtime is NOT a start source in its
+# own right: later meta writes (PR registration, busy-state updates) move it
+# forward to near the end of the task and collapse the window. Only when
+# neither durable source is available (a task spawned before the token
+# existed, on a birthless filesystem) does the start fall back to the meta
+# mtime, then the status mtime.
+# A start later than the end (a spawn with no status append after it) is
 # pinned to the end so spawned_at never postdates completed_at.
 # Turn estimate: count of "^working:" lines in the status file.
 #
 # Per-request usage sources:
 #   harness=claude: <claude-projects>/<worktree with '/' and '.' -> '-'>/*.jsonl in
-#     the task window. Each assistant message carries one API request's usage
-#     at .message.usage (input_tokens, cache_read_input_tokens,
-#     cache_creation_input_tokens, output_tokens) and Claude logs one entry
-#     per content block, so requests are deduped by .message.id before
-#     summing. cached_input_tokens folds cache_read + cache_creation (both
+#     the task window. Claude's logs record no cwd, so that path encoding is
+#     what binds a log to this task. Each assistant message carries one API
+#     request's usage at .message.usage (input_tokens,
+#     cache_read_input_tokens, cache_creation_input_tokens, output_tokens) and
+#     Claude logs one entry per content block, so requests are deduped by
+#     .message.id before summing. cached_input_tokens folds cache_read + cache_creation (both
 #     billed on top of input_tokens); reasoning_tokens captures
 #     output_tokens_details.thinking_tokens when present (a subset of
 #     output_tokens).
@@ -64,9 +79,12 @@
 #     meta, and bare when the record carries no provider.
 #   harness=cursor, a task with a recorded remote_host (its worker ran on
 #     another machine, so its logs are not on this filesystem), an absent log
-#     tree, or no in-window match: token fields are null with source
-#     "unavailable".
-# A corrupt log line is skipped best-effort by the parser.
+#     tree, or no in-window log that yields this task's assistant usage: token
+#     fields are null with source "unavailable". Every harness applies that
+#     one rule, so a source name always asserts a parsed match and never the
+#     mere presence of an in-window file.
+# A corrupt log line is skipped best-effort by the parser, which reads each
+# line on its own and keeps the rest of that file's usage.
 #
 # Idempotent: if the ledger already contains a line whose "task" is
 # <task-id>, the command exits 0 without appending.
@@ -161,7 +179,20 @@ spawn_gen_epoch() {  # <spawn_gen token>
 }
 
 END_EPOCH=$(file_mtime_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META")
-START_EPOCH=$(spawn_gen_epoch "$SPAWN_GEN" 2>/dev/null || file_birth_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
+# The two durable first-spawn witnesses are combined by taking the earlier of
+# them, so a relaunch (which rewrites spawn_gen but only appends to the status
+# log) cannot narrow the window below the span the turn count already covers.
+START_GEN=$(spawn_gen_epoch "$SPAWN_GEN" 2>/dev/null || true)
+START_BIRTH=$(file_birth_epoch "$STATUS" 2>/dev/null || true)
+START_EPOCH=
+for start_candidate in "$START_GEN" "$START_BIRTH"; do
+  [ -n "$start_candidate" ] || continue
+  if [ -z "$START_EPOCH" ] || [ "$start_candidate" -lt "$START_EPOCH" ]; then
+    START_EPOCH=$start_candidate
+  fi
+done
+[ -n "$START_EPOCH" ] \
+  || START_EPOCH=$(file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
 # Pin an impossible start to the end rather than inverting the window, which
 # would both report a negative duration and drop every session log.
 [ "$START_EPOCH" -le "$END_EPOCH" ] 2>/dev/null || START_EPOCH=$END_EPOCH
@@ -182,7 +213,9 @@ harvest_cleanup() {
 }
 trap harvest_cleanup EXIT
 epoch_to_touch() {  # <epoch>
-  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$1" +%Y%m%d%H%M.%S
+  # Both renderings are LOCAL time because that is what touch -t reads; a UTC
+  # stamp would shift both window refs by the host's offset and drop real logs.
+  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S
 }
 # find -newer compares sub-second mtimes, so the refs only narrow to
 # [START-1, END+1]; the per-file epoch filter below then applies the true
@@ -210,131 +243,126 @@ matched_files() {  # <dir> <maxdepth-or-empty> : print in-window *.jsonl paths
 }
 
 IT=null; CT=null; OT=null; RT=null
+
+# accumulate_usage <dir> <maxdepth-or-empty> <source-label> <jq-program>
+#
+# The three harness parsers differ only in their jq program; everything around
+# it lives here once. Each program reduces one session log to at most one
+# "<cwd>\t<model>\t<input>\t<cached>\t<output>\t<reasoning>" row, and emits
+# that row ONLY when the log actually yielded assistant usage, so a file that
+# parses to nothing leaves the source unavailable. Each program also reads its
+# input line by line through "try fromjson", so one corrupt line costs that
+# line rather than the whole file's usage. This loop then binds the row to
+# this task by the cwd it reports, sums the counts and remembers the first
+# model seen.
+accumulate_usage() {
+  local dir=$1 depth=$2 label=$3 prog=$4
+  local files f row cwd m it ct ot rt
+  files=$(matched_files "$dir" "$depth")
+  [ -n "$files" ] || return 0
+  IT=0; CT=0; OT=0; RT=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    # @tsv renders a null field as an empty one, and "IFS=$'\t' read" would
+    # drop those empty fields because tab is an IFS whitespace character,
+    # shifting every later field into the wrong variable. Translating the
+    # separators to the non-whitespace unit separator keeps each field in its
+    # own slot; @tsv escapes any tab inside a value, so every remaining tab
+    # byte is a separator.
+    row=$(jq -Rrn --arg wt "$WORKTREE" "$prog" "$f" 2>/dev/null | tr '\t' '\037')
+    [ -n "$row" ] || continue
+    IFS=$'\037' read -r cwd m it ct ot rt <<<"$row"
+    [ "$cwd" = "$WORKTREE" ] || continue
+    SRC=$label
+    [ -n "$m" ] && [ -z "$MODEL_LOG" ] && MODEL_LOG=$m
+    IT=$((IT + ${it:-0}))
+    CT=$((CT + ${ct:-0}))
+    OT=$((OT + ${ot:-0}))
+    RT=$((RT + ${rt:-0}))
+  done <<FMINNER
+$files
+FMINNER
+  return 0
+}
+
 case "$HARNESS" in
   claude)
     if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
       encoded=${WORKTREE//\//-}
       encoded=${encoded//./-}
-      files=$(matched_files "$CLAUDE_DIR/$encoded" 1)
-      if [ -n "$files" ]; then
-        SRC=claude-projects
-        IT=0; CT=0; OT=0; RT=0
-        # One entry per content block repeats one request's usage; dedupe on
-        # .message.id so every request is counted exactly once.
-        while IFS= read -r f; do
-          row=$(jq -rn '
-            reduce inputs as $l ({seen:{},m:null,it:0,ct:0,ot:0,rt:0};
-              if $l.type == "assistant" and ($l.message.usage // null) != null then
-                ($l.message.id // "no-id") as $id
-                | if .seen[$id] then . else
-                    .seen[$id] = 1
-                    | .it += ($l.message.usage.input_tokens // 0)
-                    | .ct += (($l.message.usage.cache_read_input_tokens // 0)
-                              + ($l.message.usage.cache_creation_input_tokens // 0))
-                    | .ot += ($l.message.usage.output_tokens // 0)
-                    | .rt += ($l.message.usage.output_tokens_details.thinking_tokens // 0)
-                    | (if .m == null then .m = ($l.message.model // null) else . end)
-                  end
-              elif $l.type == "assistant" and ($l.message.model // null) != null and .m == null then
-                .m = $l.message.model
-              else . end)
-            | [.m, .it, .ct, .ot, .rt] | @tsv' "$f" 2>/dev/null || true)
-          [ -n "$row" ] || continue
-          IFS=$'\t' read -r m it ct ot rt <<<"$row"
-          [ -n "$m" ] && [ -z "$MODEL_LOG" ] && MODEL_LOG=$m
-          IT=$((IT + ${it:-0}))
-          CT=$((CT + ${ct:-0}))
-          OT=$((OT + ${ot:-0}))
-          RT=$((RT + ${rt:-0}))
-        done <<FMINNER
-$files
-FMINNER
-      fi
+      # Claude's logs carry no cwd, so the encoded directory is the binding and
+      # the row reports the worktree it was resolved from.
+      # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
+      accumulate_usage "$CLAUDE_DIR/$encoded" 1 claude-projects '
+        reduce (inputs | try fromjson catch empty) as $l
+          ({seen:{},n:0,m:null,it:0,ct:0,ot:0,rt:0};
+            if $l.type == "assistant" and ($l.message.usage // null) != null then
+              ($l.message.id // "no-id") as $id
+              | if .seen[$id] then . else
+                  .seen[$id] = 1
+                  | .n += 1
+                  | .it += ($l.message.usage.input_tokens // 0)
+                  | .ct += (($l.message.usage.cache_read_input_tokens // 0)
+                            + ($l.message.usage.cache_creation_input_tokens // 0))
+                  | .ot += ($l.message.usage.output_tokens // 0)
+                  | .rt += ($l.message.usage.output_tokens_details.thinking_tokens // 0)
+                  | (if .m == null then .m = ($l.message.model // null) else . end)
+                end
+            elif $l.type == "assistant" and ($l.message.model // null) != null and .m == null then
+              .m = $l.message.model
+            else . end)
+        | if .n > 0 then [$wt, .m, .it, .ct, .ot, .rt] | @tsv else empty end'
     fi
     ;;
   codex)
     if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
-      files=$(matched_files "$CODEX_DIR" "")
-      if [ -n "$files" ]; then
-        IT=0; CT=0; OT=0; RT=0
-        found=0
-        while IFS= read -r f; do
-          row=$(jq -rn '
-            reduce inputs as $l ({cwd:null,m:null,it:0,ct:0,ot:0,rt:0};
-              if $l.type == "session_meta" then
-                .cwd = ($l.payload.cwd // .cwd)
-              elif $l.type == "turn_context" and ($l.payload.model // null) != null then
-                .m = $l.payload.model
-              elif $l.type == "event_msg" and $l.payload.type == "token_count"
-                   and ($l.payload.info.last_token_usage // null) != null then
-                .it += ($l.payload.info.last_token_usage.input_tokens // 0)
-                | .ct += (($l.payload.info.last_token_usage.cached_input_tokens // 0)
-                          + ($l.payload.info.last_token_usage.cache_write_input_tokens // 0))
-                | .ot += ($l.payload.info.last_token_usage.output_tokens // 0)
-                | .rt += ($l.payload.info.last_token_usage.reasoning_output_tokens // 0)
-              else . end)
-            | [.cwd, .m, .it, .ct, .ot, .rt] | @tsv' "$f" 2>/dev/null || true)
-          [ -n "$row" ] || continue
-          IFS=$'\t' read -r cwd m it ct ot rt <<<"$row"
-          [ "$cwd" = "$WORKTREE" ] || continue
-          found=1
-          SRC=codex-sessions
-          [ -n "$m" ] && [ -z "$MODEL_LOG" ] && MODEL_LOG=$m
-          IT=$((IT + ${it:-0}))
-          CT=$((CT + ${ct:-0}))
-          OT=$((OT + ${ot:-0}))
-          RT=$((RT + ${rt:-0}))
-        done <<FMINNER
-$files
-FMINNER
-        [ "$found" -eq 1 ] || SRC=unavailable
-      fi
+      # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
+      accumulate_usage "$CODEX_DIR" "" codex-sessions '
+        reduce (inputs | try fromjson catch empty) as $l
+          ({cwd:null,n:0,m:null,it:0,ct:0,ot:0,rt:0};
+            if $l.type == "session_meta" then
+              .cwd = ($l.payload.cwd // .cwd)
+            elif $l.type == "turn_context" and ($l.payload.model // null) != null then
+              .m = $l.payload.model
+            elif $l.type == "event_msg" and $l.payload.type == "token_count"
+                 and ($l.payload.info.last_token_usage // null) != null then
+              .n += 1
+              | .it += ($l.payload.info.last_token_usage.input_tokens // 0)
+              | .ct += (($l.payload.info.last_token_usage.cached_input_tokens // 0)
+                        + ($l.payload.info.last_token_usage.cache_write_input_tokens // 0))
+              | .ot += ($l.payload.info.last_token_usage.output_tokens // 0)
+              | .rt += ($l.payload.info.last_token_usage.reasoning_output_tokens // 0)
+            else . end)
+        | if .n > 0 then [.cwd, .m, .it, .ct, .ot, .rt] | @tsv else empty end'
     fi
     ;;
   pi|pi-signed)
     if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
-      files=$(matched_files "$PI_DIR" "")
-      if [ -n "$files" ]; then
-        IT=0; CT=0; OT=0; RT=0
-        found=0
-        while IFS= read -r f; do
-          row=$(jq -rn '
-            reduce inputs as $l ({cwd:null,seen:{},m:null,it:0,ct:0,ot:0,rt:0};
-              if $l.type == "session" then
-                .cwd = ($l.cwd // .cwd)
-              elif $l.type == "message" and $l.message.role == "assistant"
-                   and ($l.message.usage // null) != null then
-                ($l.id // null) as $id
-                | if $id != null and .seen[$id] then . else
-                    (if $id == null then . else .seen[$id] = 1 end)
-                    | .it += ($l.message.usage.input // 0)
-                    | .ct += (($l.message.usage.cacheRead // 0)
-                              + ($l.message.usage.cacheWrite // 0))
-                    | .ot += ($l.message.usage.output // 0)
-                    | .rt += ($l.message.usage.reasoning // 0)
-                    | (if .m == null and ($l.message.model // null) != null then
-                         .m = (if ($l.message.provider // null) != null
-                               then ($l.message.provider + "/" + $l.message.model)
-                               else $l.message.model end)
-                       else . end)
-                  end
-              else . end)
-            | [.cwd, .m, .it, .ct, .ot, .rt] | @tsv' "$f" 2>/dev/null || true)
-          [ -n "$row" ] || continue
-          IFS=$'\t' read -r cwd m it ct ot rt <<<"$row"
-          [ "$cwd" = "$WORKTREE" ] || continue
-          found=1
-          SRC=pi-sessions
-          [ -n "$m" ] && [ -z "$MODEL_LOG" ] && MODEL_LOG=$m
-          IT=$((IT + ${it:-0}))
-          CT=$((CT + ${ct:-0}))
-          OT=$((OT + ${ot:-0}))
-          RT=$((RT + ${rt:-0}))
-        done <<FMINNER
-$files
-FMINNER
-        [ "$found" -eq 1 ] || SRC=unavailable
-      fi
+      # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
+      accumulate_usage "$PI_DIR" "" pi-sessions '
+        reduce (inputs | try fromjson catch empty) as $l
+          ({cwd:null,seen:{},n:0,m:null,it:0,ct:0,ot:0,rt:0};
+            if $l.type == "session" then
+              .cwd = ($l.cwd // .cwd)
+            elif $l.type == "message" and $l.message.role == "assistant"
+                 and ($l.message.usage // null) != null then
+              ($l.id // null) as $id
+              | if $id != null and .seen[$id] then . else
+                  (if $id == null then . else .seen[$id] = 1 end)
+                  | .n += 1
+                  | .it += ($l.message.usage.input // 0)
+                  | .ct += (($l.message.usage.cacheRead // 0)
+                            + ($l.message.usage.cacheWrite // 0))
+                  | .ot += ($l.message.usage.output // 0)
+                  | .rt += ($l.message.usage.reasoning // 0)
+                  | (if .m == null and ($l.message.model // null) != null then
+                       .m = (if ($l.message.provider // null) != null
+                             then ($l.message.provider + "/" + $l.message.model)
+                             else $l.message.model end)
+                     else . end)
+                end
+            else . end)
+        | if .n > 0 then [.cwd, .m, .it, .ct, .ot, .rt] | @tsv else empty end'
     fi
     ;;
 esac

@@ -6,7 +6,9 @@
 # meta rewritten after the fact, cursor/unavailable null rows, the
 # no-double-append idempotency guard, the ledger report rendering, and the
 # teardown integration properties that the harvest sees the status log and
-# that a harvest failure never blocks teardown.
+# that a harvest failure never blocks teardown. Also covers the whole-task row
+# scope a relaunch must not narrow, the per-line corrupt-log tolerance, and
+# the rule that a source is named only after a log yields assistant usage.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -36,9 +38,11 @@ file_birth_epoch() {  # <file>
 
 # Portable epoch formatters: BSD date reads an epoch with -r, GNU date with
 # -d @<epoch>. Both forms are tried so the fixtures pin the same timestamps on
-# macOS and on the Linux CI runners.
+# macOS and on the Linux CI runners. touch -t reads its argument as LOCAL
+# time, so both renderings here are local; iso_utc below is the ledger's UTC
+# spelling and stays UTC.
 touch_stamp() {  # <epoch> : touch -t argument
-  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$1" +%Y%m%d%H%M.%S
+  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S
 }
 iso_utc() {  # <epoch> : the harvester's ledger timestamp spelling
   date -r "$1" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
@@ -630,6 +634,151 @@ SH
   pass "teardown integration: harvest failure is non-fatal"
 }
 
+# --- row scope: a relaunch must not narrow the window -----------------------
+
+# fm-spawn rewrites spawn_gen on every relaunch but only ever appends to
+# state/<id>.status, so turns always span the whole task. A row therefore
+# spans the whole task too: the start is the earliest durable first-spawn
+# witness, and a later relaunch token must not shorten wall_secs or drop the
+# first incarnation's session logs.
+relaunch_scope_case() {
+  local id=usagerelaunch1 wt="$TMP_ROOT/.no-mistakes/wt-usagerelaunch1"
+  local data home state row out base encoded logdir
+  data=$(harvest_case "$id" claude "$wt" default default)
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/first-incarnation.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgR1","model":"claude-test","usage":{"input_tokens":21,"output_tokens":4}}}
+JSON
+
+  # The status file is born now; the task then runs for 600s and is relaunched
+  # 300s in, which rewrites spawn_gen with the relaunch epoch.
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.4242.9\n' "$((base + 300))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp $((base + 600)))" "$state/$id.status"
+  touch -t "$(touch_stamp $((base + 600)))" "$state/$id.meta"
+  # A request logged by the FIRST incarnation, before the relaunch token.
+  touch -t "$(touch_stamp $((base + 100)))" "$logdir/first-incarnation.jsonl"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "relaunch-scope harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"wall_secs":600' \
+    "wall seconds span the whole task, not the last incarnation"
+  assert_contains "$row" "\"spawned_at\":\"$(iso_utc "$base")\"" \
+    "spawned_at reports the first spawn, not the relaunch"
+  assert_contains "$row" '"turns":2' "turns count the whole task's working lines"
+  assert_contains "$row" '"input_tokens":21' \
+    "the first incarnation's usage is inside the whole-task window"
+  assert_contains "$row" '"source":"claude-projects"' \
+    "a pre-relaunch session log is still matched"
+  pass "usage harvest: a relaunch never narrows the row below the turn count's span"
+}
+
+# --- corrupt lines: one bad line costs that line, not the file --------------
+
+# Pi's session logs are append-only, so a truncated tail line is a realistic
+# state. The cwd binding lives in the same parse as the usage, so an
+# all-or-nothing parser would report the whole task as unavailable.
+corrupt_line_case() {
+  local id=usagecorrupt1 wt="$TMP_ROOT/wt-usagecorrupt1"
+  local data home row out d1
+  data=$(harvest_case "$id" pi "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  d1="$FM_USAGE_PI_DIR/--encoded-corrupt--"
+  mkdir -p "$d1"
+  cat > "$d1/session-corrupt.jsonl" <<JSON
+{"type":"session","id":"sess-c","cwd":"$wt"}
+{"type":"message","id":"c1","message":{"role":"assistant","provider":"zai","model":"glm-5.3-flash","usage":{"input":40,"output":6,"cacheRead":2,"cacheWrite":1,"reasoning":3}}}
+{"type":"message","id":"c2","message":{"role":"assistant","usage":{"in
+{"type":"message","id":"c3","message":{"role":"assistant","provider":"zai","model":"glm-5.3-flash","usage":{"input":9,"output":2,"cacheRead":0,"cacheWrite":0,"reasoning":1}}}
+JSON
+  touch -m -r "$d1/session-corrupt.jsonl" "$home/state/$id.status"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "corrupt-line harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"source":"pi-sessions"' \
+    "a corrupt line does not cost the file's cwd binding"
+  assert_contains "$row" '"input_tokens":49' "the valid records around a corrupt line are summed (40+9)"
+  assert_contains "$row" '"cached_input_tokens":3' "cached folds across the corrupt line (2+1)"
+  assert_contains "$row" '"output_tokens":8' "output sums across the corrupt line (6+2)"
+  assert_contains "$row" '"reasoning_tokens":4' "reasoning sums across the corrupt line (3+1)"
+  pass "usage harvest: a corrupt log line costs that line, not the file"
+}
+
+# --- a usage record without a model must not shift the token fields ---------
+
+# The parser hands the loop a model field that can be empty. An empty field
+# must stay in its own slot, or the counts land in the wrong ledger columns
+# and the model string is reported as a token count.
+missing_model_case() {
+  local id=usagenomodel1 wt="$TMP_ROOT/wt-usagenomodel1"
+  local data home row out d1
+  data=$(harvest_case "$id" pi "$wt" pi-meta-model high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  d1="$FM_USAGE_PI_DIR/--encoded-nomodel--"
+  mkdir -p "$d1"
+  cat > "$d1/session-nomodel.jsonl" <<JSON
+{"type":"session","id":"sess-n","cwd":"$wt"}
+{"type":"message","id":"n1","message":{"role":"assistant","usage":{"input":100,"output":30,"cacheRead":20,"cacheWrite":5,"reasoning":7}}}
+JSON
+  touch -m -r "$d1/session-nomodel.jsonl" "$home/state/$id.status"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "model-less harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"model":"pi-meta-model"' \
+    "a log with no model falls back to the meta model, never to a token count"
+  assert_contains "$row" '"input_tokens":100' "input stays in its own field"
+  assert_contains "$row" '"cached_input_tokens":25' "cached stays in its own field (20+5)"
+  assert_contains "$row" '"output_tokens":30' "output stays in its own field"
+  assert_contains "$row" '"reasoning_tokens":7' "reasoning stays in its own field"
+  pass "usage harvest: an absent log model never shifts the token fields"
+}
+
+# --- source names assert a parsed match, for every harness alike ------------
+
+# An in-window log that yields no assistant usage must report source
+# "unavailable" with null token fields under claude exactly as under codex
+# and pi, so the source enum means the same thing across harnesses.
+no_usage_case() {
+  local id=usagenousage1 wt="$TMP_ROOT/.no-mistakes/wt-usagenousage1"
+  local data home row out encoded logdir
+  data=$(harvest_case "$id" claude "$wt" claude-meta-model default)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session-nousage.jsonl" <<'JSON'
+{"type":"user","message":{"role":"user"}}
+{"type":"assistant","message":{"id":"msgNU"}}
+JSON
+  touch -m -r "$logdir/session-nousage.jsonl" "$home/state/$id.status"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "no-usage harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"source":"unavailable"' \
+    "an in-window log that yields no usage is not a source"
+  assert_contains "$row" '"input_tokens":null' "no parsed usage renders null input tokens"
+  assert_contains "$row" '"cached_input_tokens":null' "no parsed usage renders null cached tokens"
+  assert_contains "$row" '"output_tokens":null' "no parsed usage renders null output tokens"
+  assert_contains "$row" '"reasoning_tokens":null' "no parsed usage renders null reasoning tokens"
+  assert_contains "$row" '"model":"claude-meta-model"' "the row still reports the meta model"
+  pass "usage harvest: a source is named only after a log yields assistant usage"
+}
+
 claude_case
 claude_nobirth_case
 codex_case
@@ -638,6 +787,10 @@ pi_case usagepisigned1 pi-signed
 spawn_gen_case
 spawn_gen_malformed_case
 spawn_gen_future_case
+relaunch_scope_case
+corrupt_line_case
+missing_model_case
+no_usage_case
 cursor_case
 remote_case
 race_case
