@@ -1,10 +1,12 @@
-# Eligibility Finality and Blocking-Check Alignment Implementation Plan
+# Eligibility Finality Fix Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stop zapp marking an evaluation `final` while CI-dependent gates are still unresolved, and stop `checksGreen` being unpassable on repositories that never produce the checks it declares.
+**Goal:** Stop zapp marking an evaluation `final` while a CI-reporting gate is still unresolved, which permanently freezes stale check evidence into both the check run and the ledger.
 
-**Architecture:** Two independent fixes that present as one symptom. The first narrows the non-candidate finality test from "was the *first* failing gate CI-dependent" to "is *any* CI-reporting gate unresolved", which lets `worker.ts`'s already-final guard open for the re-evaluation it was designed to allow. The second moves non-universal check names out of the global `blockingChecks` list into per-repo overrides, so absence-fails-closed stops firing on checks a repository was never going to run. A one-off script then corrects the `final` flag on the 16 records the first defect already wrote, without deleting evidence.
+**Architecture:** One narrow change. The non-candidate finality test reads only `eligibility.failedGate` — the *first* failure in `GATE_ORDER` — so a non-candidate failing a non-CI gate first gets stamped `final` even with `checksGreen` and `coverageFloor` unresolved, and `worker.ts`'s already-final guard then skips every re-evaluation. Narrowing the test to "is *any* CI-reporting gate unresolved" lets that guard open as designed. A one-off script then corrects the `final` flag on the 16 records the defect already wrote, without deleting evidence.
+
+**SCOPE REDUCED 2026-08-31.** This plan originally carried a second defect — the global `blockingChecks` list declaring checks most repositories never produce. That fix has been **superseded** by `2026-08-28-ci-baseline-gate.md`, which solves it properly by deriving required checks from repo *shape*. The original Task 2 shrank the global list to match whatever each repo happened to run, which is bar-lowering by self-attestation. **It has been removed from this plan. Do not reinstate it.**
 
 **Tech Stack:** TypeScript (ESM, Node 22), `node:test` + `node:assert/strict`, `@aws-sdk/client-dynamodb`, `tsx` for scripts, pnpm.
 
@@ -14,23 +16,19 @@
 
 - **`CI_REPORTING_GATES` is `checksGreen` and `coverageFloor` only.** Not the same as `CI_DEPENDENT_GATES`, which also holds `freezeOff` and `notBlocked`. Those two clear without a new commit but emit no `check_suite` event, so gating finality on them would strand a record as provisional forever.
 - **`skipped` is not `unresolved`.** A gate skipped because the change class is unrecognised can never resolve via CI. Treating it as unresolved makes every unclassified pull request re-evaluate forever.
-- **Only declare a blocking check a repository produces on EVERY pull request.** Gate 11 fails closed on absence, so a conditionally-produced check (path-filtered workflow, `paths-ignore`, manual dispatch) can never be safely blocking. This is the selection rule for every override below.
-- **A per-repo `blockingChecks` list REPLACES the global one — it never merges** (`src/enrollment.ts`'s `signalChecksFor` doc, same semantic). Every override must restate the Cycode contexts.
 - **Never delete or rewrite a gate verdict in the ledger.** The stale verdicts are a true record of what the service observed. Only the computed `final` flag is corrected, and the correction is marked.
 - Conventional Commits (`commitlint` runs in CI). Run `pnpm test` before every commit.
 
 ## Sequencing — read before starting
 
-This work touches two files that PLAT-1188's zapp plan also modifies:
+**This is the first thing to land.** As of 2026-08-31, `src/evaluate.ts:296` on zapp `main` still reads the buggy `nonCandidateFinal`, and two other pieces of work are blocked behind it:
 
-| This plan | Collides with |
+| Blocked work | Why it waits |
 |---|---|
-| `src/evaluate.ts` (Task 1) | `2026-08-28-enrollment-registry-zapp.md` **Task 5** |
-| `policy-rules.yaml` `repos[]` (Task 2) | that plan's **Task 6**, which deletes the `repos:` section |
+| `2026-08-28-ci-baseline-gate.md` | Its Task 1 Step 1 refuses to proceed until this lands — gate 11's interaction with finality is not reasonable-about otherwise. |
+| Any further eval-record analysis | 16 of 97 records carry a wrongly-true `final`, so the documented "filter on `final`" safeguard does not exclude them. |
 
-**Land this first, before the enrollment plan reaches its Task 5.** It is small, independently valuable, and enrolling more repositories on top of an unpassable `checksGreen` would scale a broken measurement.
-
-If the enrollment plan has already passed its Task 6, Task 2 below moves the per-repo overrides into the `zapp-enrollments` table's `blockingChecks` attribute instead — same values, different store — and that plan's seed script must carry them.
+The enrollment-registry work this plan used to collide with has **already landed** (zapp v2.0.0, PR #34): `evaluate` now takes `(ctx, enrollment, deps)` and `policy-rules.yaml` no longer has a `repos:` section. Nothing here touches either, so the collision is gone.
 
 ---
 
@@ -180,203 +178,7 @@ records carry a wrongly-true final flag as a result."
 
 ---
 
-### Task 2: Realign `blockingChecks` with what repositories actually produce
-
-**Files:**
-- Modify: `policy-rules.yaml` (the global `blockingChecks` list, and three `repos[]` entries)
-- Modify: `tests/build-rules.test.ts` (one acceptance case; see Step 3)
-- **No change to `tests/gates.test.ts`** — `:243` and `:269` already pin both halves of the behaviour
-
-**Interfaces:**
-- Consumes: nothing from Task 1. These two tasks are independent and can be done in either order.
-
-- [ ] **Step 1: Re-verify the measurement before changing policy**
-
-The overrides below come from sampling one recent pull request per enrolled repository. Confirm it, because a wrong list here makes the gate *looser* than intended:
-
-```bash
-cd ~/Projects
-for r in platform-cicd-v2-demo conductor conductor-api portkey zapp \
-         brand-identity-pages-app redirect-management-api-v2 crank; do
-  sha=$(gh pr list --repo bankrate/$r --state all --limit 1 --json headRefOid --jq '.[0].headRefOid')
-  names=$(gh api "repos/bankrate/$r/commits/$sha/check-runs" --jq '[.check_runs[].name]|join("|")')
-  row=""
-  for c in "Cycode: SAST" "Cycode: Secrets" "Cycode: Vulnerable Dependencies" \
-           "Build and scan image" "Terraform plan (speculative)"; do
-    case "$names" in *"$c"*) row="$row yes";; *) row="$row  --";; esac
-  done
-  printf "  %-34s%s\n" "$r" "$row"
-done
-```
-
-Expected, as measured on 2026-08-28:
-
-```
-  platform-cicd-v2-demo             yes yes yes yes yes
-  conductor                         yes yes yes  --  --
-  conductor-api                     yes yes yes yes  --
-  portkey                           yes yes yes yes  --
-  zapp                              yes yes yes  --  --
-  brand-identity-pages-app          yes yes yes  --  --
-  redirect-management-api-v2        yes yes yes  --  --
-  crank                             yes yes yes  --  --
-```
-
-**Then check whether each non-universal check is produced on EVERY pull request, not just the sampled one.** A path-filtered workflow produces the check sometimes, and a sometimes-check can never be safely blocking under fail-closed semantics:
-
-```bash
-for r in conductor-api portkey platform-cicd-v2-demo; do
-  echo "--- bankrate/$r"
-  gh pr list --repo bankrate/$r --state all --limit 6 --json number,headRefOid \
-    --jq '.[] | "\(.number) \(.headRefOid)"' | while read -r n sha; do
-    has=$(gh api "repos/bankrate/$r/commits/$sha/check-runs" \
-      --jq '[.check_runs[].name] | (index("Build and scan image") != null)')
-    echo "  PR #$n  Build and scan image: $has"
-  done
-done
-```
-
-**If any repository shows `false` on a pull request, drop that check from its override.** A check that only appears when a Dockerfile changes would fail gate 11 on every dependency bump — the exact class of pull request this service exists to evaluate.
-
-- [ ] **Step 2: Confirm the mechanism is already tested — add nothing that duplicates it**
-
-**Do not write new gate tests for this.** Both halves of the behaviour this task
-relies on are already pinned in `tests/gates.test.ts`:
-
-| Line | Test | What it proves |
-|---|---|---|
-| `:243` | *"a MISSING blocking check fails gate 11 — absence is not green"* | Why the override is necessary rather than cosmetic |
-| `:269` | *"a per-repo blockingChecks override replaces the global list"* | A repo declaring only `Cycode: SAST` passes gate 11 with only that check present — "the other four are not required here" |
-
-Together those are exactly the defect and exactly the fix. **The override
-mechanism is tested and works; it is simply unused in configuration.** That is
-what makes this task a config change rather than a code change, and adding a
-third test asserting the same thing would be noise.
-
-Run them to confirm they pass on the current tree before touching policy:
-
-```bash
-cd ~/Projects/zapp
-pnpm exec node --import tsx --test tests/gates.test.ts 2>&1 | grep -E "MISSING blocking|override replaces"
-```
-
-Expected: both PASS. **If either fails, stop** — the mechanism this whole task
-depends on is broken, and moving the configuration onto it would be unsafe.
-
-- [ ] **Step 3: Add the one genuinely missing validation test**
-
-`tests/build-rules.test.ts:243` already rejects a per-repo `blockingChecks`
-containing a non-string. Nothing asserts that a *valid* per-repo list is
-accepted — and this task is about to add three of them, so the build failing on
-them would be discovered at deploy time rather than in the suite. Add beside it:
-
-```ts
-test('a per-repo blockingChecks override of only the universal checks validates', () => {
-  const doc = validDoc();
-  doc.repos[0].blockingChecks = ['Cycode: SAST', 'Cycode: Secrets', 'Cycode: Vulnerable Dependencies'];
-  assert.deepEqual(validatePolicy(doc), []);
-});
-```
-
-```bash
-pnpm exec node --import tsx --test tests/build-rules.test.ts
-```
-
-Expected: PASS — `validatePolicy` already accepts an array of strings here. This
-test documents a guarantee the config now depends on rather than fixing a defect.
-
-- [ ] **Step 4: Change the global list**
-
-In `policy-rules.yaml`, replace the `blockingChecks` block:
-
-```yaml
-  # Must be GREEN for a pull request to be a candidate.
-  #
-  # ONLY UNIVERSALLY-PRODUCED CHECKS BELONG HERE. Gate 11 fails closed on an
-  # absent check — correctly, since "this repo does not run it" is
-  # indistinguishable from "it has not run yet" without a per-repo declaration.
-  # So a name declared here that a repository never produces makes checksGreen
-  # UNPASSABLE on that repository, permanently.
-  #
-  # That is what happened: `Build and scan image` (3 of 8 enrolled repos) and
-  # `Terraform plan (speculative)` (1 of 8) were declared globally, which closed
-  # the eligibility funnel on 7 of 8 repos and made the shadow phase measure
-  # which repositories have a job with a particular name. Both moved to per-repo
-  # overrides below. Measured 2026-08-28.
-  #
-  # The three Cycode contexts are produced by all eight enrolled repositories.
-  #
-  # DISTINCT FROM signalChecks above, which decides when the RISK grade is
-  # final. These lists overlap on the Cycode contexts because both care about
-  # scanners, not because they are the same question: this one asks "may we
-  # automate this at all", the other "have our inputs arrived".
-  blockingChecks:
-    - "Cycode: SAST"
-    - "Cycode: Secrets"
-    - "Cycode: Vulnerable Dependencies"
-```
-
-- [ ] **Step 5: Add the per-repo overrides**
-
-A per-repo list **replaces** the global one, so each override restates the Cycode contexts. On the `platform-cicd-v2-demo` entry:
-
-```yaml
-  - repo: bankrate/platform-cicd-v2-demo
-    classification: sandbox
-    ciTrustTier: 2
-    mode: shadow
-    stageEnabled: false
-    # REPLACES the global list, never extends it — so the Cycode contexts are
-    # restated. The only enrolled repo that produces all five.
-    blockingChecks:
-      - "Cycode: SAST"
-      - "Cycode: Secrets"
-      - "Cycode: Vulnerable Dependencies"
-      - "Build and scan image"
-      - "Terraform plan (speculative)"
-```
-
-On `conductor-api` and `portkey`, the same block without the Terraform line:
-
-```yaml
-    # Produces an image scan but no speculative plan under that job name.
-    blockingChecks:
-      - "Cycode: SAST"
-      - "Cycode: Secrets"
-      - "Cycode: Vulnerable Dependencies"
-      - "Build and scan image"
-```
-
-**Leave `conductor`, `zapp`, `brand-identity-pages-app`, `redirect-management-api-v2` and `crank` with no override** — they inherit the three Cycode contexts, which is exactly what they produce.
-
-`zapp` contains the string `Terraform plan (speculative)` in its own workflows but did not produce the check on the sampled pull request. Do **not** add an override for it on the strength of a grep: an omitted check makes the gate looser, which is visible in the weekly report and safe in shadow mode, whereas a wrongly-declared one silently closes the funnel again. Note it for follow-up instead.
-
-- [ ] **Step 6: Build, test, commit**
-
-```bash
-pnpm build && pnpm test
-grep -c "blockingChecks" src/generated/rules.ts
-```
-
-Expected: PASS, and 4 occurrences in the generated file (one global, three per-repo).
-
-```bash
-git add policy-rules.yaml src/generated/rules.ts tests/gates.test.ts tests/build-rules.test.ts
-git commit -m "fix(policy): declare only universally-produced checks as globally blocking
-
-Build and scan image (3 of 8 enrolled repos) and Terraform plan (speculative)
-(1 of 8) were declared globally. Gate 11 fails closed on absence, so checksGreen
-was unpassable on 7 of 8 repos regardless of the pull request. Both move to
-per-repo overrides. This is a policy loosening: candidate counts will rise."
-```
-
-- [ ] **Step 7: Say so out loud**
-
-This is a **policy loosening**, not a silent bug fix. Before it deploys, tell the captain in one line that candidate counts and the risk corpus will both grow, and that a jump in the next weekly report is the intended outcome rather than a regression to investigate.
-
----
-
-### Task 3: Correct the `final` flag on the 16 affected records
+### Task 2: Correct the `final` flag on the 16 affected records
 
 **Files:**
 - Create: `scripts/repair-final-flag.mjs`
@@ -714,7 +516,7 @@ Then re-run the dry run. Expected: `0 affected` — that is the idempotence chec
 
 ---
 
-### Task 4: Verify the fix on a live pull request
+### Task 3: Verify the fix on a live pull request
 
 The one thing no unit test can prove: that a real re-evaluation now happens and overwrites the stale check run.
 
@@ -774,11 +576,13 @@ none (candidate): 12    botAllowlisted: 5    changeClass: 17
 checksGreen: 34         classificationPermits: 24    conventionalTitle: 5
 ```
 
-Expected direction: `checksGreen` falls, `none (candidate)` rises. If `checksGreen` has not moved after several evaluations across `conductor`, `crank` or `brand-identity-pages-app`, Task 2's override list is wrong for those repos — re-run Task 2 Step 1.
+Expected direction: records that were wrongly `final` become provisional and then resolve, so `checksGreen`'s *gate-verdict* count falls as stale evidence is replaced by fresh evidence.
+
+**`checksGreen` will remain the top `failedGate` after this plan, and that is correct** — it is unpassable on 7 of 8 repos because the global list declares checks they never produce. That is the separate defect, and `2026-08-28-ci-baseline-gate.md` fixes it. Do not treat an unchanged `failedGate: checksGreen` count as this plan failing.
 
 ---
 
-### Task 5: Update the docs
+### Task 4: Update the docs
 
 **Files:**
 - Modify: `docs/policy.md` (gate 11's description, and the `final` filtering guidance)
@@ -810,11 +614,6 @@ Gate 11's row should say that the blocking list is the repository's own when it 
   stamped `final` with `checksGreen` failing on absence, permanently skipping
   the `check_suite` re-evaluation in `worker.ts`. `skipped` is not unresolved:
   counting it would leave every unclassified pull request re-evaluating forever.
-- A check name in `blockingChecks` that a repository does not produce on EVERY
-  pull request makes gate 11 unpassable there, because absence fails closed.
-  Only universally-produced checks belong in the global list; everything else
-  is a per-repo override, and an override REPLACES the global list rather than
-  extending it.
 ```
 
 - [ ] **Step 4: Commit**
@@ -828,12 +627,12 @@ git commit -m "docs: record the narrowed finality rule and the blocking-check se
 
 ## Self-review notes
 
-**Spec coverage.** Defect 1 → Task 1. Defect 2 → Task 2. The record repair → Task 3. Live verification of the one property no unit test can reach → Task 4. Docs → Task 5. The spec's out-of-scope items (the retroactive-enrollment sweep, `RECORDED_FIELDS`) have no task here, deliberately.
+**Spec coverage.** The finality defect → Task 1. The record repair → Task 2. Live verification of the one property no unit test can reach → Task 3. Docs → Task 4.
 
-**Task independence.** Tasks 1 and 2 are independent and can be done in either order or in parallel — Task 1 touches `src/evaluate.ts` and `tests/evaluate.test.ts`; Task 2 touches `policy-rules.yaml`, `tests/gates.test.ts` and `tests/build-rules.test.ts`. Task 3's *script* is independent but its **application must follow Task 1's deploy**, and Task 4 needs both.
+The spec's second defect (`blockingChecks` declaring unproduced checks) and its out-of-scope items (the retroactive-enrollment sweep, `RECORDED_FIELDS`) have no task here. The second defect moved to `2026-08-28-ci-baseline-gate.md`; the spec's Defect 2 section is retained as history and its proposed fix is **superseded** — read that section for the measurement, not for the remedy.
 
-**Two tasks are not TDD, and that is correct.** Task 2 is a configuration change against a mechanism that is already tested — `tests/gates.test.ts:243` ("absence is not green") and `:269` ("an override replaces the global list") are precisely the defect and the fix, and they pass today. So Task 2 writes **no new gate tests**; an earlier draft of this plan proposed two that duplicated those exactly. Its Step 2 runs the existing pair as a gate and says to stop if either fails, since that would mean the mechanism the config move relies on is broken. The single test it does add is a `build-rules` acceptance case, because nothing currently asserts that a *valid* per-repo list validates, and this task adds three. Task 4 is verification, not construction.
+**Task independence.** Task 1 is self-contained. Task 2's *script* is independent but its **application must follow Task 1's deploy**, or the running service keeps writing new wrong records behind it. Task 3 needs both.
 
-**One measurement to re-run rather than trust.** Task 2's override lists come from sampling one pull request per repository on 2026-08-28. Step 1 re-runs it and adds the check that matters more — whether each non-universal check appears on *every* pull request, not just the sampled one. A path-filtered image scan declared as blocking would fail gate 11 on every dependency bump, which is the exact population this service evaluates.
+**Task 3 is verification, not construction**, so it is deliberately not TDD.
 
-**Type consistency.** `CI_REPORTING_GATES` is defined once in `src/evaluate.ts` and exported, and Task 3's script mirrors it as a plain array with a comment naming the source — a `.mjs` one-off importing a TypeScript source would need `tsx`, which it already requires, but duplicating two strings is cheaper than coupling a throwaway script to the module's export surface.
+**Type consistency.** `CI_REPORTING_GATES` is defined once in `src/evaluate.ts` and exported, and Task 2's script mirrors it as a plain array with a comment naming the source — duplicating two strings is cheaper than coupling a throwaway `.mjs` to the module's export surface. The CI-baseline plan imports the same export rather than redefining it.
