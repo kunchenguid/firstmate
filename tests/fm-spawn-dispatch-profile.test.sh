@@ -494,14 +494,17 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
     --model cursor-grok-4.5-high --effort high)
   status=$?
-  expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
+  expect_code 0 "$status" "cursor scout spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --force --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
-    "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
+  assert_contains "$launch" "--trust --auto-review --sandbox enabled --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+    "cursor launch did not carry trust, review, sandbox, model, and exact workspace flags"
+  # --force / --yolo would defeat --sandbox enabled, so neither may reach the launch.
+  assert_not_contains "$launch" " --force" "cursor launch must not defeat its sandbox with --force"
+  assert_not_contains "$launch" " --yolo" "cursor launch must not defeat its sandbox with --yolo"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the
   # real installed names.
@@ -528,7 +531,7 @@ test_cursor_refuses_model_absent_from_live_catalog() {
   rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
     --model cursor-grok-4.5)
   status=$?
   expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
@@ -547,7 +550,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   read_case_record "$rec"
 
   FM_TEST_CURSOR_LIST_STATUS=124 \
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
       --model cursor-catalog-unreachable)
   status=$?
   expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
@@ -556,6 +559,38 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
     "failed catalog lookup incorrectly removed the requested model"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-catalog-unreachable default
   pass "cursor preserves the requested model when its live catalog is unreachable"
+}
+
+test_cursor_ship_spawn_is_refused_for_unattended_implementation() {
+  local rec id out status
+  id=profile-cursor-ship-bar-z6f
+  rec=$(make_spawn_case profile-cursor-ship-bar cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a cursor ship spawn must be refused, not launched into a pane that can park"
+  assert_contains "$out" "cursor cannot run an unattended ship spawn" \
+    "cursor ship refusal did not name the unattended ship spawn as the refused case"
+  assert_contains "$out" "codex" "cursor ship refusal must name codex as a supported alternative"
+  assert_contains "$out" "claude" "cursor ship refusal must name claude as a supported alternative"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor ship refusal must happen before any launch is sent"
+  pass "cursor ship spawns are refused and name codex and claude instead"
+}
+
+test_cursor_scout_spawn_is_still_allowed() {
+  local rec id out status launch
+  id=profile-cursor-scout-ok-z6g
+  rec=$(make_spawn_case profile-cursor-scout-ok cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "the cursor bar must be scoped to ship spawns and leave scouts working"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--trust --auto-review --sandbox enabled" \
+    "cursor scout launch did not keep the sandboxed review posture"
+  pass "cursor scout spawns are unaffected by the ship bar"
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
@@ -810,6 +845,8 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_ship_spawn_is_refused_for_unattended_implementation
+test_cursor_scout_spawn_is_still_allowed
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
