@@ -48,6 +48,7 @@ STATE_INITIALIZED_BYTES = b"firstmate.context-handoff.state.v1\n"
 COMPACTION_BINDING_SCHEMA = "firstmate.context-handoff.compaction-binding.v1"
 COMPACTION_RETIREMENT_SCHEMA = "firstmate.context-handoff.compaction-retirement.v1"
 COMPACTION_ATTEMPT_SCHEMA = "firstmate.context-handoff.compaction-attempt.v1"
+PI_COMPACTION_BINDING_SCHEMA = "firstmate.context-handoff.pi-compaction-binding.v1"
 EXECUTION_CLAIM_SCHEMA = "firstmate.context-handoff.execution-claim.v1"
 HANDOFF_SCHEMA = "claude-obsidian.handoff.v1"
 TRANSACTION_SCHEMA = "claude-obsidian.transaction.v1"
@@ -1371,6 +1372,148 @@ def compaction_attempt_result(status: str, bindings: Sequence[Mapping[str, str]]
     return result
 
 
+def pi_compaction_binding_path(layout: StateLayout, session_hash: str) -> Path:
+    if not HEX64.fullmatch(session_hash):
+        raise HandoffError("PI_ATTEMPT", "Pi compaction session identity is invalid")
+    return layout.bindings / f"pi-compaction-{session_hash[:48]}.json"
+
+
+def read_pi_compaction_binding(path: Path) -> dict[str, Any]:
+    value = read_json_file(path, max_bytes=32 * 1024)
+    expected = {
+        "schema",
+        "attempt_id",
+        "source_session_hash",
+        "process_capability_sha256",
+        "process_generation",
+        "process_platform",
+        "process_boot_id",
+        "process_pid",
+        "process_group",
+        "process_session",
+        "process_start_token",
+        "trigger",
+        "bindings",
+        "terminal_outcome",
+        "terminal_reason",
+        "terminal_at",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or value.get("schema") != PI_COMPACTION_BINDING_SCHEMA
+        or not re.fullmatch(r"pi-attempt-[0-9a-f]{48}", str(value.get("attempt_id", "")))
+        or not HEX64.fullmatch(str(value.get("source_session_hash", "")))
+        or not HEX64.fullmatch(str(value.get("process_capability_sha256", "")))
+        or not isinstance(value.get("process_generation"), int)
+        or value.get("process_generation", 0) < 1
+        or value.get("process_platform") not in {"linux", "darwin", "test"}
+        or not isinstance(value.get("process_pid"), int)
+        or value.get("process_pid", 0) < 1
+        or not isinstance(value.get("process_group"), int)
+        or value.get("process_group", 0) < 1
+        or not isinstance(value.get("process_session"), int)
+        or value.get("process_session", 0) < 1
+        or not isinstance(value.get("process_start_token"), str)
+        or value.get("trigger") not in TRIGGERS
+    ):
+        raise HandoffError("PI_ATTEMPT", "durable Pi compaction binding is invalid")
+    platform = value["process_platform"]
+    boot_id = value.get("process_boot_id")
+    if (platform in {"linux", "test"} and (not isinstance(boot_id, str) or not boot_id):
+        raise HandoffError("PI_ATTEMPT", "durable Pi process boot identity is invalid")
+    if platform == "darwin" and boot_id is not None:
+        raise HandoffError("PI_ATTEMPT", "durable Pi process boot identity is invalid")
+    value["bindings"] = normalize_compaction_bindings(value.get("bindings"))
+    terminal = value.get("terminal_outcome")
+    if terminal is None:
+        if value.get("terminal_reason") is not None or value.get("terminal_at") is not None:
+            raise HandoffError("PI_ATTEMPT", "durable Pi terminal binding is incomplete")
+    elif (
+        terminal not in {"succeeded", "failed"}
+        or not isinstance(value.get("terminal_reason"), str)
+        or not value["terminal_reason"]
+        or not isinstance(value.get("terminal_at"), str)
+    ):
+        raise HandoffError("PI_ATTEMPT", "durable Pi terminal binding is invalid")
+    return value
+
+
+def pi_process_claim_matches(binding: Mapping[str, Any], claim: Mapping[str, Any]) -> bool:
+    return all(binding.get(name) == claim.get(name) for name in (
+        "process_capability_sha256",
+        "process_generation",
+        "process_platform",
+        "process_boot_id",
+        "process_pid",
+        "process_group",
+        "process_session",
+        "process_start_token",
+    ))
+
+
+def apply_pi_terminal_binding(layout: StateLayout, config: Mapping[str, Any], binding: Mapping[str, Any]) -> dict[str, Any]:
+    terminal = binding.get("terminal_outcome")
+    if terminal not in {"succeeded", "failed"}:
+        raise HandoffError("PI_ATTEMPT", "Pi compaction attempt has no terminal result")
+    body = {
+        "schema": COMPACTION_ATTEMPT_SCHEMA,
+        "bindings": binding["bindings"],
+        "status": terminal,
+        "trigger": binding["trigger"],
+        "reason": binding["terminal_reason"],
+        "recorded_at": binding["terminal_at"],
+    }
+    journal = {"attempt_id": "attempt-" + sha256_bytes(canonical_json(body))[:48], **body}
+    path = layout.bindings / f"{journal['attempt_id']}.json"
+    atomic_create(path, canonical_json(journal))
+    failpoint("after-compaction-attempt-before-queues")
+    result = apply_compaction_attempt(layout, config, journal)
+    durable_unlink(path)
+    return result
+
+
+def seal_pi_attempt(home: Path, config: Mapping[str, Any], session_hash: str, trigger: str) -> dict[str, Any]:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        claim = current_pi_process_claim()
+        path = pi_compaction_binding_path(layout, session_hash)
+        if path.exists():
+            existing = read_pi_compaction_binding(path)
+            if existing["source_session_hash"] != session_hash:
+                raise HandoffError("PI_ATTEMPT", "Pi compaction binding belongs to another session")
+            if existing["terminal_outcome"] is None:
+                if pi_process_claim_matches(existing, claim):
+                    return {
+                        **compaction_attempt_result("already-sealed", existing["bindings"]),
+                        "attempt_id": existing["attempt_id"],
+                    }
+                if pi_process_binding_owner_is_live(existing):
+                    return {"status": "attempt-conflict"}
+                quarantine(layout, existing["attempt_id"], "dead-pi-compaction-attempt-retired", source_session_hash=session_hash)
+            else:
+                apply_pi_terminal_binding(layout, config, existing)
+        result = _seal_candidates_locked(layout, config, "pi", session_hash, trigger)
+        if result.get("status") not in {"sealed", "already-sealed"}:
+            if path.exists():
+                durable_unlink(path)
+            return result
+        attempt_id = "pi-attempt-" + os.urandom(24).hex()
+        binding = {
+            "schema": PI_COMPACTION_BINDING_SCHEMA,
+            "attempt_id": attempt_id,
+            "source_session_hash": session_hash,
+            **claim,
+            "trigger": trigger,
+            "bindings": normalize_compaction_bindings(result.get("bindings")),
+            "terminal_outcome": None,
+            "terminal_reason": None,
+            "terminal_at": None,
+        }
+        atomic_replace(path, canonical_json(binding))
+        return {**result, "attempt_id": attempt_id}
+
+
 def seal_candidates(
     home: Path,
     source_harness: str,
@@ -1710,7 +1853,14 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
         return seal_binding_failure_receipt(home, static_config, args.source_harness, session_hash, args.trigger, exc)
     if not config_enabled(config, "sealing_enabled"):
         return {"status": "disabled"}
-    result = seal_with_failure_receipt(home, args.source_harness, session_hash, args.trigger)
+    if args.source_harness == "pi" and not args.standalone:
+        try:
+            result = seal_pi_attempt(home, config, session_hash, args.trigger)
+        except (HandoffError, OSError) as raw_exc:
+            exc = raw_exc if isinstance(raw_exc, HandoffError) else HandoffError("STATE_DURABILITY", "Pi compaction binding publication was not durable")
+            return seal_binding_failure_receipt(home, static_config, args.source_harness, session_hash, args.trigger, exc)
+    else:
+        result = seal_with_failure_receipt(home, args.source_harness, session_hash, args.trigger)
     if args.standalone and result.get("status") in {"sealed", "already-sealed"}:
         mark_compaction(home, normalize_compaction_bindings(result.get("bindings")), True, args.trigger, "standalone-manual-seal")
         deliver_pending(home)
@@ -1838,24 +1988,84 @@ def mark_compaction(home: Path, bindings: Sequence[Mapping[str, str]], succeeded
         return _mark_compaction_locked(layout, config, bindings, succeeded, trigger, reason)
 
 
+def mark_pi_compaction(
+    home: Path,
+    session_hash: str,
+    attempt_id: str,
+    bindings: Sequence[Mapping[str, str]],
+    succeeded: bool,
+    trigger: str,
+    reason: str,
+) -> dict[str, Any]:
+    config = load_config(home)
+    if config is None:
+        return {"status": "disabled"}
+    layout = StateLayout(home)
+    with state_lock(layout):
+        path = pi_compaction_binding_path(layout, session_hash)
+        if not path.exists():
+            write_receipt(layout, "compaction", "rejected", "pi-attempt-unbound", attempt_id=attempt_id, trigger=trigger)
+            return {"status": "outcome-rejected"}
+        binding = read_pi_compaction_binding(path)
+        claim = current_pi_process_claim()
+        normalized = normalize_compaction_bindings([dict(item) for item in bindings])
+        if (
+            binding["source_session_hash"] != session_hash
+            or binding["attempt_id"] != attempt_id
+            or binding["bindings"] != normalized
+            or binding["trigger"] != trigger
+            or not pi_process_claim_matches(binding, claim)
+        ):
+            write_receipt(layout, "compaction", "rejected", "pi-attempt-authority-mismatch", attempt_id=attempt_id, trigger=trigger)
+            return {"status": "outcome-rejected"}
+        terminal = "succeeded" if succeeded else "failed"
+        if binding["terminal_outcome"] is not None and binding["terminal_outcome"] != terminal:
+            write_receipt(layout, "compaction", "rejected", "pi-terminal-outcome-immutable", attempt_id=attempt_id, trigger=trigger)
+            return {"status": "outcome-rejected"}
+        if binding["terminal_outcome"] is None:
+            binding["terminal_outcome"] = terminal
+            binding["terminal_reason"] = reason
+            binding["terminal_at"] = now_utc()
+            atomic_replace(path, canonical_json(binding))
+            failpoint("after-pi-terminal-before-queues")
+        return apply_pi_terminal_binding(layout, config, binding)
+
+
 def command_compaction_outcome(args: argparse.Namespace) -> dict[str, Any]:
     home = resolve_home(args.fm_home)
     event = parse_event_stdin()
     trigger = event.get("trigger")
     raw_bindings = event.get("bindings")
+    attempt_id = event.get("attempt_id")
+    supplied_session = event.get("session_id")
     if raw_bindings is None and isinstance(event.get("record_id"), str) and isinstance(event.get("envelope_sha256"), str):
         raw_bindings = [{"record_id": event["record_id"], "envelope_sha256": event["envelope_sha256"]}]
     try:
         bindings = normalize_compaction_bindings(raw_bindings)
     except HandoffError:
         bindings = []
-    if not bindings or trigger not in TRIGGERS:
+    if (
+        not bindings
+        or trigger not in TRIGGERS
+        or not isinstance(attempt_id, str)
+        or re.fullmatch(r"pi-attempt-[0-9a-f]{48}", attempt_id) is None
+        or not isinstance(supplied_session, str)
+        or not supplied_session
+    ):
         layout = StateLayout(home)
         with state_lock(layout):
             write_receipt(layout, "compaction", "failed", "outcome-without-seal-binding", trigger=str(trigger or "unknown"))
         return {"status": "unbound-outcome"}
-    result = mark_compaction(home, bindings, args.outcome == "success", trigger, str(event.get("reason") or args.outcome))
-    if args.outcome == "success":
+    result = mark_pi_compaction(
+        home,
+        hash_session("pi", supplied_session),
+        attempt_id,
+        bindings,
+        args.outcome == "success",
+        trigger,
+        str(event.get("reason") or args.outcome),
+    )
+    if args.outcome == "success" and result.get("status") == "compaction-succeeded":
         raw_deadline = event.get("adapter_deadline_epoch_ms")
         deadline: float | None = None
         if isinstance(raw_deadline, (int, float)):
@@ -2391,6 +2601,117 @@ def current_process_claim() -> dict[str, Any]:
     if sys.platform == "darwin":
         return darwin_process_claim(process_group)
     raise HandoffError("PROCESS_CAPABILITY", "the current platform lacks a collision-safe Claude process generation")
+
+
+def linux_pi_process_claim(process_pid: int) -> dict[str, Any]:
+    boot_id = current_linux_boot_id()
+    try:
+        info = (Path("/proc") / str(process_pid) / "stat").read_text(encoding="utf-8")
+        close = info.rfind(")")
+        fields = info[close + 1 :].split() if close >= 0 else []
+        process_group = int(fields[2])
+        process_session = int(fields[3])
+        start_time = fields[19]
+        owner = (Path("/proc") / str(process_pid)).stat().st_uid
+    except (OSError, IndexError, ValueError) as exc:
+        raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from exc
+    if owner != os.getuid() or not start_time.isdigit() or boot_id is None:
+        raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is inconsistent")
+    identity = f"pi-linux\0{boot_id}\0{process_pid}\0{process_group}\0{process_session}\0{start_time}\0{owner}"
+    return {
+        "process_capability_sha256": sha256_bytes(identity.encode("utf-8")),
+        "process_generation": int(start_time),
+        "process_platform": "linux",
+        "process_boot_id": boot_id,
+        "process_pid": process_pid,
+        "process_group": process_group,
+        "process_session": process_session,
+        "process_start_token": start_time,
+    }
+
+
+def darwin_pi_process_claim(process_pid: int) -> dict[str, Any]:
+    class ProcBSDInfo(ctypes.Structure):
+        _fields_ = [
+            ("pbi_flags", ctypes.c_uint32),
+            ("pbi_status", ctypes.c_uint32),
+            ("pbi_xstatus", ctypes.c_uint32),
+            ("pbi_pid", ctypes.c_uint32),
+            ("pbi_ppid", ctypes.c_uint32),
+            ("pbi_uid", ctypes.c_uint32),
+            ("pbi_gid", ctypes.c_uint32),
+            ("pbi_ruid", ctypes.c_uint32),
+            ("pbi_rgid", ctypes.c_uint32),
+            ("pbi_svuid", ctypes.c_uint32),
+            ("pbi_svgid", ctypes.c_uint32),
+            ("rfu_1", ctypes.c_uint32),
+            ("pbi_comm", ctypes.c_char * 16),
+            ("pbi_name", ctypes.c_char * 32),
+            ("pbi_nfiles", ctypes.c_uint32),
+            ("pbi_pgid", ctypes.c_uint32),
+            ("pbi_pjobc", ctypes.c_uint32),
+            ("e_tdev", ctypes.c_uint32),
+            ("e_tpgid", ctypes.c_uint32),
+            ("pbi_nice", ctypes.c_int32),
+            ("pbi_start_tvsec", ctypes.c_uint64),
+            ("pbi_start_tvusec", ctypes.c_uint64),
+        ]
+
+    try:
+        library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        proc_pidinfo = library.proc_pidinfo
+        proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        proc_pidinfo.restype = ctypes.c_int
+        value = ProcBSDInfo()
+        size = ctypes.sizeof(value)
+        result = proc_pidinfo(process_pid, 3, 0, ctypes.byref(value), size)
+        process_session = os.getsid(process_pid)
+    except (OSError, AttributeError) as exc:
+        raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from exc
+    if result != size or value.pbi_pid != process_pid or value.pbi_uid != os.getuid() or value.pbi_start_tvusec >= 1_000_000:
+        raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is inconsistent")
+    start_token = f"{value.pbi_start_tvsec}:{value.pbi_start_tvusec}"
+    identity = f"pi-darwin\0{process_pid}\0{value.pbi_pgid}\0{process_session}\0{start_token}\0{value.pbi_uid}"
+    return {
+        "process_capability_sha256": sha256_bytes(identity.encode("utf-8")),
+        "process_generation": int(value.pbi_start_tvsec) * 1_000_000 + int(value.pbi_start_tvusec),
+        "process_platform": "darwin",
+        "process_boot_id": None,
+        "process_pid": process_pid,
+        "process_group": int(value.pbi_pgid),
+        "process_session": process_session,
+        "process_start_token": start_token,
+    }
+
+
+def current_pi_process_claim() -> dict[str, Any]:
+    if os.environ.get("FM_HANDOFF_TESTING") == "1" and os.environ.get("FM_HANDOFF_TEST_PROCESS_CAPABILITY") is not None:
+        claim = current_process_claim()
+        return {**claim, "process_pid": claim["process_generation"]}
+    process_pid = os.getppid()
+    if sys.platform.startswith("linux"):
+        return linux_pi_process_claim(process_pid)
+    if sys.platform == "darwin":
+        return darwin_pi_process_claim(process_pid)
+    raise HandoffError("PI_PROCESS_CAPABILITY", "the current platform lacks a collision-safe Pi process generation")
+
+
+def pi_process_binding_owner_is_live(value: Mapping[str, Any]) -> bool:
+    platform = value.get("process_platform")
+    process_pid = value.get("process_pid")
+    if not isinstance(platform, str) or not isinstance(process_pid, int) or process_pid < 1:
+        return True
+    if process_binding_boot_is_current(value) is False:
+        return False
+    if platform == "test" and os.environ.get("FM_HANDOFF_TESTING") == "1":
+        live = os.environ.get("FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY")
+        boot_id = value.get("process_boot_id")
+        return isinstance(boot_id, str) and bool(live) and value.get("process_capability_sha256") == sha256_bytes(f"test\0{boot_id}\0{live}".encode("utf-8"))
+    try:
+        claim = linux_pi_process_claim(process_pid) if platform == "linux" else darwin_pi_process_claim(process_pid) if platform == "darwin" else None
+    except HandoffError:
+        return False
+    return claim is not None and pi_process_claim_matches(value, claim)
 
 
 def current_process_identity() -> tuple[str, int]:

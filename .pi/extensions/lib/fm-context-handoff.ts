@@ -7,13 +7,16 @@ type RecordBinding = {
 };
 
 type SealBinding = {
+  attemptId: string;
   bindings: RecordBinding[];
+  sessionId: string;
   trigger: "manual" | "threshold" | "overflow";
   terminal?: "success" | "failure";
   terminalReason?: string;
 };
 
 type HandoffResult = {
+  attempt_id?: string;
   status?: string;
   had_candidates?: boolean;
   record_id?: string;
@@ -51,16 +54,16 @@ function exactBindings(result: HandoffResult): RecordBinding[] | null {
   return bindings;
 }
 
-function exactSealResult(result: HandoffResult): RecordBinding[] | null {
+function exactSealResult(result: HandoffResult): { attemptId: string; bindings: RecordBinding[] } | null {
   const bindings = exactBindings(result);
-  if (!bindings) return null;
+  if (!bindings || typeof result.attempt_id !== "string" || !/^pi-attempt-[0-9a-f]{48}$/u.test(result.attempt_id)) return null;
   const keys = Object.keys(result).sort();
   const expected = bindings.length === 1
-    ? ["bindings", "envelope_sha256", "record_id", "status"]
-    : ["bindings", "status"];
+    ? ["attempt_id", "bindings", "envelope_sha256", "record_id", "status"]
+    : ["attempt_id", "bindings", "status"];
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null;
   if (bindings.length === 1 && (result.record_id !== bindings[0].record_id || result.envelope_sha256 !== bindings[0].envelope_sha256)) return null;
-  return bindings;
+  return { attemptId: result.attempt_id, bindings };
 }
 
 function exactNoopResult(result: HandoffResult): boolean {
@@ -191,7 +194,9 @@ export function registerContextHandoff(
       fmHome,
       ["compaction-outcome", binding.terminal],
       {
+        attempt_id: binding.attemptId,
         bindings: binding.bindings,
+        session_id: binding.sessionId,
         trigger: binding.trigger,
         reason: binding.terminalReason,
       },
@@ -203,16 +208,19 @@ export function registerContextHandoff(
 
   pi.on("session_before_compact", async (event, ctx) => {
     if (pendingSeal && !(await persistPendingOutcome())) return { cancel: true };
+    const currentSessionId = sessionId(ctx);
     const result = await runHandoff(
       root,
       fmHome,
       ["seal", "--source-harness", "pi", "--trigger", event.reason],
-      { session_id: sessionId(ctx) },
+      { session_id: currentSessionId },
     );
-    const bindings = exactSealResult(result);
-    if ((result.status === "sealed" || result.status === "already-sealed") && bindings) {
+    const sealed = exactSealResult(result);
+    if ((result.status === "sealed" || result.status === "already-sealed") && sealed) {
       pendingSeal = {
-        bindings,
+        attemptId: sealed.attemptId,
+        bindings: sealed.bindings,
+        sessionId: currentSessionId,
         trigger: event.reason,
       };
       return;
