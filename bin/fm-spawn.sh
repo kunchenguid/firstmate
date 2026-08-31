@@ -635,6 +635,7 @@ NODE_MODULES_ABORT_NODE=
 BEELINE_NODE_MODULES_ACTIVE=0
 BEELINE_NODE_PUBLICATION_OWNED=0
 BEELINE_NODE_RESOLVER_ESM_URL=
+BEELINE_NODE_RUNTIME_ID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -1412,15 +1413,17 @@ native_node_candidate() {
 }
 
 native_node_supports_publication() {
+  local probe_root
+  probe_root="$WT/.fm-node-runtime-probe.$$.$RANDOM.$RANDOM"
   NODE_OPTIONS= "$1" - \
     "$FM_ROOT/bin/fm-beeline-workspace-resolver.cjs" \
-    "$FM_ROOT/bin/fm-beeline-workspace-resolver.mjs" "$WT" <<'JS' \
+    "$FM_ROOT/bin/fm-beeline-workspace-resolver.mjs" "$probe_root" <<'JS' \
     >/dev/null 2>&1
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { pathToFileURL } = require('url');
-const [preload, loader, worktree] = process.argv.slice(2);
+const [preload, loader, root] = process.argv.slice(2);
 
 function remove(entry) {
   let stat;
@@ -1438,12 +1441,24 @@ function remove(entry) {
   }
 }
 
-let root;
+let created = false;
 let status = 1;
+function finish(signalStatus) {
+  try {
+    if (created) remove(root);
+  } finally {
+    created = false;
+  }
+  process.exit(signalStatus);
+}
+process.once('SIGINT', () => finish(130));
+process.once('SIGTERM', () => finish(143));
+process.once('SIGHUP', () => finish(129));
 try {
   if (typeof fs.symlinkSync !== 'function' || typeof fs.linkSync !== 'function' ||
       typeof fs.copyFileSync !== 'function') process.exit(1);
-  root = fs.mkdtempSync(path.join(worktree, '.fm-node-runtime-probe.'));
+  fs.mkdirSync(root);
+  created = true;
   const nodeModules = path.join(root, 'node_modules');
   const packageRoot = path.join(nodeModules, '@beeline', 'probe');
   fs.mkdirSync(packageRoot, { recursive: true });
@@ -1468,23 +1483,55 @@ import('@beeline/probe').then(value => {
   });
   status = result.status === 0 ? 0 : 1;
 } finally {
-  if (root) remove(root);
+  if (created) remove(root);
+  created = false;
 }
 process.exit(status);
 JS
 }
 
+native_node_realpath() {
+  NODE_OPTIONS= "$1" -e \
+    'process.stdout.write(require("fs").realpathSync(process.argv[1]));' \
+    "$1" </dev/null 2>/dev/null
+}
+
+native_node_identity() {
+  NODE_OPTIONS= "$1" -e \
+    'const s=require("fs").statSync(process.argv[1],{bigint:true});process.stdout.write([s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].join(":"));' \
+    "$1" </dev/null 2>/dev/null
+}
+
+beeline_node_runtime_identity_matches() {
+  local current
+  [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ] || return 0
+  native_node_candidate "$NODE_MODULES_ABORT_NODE" || return 1
+  current=$(native_node_identity "$NODE_MODULES_ABORT_NODE") || return 1
+  [ "$current" = "$BEELINE_NODE_RUNTIME_ID" ]
+}
+
+beeline_node_runtime_ready_for_launch() {
+  [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ] || return 0
+  beeline_node_runtime_identity_matches \
+    && native_node_supports_publication "$NODE_MODULES_ABORT_NODE"
+}
+
 native_node_executable() {
-  local candidate directory old_ifs account_home
+  local candidate resolved directory old_ifs account_home
   old_ifs=$IFS
   IFS=:
   for directory in $PATH; do
     [ -n "$directory" ] || directory=.
     candidate="$directory/node"
     case "$candidate" in /*) ;; *) candidate="$PWD/$candidate" ;; esac
-    if native_node_candidate "$candidate" && native_node_supports_publication "$candidate"; then
+    resolved=
+    if native_node_candidate "$candidate"; then
+      resolved=$(native_node_realpath "$candidate") || resolved=
+    fi
+    if [ -n "$resolved" ] && native_node_candidate "$resolved" \
+       && native_node_supports_publication "$resolved"; then
       IFS=$old_ifs
-      printf '%s\n' "$candidate"
+      printf '%s\n' "$resolved"
       return 0
     fi
   done
@@ -1497,8 +1544,13 @@ native_node_executable() {
     "$account_home"/.asdf/installs/*/*/bin/node \
     "$account_home"/.local/share/mise/installs/*/*/bin/node \
     "$account_home"/.mise/installs/*/*/bin/node; do
-    if native_node_candidate "$candidate" && native_node_supports_publication "$candidate"; then
-      printf '%s\n' "$candidate"
+    resolved=
+    if native_node_candidate "$candidate"; then
+      resolved=$(native_node_realpath "$candidate") || resolved=
+    fi
+    if [ -n "$resolved" ] && native_node_candidate "$resolved" \
+       && native_node_supports_publication "$resolved"; then
+      printf '%s\n' "$resolved"
       return 0
     fi
   done
@@ -1585,6 +1637,33 @@ beeline_node_link_matches() {
     "$target" "$expected" </dev/null >/dev/null 2>&1
 }
 
+retract_owned_beeline_node_modules() {
+  local node target anchor staging
+  node=$NODE_MODULES_ABORT_NODE
+  target="$WT/node_modules"
+  anchor=$NODE_MODULES_ABORT_PROBE
+  staging=$NODE_MODULES_ABORT_STAGING
+  [ -n "$node" ] && [ -n "$anchor" ] && [ -n "$staging" ] || return 1
+  NODE_OPTIONS= "$node" - "$target" "$anchor" "$staging" <<'JS'
+const fs = require('fs');
+const path = require('path');
+const [target, anchor, staging] = process.argv.slice(2);
+try {
+  const targetStat = fs.lstatSync(target);
+  const anchorStat = fs.lstatSync(anchor);
+  if (!targetStat.isSymbolicLink() || !anchorStat.isSymbolicLink() ||
+      targetStat.dev !== anchorStat.dev || targetStat.ino !== anchorStat.ino ||
+      path.resolve(path.dirname(target), fs.readlinkSync(target)) !== path.resolve(staging)) {
+    process.exit(1);
+  }
+  fs.unlinkSync(target);
+  if (fs.lstatSync(anchor).nlink !== 1) process.exit(1);
+} catch (_) {
+  process.exit(1);
+}
+JS
+}
+
 share_beeline_node_modules() {
   local source target staging_root staging publication_link publisher_node
   local publish_status setup_signal_status mkdir_status cleanup_status workspace_status
@@ -1594,6 +1673,10 @@ share_beeline_node_modules() {
   [ -d "$source/@beeline" ] || return 0
   publisher_node=$(native_node_executable) || {
     echo "error: Beeline dependency sharing requires a compatible native Node runtime" >&2
+    return 1
+  }
+  BEELINE_NODE_RUNTIME_ID=$(native_node_identity "$publisher_node") || {
+    echo "error: Beeline dependency sharing could not identify its selected Node runtime" >&2
     return 1
   }
   BEELINE_NODE_RESOLVER_ESM_URL=$(NODE_OPTIONS= "$publisher_node" -e \
@@ -1787,7 +1870,7 @@ for (const name of fs.readdirSync(source)) {
   if (name === '@beeline' || name === '.bin') continue;
   const sourceEntry = path.join(source, name);
   const targetEntry = path.join(staging, name);
-  if (name.startsWith('@') && fs.statSync(sourceEntry).isDirectory()) {
+  if (name.startsWith('@') && fs.lstatSync(sourceEntry).isDirectory()) {
     fs.mkdirSync(targetEntry);
     for (const packageName of fs.readdirSync(sourceEntry)) {
       materialize(
@@ -2148,14 +2231,22 @@ function workspaceMap(rootPath) {
   return result;
 }
 
+let exactOwned = false;
 try {
   if (owned === '1') {
-    const targetStat = fs.lstatSync(target);
     const anchorStat = fs.lstatSync(anchor);
+    let targetStat;
+    try {
+      targetStat = fs.lstatSync(target);
+    } catch (error) {
+      if (error.code === 'ENOENT') process.exit(anchorStat.nlink === 1 ? 2 : 3);
+      throw error;
+    }
     if (!targetStat.isSymbolicLink() || !anchorStat.isSymbolicLink() ||
         targetStat.dev !== anchorStat.dev || targetStat.ino !== anchorStat.ino) {
       process.exit(anchorStat.nlink === 1 ? 2 : 3);
     }
+    exactOwned = true;
   }
   const projectWorkspaces = workspaceMap(project);
   const worktreeWorkspaces = workspaceMap(worktree);
@@ -2178,7 +2269,7 @@ try {
     if (projectWorkspaces.has(name) || !sourceNames.has(name)) throw new Error('target-only package');
   }
 } catch (_) {
-  process.exit(1);
+  process.exit(exactOwned ? 4 : 1);
 }
 JS
   case "$status" in
@@ -2201,6 +2292,21 @@ JS
     3)
       cleanup_beeline_node_modules_probe || true
       echo "error: worktree node_modules ownership became ambiguous before worker launch" >&2
+      return 1
+      ;;
+    4)
+      cleanup_status=0
+      if retract_owned_beeline_node_modules; then
+        NODE_MODULES_ABORT_CLEANUP=1
+        cleanup_beeline_node_modules_staging || cleanup_status=$?
+      else
+        cleanup_beeline_node_modules_probe || true
+        cleanup_status=1
+      fi
+      BEELINE_NODE_PUBLICATION_OWNED=0
+      echo "error: owned worktree node_modules failed final Beeline workspace validation" >&2
+      [ "$cleanup_status" -eq 0 ] \
+        || echo "warning: ambiguous dependency publication backing was retained" >&2
       return 1
       ;;
     *)
@@ -3087,6 +3193,19 @@ if [ "$launch_settle_status" -ne 0 ]; then
   trap - INT TERM HUP
   exit "$launch_settle_status"
 fi
+launch_runtime_status=0
+beeline_node_runtime_identity_matches || launch_runtime_status=$?
+if [ -n "$launch_signal_status" ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_signal_status"
+fi
+if [ "$launch_runtime_status" -ne 0 ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  echo "error: selected Beeline Node runtime changed before worker launch" >&2
+  exit "$launch_runtime_status"
+fi
 launch_validation_status=0
 beeline_node_modules_ready_for_launch || launch_validation_status=$?
 if [ -n "$launch_signal_status" ]; then
@@ -3098,6 +3217,25 @@ if [ "$launch_validation_status" -ne 0 ]; then
   spawn_send_key "$T" C-c || true
   trap - INT TERM HUP
   exit "$launch_validation_status"
+fi
+launch_runtime_status=0
+beeline_node_runtime_ready_for_launch || launch_runtime_status=$?
+if [ -n "$launch_signal_status" ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_signal_status"
+fi
+if [ "$launch_runtime_status" -ne 0 ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  echo "error: selected Beeline Node runtime changed before worker launch" >&2
+  exit "$launch_runtime_status"
+fi
+trap '' INT TERM HUP
+if [ -n "$launch_signal_status" ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_signal_status"
 fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0

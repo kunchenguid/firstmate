@@ -15,19 +15,24 @@ if ! command -v node >/dev/null 2>&1; then
   echo "ok - fm-spawn node_modules behavior # SKIP node unavailable"
   exit 0
 fi
-for utility in ln mkdir mv rm readlink false; do
+for utility in cp ln mkdir mv rm readlink; do
   if ! command -v "$utility" >/dev/null 2>&1; then
     echo "ok - fm-spawn node_modules behavior # SKIP $utility unavailable"
     exit 0
   fi
 done
 SYSTEM_NODE=$(NODE_OPTIONS= node -p 'process.execPath')
+CP_BIN=$(command -v cp)
 LN_BIN=$(command -v ln)
 MKDIR_BIN=$(command -v mkdir)
 MV_BIN=$(command -v mv)
 RM_BIN=$(command -v rm)
 READLINK_BIN=$(command -v readlink)
-FALSE_BIN=$(command -v false)
+FALSE_BIN=$(type -P false)
+if [ -z "$FALSE_BIN" ]; then
+  echo "ok - fm-spawn node_modules behavior # SKIP external false unavailable"
+  exit 0
+fi
 
 make_fakebin() {
   local dir=$1 fakebin
@@ -46,6 +51,16 @@ case "${1:-}" in
       if [ "${FM_SIGNAL_AFTER_LAUNCH_PAYLOAD:-0}" = 1 ]; then
         parent=$PPID
         (sleep 0.05; kill -TERM "$parent") &
+      fi
+      if [ -n "${FM_SWAP_NODE_RUNTIME_PATH:-}" ]; then
+        "$FM_TEST_MV_BIN" "$FM_SWAP_NODE_RUNTIME_REPLACEMENT" \
+          "$FM_SWAP_NODE_RUNTIME_PATH"
+      fi
+      if [ -n "${FM_INVALIDATE_OWNED_PUBLICATION_TARGET:-}" ]; then
+        "$FM_TEST_RM_BIN" -f \
+          "$FM_INVALIDATE_OWNED_PUBLICATION_TARGET/node_modules/@beeline/lib"
+        "$FM_TEST_LN_BIN" -s "$FM_INVALIDATE_OWNED_PUBLICATION_PRIMARY" \
+          "$FM_INVALIDATE_OWNED_PUBLICATION_TARGET/node_modules/@beeline/lib"
       fi
     elif [ "${4:-}" = C-c ] && [ -n "${FM_FAKE_LAUNCH_SCRIPT:-}" ]; then
       : > "$FM_FAKE_LAUNCH_SCRIPT"
@@ -337,7 +352,11 @@ run_spawn() {
     FM_NODE_SHIM_MUTATION_PRIMARY="${FM_NODE_SHIM_MUTATION_PRIMARY:-}" \
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
     FM_SIGNAL_AFTER_LAUNCH_PAYLOAD="${FM_SIGNAL_AFTER_LAUNCH_PAYLOAD:-0}" \
-    FM_TEST_LN_BIN="$LN_BIN" FM_TEST_RM_BIN="$RM_BIN" \
+    FM_SWAP_NODE_RUNTIME_PATH="${FM_SWAP_NODE_RUNTIME_PATH:-}" \
+    FM_SWAP_NODE_RUNTIME_REPLACEMENT="${FM_SWAP_NODE_RUNTIME_REPLACEMENT:-}" \
+    FM_INVALIDATE_OWNED_PUBLICATION_TARGET="${FM_INVALIDATE_OWNED_PUBLICATION_TARGET:-}" \
+    FM_INVALIDATE_OWNED_PUBLICATION_PRIMARY="${FM_INVALIDATE_OWNED_PUBLICATION_PRIMARY:-}" \
+    FM_TEST_LN_BIN="$LN_BIN" FM_TEST_MV_BIN="$MV_BIN" FM_TEST_RM_BIN="$RM_BIN" \
     FM_TEST_READLINK_BIN="$READLINK_BIN" \
     FM_FAKE_LAUNCH_SCRIPT="$HOME_DIR/state/fake-pane-launch.sh" \
     PATH="${FM_SPAWN_TEST_PATH:-$FAKEBIN_DIR:$PATH}" \
@@ -526,6 +545,31 @@ test_spawn_preserves_external_package_root_symlinks() {
   pass "fm-spawn preserves external package-root sharing and identity"
 }
 
+test_spawn_preserves_external_scoped_dependency_symlinks() {
+  local rec id out status external_scope resolved
+  id=node-modules-external-scope-z0e
+  rec=$(make_case external-scope "$id")
+  read_case "$rec"
+  external_scope="$TMP_ROOT/external-scope-source"
+  mkdir -p "$external_scope/pkg"
+  printf 'external scope v1\n' > "$external_scope/pkg/index.js"
+  "$LN_BIN" -s "$external_scope" "$PROJECT_DIR/node_modules/@vendor"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should preserve an external scoped dependency link"
+  assert_contains "$out" "spawned $id" "external scoped dependency did not launch the worker"
+  [ -L "$WORKTREE_DIR/node_modules/@vendor" ] \
+    || fail "external scoped dependency was materialized instead of linked"
+  resolved=$(cd "$WORKTREE_DIR/node_modules/@vendor" && pwd -P)
+  [ "$resolved" = "$external_scope" ] \
+    || fail "external scoped dependency link changed identity"
+  printf 'external scope v2\n' > "$external_scope/pkg/index.js"
+  [ "$(cat "$WORKTREE_DIR/node_modules/@vendor/pkg/index.js")" = 'external scope v2' ] \
+    || fail "external scoped dependency stopped reflecting live updates"
+  pass "fm-spawn preserves external scoped dependency sharing"
+}
+
 test_spawn_uses_worktree_workspace_manifests() {
   local rec id out status renamed_real expected_renamed_real new_real expected_new_real
   id=node-modules-worktree-manifests-z1aaa
@@ -622,6 +666,39 @@ test_spawn_resolves_script_managed_node_runtime() {
   [ "$result" = compatible ] \
     || fail "pane launch did not pin the compatible Node runtime"
   pass "fm-spawn resolves script-managed Node runtimes before publication"
+}
+
+test_spawn_rejects_runtime_replacement_before_submission() {
+  local rec id out status toolbin account_home runtime replacement candidate
+  id=node-modules-runtime-replacement-z1d
+  rec=$(make_case runtime-replacement "$id")
+  read_case "$rec"
+  toolbin=$(make_toolbin_without_node "$TMP_ROOT/runtime-replacement-tools")
+  account_home="$TMP_ROOT/runtime-replacement-account"
+  runtime="$account_home/.asdf/installs/nodejs/22/bin/node"
+  replacement="$account_home/replacement-node"
+  mkdir -p "${runtime%/*}"
+  "$CP_BIN" "$SYSTEM_NODE" "$runtime"
+  "$CP_BIN" "$FALSE_BIN" "$replacement"
+  chmod +x "$runtime" "$replacement"
+
+  out=$(FM_REJECT_PATH_NODE_PUBLISHER=1 \
+    FM_TEST_ACCOUNT_HOME="$account_home" \
+    FM_SPAWN_TEST_PATH="$FAKEBIN_DIR:$toolbin" \
+    FM_SWAP_NODE_RUNTIME_PATH="$runtime" \
+    FM_SWAP_NODE_RUNTIME_REPLACEMENT="$replacement" run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a replaced Node runtime before submission"
+  assert_contains "$out" "selected Beeline Node runtime changed before worker launch" \
+    "runtime replacement failure was not diagnosed"
+  assert_not_contains "$out" "spawned $id" "replaced Node runtime launched a worker"
+  [ ! -s "$HOME_DIR/state/fake-pane-launch.sh" ] \
+    || fail "runtime replacement left an unsubmitted launch payload"
+  for candidate in "$WORKTREE_DIR"/.fm-node-runtime-probe.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "runtime replacement leaked a compatibility probe"
+  done
+  pass "fm-spawn revalidates its selected Node runtime before submission"
 }
 
 test_spawn_reports_missing_compatible_node_runtime() {
@@ -1053,6 +1130,29 @@ test_spawn_rejects_replacement_after_owned_publication() {
   pass "fm-spawn rejects replacement of its validated publication before launch"
 }
 
+test_spawn_retracts_invalid_exact_owned_publication() {
+  local rec id out status candidate
+  id=node-modules-owned-invalid-z4da
+  rec=$(make_case owned-invalid "$id")
+  read_case "$rec"
+
+  out=$(FM_INVALIDATE_OWNED_PUBLICATION_TARGET="$WORKTREE_DIR" \
+    FM_INVALIDATE_OWNED_PUBLICATION_PRIMARY="$PROJECT_DIR/packages/lib" \
+    run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an invalid exact-owned publication"
+  assert_contains "$out" "owned worktree node_modules failed final" \
+    "exact-owned publication failure was not diagnosed"
+  assert_not_contains "$out" "spawned $id" "invalid exact-owned publication launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "invalid exact-owned publication was not retracted"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "invalid exact-owned publication retained its backing"
+  done
+  pass "fm-spawn retracts an invalid exact-owned publication"
+}
+
 test_spawn_preserves_presubmission_cancellation() {
   local rec id out status
   id=node-modules-presubmit-signal-z4e
@@ -1136,10 +1236,12 @@ test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_shared_dependency_imports_worktree_workspace
 test_spawn_preserves_shared_dependency_symlinks
 test_spawn_preserves_external_package_root_symlinks
+test_spawn_preserves_external_scoped_dependency_symlinks
 test_spawn_uses_worktree_workspace_manifests
 test_spawn_rebases_canonical_absolute_workspace_binary
 test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_resolves_script_managed_node_runtime
+test_spawn_rejects_runtime_replacement_before_submission
 test_spawn_reports_missing_compatible_node_runtime
 test_spawn_does_not_accept_unvalidated_exact_contention
 test_spawn_prevents_path_link_mutation_after_validation
@@ -1158,6 +1260,7 @@ test_spawn_rejects_dependency_source_changes_during_staging
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_rejects_invalid_candidate_before_competing_publication
 test_spawn_rejects_replacement_after_owned_publication
+test_spawn_retracts_invalid_exact_owned_publication
 test_spawn_preserves_presubmission_cancellation
 test_spawn_omits_worktree_deleted_workspace
 test_spawn_rejects_missing_installed_workspace_link
