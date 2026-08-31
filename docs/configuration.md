@@ -303,6 +303,8 @@ On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
 cursor is refused for every ordinary UNATTENDED launch, ship, scout, and secondmate alike, because it runs under `--auto-review --sandbox enabled` and that classifier prompts for any call it does not deem safe, leaving a pane parked on a dialog no one answers while the `cursor-transcript` fold still reads it as working.
 Set `config/crew-harness` or `config/secondmate-harness` to codex or claude for unattended work, since a cursor value there now fails at spawn time.
+The bar holds however cursor was selected, so a home running inside Cursor that leaves both files unset resolves cursor by detection and is refused on the same terms as an explicit value.
+The refusal names the exact knob for that kind, the harness file to set or, for a crewmate or scout, an eligible crew-dispatch profile to add, because firstmate never silently substitutes another adapter for the one this home resolved.
 cursor remains permitted when a person is in the pane or a separately proven outer isolation envelope governs the worker, and each case requires passing `--cursor-exemption attended` or `--cursor-exemption envelope:<name>` on the spawn itself.
 That grant is per invocation and is recorded as `cursor_exemption=` in the task's meta, so it cannot leak to a later spawn in the same shell and an audit can tell the two grounds apart.
 An envelope name is whitelisted to letters, digits, `.`, `_`, and `-` starting on a letter or digit, so a grant can neither be unauditable nor carry a line break into the record that would displace another recorded field.
@@ -389,6 +391,9 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+A schema-valid file whose rules or default name `cursor` is reported as the separate advisory `CREW_DISPATCH: config/crew-dispatch.json - cursor is ineligible for ordinary dispatch here: ...` rather than as invalid, because these rules only ever resolve unattended crewmate and scout spawns and the harness section above refuses cursor for them.
+Such a rule is usable only for a spawn that also passes `--cursor-exemption`, so bootstrap says so here instead of validating clean and letting the spawn fail later.
+That advisory takes the place of the verbose per-rule facts for the run that prints it.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
