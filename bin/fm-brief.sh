@@ -13,10 +13,12 @@
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   repo-name stays a free-form caller-supplied label. It is resolved best-effort
 #   under FM_PROJECTS_OVERRIDE when set, otherwise under $FM_HOME/projects;
-#   projects/<repo-name> and explicit directory paths work too. A repo that
-#   resolves renders its real default branch into the startup base-freshness
-#   check; one that does not still gets the same mandatory check, deferred to the
-#   worker at runtime. An unresolvable label never fails the scaffold.
+#   projects/<repo-name>, explicit directory paths, and a bare name relative to
+#   the caller's cwd work too. Resolution only succeeds when the candidate is
+#   itself a git work-tree ROOT. A repo that resolves renders its real default
+#   branch into the startup base-freshness check; one that does not still gets
+#   the same mandatory check, deferred to the worker at runtime. An unresolvable
+#   label never fails the scaffold.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -88,8 +90,6 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
-# shellcheck source=bin/fm-tangle-lib.sh
-. "$SCRIPT_DIR/fm-tangle-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -208,23 +208,37 @@ resolve_brief_repo() {  # <repo-name-or-directory>
       ;;
   esac
   [ -d "$candidate" ] || return 1
-  git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   resolved=$(CDPATH='' cd -- "$candidate" 2>/dev/null && pwd -P) || return 1
+  # Must BE a work tree root, not merely sit inside one: `projects/` is a
+  # gitignored subdirectory of the firstmate checkout, so an inside-a-work-tree
+  # test resolves any `projects/<name>` that is not itself a clone to the
+  # firstmate repo and renders ITS default branch as that project's base.
+  [ "$(git -C "$resolved" rev-parse --show-toplevel 2>/dev/null)" = "$resolved" ] || return 1
   printf '%s\n' "$resolved"
+}
+
+origin_default_branch_name() {  # <repo-dir>
+  local repo=$1 ref
+  ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
+  case "$ref" in
+    origin/*) printf '%s\n' "${ref#origin/}" ;;
+    *) return 1 ;;
+  esac
 }
 
 # origin/HEAD only supplies the NAME; the comparison must still target the
 # clone's local branch, which may legitimately be ahead of origin. Resolution
 # never reads HEAD: a primary stranded on a feature branch (the worktree tangle
 # bin/fm-tangle-lib.sh exists to detect) would otherwise have that feature branch
-# rendered into the brief as its own base. fm_default_branch encodes the same
-# origin/HEAD-then-local-main/master order the rest of the fleet uses; the loop
-# below covers the residual case where origin names a branch this clone has no
-# local ref for.
+# rendered into the brief as its own base. When origin names a default this clone
+# has no local ref for, resolution FAILS rather than substituting main/master:
+# origin/HEAD is the authority, and presenting some other branch as "your local
+# default branch" would be the same confidently-wrong base this check exists to
+# catch. The main/master guess applies only where no authority exists at all.
 resolve_local_default_branch() {  # <repo-dir>
   local repo=$1 branch
-  if branch=$(fm_default_branch "$repo" 2>/dev/null) \
-    && git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null 2>&1; then
+  if branch=$(origin_default_branch_name "$repo"); then
+    git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null 2>&1 || return 1
     printf '%s\n' "$branch"
     return 0
   fi
@@ -238,12 +252,8 @@ resolve_local_default_branch() {  # <repo-dir>
 }
 
 resolve_origin_default_branch() {  # <repo-dir>
-  local repo=$1 ref branch
-  ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
-  case "$ref" in
-    origin/*) branch=${ref#origin/} ;;
-    *) return 1 ;;
-  esac
+  local repo=$1 branch
+  branch=$(origin_default_branch_name "$repo") || return 1
   git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" >/dev/null 2>&1 || return 1
   printf '%s\n' "$branch"
 }
@@ -373,42 +383,43 @@ REPO=${POS[1]}
 BASE_REF=
 BASE_DESCRIPTION=
 BASE_NEEDS_FETCH=0
+BASE_NO_FETCH_REASON=
 BASE_UNRESOLVED_REASON=
 case "$KIND:$MODE" in
   ship:local-only) BASE_FALLBACK_KIND=local ;;
   *) BASE_FALLBACK_KIND=origin ;;
 esac
 
+set_origin_base() {  # <repo-dir>
+  local branch
+  branch=$(resolve_origin_default_branch "$1") || return 1
+  BASE_REF="origin/$branch"
+  BASE_DESCRIPTION="the freshly fetched default branch \`$BASE_REF\`"
+  BASE_NEEDS_FETCH=1
+}
+
+set_local_base() {  # <repo-dir> <why-no-fetch>
+  local branch
+  branch=$(resolve_local_default_branch "$1") || return 1
+  BASE_REF=$branch
+  BASE_DESCRIPTION="your local default branch \`$branch\`"
+  BASE_NO_FETCH_REASON=$2
+}
+
 if REPO_DIR=$(resolve_brief_repo "$REPO"); then
   case "$KIND:$MODE" in
     ship:local-only)
-      if DEFAULT_BRANCH=$(resolve_local_default_branch "$REPO_DIR"); then
-        BASE_REF=$DEFAULT_BRANCH
-        BASE_DESCRIPTION="your local default branch \`$DEFAULT_BRANCH\`"
-      else
-        BASE_UNRESOLVED_REASON="This brief could not determine the local default branch of \`$REPO\`"
-      fi
+      set_local_base "$REPO_DIR" "This task lands locally, so do not fetch" \
+        || BASE_UNRESOLVED_REASON="This brief could not determine the local default branch of \`$REPO\`"
       ;;
     ship:*)
-      if DEFAULT_BRANCH=$(resolve_origin_default_branch "$REPO_DIR"); then
-        BASE_REF="origin/$DEFAULT_BRANCH"
-        BASE_DESCRIPTION="the freshly fetched default branch \`$BASE_REF\`"
-        BASE_NEEDS_FETCH=1
-      else
-        BASE_UNRESOLVED_REASON="This brief could not determine origin's default branch for \`$REPO\`"
-      fi
+      set_origin_base "$REPO_DIR" \
+        || BASE_UNRESOLVED_REASON="This brief could not determine origin's default branch for \`$REPO\`"
       ;;
     scout:*)
-      if DEFAULT_BRANCH=$(resolve_origin_default_branch "$REPO_DIR"); then
-        BASE_REF="origin/$DEFAULT_BRANCH"
-        BASE_DESCRIPTION="the freshly fetched default branch \`$BASE_REF\`"
-        BASE_NEEDS_FETCH=1
-      elif DEFAULT_BRANCH=$(resolve_local_default_branch "$REPO_DIR"); then
-        BASE_REF=$DEFAULT_BRANCH
-        BASE_DESCRIPTION="your local default branch \`$DEFAULT_BRANCH\`"
-      else
-        BASE_UNRESOLVED_REASON="This brief could not determine a default branch for \`$REPO\`"
-      fi
+      set_origin_base "$REPO_DIR" \
+        || set_local_base "$REPO_DIR" "Origin's default branch could not be resolved, so do not fetch" \
+        || BASE_UNRESOLVED_REASON="This brief could not determine a default branch for \`$REPO\`"
       ;;
   esac
 else
@@ -449,7 +460,7 @@ $step. **Check your base before starting work.** Refresh the remote exactly once
 EOF
   else
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
-$step. **Check your base before starting work.** This task lands locally, so do not fetch; measure against the local branch:
+$step. **Check your base before starting work.** $BASE_NO_FETCH_REASON; measure against the local branch:
    \`git rev-list --count \$(git merge-base HEAD $BASE_REF)..$BASE_REF\`
    Only \`0\` passes against $BASE_DESCRIPTION.
    If the count is not \`0\`, rebase onto \`$BASE_REF\` before reading or writing anything.
@@ -559,7 +570,11 @@ case "$MODE" in
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    if [ -n "$BASE_REF" ]; then
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`$BASE_REF\`."
+    else
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into the local default branch you resolved in Setup."
+    fi
     ;;
   *)  # no-mistakes
     SETUP2="

@@ -375,6 +375,122 @@ test_missing_origin_head_never_relabels_the_current_branch() {
   pass "fm-brief.sh: a missing origin/HEAD never relabels the current feature branch"
 }
 
+# `projects/` is a gitignored subdirectory of the firstmate checkout itself, so a
+# directory that is merely INSIDE a work tree must never resolve: it would render
+# the enclosing repo's default branch as an unrelated project's base - a
+# confidently-wrong base with no error, the exact class this check exists to stop.
+test_non_root_directory_never_resolves_to_its_enclosing_repo() {
+  local home enclosing setup
+  home="$TMP_ROOT/non-root-home"
+  enclosing="$TMP_ROOT/enclosing-checkout"
+  mkdir -p "$home/data"
+
+  fm_git_init_commit "$enclosing"
+  git -C "$enclosing" branch -M trunk
+  fm_git_add_origin "$enclosing" "$enclosing.origin.git"
+  git -C "$enclosing" fetch --quiet origin
+  git -C "$enclosing" remote set-head origin --auto >/dev/null
+  mkdir -p "$enclosing/projects/webapp"
+  [ "$(git -C "$enclosing/projects/webapp" rev-parse --show-toplevel)" = "$(cd "$enclosing" && pwd -P)" ] \
+    || fail "fixture is not a plain directory inside the enclosing work tree"
+
+  FM_PROJECTS_OVERRIDE="$enclosing/projects" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" non-root webapp --mode direct-PR >/dev/null 2>&1 \
+    || fail "a non-root project directory must not fail the scaffold"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/non-root/brief.md")
+
+  assert_not_contains "$setup" 'origin/trunk' \
+    "a plain directory inside a work tree rendered the enclosing repo's default branch as its base"
+  assert_contains "$setup" 'git rev-list --count $(git merge-base HEAD origin/<default>)..origin/<default>' \
+    "a non-root project directory did not fall back to the runtime base check"
+  pass "fm-brief.sh: a directory inside a work tree never resolves as that project's repo"
+}
+
+# origin/HEAD is the authority on the default branch NAME. When the clone has no
+# local ref for it, no other branch may be presented as "your local default
+# branch"; the strict runtime fallback must take over instead.
+test_absent_local_ref_for_origin_default_never_substitutes_another_branch() {
+  local home diverged setup
+  home="$TMP_ROOT/absent-local-ref-home"
+  diverged="$BRIEF_PROJECTS/diverged"
+  mkdir -p "$home/data"
+
+  fm_git_init_commit "$diverged"
+  git -C "$diverged" branch -M develop
+  fm_git_add_origin "$diverged" "$diverged.origin.git"
+  git -C "$diverged" fetch --quiet origin
+  git -C "$diverged" remote set-head origin --auto >/dev/null
+  git -C "$diverged" checkout -q -b main
+  printf '%s\n' 'diverged' >> "$diverged/README.md"
+  git -C "$diverged" add README.md
+  git -C "$diverged" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'local main diverges from the default branch'
+  git -C "$diverged" branch -D develop >/dev/null
+  [ "$(git -C "$diverged" symbolic-ref --short refs/remotes/origin/HEAD)" = "origin/develop" ] \
+    || fail "fixture origin/HEAD does not name develop"
+  git -C "$diverged" rev-parse --verify --quiet refs/heads/develop >/dev/null 2>&1 \
+    && fail "fixture still has a local develop ref"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" absent-ref diverged --mode local-only >/dev/null 2>&1 \
+    || fail "an absent local ref for origin's default must not fail the scaffold"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/absent-ref/brief.md")
+
+  assert_not_contains "$setup" 'your local default branch `main`' \
+    "a substitute branch was presented as the repository's local default branch"
+  assert_contains "$setup" 'git rev-list --count $(git merge-base HEAD <default>)..<default>' \
+    "an absent local ref for origin's default did not fall back to the runtime base check"
+  assert_contains "$setup" 'blocked: cannot determine the default branch to verify base freshness' \
+    "the runtime fallback dropped its blocked-and-stop requirement"
+  pass "fm-brief.sh: an absent local ref for origin's default never substitutes another branch"
+}
+
+# The generated brief must not contradict itself: a local-only task whose Setup
+# rebases onto `release` cannot tell the worker firstmate merges into `main`.
+test_local_only_rule_names_the_resolved_default_branch() {
+  local home rules setup
+  home="$TMP_ROOT/local-rule-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" rule-local local-proj --mode local-only >/dev/null 2>&1 \
+    || fail "local-only brief should scaffold against the release-default fixture"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/rule-local/brief.md")
+  rules=$(sed -n '/^# Rules$/,/^# Firstmate instruction inbox$/p' "$home/data/rule-local/brief.md")
+
+  assert_contains "$setup" 'rebase onto `release`' \
+    "the local-only fixture no longer resolves its non-main default branch"
+  assert_contains "$rules" 'firstmate handles the merge into local `release`' \
+    "Rule 1 named a branch other than the resolved local default"
+  assert_not_contains "$rules" 'merge into local `main`' \
+    "Rule 1 kept the hard-coded main that contradicts the resolved Setup base"
+  pass "fm-brief.sh: local-only Rule 1 names the resolved local default branch"
+}
+
+# A scout lands nowhere - its deliverable is a report and it may never push. When
+# it falls back to a local comparison it must be told WHY (origin's default could
+# not be resolved), never that its task "lands locally".
+test_scout_local_fallback_uses_kind_neutral_wording() {
+  local home remoteless setup
+  home="$TMP_ROOT/scout-neutral-home"
+  remoteless="$BRIEF_PROJECTS/remoteless"
+  mkdir -p "$home/data"
+
+  fm_git_init_commit "$remoteless"
+  git -C "$remoteless" branch -M main
+  [ -z "$(git -C "$remoteless" remote)" ] || fail "remoteless fixture unexpectedly has a remote"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" neutral-scout remoteless --scout >/dev/null 2>&1 \
+    || fail "scout brief should scaffold against a remoteless clone"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/neutral-scout/brief.md")
+
+  assert_contains "$setup" 'git rev-list --count $(git merge-base HEAD main)..main' \
+    "the scout local fallback did not measure against the local default branch"
+  assert_not_contains "$setup" 'This task lands locally' \
+    "the scout brief claimed its task lands locally"
+  assert_contains "$setup" "Origin's default branch could not be resolved, so do not fetch" \
+    "the scout local fallback did not explain why it skips the network refresh"
+  pass "fm-brief.sh: a scout local fallback explains itself without claiming it lands locally"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -927,6 +1043,10 @@ test_ship_modes_generate_clean_briefs
 test_base_freshness_check_is_resolved_and_mode_aware
 test_unresolvable_repo_label_still_mandates_the_base_check
 test_missing_origin_head_never_relabels_the_current_branch
+test_non_root_directory_never_resolves_to_its_enclosing_repo
+test_absent_local_ref_for_origin_default_never_substitutes_another_branch
+test_local_only_rule_names_the_resolved_default_branch
+test_scout_local_fallback_uses_kind_neutral_wording
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
