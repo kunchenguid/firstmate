@@ -1231,7 +1231,20 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    #
+    # --permission-mode auto runs the worker under claude's OWN classifier
+    # ("approve/deny permission prompts") instead of --dangerously-skip-permissions,
+    # which bypassed every check. Auto mode is NOT unconditional: claude 2.1.251
+    # falls back to the prompting `default` mode when auto is unavailable for the
+    # plan, for the session model, while fast mode is on, or when the classifier
+    # transcript grows too long, and an unattended pane has nobody to answer the
+    # prompt it falls back to. CLAUDE_CODE_DISABLE_FAST_MODE=1 removes the one
+    # fallback trigger a launch can control (verified: the session then reports
+    # fast_mode_disabled_reason=disabled_by_env), so a captain's own /fast on
+    # cannot silently drop a crewmate back to interactive prompting. The
+    # remaining triggers are plan/model/server-side; the harness-adapters skill
+    # documents the resulting dialog so a degraded worker is recognizable.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # -s workspace-write -a never replaces --dangerously-bypass-approvals-and-sandbox:
     # the worker runs under codex's OWN filesystem sandbox and never prompts,
     # instead of running with both switched off. workspace-write confines writes
@@ -1239,11 +1252,21 @@ launch_template() {
     # radius for a crewmate. It also DENIES the supervision paths the crewmate
     # contract needs outside that worktree; granting those back narrowly is a
     # separate change and is deliberately not bundled here.
+    #
+    # sandbox_workspace_write.network_access=true is NOT part of that deferred
+    # write grant, it is a distinct axis: workspace-write confines NETWORK egress
+    # as well as writes, and codex defaults that key to false. Verified on codex
+    # 0.150.1 against a config-free CODEX_HOME - the worker's shell cannot resolve
+    # a host at all under the default, which would break `git push`, `gh`, and
+    # every dependency install the delivery contract needs. Setting it here rather
+    # than relying on the operator's own ~/.codex/config.toml makes the grant
+    # explicit and machine-independent; the write confinement above is unaffected
+    # (verified: a write outside the worktree is still denied with it on).
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never -c sandbox_workspace_write.network_access=true "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never -c sandbox_workspace_write.network_access=true -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1258,17 +1281,29 @@ launch_template() {
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
+    # crewmate needs. grok's launch was deliberately left unchanged when the other
+    # harnesses moved onto their own approval and sandbox controls: it exposes no
+    # sandbox or classifier equivalent, so full auto-approval remains the only
+    # posture that keeps an unattended grok pane running. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which the
-    # autonomy flags do NOT cover and which would otherwise block every spawn,
+    # autonomy flag does NOT cover and which would otherwise block every spawn,
     # since each task gets a fresh worktree path cursor has never seen.
-    # --auto-review --sandbox enabled replaces the former --yolo (the --force
-    # alias whose TUI label is "Run Everything"): the worker runs under cursor's
-    # own review and sandbox controls rather than with both switched off.
+    # --force ("Force allow commands unless explicitly denied", the canonical flag
+    # --yolo aliases) is the ONLY non-prompting posture cursor offers, and it
+    # genuinely defeats the sandbox. This was measured on cursor-agent
+    # 2026.08.25, not assumed: --auto-review runs a server classifier that
+    # "prompts for the rest", which parks an unattended crewmate on a dialog
+    # nobody can answer while the cursor busy-state fold still reads the pane as
+    # working; and --sandbox enabled, which DOES confine writes under
+    # --auto-review, is overridden by --force regardless of flag order (a write
+    # outside the worktree succeeds). So --sandbox enabled is deliberately NOT
+    # passed alongside --force: it would claim a confinement the launch does not
+    # actually have. Unattended operation wins here because a parked pane fails
+    # the delivery contract outright, and the per-task worktree plus firstmate's
+    # own supervision remain the blast-radius control.
     # --workspace pins the
     # exact worktree. -w/--worktree is deliberately never passed: it allocates a
     # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
@@ -1278,7 +1313,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --force __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded

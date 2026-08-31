@@ -12,9 +12,20 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
+| Autonomy | `--permission-mode auto`, so the worker runs under Claude's own classifier rather than `--dangerously-skip-permissions`, which bypassed every check. The spawn also sets `CLAUDE_CODE_DISABLE_FAST_MODE=1`; see "Auto mode" below. |
 
-Fresh-worktree or first-machine launch may show trust or bypass-permissions confirmation.
+Fresh-worktree or first-machine launch may show the workspace-trust confirmation, and a first-ever auto-mode session may show Claude's auto-mode entry warning.
+The bypass-permissions confirmation can no longer appear, because Firstmate no longer passes `--dangerously-skip-permissions`.
 Inspect within about 20 seconds, accept the required choice with `FM_HOME=<active-home> ../../../bin/fm-send.sh <window> --key Enter` unless already bound, and verify instructions started.
+
+## Auto mode
+
+Auto mode is not unconditional.
+On 2.1.251 the session silently falls back to the prompting `default` mode when auto mode is unavailable for the account's plan, unavailable for the session model, disabled by settings, blocked because fast mode is on, or when the classifier transcript grows too long.
+An unattended crewmate has nobody to answer the permission prompt it falls back to, and the `claude-hook` busy fold keeps that pane reading as busy rather than surfacing a hold.
+The spawn sets `CLAUDE_CODE_DISABLE_FAST_MODE=1` to remove the one trigger a launch command controls, so a captain's own `/fast on` cannot degrade a running crewmate.
+The plan, model, and classifier-transcript triggers remain server-side and are not launch-controllable, so treat a Claude pane that stops progressing without a status write as a possible permission prompt and peek it before assuming it is working.
+Firstmate threads an arbitrary `--model` from the dispatch profile into this same launch, so a model without auto-mode support is the most likely local cause.
 
 ## Composer ghost
 
