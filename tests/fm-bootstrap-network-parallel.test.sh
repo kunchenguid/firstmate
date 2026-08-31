@@ -137,7 +137,19 @@ for arg in "\$@"; do
 done
 if [ "\$slow" -eq 1 ]; then
   printf 'START fleet-fetch git fetch\n' >> '$log'
-  sleep "\${FM_FAKE_GIT_FETCH_SLEEP:-0.4}"
+  # Hold the fetch in flight until the secondmate sync sweep has started, so
+  # the overlap this suite asserts is event-ordered instead of a wall-clock
+  # race a loaded host can lose (the fetch used to sleep a fixed 0.4s and
+  # could start and finish inside the gap between the two sweeps). The wait
+  # is bounded below fleet_sync's 20s bootstrap timeout so a regression that
+  # serializes the sweeps after the fetch still logs END and fails the
+  # overlap assertion instead of hanging or being killed mid-log.
+  tries=0
+  until grep -q '^START host-.* sync\$' '$log'; do
+    tries=\$((tries + 1))
+    [ "\$tries" -lt 200 ] || break
+    sleep 0.05
+  done
   printf 'END fleet-fetch git fetch\n' >> '$log'
 fi
 exec '$real_git' "\$@"
@@ -219,7 +231,6 @@ SH
     FM_FAKE_SSH_UNREACHABLE_HOST=host-bravo \
     FM_FAKE_SSH_FAIL_HOST=host-alpha \
     FM_FAKE_SSH_DIRTY_HOST=host-charlie \
-    FM_FAKE_GIT_FETCH_SLEEP=0.4 \
     FM_INHERITABLE_CONFIG='' \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
