@@ -93,15 +93,40 @@ fm_control_harness_family() {  # <recorded-harness>
 
 # Which task kinds an adapter is verified to run. muse is a crewmate/scout
 # adapter only: it has no primary supervision protocol, and bin/fm-spawn.sh
-# refuses a --secondmate launch on it. The control plane
-# asks this BEFORE it stops anything, so an incompatible relaunch target is
-# refused while the current agent is still running rather than after it has
-# been stopped.
-fm_control_harness_supports_kind() {  # <harness> <kind>
-  local harness=${1-} kind=${2-}
+# refuses a --secondmate launch on it.
+#
+# cursor is refused for EVERY ordinary unattended kind - ship, scout, AND
+# secondmate. It launches under --auto-review --sandbox enabled, which keeps a
+# real filesystem sandbox but accepts that cursor's server classifier prompts
+# for any call it does not deem safe. An unattended pane has no approver, and
+# the cursor-transcript busy fold keeps a parked pane reading as working, so the
+# stall never surfaces as a hold. A cursor secondmate is the worst case, because
+# a whole firstmate instance stalls invisibly.
+#
+# The optional third argument is the caller's EXEMPTION token, which is the only
+# opt-in past the cursor refusal:
+#   attended           - a person is in the pane and can answer the prompt.
+#   isolation-envelope - a separately proven outer envelope governs the worker.
+# Any other value, including an empty one, is no exemption, so an ordinary
+# unattended spawn stays refused. No in-repo caller sets it today, so it must be
+# passed deliberately by whoever knows the launch is covered.
+#
+# This function is the ONE owner of the rule. bin/fm-spawn.sh asks it rather
+# than repeating the table, so the launch owner and the control plane cannot
+# drift. The control plane asks it BEFORE it stops anything, so an incompatible
+# relaunch target is refused while the current agent is still running rather
+# than after it has been stopped.
+fm_control_harness_supports_kind() {  # <harness> <kind> [exemption]
+  local harness=${1-} kind=${2-} exemption=${3-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
     muse) [ "$kind" != secondmate ] || return 1 ;;
+    cursor)
+      case "$exemption" in
+        attended|isolation-envelope) ;;
+        *) return 1 ;;
+      esac
+      ;;
   esac
   return 0
 }
