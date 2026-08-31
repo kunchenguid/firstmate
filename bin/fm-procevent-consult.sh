@@ -49,24 +49,28 @@ json_error_code() {
   ' "$1"
 }
 
-json_wait_timed_out() {
+json_wait_timed_out() {  # <file> <expected-job-id>
   perl -MJSON::PP -e '
-    my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
+    my ($file, $job_id) = @ARGV;
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
     exit 1 unless ref($v) eq "HASH" && ref($v->{ok}) eq "JSON::PP::Boolean" && $v->{ok};
-    exit 1 unless ref($v->{data}) eq "HASH" && ref($v->{data}{wait}) eq "HASH";
+    exit 1 unless ref($v->{data}) eq "HASH" && ref($v->{data}{job}) eq "HASH" && ($v->{data}{job}{id} // "") eq $job_id;
+    exit 1 unless ref($v->{data}{wait}) eq "HASH";
     exit 1 unless ref($v->{data}{wait}{timedOut}) eq "JSON::PP::Boolean" && $v->{data}{wait}{timedOut};
-  ' "$1"
+  ' "$1" "$2"
 }
 
-json_wait_job_status() {  # <file>; prints one known job status
+json_wait_job_status() {  # <file> <expected-job-id>; prints one known job status
   perl -MJSON::PP -e '
-    my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
+    my ($file, $job_id) = @ARGV;
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
     exit 1 unless ref($v) eq "HASH" && ref($v->{ok}) eq "JSON::PP::Boolean" && $v->{ok};
     exit 1 unless ref($v->{data}) eq "HASH" && ref($v->{data}{job}) eq "HASH";
+    exit 1 unless ($v->{data}{job}{id} // "") eq $job_id;
     my $status = $v->{data}{job}{status};
     exit 1 unless defined($status) && !ref($status) && $status =~ /^(?:queued|running|succeeded|failed|cancelled)$/;
     print "$status\n";
-  ' "$1"
+  ' "$1" "$2"
 }
 
 json_string() { perl -MJSON::PP -e 'print JSON::PP->new->encode($ARGV[0])' "$1"; }
@@ -114,10 +118,10 @@ cmd_wait() {
   pro-cli job wait "$job" --soft-timeout "$(wait_timeout_ms)" --json > "$raw" 2>&1
   rc=$?
   chmod 0600 "$raw" || { rm -f -- "$raw"; die "cannot secure pro-cli wait capture"; }
-  if [ "$rc" -eq 0 ] && json_wait_timed_out "$raw"; then
+  if [ "$rc" -eq 0 ] && json_wait_timed_out "$raw" "$job"; then
     timed_out=true
   fi
-  job_status=$(json_wait_job_status "$raw" 2>/dev/null || true)
+  job_status=$(json_wait_job_status "$raw" "$job" 2>/dev/null || true)
   [ -z "$job_status" ] || job_status_json=$(json_string "$job_status")
   code=$(json_error_code "$raw" 2>/dev/null || true)
   rm -f -- "$raw"
@@ -147,9 +151,8 @@ event_is_terminal() {  # <file>
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
     exit 1 unless ref($v) eq "HASH" && ($v->{schema} // "") eq "fm-consult-wait/1";
     exit 1 unless ref($v->{wait_timed_out}) eq "JSON::PP::Boolean";
-    exit 1 unless defined($v->{wait_exit}) && !ref($v->{wait_exit}) && $v->{wait_exit} =~ /^0$/;
-    exit 0 if $v->{wait_timed_out};
     exit 0 if defined($v->{job_status}) && !ref($v->{job_status}) && $v->{job_status} =~ /^(?:succeeded|failed|cancelled)$/;
+    exit 0 if defined($v->{wait_exit}) && !ref($v->{wait_exit}) && $v->{wait_exit} =~ /^0$/ && $v->{wait_timed_out};
     exit 1;
   ' "$1"
 }

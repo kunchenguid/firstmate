@@ -628,7 +628,7 @@ cmd_start_public() {
 
 cmd_start() {
   local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
-  local extension_owner=0 extension_load_state extension_sequence='' extension_request_id='' registration_generation=''
+  local extension_owner=0 extension_load_state extension_sequence='' extension_request_id='' registration_generation='' legacy_claim_state
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -683,14 +683,21 @@ cmd_start() {
       ;;
   esac
   if [ "$extension_owner" -eq 0 ]; then
-    registration_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") \
-      || { fm_procevent_source_lock_release "$id"; die "cannot derive stable registration generation: $id"; }
+    registration_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$registration_generation" ]; then
+      fm_procevent_claim_state_locked "$id"
+      legacy_claim_state=$?
+      if [ "$legacy_claim_state" -eq 1 ]; then
+        registration_generation=$(fm_procevent_registration_generation_ensure_locked "$STATE" "$id") \
+          || { fm_procevent_source_lock_release "$id"; die "cannot publish a stable registration generation: $id"; }
+      fi
+    fi
   fi
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")"
   claimed=$?
   fm_procevent_source_lock_release "$id"
   case "$claimed" in
-    0) ;;
+    0) [ "$extension_owner" -eq 1 ] || [ -n "$registration_generation" ] || die "claimed source has no stable registration generation: $id" ;;
     2) printf 'already owned: %s\n' "$id"; exit 0 ;;
     *) die "cannot claim source: $id" ;;
   esac
@@ -935,8 +942,7 @@ detach_runner() {  # <source-id>
 # terminal generation that a crashed runner left behind. This happens under the
 # same source lock as registration/claim transitions, so the next loop cannot
 # launch a second known-job waiter between observing the capture and retiring
-# its source. The comparison uses the content generation sidecar rather than a
-# device/inode identity, which is intentionally volatile across a reboot.
+# its source.
 recover_captured_terminal_sources() {
   local inbox result id adapter capture_generation current_generation claim_state recovered=0
   inbox=$(fm_procevent_inbox_dir "$STATE")
@@ -953,18 +959,15 @@ recover_captured_terminal_sources() {
       fm_procevent_source_lock_release "$id"
       continue
     fi
-    if fm_procevent_result_registration_generation "$result"; then
-      capture_generation=$FM_PROCEVENT_RESULT_REGISTRATION_GENERATION
-      current_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
-      if [ "$capture_generation" != "$current_generation" ]; then
-        fm_procevent_source_lock_release "$id"
-        continue
-      fi
-    else
-      # A legacy capture predates generation sidecars. It still proves this
-      # source reached its adapter's terminal verdict, so fail closed by
-      # retiring it instead of launching another wait against the same source.
-      :
+    if ! fm_procevent_result_registration_generation "$result"; then
+      fm_procevent_source_lock_release "$id"
+      continue
+    fi
+    capture_generation=$FM_PROCEVENT_RESULT_REGISTRATION_GENERATION
+    current_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+    if [ "$capture_generation" != "$current_generation" ]; then
+      fm_procevent_source_lock_release "$id"
+      continue
     fi
     fm_procevent_claim_state_locked "$id"
     claim_state=$?

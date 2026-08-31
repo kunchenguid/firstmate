@@ -129,8 +129,24 @@ fm_procevent_source_lock_release() {
   fm_lock_release "$(fm_procevent_source_lock_path "$1")"
 }
 
+fm_procevent_new_registration_generation() {
+  local hex
+  hex=$(LC_ALL=C od -An -v -tx1 -N 32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  [ "${#hex}" -eq 64 ] || return 1
+  case "$hex" in *[!0-9a-f]*) return 1 ;; esac
+  printf 'sha256:%s\n' "$hex"
+}
+
+fm_procevent_sync_file() {
+  perl -MIO::Handle -e 'open my $fh, "+<", $ARGV[0] or exit 1; $fh->sync or exit 1; close $fh or exit 1' "$1"
+}
+
+fm_procevent_sync_directory() {
+  perl -MFcntl=':DEFAULT' -MIO::Handle -e 'sysopen(my $fh, $ARGV[0], O_RDONLY) or exit 1; $fh->sync or exit 1; close $fh or exit 1' "$1"
+}
+
 fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg generation
   shift 3
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
@@ -142,34 +158,62 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   (umask 077; mkdir -p "$reg") || return 1
   [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
   dest="$reg/$id.source"
+  generation=$(fm_procevent_new_registration_generation) || return 1
   tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
   if {
     printf 'adapter=%s\n' "$adapter"
+    printf 'registration_generation=%s\n' "$generation"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
-  } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
+  } > "$tmp" && chmod 0600 "$tmp" && fm_procevent_sync_file "$tmp" \
+    && mv -f -- "$tmp" "$dest" && fm_procevent_sync_directory "$reg"; then
     return 0
   fi
   rm -f -- "$tmp"
   return 1
 }
 
-# Stable across reboot, unlike the filesystem device/inode pair used only for
-# live-process custody. A captured terminal binds to these immutable
-# registration bytes so restart recovery can prove it belongs to the source it
-# retires without treating an APFS device reassignment as a new generation.
 fm_procevent_registration_generation_locked() {  # <state> <source-id>
-  local state=$1 id=$2 registration hash
+  local state=$1 id=$2 registration line generation
   fm_procevent_source_id_valid "$id" || return 1
   registration="$(fm_procevent_registry_dir "$state")/$id.source"
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   [ "$(fm_pr_file_mode "$registration")" = 600 ] || return 1
-  hash=$(fm_pr_sha256 "$registration") || return 1
-  case "$hash" in ??????*) ;; *) return 1 ;; esac
-  case "$hash" in *[!0-9a-f]*) return 1 ;; esac
-  [ "${#hash}" -eq 64 ] || return 1
-  printf 'sha256:%s\n' "$hash"
+  line=$(sed -n '2p' "$registration") || return 1
+  generation=${line#registration_generation=}
+  [ "$line" = "registration_generation=$generation" ] || return 1
+  fm_procevent_digest_valid "$generation" || return 1
+  printf '%s\n' "$generation"
+}
+
+fm_procevent_registration_generation_ensure_locked() {  # <state> <source-id>
+  local state=$1 id=$2 registration reg first second generation tmp
+  if fm_procevent_registration_generation_locked "$state" "$id"; then
+    return 0
+  fi
+  fm_procevent_source_id_valid "$id" || return 1
+  reg=$(fm_procevent_registry_dir "$state")
+  registration="$reg/$id.source"
+  [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
+  [ "$(fm_pr_file_mode "$registration")" = 600 ] || return 1
+  first=$(sed -n '1p' "$registration") || return 1
+  second=$(sed -n '2p' "$registration") || return 1
+  case "$first" in adapter=*) ;; *) return 1 ;; esac
+  case "$second" in argc=*) ;; *) return 1 ;; esac
+  generation=$(fm_procevent_new_registration_generation) || return 1
+  tmp=$(umask 077; mktemp "$reg/.source-upgrade.XXXXXX") || return 1
+  if {
+    printf '%s\n' "$first"
+    printf 'registration_generation=%s\n' "$generation"
+    tail -n +2 "$registration"
+  } > "$tmp" && chmod 0600 "$tmp" && fm_procevent_sync_file "$tmp" \
+    && mv -f -- "$tmp" "$registration" && fm_procevent_sync_directory "$reg"; then
+    printf '%s\n' "$generation"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
 }
 
 # Publish one extension-owned registration. Its identity fields and random
@@ -270,7 +314,7 @@ fm_procevent_extension_registration_load_locked() {  # <state> <source-id>
 
 # Exact legacy registration comparison used by conditional built-in retirement.
 fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg status=1
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg status=1 generation
   shift 3
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
@@ -282,9 +326,11 @@ fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <a
   [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
   dest="$reg/$id.source"
   [ -f "$dest" ] && [ ! -L "$dest" ] || return 1
+  generation=$(fm_procevent_registration_generation_locked "$state" "$id" 2>/dev/null || true)
   tmp=$(umask 077; mktemp "$reg/.source-match.XXXXXX") || return 1
   if {
     printf 'adapter=%s\n' "$adapter"
+    [ -z "$generation" ] || printf 'registration_generation=%s\n' "$generation"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
@@ -724,10 +770,6 @@ fm_procevent_capture() {
   adapter_tmp=$(umask 077; mktemp "$inbox/.adapter.XXXXXX") || { rm -f -- "$tmp"; return 1; }
   if [ -n "$registration_generation" ]; then
     generation_dest="$inbox/$id.$seq.generation"
-    [ ! -e "$generation_dest" ] && [ ! -L "$generation_dest" ] || {
-      rm -f -- "$tmp" "$adapter_tmp"
-      return 1
-    }
     generation_tmp=$(umask 077; mktemp "$inbox/.generation.XXXXXX") \
       || { rm -f -- "$tmp" "$adapter_tmp"; return 1; }
   fi
@@ -772,6 +814,18 @@ fm_procevent_capture() {
     rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
     return 1
   fi
+  fm_procevent_sync_file "$tmp" && fm_procevent_sync_file "$adapter_tmp" || {
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
+    return 1
+  }
+  if [ -n "$generation_tmp" ] && ! fm_procevent_sync_file "$generation_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
+    return 1
+  fi
+  if [ -n "$extension_tmp" ] && ! fm_procevent_sync_file "$extension_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
+    return 1
+  fi
   if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"; return 1; fi
   if [ -n "$generation_dest" ] && ! mv -f -- "$generation_tmp" "$generation_dest"; then
     rm -f -- "$tmp" "$adapter_dest" "$generation_tmp" "$extension_tmp"
@@ -787,6 +841,7 @@ fm_procevent_capture() {
     [ -z "$generation_dest" ] || rm -f -- "$generation_dest"
     return 1
   fi
+  fm_procevent_sync_directory "$inbox" || return 1
   if [ "$#" -eq 9 ]; then
     printf '%s\n' "$FM_PROCEVENT_CAPTURE_ABSOLUTE_INBOX/$id.$seq.result"
   else

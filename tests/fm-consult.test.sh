@@ -132,6 +132,7 @@ record_one="$H1/data/consults/$id_one"
 for leaf in question.md contract.md prepared.json; do
   [ "$(mode_of "$record_one/$leaf")" = 600 ] || fail "$leaf is not 0600"
 done
+assert_grep '"source_packet_sha256":null' "$record_one/prepared.json" "an absent source packet is explicit in the prepared record"
 assert_grep 'ADVISORY_ONLY' "$record_one/contract.md" "contract declares advisory-only authority"
 assert_grep "FIRSTMATE_CONSULT_ID: $id_one" "$record_one/question.md" "private question carries its unique forensic marker"
 assert_grep 'Conversation retention: temporary' "$record_one/contract.md" "ordinary consult declares temporary retention"
@@ -143,6 +144,7 @@ submit_out=$(fc "$H1" submit "$id_one") || fail "submit failed: $submit_out"
 assert_contains "$submit_out" "submitted: $id_one" "non-waiting submit returns the consult id"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = 1 ] || fail "submit did not issue exactly one create"
 assert_grep '"retries":0' "$record_one/request.json" "request records zero retries"
+assert_grep '"source_packet_sha256":null' "$record_one/request.json" "an absent source packet remains explicit in the request record"
 assert_grep '"terminal":"SUBMITTED"' "$record_one/submission.json" "submission has one submitted terminal"
 assert_grep '"pro_cli_version":"pro-cli fixture"' "$record_one/submission.json" "submission records the local pro-cli identity"
 assert_absent "$WAIT_STARTED" "submit did not call job wait in the foreground"
@@ -178,6 +180,10 @@ assert_grep "$answer_secret" "$record_one/advisory.md" "matching job result is w
 [ "$(mode_of "$record_one/advisory.md")" = 600 ] || fail "advisory is not 0600"
 assert_not_contains "$(<"$record_one/receipt.json")" "$answer_secret" "receipt contains answer hash rather than answer bytes"
 assert_grep '"result_terminal":"ADVISORY_RECORDED"' "$record_one/receipt.json" "receipt records a durable advisory terminal"
+rm -f -- "$record_one/receipt.json"
+recovery_out=$(pa "$H1" handle "$id_one" 1 "$capture_one") || fail "advisory-without-receipt recovery failed: $recovery_out"
+assert_contains "$recovery_out" "already-handled: $source_one 1" "advisory recovery reuses the captured generation"
+assert_grep '"result_terminal":"ADVISORY_RECORDED"' "$record_one/receipt.json" "byte-identical advisory recovery completes its receipt"
 replay_out=$(pa "$H1" handle "$id_one" 1 "$capture_one") || fail "completion replay failed: $replay_out"
 assert_contains "$replay_out" "already-handled: $source_one 1" "replay does not authorize a second handling effect"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = 1 ] || fail "completion replay created another pro-cli job"
@@ -235,12 +241,46 @@ blocked_out=$(fc "$H2" submit "$id_two_next" 2>&1) || blocked_submit=$?
 [ "$blocked_submit" -ne 0 ] || fail "a different consult submitted before human ambiguity reconciliation"
 assert_contains "$blocked_out" "reconciles DELIVERY_AMBIGUOUS" "different consult is blocked at submission boundary"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_ambiguous" ] || fail "ambiguity blocker still created a job"
+printf '{"schema_version":1,"consult_id":"%s","reconciled_at":"2026-01-01T00:00:00Z","human_record":"captain-record-42","state":"HUMAN_RECONCILED"}\n' \
+  "$id_two" > "$H2/data/consults/$id_two/reconciliation.json"
+chmod 0644 "$H2/data/consults/$id_two/reconciliation.json"
+invalid_reconciliation_status=0
+invalid_reconciliation_out=$(fc "$H2" submit "$id_two_next" 2>&1) || invalid_reconciliation_status=$?
+[ "$invalid_reconciliation_status" -ne 0 ] || fail "an unsafe reconciliation mode unblocked a different consult"
+assert_contains "$invalid_reconciliation_out" "reconciles DELIVERY_AMBIGUOUS" "reconciliation mode is validated at the shared blocker"
+chmod 0600 "$H2/data/consults/$id_two/reconciliation.json"
+printf '{"schema_version":1,"consult_id":"%s","reconciled_at":"2026-01-01T00:00:00Z","human_record":"captain-record-42","state":"NOT_RECONCILED"}\n' \
+  "$id_two" > "$H2/data/consults/$id_two/reconciliation.json"
+invalid_reconciliation_status=0
+invalid_reconciliation_out=$(fc "$H2" submit "$id_two_next" 2>&1) || invalid_reconciliation_status=$?
+[ "$invalid_reconciliation_status" -ne 0 ] || fail "an invalid reconciliation record unblocked a different consult"
+assert_contains "$invalid_reconciliation_out" "reconciles DELIVERY_AMBIGUOUS" "only a complete HUMAN_RECONCILED record lifts the blocker"
+rm -f -- "$H2/data/consults/$id_two/reconciliation.json"
 fc "$H2" reconcile-ambiguous "$id_two" --human-record captain-record-42 >/dev/null || fail "explicit reconciliation was rejected"
 [ "$(mode_of "$H2/data/consults/$id_two/reconciliation.json")" = 600 ] || fail "reconciliation record is not 0600"
 export PRO_CLI_CREATE_JSON='{"ok":true,"data":{"job":{"id":"job_fixture","status":"queued"}}}'
 fc "$H2" submit "$id_two_next" >/dev/null || fail "reconciled different consult did not submit"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = $((before_ambiguous + 1)) ] || fail "reconciled submit count is wrong"
 pass "delivery ambiguity forbids automatic retries and blocks a different consult until explicit reconciliation"
+
+H_ATTEMPT_ONLY="$TMP_ROOT/home-attempt-only"
+consult_home "$H_ATTEMPT_ONLY"
+id_attempt_only=$(prepare_id "$H_ATTEMPT_ONLY" "$QUESTION_TWO")
+id_after_attempt=$(prepare_id "$H_ATTEMPT_ONLY" "$QUESTION_TWO")
+attempt_only_record="$H_ATTEMPT_ONLY/data/consults/$id_attempt_only"
+printf '{"schema_version":1,"consult_id":"%s","attempted_at":"%s","state":"SUBMISSION_ATTEMPTED","retries":0}\n' \
+  "$id_attempt_only" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$attempt_only_record/submission-attempt.json"
+chmod 0600 "$attempt_only_record/submission-attempt.json"
+before_attempt_only=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+attempt_only_status=0
+attempt_only_out=$(fc "$H_ATTEMPT_ONLY" submit "$id_after_attempt" 2>&1) || attempt_only_status=$?
+[ "$attempt_only_status" -ne 0 ] || fail "an attempt without a conclusive terminal did not block a different consult"
+assert_grep '"terminal":"DELIVERY_AMBIGUOUS"' "$attempt_only_record/submission.json" "an unresolved attempt becomes DELIVERY_AMBIGUOUS"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_attempt_only" ] || fail "attempt-only recovery created another job"
+fc "$H_ATTEMPT_ONLY" reconcile-ambiguous "$id_attempt_only" --human-record captain-record-43 >/dev/null \
+  || fail "attempt-only ambiguity reconciliation was rejected"
+fc "$H_ATTEMPT_ONLY" submit "$id_after_attempt" >/dev/null || fail "attempt-only reconciliation did not unblock the next consult"
+pass "an unresolved submission attempt blocks every consult until validated human reconciliation"
 
 H3="$TMP_ROOT/home-stalled"
 consult_home "$H3"
@@ -261,31 +301,53 @@ assert_grep '"result_terminal":"STALLED"' "$H3/data/consults/$id_three/receipt.j
 assert_absent "$H3/data/consults/$id_three/advisory.md" "stalled job cannot manufacture an advisory"
 pass "a normal known job that remains running after bounded waiting records STALLED"
 
-# A transport failure from `job wait` is evidence to inspect, not proof that a
-# known job is terminal. The source must remain armed; a later event may safely
-# reconcile status/result but must never create a second consultation job.
-H_WAIT_FAILURE="$TMP_ROOT/home-wait-failure"
-consult_home "$H_WAIT_FAILURE"
-id_wait_failure=$(prepare_id "$H_WAIT_FAILURE" "$QUESTION_TWO")
+# A validated completed job remains terminal even when the local wait process
+# reports a transport exit after receiving that completion.
+H_WAIT_COMPLETED="$TMP_ROOT/home-wait-completed"
+consult_home "$H_WAIT_COMPLETED"
+id_wait_completed=$(prepare_id "$H_WAIT_COMPLETED" "$QUESTION_TWO")
 rm -f -- "$WAIT_STARTED" "$WAIT_RELEASE"
-export PRO_CLI_WAIT_JSON='{"ok":false,"error":{"code":"STREAM_INTERRUPTED"}}'
+export PRO_CLI_WAIT_JSON='{"ok":true,"data":{"job":{"id":"job_fixture","status":"succeeded"}}}'
 export PRO_CLI_WAIT_EXIT=75
-before_wait_failure=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
-fc "$H_WAIT_FAILURE" submit "$id_wait_failure" >/dev/null || fail "wait-failure fixture submit failed"
-pe "$H_WAIT_FAILURE" reconcile >/dev/null || fail "wait-failure fixture reconcile failed"
-wait_for_file "$WAIT_STARTED" || fail "wait-failure fixture wait did not start"
+before_wait_completed=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+fc "$H_WAIT_COMPLETED" submit "$id_wait_completed" >/dev/null || fail "completed-wait fixture submit failed"
+pe "$H_WAIT_COMPLETED" reconcile >/dev/null || fail "completed-wait fixture reconcile failed"
+wait_for_file "$WAIT_STARTED" || fail "completed-wait fixture wait did not start"
 : > "$WAIT_RELEASE"
-source_wait_failure="consult-$id_wait_failure"
-capture_wait_failure="$H_WAIT_FAILURE/state/procevent-inbox/$source_wait_failure.1.result"
-wait_for_file "$capture_wait_failure" || fail "nonzero wait outcome was not captured"
+source_wait_completed="consult-$id_wait_completed"
+capture_wait_completed="$H_WAIT_COMPLETED/state/procevent-inbox/$source_wait_completed.1.result"
+wait_for_file "$capture_wait_completed" || fail "nonzero completed wait outcome was not captured"
 terminal_status=0
-pa "$H_WAIT_FAILURE" terminal "$capture_wait_failure" >/dev/null 2>&1 || terminal_status=$?
-[ "$terminal_status" -ne 0 ] || fail "nonzero wait outcome was misclassified as terminal"
-assert_present "$H_WAIT_FAILURE/state/procevent/$source_wait_failure.source" "nonzero wait outcome must leave its source armed"
-[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = $((before_wait_failure + 1)) ] \
-  || fail "nonzero wait outcome submitted another consultation job"
+pa "$H_WAIT_COMPLETED" terminal "$capture_wait_completed" >/dev/null 2>&1 || terminal_status=$?
+[ "$terminal_status" -eq 0 ] || fail "validated completion was not terminal when job wait exited nonzero"
+for _ in $(seq 1 100); do
+  [ ! -e "$H_WAIT_COMPLETED/state/procevent/$source_wait_completed.source" ] && break
+  sleep 0.05
+done
+assert_absent "$H_WAIT_COMPLETED/state/procevent/$source_wait_completed.source" "validated completion retires its source despite nonzero wait exit"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = $((before_wait_completed + 1)) ] \
+  || fail "nonzero completed wait submitted another consultation job"
 unset PRO_CLI_WAIT_JSON PRO_CLI_WAIT_EXIT
-pass "a nonzero job wait result never retires or resubmits a consultation"
+pass "a validated completed job retires even when the wait process exits nonzero"
+
+H_WAIT_MISMATCH="$TMP_ROOT/home-wait-mismatch"
+consult_home "$H_WAIT_MISMATCH"
+id_wait_mismatch=$(prepare_id "$H_WAIT_MISMATCH" "$QUESTION_TWO")
+rm -f -- "$WAIT_STARTED" "$WAIT_RELEASE"
+export PRO_CLI_WAIT_JSON='{"ok":true,"data":{"job":{"id":"job_other","status":"succeeded"}}}'
+fc "$H_WAIT_MISMATCH" submit "$id_wait_mismatch" >/dev/null || fail "mismatched-wait fixture submit failed"
+pe "$H_WAIT_MISMATCH" reconcile >/dev/null || fail "mismatched-wait fixture reconcile failed"
+wait_for_file "$WAIT_STARTED" || fail "mismatched-wait fixture wait did not start"
+: > "$WAIT_RELEASE"
+source_wait_mismatch="consult-$id_wait_mismatch"
+capture_wait_mismatch="$H_WAIT_MISMATCH/state/procevent-inbox/$source_wait_mismatch.1.result"
+wait_for_file "$capture_wait_mismatch" || fail "mismatched wait outcome was not captured"
+mismatched_terminal_status=0
+pa "$H_WAIT_MISMATCH" terminal "$capture_wait_mismatch" >/dev/null 2>&1 || mismatched_terminal_status=$?
+[ "$mismatched_terminal_status" -ne 0 ] || fail "a different returned job id was trusted as terminal"
+assert_present "$H_WAIT_MISMATCH/state/procevent/$source_wait_mismatch.source" "a mismatched returned job id cannot retire the known job wait"
+unset PRO_CLI_WAIT_JSON
+pass "job wait status is trusted only for the exact submitted job id"
 
 # The first durable request is a pre-delivery checkpoint. Its presence without
 # the intent marker means the external call provably has not begun, so resume it
@@ -310,7 +372,7 @@ after_resume=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
 assert_grep '"terminal":"SUBMITTED"' "$record_resume/submission.json" "request checkpoint resume records the known submitted job"
 pass "a request checkpoint before the attempt marker resumes without ambiguity"
 
-# A captured terminal belongs to its registration bytes, not a boot-volatile
+# A captured terminal belongs to its publication generation, not a boot-volatile
 # device/inode. Reconcile must retire that exact source before it can start a
 # second wait after a runner crash between capture and retirement.
 H_CAPTURE_RECOVERY="$TMP_ROOT/home-capture-recovery"
@@ -320,7 +382,8 @@ before_capture_recovery=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
 fc "$H_CAPTURE_RECOVERY" submit "$id_capture_recovery" >/dev/null || fail "capture-recovery fixture submit failed"
 source_capture_recovery="consult-$id_capture_recovery"
 registration_capture_recovery="$H_CAPTURE_RECOVERY/state/procevent/$source_capture_recovery.source"
-generation_capture_recovery="sha256:$(shasum -a 256 "$registration_capture_recovery" | awk '{print $1}')"
+generation_capture_recovery=$(sed -n 's/^registration_generation=//p' "$registration_capture_recovery")
+[ -n "$generation_capture_recovery" ] || fail "capture-recovery registration has no publication generation"
 mkdir -p "$H_CAPTURE_RECOVERY/state/procevent-inbox"
 printf '{"schema":"fm-consult-wait/1","consult_id":"%s","job_id":"job_fixture","wait_exit":0,"wait_timed_out":false,"job_status":"succeeded","error_code":null}\n' \
   "$id_capture_recovery" > "$H_CAPTURE_RECOVERY/state/procevent-inbox/$source_capture_recovery.1.result"
@@ -391,11 +454,22 @@ assert_contains "$model_out" "model is not approved" "model default-deny is enfo
 assert_absent "$H_MODEL/data/consults" "unapproved model creates no consultation record"
 pass "only the explicitly approved temporary-chat model may be prepared"
 
+H_REASONING="$TMP_ROOT/home-reasoning-deny"
+consult_home "$H_REASONING"
+reasoning_status=0
+reasoning_out=$(fc "$H_REASONING" prepare --question "$QUESTION_TWO" --privacy internal-research --reasoning definitely-invalid 2>&1) || reasoning_status=$?
+[ "$reasoning_status" -ne 0 ] || fail "an unsupported reasoning level was accepted"
+assert_contains "$reasoning_out" "reasoning is not approved" "reasoning default-deny is enforced at preparation"
+assert_absent "$H_REASONING/data/consults" "unsupported reasoning creates no consultation record"
+pass "unsupported reasoning fails before any consultation side effect"
+
 PE_HOME="$H2"
 FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
 PE_HOME="$H3"
 FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-PE_HOME="$H_WAIT_FAILURE"
+PE_HOME="$H_WAIT_COMPLETED"
+FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+PE_HOME="$H_WAIT_MISMATCH"
 FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
 PE_HOME="$H_RESUME"
 FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true

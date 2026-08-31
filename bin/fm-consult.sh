@@ -93,29 +93,49 @@ require_consult_dir() {  # <consult-id>
 
 write_once() {  # <path>; bytes arrive on stdin
   local path=$1
-  perl -MFcntl=':DEFAULT' -e '
+  perl -MFcntl=':DEFAULT' -MFile::Basename=dirname -MFile::Temp=tempfile -MIO::Handle -e '
     use strict;
     use warnings;
     my $path = shift @ARGV;
+    my $dir = dirname($path);
     umask 0077;
-    sysopen(my $out, $path, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 1;
+    exit 1 if -e $path || -l $path;
+    my ($out, $tmp) = tempfile(".fm-consult-publish.XXXXXX", DIR => $dir, UNLINK => 0);
+    my $published = 0;
     binmode STDIN;
     binmode $out;
-    while (1) {
-      my $count = sysread(STDIN, my $chunk, 65536);
-      exit 2 unless defined $count;
-      last if $count == 0;
-      my $offset = 0;
-      while ($offset < $count) {
-        my $written = syswrite($out, $chunk, $count - $offset, $offset);
-        exit 2 unless defined $written && $written > 0;
-        $offset += $written;
+    my $ok = eval {
+      while (1) {
+        my $count = sysread(STDIN, my $chunk, 65536);
+        die "read" unless defined $count;
+        last if $count == 0;
+        my $offset = 0;
+        while ($offset < $count) {
+          my $written = syswrite($out, $chunk, $count - $offset, $offset);
+          die "write" unless defined $written && $written > 0;
+          $offset += $written;
+        }
       }
+      chmod 0600, $tmp or die "chmod";
+      $out->flush or die "flush";
+      $out->sync or die "file sync";
+      close $out or die "close";
+      link $tmp, $path or die "publish";
+      $published = 1;
+      sysopen(my $dir_handle, $dir, O_RDONLY) or die "open dir";
+      $dir_handle->sync or die "directory sync";
+      close $dir_handle or die "close dir";
+      unlink $tmp or die "unlink stage";
+      sysopen($dir_handle, $dir, O_RDONLY) or die "reopen dir";
+      $dir_handle->sync or die "directory resync";
+      close $dir_handle or die "reclose dir";
+      1;
+    };
+    if (!$ok) {
+      unlink $tmp if -e $tmp || -l $tmp;
+      exit($published ? 2 : 1);
     }
-    chmod 0600, $path or exit 3;
-    close $out or exit 4;
   ' "$path" || return 1
-  chmod 0600 "$path" || return 1
   private_mode "$path" 600
 }
 
@@ -170,7 +190,7 @@ canonical_temporary_model() {  # <requested model>; prints the known temporary-c
 }
 
 submission_attempt_exists() {  # <dir>
-  [ -f "$1/submission-attempt.json" ] && [ ! -L "$1/submission-attempt.json" ] && private_mode "$1/submission-attempt.json" 600
+  submission_attempt_at "$1" >/dev/null
 }
 
 request_exists() {  # <dir>
@@ -322,9 +342,47 @@ private_capture() {  # <directory> <name> <command...>; prints capture path and 
 }
 
 submission_terminal() {  # <directory>
-  local file="$1/submission.json"
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  json_path_string "$file" terminal
+  local dir=$1 file="$1/submission.json" id
+  id=$(basename "$dir")
+  [ -f "$file" ] && [ ! -L "$file" ] && private_mode "$file" 600 || return 1
+  perl -MJSON::PP -e '
+    my ($file, $id) = @ARGV;
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
+    exit 1 unless ref($v) eq "HASH" && ($v->{schema_version} // 0) == 1 && ($v->{consult_id} // "") eq $id;
+    my $terminal = $v->{terminal};
+    exit 1 unless defined($terminal) && !ref($terminal) && $terminal =~ /^(?:SUBMITTED|AUTH_UNAVAILABLE|LIMIT_REACHED|LIMITS_INDETERMINATE|UPSTREAM_REJECTED|DELIVERY_AMBIGUOUS)$/;
+    print "$terminal\n";
+  ' "$file" "$id"
+}
+
+submission_attempt_at() {  # <directory>
+  local dir=$1 file="$1/submission-attempt.json" id
+  id=$(basename "$dir")
+  [ -f "$file" ] && [ ! -L "$file" ] && private_mode "$file" 600 || return 1
+  perl -MJSON::PP -e '
+    my ($file, $id) = @ARGV;
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
+    exit 1 unless ref($v) eq "HASH" && ($v->{schema_version} // 0) == 1 && ($v->{consult_id} // "") eq $id;
+    exit 1 unless ($v->{state} // "") eq "SUBMISSION_ATTEMPTED" && ($v->{retries} // -1) == 0;
+    my $at = $v->{attempted_at};
+    exit 1 unless defined($at) && !ref($at) && $at =~ /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+    print "$at\n";
+  ' "$file" "$id"
+}
+
+reconciliation_valid() {  # <directory> <consult-id>
+  local file="$1/reconciliation.json"
+  [ -f "$file" ] && [ ! -L "$file" ] && private_mode "$file" 600 || return 1
+  perl -MJSON::PP -e '
+    my ($file, $id) = @ARGV;
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
+    exit 1 unless ref($v) eq "HASH" && ($v->{schema_version} // 0) == 1 && ($v->{consult_id} // "") eq $id;
+    exit 1 unless ($v->{state} // "") eq "HUMAN_RECONCILED";
+    my $at = $v->{reconciled_at};
+    my $record = $v->{human_record};
+    exit 1 unless defined($at) && !ref($at) && $at =~ /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+    exit 1 unless defined($record) && !ref($record) && length($record) > 0 && $record =~ /^[A-Za-z0-9._:\/#=-]+$/;
+  ' "$file" "$2"
 }
 
 submitted_job_id() {  # <directory>
@@ -361,7 +419,7 @@ EOF
 }
 
 unreconciled_ambiguity() {  # [except consult id]
-  local except=${1-} dir id terminal
+  local except=${1-} dir id terminal attempted
   [ -d "$CONSULT_ROOT" ] || return 1
   for dir in "$CONSULT_ROOT"/*; do
     [ -d "$dir" ] && [ ! -L "$dir" ] || continue
@@ -369,8 +427,19 @@ unreconciled_ambiguity() {  # [except consult id]
     consult_id_valid "$id" || continue
     [ "$id" = "$except" ] && continue
     terminal=$(submission_terminal "$dir" 2>/dev/null || true)
+    if [ -e "$dir/submission-attempt.json" ] || [ -L "$dir/submission-attempt.json" ]; then
+      attempted=$(submission_attempt_at "$dir" 2>/dev/null || true)
+      if [ -z "$terminal" ] && [ -n "$attempted" ] \
+        && [ ! -e "$dir/submission.json" ] && [ ! -L "$dir/submission.json" ]; then
+        write_submission "$dir" "$id" DELIVERY_AMBIGUOUS '' '' "$attempted" || return 2
+        terminal=DELIVERY_AMBIGUOUS
+      elif [ -z "$terminal" ]; then
+        printf '%s\n' "$id"
+        return 0
+      fi
+    fi
     [ "$terminal" = DELIVERY_AMBIGUOUS ] || continue
-    [ -f "$dir/reconciliation.json" ] && [ ! -L "$dir/reconciliation.json" ] && continue
+    reconciliation_valid "$dir" "$id" && continue
     printf '%s\n' "$id"
     return 0
   done
@@ -379,7 +448,7 @@ unreconciled_ambiguity() {  # [except consult id]
 
 cmd_prepare() {
   local question='' source_packet='' privacy='' model=gpt-5-6-pro reasoning=standard
-  local id dir question_hash source_hash contract canonical_model
+  local id dir question_hash source_hash='' source_hash_json=null contract canonical_model
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --question|--source-packet|--privacy|--model|--reasoning)
@@ -407,6 +476,7 @@ cmd_prepare() {
     2) die "Deep Research is not enabled by this consultation capability; saved-chat-only models are refused" ;;
     *) die "model is not approved for a temporary consultation" ;;
   esac
+  [ "$reasoning" = standard ] || die "reasoning is not approved for the selected temporary consultation model"
   [ "${#privacy}" -le 128 ] && [ "${#model}" -le 128 ] && [ "${#reasoning}" -le 128 ] || die "consult metadata is too long"
   ensure_consult_root || die "cannot prepare private consultation root"
   for _ in $(seq 1 32); do
@@ -425,8 +495,7 @@ cmd_prepare() {
   question_hash=$(sha256_file "$question") || die "cannot digest question"
   if [ -n "$source_packet" ]; then
     source_hash=$(sha256_file "$source_packet") || die "cannot digest source packet"
-  else
-    source_hash=$question_hash
+    source_hash_json=$(json_string "$source_hash")
   fi
   if ! {
     printf 'FIRSTMATE_CONSULT_ID: %s\n\n' "$id"
@@ -466,7 +535,7 @@ EOF
   # Keep the digest inputs in immutable leaves until submit captures the final
   # preflight snapshots in request.json.
   write_once "$dir/prepared.json" <<EOF
-{"schema_version":1,"consult_id":$(json_string "$id"),"prepared_at":$(json_string "$(timestamp)"),"question_input_sha256":$(json_string "$question_hash"),"source_packet_sha256":$(json_string "$source_hash"),"model":$(json_string "$model"),"reasoning":$(json_string "$reasoning"),"privacy_classification":$(json_string "$privacy")}
+{"schema_version":1,"consult_id":$(json_string "$id"),"prepared_at":$(json_string "$(timestamp)"),"question_input_sha256":$(json_string "$question_hash"),"source_packet_sha256":$source_hash_json,"model":$(json_string "$model"),"reasoning":$(json_string "$reasoning"),"privacy_classification":$(json_string "$privacy")}
 EOF
   printf 'prepared: %s\n' "$id"
 }
@@ -476,14 +545,21 @@ write_request_from_preflight() {  # <dir> <id> <doctor capture> <limits capture>
   local question_hash contract_hash source_hash model reasoning privacy doctor_json limits_json
   question_hash=$(sha256_file "$dir/question.md") || return 1
   contract_hash=$(sha256_file "$dir/contract.md") || return 1
-  source_hash=$(json_path_string "$prepared" source_packet_sha256) || return 1
+  source_hash=$(perl -MJSON::PP -e '
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
+    exit 1 unless ref($v) eq "HASH" && exists($v->{source_packet_sha256});
+    my $hash = $v->{source_packet_sha256};
+    if (!defined($hash)) { print "null"; exit 0; }
+    exit 1 if ref($hash) || $hash !~ /^[0-9a-f]{64}$/;
+    print encode_json($hash);
+  ' "$prepared") || return 1
   model=$(json_path_string "$prepared" model) || return 1
   reasoning=$(json_path_string "$prepared" reasoning) || return 1
   privacy=$(json_path_string "$prepared" privacy_classification) || return 1
   doctor_json=$(json_redact_capture doctor "$doctor") || return 1
   limits_json=$(json_redact_capture limits "$limits") || return 1
   write_once "$dir/request.json" <<EOF
-{"schema_version":1,"consult_id":$(json_string "$id"),"created_at":$(json_string "$(timestamp)"),"question_sha256":$(json_string "$question_hash"),"contract_sha256":$(json_string "$contract_hash"),"source_packet_sha256":$(json_string "$source_hash"),"model":$(json_string "$model"),"reasoning":$(json_string "$reasoning"),"privacy_classification":$(json_string "$privacy"),"retries":0,"conversation_retention":"temporary","preflight":{"recorded_at":$(json_string "$(timestamp)"),"doctor":$doctor_json},"limits_observed_at":$(json_string "$(timestamp)"),"limits_observed":$limits_json,"redaction_declaration":"Credential, cookie, token, CDP, endpoint, websocket, and browser-target values are redacted."}
+{"schema_version":1,"consult_id":$(json_string "$id"),"created_at":$(json_string "$(timestamp)"),"question_sha256":$(json_string "$question_hash"),"contract_sha256":$(json_string "$contract_hash"),"source_packet_sha256":$source_hash,"model":$(json_string "$model"),"reasoning":$(json_string "$reasoning"),"privacy_classification":$(json_string "$privacy"),"retries":0,"conversation_retention":"temporary","preflight":{"recorded_at":$(json_string "$(timestamp)"),"doctor":$doctor_json},"limits_observed_at":$(json_string "$(timestamp)"),"limits_observed":$limits_json,"redaction_declaration":"Credential, cookie, token, CDP, endpoint, websocket, and browser-target values are redacted."}
 EOF
 }
 
@@ -510,7 +586,7 @@ cmd_submit() {
 }
 
 cmd_submit_locked() {
-  local id=${1-} dir terminal existing_ambiguous doctor_capture limits_capture rc limits_rc limit_terminal
+  local id=${1-} dir terminal existing_ambiguous doctor_capture limits_capture rc limits_rc limit_terminal ambiguity_rc
   local request_present attempt_at submit_capture job_id code model reasoning
   [ "$#" -eq 1 ] || usage
   dir=$(require_consult_dir "$id")
@@ -522,8 +598,13 @@ cmd_submit_locked() {
     printf 'already-terminal: %s %s\n' "$id" "$terminal"
     return 0
   fi
-  existing_ambiguous=$(unreconciled_ambiguity "$id" 2>/dev/null || true)
-  [ -z "$existing_ambiguous" ] || die "submission refused until captain reconciles DELIVERY_AMBIGUOUS consult $existing_ambiguous"
+  existing_ambiguous=$(unreconciled_ambiguity "$id" 2>/dev/null)
+  ambiguity_rc=$?
+  case "$ambiguity_rc" in
+    0) die "submission refused until captain reconciles DELIVERY_AMBIGUOUS consult $existing_ambiguous" ;;
+    1) ;;
+    *) die "cannot safely reconcile the global delivery-ambiguity boundary" ;;
+  esac
   record_pro_cli_identity
   if ! [ -f "$dir/question.md" ] || [ -L "$dir/question.md" ] || ! private_mode "$dir/question.md" 600; then
     die "private question record is missing or unsafe"
@@ -540,15 +621,17 @@ cmd_submit_locked() {
     request_present=1
   fi
   if [ -e "$dir/submission-attempt.json" ] || [ -L "$dir/submission-attempt.json" ]; then
-    submission_attempt_exists "$dir" || die "existing submission attempt record is missing or unsafe"
+    attempt_at=$(submission_attempt_at "$dir") || die "existing submission attempt record is missing or unsafe"
     # The durable intent marker is written immediately before the only external
     # call. Its presence proves delivery may have crossed, so recovery stops.
-    [ -e "$dir/submission.json" ] || write_submission "$dir" "$id" DELIVERY_AMBIGUOUS '' '' "$(timestamp)" \
+    [ -e "$dir/submission.json" ] || write_submission "$dir" "$id" DELIVERY_AMBIGUOUS '' '' "$attempt_at" \
       || die "cannot record ambiguous delivery terminal"
     die "submission boundary is already durable but not conclusively resolved; DELIVERY_AMBIGUOUS"
   fi
   model=$(json_path_string "$dir/prepared.json" model) || die "prepared model is unreadable"
   reasoning=$(json_path_string "$dir/prepared.json" reasoning) || die "prepared reasoning is unreadable"
+  [ "$(canonical_temporary_model "$model" 2>/dev/null || true)" = "$model" ] || die "prepared model is not approved"
+  [ "$reasoning" = standard ] || die "prepared reasoning is not approved"
   if [ "$request_present" -eq 0 ]; then
     doctor_capture=$(private_capture "$dir" doctor pro-cli doctor --json); rc=$?
     [ -n "$doctor_capture" ] || die "cannot capture redacted pro-cli doctor response"
@@ -604,9 +687,13 @@ cmd_submit_locked() {
   chmod 0600 "$submit_capture" || { rm -f -- "$submit_capture"; die "cannot secure pro-cli submission staging"; }
   attempt_at=$(timestamp)
   cd "$dir" || { rm -f -- "$submit_capture"; die "cannot enter private consultation record"; }
-  write_once "$dir/submission-attempt.json" <<EOF
+  if ! write_once "$dir/submission-attempt.json" <<EOF
 {"schema_version":1,"consult_id":$(json_string "$id"),"attempted_at":$(json_string "$attempt_at"),"state":"SUBMISSION_ATTEMPTED","retries":0}
 EOF
+  then
+    rm -f -- "$submit_capture"
+    die "cannot publish the durable submission marker"
+  fi
   pro-cli job create @question.md --json --retries 0 --temporary --model "$model" --reasoning "$reasoning" > "$submit_capture" 2>&1
   rc=$?
   chmod 0600 "$submit_capture" || { rm -f -- "$submit_capture"; die "cannot secure pro-cli submission capture"; }
@@ -738,10 +825,18 @@ cmd_collect() {
         rm -f -- "$result_capture" "$answer_capture"
         die "result validation failed at private boundary ($rc); leave the wake unhandled"
       }
-      cat -- "$answer_capture" | write_once "$dir/advisory.md" || {
-        rm -f -- "$result_capture" "$answer_capture"
-        die "private advisory could not be created"
-      }
+      if [ -e "$dir/advisory.md" ] || [ -L "$dir/advisory.md" ]; then
+        [ -f "$dir/advisory.md" ] && [ ! -L "$dir/advisory.md" ] && private_mode "$dir/advisory.md" 600 \
+          && cmp -s -- "$answer_capture" "$dir/advisory.md" || {
+            rm -f -- "$result_capture" "$answer_capture"
+            die "existing private advisory does not match the known job result"
+          }
+      else
+        write_once "$dir/advisory.md" < "$answer_capture" || {
+          rm -f -- "$result_capture" "$answer_capture"
+          die "private advisory could not be created"
+        }
+      fi
       rm -f -- "$result_capture" "$answer_capture"
       answer_hash=$(sha256_file "$dir/advisory.md") || die "cannot digest advisory"
       write_receipt "$dir" "$id" ADVISORY_RECORDED "$answer_hash" || die "cannot create advisory receipt"

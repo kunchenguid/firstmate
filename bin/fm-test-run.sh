@@ -1162,6 +1162,7 @@ families_for_changed_path() {
       ;;
     bin/fm-consult.sh|bin/fm-procevent-consult.sh)
       printf '%s\n' __script__:fm-consult.test.sh
+      printf '%s\n' __script__:fm-procevent.test.sh
       ;;
     bin/fm-procevent.sh|bin/fm-procevent-lib.sh|bin/fm-procevent-extension-capture.pl)
       printf '%s\n' __script__:fm-extension-binding.test.sh

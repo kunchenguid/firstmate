@@ -185,6 +185,44 @@ assert_grep 'payload one' "$RESULT" "the captured result holds the source output
 assert_grep 'lavish' "${RESULT%.result}.adapter" "the captured result retains its immutable adapter"
 assert_absent "${RESULT%.result}.handled" "publication alone never marks a result handled"
 
+HCONSULT="$TMP_ROOT/hconsult"; new_home "$HCONSULT"
+CONSULT_TRIGGER="$TMP_ROOT/consult-trigger"
+CONSULT_SOURCE=consult-shared-runner
+CONSULT_PAYLOAD='{"schema":"fm-consult-wait/1","consult_id":"11111111-1111-1111-1111-111111111111","job_id":"job_shared_runner","wait_exit":75,"wait_timed_out":false,"job_status":"succeeded","error_code":null}'
+pe_register "$HCONSULT" consult "$CONSULT_SOURCE" -- "$BLOCKER" "$CONSULT_TRIGGER" "$CONSULT_PAYLOAD" >/dev/null
+: > "$CONSULT_TRIGGER"
+consult_start=$(pe "$HCONSULT" start "$CONSULT_SOURCE") || fail "consult mapping start failed: $consult_start"
+assert_contains "$consult_start" "retired: $CONSULT_SOURCE" "consult terminal mapping retires a validated completed job"
+CONSULT_RESULT=$(first_result "$HCONSULT" "$CONSULT_SOURCE" || true)
+[ -n "$CONSULT_RESULT" ] || fail "consult mapping produced no durable result"
+consult_classification=$(pe "$HCONSULT" classify "$CONSULT_RESULT") || fail "generic classification did not invoke the consult adapter"
+assert_contains "$consult_classification" completed "generic classification preserves the consult completion mapping"
+assert_absent "$HCONSULT/state/procevent/$CONSULT_SOURCE.source" "terminal consult classification retires its registration"
+first_consult_generation=$(sed -n 's/^registration_generation=//p' "${CONSULT_RESULT%.result}.generation")
+[ -n "$first_consult_generation" ] || fail "consult capture omitted its registration generation"
+rm -f -- "$CONSULT_TRIGGER"
+pe_register "$HCONSULT" consult "$CONSULT_SOURCE" -- "$BLOCKER" "$CONSULT_TRIGGER" "$CONSULT_PAYLOAD" >/dev/null
+second_consult_generation=$(sed -n 's/^registration_generation=//p' "$HCONSULT/state/procevent/$CONSULT_SOURCE.source")
+[ -n "$second_consult_generation" ] || fail "rearmed consult registration omitted its publication generation"
+[ "$first_consult_generation" != "$second_consult_generation" ] || fail "identical consult registrations reused a publication generation"
+consult_rearm=$(pe "$HCONSULT" reconcile) || fail "consult rearm reconcile failed: $consult_rearm"
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/$CONSULT_SOURCE.claim" || fail "rearmed consult source did not start"
+assert_present "$HCONSULT/state/procevent/$CONSULT_SOURCE.source" "an old terminal capture cannot retire a rearmed consult generation"
+consult_ack=$(pe "$HCONSULT" handled "$CONSULT_SOURCE" 1) || fail "old consult capture acknowledgement failed: $consult_ack"
+assert_contains "$consult_ack" "handled: $CONSULT_SOURCE 1" "the old consult capture remains independently acknowledgeable"
+: > "$CONSULT_TRIGGER"
+for _ in $(seq 1 100); do
+  [ -s "$HCONSULT/state/procevent-inbox/$CONSULT_SOURCE.2.result" ] && break
+  sleep 0.05
+done
+assert_present "$HCONSULT/state/procevent-inbox/$CONSULT_SOURCE.2.result" "rearmed consult generation did not capture its own terminal result"
+for _ in $(seq 1 100); do
+  [ ! -e "$HCONSULT/state/procevent/$CONSULT_SOURCE.source" ] && break
+  sleep 0.05
+done
+assert_absent "$HCONSULT/state/procevent/$CONSULT_SOURCE.source" "only the matching rearmed consult generation may retire itself"
+pass "shared runner maps consult classification terminal rearm and old-capture acknowledgement"
+
 # --- the public start boundary establishes generation group ownership -------
 HPG="$TMP_ROOT/hpg"; new_home "$HPG"
 DIRECT_TRIGGER="$TMP_ROOT/direct-trigger"
