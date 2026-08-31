@@ -1524,26 +1524,6 @@ def parse_event_stdin(max_bytes: int = MAX_HOOK_BYTES) -> dict[str, Any]:
     return value
 
 
-def matching_candidate_present(layout: StateLayout, source_harness: str, session_hash: str) -> bool:
-    layout.initialize()
-    claimed = claimed_candidate_ids(layout)
-    for path in sorted(layout.candidates.glob("candidate-*.json")):
-        if path.stem in claimed:
-            continue
-        try:
-            value = read_json_file(path, max_bytes=16 * 1024)
-        except HandoffError:
-            raise
-        if (
-            isinstance(value, dict)
-            and value.get("schema") == CANDIDATE_SCHEMA
-            and value.get("source_harness") == source_harness
-            and value.get("source_session_hash") == session_hash
-        ):
-            return True
-    return False
-
-
 def matching_nonempty_state(layout: StateLayout, source_harness: str, session_hash: str) -> bool:
     layout.initialize()
     candidate_owners: dict[str, bool | None] = {}
@@ -2530,20 +2510,23 @@ def compaction_binding_path(layout: StateLayout, config: Mapping[str, Any], capa
     return layout.bindings / f"compaction-{endpoint_binding_key(config)}-{process_capability}.json"
 
 
-def outstanding_compaction_bindings(layout: StateLayout) -> list[Path]:
-    paths = sorted(layout.bindings.glob("compaction-*-*.json"))
-    if len(paths) > MAX_COMPACTION_RECORDS:
-        raise HandoffError("COMPACTION_BACKPRESSURE", "durable Claude compaction bindings exceed their global bound")
-    return paths
-
-
 def session_compaction_bindings_locked(
     layout: StateLayout,
     session_hash: str,
 ) -> list[tuple[Path, dict[str, Any], list[dict[str, str]]]]:
     matches: list[tuple[Path, dict[str, Any], list[dict[str, str]]]] = []
+    paths: list[Path] = []
+    for path in sorted(layout.bindings.glob("compaction-*-*.json")):
+        try:
+            value = read_compaction_binding_header(path)
+        except HandoffError:
+            continue
+        if value["session_hash"] == session_hash:
+            paths.append(path)
+    if len(paths) > MAX_COMPACTION_RECORDS:
+        raise HandoffError("COMPACTION_BACKPRESSURE", "durable Claude compaction bindings exceed their session bound")
     owned_records: set[str] = set()
-    for path in outstanding_compaction_bindings(layout):
+    for path in paths:
         value, bindings = read_compaction_binding_locked(layout, path)
         record_ids = {item["record_id"] for item in bindings}
         if owned_records & record_ids:
@@ -2554,14 +2537,7 @@ def session_compaction_bindings_locked(
     return matches
 
 
-def read_compaction_binding_locked(
-    layout: StateLayout,
-    path: Path,
-    *,
-    config: Mapping[str, Any] | None = None,
-    session_hash: str | None = None,
-    process_capability: str | None = None,
-) -> tuple[dict[str, Any], list[dict[str, str]]]:
+def read_compaction_binding_header(path: Path) -> dict[str, Any]:
     value = read_json_file(path, max_bytes=16 * 1024)
     binding_key = value.get("binding_key") if isinstance(value, dict) else None
     bound_session = value.get("session_hash") if isinstance(value, dict) else None
@@ -2580,6 +2556,21 @@ def read_compaction_binding_locked(
         or value.get("trigger") not in TRIGGERS
     ):
         raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding is invalid")
+    return value
+
+
+def read_compaction_binding_locked(
+    layout: StateLayout,
+    path: Path,
+    *,
+    config: Mapping[str, Any] | None = None,
+    session_hash: str | None = None,
+    process_capability: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    value = read_compaction_binding_header(path)
+    binding_key = str(value["binding_key"])
+    bound_session = str(value["session_hash"])
+    bound_capability = str(value["process_capability_sha256"])
     if session_hash is not None and bound_session != session_hash:
         raise HandoffError("COMPACTION_BINDING", "durable Claude PreCompact binding belongs to another hook session")
     if process_capability is not None and bound_capability != process_capability:
@@ -2613,7 +2604,22 @@ def reuse_compaction_binding_locked(layout: StateLayout, config: Mapping[str, An
 
 
 def retire_replaced_compaction_bindings_locked(layout: StateLayout, config: Mapping[str, Any], replacement_capability: str) -> None:
-    for path, value, bindings in session_compaction_bindings_locked(layout, config["recipient"]["agent_session_sha256"]):
+    session_hash = str(config["recipient"]["agent_session_sha256"])
+    binding_prefix = f"compaction-{endpoint_binding_key(config)}-"
+    for path in sorted(layout.bindings.glob("compaction-*-*.json")):
+        try:
+            header = read_compaction_binding_header(path)
+        except HandoffError as exc:
+            if path.name.startswith(binding_prefix):
+                retire_invalid_compaction_binding(layout, path, exc.code)
+            continue
+        if header["session_hash"] != session_hash:
+            continue
+        try:
+            value, bindings = read_compaction_binding_locked(layout, path)
+        except HandoffError as exc:
+            retire_invalid_compaction_binding(layout, path, exc.code)
+            continue
         if value["process_capability_sha256"] == replacement_capability:
             continue
         if value.get("terminal_outcome") is not None:
@@ -2627,6 +2633,15 @@ def retire_replaced_compaction_bindings_locked(layout: StateLayout, config: Mapp
         }
         atomic_create(layout.quarantine / f"retired-{path.name}", canonical_json(retirement))
         durable_unlink(path)
+
+
+def retire_invalid_compaction_binding(layout: StateLayout, path: Path, failure_code: str) -> None:
+    try:
+        observed_sha = sha256_file(path, max_bytes=16 * 1024)
+    except HandoffError:
+        observed_sha = ""
+    quarantine(layout, path.stem, "compaction-binding-record-invalid", failure_code=failure_code, observed_sha256=observed_sha)
+    durable_unlink(path)
 
 
 def durable_unlink(path: Path) -> None:
@@ -2726,10 +2741,9 @@ def apply_terminal_compaction_binding_locked(
     return result
 
 
-def replay_terminal_compaction_bindings_locked(layout: StateLayout) -> None:
+def replay_terminal_compaction_bindings_locked(layout: StateLayout, session_hash: str) -> None:
     owned_records: set[str] = set()
-    for path in outstanding_compaction_bindings(layout):
-        value, bindings = read_compaction_binding_locked(layout, path)
+    for path, value, bindings in session_compaction_bindings_locked(layout, session_hash):
         record_ids = {item["record_id"] for item in bindings}
         if owned_records & record_ids:
             raise HandoffError("COMPACTION_BINDING", "multiple durable Claude attempts own the same sealed record")
@@ -3615,7 +3629,7 @@ def claimable_records_locked(
     *,
     suppress_invalid: bool = False,
 ) -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
-    replay_terminal_compaction_bindings_locked(layout)
+    replay_terminal_compaction_bindings_locked(layout, str(config["recipient"]["agent_session_sha256"]))
     replay_compaction_attempts(layout, config)
     require_consumer_binding(home, config)
     for ack_path in sorted(layout.acks.glob("handoff-*.json")):
