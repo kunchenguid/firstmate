@@ -631,6 +631,7 @@ CONFIG_INHERIT_LOCK_HELD=0
 NODE_MODULES_ABORT_STAGING=
 NODE_MODULES_ABORT_TARGET=
 NODE_MODULES_ABORT_LINK=
+NODE_MODULES_ABORT_CLEANUP=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -650,14 +651,17 @@ parse_orca_worktree_result() {
 }
 
 cleanup_beeline_node_modules_staging() {
-  if [ -n "$NODE_MODULES_ABORT_TARGET" ] \
-     && [ -L "$NODE_MODULES_ABORT_TARGET" ] \
-     && [ "$(readlink "$NODE_MODULES_ABORT_TARGET" 2>/dev/null || true)" = "$NODE_MODULES_ABORT_LINK" ]; then
-    rm -f -- "$NODE_MODULES_ABORT_TARGET" 2>/dev/null || true
+  if [ "$NODE_MODULES_ABORT_CLEANUP" = 1 ]; then
+    if [ -n "$NODE_MODULES_ABORT_TARGET" ] \
+       && [ -L "$NODE_MODULES_ABORT_TARGET" ] \
+       && [ "$(readlink "$NODE_MODULES_ABORT_TARGET" 2>/dev/null || true)" = "$NODE_MODULES_ABORT_LINK" ]; then
+      rm -f -- "$NODE_MODULES_ABORT_TARGET" 2>/dev/null || true
+    fi
+    if [ -n "$NODE_MODULES_ABORT_STAGING" ]; then
+      rm -rf -- "$NODE_MODULES_ABORT_STAGING" 2>/dev/null || true
+    fi
   fi
-  if [ -n "$NODE_MODULES_ABORT_STAGING" ]; then
-    rm -rf -- "$NODE_MODULES_ABORT_STAGING" 2>/dev/null || true
-  fi
+  NODE_MODULES_ABORT_CLEANUP=0
   NODE_MODULES_ABORT_STAGING=
   NODE_MODULES_ABORT_TARGET=
   NODE_MODULES_ABORT_LINK=
@@ -1357,6 +1361,7 @@ share_beeline_node_modules() {
   NODE_MODULES_ABORT_STAGING=$staging_root
   NODE_MODULES_ABORT_TARGET=$target
   NODE_MODULES_ABORT_LINK=$(basename "$staging_root")
+  NODE_MODULES_ABORT_CLEANUP=1
   trap - INT TERM
   if [ -n "$creation_signal_status" ]; then
     cleanup_beeline_node_modules_staging
@@ -1425,6 +1430,7 @@ JS
   case "$publish_status" in
     0)
       exclude_path '.fm-node-modules.*/'
+      NODE_MODULES_ABORT_CLEANUP=0
       NODE_MODULES_ABORT_STAGING=
       NODE_MODULES_ABORT_TARGET=
       NODE_MODULES_ABORT_LINK=
