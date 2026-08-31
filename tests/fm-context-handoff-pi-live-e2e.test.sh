@@ -52,6 +52,7 @@ export default function (pi) {
   });
   pi.on("session_before_compact", async (event) => {
     fs.appendFileSync(process.env.FM_PI_EVENT_LOG, `extension:${event.type}:${event.reason}\n`);
+    if (process.env.FM_PI_COMPACTION_MODE === "cancel") return { cancel: true };
     return {
       compaction: {
         summary: "synthetic offline compaction",
@@ -67,8 +68,11 @@ export default function (pi) {
     finishCompaction();
   });
   pi.on("session_compact_failed", async (event) => {
-    fs.appendFileSync(process.env.FM_PI_EVENT_LOG, `extension:${event.type}:${event.reason}\n`);
+    fs.appendFileSync(process.env.FM_PI_EVENT_LOG, `extension:${event.type}:${event.reason}:aborted=${event.aborted}\n`);
     finishCompaction();
+  });
+  pi.on("before_provider_request", async () => {
+    fs.appendFileSync(process.env.FM_PI_EVENT_LOG, "extension:provider-request\n");
   });
   pi.registerCommand("fm-context-handoff-live", {
     description: "Run a synthetic offline compaction",
@@ -81,19 +85,35 @@ export default function (pi) {
 }
 EOF
 
-printf '%s\n' '{"id":"compact","type":"prompt","message":"/fm-context-handoff-live"}' | \
-  env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GOOGLE_API_KEY -u GEMINI_API_KEY \
-    PI_CODING_AGENT_DIR="$agent_dir" PI_OFFLINE=1 FM_PI_EVENT_LOG="$event_log" FM_PI_SESSION_FILE="$session_file" \
-    pi --approve --mode rpc --offline --provider fm-synthetic --model offline --api-key synthetic \
-      --no-tools --no-context-files --no-extensions --no-skills --no-prompt-templates --no-themes \
-      --session-dir "$session_dir" --session "$session_file" -e "$extension" > "$rpc_log" || \
-  fail "installed Pi executable offline compaction failed"
+run_offline_compaction() {
+  local mode=$1 output=$2
+  : > "$event_log"
+  printf '%s\n' '{"id":"compact","type":"prompt","message":"/fm-context-handoff-live"}' | \
+    env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GOOGLE_API_KEY -u GEMINI_API_KEY \
+      PI_CODING_AGENT_DIR="$agent_dir" PI_OFFLINE=1 FM_PI_EVENT_LOG="$event_log" FM_PI_SESSION_FILE="$session_file" FM_PI_COMPACTION_MODE="$mode" \
+      pi --approve --mode rpc --offline --provider fm-synthetic --model offline --api-key synthetic \
+        --no-tools --no-context-files --no-extensions --no-skills --no-prompt-templates --no-themes \
+        --session-dir "$session_dir" --session "$session_file" -e "$extension" > "$output"
+}
+
+cancel_rpc="$fixture/cancel-rpc.jsonl"
+run_offline_compaction cancel "$cancel_rpc" || fail "installed Pi executable offline cancellation failed"
+[ "$(sed -n '1p' "$event_log" 2>/dev/null)" = 'extension:session_before_compact:manual' ] || fail "installed Pi executable did not invoke the cancellation extension"
+[ "$(sed -n '2p' "$event_log")" = 'extension:session_compact_failed:manual:aborted=true' ] || fail "installed Pi executable did not emit its cancelled compaction failure event"
+[ "$(wc -l < "$event_log" | tr -d ' ')" -eq 2 ] || fail "cancelled installed Pi compaction reached a provider request"
+jq -se 'any(.type == "response" and .id == "compact" and .success == true) and any(.type == "compaction_end" and .reason == "manual" and .aborted == true)' "$cancel_rpc" >/dev/null || fail "installed Pi executable did not publish its aborted compaction lifecycle"
+jq -se 'all(.type != "compaction")' "$session_file" >/dev/null || fail "cancelled installed Pi compaction persisted a compaction entry"
+printf '%s\n' 'extension:session_before_compact:manual' 'extension:session_compact_failed:manual:aborted=true'
+pass "installed Pi executable offline cancellation"
+
+run_offline_compaction success "$rpc_log" || fail "installed Pi executable offline compaction failed"
 
 if [ "$(sed -n '1p' "$event_log" 2>/dev/null)" != 'extension:session_before_compact:manual' ]; then
   sed -n '1,40p' "$rpc_log" >&2
   fail "installed Pi executable did not invoke the synthetic compaction extension"
 fi
 [ "$(sed -n '2p' "$event_log")" = 'extension:session_compact:persisted=true' ] || fail "installed Pi executable reported success before durable persistence"
+[ "$(wc -l < "$event_log" | tr -d ' ')" -eq 2 ] || fail "synthetic installed Pi compaction reached a provider request"
 jq -se 'any(.type == "response" and .id == "compact" and .success == true) and any(.type == "compaction_end" and .reason == "manual" and .aborted == false)' "$rpc_log" >/dev/null || fail "installed Pi executable did not complete its public compaction lifecycle"
 printf '%s\n' 'extension:session_before_compact:manual' 'extension:session_compact:persisted=true'
 pass "installed Pi executable offline persistence-before-success"

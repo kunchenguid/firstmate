@@ -55,6 +55,11 @@ test_family_selection() {
   fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
   [ "$fam_count" -lt "$all_count" ] \
     || fail "pure-contract-unit must be a proper subset of --all"
+  listed=$("$RUNNER" --list --family context-handoff-serial)
+  [ "$listed" = "tests/fm-context-handoff.test.sh" ] || fail "context handoff must remain in its dedicated serial family"
+  if "$RUNNER" --list-concurrent-safe-families | grep -Fxq context-handoff-serial; then
+    fail "context handoff serial family lacks a current concurrency proof"
+  fi
   pass "family selection returns a proper subset of the suite"
 }
 
@@ -90,7 +95,7 @@ test_changed_file_selection_is_conservative() {
 
 init_changed_fixture_repo() {
   local repo=$1 script
-  mkdir -p "$repo/bin" "$repo/tests"
+  mkdir -p "$repo/bin" "$repo/libexec" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -99,6 +104,7 @@ init_changed_fixture_repo() {
     fm-documentation-audiences.test.sh \
     fm-test-isolation-proof.test.sh \
     fm-test-run.test.sh \
+    fm-context-handoff.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-harness-adapter-instructions-live-e2e.test.sh \
@@ -129,6 +135,7 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
+  : >"$repo/libexec/fm-context-handoff.py"
   : >"$repo/bin/unmapped-source.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
   # script of the expensive real-Herdr family and consumed by one curated
@@ -211,6 +218,15 @@ test_changed_dependency_selection_and_unmapped_failure() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/libexec/fm-context-handoff.py"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-context-handoff.test.sh" "context handoff source selects serial coverage"
+  case "$listed" in
+    *tests/fm-brief.test.sh*) fail "context handoff source widened into the concurrent pure-contract family" ;;
+  esac
+  git -C "$repo" add libexec/fm-context-handoff.py
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm context-handoff-change
 
   printf '\n' >>"$repo/tests/lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

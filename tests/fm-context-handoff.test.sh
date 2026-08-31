@@ -240,6 +240,7 @@ cli() {
       FM_HANDOFF_TEST_PROCESS_GENERATION="$PROCESS_GENERATION" \
       FM_HANDOFF_TEST_PROCESS_BOOT_ID="$PROCESS_BOOT_ID" \
       FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY="${LIVE_PROCESS_CAPABILITY:-}" \
+      FM_HANDOFF_TEST_PI_LIVENESS="${FM_HANDOFF_TEST_PI_LIVENESS:-}" \
       FM_HANDOFF_TEST_FAILPOINT="${FM_HANDOFF_TEST_FAILPOINT:-}" \
       FM_HANDOFF_TEST_PAUSEPOINT="${FM_HANDOFF_TEST_PAUSEPOINT:-}" \
       FM_HANDOFF_TEST_PAUSE_MARKER="${FM_HANDOFF_TEST_PAUSE_MARKER:-$EROOT/pause-marker}" \
@@ -1193,7 +1194,7 @@ PY
 }
 
 test_pi_result_validation() {
-  local adapter_root body stale_root
+  local adapter_root body stale_root inert_home no_config_home symlink_home held_pipe_root
   new_env pi-result-validation
   register_statement 'Cancel Pi compaction only when a non-empty durable register cannot seal.' >/dev/null || fail "Pi lifecycle candidate did not register"
   for case_name in malformed unknown polluted empty disabled exited hanging; do
@@ -1229,6 +1230,24 @@ EOF
     fi
     chmod 755 "$adapter_root/bin/fm-context-handoff.py"
   done
+  inert_home="$EROOT/inert-home"
+  no_config_home="$EROOT/no-config-home"
+  symlink_home="$EROOT/symlink-home"
+  mkdir -p "$inert_home/config" "$no_config_home" "$symlink_home/config"
+  jq '.registration_enabled=false | .sealing_enabled=false | .delivery_enabled=false | .consumer_enabled=false' "$FM_HOME/config/context-handoff.json" > "$inert_home/config/context-handoff.json" || fail "could not create exact default-off configuration"
+  ln -s "$inert_home/config/context-handoff.json" "$symlink_home/config/context-handoff.json"
+  held_pipe_root="$EROOT/held-pipe"
+  mkdir -p "$held_pipe_root/bin"
+  cat > "$held_pipe_root/bin/fm-context-handoff.py" <<'EOF'
+#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { detached: true, stdio: ["ignore", "inherit", "ignore"] });
+holder.unref();
+fs.writeFileSync(process.env.FM_HELD_PIPE_PID, `${holder.pid}\n`);
+setInterval(() => {}, 10000);
+EOF
+  chmod 755 "$held_pipe_root/bin/fm-context-handoff.py"
   stale_root="$EROOT/stale-binding"
   mkdir -p "$stale_root/bin"
   printf 'sealed\n' > "$stale_root/mode"
@@ -1260,6 +1279,7 @@ EOF
   FM_HOME="$FM_HOME" FM_HANDOFF_TESTING=1 FM_HANDOFF_TEST_NOW="$FIXED_NOW" PI_SESSION_ID=pi-session-1 \
   EXT="$ROOT/.pi/extensions/lib/fm-context-handoff.ts" REAL_ROOT="$ROOT" MISSING="$EROOT/missing" \
   MALFORMED="$EROOT/malformed" UNKNOWN="$EROOT/unknown" POLLUTED="$EROOT/polluted" EMPTY="$EROOT/empty" DISABLED="$EROOT/disabled" EXITED="$EROOT/exited" HANGING="$EROOT/hanging" STALE="$stale_root" \
+  INERT_HOME="$inert_home" NO_CONFIG_HOME="$no_config_home" SYMLINK_HOME="$symlink_home" HELD_PIPE="$held_pipe_root" FM_HELD_PIPE_PID="$EROOT/held-pipe-pid" \
   FM_HANGING_DESCENDANT_PID="$EROOT/hanging-descendant-pid" \
   FM_STALE_BINDING_MODE="$stale_root/mode" FM_STALE_BINDING_LOG="$stale_root/log" \
   node --input-type=module <<'EOF' || fail "Pi result validation failed"
@@ -1272,6 +1292,17 @@ mod.registerContextHandoff({on(name, handler){lifecycle.set(name, handler);}}, p
 for (const name of ["session_before_compact","session_compact","session_compact_failed"]) {
   if (!lifecycle.has(name)) throw new Error(`missing lifecycle handler ${name}`);
 }
+for (const home of [process.env.INERT_HOME, process.env.NO_CONFIG_HOME]) {
+  const inert = new Map();
+  mod.registerContextHandoff({on(name, handler){inert.set(name, handler);}}, process.env.MISSING, home);
+  process.env.FM_HANDOFF_CONFIG = "";
+  const result = await inert.get("session_before_compact")({reason:"threshold"}, ctx);
+  delete process.env.FM_HANDOFF_CONFIG;
+  if (result?.cancel) throw new Error(`exact default-off state invoked its unavailable adapter: ${home}`);
+}
+const symlinked = new Map();
+mod.registerContextHandoff({on(name, handler){symlinked.set(name, handler);}}, process.env.MISSING, process.env.SYMLINK_HOME);
+if (!(await symlinked.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("symlinked default-off configuration bypassed adapter validation");
 process.env.FM_HANDOFF_TEST_FAILPOINT = "before-file-fsync";
 const blocked = await lifecycle.get("session_before_compact")({reason:"threshold"}, ctx);
 if (!blocked?.cancel) throw new Error("non-empty seal failure did not cancel Pi compaction");
@@ -1315,6 +1346,23 @@ for (let attempt = 0; attempt < 20 && descendantAlive; attempt += 1) {
   if (descendantAlive) await new Promise(resolve => setTimeout(resolve, 25));
 }
 if (descendantAlive) throw new Error("hanging Pi adapter descendant survived process-group termination");
+const heldPipe = new Map();
+mod.registerContextHandoff({on(name, handler){heldPipe.set(name, handler);}}, process.env.HELD_PIPE, process.env.FM_HOME);
+const heldStarted = Date.now();
+let heldResult;
+let holderPid = 0;
+try {
+  heldResult = await heldPipe.get("session_before_compact")({reason:"threshold"}, ctx);
+  holderPid = Number(fs.readFileSync(process.env.FM_HELD_PIPE_PID, "utf8").trim());
+} finally {
+  if (!holderPid) {
+    try { holderPid = Number(fs.readFileSync(process.env.FM_HELD_PIPE_PID, "utf8").trim()); } catch {}
+  }
+  if (holderPid) {
+    try { process.kill(holderPid, "SIGKILL"); } catch {}
+  }
+}
+if (!heldResult?.cancel || Date.now() - heldStarted > 2000) throw new Error("Pi adapter timeout awaited a retained pipe after process-group cleanup");
 const stale = new Map();
 mod.registerContextHandoff({on(name, handler){stale.set(name, handler);}}, process.env.STALE, process.env.FM_HOME);
 if ((await stale.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("synthetic stale binding did not seal");
@@ -1880,7 +1928,7 @@ EOF
 }
 
 test_claude_terminal_outcome_uses_durable_binding() {
-  local statement arguments registered record calls_before calls_after output
+  local statement arguments registered record calls_before calls_after output standalone
   new_env claude-terminal-binding
   enable_consumer
   bind_claude >/dev/null || fail "terminal binding fixture did not bind Claude"
@@ -1891,6 +1939,9 @@ test_claude_terminal_outcome_uses_durable_binding() {
   [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "terminal binding candidate did not register"
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "terminal binding PreCompact failed"
   record=$(find "$FM_HOME/state/context-handoff/queue" -name 'handoff-*.json' -printf '%f\n' | sed 's/\.json$//' | head -1)
+  standalone=$(printf '%s\n' "$(jq -nc --arg session "$CLAUDE_SESSION" '{session_id:$session}')" | cli seal --source-harness claude --trigger threshold --standalone) || fail "standalone Claude conflict escaped bounded transport"
+  [ "$(printf '%s' "$standalone" | jq -r .status)" = attempt-conflict ] || fail "standalone Claude seal bypassed its durable attempt"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "standalone Claude conflict assigned a producer outcome"
   CAPABILITY=claude-process-generation-2
   PROCESS_GENERATION=2
   bind_claude >/dev/null || fail "replacement generation did not supersede the active process binding"
@@ -1912,6 +1963,8 @@ test_claude_terminal_outcome_uses_durable_binding() {
   calls_after=$(wc -l < "$HERDR_LOG")
   [ "$calls_after" -eq "$calls_before" ] || fail "terminal outcome performed a fresh Herdr probe"
   [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "terminal outcome did not consume its durable PreCompact binding"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "opposite Claude terminal outcome escaped bounded transport"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "opposite Claude terminal outcome replaced the first authenticated assignment"
   pass "probe-independent authenticated Claude terminal outcome"
 }
 
@@ -2244,6 +2297,12 @@ test_pi_attempt_authority_and_immutable_outcome() {
   PROCESS_GENERATION=202
   conflict=$(seal_pi) || fail "duplicate Pi process conflict escaped bounded transport"
   [ "$(printf '%s' "$conflict" | jq -r .status)" = attempt-conflict ] || fail "second live Pi process received the first process attempt"
+  LIVE_PROCESS_CAPABILITY=
+  FM_HANDOFF_TEST_PI_LIVENESS=uncertain
+  conflict=$(seal_pi) || fail "uncertain Pi liveness escaped bounded transport"
+  [ "$(printf '%s' "$conflict" | jq -r .status)" = attempt-conflict ] || fail "uncertain Pi liveness retired the first process attempt"
+  FM_HANDOFF_TEST_PI_LIVENESS=
+  LIVE_PROCESS_CAPABILITY=pi-process-one
   rejected=$(complete "$seal" failure) || fail "mismatched Pi outcome escaped bounded transport"
   [ "$(printf '%s' "$rejected" | jq -r .status)" = outcome-rejected ] || fail "mismatched Pi process assigned a terminal outcome"
   [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "mismatched Pi process changed the sealed queue"

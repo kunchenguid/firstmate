@@ -113,6 +113,9 @@ Its exact output was:
 
 ```text
 extension:session_before_compact:manual
+extension:session_compact_failed:manual:aborted=true
+ok - installed Pi executable offline cancellation
+extension:session_before_compact:manual
 extension:session_compact:persisted=true
 ok - installed Pi executable offline persistence-before-success
 ```

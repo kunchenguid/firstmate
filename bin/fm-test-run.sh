@@ -200,7 +200,7 @@ family_for_basename() {
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
-    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-context-handoff.test.sh|\
+    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
@@ -214,6 +214,9 @@ family_for_basename() {
     fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
+      ;;
+    fm-context-handoff.test.sh)
+      printf '%s\n' context-handoff-serial
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
@@ -319,6 +322,7 @@ expected_gate_skip_for_family() {
 list_known_families() {
   cat <<'EOF'
 pure-contract-unit
+context-handoff-serial
 watcher-wake-lock
 real-herdr-gated
 secondmate
@@ -1250,7 +1254,7 @@ families_for_changed_path() {
     tests/fixtures/context-handoff-transaction-core.sh|schemas/claude-obsidian.handoff.v1.schema.json|\
     integrations/claude-context-handoff/*|\
     .pi/extensions/lib/fm-context-handoff.ts)
-      printf '%s\n' pure-contract-unit
+      printf '%s\n' context-handoff-serial
       printf '%s\n' live-harness-optin
       ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)

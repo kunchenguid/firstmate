@@ -1512,7 +1512,8 @@ def seal_pi_attempt(home: Path, config: Mapping[str, Any], session_hash: str, tr
                         "attempt_id": existing["attempt_id"],
                         "trigger": existing["trigger"],
                     }
-                if pi_process_binding_owner_is_live(existing):
+                owner_liveness = pi_process_binding_owner_is_live(existing)
+                if owner_liveness is not False:
                     return {"status": "attempt-conflict"}
                 quarantine(layout, existing["attempt_id"], "dead-pi-compaction-attempt-retired", source_session_hash=session_hash)
             else:
@@ -1538,14 +1539,19 @@ def seal_pi_attempt(home: Path, config: Mapping[str, Any], session_hash: str, tr
         return {**result, "attempt_id": attempt_id, "trigger": trigger}
 
 
-def seal_pi_standalone(home: Path, config: Mapping[str, Any], session_hash: str, trigger: str) -> dict[str, Any]:
+def seal_standalone(home: Path, config: Mapping[str, Any], source_harness: str, session_hash: str, trigger: str) -> dict[str, Any]:
     layout = StateLayout(home)
     with state_lock(layout):
         replay_compaction_attempts(layout, config)
-        for path in sorted(layout.bindings.glob("pi-compaction-*.json")):
-            read_pi_compaction_binding(path)
-            return {"status": "attempt-conflict"}
-        result = _seal_candidates_locked(layout, config, "pi", session_hash, trigger)
+        if source_harness == "pi":
+            for path in sorted(layout.bindings.glob("pi-compaction-*.json")):
+                read_pi_compaction_binding(path)
+                return {"status": "attempt-conflict"}
+        else:
+            for path in sorted(layout.bindings.glob("compaction-*-*.json")):
+                read_compaction_binding_locked(layout, path)
+                return {"status": "attempt-conflict"}
+        result = _seal_candidates_locked(layout, config, source_harness, session_hash, trigger)
         if result.get("status") in {"sealed", "already-sealed"}:
             _mark_compaction_locked(
                 layout,
@@ -1897,9 +1903,17 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
         return seal_binding_failure_receipt(home, static_config, args.source_harness, session_hash, args.trigger, exc)
     if not config_enabled(config, "sealing_enabled"):
         return {"status": "disabled"}
-    if args.source_harness == "pi":
+    if args.standalone:
         try:
-            result = seal_pi_standalone(home, config, session_hash, args.trigger) if args.standalone else seal_pi_attempt(home, config, session_hash, args.trigger)
+            result = seal_standalone(home, config, args.source_harness, session_hash, args.trigger)
+        except (HandoffError, OSError) as raw_exc:
+            exc = raw_exc if isinstance(raw_exc, HandoffError) else HandoffError("STATE_DURABILITY", "standalone compaction publication was not durable")
+            if exc.code in {"TRANSACTION_RUNTIME_BACKPRESSURE", "HERDR_RUNTIME_BACKPRESSURE"}:
+                raise exc
+            return seal_binding_failure_receipt(home, static_config, args.source_harness, session_hash, args.trigger, exc)
+    elif args.source_harness == "pi":
+        try:
+            result = seal_pi_attempt(home, config, session_hash, args.trigger)
         except (HandoffError, OSError) as raw_exc:
             exc = raw_exc if isinstance(raw_exc, HandoffError) else HandoffError("STATE_DURABILITY", "Pi compaction binding publication was not durable")
             if exc.code in {"TRANSACTION_RUNTIME_BACKPRESSURE", "HERDR_RUNTIME_BACKPRESSURE"}:
@@ -1908,8 +1922,6 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
     else:
         result = seal_with_failure_receipt(home, args.source_harness, session_hash, args.trigger)
     if args.standalone and result.get("status") in {"sealed", "already-sealed"}:
-        if args.source_harness != "pi":
-            mark_compaction(home, normalize_compaction_bindings(result.get("bindings")), True, args.trigger, "standalone-manual-seal")
         deliver_pending(home)
     return result
 
@@ -2744,22 +2756,32 @@ def current_pi_process_claim() -> dict[str, Any]:
     raise HandoffError("PI_PROCESS_CAPABILITY", "the current platform lacks a collision-safe Pi process generation")
 
 
-def pi_process_binding_owner_is_live(value: Mapping[str, Any]) -> bool:
+def pi_process_binding_owner_is_live(value: Mapping[str, Any]) -> bool | None:
     platform = value.get("process_platform")
     process_pid = value.get("process_pid")
     if not isinstance(platform, str) or not isinstance(process_pid, int) or process_pid < 1:
-        return True
-    if process_binding_boot_is_current(value) is False:
+        return None
+    boot_current = process_binding_boot_is_current(value)
+    if boot_current is False:
         return False
+    if boot_current is None:
+        return None
     if platform == "test" and os.environ.get("FM_HANDOFF_TESTING") == "1":
+        forced = os.environ.get("FM_HANDOFF_TEST_PI_LIVENESS")
+        if forced == "uncertain":
+            return None
+        if forced == "dead":
+            return False
         live = os.environ.get("FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY")
         boot_id = value.get("process_boot_id")
         return isinstance(boot_id, str) and bool(live) and value.get("process_capability_sha256") == sha256_bytes(f"test\0{boot_id}\0{live}".encode("utf-8"))
     try:
         claim = linux_pi_process_claim(process_pid) if platform == "linux" else darwin_pi_process_claim(process_pid) if platform == "darwin" else None
     except HandoffError:
-        return False
-    return claim is not None and pi_process_claim_matches(value, claim)
+        return None
+    if claim is None:
+        return None
+    return pi_process_claim_matches(value, claim)
 
 
 def current_process_identity() -> tuple[str, int]:

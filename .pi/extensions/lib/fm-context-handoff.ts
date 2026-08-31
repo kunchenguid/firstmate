@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type RecordBinding = {
@@ -32,6 +35,30 @@ type SessionContext = {
     getSessionId?: () => unknown;
   };
 };
+
+function exactDefaultOff(fmHome: string): boolean {
+  const configured = process.env.FM_HANDOFF_CONFIG;
+  const rawPath = configured || `${fmHome}/config/context-handoff.json`;
+  if (rawPath.startsWith("~") && rawPath !== "~" && !rawPath.startsWith("~/")) return false;
+  const expanded = rawPath === "~" ? homedir() : rawPath.startsWith("~/") ? `${homedir()}/${rawPath.slice(2)}` : rawPath;
+  const path = isAbsolute(expanded) ? expanded : resolvePath(expanded);
+  let bytes: Buffer;
+  try {
+    if (realpathSync.native(path) !== path) return false;
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size > 256 * 1024) return false;
+    bytes = readFileSync(path);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  try {
+    const value = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    return value?.schema === "firstmate.context-handoff.config.v1"
+      && ["registration_enabled", "sealing_enabled", "delivery_enabled", "consumer_enabled"].every((key) => value[key] === false);
+  } catch {
+    return false;
+  }
+}
 
 function sessionId(ctx: SessionContext): string {
   try {
@@ -96,6 +123,7 @@ function runHandoff(
     let adapterFailed = false;
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let killGrace: ReturnType<typeof setTimeout> | undefined;
     let child: ReturnType<typeof spawn> | undefined;
     const testTimeout = Number(process.env.FM_HANDOFF_TEST_ADAPTER_TIMEOUT_MS);
     const adapterTimeoutMs = process.env.FM_HANDOFF_TESTING === "1" && Number.isFinite(testTimeout) && testTimeout >= 50 && testTimeout <= 5000
@@ -108,6 +136,9 @@ function runHandoff(
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
+      if (killGrace) clearTimeout(killGrace);
+      child?.stdout?.destroy();
+      child?.stdin?.destroy();
       resolve(result);
     };
     try {
@@ -125,6 +156,10 @@ function runHandoff(
       return;
     }
     const runningChild = child;
+    const armKillGrace = (): void => {
+      if (killGrace || settled) return;
+      killGrace = setTimeout(() => finish({ status: "adapter-failed" }), 250);
+    };
     const terminateAdapter = (): void => {
       adapterFailed = true;
       try {
@@ -133,10 +168,9 @@ function runHandoff(
       } catch {
         try {
           runningChild.kill("SIGKILL");
-        } catch {
-          finish({ status: "adapter-failed" });
-        }
+        } catch {}
       }
+      armKillGrace();
     };
     if (!runningChild.stdout || !runningChild.stdin) {
       terminateAdapter();
@@ -210,6 +244,7 @@ export function registerContextHandoff(
 
   pi.on("session_before_compact", async (event, ctx) => {
     if (pendingSeal && !(await persistPendingOutcome())) return { cancel: true };
+    if (exactDefaultOff(fmHome)) return;
     const currentSessionId = sessionId(ctx);
     const result = await runHandoff(
       root,
