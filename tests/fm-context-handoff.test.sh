@@ -1335,80 +1335,6 @@ EOF
   pass "isolated turn-end extension runtime dependencies"
 }
 
-test_installed_pi_success_order() {
-  local pi_entry pi_root output expected
-  if ! command -v pi >/dev/null 2>&1; then
-    if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ] || [ "${FM_CONTEXT_HANDOFF_PI_SUCCESS_PROBE_ONLY:-0}" = 1 ]; then
-      fail "required installed Pi success-order probe is unavailable"
-    fi
-    printf 'skip: pi not found\n'
-    return
-  fi
-  pi_entry=$(realpath "$(command -v pi)")
-  pi_root=$(dirname "$(dirname "$(dirname "$pi_entry")")")
-  [ -f "$pi_root/dist/core/agent-session.js" ] || fail "installed Pi agent session is unavailable"
-  output=$(PI_ROOT="$pi_root" node --input-type=module <<'EOF'
-import { pathToFileURL } from "node:url";
-const { AgentSession } = await import(pathToFileURL(`${process.env.PI_ROOT}/dist/core/agent-session.js`));
-const events = [];
-let persisted = false;
-let entries = [];
-const entry = (id, parentId, text) => ({
-  type: "message",
-  id,
-  parentId,
-  timestamp: "2026-08-30T20:00:00.000Z",
-  message: { role: "user", content: text, timestamp: 1788120000000 },
-});
-const branch = [entry("old", null, "old ".repeat(5000)), entry("recent", "old", "recent")];
-const runner = {
-  hasHandlers: () => true,
-  async emit(event) {
-    if (event.type === "session_before_compact") {
-      events.push(`extension:${event.type}:${event.reason}`);
-      return { compaction: { summary: "synthetic", firstKeptEntryId: "recent", tokensBefore: 5001 } };
-    }
-    if (event.type === "session_compact") {
-      events.push(`extension:${event.type}:persisted=${persisted}`);
-    }
-  },
-};
-const probe = {
-  model: { provider: "synthetic" },
-  settingsManager: { getCompactionSettings: () => ({ keepRecentTokens: 1 }) },
-  sessionManager: {
-    getBranch: () => branch,
-    appendCompaction(summary, firstKeptEntryId, tokensBefore) {
-      persisted = true;
-      events.push("persistence:appendCompaction");
-      entries = [{ type: "compaction", summary, firstKeptEntryId, tokensBefore }];
-    },
-    getEntries: () => entries,
-    buildSessionContext: () => ({ messages: [] }),
-  },
-  agent: { state: { messages: [] }, hasQueuedMessages: () => false },
-  _extensionRunner: runner,
-  _getSummarizationRequestAuth: async model => ({ model, apiKey: undefined, headers: undefined, env: undefined }),
-  _runDefaultCompaction: async () => { throw new Error("synthetic extension compaction called a model"); },
-  _emit: event => events.push(`public:${event.type}:${event.reason}:aborted=${event.aborted ?? "unset"}`),
-  _emitSessionCompactFailed: AgentSession.prototype._emitSessionCompactFailed,
-};
-const continued = await AgentSession.prototype._runAutoCompaction.call(probe, "threshold", false);
-console.log([...events, `continued=${continued}`].join("\n"));
-EOF
-  ) || fail "installed Pi success-order probe failed"
-  expected=$(printf '%s\n' \
-    'public:compaction_start:threshold:aborted=unset' \
-    'extension:session_before_compact:threshold' \
-    'persistence:appendCompaction' \
-    'extension:session_compact:persisted=true' \
-    'public:compaction_end:threshold:aborted=false' \
-    'continued=false')
-  [ "$output" = "$expected" ] || fail "installed Pi success event preceded durable compaction persistence"
-  printf '%s\n' "$output"
-  pass "installed Pi persistence-before-success order"
-}
-
 test_completed_save_precedes_source_validation() {
   local seal record bundle prepared approval bundle_path result disposition
   new_env completed-save-source-change
@@ -1852,7 +1778,7 @@ test_orphan_apply_execution_claim() {
 }
 
 test_claude_lifecycle_and_plugin_discovery() {
-  local statement arguments registered output marker adapter_status ambient ambient_marker
+  local statement arguments registered output marker adapter_status ambient ambient_marker bash_marker
   new_env claude-plugin
   enable_consumer
   bind_claude >/dev/null || fail "Claude binding failed"
@@ -1901,6 +1827,7 @@ test_claude_lifecycle_and_plugin_discovery() {
   jq -e '.mcpServers["firstmate-context-handoff"] | .command=="python3" and .args==["-I","-S","${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py","mcp-server"]' "$PLUGIN/.mcp.json" >/dev/null || fail "Claude plugin MCP discovery contract is incomplete"
   ambient="$EROOT/hostile-plugin-startup"
   ambient_marker="$EROOT/ambient-plugin-executed"
+  bash_marker="$EROOT/ambient-bash-executed"
   mkdir -p "$ambient"
   cat > "$ambient/sitecustomize.py" <<'PY'
 import os
@@ -1909,15 +1836,21 @@ from pathlib import Path
 Path(os.environ["FM_AMBIENT_PLUGIN_MARKER"]).write_text("executed\n", encoding="utf-8")
 os._exit(0)
 PY
+  cat > "$ambient/bash-env" <<EOF
+printf 'executed\n' > '$bash_marker'
+exit 0
+EOF
   (
     export PYTHONPATH="$ambient"
     export FM_AMBIENT_PLUGIN_MARKER="$ambient_marker"
+    export BASH_ENV="$ambient/bash-env"
     jq -nc --arg session "$CLAUDE_SESSION" --arg path "$VAULT/blocked.md" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"Write",tool_input:{file_path:$path,content:"x"}}' | plugin_cli claude-hook
   ) > "$EROOT/plugin-out" 2> "$EROOT/plugin-error"
   adapter_status=$?
   [ "$adapter_status" -eq 2 ] && [ ! -s "$EROOT/plugin-out" ] || fail "Claude plugin adapter changed deny transport status"
   jq -e '.hookSpecificOutput.permissionDecision=="deny"' "$EROOT/plugin-error" >/dev/null || fail "Claude plugin adapter did not preserve the mutation guard"
   [ ! -e "$ambient_marker" ] || fail "Claude plugin boundary executed ambient Python startup code"
+  [ ! -e "$bash_marker" ] || fail "Claude plugin boundary executed ambient shell startup code"
   pass "Claude lifecycle and model-free plugin discovery"
 }
 
@@ -2022,7 +1955,7 @@ test_candidate_identity_binding() {
 }
 
 test_seal_binding_failure_receipt() {
-  local seal record
+  local seal record i foreign statement registered queue
   new_env seal-binding-receipt
   register_statement 'Durable seal receipts survive an unhealthy Vault binding.' >/dev/null || fail "seal binding fixture did not register"
   jq '.vault.inode=999999999' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not break the reviewed Vault binding"
@@ -2054,6 +1987,39 @@ test_seal_binding_failure_receipt() {
   seal=$(seal_pi) || fail "malformed matching queue escaped the failure receipt boundary"
   [ "$(printf '%s' "$seal" | jq -r .status)" = seal-failed ] || fail "malformed matching queue failed open"
   jq -se 'any(.[]; .reason=="seal-binding-failed" and .failure_code=="RECORD_JSON")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "malformed matching queue wrote no configuration-independent receipt"
+
+  new_env terminal-queue-seal-inventory
+  seal=$(make_ready 'Terminal queue state must not block a later empty compaction.') || fail "terminal queue inventory fixture did not become ready"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  queue="$FM_HOME/state/context-handoff/queue/$record.json"
+  jq -c '.status="acknowledged" | .reason="synthetic-terminal-disposition"' "$queue" > "$queue.tmp" || fail "could not create terminal queue inventory fixture"
+  chmod 600 "$queue.tmp"
+  mv "$queue.tmp" "$queue"
+  printf '{\n' > "$FM_HOME/config/context-handoff.json"
+  chmod 600 "$FM_HOME/config/context-handoff.json"
+  seal=$(seal_pi) || fail "terminal queue inventory escaped the unhealthy configuration boundary"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = disabled ] || fail "terminal queue state falsely blocked an empty compaction"
+
+  new_env foreign-history-seal-inventory
+  i=1
+  while [ "$i" -le 33 ]; do
+    foreign="foreign-pi-session-$i"
+    statement="Terminal foreign history record $i does not authorize current-session blocking."
+    authorize "$statement"
+    registered=$(PI_SESSION_ID="$foreign" cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian) || fail "foreign history record $i did not register"
+    [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "foreign history record $i returned an invalid status"
+    seal=$(printf '%s\n' "$(jq -nc --arg session "$foreign" '{session_id:$session}')" | PI_SESSION_ID="$foreign" cli seal --source-harness pi --trigger threshold) || fail "foreign history record $i did not seal"
+    record=$(printf '%s' "$seal" | jq -r .record_id)
+    queue="$FM_HOME/state/context-handoff/queue/$record.json"
+    jq -c '.status="acknowledged" | .reason="synthetic-terminal-disposition"' "$queue" > "$queue.tmp" || fail "could not terminate foreign history record $i"
+    chmod 600 "$queue.tmp"
+    mv "$queue.tmp" "$queue"
+    i=$((i + 1))
+  done
+  printf '{\n' > "$FM_HOME/config/context-handoff.json"
+  chmod 600 "$FM_HOME/config/context-handoff.json"
+  seal=$(seal_pi) || fail "foreign terminal history escaped the unhealthy configuration boundary"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = disabled ] || fail "foreign terminal history falsely blocked the current empty compaction"
   pass "durable receipt for unhealthy seal-time bindings"
 }
 
@@ -2158,7 +2124,7 @@ test_precompact_generation_and_timeout_margin() {
 }
 
 test_sessionstart_pending_eligibility() {
-  local statement arguments registered output
+  local statement arguments registered output record
   new_env sessionstart-eligibility
   enable_consumer
   bind_claude >/dev/null || fail "SessionStart eligibility fixture did not bind"
@@ -2182,6 +2148,27 @@ test_sessionstart_pending_eligibility() {
   [ -z "$output" ] || fail "SessionStart announced a record rejected by the serialized consumer boundary"
   output=$(mcp_content next_curated_handoff)
   [ "$(printf '%s' "$output" | jq -r .status)" = empty ] || fail "SessionStart and next_curated_handoff disagreed on claimability"
+
+  new_env sessionstart-terminal-recovery
+  enable_consumer
+  bind_claude >/dev/null || fail "terminal recovery fixture did not bind Claude"
+  statement='Replay durable terminal compaction evidence before announcing claimability.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "terminal recovery candidate did not register"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "terminal recovery PreCompact failed"
+  record=$(find "$FM_HOME/state/context-handoff/queue" -name 'handoff-*.json' -printf '%f\n' | sed 's/\.json$//' | head -1)
+  if (
+    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues
+    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook
+  ) > "$EROOT/terminal-recovery-crash" 2> "$EROOT/terminal-recovery-error"; then
+    fail "terminal recovery failpoint unexpectedly completed"
+  fi
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "terminal recovery failpoint published an incomplete queue transition"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"SessionStart",session_id:$session,source:"startup"}' | cli claude-hook) || fail "SessionStart did not replay durable terminal evidence"
+  printf '%s' "$output" | jq -e '.systemMessage | test("1 bounded record")' >/dev/null || fail "SessionStart left a recoverable terminal record inaccessible"
+  [ -z "$(find "$FM_HOME/state/context-handoff/bindings" \( -name 'compaction-*.json' -o -name 'attempt-*.json' \) -print -quit)" ] || fail "claimability recovery retained completed terminal journals"
   pass "SessionStart announces only consumable records"
 }
 
@@ -2252,11 +2239,6 @@ test_invalid_attempt_journal_retired() {
   pass "invalid compaction attempt journals are retired"
 }
 
-if [ "${FM_CONTEXT_HANDOFF_PI_SUCCESS_PROBE_ONLY:-0}" = 1 ]; then
-  test_installed_pi_success_order
-  exit 0
-fi
-
 test_required_prerequisite_status
 test_sensitive_contracts
 test_foreign_candidate_isolation
@@ -2286,7 +2268,6 @@ test_directory_durability
 test_serialized_directory_initialization
 test_pi_result_validation
 test_isolated_turnend_extension_fixture
-test_installed_pi_success_order
 test_completed_save_precedes_source_validation
 test_registration_lifecycle_retries
 test_quarantine_disable_and_disposition_recovery

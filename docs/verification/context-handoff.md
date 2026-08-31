@@ -102,22 +102,22 @@ extension:session_compact_failed:threshold
 continued=false
 ```
 
-The installed Pi success path was then executed with an extension-supplied synthetic compaction, so no summarizer or model was reachable. The probe records the persistence call and observes that state from the public success event:
+The installed Pi success path was then executed through the public package compaction entry with an extension-supplied synthetic compaction, so no summarizer or model was reachable.
+The separately mapped live guard records the persistence call and observes that state from the public success event:
 
 ```sh
-FM_CONTEXT_HANDOFF_PI_SUCCESS_PROBE_ONLY=1 tests/fm-context-handoff.test.sh
+FM_CONTEXT_HANDOFF_PI_LIVE_E2E=1 tests/fm-context-handoff-pi-live-e2e.test.sh
 ```
 
 Its exact output was:
 
 ```text
-public:compaction_start:threshold:aborted=unset
-extension:session_before_compact:threshold
+public:compaction_start:manual:aborted=unset
+extension:session_before_compact:manual
 persistence:appendCompaction
 extension:session_compact:persisted=true
-public:compaction_end:threshold:aborted=false
-continued=false
-ok - installed Pi persistence-before-success order
+public:compaction_end:manual:aborted=false
+ok - installed Pi public persistence-before-success order
 ```
 
 The normalized Claude strings output was:
@@ -221,13 +221,6 @@ ok - durable private state directory creation
 ok - serialized durable state initialization
 ok - model-free Pi lifecycle and fail-closed adapter validation
 ok - isolated turn-end extension runtime dependencies
-public:compaction_start:threshold:aborted=unset
-extension:session_before_compact:threshold
-persistence:appendCompaction
-extension:session_compact:persisted=true
-public:compaction_end:threshold:aborted=false
-continued=false
-ok - installed Pi persistence-before-success order
 ok - completed Save recovery before source validation
 ok - registration lifecycle and multi-record retry recovery
 ok - quarantine, disable, and disposition recovery
