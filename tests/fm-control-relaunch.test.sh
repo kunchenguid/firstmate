@@ -837,6 +837,45 @@ test_ship_relaunch_ignores_the_crew_harness_config() {
   pass "fm-control relaunch: a ship task keeps its recorded harness instead of re-reading crew config"
 }
 
+# The two cursor exemption grants differ in KIND, not degree, so relaunch treats
+# them differently. envelope:<name> describes a mechanically proven outer
+# isolation envelope that still governs the replacement agent, so it survives.
+# `attended` asserts a person is in the pane RIGHT NOW; the captain who attested
+# may have left hours before firstmate's stuck-worker recovery relaunches, so
+# inheriting it would let one attestation authorize unlimited unattended
+# launches. Both directions are pinned: a silent revert of either would let an
+# unattended cursor pane run on a stale human attestation.
+test_relaunch_never_inherits_an_attended_cursor_grant() {
+  local dir out status
+  dir=$(new_case cursorattended rl40)
+  add_ship_task "$dir" rl40 cursor
+  printf 'cursor_exemption=attended\n' >> "$dir/home/state/rl40.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl40 --relaunch 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a relaunch must not inherit an attended cursor grant, but the spawn succeeded: $out"
+  case "$out" in
+    *"refused for an unattended ship launch"*) ;;
+    *) fail "the relaunch should be refused on the cursor unattended rule, got: $out" ;;
+  esac
+  pass "fm-spawn --relaunch: an attended cursor grant is never inherited and the relaunch is refused"
+}
+
+test_relaunch_inherits_a_named_isolation_envelope_grant() {
+  local dir out
+  dir=$(new_case cursorenvelope rl41)
+  add_ship_task "$dir" rl41 cursor
+  printf 'cursor_exemption=envelope:routing-benchmark\n' >> "$dir/home/state/rl41.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl41 --relaunch)
+  [ "$(meta_field "$dir" rl41 cursor_exemption)" = envelope:routing-benchmark ] \
+    || fail "a named isolation envelope must survive relaunch, got '$(meta_field "$dir" rl41 cursor_exemption)'"
+  assert_contains "$out" "spawned rl41 harness=cursor" \
+    "an enveloped cursor relaunch should proceed"
+  pass "fm-spawn --relaunch: a named isolation-envelope grant is inherited so automatic recovery still works"
+}
+
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   local dir out
   dir=$(new_case spawnharness rl21)
@@ -1518,6 +1557,8 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_relaunch_never_inherits_an_attended_cursor_grant
+test_relaunch_inherits_a_named_isolation_envelope_grant
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

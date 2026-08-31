@@ -155,7 +155,7 @@ fm_control_harness_kind_refusal() {  # <harness> <kind>
       printf 'muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates.'
       ;;
     cursor)
-      printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. Use codex or claude for unattended work. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the spawn itself with --cursor-exemption attended or --cursor-exemption envelope:<name>." "$kind"
+      printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. The bar applies however cursor was selected, INCLUDING when firstmate inherited it by detecting its own runtime, because silently substituting another tool would change which adapter runs the captain's work without saying so. If this home is running inside cursor and resolved it that way, set config/crew-harness to a verified adapter such as codex or claude, or add a crew-dispatch profile eligible for this kind; firstmate will not choose one for you. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the spawn itself with --cursor-exemption attended or --cursor-exemption envelope:<name>." "$kind"
       ;;
     *)
       printf "'%s' is not verified to run a %s task" "$canonical" "$kind"

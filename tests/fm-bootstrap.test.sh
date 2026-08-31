@@ -1114,6 +1114,13 @@ test_crew_dispatch_validation() {
         [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
       grep)
         printf '%s\n' "$out" | grep -Fx "$expect" >/dev/null || fail "$label: missing '$expect' (got: $out)" ;;
+      contains)
+        case "$out" in
+          *"$expect"*) ;;
+          *) fail "$label: expected output containing '$expect', got: $out" ;;
+        esac ;;
+      *)
+        fail "$label: unknown row mode '$mode'" ;;
     esac
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
@@ -1128,7 +1135,9 @@ unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
-cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
+cursor dispatch rule is flagged as ineligible^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^contains^cursor is ineligible here
+cursor in an array use is flagged as ineligible^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"cursor"}]}]}^contains^cursor is ineligible here
+cursor as the default profile is flagged as ineligible^{"default":{"harness":"cursor"}}^contains^cursor is ineligible here
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^

@@ -672,6 +672,54 @@ test_cursor_bar_ignores_an_ambient_environment_grant() {
   pass "an ambient environment grant never opens the cursor bar"
 }
 
+# A cursor grant is meaningful only for a cursor launch. Recording one on another
+# harness would leave a stale attestation in that task's meta that a later
+# relaunch onto cursor could read back as authority nobody granted for cursor.
+test_cursor_exemption_is_refused_on_a_non_cursor_harness() {
+  local rec id out status
+  id=profile-exempt-noncursor-z6l
+  rec=$(make_spawn_case profile-exempt-noncursor codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption attended)
+  status=$?
+  expect_code 1 "$status" "a cursor exemption on a codex spawn must be refused, not recorded"
+  assert_contains "$out" "applies only to a cursor launch" \
+    "the refusal should name the mismatch between the grant and the resolved harness"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the mismatched spawn must be refused before any launch is sent"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] || {
+    grep -q '^cursor_exemption=' "$HOME_DIR/state/$id.meta" \
+      && fail "a refused spawn must not leave a cursor grant in the task meta"
+  }
+  pass "a cursor exemption is refused on a non-cursor harness rather than recorded as a stale grant"
+}
+
+# The captain's rule is that the bar holds however cursor was selected, including
+# when firstmate INHERITED it by detecting its own runtime, and that an
+# unconfigured cursor-hosted home is told exactly what to configure rather than
+# being handed a silent substitution. Both halves are pinned here: a silent
+# fallback to another adapter would make the first assertion fail, and dropping
+# the remedy from the message would make the second fail.
+test_inherited_cursor_selection_is_barred_and_names_the_configuration_remedy() {
+  local rec id out status
+  id=profile-cursor-inherited-z6m
+  rec=$(make_spawn_case profile-cursor-inherited cursor "$id")
+  read_case_record "$rec"
+  rm -f "$HOME_DIR/config/crew-harness"
+
+  out=$(CURSOR_INVOKED_AS=cursor-agent \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an inherited cursor selection must be refused, never silently substituted"
+  assert_contains "$out" "config/crew-harness" \
+    "the refusal must name the exact configuration remedy"
+  assert_contains "$out" "crew-dispatch profile" \
+    "the refusal must offer the dispatch-profile remedy too"
+  [ ! -s "$LAUNCH_LOG" ] || fail "no launch may be sent for a barred inherited cursor selection"
+  pass "an inherited cursor selection is barred and the refusal names config/crew-harness or a dispatch profile"
+}
+
 test_opencode_threads_model_and_ignores_effort_axis() {
   local rec id out status launch
   id=profile-opencode-z7
@@ -925,6 +973,8 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_is_refused_for_every_unattended_kind
+test_cursor_exemption_is_refused_on_a_non_cursor_harness
+test_inherited_cursor_selection_is_barred_and_names_the_configuration_remedy
 test_cursor_unrecognized_exemption_still_refuses
 test_cursor_exemption_permits_an_attended_or_enveloped_spawn
 test_cursor_exemption_does_not_leak_to_a_later_spawn

@@ -1160,6 +1160,8 @@ crew_dispatch_validate() {
         | unique) as $bad_harnesses
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
+        elif (configured_profiles | map(.harness) | index("cursor")) then
+          "cursor is ineligible here: these rules resolve the harness for crewmate and scout spawns, both of which are unattended, and cursor is refused for every unattended kind. A rule naming cursor can never be satisfied, so it would validate clean here and fail at spawn time. Name a harness verified for unattended work, such as codex or claude."
         else empty
         end
     end

@@ -530,6 +530,15 @@ spawn_remote_secondmate() {
     echo "error: $(fm_control_harness_kind_refusal "$harness" secondmate)" >&2
     return 1
   fi
+  # `attended` asserts that a person is at THIS pane, which says nothing about a
+  # worker started on another host, so it is refused here rather than forwarded.
+  # Only a named isolation envelope describes a property that still holds there.
+  if [ "$CURSOR_EXEMPTION" = attended ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: an 'attended' cursor exemption asserts a person at this pane and cannot authorize a worker on a remote host; pass --cursor-exemption envelope:<name> naming the proven isolation envelope that governs the remote worker" >&2
+    return 1
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
@@ -653,8 +662,15 @@ spawn_remote_secondmate() {
   if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
+  # Self-describing trailing arguments; bin/fm-remote-secondmate-control.sh's
+  # cmd_launch owns the wire contract and its compatibility degradation. Only an
+  # envelope grant is forwardable: `attended` asserts a person at THIS pane and
+  # cannot describe a worker on another host, so it never crosses the wire.
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  [ -z "$remote_traceparent" ] || launch_args+=("traceparent:$remote_traceparent")
+  case "$CURSOR_EXEMPTION" in
+    envelope:?*) launch_args+=("exemption:$CURSOR_EXEMPTION") ;;
+  esac
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -1191,8 +1207,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  # An exemption is inherited across relaunch ONLY when it names a durable
+  # property of the environment. envelope:<name> is a mechanically proven outer
+  # isolation envelope that still governs the replacement agent, so it carries
+  # over and automatic recovery keeps working. `attended` asserts that a PERSON
+  # IS IN THE PANE RIGHT NOW, which a later relaunch cannot inherit: the captain
+  # who attested may have walked away hours ago, and firstmate's own stuck-worker
+  # recovery relaunches with nobody there. Inheriting it would let one attestation
+  # authorize unlimited unattended launches, so a relaunch needs a fresh one.
   if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
-    CURSOR_EXEMPTION=$(fm_meta_get "$RELAUNCH_META" cursor_exemption)
+    RELAUNCH_EXEMPTION=$(fm_meta_get "$RELAUNCH_META" cursor_exemption)
+    case "$RELAUNCH_EXEMPTION" in
+      envelope:?*) CURSOR_EXEMPTION=$RELAUNCH_EXEMPTION ;;
+      *) CURSOR_EXEMPTION= ;;
+    esac
   fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
@@ -1464,6 +1492,15 @@ esac
 # An unverified harness is skipped, not refused: a raw launch command is the
 # documented escape hatch for an adapter with no template. The canonicalization
 # inside the table still holds a raw `cursor-agent` command to the cursor rule.
+# A cursor exemption is meaningful only for a cursor launch. Accepting and
+# RECORDING one on another harness would leave a stale attested grant in that
+# task's meta, which a later relaunch onto cursor would read back as authority
+# nobody granted for cursor, so refuse the combination outright instead.
+if [ "$CURSOR_EXEMPTION_SET" -eq 1 ] && [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" != cursor ]; then
+  echo "error: --cursor-exemption applies only to a cursor launch, but this spawn resolved harness=$HARNESS; drop the flag rather than recording a cursor grant that would outlive it" >&2
+  exit 1
+fi
+
 if fm_control_harness_family "$HARNESS" >/dev/null &&
   ! fm_control_harness_supports_kind "$HARNESS" "$KIND" "$CURSOR_EXEMPTION"; then
   echo "error: $(fm_control_harness_kind_refusal "$HARNESS" "$KIND")" >&2

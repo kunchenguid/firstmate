@@ -151,9 +151,28 @@ cmd_route() {
   print_route "$id"
 }
 
+# Trailing arguments after the fixed five are SELF-DESCRIBING rather than
+# positional, so a new field cannot be mistaken for an older one. The parent
+# sends `traceparent:<value>` and `exemption:<grant>`; anything else is rejected.
+#
+# Compatibility choice, stated deliberately: an OLDER remote host does not know
+# `exemption:` and would bind it to its positional traceparent slot, which then
+# fails validation there. That is the intended degradation - the launch fails
+# loudly on the remote instead of silently proceeding without the grant, and a
+# cursor secondmate that reaches fm-spawn.sh with no exemption is refused by the
+# unattended bar anyway. Both paths fail closed; neither launches unexempted.
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5
+  local current meta out herdr_session traceparent='' exemption='' extra
+  shift 5
+  for extra in "$@"; do
+    case "$extra" in
+      traceparent:*) traceparent=${extra#traceparent:} ;;
+      exemption:*) exemption=${extra#exemption:} ;;
+      "") ;;
+      *) die "unrecognized remote launch argument '$extra'; expected traceparent:<value> or exemption:<grant>" ;;
+    esac
+  done
 
   validate_id "$id"
   validate_home "$id"
@@ -192,6 +211,7 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
+  [ -z "$exemption" ] || ARGS+=(--cursor-exemption "$exemption")
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
