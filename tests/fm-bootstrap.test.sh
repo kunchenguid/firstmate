@@ -986,28 +986,6 @@ EOF
   pass "forge host resolver expands included aliases without executing SSH config commands"
 }
 
-test_forge_host_resolver_expands_safe_includes() {
-  local case_dir config_dir marker result
-  case_dir="$TMP_ROOT/forge-ssh-include"
-  config_dir="$case_dir/home/.ssh"
-  marker="$case_dir/match-exec-ran"
-  mkdir -p "$config_dir"
-  cat > "$config_dir/config" <<EOF
-Include included.conf
-Match exec "touch $marker"
-  HostName should-not-be-used.example
-EOF
-  cat > "$config_dir/included.conf" <<'EOF'
-Host github-work
-  HostName github.com
-EOF
-  result=$(HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
-    bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
-  [ "$result" = github.com ] || fail "included SSH alias must resolve to its canonical host, got: $result"
-  [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
-  pass "forge host resolver expands included aliases without executing SSH config commands"
-}
-
 test_cmux_bundled_cli_satisfies_dependency() {
   local case_dir fakebin bundle out
   case_dir="$TMP_ROOT/cmux-bundled-cli"
