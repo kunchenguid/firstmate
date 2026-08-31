@@ -429,6 +429,26 @@ assert_present "$H_WAIT_MISMATCH/state/procevent/$source_wait_mismatch.source" "
 unset PRO_CLI_WAIT_JSON
 pass "job wait status is trusted only for the exact submitted job id"
 
+H_ARM_IDENTITY="$TMP_ROOT/home-arm-identity"
+consult_home "$H_ARM_IDENTITY"
+id_arm_identity=$(prepare_id "$H_ARM_IDENTITY" "$QUESTION_TWO")
+before_arm_identity=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+fc "$H_ARM_IDENTITY" submit "$id_arm_identity" >/dev/null || fail "arm-identity fixture submit failed"
+source_arm_identity="consult-$id_arm_identity"
+pe "$H_ARM_IDENTITY" retire "$source_arm_identity" >/dev/null || fail "arm-identity fixture registration could not be retired"
+mkdir -p "$H_ARM_IDENTITY/state/procevent-inbox"
+printf '{"schema":"fm-consult-wait/1","consult_id":"%s","job_id":"job_other","wait_exit":0,"wait_timed_out":false,"job_status":"succeeded","error_code":null}\n' \
+  "$id_arm_identity" > "$H_ARM_IDENTITY/state/procevent-inbox/$source_arm_identity.1.result"
+printf '{"schema":"fm-consult-wait/1","consult_id":"11111111-1111-1111-1111-111111111111","job_id":"job_fixture","wait_exit":0,"wait_timed_out":false,"job_status":"succeeded","error_code":null}\n' \
+  > "$H_ARM_IDENTITY/state/procevent-inbox/$source_arm_identity.2.result"
+chmod 0600 "$H_ARM_IDENTITY/state/procevent-inbox/$source_arm_identity.1.result" \
+  "$H_ARM_IDENTITY/state/procevent-inbox/$source_arm_identity.2.result"
+arm_identity_out=$(pa "$H_ARM_IDENTITY" arm "$id_arm_identity") || fail "mismatched captures blocked the exact known-job waiter: $arm_identity_out"
+assert_contains "$arm_identity_out" "armed: $id_arm_identity" "arm ignores terminal captures for another consult or job"
+assert_present "$H_ARM_IDENTITY/state/procevent/$source_arm_identity.source" "mismatched terminal capture suppressed the exact known-job waiter"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = $((before_arm_identity + 1)) ] || fail "arm identity recovery submitted another job"
+pass "arm suppresses waiting only for an exact consult and job capture"
+
 # The first durable request is a pre-delivery checkpoint. Its presence without
 # the intent marker means the external call provably has not begun, so resume it
 # rather than converting a harmless pre-call crash into delivery ambiguity.
@@ -480,6 +500,47 @@ assert_contains "$submission_unmarked_out" "submission terminal is invalid" "pos
 assert_absent "$H_SUBMISSION_UNMARKED/state/procevent/consult-$id_submission_unmarked.source" "unmarked SUBMITTED state armed a waiter"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_submission_unmarked" ] || fail "unmarked SUBMITTED state created another job"
 pass "submission recovery rejects malformed and unmarked terminal state"
+
+H_POST_AUTH="$TMP_ROOT/home-post-auth"
+consult_home "$H_POST_AUTH"
+id_post_auth=$(prepare_id "$H_POST_AUTH" "$QUESTION_TWO")
+export PRO_CLI_CREATE_JSON='{"ok":false,"error":{"code":"SESSION_EXPIRED"}}'
+post_auth_out=$(fc "$H_POST_AUTH" submit "$id_post_auth") || fail "post-attempt auth terminal was not recorded: $post_auth_out"
+assert_contains "$post_auth_out" "AUTH_UNAVAILABLE" "structured post-attempt auth failure records its terminal"
+post_auth_replay=$(fc "$H_POST_AUTH" submit "$id_post_auth") || fail "marked auth terminal was rejected on replay: $post_auth_replay"
+assert_contains "$post_auth_replay" "already-terminal: $id_post_auth AUTH_UNAVAILABLE" "marked auth terminal remains replayable"
+id_after_post_auth=$(prepare_id "$H_POST_AUTH" "$QUESTION_TWO")
+export PRO_CLI_CREATE_JSON='{"ok":true,"data":{"job":{"id":"job_fixture","status":"queued"}}}'
+fc "$H_POST_AUTH" submit "$id_after_post_auth" >/dev/null || fail "valid marked auth terminal wedged the global submission boundary"
+
+H_POST_LIMIT="$TMP_ROOT/home-post-limit"
+consult_home "$H_POST_LIMIT"
+id_post_limit=$(prepare_id "$H_POST_LIMIT" "$QUESTION_TWO")
+export PRO_CLI_CREATE_JSON='{"ok":false,"error":{"code":"RATE_LIMITED"}}'
+post_limit_out=$(fc "$H_POST_LIMIT" submit "$id_post_limit") || fail "post-attempt limit terminal was not recorded: $post_limit_out"
+assert_contains "$post_limit_out" "LIMIT_REACHED" "structured post-attempt limit failure records its terminal"
+post_limit_replay=$(fc "$H_POST_LIMIT" submit "$id_post_limit") || fail "marked limit terminal was rejected on replay: $post_limit_replay"
+assert_contains "$post_limit_replay" "already-terminal: $id_post_limit LIMIT_REACHED" "marked limit terminal remains replayable"
+id_after_post_limit=$(prepare_id "$H_POST_LIMIT" "$QUESTION_TWO")
+export PRO_CLI_CREATE_JSON='{"ok":true,"data":{"job":{"id":"job_fixture","status":"queued"}}}'
+fc "$H_POST_LIMIT" submit "$id_after_post_limit" >/dev/null || fail "valid marked limit terminal wedged the global submission boundary"
+
+H_MARKER_MISMATCH="$TMP_ROOT/home-marker-mismatch"
+consult_home "$H_MARKER_MISMATCH"
+id_marker_mismatch=$(prepare_id "$H_MARKER_MISMATCH" "$QUESTION_TWO")
+record_marker_mismatch="$H_MARKER_MISMATCH/data/consults/$id_marker_mismatch"
+printf '{"schema_version":1,"consult_id":"%s","attempted_at":"2026-01-01T00:00:00Z","state":"SUBMISSION_ATTEMPTED","retries":0}\n' \
+  "$id_marker_mismatch" > "$record_marker_mismatch/submission-attempt.json"
+printf '{"schema_version":1,"consult_id":"%s","attempted_at":"2026-01-01T00:00:01Z","pro_cli_version":"pro-cli fixture","pro_cli_source_revision":"UNAVAILABLE","job_id":null,"terminal":"AUTH_UNAVAILABLE","error_code":"SESSION_EXPIRED"}\n' \
+  "$id_marker_mismatch" > "$record_marker_mismatch/submission.json"
+chmod 0600 "$record_marker_mismatch/submission-attempt.json" "$record_marker_mismatch/submission.json"
+before_marker_mismatch=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+marker_mismatch_status=0
+marker_mismatch_out=$(fc "$H_MARKER_MISMATCH" submit "$id_marker_mismatch" 2>&1) || marker_mismatch_status=$?
+[ "$marker_mismatch_status" -ne 0 ] || fail "post-attempt terminal with a mismatched marker timestamp was trusted"
+assert_contains "$marker_mismatch_out" "submission terminal is invalid" "post-attempt terminal remains bound to its exact marker timestamp"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_marker_mismatch" ] || fail "mismatched marker state created another job"
+pass "auth and limit terminals validate their preflight or marked origin"
 
 H_RECEIPT_INVALID="$TMP_ROOT/home-receipt-invalid"
 consult_home "$H_RECEIPT_INVALID"
@@ -587,6 +648,8 @@ before_limit=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
 fc "$H_LIMIT" submit "$id_limit" >/dev/null || fail "limit terminal was not recorded"
 assert_grep '"terminal":"LIMIT_REACHED"' "$H_LIMIT/data/consults/$id_limit/submission.json" "explicit limits observation stops before submission"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_limit" ] || fail "explicit limits exhaustion still created a job"
+limit_replay=$(fc "$H_LIMIT" submit "$id_limit") || fail "unmarked preflight limit terminal was rejected on replay: $limit_replay"
+assert_contains "$limit_replay" "already-terminal: $id_limit LIMIT_REACHED" "preflight limit terminal remains valid without an attempt marker"
 unset PRO_CLI_LIMITS_JSON
 pass "an explicit observed exhaustion fails closed without inferring absent limits"
 
@@ -598,6 +661,8 @@ before_auth=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
 fc "$H4" submit "$id_four" >/dev/null || fail "auth-unavailable terminal was not recorded"
 assert_grep '"terminal":"AUTH_UNAVAILABLE"' "$H4/data/consults/$id_four/submission.json" "doctor failure stops before submission"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_auth" ] || fail "auth failure still created a job"
+auth_replay=$(fc "$H4" submit "$id_four") || fail "unmarked preflight auth terminal was rejected on replay: $auth_replay"
+assert_contains "$auth_replay" "already-terminal: $id_four AUTH_UNAVAILABLE" "preflight auth terminal remains valid without an attempt marker"
 pass "auth preflight fails closed before the submission boundary"
 
 H_DEEP="$TMP_ROOT/home-deep-research"

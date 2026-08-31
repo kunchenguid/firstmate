@@ -379,7 +379,14 @@ submission_terminal() {  # <directory>
       recorded_attempt=$(json_path_string "$file" attempted_at) || return 1
       [ "$attempted" = "$recorded_attempt" ] || return 1
       ;;
-    *)
+    AUTH_UNAVAILABLE|LIMIT_REACHED)
+      if [ -e "$dir/submission-attempt.json" ] || [ -L "$dir/submission-attempt.json" ]; then
+        attempted=$(submission_attempt_at "$dir") || return 1
+        recorded_attempt=$(json_path_string "$file" attempted_at) || return 1
+        [ "$attempted" = "$recorded_attempt" ] || return 1
+      fi
+      ;;
+    LIMITS_INDETERMINATE)
       [ ! -e "$dir/submission-attempt.json" ] && [ ! -L "$dir/submission-attempt.json" ] || return 1
       ;;
   esac
@@ -827,18 +834,20 @@ cmd_source_id() {
 }
 
 cmd_wait_needed() {  # <consult-id>: succeeds only when a known job has no terminal capture or receipt
-  local id=${1-} dir terminal source result
+  local id=${1-} dir terminal source result job_id
   [ "$#" -eq 1 ] || usage
   dir=$(require_consult_dir "$id")
   terminal=$(submission_terminal "$dir") || return 1
   [ "$terminal" = SUBMITTED ] || return 1
+  job_id=$(submitted_job_id "$dir") || return 2
   if [ -e "$dir/receipt.json" ] || [ -L "$dir/receipt.json" ]; then
-    receipt_valid "$dir" "$id" "$(submitted_job_id "$dir")" || return 2
+    receipt_valid "$dir" "$id" "$job_id" || return 2
     return 1
   fi
   source=$(cmd_source_id "$id") || return 1
   for result in "$FM_HOME/state/procevent-inbox/$source".*.result; do
     [ -f "$result" ] && [ ! -L "$result" ] || continue
+    result_event_matches "$result" "$id" "$job_id" || continue
     "$SCRIPT_DIR/fm-procevent-consult.sh" terminal "$result" && return 1
   done
   return 0
