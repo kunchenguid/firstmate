@@ -59,6 +59,7 @@
 #   (ag) process exits mid-scan                                 -> converge + ALLOW
 #   (ah) parent exits mid-scan, child cwd outside roots         -> carry lineage, ALLOW
 #   (ai) enumerable-but-empty /proc snapshot                    -> REFUSE loudly
+#   (aj) abort after first root scan, parent exits, child outside -> carry all roots, ALLOW
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -3189,6 +3190,115 @@ EOF
   pass "a parent exiting mid-scan carries its bound child into the retry and reaps it"
 }
 
+test_abort_after_first_root_keeps_earlier_bound_root_and_child() {
+  local case_dir rc pid child_pid q_pid pid_file outside
+  case_dir=$(make_case abort-after-first-root-carry)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/tasktmp"
+  land_shippable_commit "$case_dir"
+  pid_file="$case_dir/child.pid"
+  outside="$case_dir/outside"
+  mkdir -p "$outside"
+
+  ( cd "$case_dir/wt" && exec perl -e '
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($pid_file, $outside) = @ARGV;
+      my $child = fork();
+      die "fork: $!" unless defined $child;
+      if (!$child) {
+        chdir $outside or die "chdir: $!";
+        exec "sleep", "300";
+        die "exec: $!";
+      }
+      open my $fh, ">", $pid_file or die "open: $!";
+      print {$fh} "$child\n";
+      close $fh;
+      $SIG{TERM} = "IGNORE";
+      sleep 300;
+    ' "$pid_file" "$outside" ) &
+  pid=$!
+  disown
+  fm_teardown_test_register_process_group "$pid"
+  fm_teardown_test_register_pid "$pid"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+  done
+  child_pid=$(cat "$pid_file" 2>/dev/null || true)
+  fm_teardown_test_register_pid "$child_pid"
+  [ -n "$child_pid" ] || fail "abort-after-first-root-carry: setup child did not start"
+  kill -0 "$pid" 2>/dev/null || fail "abort-after-first-root-carry: setup parent did not start"
+  q_pid=99999998
+  add_fake_proc_cwd "$case_dir/fake-proc" "$pid" "$case_dir/wt"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$child_pid" "$outside"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$q_pid" "$case_dir/tasktmp"
+
+  # The abort fires during the SECOND root's cwd scan, after the first root's
+  # scan has already bound the parent: the first read of the fake tasktmp
+  # root's cwd happens while scanning the worktree root (no match), and the
+  # second - inside the tasktmp scan - kills the parent, removes both fake
+  # entries, and makes the fake root's own recheck observe "gone", aborting
+  # the attempt. The child, reparented with a cwd outside the roots, can then
+  # only be found through the carried lineage of the earlier bound parent.
+  cat > "$case_dir/fakebin/readlink" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_Q_PID/cwd" ]; then
+  count=0
+  if [ -f "$FM_FAKE_SNAPSHOT_COUNT" ]; then
+    count=$(< "$FM_FAKE_SNAPSHOT_COUNT") || count=0
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
+  if [ "$count" -eq 2 ]; then
+    result=$("$REAL_READLINK_FOR_TEST" "$1" 2>/dev/null) || true
+    kill -KILL "$FM_FAKE_PARENT_PID" 2>/dev/null || true
+    i=0
+    while kill -0 "$FM_FAKE_PARENT_PID" 2>/dev/null; do
+      sleep 0.02
+      i=$((i + 1))
+      [ "$i" -lt 250 ] || break
+    done
+    rm -rf "$FM_FAKE_PROC/$FM_FAKE_PARENT_PID"
+    rm -rf "$FM_FAKE_PROC/$FM_FAKE_Q_PID"
+    : > "$FM_FAKE_ABORT_MARKER"
+    printf '%s\n' "$result"
+    exit 0
+  fi
+fi
+exec "$REAL_READLINK_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/readlink" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_PROC="$case_dir/fake-proc" \
+  FM_FAKE_Q_PID="$q_pid" FM_FAKE_PARENT_PID="$pid" \
+  FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
+  FM_FAKE_ABORT_MARKER="$case_dir/abort-marker" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "abort-after-first-root-carry: teardown should converge and succeed"
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
+    kill -KILL "$child_pid" 2>/dev/null || true
+    fail "abort-after-first-root-carry: the reparented changed-cwd child survived teardown"
+  fi
+  kill -0 "$pid" 2>/dev/null \
+    && fail "abort-after-first-root-carry: the mid-scan exiting parent survived"
+  assert_present "$case_dir/abort-marker" \
+    "abort-after-first-root-carry: the second-root scan abort was never exercised"
+  assert_present "$case_dir/treehouse.log" \
+    "abort-after-first-root-carry: teardown did not reach worktree return"
+  ! grep -q REFUSED "$case_dir/stderr" || \
+    fail "abort-after-first-root-carry: teardown refused on a mid-scan parent exit"
+  fm_teardown_test_unregister_process_group "$pid"
+  pass "an abort after the first root's scan still reaps a child whose parent exited mid-scan"
+}
+
 test_process_exit_mid_scan_converges_without_refusal() {
   local case_dir rc wt_path fake_pid=99999998
   case_dir=$(make_case mid-scan-exit-convergence)
@@ -3385,5 +3495,6 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_mid_scan_converges_without_refusal
 test_parent_exit_mid_scan_preserves_bound_descendant
+test_abort_after_first_root_keeps_earlier_bound_root_and_child
 test_real_proc_scan_reaches_a_verdict
 test_run_abort_precedes_process_reap_precedes_worktree_removal

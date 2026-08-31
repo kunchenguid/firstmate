@@ -13,9 +13,12 @@
 # FM_PROCESS_RECORDS binds each exact PID to its birth identity at the decision
 # snapshot. Unresolved identity-bound candidates are retained across rescans
 # until gone, replaced, or non-live. An attempt aborted by a mid-scan exit or
-# replacement does not throw away what it already bound: its bound records and
-# the aborted node's snapshot subtree are carried into the retry, where every
-# carried record is re-verified by the same rules before it can be collected.
+# replacement does not throw away what it already bound: every cwd root
+# discovered for every root scanned, every queued walk node, and the snapshot
+# subtree below each of them are carried into the retry, where every carried
+# record is re-verified by the same rules before it can be collected. A retry
+# that silently narrowed the candidate set would be the same false-success
+# shape this library exists to eliminate.
 # Descendant walks carry pid+identity together and include or queue a walk PID
 # only when its live identity still matches that bound birth identity. A
 # recycled PID is never adopted as lineage; a replacement may be signaled only
@@ -82,7 +85,6 @@ FM_PROCESS_RECORD_ERROR_PID=
 FM_PROCESS_FOUND_IDENTITY=
 FM_PROCESS_RECORD_PIDS=
 FM_PROCESS_WALK_RECORDS=
-FM_PROCESS_SUBTREE_RECORDS=
 FM_PROCESS_UNSTABLE_RECHECK_PID=
 FM_PROCESS_STAT_PPID=
 FM_PROCESS_STAT_STATE=
@@ -399,26 +401,40 @@ $records
 EOF
 }
 
-# Every snapshot row reachable from <root-pid> by ppid edges, as pid<tab>identity
-# records. Used only when a recheck aborts an attempt (rc 2): the aborted node's
-# descendants may already be reparented by the retry, so they are carried into
-# it as identity-bound walk records and re-verified there like any other seed.
-fm_process_snapshot_subtree_records() {  # <root-pid>
-  local root_pid=$1 pid ppid uid state identity seen='' out='' current
+# Everything an attempt had already bound when a recheck aborted it (rc 2), as
+# pid<tab>identity records: every supplied bound record, the aborted pid itself
+# when it was not yet bound, and every snapshot row reachable from any of them
+# by ppid edges. Used only when a recheck aborts an attempt: the aborted
+# attempt's descendants may already be reparented by the retry, so the whole
+# bound frontier - earlier cwd roots, queued walk nodes, collected records - is
+# carried into it as identity-bound walk records and re-verified there like any
+# other seed.
+fm_process_carry_unstable_records() {  # <bound-records> [aborted-pid]
+  local bound=$1 aborted=${2:-} pid ppid uid state identity current
   local -a frontier
   local frontier_index=0
-  FM_PROCESS_SUBTREE_RECORDS=
-  while IFS=$'\t' read -r pid ppid uid state identity; do
+  local seen='' out=''
+  while IFS=$'\t' read -r pid identity; do
     [ -n "$pid" ] || continue
-    [ "$pid" = "$root_pid" ] || continue
-    case "$state" in
-      Z*) return 0 ;;
-    esac
+    [ -n "$identity" ] || continue
+    fm_process_pid_list_contains "$seen" "$pid" && continue
+    seen=${seen}${pid}$'\n'
     out=${out}${pid}$'\t'${identity}$'\n'
-    seen=${pid}$'\n'
     frontier+=("$pid")
-    break
-  done <<< "$FM_PROCESS_SNAPSHOT"
+  done <<EOF
+$bound
+EOF
+  if [ -n "$aborted" ] && ! fm_process_pid_list_contains "$seen" "$aborted"; then
+    while IFS=$'\t' read -r pid ppid uid state identity; do
+      [ -n "$pid" ] || continue
+      [ "$pid" = "$aborted" ] || continue
+      [ -n "$identity" ] || break
+      seen=${seen}${pid}$'\n'
+      out=${out}${pid}$'\t'${identity}$'\n'
+      frontier+=("$pid")
+      break
+    done <<< "$FM_PROCESS_SNAPSHOT"
+  fi
   while [ "$frontier_index" -lt "${#frontier[@]}" ]; do
     current=${frontier[$frontier_index]}
     frontier_index=$((frontier_index + 1))
@@ -434,13 +450,13 @@ fm_process_snapshot_subtree_records() {  # <root-pid>
       frontier+=("$pid")
     done <<< "$FM_PROCESS_SNAPSHOT"
   done
-  FM_PROCESS_SUBTREE_RECORDS=$out
+  FM_PROCESS_CANDIDATE_RECORDS=$out
 }
 
 fm_process_collect_candidate() {  # <canonical-root>...
   local canonical root_record root pid ppid uid state child identity child_identity
   local queue_record sorted_pids sorted_records rc
-  local included='' visited='' roots_text='' records='' unresolved=''
+  local included='' visited='' roots_text='' records='' bound='' unresolved=''
   local -a roots queue
   local queue_index=0
   roots=()
@@ -459,8 +475,7 @@ fm_process_collect_candidate() {  # <canonical-root>...
     else
       rc=$?
       if [ "$rc" -eq 2 ]; then
-        fm_process_snapshot_subtree_records "${FM_PROCESS_UNSTABLE_RECHECK_PID:-}"
-        FM_PROCESS_CANDIDATE_RECORDS=${records}${FM_PROCESS_SUBTREE_RECORDS}
+        fm_process_carry_unstable_records "${roots_text}${FM_PROCESS_ROOT_RECORDS}${bound}" "${FM_PROCESS_UNSTABLE_RECHECK_PID:-}"
       fi
       return "$rc"
     fi
@@ -489,6 +504,7 @@ fm_process_collect_candidate() {  # <canonical-root>...
         return 1
       fi
       fm_process_pid_list_contains "$included" "$root" && continue
+      bound=${bound}${root}$'\t'${identity}$'\n'
       included=${included}${root}$'\n'
       records=${records}${root}$'\t'${identity}$'\n'
       visited=${visited}${root}$'\n'
@@ -514,6 +530,7 @@ fm_process_collect_candidate() {  # <canonical-root>...
     fi
     visited=${visited}${root}$'\n'
     queue+=("$root"$'\t'"$identity")
+    bound=${bound}${root}$'\t'${identity}$'\n'
     fm_process_pid_list_contains "$included" "$root" && continue
     included=${included}${root}$'\n'
     records=${records}${root}$'\t'${identity}$'\n'
@@ -528,8 +545,7 @@ fm_process_collect_candidate() {  # <canonical-root>...
     else
       rc=$?
       if [ "$rc" -eq 2 ]; then
-        fm_process_snapshot_subtree_records "$pid"
-        FM_PROCESS_CANDIDATE_RECORDS=${records}${FM_PROCESS_SUBTREE_RECORDS}
+        fm_process_carry_unstable_records "${roots_text}${bound}" "$pid"
       fi
       return "$rc"
     fi
@@ -549,16 +565,15 @@ fm_process_collect_candidate() {  # <canonical-root>...
       else
         rc=$?
         if [ "$rc" -eq 2 ]; then
-          fm_process_snapshot_subtree_records "$child"
-          FM_PROCESS_CANDIDATE_RECORDS=${records}${FM_PROCESS_SUBTREE_RECORDS}
+          fm_process_carry_unstable_records "${roots_text}${bound}" "$child"
         fi
         return "$rc"
       fi
+      bound=${bound}${child}$'\t'${child_identity}$'\n'
+      queue+=("$child"$'\t'"$child_identity")
       if [ "$uid" != "$FM_PROCESS_CURRENT_UID" ]; then
-        queue+=("$child"$'\t'"$child_identity")
         continue
       fi
-      queue+=("$child"$'\t'"$child_identity")
       included=${included}${child}$'\n'
       records=${records}${child}$'\t'${child_identity}$'\n'
     done <<< "$FM_PROCESS_SNAPSHOT"
