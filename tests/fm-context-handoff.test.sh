@@ -849,7 +849,7 @@ test_exit75_requires_fresh_inspect() {
 }
 
 test_exact_mcp_guard() {
-  local denied shell_denied case_denied unbound stale foreign
+  local denied shell_denied case_denied unbound stale foreign seal record bundle prepared approval active_input stale_source disposition
   new_env exact-mcp-guard
   enable_consumer
   denied=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff-evil__execute",tool_input:{}}' | cli claude-hook 2>&1 >/dev/null || true)
@@ -860,15 +860,30 @@ test_exact_mcp_guard() {
   printf '%s' "$shell_denied" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "direct shell mutation bypassed the guard"
   unbound=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:{}}' | cli claude-hook 2>&1 >/dev/null || true)
   printf '%s' "$unbound" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "mutation-capable MCP tool bypassed a missing hook binding"
+  seal=$(make_ready 'Guard every Save against current source, queue, bundle, and approval authority.') || fail "exact MCP guard record did not become ready"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
   bind_claude >/dev/null || fail "exact MCP guard fixture did not bind Claude"
-  if ! jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:{}}' | cli claude-hook > "$EROOT/mutation-allowed" 2> "$EROOT/mutation-allowed-error"; then
+  bundle=$(make_bundle "$record")
+  prepared=$(prepare_save "$record" "$bundle") || fail "exact MCP guard Save did not prepare"
+  approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
+  active_input=$(jq -nc --arg record "$record" --arg approval "$approval" '{record_id:$record,approval_sha256:$approval}')
+  if ! jq -nc --arg session "$CLAUDE_SESSION" --argjson input "$active_input" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:$input}' | cli claude-hook > "$EROOT/mutation-allowed" 2> "$EROOT/mutation-allowed-error"; then
     fail "exact mutation-capable MCP tool was denied for the active hook binding"
   fi
   [ ! -s "$EROOT/mutation-allowed" ] && [ ! -s "$EROOT/mutation-allowed-error" ] || fail "active mutation-capable MCP guard emitted an unexpected decision"
-  stale=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:{}}' | CAPABILITY=stale-process-capability cli claude-hook 2>&1 >/dev/null || true)
+  stale_source=$(cat "$SOURCE_FILE")
+  printf 'Changed after guard approval.\n' > "$SOURCE_FILE"
+  stale=$(jq -nc --arg session "$CLAUDE_SESSION" --argjson input "$active_input" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:$input}' | cli claude-hook 2>&1 >/dev/null || true)
+  printf '%s' "$stale" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "stale source hash retained MCP mutation authority"
+  printf '%s\n' "$stale_source" > "$SOURCE_FILE"
+  stale=$(jq -nc --arg session "$CLAUDE_SESSION" --argjson input "$active_input" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:$input}' | CAPABILITY=stale-process-capability cli claude-hook 2>&1 >/dev/null || true)
   printf '%s' "$stale" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "stale process capability retained MCP mutation authority"
-  foreign=$(jq -nc '{hook_event_name:"PreToolUse",session_id:"foreign-session",tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:{}}' | cli claude-hook 2>&1 >/dev/null || true)
+  foreign=$(jq -nc --argjson input "$active_input" '{hook_event_name:"PreToolUse",session_id:"foreign-session",tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:$input}' | cli claude-hook 2>&1 >/dev/null || true)
   printf '%s' "$foreign" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "foreign hook session retained MCP mutation authority"
+  disposition=$(jq -nc --arg record "$record" '{record_id:$record,disposition:"duplicate",rationale:"The durable fact already exists."}')
+  mcp_content record_curation_disposition "$disposition" >/dev/null || fail "guard terminal disposition failed"
+  stale=$(jq -nc --arg session "$CLAUDE_SESSION" --argjson input "$active_input" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:$input}' | cli claude-hook 2>&1 >/dev/null || true)
+  printf '%s' "$stale" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "terminal queue and stale approval retained guard mutation authority"
   if ! jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__next_curated_handoff",tool_input:{}}' | cli claude-hook > "$EROOT/allowed" 2> "$EROOT/allowed-error"; then
     fail "exact bundled MCP read tool was denied"
   fi
@@ -877,7 +892,7 @@ test_exact_mcp_guard() {
 }
 
 test_bounded_transports_and_delivery() {
-  local seal delivery framed pid i record
+  local seal delivery framed pid i record payload registered
   new_env bounded-transport
   enable_consumer
   seal=$(make_ready 'Retain delivery until an exact atomic generation prompt exists.') || fail "delivery fixture failed"
@@ -898,6 +913,26 @@ test_bounded_transports_and_delivery() {
   [ "$(printf '%s' "$delivery" | jq -r .status)" = notified ] || fail "supported atomic generation delivery stayed pending"
   [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = notified ] || fail "atomic notification did not transition one exact queue record"
   grep -Fx "agent prompt pane-1 /firstmate-context-handoff:consume --expected-agent-session $CLAUDE_SESSION --session lab --timeout 2000" "$HERDR_LOG" >/dev/null || fail "delivery omitted the constant prompt or exact generation precondition"
+
+  new_env delivery-deadline
+  enable_consumer
+  registered=$(register_statement 'Persist compaction before declining an unsafe notification deadline.') || fail "deadline delivery candidate did not register"
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "deadline delivery candidate did not register"
+  seal=$(seal_pi) || fail "deadline delivery candidate did not seal"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  DELIVERY_ENABLED=true
+  printf 'atomic\n' > "$HERDR_MODE"
+  write_config
+  payload=$(printf '%s' "$seal" | jq -c '{bindings:.bindings,trigger:"threshold",reason:"synthetic-deadline",adapter_deadline_epoch_ms:1}')
+  delivery=$(printf '%s\n' "$payload" | cli compaction-outcome success) || fail "deadline outcome did not persist"
+  [ "$(printf '%s' "$delivery" | jq -r .delivery)" = pending ] || fail "unsafe deadline did not defer notification"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "unsafe notification deadline lost the successful compaction outcome"
+  [ "$(jq -r .reason "$FM_HOME/state/context-handoff/queue/$record.json")" = delivery-deadline-insufficient ] || fail "unsafe notification deadline lacked its explicit pending reason"
+  ! grep -q '^agent prompt ' "$HERDR_LOG" || fail "unsafe notification deadline still submitted a prompt"
+  delivery=$(cli deliver) || fail "deferred deadline delivery did not recover"
+  [ "$(printf '%s' "$delivery" | jq -r .status)" = notified ] || fail "deferred deadline delivery did not notify once a full budget existed"
+  [ "$(grep -c '^agent prompt pane-1 /firstmate-context-handoff:consume ' "$HERDR_LOG")" -eq 1 ] || fail "deferred deadline delivery was not exactly one acknowledged prompt"
+
   dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' x > "$EROOT/frames"
   printf 'x\n{"jsonrpc":"2.0","id":2,"method":"ping"}\n' >> "$EROOT/frames"
   framed=$(cli mcp-server < "$EROOT/frames") || fail "MCP server failed while draining an oversized frame"
@@ -1401,6 +1436,25 @@ test_transaction_replay_and_rollback() {
   result=$(commit_save "$record" "$approval")
   [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "rolled-back transaction did not recover on retry"
 
+  new_env transaction-result-before-journal
+  enable_consumer
+  seal=$(make_ready 'Replay a complete result whose correlated journal completion was interrupted.') || fail "result-before-journal fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "result-before-journal fixture did not bind Claude"
+  bundle=$(make_bundle "$record")
+  prepared=$(prepare_save "$record" "$bundle") || fail "result-before-journal inspect failed"
+  approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
+  bundle_path="$FM_HOME/state/context-handoff/bundles/$record/$(printf '%s' "$prepared" | jq -r .bundle_sha256).json"
+  "$TRANSACTION_INTERPRETER" "$TRANSACTION_CORE" transaction apply "$bundle_path" --vault "$VAULT" --approved-plan-sha256 "$approval" >/dev/null || fail "result-before-journal apply failed"
+  operation="handoff-$(hash_text "$record" | cut -c1-32)"
+  transaction_dir="$VAULT/.vault-meta/transactions/$operation"
+  jq '.state="applying"' "$transaction_dir/journal.json" > "$transaction_dir/journal.tmp" || fail "could not stage an incomplete correlated journal"
+  chmod 600 "$transaction_dir/journal.tmp"
+  mv "$transaction_dir/journal.tmp" "$transaction_dir/journal.json"
+  result=$(commit_save "$record" "$approval")
+  [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "complete result with an incomplete correlated journal did not replay"
+  [ "$(jq -r .state "$transaction_dir/journal.json")" = complete ] || fail "transaction replay did not durably complete its journal"
+
   TRANSACTION_CORE=$saved_core
   TRANSACTION_MODULE=$saved_module
   TRANSACTION_INTERPRETER=$saved_interpreter
@@ -1430,25 +1484,37 @@ test_transaction_replay_and_rollback() {
 }
 
 test_transaction_dependency_manifest() {
-  local runtime saved_core saved_module saved_interpreter saved_dependency_root seal record bundle result
+  local runtime saved_core saved_module saved_interpreter saved_dependency_root seal record bundle result orphan i remaining
   saved_core=$TRANSACTION_CORE
   saved_module=$TRANSACTION_MODULE
   saved_interpreter=$TRANSACTION_INTERPRETER
   saved_dependency_root=$TRANSACTION_DEPENDENCY_ROOT
   new_env transaction-dependency-manifest
   runtime="$EROOT/transaction-runtime"
-  mkdir -p "$runtime/scripts" "$runtime/txpkg"
-  cat > "$runtime/scripts/core.py" <<'PY'
+  mkdir -p "$runtime/scripts" "$runtime/claude_obsidian"
+  cp "$CORE" "$runtime/arbitrary-single-file.sh"
+  chmod 755 "$runtime/arbitrary-single-file.sh"
+  TRANSACTION_CORE="$runtime/arbitrary-single-file.sh"
+  TRANSACTION_MODULE="$runtime/arbitrary-single-file.sh"
+  TRANSACTION_INTERPRETER=$(realpath "$(command -v bash)")
+  TRANSACTION_DEPENDENCY_ROOT="$runtime"
+  enable_consumer
+  if cli status > "$EROOT/arbitrary-single-output" 2> "$EROOT/arbitrary-single-error"; then
+    fail "arbitrary same-file transaction fixture retained execution authority"
+  fi
+  grep -q 'CONFIG_TRANSACTION' "$EROOT/arbitrary-single-error" || fail "arbitrary same-file transaction fixture lacked a bounded refusal"
+
+  cat > "$runtime/scripts/claude-obsidian.py" <<'PY'
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from txpkg.cli import main
+from claude_obsidian.cli import main
 
 raise SystemExit(main())
 PY
-  cat > "$runtime/txpkg/cli.py" <<'PY'
+  cat > "$runtime/claude_obsidian/cli.py" <<'PY'
 import hashlib
 import json
 import os
@@ -1475,18 +1541,39 @@ def main():
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 PY
-  printf '\n' > "$runtime/txpkg/__init__.py"
-  printf '\n' > "$runtime/txpkg/transaction.py"
-  TRANSACTION_CORE="$runtime/scripts/core.py"
-  TRANSACTION_MODULE="$runtime/txpkg/transaction.py"
+  printf '\n' > "$runtime/claude_obsidian/__init__.py"
+  printf '\n' > "$runtime/claude_obsidian/transaction.py"
+  TRANSACTION_CORE="$runtime/scripts/claude-obsidian.py"
+  TRANSACTION_MODULE="$runtime/claude_obsidian/transaction.py"
   TRANSACTION_INTERPRETER=$(realpath "$(command -v python3)")
   TRANSACTION_DEPENDENCY_ROOT="$runtime"
   enable_consumer
+  cli status >/dev/null || fail "transaction dependency fixture state initialization failed"
+  orphan="$FM_HOME/state/context-handoff/bindings/.transaction-runtime-orphan"
+  mkdir "$orphan"
+  chmod 700 "$orphan"
+  printf 'orphan\n' > "$orphan/dependency.py"
+  seal_pi >/dev/null || fail "orphan transaction runtime recovery failed"
+  [ ! -e "$orphan" ] || fail "orphan transaction runtime remained after serialized recovery"
+  i=1
+  while [ "$i" -le 9 ]; do
+    mkdir "$FM_HOME/state/context-handoff/bindings/.transaction-runtime-overflow_$i"
+    chmod 700 "$FM_HOME/state/context-handoff/bindings/.transaction-runtime-overflow_$i"
+    i=$((i + 1))
+  done
+  if seal_pi > "$EROOT/runtime-overflow-output" 2> "$EROOT/runtime-overflow-error"; then
+    fail "orphan transaction runtime recovery exceeded its bounded batch"
+  fi
+  grep -q 'TRANSACTION_RUNTIME_BACKPRESSURE' "$EROOT/runtime-overflow-error" || fail "orphan transaction runtime overflow lacked bounded backpressure"
+  remaining=$(find "$FM_HOME/state/context-handoff/bindings" -maxdepth 1 -type d -name '.transaction-runtime-*' | wc -l)
+  [ "$remaining" -le 1 ] || fail "orphan transaction runtime recovery did not make bounded deterministic progress"
+  seal_pi >/dev/null || fail "orphan transaction runtime recovery did not resume after bounded backpressure"
+  [ -z "$(find "$FM_HOME/state/context-handoff/bindings" -maxdepth 1 -type d -name '.transaction-runtime-*' -print -quit)" ] || fail "orphan transaction runtime recovery left durable snapshots"
   seal=$(make_ready 'Bind every executable transaction dependency before inspect.') || fail "transaction dependency fixture failed"
   record=$(printf '%s' "$seal" | jq -r .record_id)
   bind_claude >/dev/null || fail "transaction dependency fixture did not bind Claude"
   bundle=$(make_bundle "$record")
-  printf '\nchanged = True\n' >> "$runtime/txpkg/cli.py"
+  printf '\nchanged = True\n' >> "$runtime/claude_obsidian/cli.py"
   result=$(prepare_save "$record" "$bundle")
   [ "$(printf '%s' "$result" | jq -r .code)" = TRANSACTION_DEPENDENCY_IDENTITY ] || fail "changed imported transaction dependency retained inspect authority"
   [ ! -e "$VAULT/.vault-meta/transactions" ] || fail "changed transaction dependency executed before identity refusal"
@@ -1635,7 +1722,7 @@ test_claude_lifecycle_and_plugin_discovery() {
 }
 
 test_claude_terminal_outcome_uses_durable_binding() {
-  local statement arguments registered record calls_before calls_after
+  local statement arguments registered record calls_before calls_after blocked
   new_env claude-terminal-binding
   enable_consumer
   bind_claude >/dev/null || fail "terminal binding fixture did not bind Claude"
@@ -1649,6 +1736,10 @@ test_claude_terminal_outcome_uses_durable_binding() {
   CAPABILITY=claude-process-generation-2
   PROCESS_GENERATION=2
   bind_claude >/dev/null || fail "replacement generation did not supersede the active process binding"
+  blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "replacement PreCompact escaped its outstanding-attempt boundary"
+  printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "replacement generation overwrote an outstanding compaction attempt"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "unbound replacement terminal event failed"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "replacement generation applied an opposite outcome to the first attempt"
   SEALING_ENABLED=false
   CONSUMER_ENABLED=false
   write_config

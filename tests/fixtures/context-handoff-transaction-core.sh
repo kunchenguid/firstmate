@@ -107,6 +107,13 @@ apply_bundle() {
   result_path="$operation/changed-paths.json"
   if [ -f "$result_path" ]; then
     [ "$(jq -r .bundle_sha256 "$result_path")" = "$bundle_sha" ] || return 75
+    if [ "$(jq -r .state "$operation/journal.json")" != complete ]; then
+      jq -e --arg operation "$operation_id" --arg bundle "$bundle_sha" --arg approval "$approval" '
+        .operation_id==$operation and .operation_type=="save" and .input_bundle_sha256==$bundle and .expanded_bundle_sha256==$bundle and .approval_sha256==$approval
+      ' "$operation/journal.json" >/dev/null || return 2
+      journal=$(jq -c '.state="complete"' "$operation/journal.json") || return 2
+      private_json "$operation/journal.json" "$journal" || return 2
+    fi
     jq -cS . "$result_path"
     return
   fi
