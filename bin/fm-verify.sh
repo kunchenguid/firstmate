@@ -17,10 +17,10 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 cd "$FM_ROOT"
 "$FM_ROOT/bin/fm-lint.sh"
 
-[ -L CLAUDE.md ] && [ "$(readlink CLAUDE.md)" = AGENTS.md ] || {
+if ! { [ -f CLAUDE.md ] && [ ! -L CLAUDE.md ] && grep -qxF '@AGENTS.md' CLAUDE.md; }; then
   echo "error: CLAUDE.md must point to AGENTS.md" >&2
   exit 1
-}
+fi
 [ -L .claude/skills ] && [ "$(readlink .claude/skills)" = ../.agents/skills ] || {
   echo "error: .claude/skills must point to ../.agents/skills" >&2
   exit 1

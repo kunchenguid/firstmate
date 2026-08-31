@@ -49,6 +49,7 @@ file_mode() {
 
 # Inactive migration compatibility fixtures retained on disk for legacy
 # quarantine evidence; the active suite below owns current PR-check behavior.
+# shellcheck disable=SC2329
 state_snapshot() {
   local state=$1 file
   (
@@ -64,6 +65,7 @@ state_snapshot() {
   )
 }
 
+# shellcheck disable=SC2329
 make_case() {
   local name=$1 dir fakebin fake_root
   dir="$TMP_ROOT/$name"
@@ -109,6 +111,7 @@ SH
   printf '%s\n' "$dir"
 }
 
+# shellcheck disable=SC2329
 write_task_meta() {
   local dir=$1 id=${2:-task-a}
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -120,6 +123,7 @@ write_task_meta() {
     "mode=direct-PR"
 }
 
+# shellcheck disable=SC2329
 write_poll_meta() {
   local state=$1 id=$2 url=$3
   fm_write_meta "$state/$id.meta" \

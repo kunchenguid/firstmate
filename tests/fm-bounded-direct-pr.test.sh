@@ -18,7 +18,7 @@ make_verify_fixture() {
 printf 'lint-ok\n'
 SH
   chmod +x "$dir/bin/fm-verify.sh" "$dir/bin/fm-lint.sh"
-  ln -s AGENTS.md "$dir/CLAUDE.md"
+  printf '%s\n' '@AGENTS.md' > "$dir/CLAUDE.md"
   ln -s ../.agents/skills "$dir/.claude/skills"
   printf '%s\n' '# fixture' > "$dir/AGENTS.md"
   git -C "$dir" init -q
@@ -35,16 +35,14 @@ test_canonical_verify_contract() {
   assert_contains "$out" "verified: canonical repository checks passed" \
     "canonical verifier did not report its deterministic success"
 
-  rm "$dir/CLAUDE.md"
-  ln -s WRONG.md "$dir/CLAUDE.md"
+  printf '%s\n' '@WRONG.md' > "$dir/CLAUDE.md"
   status=0
   out=$(FM_ROOT_OVERRIDE="$dir" "$dir/bin/fm-verify.sh" 2>&1) || status=$?
   expect_code 1 "$status" "canonical verifier must reject a wrong CLAUDE.md target"
   assert_contains "$out" "CLAUDE.md must point to AGENTS.md" \
     "wrong instruction alias refusal was not diagnostic"
 
-  rm "$dir/CLAUDE.md"
-  ln -s AGENTS.md "$dir/CLAUDE.md"
+  printf '%s\n' '@AGENTS.md' > "$dir/CLAUDE.md"
   mkdir -p "$dir/data"
   printf '%s\n' secret > "$dir/data/tracked.txt"
   git -C "$dir" add -f data/tracked.txt
