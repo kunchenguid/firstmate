@@ -1506,17 +1506,26 @@ share_beeline_node_modules() {
   target="$WT/node_modules"
 
   [ -d "$source/@beeline" ] || return 0
-  publisher_node=$(native_node_executable) || return 1
+  publisher_node=$(native_node_executable) || {
+    echo "error: Beeline dependency sharing requires a compatible native Node runtime" >&2
+    return 1
+  }
   workspace_status=0
   beeline_workspace_links_match_worktree "$publisher_node" "$source" || workspace_status=$?
   case "$workspace_status" in
     0) ;;
     2) return 0 ;;
-    *) return 1 ;;
+    *)
+      echo "error: primary Beeline workspace links failed validation" >&2
+      return 1
+      ;;
   esac
   if [ -e "$target" ] || [ -L "$target" ]; then
-    beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"
-    return $?
+    if beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
+      return 0
+    fi
+    echo "error: existing worktree node_modules failed Beeline workspace validation" >&2
+    return 1
   fi
   setup_signal_status=
   trap 'setup_signal_status=130' INT
@@ -1607,7 +1616,13 @@ function materialize(sourcePath, targetPath, root = false) {
   if (sourceStat.isSymbolicLink()) {
     const link = fs.readlinkSync(sourcePath);
     if (!root) {
-      fs.symlinkSync(link, targetPath);
+      const canonical = fs.realpathSync(sourcePath);
+      const target = path.isAbsolute(link) && inside(canonical, sourceReal)
+        ? path.join(staging, path.relative(sourceReal, canonical))
+        : path.isAbsolute(link) && inside(canonical, projectReal)
+          ? path.join(worktree, path.relative(projectReal, canonical))
+          : link;
+      fs.symlinkSync(target, targetPath);
       return;
     }
     const canonical = fs.realpathSync(sourcePath);
@@ -1715,6 +1730,7 @@ JS
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
     trap - INT TERM HUP
+    echo "error: failed to stage the primary Beeline dependency tree" >&2
     [ -z "$setup_signal_status" ] || return "$setup_signal_status"
     [ "$cleanup_status" -eq 0 ] || return 1
     return 1
@@ -1724,6 +1740,7 @@ JS
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
     trap - INT TERM HUP
+    echo "error: staged Beeline workspace links failed validation" >&2
     [ -z "$setup_signal_status" ] || return "$setup_signal_status"
     [ "$cleanup_status" -eq 0 ] || return 1
     return 1
@@ -1746,39 +1763,146 @@ JS
     [ "$cleanup_status" -eq 0 ] || return 1
     return "$setup_signal_status"
   fi
-  NODE_MODULES_ABORT_CLEANUP=0
   publish_status=0
-NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" <<'JS' || publish_status=$?
+NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" "$PROJ_ABS" "$WT" "$source" <<'JS' || publish_status=$?
 const fs = require('fs');
+const path = require('path');
+const [publication, target, project, worktree, source] = process.argv.slice(2);
 
 process.on('SIGINT', () => {});
 process.on('SIGTERM', () => {});
+process.on('SIGHUP', () => {});
+
+function inside(child, parent) {
+  return child === parent || child.startsWith(`${parent}${path.sep}`);
+}
+
+function workspaceMap(rootPath) {
+  const result = new Map();
+  const rootReal = fs.realpathSync(rootPath);
+  for (const rootName of ['packages', 'apps']) {
+    const root = path.join(rootPath, rootName);
+    let names;
+    try {
+      names = fs.readdirSync(root);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const directoryName of names) {
+      const directory = path.join(root, directoryName);
+      let manifest;
+      try {
+        manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+        throw error;
+      }
+      const match = typeof manifest.name === 'string' && manifest.name.match(/^@beeline\/([^/]+)$/);
+      if (!match) continue;
+      if (result.has(match[1])) throw new Error('duplicate workspace');
+      const real = fs.realpathSync(directory);
+      if (!inside(real, rootReal) || real === rootReal) throw new Error('workspace escaped project');
+      result.set(match[1], { real });
+    }
+  }
+  return result;
+}
+
+function validateTarget() {
+  const projectWorkspaces = workspaceMap(project);
+  const worktreeWorkspaces = workspaceMap(worktree);
+  const scope = path.join(source, '@beeline');
+  const targetScope = path.join(target, '@beeline');
+  for (const [name, workspace] of worktreeWorkspaces) {
+    const projectWorkspace = projectWorkspaces.get(name);
+    if (projectWorkspace) {
+      const sourceEntry = path.join(scope, name);
+      if (!fs.lstatSync(sourceEntry).isSymbolicLink()) throw new Error('workspace entry is not a link');
+      if (fs.realpathSync(sourceEntry) !== projectWorkspace.real) throw new Error('workspace entry is stale');
+    }
+    if (fs.realpathSync(path.join(targetScope, name)) !== workspace.real) {
+      throw new Error('target workspace is stale');
+    }
+  }
+  const sourceNames = new Set(fs.readdirSync(scope));
+  for (const name of fs.readdirSync(targetScope)) {
+    if (worktreeWorkspaces.has(name)) continue;
+    if (projectWorkspaces.has(name) || !sourceNames.has(name)) throw new Error('target-only package');
+  }
+}
+
+function publicationLink() {
+  try {
+    const stat = fs.lstatSync(target);
+    return stat.isSymbolicLink() ? fs.readlinkSync(target) : null;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function targetUsesPublication() {
+  const link = publicationLink();
+  return link !== null &&
+    path.resolve(path.dirname(target), link) === path.resolve(path.dirname(target), publication);
+}
+
+let created = false;
 
 try {
-  fs.symlinkSync(process.argv[2], process.argv[3], 'dir');
+  fs.symlinkSync(publication, target, 'dir');
+  created = true;
 } catch (error) {
-  if (error.code === 'EEXIST') process.exit(3);
+  if (error.code !== 'EEXIST') process.exit(4);
+}
+
+try {
+  validateTarget();
+  process.exit(created ? 0 : targetUsesPublication() ? 8 : 3);
+} catch (_) {
+  if (!created) process.exit(targetUsesPublication() ? 7 : 5);
+  if (publicationLink() !== publication) process.exit(7);
+  try {
+    fs.unlinkSync(target);
+  } catch (_) {
+    process.exit(7);
+  }
+  if (publicationLink() !== null) process.exit(7);
+  process.exit(6);
+}
+
+if (!created) {
   process.exit(4);
 }
 JS
   case "$publish_status" in
-    0)
-      if beeline_node_link_matches "$publisher_node" "$target" "$publication_link" \
-         && beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
-        NODE_MODULES_ABORT_STAGING=
-      else
-        publish_status=5
-      fi
+    0|8)
+      NODE_MODULES_ABORT_CLEANUP=0
+      NODE_MODULES_ABORT_STAGING=
+      NODE_MODULES_ABORT_NODE=
+      ;;
+    3)
+      cleanup_status=0
+      cleanup_beeline_node_modules_staging || cleanup_status=$?
+      [ "$cleanup_status" -eq 0 ] || publish_status=5
+      ;;
+    4|5|6)
+      cleanup_status=0
+      cleanup_beeline_node_modules_staging || cleanup_status=$?
+      [ "$cleanup_status" -eq 0 ] || publish_status=5
+      ;;
+    7)
+      NODE_MODULES_ABORT_CLEANUP=0
+      NODE_MODULES_ABORT_STAGING=
+      NODE_MODULES_ABORT_NODE=
       ;;
     *)
       if beeline_node_link_matches "$publisher_node" "$target" "$publication_link"; then
-        if beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
-          NODE_MODULES_ABORT_STAGING=
-        else
-          publish_status=5
-        fi
+        NODE_MODULES_ABORT_CLEANUP=0
+        NODE_MODULES_ABORT_STAGING=
+        NODE_MODULES_ABORT_NODE=
       else
-        NODE_MODULES_ABORT_CLEANUP=1
         cleanup_status=0
         cleanup_beeline_node_modules_staging || cleanup_status=$?
         if [ "$cleanup_status" -eq 0 ] \
@@ -1794,8 +1918,12 @@ JS
   trap - INT TERM HUP
   [ -z "$setup_signal_status" ] || return "$setup_signal_status"
   case "$publish_status" in
-    0|3) ;;
-    *) return 1 ;;
+    0|3|8) ;;
+    4) echo "error: failed to publish worktree node_modules atomically" >&2; return 1 ;;
+    5) echo "error: published Beeline dependency tree failed workspace validation" >&2; return 1 ;;
+    6) echo "error: invalid Beeline dependency publication was retracted" >&2; return 1 ;;
+    7) echo "error: Beeline dependency publication ownership became ambiguous; retained its backing tree" >&2; return 1 ;;
+    *) echo "error: Beeline dependency publisher exited unexpectedly" >&2; return 1 ;;
   esac
 }
 

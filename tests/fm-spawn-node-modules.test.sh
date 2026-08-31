@@ -121,6 +121,20 @@ add_dependency_volume() {
   done
 }
 
+add_workspace_validation_volume() {
+  local index=0 name
+  while [ "$index" -lt 150 ]; do
+    name="race-$index"
+    mkdir -p "$PROJECT_DIR/packages/$name" "$WORKTREE_DIR/packages/$name"
+    printf '{"name":"@beeline/%s","version":"1.0.0"}\n' "$name" \
+      > "$PROJECT_DIR/packages/$name/package.json"
+    printf '{"name":"@beeline/%s","version":"1.0.0"}\n' "$name" \
+      > "$WORKTREE_DIR/packages/$name/package.json"
+    "$LN_BIN" -s "../../packages/$name" "$PROJECT_DIR/node_modules/@beeline/$name"
+    index=$((index + 1))
+  done
+}
+
 start_publication_contender() {
   local target=$1 primary=${2:-}
   (
@@ -142,6 +156,28 @@ start_publication_contender() {
       done
       attempts=$((attempts + 1))
       sleep 0.005
+    done
+    exit 124
+  ) &
+  PUBLICATION_CONTENDER_PID=$!
+}
+
+start_postpublication_workspace_mutator() {
+  local target=$1 victim=$2 primary=$3
+  (
+    local attempts=0 publication staging
+    while [ "$attempts" -lt 20000 ]; do
+      if [ -L "$target/node_modules" ]; then
+        publication=$("$READLINK_BIN" "$target/node_modules")
+        staging="$target/$publication"
+        if [ -L "$staging/@beeline/$victim" ]; then
+          "$RM_BIN" -f "$staging/@beeline/$victim"
+          "$LN_BIN" -s "$primary" "$staging/@beeline/$victim"
+          exit 0
+        fi
+      fi
+      attempts=$((attempts + 1))
+      sleep 0.001
     done
     exit 124
   ) &
@@ -297,16 +333,22 @@ test_spawn_shared_dependency_imports_worktree_workspace() {
 }
 
 test_spawn_preserves_shared_dependency_symlinks() {
-  local rec id out status result alias_link root_alias_link
+  local rec id out status result alias_link root_alias_link nested_link publication
   id=node-modules-shared-symlink-z1aa
   rec=$(make_case shared-symlink "$id")
   read_case "$rec"
   mkdir "$PROJECT_DIR/node_modules/shared"
+  mkdir "$PROJECT_DIR/node_modules/bridge"
   printf 'module.exports = {};\n' > "$PROJECT_DIR/node_modules/shared/index.js"
+  printf 'module.exports = require("@beeline/lib");\n' \
+    > "$PROJECT_DIR/node_modules/bridge/index.js"
   ln -s ../shared "$PROJECT_DIR/node_modules/third-party/alias"
+  ln -s "$PROJECT_DIR/node_modules/bridge" \
+    "$PROJECT_DIR/node_modules/third-party/absolute-bridge"
   ln -s shared "$PROJECT_DIR/node_modules/root-alias"
-  printf 'const direct = require("../shared");\nconst alias = require("./alias");\nconst rootAlias = require("../root-alias");\nmodule.exports = direct === alias && direct === rootAlias;\n' \
+  printf 'const direct = require("../shared");\nconst alias = require("./alias");\nconst rootAlias = require("../root-alias");\nif (direct !== alias || direct !== rootAlias) throw new Error("identity changed");\nmodule.exports = require("./absolute-bridge");\n' \
     > "$PROJECT_DIR/node_modules/third-party/index.js"
+  printf 'module.exports = "worker";\n' > "$WORKTREE_DIR/packages/lib/index.js"
 
   out=$(run_spawn "$id")
   status=$?
@@ -316,11 +358,15 @@ test_spawn_preserves_shared_dependency_symlinks() {
   [ "$alias_link" = ../shared ] || fail "shared dependency symlink topology changed"
   root_alias_link=$(readlink "$WORKTREE_DIR/node_modules/root-alias")
   [ "$root_alias_link" = shared ] || fail "package-root dependency symlink topology changed"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  nested_link=$(readlink "$WORKTREE_DIR/node_modules/third-party/absolute-bridge")
+  [ "$nested_link" = "$WORKTREE_DIR/$publication/bridge" ] \
+    || fail "absolute nested dependency symlink remained rooted in the primary checkout"
   result=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
-    'process.stdout.write(String(require(process.argv[1])));' \
+    'process.stdout.write(require(process.argv[1]));' \
     "$WORKTREE_DIR/node_modules/third-party")
-  [ "$result" = true ] || fail "shared dependency symlink changed module identity"
-  pass "fm-spawn preserves shared dependency symlink topology and identity"
+  [ "$result" = worker ] || fail "nested dependency symlink imported the primary workspace"
+  pass "fm-spawn preserves dependency symlinks while rebasing primary targets"
 }
 
 test_spawn_uses_worktree_workspace_manifests() {
@@ -415,6 +461,26 @@ test_spawn_resolves_script_managed_node_runtime() {
   publication=$(readlink "$WORKTREE_DIR/node_modules")
   [ -d "$WORKTREE_DIR/$publication" ] || fail "script-managed Node runtime left dependency backing unavailable"
   pass "fm-spawn resolves script-managed Node runtimes before publication"
+}
+
+test_spawn_reports_missing_compatible_node_runtime() {
+  local rec id out status toolbin account_home
+  id=node-modules-missing-node-z1ca
+  rec=$(make_case missing-node "$id")
+  read_case "$rec"
+  toolbin=$(make_toolbin_without_node "$TMP_ROOT/missing-node-tools")
+  account_home="$TMP_ROOT/missing-node-account"
+  mkdir -p "$account_home"
+
+  out=$(FM_REJECT_PATH_NODE_PUBLISHER=1 \
+    FM_TEST_ACCOUNT_HOME="$account_home" \
+    FM_SPAWN_TEST_PATH="$FAKEBIN_DIR:$toolbin" run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an environment without a compatible Node runtime"
+  assert_contains "$out" "requires a compatible native Node runtime" \
+    "missing Node runtime failure was silent"
+  assert_not_contains "$out" "spawned $id" "missing Node runtime launched a worker"
+  pass "fm-spawn reports an unavailable compatible Node runtime"
 }
 
 test_spawn_does_not_accept_unvalidated_exact_contention() {
@@ -720,6 +786,35 @@ test_spawn_rejects_primary_dependency_link_created_during_publication() {
   pass "fm-spawn refuses contended dependency links whose workspaces resolve to primary source"
 }
 
+test_spawn_retracts_invalid_owned_publication() {
+  local rec id out status candidate victim
+  id=node-modules-postpublication-invalid-z4c
+  rec=$(make_case postpublication-invalid "$id")
+  read_case "$rec"
+  add_workspace_validation_volume
+  victim=race-149
+  start_postpublication_workspace_mutator \
+    "$WORKTREE_DIR" "$victim" "$PROJECT_DIR/packages/$victim"
+
+  out=$(run_spawn "$id")
+  status=$?
+  wait_publication_contender \
+    || fail "post-publication workspace mutator did not alter the published tree"
+  [ "$status" -ne 0 ] || fail "spawn accepted a workspace mutation after publication"
+  assert_contains "$out" "invalid Beeline dependency publication was retracted" \
+    "post-publication validation failure was not diagnosed"
+  assert_not_contains "$out" "spawned $id" "invalid owned publication launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "invalid owned publication left node_modules installed"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "invalid owned publication left its backing tree installed"
+  done
+  [ "$(readlink "$PROJECT_DIR/node_modules/@beeline/$victim")" = "../../packages/$victim" ] \
+    || fail "invalid publication rollback mutated the primary dependency tree"
+  pass "fm-spawn retracts only its invalid owned dependency publication"
+}
+
 test_spawn_omits_worktree_deleted_workspace() {
   local rec id out status
   id=node-modules-deleted-workspace-z5b
@@ -752,6 +847,8 @@ test_spawn_rejects_missing_installed_workspace_link() {
   out=$(run_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a missing installed workspace link"
+  assert_contains "$out" "primary Beeline workspace links failed validation" \
+    "workspace validation failure was silent"
   assert_not_contains "$out" "spawned $id" "missing installed workspace link launched a worker"
   [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
     || fail "missing installed workspace link published node_modules"
@@ -789,6 +886,7 @@ test_spawn_uses_worktree_workspace_manifests
 test_spawn_rebases_canonical_absolute_workspace_binary
 test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_resolves_script_managed_node_runtime
+test_spawn_reports_missing_compatible_node_runtime
 test_spawn_does_not_accept_unvalidated_exact_contention
 test_spawn_prevents_path_link_mutation_after_validation
 test_spawn_leaves_existing_node_modules_untouched
@@ -803,6 +901,7 @@ test_spawn_preserves_exclude_path_for_harness_files
 test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
+test_spawn_retracts_invalid_owned_publication
 test_spawn_omits_worktree_deleted_workspace
 test_spawn_rejects_missing_installed_workspace_link
 test_spawn_rejects_dangling_staged_workspace_link
