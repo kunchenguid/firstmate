@@ -48,7 +48,7 @@ case "${1:-}" in
       [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' composer-empty >> "$FM_FAKE_EVENT_LOG"
       printf '→\n'
     elif [ "${FM_FAKE_KIMI_SCREEN:-0}" = 1 ]; then
-      printf 'context: 1%%\n│ > │\n'
+      printf 'context: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
     else
       [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' composer-not-empty >> "$FM_FAKE_EVENT_LOG"
     fi
@@ -340,7 +340,7 @@ SH
 
 test_every_verified_harness_reaches_task_local_sanitizer() {
   local case_dir="$TMP_ROOT/harness-reach" home proj wt fakebin harness id out status launch hook \
-    cursor_screen first_launch events
+    cursor_screen composer_cursor_y first_launch events
   case_dir="$TMP_ROOT/harness-reach"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -362,12 +362,14 @@ test_every_verified_harness_reaches_task_local_sanitizer() {
     : > "$case_dir/launch"
     : > "$case_dir/events"
     cursor_screen=0
+    composer_cursor_y=0
     [ "$harness" = cursor-agent ] && cursor_screen=1
+    [ "$harness" = kimi ] && composer_cursor_y=2
     out=$(HOME="$case_dir/agent-home" FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
       FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
       FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_FILE="$case_dir/launch" FM_FAKE_KIMI_SCREEN=1 \
-      FM_FAKE_CURSOR_SCREEN="$cursor_screen" FM_FAKE_TMUX_CURSOR_Y=0 \
+      FM_FAKE_CURSOR_SCREEN="$cursor_screen" FM_FAKE_TMUX_CURSOR_Y="$composer_cursor_y" \
       FM_FAKE_EVENT_LOG="$case_dir/events" \
       FM_KIMI_READY_POLLS=1 FM_KIMI_DELIVERY_POLLS=1 FM_KIMI_POLL_INTERVAL=0 PATH="$fakebin:$PATH" \
       "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off 2>&1)
