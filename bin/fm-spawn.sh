@@ -2092,6 +2092,16 @@ else
   fi
 fi
 
+CODEX_REMOTE_BINDING_REQUIRED=0
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = codex ] && [ "$BACKEND" = herdr ] \
+  && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ]; then
+  CODEX_REMOTE_BINDING_REQUIRED=1
+fi
+if [ "$CODEX_REMOTE_BINDING_REQUIRED" -eq 1 ] && [ "$BACKLOG_TRANSITION" -eq 1 ]; then
+  echo "error: remote Codex secondmate launch unexpectedly owns a backlog transition; refusing before endpoint creation" >&2
+  exit 1
+fi
+
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
@@ -2965,12 +2975,6 @@ if [ "$KIND" = secondmate ]; then
 elif [ "$KIND" = scout ]; then
   MODE=
   YOLO=
-fi
-
-CODEX_REMOTE_BINDING_REQUIRED=0
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = codex ] && [ "$BACKEND" = herdr ] \
-  && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ]; then
-  CODEX_REMOTE_BINDING_REQUIRED=1
 fi
 
 # Resolve the optional default-off W3C trace context (bin/fm-trace-context-lib.sh,
