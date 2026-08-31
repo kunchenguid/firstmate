@@ -20,6 +20,11 @@ CONTRIBUTING.md:101:Local no-mistakes Test stays intent-targeted and must not wi
 CONTRIBUTING.md:106:Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 CONTRIBUTING.md:107:The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 CONTRIBUTING.md:111:Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).
+
+## Initial Checkout State
+
+- Branch: `rharriso-main`
+- Initial `git status --short`: clean, with no output, before Task 1 edits.
 AGENTS.md:43:This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
 AGENTS.md:44:Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 AGENTS.md:66:.env                 optional Relay pairing token; LOCAL, gitignored; presence-gates section 14
@@ -9636,3 +9641,14 @@ bytes=8222	lines=143	est_tokens=2056
 - Local secondmates: `tests/fm-secondmate-lifecycle-e2e.test.sh`, `tests/fm-secondmate-liveness.test.sh`, `tests/fm-secondmate-safety.test.sh`, `tests/fm-secondmate-sync.test.sh`, `tests/fm-secondmate-harness.test.sh`, `tests/fm-backlog-handoff.test.sh`, `tests/fm-shared-captain-inheritance.test.sh`, and `tests/fm-send-secondmate-marker.test.sh`.
 - Watcher and decisions: `tests/fm-watch-arm.test.sh`, `tests/fm-watch-checkpoint.test.sh`, `tests/fm-wake-drain-open-decisions.test.sh`, `tests/fm-wake-drain-unread-status.test.sh`, `tests/fm-wake-queue.test.sh`, `tests/fm-pending-reply.test.sh`, and `tests/fm-decision-hold-lifecycle.test.sh`.
 - Approval gates: add new coverage in this plan for validation-not-authority behavior.
+
+## Narrow Baseline Failure Record
+
+The required unchanged command failed in this sandbox. Representative stderr and error lines were:
+
+- `error creating /private/tmp/tmux-502/fm-backend-smoke-47685 (Operation not permitted)`
+- `tests/fm-secondmate-lifecycle-e2e.test.sh: line 30: fm_test_tmproot: command not found`
+- `tests/fm-secondmate-lifecycle-e2e.test.sh: line 45: fm_git_init_commit: command not found`
+- `basename: /signal/state/.wake-queue.lock.steal.steal...: File name too long`
+
+The watcher case `tests/fm-watch-checkpoint.test.sh` was interrupted after repeated lock-path growth; the original run ended with exit code 130. A bounded diagnostic rerun was also stopped after reproducing the same failure pattern.
