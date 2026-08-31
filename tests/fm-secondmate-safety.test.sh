@@ -73,7 +73,9 @@ test_fm_home_parameterization() {
   brief="$home_one/data/task-c/brief.md"
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
-  printf 'project=x\n' > "$home_one/state/task-a.meta"
+  mkdir -p "$home_one/worktree"
+  printf 'project=x\nworktree=%s\n' "$home_one/worktree" > "$home_one/state/task-a.meta"
+  chmod 0600 "$home_one/state/task-a.meta"
   fakebin="$TMP_ROOT/home-parameterization-fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/gh" <<'SH'
@@ -82,7 +84,9 @@ printf '%040d\n' 1
 SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
-printf 'summary: 1 passed, 0 failed, 1 total\n'
+printf '%s\n' 'summary: 1 passed, 0 failed, 1 total'
+printf '%s\n' 'checks[1]{name,conclusion}:'
+printf '%s\n' '  Verify exact PR head,pass'
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi"
   PATH="$fakebin:$PATH" FM_HOME="$home_one" FM_GUARD_GRACE=999999 \
