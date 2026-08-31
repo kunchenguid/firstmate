@@ -201,16 +201,6 @@ hold_lock_until_released() {  # <lock> <ready> <release>
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2" "$3" &
 }
 
-wait_until_process_exits() {  # <pid>
-  local pid=$1 attempts=1000
-  while kill -0 "$pid" 2>/dev/null; do
-    [ "$attempts" -gt 0 ] || return 1
-    attempts=$((attempts - 1))
-    sleep 0.01
-  done
-}
-
-
 test_an_inventory_mismatch_asks_the_mate_once_per_window() {
   local home mate fakebin snap out
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home once mate)
@@ -441,7 +431,8 @@ test_busy_lifecycle_locks_never_hold_up_the_digest() {
     while [ ! -f "$ready" ]; do sleep 0.01; done
     run_notify "$home" "$fakebin" "busy-$label" "$snap" > "$home/notify.out" 2>&1 &
     notify=$!
-    if ! wait_until_process_exits "$notify"; then
+    sleep 0.2
+    if kill -0 "$notify" 2>/dev/null; then
       : > "$release"
       wait "$notify" 2>/dev/null || true
       wait "$holder" 2>/dev/null || true
