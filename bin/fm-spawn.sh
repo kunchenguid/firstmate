@@ -630,6 +630,7 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 NODE_MODULES_ABORT_STAGING=
 NODE_MODULES_ABORT_CLEANUP=0
+NODE_MODULES_ABORT_NODE=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -649,19 +650,42 @@ parse_orca_worktree_result() {
 }
 
 cleanup_beeline_node_modules_staging() {
-  local staging
+  local staging node
   [ "$NODE_MODULES_ABORT_CLEANUP" = 1 ] || return 0
   [ -n "$NODE_MODULES_ABORT_STAGING" ] || return 1
+  [ -n "$NODE_MODULES_ABORT_NODE" ] || return 1
   staging=$NODE_MODULES_ABORT_STAGING
+  node=$NODE_MODULES_ABORT_NODE
   if ! (
     trap '' INT TERM HUP
-    exec /bin/rm -rf -- "$staging"
+    NODE_OPTIONS= "$node" - "$staging" <<'JS'
+const fs = require('fs');
+
+function remove(path) {
+  let stat;
+  try {
+    stat = fs.lstatSync(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    for (const name of fs.readdirSync(path)) remove(`${path}/${name}`);
+    fs.rmdirSync(path);
+  } else {
+    fs.unlinkSync(path);
+  }
+}
+
+remove(process.argv[2]);
+JS
   ); then
     return 1
   fi
   [ ! -e "$staging" ] && [ ! -L "$staging" ] || return 1
   NODE_MODULES_ABORT_CLEANUP=0
   NODE_MODULES_ABORT_STAGING=
+  NODE_MODULES_ABORT_NODE=
 }
 
 spawn_abort_cleanup() {
@@ -1317,12 +1341,25 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 exclude_path() {
-  local rel=$1 EXCL excl_dir
+  local node=$1 rel=$2 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
-  excl_dir=${EXCL%/*}
-  /bin/mkdir -p "$excl_dir"
-  /usr/bin/grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+  NODE_OPTIONS= "$node" - "$EXCL" "$rel" <<'JS'
+const fs = require('fs');
+const path = require('path');
+const file = process.argv[2];
+const entry = process.argv[3];
+fs.mkdirSync(path.dirname(file), { recursive: true });
+let text = '';
+try {
+  text = fs.readFileSync(file, 'utf8');
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+if (!text.split(/\r?\n/).includes(entry)) {
+  fs.appendFileSync(file, `${text && !text.endsWith('\n') ? '\n' : ''}${entry}\n`);
+}
+JS
 }
 
 native_node_candidate() {
@@ -1341,7 +1378,7 @@ native_node_candidate() {
 
 native_node_supports_publication() {
   NODE_OPTIONS= "$1" -e \
-    'const fs = require("fs"); if (typeof fs.symlinkSync !== "function") process.exit(1);' \
+    'const fs = require("fs"); if (typeof fs.symlinkSync !== "function" || typeof fs.linkSync !== "function" || typeof fs.copyFileSync !== "function") process.exit(1);' \
     </dev/null >/dev/null 2>&1
 }
 
@@ -1376,85 +1413,104 @@ native_node_executable() {
   return 1
 }
 
-beeline_primary_workspace_path() {
-  local name=$1 candidate
-  case "$name" in ''|.|..|*/*) return 1 ;; esac
-  for candidate in "$PROJ_ABS/packages/$name" "$PROJ_ABS/apps/$name"; do
-    [ -d "$candidate" ] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
+beeline_workspace_links_match_worktree() {
+  local node=$1 source=$2 target=${3:-}
+  NODE_OPTIONS= "$node" - "$PROJ_ABS" "$WT" "$source" "$target" <<'JS'
+const fs = require('fs');
+const path = require('path');
+const [project, worktree, source, target] = process.argv.slice(2);
+
+function inside(child, parent) {
+  return child === parent || child.startsWith(`${parent}${path.sep}`);
 }
 
-beeline_workspace_links_match_worktree() {
-  local source=$1 target=${2:-} entry entry_real name expected expected_real candidate candidate_real found wt_real
-  [ -z "$target" ] || [ -d "$target" ] || return 1
-  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || return 1
-  found=0
-  for entry in "$source/@beeline"/* "$source/@beeline"/.[!.]* "$source/@beeline"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    name=${entry##*/}
-    expected=$(beeline_primary_workspace_path "$name") || continue
-    found=1
-    [ -L "$entry" ] || return 1
-    expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
-    [[ "$expected_real" == "$PROJ_ABS_REAL"/* ]] || return 1
-    entry_real=$(cd "$entry" 2>/dev/null && pwd -P) || return 1
-    [ "$entry_real" = "$expected_real" ] || return 1
-    [ -n "$target" ] || continue
-    candidate="$target/@beeline/$name"
-    [ -e "$candidate" ] || [ -L "$candidate" ] || return 1
-    expected="$WT${expected#"$PROJ_ABS"}"
-    expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
-    [[ "$expected_real" == "$wt_real"/* ]] || return 1
-    candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
-    [ "$candidate_real" = "$expected_real" ] || return 1
-  done
-  if [ -n "$target" ]; then
-    for candidate in "$target/@beeline"/* "$target/@beeline"/.[!.]* "$target/@beeline"/..?*; do
-      [ -L "$candidate" ] || continue
-      name=${candidate##*/}
-      entry="$source/@beeline/$name"
-      [ -e "$entry" ] || [ -L "$entry" ] || return 1
-      entry_real=$(cd "$entry" 2>/dev/null && pwd -P) || return 1
-      candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
-      if expected=$(beeline_primary_workspace_path "$name"); then
-        [ -L "$entry" ] || return 1
-        expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
-        [[ "$expected_real" == "$PROJ_ABS_REAL"/* ]] || return 1
-        [ "$entry_real" = "$expected_real" ] || return 1
-        expected="$WT${expected#"$PROJ_ABS"}"
-        expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
-        [[ "$expected_real" == "$wt_real"/* ]] || return 1
-        [ "$candidate_real" = "$expected_real" ] || return 1
-      else
-        [ "$candidate_real" = "$entry_real" ] || return 1
-      fi
-    done
-  fi
-  [ "$found" = 1 ] || return 2
+function workspaces() {
+  const result = new Map();
+  const projectReal = fs.realpathSync(project);
+  for (const rootName of ['packages', 'apps']) {
+    const root = path.join(project, rootName);
+    let names;
+    try {
+      names = fs.readdirSync(root);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const directoryName of names) {
+      const directory = path.join(root, directoryName);
+      let manifest;
+      try {
+        manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+        throw error;
+      }
+      const match = typeof manifest.name === 'string' && manifest.name.match(/^@beeline\/([^/]+)$/);
+      if (!match) continue;
+      if (result.has(match[1])) throw new Error('duplicate workspace');
+      const real = fs.realpathSync(directory);
+      if (!inside(real, projectReal) || real === projectReal) throw new Error('workspace escaped project');
+      result.set(match[1], { directory, real });
+    }
+  }
+  return result;
+}
+
+try {
+  const found = workspaces();
+  if (found.size === 0) process.exit(2);
+  const worktreeReal = fs.realpathSync(worktree);
+  const scope = path.join(source, '@beeline');
+  for (const [name, workspace] of found) {
+    const sourceEntry = path.join(scope, name);
+    if (!fs.lstatSync(sourceEntry).isSymbolicLink()) throw new Error('workspace entry is not a link');
+    if (fs.realpathSync(sourceEntry) !== workspace.real) throw new Error('workspace entry is stale');
+    const expected = path.join(worktree, path.relative(project, workspace.directory));
+    const expectedReal = fs.realpathSync(expected);
+    if (!inside(expectedReal, worktreeReal) || expectedReal === worktreeReal) throw new Error('worktree workspace escaped');
+    if (target && fs.realpathSync(path.join(target, '@beeline', name)) !== expectedReal) {
+      throw new Error('target workspace is stale');
+    }
+  }
+  if (target) {
+    const sourceNames = new Set(fs.readdirSync(scope));
+    const targetScope = path.join(target, '@beeline');
+    for (const name of fs.readdirSync(targetScope)) {
+      if (!sourceNames.has(name)) throw new Error('target-only package');
+    }
+  }
+} catch (error) {
+  process.exit(1);
+}
+JS
+}
+
+beeline_node_link_matches() {
+  local node=$1 target=$2 expected=$3
+  NODE_OPTIONS= "$node" -e \
+    'const fs = require("fs"); try { process.exit(fs.lstatSync(process.argv[1]).isSymbolicLink() && fs.readlinkSync(process.argv[1]) === process.argv[2] ? 0 : 1); } catch (_) { process.exit(1); }' \
+    "$target" "$expected" </dev/null >/dev/null 2>&1
 }
 
 share_beeline_node_modules() {
-  local source target staging_root staging entry name entry_real link_target publication_link publisher_node
-  local publish_status setup_signal_status mkdir_status cleanup_status workspace_status expected expected_real
+  local source target staging_root staging publication_link publisher_node
+  local publish_status setup_signal_status mkdir_status cleanup_status workspace_status
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
 
   [ -d "$source/@beeline" ] || return 0
+  publisher_node=$(native_node_executable) || return 1
   workspace_status=0
-  beeline_workspace_links_match_worktree "$source" || workspace_status=$?
+  beeline_workspace_links_match_worktree "$publisher_node" "$source" || workspace_status=$?
   case "$workspace_status" in
     0) ;;
     2) return 0 ;;
     *) return 1 ;;
   esac
   if [ -e "$target" ] || [ -L "$target" ]; then
-    beeline_workspace_links_match_worktree "$source" "$target"
+    beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"
     return $?
   fi
-  publisher_node=$(native_node_executable) || return 1
   setup_signal_status=
   trap 'setup_signal_status=130' INT
   trap 'setup_signal_status=143' TERM
@@ -1470,8 +1526,16 @@ share_beeline_node_modules() {
   staging="$staging_root"
   NODE_MODULES_ABORT_STAGING=$staging_root
   NODE_MODULES_ABORT_CLEANUP=1
+  NODE_MODULES_ABORT_NODE=$publisher_node
   mkdir_status=0
-  /bin/mkdir -- "$staging_root" || mkdir_status=$?
+  NODE_OPTIONS= "$publisher_node" - "$staging_root" <<'JS' || mkdir_status=$?
+const fs = require('fs');
+try {
+  fs.mkdirSync(process.argv[2]);
+} catch (error) {
+  process.exit(error.code === 'EEXIST' ? 2 : 1);
+}
+JS
   if [ "$mkdir_status" -ne 0 ]; then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
@@ -1487,55 +1551,121 @@ share_beeline_node_modules() {
     [ "$cleanup_status" -eq 0 ] || return 1
     return "$setup_signal_status"
   fi
-  if ! (
-    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
-      [ -e "$entry" ] || [ -L "$entry" ] || continue
-      name=${entry##*/}
-      case "$name" in
-        '@beeline'|.bin) continue ;;
-      esac
-      /bin/ln -s "$entry" "$staging/$name" || exit 1
-    done
+  if ! NODE_OPTIONS= "$publisher_node" - "$PROJ_ABS" "$WT" "$source" "$staging" <<'JS'
+const fs = require('fs');
+const path = require('path');
+const [project, worktree, source, staging] = process.argv.slice(2);
 
-    /bin/mkdir "$staging/@beeline" || exit 1
-    for entry in "$source/@beeline"/* "$source/@beeline"/.[!.]* "$source/@beeline"/..?*; do
-      [ -e "$entry" ] || [ -L "$entry" ] || continue
-      name=${entry##*/}
-      entry_real=$(real_path_or_raw "$entry")
-      if expected=$(beeline_primary_workspace_path "$name"); then
-        [ -L "$entry" ] || exit 1
-        expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || exit 1
-        [[ "$expected_real" == "$PROJ_ABS_REAL"/* ]] || exit 1
-        [ "$entry_real" = "$expected_real" ] || exit 1
-        link_target=$(/usr/bin/readlink "$entry")
-        case "$link_target" in
-          /*) /bin/ln -s "$WT${expected#"$PROJ_ABS"}" "$staging/@beeline/$name" || exit 1 ;;
-          *) /bin/ln -s "$link_target" "$staging/@beeline/$name" || exit 1 ;;
-        esac
-      else
-        /bin/ln -s "$entry" "$staging/@beeline/$name" || exit 1
-      fi
-    done
+function inside(child, parent) {
+  return child === parent || child.startsWith(`${parent}${path.sep}`);
+}
 
-    if [ -d "$source/.bin" ]; then
-      /bin/mkdir "$staging/.bin" || exit 1
-      for entry in "$source/.bin"/* "$source/.bin"/.[!.]* "$source/.bin"/..?*; do
-        [ -e "$entry" ] || [ -L "$entry" ] || continue
-        name=${entry##*/}
-        if [ -L "$entry" ]; then
-          link_target=$(/usr/bin/readlink "$entry")
-          case "$link_target" in
-            "$PROJ_ABS"/*) /bin/ln -s "$WT${link_target#"$PROJ_ABS"}" "$staging/.bin/$name" || exit 1 ;;
-            "$PROJ_ABS_REAL"/*) /bin/ln -s "$WT${link_target#"$PROJ_ABS_REAL"}" "$staging/.bin/$name" || exit 1 ;;
-            *) /bin/ln -s "$link_target" "$staging/.bin/$name" || exit 1 ;;
-          esac
-        else
-          /bin/ln -s "$entry" "$staging/.bin/$name" || exit 1
-        fi
-      done
-    fi
+function workspaceMap() {
+  const result = new Map();
+  const projectReal = fs.realpathSync(project);
+  for (const rootName of ['packages', 'apps']) {
+    const root = path.join(project, rootName);
+    let names;
+    try {
+      names = fs.readdirSync(root);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const directoryName of names) {
+      const directory = path.join(root, directoryName);
+      let manifest;
+      try {
+        manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+        throw error;
+      }
+      const match = typeof manifest.name === 'string' && manifest.name.match(/^@beeline\/([^/]+)$/);
+      if (!match) continue;
+      if (result.has(match[1])) throw new Error('duplicate workspace');
+      const real = fs.realpathSync(directory);
+      if (!inside(real, projectReal) || real === projectReal) throw new Error('workspace escaped project');
+      result.set(match[1], { directory, real });
+    }
+  }
+  return result;
+}
 
-  ); then
+function materialize(sourcePath, targetPath, parents = new Set()) {
+  const real = fs.realpathSync(sourcePath);
+  const stat = fs.statSync(real);
+  if (stat.isDirectory()) {
+    if (parents.has(real)) throw new Error('dependency cycle');
+    const next = new Set(parents);
+    next.add(real);
+    fs.mkdirSync(targetPath);
+    for (const name of fs.readdirSync(sourcePath)) {
+      materialize(path.join(sourcePath, name), path.join(targetPath, name), next);
+    }
+    return;
+  }
+  if (!stat.isFile()) throw new Error('unsupported dependency entry');
+  try {
+    fs.linkSync(real, targetPath);
+  } catch (_) {
+    fs.copyFileSync(real, targetPath);
+  }
+}
+
+const projectReal = fs.realpathSync(project);
+const workspaces = workspaceMap();
+for (const name of fs.readdirSync(source)) {
+  if (name === '@beeline' || name === '.bin') continue;
+  materialize(path.join(source, name), path.join(staging, name));
+}
+
+const sourceScope = path.join(source, '@beeline');
+const targetScope = path.join(staging, '@beeline');
+fs.mkdirSync(targetScope);
+for (const name of fs.readdirSync(sourceScope)) {
+  const sourceEntry = path.join(sourceScope, name);
+  const targetEntry = path.join(targetScope, name);
+  const workspace = workspaces.get(name);
+  if (!workspace) {
+    materialize(sourceEntry, targetEntry);
+    continue;
+  }
+  if (!fs.lstatSync(sourceEntry).isSymbolicLink() || fs.realpathSync(sourceEntry) !== workspace.real) {
+    throw new Error('workspace entry is stale');
+  }
+  const link = fs.readlinkSync(sourceEntry);
+  const target = path.isAbsolute(link)
+    ? path.join(worktree, path.relative(project, workspace.directory))
+    : link;
+  fs.symlinkSync(target, targetEntry, 'dir');
+}
+
+const sourceBin = path.join(source, '.bin');
+try {
+  if (fs.statSync(sourceBin).isDirectory()) {
+    const targetBin = path.join(staging, '.bin');
+    fs.mkdirSync(targetBin);
+    for (const name of fs.readdirSync(sourceBin)) {
+      const sourceEntry = path.join(sourceBin, name);
+      const targetEntry = path.join(targetBin, name);
+      if (!fs.lstatSync(sourceEntry).isSymbolicLink()) {
+        materialize(sourceEntry, targetEntry);
+        continue;
+      }
+      const link = fs.readlinkSync(sourceEntry);
+      const resolved = path.resolve(path.dirname(sourceEntry), link);
+      const target = path.isAbsolute(link) && inside(resolved, projectReal)
+        ? path.join(worktree, path.relative(projectReal, resolved))
+        : link;
+      fs.symlinkSync(target, targetEntry);
+    }
+  }
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+JS
+  then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
     trap - INT TERM HUP
@@ -1544,7 +1674,7 @@ share_beeline_node_modules() {
     return 1
   fi
 
-  if ! beeline_workspace_links_match_worktree "$source" "$staging"; then
+  if ! beeline_workspace_links_match_worktree "$publisher_node" "$source" "$staging"; then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
     trap - INT TERM HUP
@@ -1561,7 +1691,7 @@ share_beeline_node_modules() {
     return "$setup_signal_status"
   fi
 
-  exclude_path '.fm-node-modules.*/'
+  exclude_path "$publisher_node" '.fm-node-modules.*/'
   publication_link=${staging_root##*/}
   if [ -n "$setup_signal_status" ]; then
     cleanup_status=0
@@ -1587,18 +1717,16 @@ try {
 JS
   case "$publish_status" in
     0)
-      if [ -L "$target" ] \
-         && [ "$(/usr/bin/readlink "$target" 2>/dev/null || true)" = "$publication_link" ] \
-         && beeline_workspace_links_match_worktree "$source" "$target"; then
+      if beeline_node_link_matches "$publisher_node" "$target" "$publication_link" \
+         && beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
         NODE_MODULES_ABORT_STAGING=
       else
         publish_status=5
       fi
       ;;
     *)
-      if [ -L "$target" ] \
-         && [ "$(/usr/bin/readlink "$target" 2>/dev/null || true)" = "$publication_link" ]; then
-        if beeline_workspace_links_match_worktree "$source" "$target"; then
+      if beeline_node_link_matches "$publisher_node" "$target" "$publication_link"; then
+        if beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
           NODE_MODULES_ABORT_STAGING=
         else
           publish_status=5
@@ -1609,7 +1737,7 @@ JS
         cleanup_beeline_node_modules_staging || cleanup_status=$?
         if [ "$cleanup_status" -eq 0 ] \
            && { [ -e "$target" ] || [ -L "$target" ]; } \
-           && beeline_workspace_links_match_worktree "$source" "$target"; then
+           && beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
           publish_status=3
         else
           publish_status=5

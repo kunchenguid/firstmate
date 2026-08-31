@@ -162,6 +162,13 @@ make_case() {
     "$project/node_modules/.bin" "$project/node_modules/third-party"
   printf 'canonical\n' > "$project/packages/lib/origin.txt"
   printf 'canonical absolute\n' > "$project/packages/absolute-lib/origin.txt"
+  printf '{"name":"@beeline/lib","version":"1.0.0","main":"index.js"}\n' \
+    > "$project/packages/lib/package.json"
+  printf '{"name":"@beeline/absolute-lib","version":"1.0.0"}\n' \
+    > "$project/packages/absolute-lib/package.json"
+  printf '{"name":"@beeline/cli","version":"1.0.0"}\n' \
+    > "$project/packages/cli/package.json"
+  printf 'module.exports = "primary";\n' > "$project/packages/lib/index.js"
   printf '#!/usr/bin/env bash\nprintf "primary cli\\n"\n' > "$project/packages/cli/bin.sh"
   chmod +x "$project/packages/cli/bin.sh"
   printf 'shared dependency\n' > "$project/node_modules/third-party/index.js"
@@ -197,7 +204,7 @@ run_spawn() {
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links() {
-  local rec id out status node_modules_link third_party_link workspace_link absolute_workspace_link bin_link bin_out
+  local rec id out status node_modules_link workspace_link absolute_workspace_link bin_link bin_out
   id=node-modules-share-z1
   rec=$(make_case shared-dependencies "$id")
   read_case "$rec"
@@ -215,9 +222,9 @@ test_spawn_shares_dependencies_and_repoints_workspace_links() {
     *) fail "worktree node_modules did not point to its local dependency link farm" ;;
   esac
   [ -d "$WORKTREE_DIR/$node_modules_link" ] || fail "worktree dependency link farm is missing"
-  third_party_link=$(readlink "$WORKTREE_DIR/node_modules/third-party")
-  [ "$third_party_link" = "$PROJECT_DIR/node_modules/third-party" ] \
-    || fail "third-party package did not share the primary dependency tree"
+  [ "$WORKTREE_DIR/node_modules/third-party/index.js" -ef \
+    "$PROJECT_DIR/node_modules/third-party/index.js" ] \
+    || fail "third-party package file did not share the primary installation"
 
   workspace_link=$(readlink "$WORKTREE_DIR/node_modules/@beeline/lib")
   [ "$workspace_link" = '../../packages/lib' ] \
@@ -243,6 +250,26 @@ test_spawn_shares_dependencies_and_repoints_workspace_links() {
   bin_out=$("$WORKTREE_DIR/node_modules/.bin/beeline-cli")
   [ "$bin_out" = 'worker cli' ] || fail "workspace binary executed primary source"
   pass "fm-spawn shares third-party dependencies while @beeline links and binaries resolve to the worktree"
+}
+
+test_spawn_shared_dependency_imports_worktree_workspace() {
+  local rec id out status result
+  id=node-modules-shared-import-z1a
+  rec=$(make_case shared-import "$id")
+  read_case "$rec"
+  printf 'module.exports = require("@beeline/lib");\n' \
+    > "$PROJECT_DIR/node_modules/third-party/index.js"
+  printf 'module.exports = "worker";\n' > "$WORKTREE_DIR/packages/lib/index.js"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should publish worktree-rooted shared dependencies"
+  assert_contains "$out" "spawned $id" "worktree-rooted dependency publication did not launch the worker"
+  result=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
+    'process.stdout.write(require(process.argv[1]));' \
+    "$WORKTREE_DIR/node_modules/third-party")
+  [ "$result" = worker ] || fail "shared dependency imported the primary workspace source"
+  pass "fm-spawn roots shared dependency workspace imports in the worktree"
 }
 
 test_spawn_publication_is_independent_of_path_node_wrappers() {
@@ -475,6 +502,9 @@ test_spawn_ignores_published_beeline_consumers() {
   rm "$PROJECT_DIR/node_modules/@beeline/lib" \
     "$PROJECT_DIR/node_modules/@beeline/absolute-lib" \
     "$PROJECT_DIR/node_modules/@beeline/cli"
+  rm "$PROJECT_DIR/packages/lib/package.json" \
+    "$PROJECT_DIR/packages/absolute-lib/package.json" \
+    "$PROJECT_DIR/packages/cli/package.json"
   mkdir "$PROJECT_DIR/node_modules/@beeline/published"
   printf 'published package\n' > "$PROJECT_DIR/node_modules/@beeline/published/index.js"
 
@@ -487,7 +517,7 @@ test_spawn_ignores_published_beeline_consumers() {
 }
 
 test_spawn_shares_published_beeline_dependencies_with_workspaces() {
-  local rec id out status published_real expected_real workspace_real expected_workspace_real
+  local rec id out status workspace_real expected_workspace_real
   id=node-modules-mixed-beeline-z3b
   rec=$(make_case mixed-beeline "$id")
   read_case "$rec"
@@ -498,9 +528,9 @@ test_spawn_shares_published_beeline_dependencies_with_workspaces() {
   status=$?
   expect_code 0 "$status" "spawn should share published @beeline dependencies alongside workspaces"
   assert_contains "$out" "spawned $id" "mixed @beeline dependency tree did not launch the worker"
-  published_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/published" && pwd -P)
-  expected_real=$(cd "$PROJECT_DIR/node_modules/@beeline/published" && pwd -P)
-  [ "$published_real" = "$expected_real" ] || fail "published @beeline dependency was not shared from primary"
+  [ "$WORKTREE_DIR/node_modules/@beeline/published/index.js" -ef \
+    "$PROJECT_DIR/node_modules/@beeline/published/index.js" ] \
+    || fail "published @beeline dependency file was not shared from primary"
   workspace_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/lib" && pwd -P)
   expected_workspace_real=$(cd "$WORKTREE_DIR/packages/lib" && pwd -P)
   [ "$workspace_real" = "$expected_workspace_real" ] || fail "mixed @beeline workspace did not resolve to worktree source"
@@ -582,6 +612,30 @@ test_spawn_validates_staging_before_publication() {
   pass "fm-spawn validates workspace links before dependency publication"
 }
 
+test_spawn_rejects_missing_installed_workspace_link() {
+  local rec id out status candidate
+  id=node-modules-missing-installed-workspace-z5bb
+  rec=$(make_case missing-installed-workspace "$id")
+  read_case "$rec"
+  mkdir -p "$PROJECT_DIR/packages/new" "$WORKTREE_DIR/packages/new"
+  printf '{"name":"@beeline/new","version":"1.0.0"}\n' \
+    > "$PROJECT_DIR/packages/new/package.json"
+  printf '{"name":"@beeline/new","version":"1.0.0"}\n' \
+    > "$WORKTREE_DIR/packages/new/package.json"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a missing installed workspace link"
+  assert_not_contains "$out" "spawned $id" "missing installed workspace link launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "missing installed workspace link published node_modules"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "missing installed workspace link leaked dependency staging"
+  done
+  pass "fm-spawn requires an installed link for every workspace manifest"
+}
+
 test_spawn_rejects_dangling_staged_workspace_link() {
   local rec id out status candidate
   id=node-modules-dangling-staging-z5c
@@ -603,6 +657,7 @@ test_spawn_rejects_dangling_staged_workspace_link() {
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links
+test_spawn_shared_dependency_imports_worktree_workspace
 test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_resolves_script_managed_node_runtime
 test_spawn_does_not_accept_unvalidated_exact_contention
@@ -619,6 +674,7 @@ test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_validates_staging_before_publication
+test_spawn_rejects_missing_installed_workspace_link
 test_spawn_rejects_dangling_staged_workspace_link
 
 echo "# all fm-spawn-node-modules tests passed"
