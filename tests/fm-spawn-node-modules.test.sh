@@ -41,8 +41,13 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   send-keys)
-    if [ "${4:-}" != -l ] && [[ "${4:-}" = export\ * ]] && [ -n "${FM_FAKE_ENV_SCRIPT:-}" ]; then
-      printf '%s\n' "$4" >> "$FM_FAKE_ENV_SCRIPT"
+    if [ "${4:-}" = -l ] && [ -n "${FM_FAKE_LAUNCH_SCRIPT:-}" ]; then
+      printf '%s\n' "${5:-}" > "$FM_FAKE_LAUNCH_SCRIPT"
+      if [ "${FM_SIGNAL_AFTER_LAUNCH_PAYLOAD:-0}" = 1 ]; then
+        kill -TERM "$PPID"
+      fi
+    elif [ "${4:-}" = C-c ] && [ -n "${FM_FAKE_LAUNCH_SCRIPT:-}" ]; then
+      : > "$FM_FAKE_LAUNCH_SCRIPT"
     fi
     exit 0
     ;;
@@ -96,6 +101,22 @@ fi
 exec "$SYSTEM_NODE" "\$@"
 SH
   chmod +x "$fakebin/node"
+  cat > "$fakebin/codex" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${FM_TEST_NODE_PROBE:-}" in
+  cjs)
+    exec "$SYSTEM_NODE" -e "\$FM_TEST_NODE_SCRIPT" \
+      "\${FM_TEST_NODE_ARG1:-}" "\${FM_TEST_NODE_ARG2:-}"
+    ;;
+  esm)
+    exec "$SYSTEM_NODE" --input-type=module -e "\$FM_TEST_NODE_SCRIPT" \
+      "\${FM_TEST_NODE_ARG1:-}" "\${FM_TEST_NODE_ARG2:-}"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/codex"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -195,8 +216,9 @@ start_postpublication_workspace_mutator() {
 }
 
 start_postpublication_replacer() {
-  local target=$1 replacement
+  local target=$1 replacement launch_script
   replacement="$target/.fm-test-node-modules-replacement.$$"
+  launch_script="$HOME_DIR/state/fake-pane-launch.sh"
   mkdir -p "$replacement/@beeline"
   printf 'competing install\n' > "$replacement/owned.txt"
   ln -s ../../packages/lib "$replacement/@beeline/lib"
@@ -205,7 +227,7 @@ start_postpublication_replacer() {
   (
     local attempts=0
     while [ "$attempts" -lt 20000 ]; do
-      if [ -L "$target/node_modules" ]; then
+      if [ -s "$launch_script" ] && [ -L "$target/node_modules" ]; then
         "$RM_BIN" -f "$target/node_modules"
         "$MV_BIN" "$replacement" "$target/node_modules"
         exit 0
@@ -282,7 +304,7 @@ EOF
 
 run_spawn() {
   local id=$1
-  : > "$HOME_DIR/state/fake-pane-env.sh"
+  : > "$HOME_DIR/state/fake-pane-launch.sh"
   HOME="${FM_TEST_ACCOUNT_HOME:-$HOME}" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -292,29 +314,32 @@ run_spawn() {
     FM_NODE_SHIM_MUTATION_TARGET="${FM_NODE_SHIM_MUTATION_TARGET:-}" \
     FM_NODE_SHIM_MUTATION_PRIMARY="${FM_NODE_SHIM_MUTATION_PRIMARY:-}" \
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
+    FM_SIGNAL_AFTER_LAUNCH_PAYLOAD="${FM_SIGNAL_AFTER_LAUNCH_PAYLOAD:-0}" \
     FM_TEST_LN_BIN="$LN_BIN" FM_TEST_RM_BIN="$RM_BIN" \
     FM_TEST_READLINK_BIN="$READLINK_BIN" \
-    FM_FAKE_ENV_SCRIPT="$HOME_DIR/state/fake-pane-env.sh" \
+    FM_FAKE_LAUNCH_SCRIPT="$HOME_DIR/state/fake-pane-launch.sh" \
     PATH="${FM_SPAWN_TEST_PATH:-$FAKEBIN_DIR:$PATH}" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
 run_beeline_cjs() {
-  local script=$1
+  local script=$1 launch
   shift
-  (
-    . "$HOME_DIR/state/fake-pane-env.sh"
-    "$SYSTEM_NODE" -e "$script" "$@"
-  )
+  launch=$(cat "$HOME_DIR/state/fake-pane-launch.sh")
+  [ -n "$launch" ] || fail "Beeline launch payload was not captured"
+  FM_TEST_NODE_PROBE=cjs FM_TEST_NODE_SCRIPT="$script" \
+    FM_TEST_NODE_ARG1="${1:-}" FM_TEST_NODE_ARG2="${2:-}" \
+    NODE_OPTIONS= PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
 }
 
 run_beeline_esm() {
-  local script=$1
+  local script=$1 launch
   shift
-  (
-    . "$HOME_DIR/state/fake-pane-env.sh"
-    "$SYSTEM_NODE" --input-type=module -e "$script" "$@"
-  )
+  launch=$(cat "$HOME_DIR/state/fake-pane-launch.sh")
+  [ -n "$launch" ] || fail "Beeline launch payload was not captured"
+  FM_TEST_NODE_PROBE=esm FM_TEST_NODE_SCRIPT="$script" \
+    FM_TEST_NODE_ARG1="${1:-}" FM_TEST_NODE_ARG2="${2:-}" \
+    NODE_OPTIONS= PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links() {
@@ -963,6 +988,8 @@ test_spawn_rejects_replacement_after_owned_publication() {
   assert_contains "$out" "replaced before worker launch" \
     "publication identity replacement was not diagnosed"
   assert_not_contains "$out" "spawned $id" "replaced dependency publication launched a worker"
+  [ ! -s "$HOME_DIR/state/fake-pane-launch.sh" ] \
+    || fail "failed final validation left a stale launch payload in the pane"
   assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
     "publication validation mutated the competing dependency tree"
   for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
@@ -970,6 +997,21 @@ test_spawn_rejects_replacement_after_owned_publication() {
       || fail "replaced publication leaked its private dependency staging"
   done
   pass "fm-spawn rejects replacement of its validated publication before launch"
+}
+
+test_spawn_preserves_presubmission_cancellation() {
+  local rec id out status
+  id=node-modules-presubmit-signal-z4e
+  rec=$(make_case presubmit-signal "$id")
+  read_case "$rec"
+
+  out=$(FM_SIGNAL_AFTER_LAUNCH_PAYLOAD=1 run_spawn "$id")
+  status=$?
+  expect_code 143 "$status" "spawn should retain pre-submission TERM status"
+  assert_not_contains "$out" "spawned $id" "cancelled dependency launch reported success"
+  [ ! -s "$HOME_DIR/state/fake-pane-launch.sh" ] \
+    || fail "cancelled dependency launch left a staged pane command"
+  pass "fm-spawn preserves cancellation before dependency launch submission"
 }
 
 test_spawn_omits_worktree_deleted_workspace() {
@@ -1061,6 +1103,7 @@ test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_rejects_invalid_candidate_before_competing_publication
 test_spawn_rejects_replacement_after_owned_publication
+test_spawn_preserves_presubmission_cancellation
 test_spawn_omits_worktree_deleted_workspace
 test_spawn_rejects_missing_installed_workspace_link
 test_spawn_rejects_dangling_staged_workspace_link

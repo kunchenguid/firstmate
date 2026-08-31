@@ -634,9 +634,7 @@ NODE_MODULES_ABORT_CLEANUP=0
 NODE_MODULES_ABORT_NODE=
 BEELINE_NODE_MODULES_ACTIVE=0
 BEELINE_NODE_PUBLICATION_OWNED=0
-BEELINE_NODE_RESOLVER_ROOT=
-BEELINE_NODE_RESOLVER_CLEANUP=0
-BEELINE_NODE_RESOLVER_NODE=
+BEELINE_NODE_RESOLVER_ESM_URL=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -716,34 +714,8 @@ JS
   NODE_MODULES_ABORT_PROBE=
 }
 
-cleanup_beeline_node_resolver() {
-  local resolver node
-  [ "$BEELINE_NODE_RESOLVER_CLEANUP" = 1 ] || return 0
-  resolver=$BEELINE_NODE_RESOLVER_ROOT
-  node=$BEELINE_NODE_RESOLVER_NODE
-  [ -n "$resolver" ] || return 1
-  [ -n "$node" ] || return 1
-  NODE_OPTIONS= "$node" - "$resolver" <<'JS' || return 1
-const fs = require('fs');
-const root = process.argv[2];
-try {
-  for (const name of fs.readdirSync(root)) fs.unlinkSync(`${root}/${name}`);
-  fs.rmdirSync(root);
-} catch (error) {
-  if (error.code !== 'ENOENT') throw error;
-}
-JS
-  [ ! -e "$resolver" ] && [ ! -L "$resolver" ] || return 1
-  BEELINE_NODE_RESOLVER_ROOT=
-  BEELINE_NODE_RESOLVER_CLEANUP=0
-  BEELINE_NODE_RESOLVER_NODE=
-}
-
 spawn_abort_cleanup() {
   local status=$?
-  if ! cleanup_beeline_node_resolver; then
-    echo "warning: failed to remove Beeline resolver staging at $BEELINE_NODE_RESOLVER_ROOT" >&2
-  fi
   if ! cleanup_beeline_node_modules_staging; then
     echo "warning: failed to remove dependency staging at $NODE_MODULES_ABORT_STAGING" >&2
   fi
@@ -1440,9 +1412,66 @@ native_node_candidate() {
 }
 
 native_node_supports_publication() {
-  NODE_OPTIONS= "$1" -e \
-    'const fs = require("fs"); if (typeof fs.symlinkSync !== "function" || typeof fs.linkSync !== "function" || typeof fs.copyFileSync !== "function") process.exit(1);' \
-    </dev/null >/dev/null 2>&1
+  NODE_OPTIONS= "$1" - \
+    "$FM_ROOT/bin/fm-beeline-workspace-resolver.cjs" \
+    "$FM_ROOT/bin/fm-beeline-workspace-resolver.mjs" "$WT" <<'JS' \
+    >/dev/null 2>&1
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { pathToFileURL } = require('url');
+const [preload, loader, worktree] = process.argv.slice(2);
+
+function remove(entry) {
+  let stat;
+  try {
+    stat = fs.lstatSync(entry);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    for (const name of fs.readdirSync(entry)) remove(path.join(entry, name));
+    fs.rmdirSync(entry);
+  } else {
+    fs.unlinkSync(entry);
+  }
+}
+
+let root;
+let status = 1;
+try {
+  if (typeof fs.symlinkSync !== 'function' || typeof fs.linkSync !== 'function' ||
+      typeof fs.copyFileSync !== 'function') process.exit(1);
+  root = fs.mkdtempSync(path.join(worktree, '.fm-node-runtime-probe.'));
+  const nodeModules = path.join(root, 'node_modules');
+  const packageRoot = path.join(nodeModules, '@beeline', 'probe');
+  fs.mkdirSync(packageRoot, { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, 'package.json'), '{"main":"index.cjs"}\n');
+  fs.writeFileSync(path.join(packageRoot, 'index.cjs'), 'module.exports = "probe";\n');
+  const script = `
+import { createRequire } from 'module';
+const load = createRequire(import.meta.url);
+if (load('@beeline/probe') !== 'probe') process.exit(2);
+import('@beeline/probe').then(value => {
+  if (value.default !== 'probe') process.exit(3);
+}).catch(() => process.exit(4));
+`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: {
+      ...process.env,
+      FM_BEELINE_NODE_MODULES: nodeModules,
+      NODE_OPTIONS: `--require=fm-beeline-workspace-resolver.cjs --experimental-loader=${pathToFileURL(loader).href}`,
+      NODE_PATH: `${path.dirname(preload)}${path.delimiter}${nodeModules}`
+    },
+    stdio: 'ignore'
+  });
+  status = result.status === 0 ? 0 : 1;
+} finally {
+  if (root) remove(root);
+}
+process.exit(status);
+JS
 }
 
 native_node_executable() {
@@ -1565,6 +1594,12 @@ share_beeline_node_modules() {
   [ -d "$source/@beeline" ] || return 0
   publisher_node=$(native_node_executable) || {
     echo "error: Beeline dependency sharing requires a compatible native Node runtime" >&2
+    return 1
+  }
+  BEELINE_NODE_RESOLVER_ESM_URL=$(NODE_OPTIONS= "$publisher_node" -e \
+    'process.stdout.write(require("url").pathToFileURL(process.argv[1]).href);' \
+    "$FM_ROOT/bin/fm-beeline-workspace-resolver.mjs") || {
+    echo "error: Beeline dependency sharing could not resolve its ESM loader" >&2
     return 1
   }
   workspace_status=0
@@ -2031,64 +2066,6 @@ JS
     10) echo "error: Beeline dependency publication probe cleanup failed; retained its backing tree" >&2; return 1 ;;
     *) echo "error: Beeline dependency publisher exited unexpectedly" >&2; return 1 ;;
   esac
-}
-
-prepare_beeline_node_resolver() {
-  local node resolver status
-  [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ] || return 0
-  node=$NODE_MODULES_ABORT_NODE
-  [ -n "$node" ] || return 1
-  exclude_path '.fm-beeline-resolver.*/'
-  while :; do
-    resolver="$WT/.fm-beeline-resolver.$$.$RANDOM.$RANDOM"
-    [ ! -e "$resolver" ] && [ ! -L "$resolver" ] && break
-  done
-  BEELINE_NODE_RESOLVER_ROOT=$resolver
-  BEELINE_NODE_RESOLVER_CLEANUP=1
-  BEELINE_NODE_RESOLVER_NODE=$node
-  status=0
-  BEELINE_NODE_RESOLVER_ESM_URL=$(NODE_OPTIONS= "$node" - "$resolver" <<'JS') || status=$?
-const fs = require('fs');
-const path = require('path');
-const { pathToFileURL } = require('url');
-const root = process.argv[2];
-fs.mkdirSync(root);
-fs.writeFileSync(path.join(root, '__firstmate_beeline_workspace_resolver__.cjs'), `
-const Module = require('module');
-const path = require('path');
-const root = process.env.FM_BEELINE_NODE_MODULES;
-if (!root) throw new Error('FM_BEELINE_NODE_MODULES is required');
-const originalResolveFilename = Module._resolveFilename;
-const workspaceParent = new Module(path.join(path.dirname(root), '.fm-beeline-resolver-entry.cjs'));
-workspaceParent.filename = path.join(path.dirname(root), '.fm-beeline-resolver-entry.cjs');
-workspaceParent.paths = [root];
-Module._resolveFilename = function (request, parent, isMain, options) {
-  if (/^@beeline\\/[^/]+(?:\\/.*)?$/.test(request)) {
-    return Reflect.apply(originalResolveFilename, this, [request, workspaceParent, isMain, options]);
-  }
-  return Reflect.apply(originalResolveFilename, this, [request, parent, isMain, options]);
-};
-`);
-const loader = path.join(root, '__firstmate_beeline_workspace_resolver__.mjs');
-fs.writeFileSync(loader, `
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-export async function resolve(specifier, context, nextResolve) {
-  if (/^@beeline\\/[^/]+(?:\\/.*)?$/.test(specifier)) {
-    const root = process.env.FM_BEELINE_NODE_MODULES;
-    if (!root) throw new Error('FM_BEELINE_NODE_MODULES is required');
-    const parentURL = pathToFileURL(path.join(path.dirname(root), '.fm-beeline-resolver-entry.mjs')).href;
-    return nextResolve(specifier, { ...context, parentURL });
-  }
-  return nextResolve(specifier, context);
-}
-`);
-process.stdout.write(pathToFileURL(loader).href);
-JS
-  if [ "$status" -ne 0 ] || [ -z "$BEELINE_NODE_RESOLVER_ESM_URL" ]; then
-    cleanup_beeline_node_resolver || true
-    return 1
-  fi
 }
 
 beeline_node_modules_ready_for_launch() {
@@ -3029,16 +3006,10 @@ fi
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ]; then
-  prepare_beeline_node_resolver || {
-    echo "error: failed to prepare Beeline workspace resolvers" >&2
-    exit 1
-  }
   beeline_node_path=$(shell_quote "$WT/node_modules")
-  beeline_resolver_path=$(shell_quote "$BEELINE_NODE_RESOLVER_ROOT")
-  beeline_node_options=$(shell_quote "--require=__firstmate_beeline_workspace_resolver__.cjs --experimental-loader=$BEELINE_NODE_RESOLVER_ESM_URL")
-  spawn_send_text_line "$T" "export FM_BEELINE_NODE_MODULES=$beeline_node_path"
-  spawn_send_text_line "$T" "export NODE_PATH=$beeline_resolver_path:$beeline_node_path:\${NODE_PATH:-}"
-  spawn_send_text_line "$T" "export NODE_OPTIONS=$beeline_node_options\" \${NODE_OPTIONS:-}\""
+  beeline_resolver_path=$(shell_quote "$FM_ROOT/bin")
+  beeline_node_options=$(shell_quote "--require=fm-beeline-workspace-resolver.cjs --experimental-loader=$BEELINE_NODE_RESOLVER_ESM_URL")
+  LAUNCH="FM_BEELINE_NODE_MODULES=$beeline_node_path NODE_PATH=$beeline_resolver_path:$beeline_node_path:\${NODE_PATH:-} NODE_OPTIONS=$beeline_node_options\" \${NODE_OPTIONS:-}\" $LAUNCH"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -3057,15 +3028,48 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
-beeline_node_modules_ready_for_launch || exit 1
-spawn_send_literal "$T" "$LAUNCH"
+launch_signal_status=
+trap 'launch_signal_status=130' INT
+trap 'launch_signal_status=143' TERM
+trap 'launch_signal_status=129' HUP
+launch_payload_status=0
+spawn_send_literal "$T" "$LAUNCH" || launch_payload_status=$?
+[ -z "$launch_signal_status" ] || {
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_signal_status"
+}
+[ "$launch_payload_status" -eq 0 ] || {
+  trap - INT TERM HUP
+  exit "$launch_payload_status"
+}
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
-BEELINE_NODE_RESOLVER_CLEANUP=0
+if [ -n "$launch_signal_status" ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_signal_status"
+fi
+launch_validation_status=0
+beeline_node_modules_ready_for_launch || launch_validation_status=$?
+if [ -n "$launch_signal_status" ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_signal_status"
+fi
+if [ "$launch_validation_status" -ne 0 ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_validation_status"
+fi
+launch_submit_status=0
+spawn_send_key "$T" Enter || launch_submit_status=$?
+trap - INT TERM HUP
+[ -z "$launch_signal_status" ] || exit "$launch_signal_status"
+[ "$launch_submit_status" -eq 0 ] || exit "$launch_submit_status"
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
