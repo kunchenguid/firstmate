@@ -249,8 +249,25 @@ fm_control_harness_kind_refusal() {  # <harness> <kind>
 # missing the inheritance rule, once missing the non-cursor grant rule - and both
 # times the result was identical: the pre-stop check passed, the running agent
 # was stopped, and the replacement was then refused, stranding the task with no
-# agent. Composing every launch-admissibility rule here means a rule added for
-# the launch path is automatically enforced pre-stop and the two cannot drift.
+# agent. Composing the POLICY rules here means a policy rule added for the launch
+# path is automatically enforced pre-stop and the two cannot drift.
+#
+# The bound is deliberate and a contributor adding a launch-time refusal has to
+# know it. What belongs here is every rule answerable from the recorded profile
+# ALONE - harness, kind, and effective grant - because that is what the control
+# plane can evaluate while the old agent is still running. What does not belong
+# here is the ENVIRONMENTAL class: bin/fm-spawn.sh still refuses after this point
+# when the harness executable is absent from PATH (pi, cursor) and when a
+# requested cursor model is missing from the live `--list-models` catalog. Those
+# cannot be answered without probing this machine and running the harness binary,
+# which this file must never do - it is sourced as a pure contract with no side
+# effects, no backend command, and no state reads - and their answer can change
+# between the check and the launch anyway, so asking them early would narrow the
+# window without closing it and would buy a false sense of an absolute guarantee.
+# The consequence is real and stays: `relaunch` onto a harness whose executable
+# is missing stops the agent and is then refused. Add a new rule here when it is
+# answerable from the profile; otherwise leave it at the launch and know that the
+# relaunch transaction can strand on it.
 #
 # The order below is the order the refusals are reported in, so the reason the
 # control plane prints pre-stop is the reason the launch would have printed. The
