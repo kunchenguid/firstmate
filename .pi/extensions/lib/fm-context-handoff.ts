@@ -9,6 +9,8 @@ type RecordBinding = {
 type SealBinding = {
   bindings: RecordBinding[];
   trigger: "manual" | "threshold" | "overflow";
+  terminal?: "success" | "failure";
+  terminalReason?: string;
 };
 
 type HandoffResult = {
@@ -17,6 +19,8 @@ type HandoffResult = {
   record_id?: string;
   envelope_sha256?: string;
   bindings?: RecordBinding[];
+  record_ids?: string[];
+  delivery?: string;
 };
 
 type SessionContext = {
@@ -61,6 +65,18 @@ function exactSealResult(result: HandoffResult): RecordBinding[] | null {
 
 function exactNoopResult(result: HandoffResult): boolean {
   return (result.status === "empty" || result.status === "disabled") && Object.keys(result).length === 1;
+}
+
+function exactOutcomeResult(result: HandoffResult, binding: SealBinding): boolean {
+  const expectedStatus = binding.terminal === "success" ? "compaction-succeeded" : "compaction-failed";
+  const expectedIds = binding.bindings.map((item) => item.record_id).sort();
+  const expectedKeys = binding.terminal === "success" ? "delivery\0record_ids\0status" : "record_ids\0status";
+  return result.status === expectedStatus
+    && Object.keys(result).sort().join("\0") === expectedKeys
+    && (binding.terminal !== "success" || ["disabled", "nothing-pending", "pending", "notified"].includes(result.delivery ?? ""))
+    && Array.isArray(result.record_ids)
+    && result.record_ids.length === expectedIds.length
+    && result.record_ids.every((recordId, index) => recordId === expectedIds[index]);
 }
 
 function runHandoff(
@@ -152,8 +168,26 @@ export function registerContextHandoff(
 ): void {
   let pendingSeal: SealBinding | null = null;
 
-  pi.on("session_before_compact", async (event, ctx) => {
+  const persistPendingOutcome = async (): Promise<boolean> => {
+    const binding = pendingSeal;
+    if (!binding?.terminal || !binding.terminalReason) return false;
+    const result = await runHandoff(
+      root,
+      fmHome,
+      ["compaction-outcome", binding.terminal],
+      {
+        bindings: binding.bindings,
+        trigger: binding.trigger,
+        reason: binding.terminalReason,
+      },
+    );
+    if (!exactOutcomeResult(result, binding)) return false;
     pendingSeal = null;
+    return true;
+  };
+
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (pendingSeal && !(await persistPendingOutcome())) return { cancel: true };
     const result = await runHandoff(
       root,
       fmHome,
@@ -174,27 +208,29 @@ export function registerContextHandoff(
 
   pi.on("session_compact", async (event) => {
     const binding = pendingSeal;
-    pendingSeal = null;
-    await runHandoff(
-      root,
-      fmHome,
-      ["compaction-outcome", "success"],
-      binding
-        ? { ...binding, reason: "pi-session-compact-succeeded" }
-        : { trigger: event.reason, reason: "pi-session-compact-succeeded-without-seal-binding" },
-    );
+    if (binding) {
+      binding.terminal = "success";
+      binding.terminalReason = "pi-session-compact-succeeded";
+      await persistPendingOutcome();
+      return;
+    }
+    await runHandoff(root, fmHome, ["compaction-outcome", "success"], {
+      trigger: event.reason,
+      reason: "pi-session-compact-succeeded-without-seal-binding",
+    });
   });
 
   pi.on("session_compact_failed", async (event) => {
     const binding = pendingSeal;
-    pendingSeal = null;
-    await runHandoff(
-      root,
-      fmHome,
-      ["compaction-outcome", "failure"],
-      binding
-        ? { ...binding, reason: "pi-session-compact-failed" }
-        : { trigger: event.reason, reason: "pi-session-compact-failed-without-seal-binding" },
-    );
+    if (binding) {
+      binding.terminal = "failure";
+      binding.terminalReason = "pi-session-compact-failed";
+      await persistPendingOutcome();
+      return;
+    }
+    await runHandoff(root, fmHome, ["compaction-outcome", "failure"], {
+      trigger: event.reason,
+      reason: "pi-session-compact-failed-without-seal-binding",
+    });
   });
 }

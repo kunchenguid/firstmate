@@ -160,7 +160,18 @@ if [ "$1 $2" = "agent get" ]; then
   jq -nc --arg pane pane-1 --arg workspace workspace-1 --arg tab tab-1 --arg value "$value" --arg status "$status" --arg cwd "$FAKE_VAULT" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:$status,cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}}}}'
   exit 0
 fi
-[ "$1 $2" = "agent prompt" ] && { printf '{}\n'; exit 0; }
+if [ "$1 $2" = "agent prompt" ] && [ "${3:-}" = --help ]; then
+  [ "$mode" = atomic ] && printf '%s\n' '      --expected-agent-session <SESSION>'
+  exit 0
+fi
+if [ "$1 $2" = "agent prompt" ]; then
+  [ "$mode" = atomic ] || exit 65
+  [ "${3:-}" = pane-1 ] && [ "${4:-}" = /firstmate-context-handoff:consume ] || exit 66
+  [ "${5:-}" = --expected-agent-session ] && [ "${6:-}" = "$FAKE_CLAUDE_SESSION" ] || exit 67
+  [ "${7:-}" = --session ] && [ "${8:-}" = lab ] && [ "${9:-}" = --timeout ] && [ "${10:-}" = 5000 ] || exit 68
+  jq -nc --arg pane pane-1 --arg workspace workspace-1 --arg tab tab-1 --arg value "$FAKE_CLAUDE_SESSION" --arg cwd "$FAKE_VAULT" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:"working",cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}}}}'
+  exit 0
+fi
 exit 64
 EOF
   chmod 755 "$FAKE_HERDR"
@@ -412,6 +423,43 @@ test_foreign_candidate_isolation() {
   record=$(printf '%s' "$seal" | jq -r .record_id)
   jq -e --arg statement "$current_statement" '.items | length == 1 and .[0].statement == $statement' "$FM_HOME/state/context-handoff/records/$record.json" >/dev/null || fail "current envelope included foreign session work"
   pass "foreign candidate ownership isolation"
+}
+
+test_global_register_bounds_and_stale_recovery() {
+  local i session statement registered seal active
+  new_env global-candidate-bound
+  i=1
+  while [ "$i" -le 33 ]; do
+    session="pi-rotating-candidate-$i"
+    statement="Rotating session candidate $i remains globally bounded."
+    authorize "$statement"
+    registered=$(PI_SESSION_ID="$session" cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian) || fail "rotating candidate $i did not register"
+    [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "rotating candidate $i returned an invalid status"
+    i=$((i + 1))
+  done
+  [ "$(find "$FM_HOME/state/context-handoff/candidates" -name 'candidate-*.json' | wc -l)" -eq 32 ] || fail "rotating sessions bypassed the global candidate cap"
+  [ "$(find "$FM_HOME/state/context-handoff/quarantine" -name 'retired-candidate-*.json' | wc -l)" -eq 1 ] || fail "stale candidate retirement did not preserve the exact artifact"
+  jq -se 'any(.[]; .reason=="stale-session-candidate-retired" and (.observed_sha256 | test("^[0-9a-f]{64}$")))' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "stale candidate retirement left no durable evidence"
+
+  new_env global-retry-bound
+  i=1
+  while [ "$i" -le 32 ]; do
+    session="pi-rotating-record-$i"
+    statement="Rotating retryable record $i remains globally bounded."
+    authorize "$statement"
+    PI_SESSION_ID="$session" cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian >/dev/null || fail "rotating retry record $i did not register"
+    seal=$(printf '{"session_id":"%s"}\n' "$session" | cli seal --source-harness pi --trigger threshold) || fail "rotating retry record $i did not seal"
+    complete "$seal" failure >/dev/null || fail "rotating retry record $i did not record failure"
+    i=$((i + 1))
+  done
+  session=pi-rotating-record-33
+  statement='The replacement session must recover one globally bounded retry slot.'
+  authorize "$statement"
+  PI_SESSION_ID="$session" cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian >/dev/null || fail "global retry cap did not recover a stale-session slot"
+  active=$(jq -s '[.[] | select(.status!="acknowledged" and .status!="quarantined" and .compaction!="succeeded")] | length' "$FM_HOME"/state/context-handoff/queue/handoff-*.json) || fail "could not count globally active retry records"
+  [ "$active" -lt 32 ] || fail "rotating sessions bypassed the global retryable-record cap"
+  jq -se 'any(.[]; .reason=="stale-session-record-retired" and (.observed_sha256 | test("^[0-9a-f]{64}$")))' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "stale retry retirement left no durable evidence"
+  pass "global active-state caps and stale-session recovery"
 }
 
 test_single_create_save() {
@@ -786,7 +834,7 @@ test_exact_mcp_guard() {
 }
 
 test_bounded_transports_and_delivery() {
-  local seal delivery framed pid i
+  local seal delivery framed pid i record
   new_env bounded-transport
   enable_consumer
   seal=$(make_ready 'Retain delivery until an exact atomic generation prompt exists.') || fail "delivery fixture failed"
@@ -794,7 +842,19 @@ test_bounded_transports_and_delivery() {
   write_config
   delivery=$(cli deliver) || fail "unsupported atomic delivery did not stay pending"
   [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-atomic-generation-prompt-unsupported ] || fail "delivery did not fail closed without an atomic generation precondition"
-  ! grep -q '^agent prompt' "$HERDR_LOG" || fail "delivery sent a probe-then-prompt notification"
+  ! grep -q '^agent prompt pane-1 /firstmate-context-handoff:consume ' "$HERDR_LOG" || fail "delivery sent a probe-then-prompt notification"
+
+  new_env atomic-delivery
+  enable_consumer
+  seal=$(make_ready 'Notify only through the exact generation-precondition capability.') || fail "atomic delivery fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  DELIVERY_ENABLED=true
+  printf 'atomic\n' > "$HERDR_MODE"
+  write_config
+  delivery=$(cli deliver) || fail "atomic generation delivery failed"
+  [ "$(printf '%s' "$delivery" | jq -r .status)" = notified ] || fail "supported atomic generation delivery stayed pending"
+  [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = notified ] || fail "atomic notification did not transition one exact queue record"
+  grep -Fx "agent prompt pane-1 /firstmate-context-handoff:consume --expected-agent-session $CLAUDE_SESSION --session lab --timeout 5000" "$HERDR_LOG" >/dev/null || fail "delivery omitted the constant prompt or exact generation precondition"
   dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' x > "$EROOT/frames"
   printf 'x\n{"jsonrpc":"2.0","id":2,"method":"ping"}\n' >> "$EROOT/frames"
   framed=$(cli mcp-server < "$EROOT/frames") || fail "MCP server failed while draining an oversized frame"
@@ -817,6 +877,21 @@ test_bounded_transports_and_delivery() {
   done
   ! kill -0 "$pid" 2>/dev/null || fail "output-capped adapter remained alive"
   pass "bounded transports and fail-closed delivery"
+}
+
+test_private_atomic_publication_under_masking_umask() {
+  local registered seal record candidate statement
+  new_env atomic-private-mode
+  statement='Private publication must survive a masking umask.'
+  authorize "$statement"
+  registered=$(umask 0777; cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian) || fail "masked-umask candidate registration failed"
+  candidate=$(printf '%s' "$registered" | jq -r .candidate_id)
+  [ "$(file_mode "$FM_HOME/state/context-handoff/candidates/$candidate.json")" = 600 ] || fail "candidate temporary descriptor did not publish mode 0600"
+  seal=$(umask 0777; seal_pi) || fail "masked-umask seal failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  [ "$(file_mode "$FM_HOME/state/context-handoff/records/$record.json")" = 600 ] || fail "envelope temporary descriptor did not publish mode 0600"
+  [ "$(file_mode "$FM_HOME/state/context-handoff/queue/$record.json")" = 600 ] || fail "queue replacement temporary descriptor did not publish mode 0600"
+  pass "descriptor-private atomic publication"
 }
 
 test_directory_durability() {
@@ -938,6 +1013,15 @@ if [ "$1" = seal ]; then
   fi
   exit 0
 fi
+if [ "$1" = compaction-outcome ] && [ "$(cat "$FM_STALE_BINDING_MODE")" = outcome-ok ]; then
+  if [ "$2" = success ]; then
+    status=compaction-succeeded
+  else
+    status=compaction-failed
+  fi
+  printf '{"status":"%s","record_ids":["handoff-111111111111111111111111111111111111111111111111"]}\n' "$status"
+  exit 0
+fi
 exit 7
 EOF
   chmod 755 "$stale_root/bin/fm-context-handoff.py"
@@ -989,14 +1073,35 @@ const stale = new Map();
 mod.registerContextHandoff({on(name, handler){stale.set(name, handler);}}, process.env.STALE, process.env.FM_HOME);
 if ((await stale.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("synthetic stale binding did not seal");
 await stale.get("session_compact_failed")({reason:"threshold"});
-fs.writeFileSync(process.env.FM_STALE_BINDING_MODE, "empty\n");
+fs.writeFileSync(process.env.FM_STALE_BINDING_MODE, "outcome-ok\n");
 if ((await stale.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("explicit no-op cancelled after outcome failure");
 await stale.get("session_compact")({reason:"threshold"});
+const failureCalls = fs.readFileSync(process.env.FM_STALE_BINDING_LOG, "utf8").trim().split("\n").filter(line => line.startsWith("compaction-outcome failure"));
+if (failureCalls.length !== 2) throw new Error("failed Pi outcome was not retried until persistence confirmation");
+const failurePayload = JSON.parse(failureCalls.at(-1).split("\t")[1]);
+if (failurePayload.bindings?.[0]?.record_id !== "handoff-111111111111111111111111111111111111111111111111") throw new Error("retried Pi outcome lost its exact seal binding");
 const calls = fs.readFileSync(process.env.FM_STALE_BINDING_LOG, "utf8").trim().split("\n").filter(line => line.startsWith("compaction-outcome success"));
 const payload = JSON.parse(calls.at(-1).split("\t")[1]);
 if (Object.hasOwn(payload, "bindings")) throw new Error("prior Pi binding crossed into a later no-op attempt");
 EOF
   pass "model-free Pi lifecycle and fail-closed adapter validation"
+}
+
+test_isolated_turnend_extension_fixture() {
+  local fixture
+  fixture="$TMP_ROOT/isolated-turnend-extension"
+  fm_test_install_pi_turnend_extension "$fixture/.pi/extensions"
+  mkdir -p "$fixture/state"
+  EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" FM_HOME="$fixture" node --input-type=module <<'EOF' || fail "isolated turn-end extension fixture could not load runtime dependencies"
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default({ on(name, handler) { handlers.set(name, handler); } });
+for (const event of ["session_before_compact", "session_compact", "session_compact_failed"]) {
+  if (!handlers.has(event)) throw new Error(`missing context handoff handler: ${event}`);
+}
+EOF
+  pass "isolated turn-end extension runtime dependencies"
 }
 
 test_installed_pi_success_order() {
@@ -1386,6 +1491,27 @@ test_claude_lifecycle_and_plugin_discovery() {
   pass "Claude lifecycle and model-free plugin discovery"
 }
 
+test_claude_terminal_outcome_uses_durable_binding() {
+  local statement arguments registered record calls_before calls_after
+  new_env claude-terminal-binding
+  enable_consumer
+  bind_claude >/dev/null || fail "terminal binding fixture did not bind Claude"
+  statement='A terminal hook records against its durable attempt without a new endpoint probe.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "terminal binding candidate did not register"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "terminal binding PreCompact failed"
+  record=$(find "$FM_HOME/state/context-handoff/queue" -name 'handoff-*.json' -printf '%f\n' | sed 's/\.json$//' | head -1)
+  calls_before=$(wc -l < "$HERDR_LOG")
+  printf 'unavailable\n' > "$HERDR_MODE"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "authenticated PostCompact depended on a fresh recipient probe"
+  calls_after=$(wc -l < "$HERDR_LOG")
+  [ "$calls_after" -eq "$calls_before" ] || fail "terminal outcome performed a fresh Herdr probe"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "terminal outcome did not consume its durable PreCompact binding"
+  pass "probe-independent authenticated Claude terminal outcome"
+}
+
 test_candidate_identity_binding() {
   local candidate foreign_hash seal
   new_env candidate-identity-binding
@@ -1419,7 +1545,7 @@ test_seal_binding_failure_receipt() {
 }
 
 test_durable_compaction_attempt() {
-  local first second succeeded queues
+  local first second succeeded queues journal
   new_env durable-compaction-attempt
   register_statement 'First bounded record must survive a crashed compaction outcome.' >/dev/null || fail "first attempt record did not register"
   first=$(seal_pi) || fail "first attempt record did not seal"
@@ -1440,6 +1566,27 @@ test_durable_compaction_attempt() {
   [ "$queues" -eq 2 ] || fail "durable attempt fixture did not seal two records"
   succeeded=$(jq -s '[.[] | select(.compaction=="succeeded")] | length' "$FM_HOME"/state/context-handoff/queue/handoff-*.json) || fail "could not read replayed queue state"
   [ "$succeeded" -eq 2 ] || fail "crashed compaction attempt lost its exact terminal result"
+
+  new_env partial-compaction-attempt
+  register_statement 'First partial-attempt record must replay idempotently.' >/dev/null || fail "first partial-attempt record did not register"
+  first=$(seal_pi) || fail "first partial-attempt record did not seal"
+  complete "$first" failure >/dev/null || fail "first partial-attempt failure was not recorded"
+  register_statement 'Second partial-attempt record must retain the shared journal.' next-step >/dev/null || fail "second partial-attempt record did not register"
+  second=$(seal_pi) || fail "partial compaction attempt did not seal"
+  if (
+    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-record-apply
+    complete "$second" success
+  ) > "$EROOT/partial-out" 2> "$EROOT/partial-error"; then
+    fail "partial compaction failpoint unexpectedly completed"
+  fi
+  journal=$(find "$FM_HOME/state/context-handoff/bindings" -name 'attempt-*.json' -print -quit)
+  [ -n "$journal" ] || fail "partial compaction discarded its durable journal"
+  succeeded=$(jq -s '[.[] | select(.compaction=="succeeded")] | length' "$FM_HOME"/state/context-handoff/queue/handoff-*.json) || fail "could not read partially applied queues"
+  [ "$succeeded" -eq 1 ] || fail "partial compaction fixture did not stop after one record"
+  seal_pi >/dev/null || fail "partial compaction attempt did not replay"
+  [ ! -e "$journal" ] || fail "fully replayed compaction attempt retained its journal"
+  succeeded=$(jq -s '[.[] | select(.compaction=="succeeded")] | length' "$FM_HOME"/state/context-handoff/queue/handoff-*.json) || fail "could not read replayed partial queues"
+  [ "$succeeded" -eq 2 ] || fail "partial compaction replay lost records"
   pass "durable compaction attempt result replay"
 }
 
@@ -1534,7 +1681,7 @@ test_empty_register_binding_noop() {
 }
 
 test_missing_record_is_classified() {
-  local payload status
+  local payload status journal
   new_env missing-record-classification
   register_statement 'Bounded classification survives a missing durable record.' >/dev/null || fail "missing record fixture did not register"
   payload=$(jq -nc '{bindings:[{record_id:"handoff-000000000000000000000000000000000000000000000000",envelope_sha256:"1111111111111111111111111111111111111111111111111111111111111111"}],trigger:"threshold",reason:"synthetic-missing-record"}') || fail "could not build the missing-record outcome"
@@ -1548,13 +1695,13 @@ test_missing_record_is_classified() {
   if grep -qF "$FM_HOME" "$EROOT/missing-error"; then
     fail "a missing durable record leaked an absolute state path"
   fi
-  [ -z "$(find "$FM_HOME/state/context-handoff/bindings" -name 'attempt-*.json' -print -quit)" ] || fail "a failed attempt left its journal behind"
-  seal_pi >/dev/null || fail "a missing durable record wedged later sealing"
+  journal=$(find "$FM_HOME/state/context-handoff/bindings" -name 'attempt-*.json' -print -quit)
+  [ -n "$journal" ] || fail "a failed recoverable attempt discarded its exact journal"
   pass "missing durable records fail with bounded classification"
 }
 
 test_invalid_attempt_journal_retired() {
-  local journal seal
+  local journal seal valid record
   new_env invalid-attempt-journal
   register_statement 'An invalid attempt journal must not wedge sealing.' >/dev/null || fail "invalid journal fixture did not register"
   journal="$FM_HOME/state/context-handoff/bindings/attempt-deadbeef.json"
@@ -1564,6 +1711,26 @@ test_invalid_attempt_journal_retired() {
   [ "$(printf '%s' "$seal" | jq -r .status)" = sealed ] || fail "sealing did not recover from an invalid attempt journal"
   [ ! -e "$journal" ] || fail "an invalid attempt journal was not retired"
   jq -se 'any(.[]; .reason=="compaction-attempt-record-invalid" and .record_id=="attempt-deadbeef")' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "a retired attempt journal left no durable quarantine evidence"
+
+  new_env tampered-attempt-journal
+  register_statement 'A content-bound attempt cannot retain its ID after a status edit.' >/dev/null || fail "tampered attempt fixture did not register"
+  seal=$(seal_pi) || fail "tampered attempt fixture did not seal"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  if (
+    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues
+    complete "$seal" success
+  ) > "$EROOT/tamper-out" 2> "$EROOT/tamper-error"; then
+    fail "tampered attempt fixture did not retain a journal"
+  fi
+  valid=$(find "$FM_HOME/state/context-handoff/bindings" -name 'attempt-*.json' -print -quit)
+  [ -n "$valid" ] || fail "tampered attempt fixture found no journal"
+  jq -c '.status="failed"' "$valid" > "$valid.tmp" || fail "could not alter the durable attempt fixture"
+  chmod 600 "$valid.tmp"
+  mv "$valid.tmp" "$valid"
+  seal_pi >/dev/null || fail "content-mismatched attempt journal wedged sealing"
+  [ ! -e "$valid" ] || fail "content-mismatched attempt journal was not retired"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "tampered attempt applied an outcome under its old ID"
+  jq -se 'any(.[]; .reason=="compaction-attempt-record-invalid" and .failure_code=="COMPACTION_ATTEMPT")' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "content-mismatched attempt left no quarantine evidence"
   pass "invalid compaction attempt journals are retired"
 }
 
@@ -1575,6 +1742,7 @@ fi
 test_required_prerequisite_status
 test_sensitive_contracts
 test_foreign_candidate_isolation
+test_global_register_bounds_and_stale_recovery
 test_candidate_identity_binding
 test_seal_binding_failure_receipt
 test_durable_compaction_attempt
@@ -1595,9 +1763,11 @@ test_lifecycle_and_authority_snapshots
 test_exit75_requires_fresh_inspect
 test_exact_mcp_guard
 test_bounded_transports_and_delivery
+test_private_atomic_publication_under_masking_umask
 test_directory_durability
 test_serialized_directory_initialization
 test_pi_result_validation
+test_isolated_turnend_extension_fixture
 test_installed_pi_success_order
 test_completed_save_precedes_source_validation
 test_registration_lifecycle_retries
@@ -1605,6 +1775,7 @@ test_quarantine_disable_and_disposition_recovery
 test_transaction_replay_and_rollback
 test_orphan_apply_execution_claim
 test_claude_lifecycle_and_plugin_discovery
+test_claude_terminal_outcome_uses_durable_binding
 
 if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ]; then
   pass "exact-installed-transaction-core core=$(hash_file "$TRANSACTION_CORE") module=$(hash_file "$TRANSACTION_MODULE")"
