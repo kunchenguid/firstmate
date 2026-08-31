@@ -1661,7 +1661,7 @@ task_pids_under_roots() {  # <dir>...
 # claim what you can observe, disclose what you cannot, refuse only on evidence.
 task_process_disclose_uncovered() {
   [ -n "${TASK_PROCESS_UNCOVERED_PIDS:-}" ] || return 0
-  echo "teardown: note - could not read the working directory of $(printf '%s' "$TASK_PROCESS_UNCOVERED_PIDS" | tr '\n' ' ')for $ID; none is in this task's process tree, so none is treated as a leak." >&2
+  echo "teardown: note - could not read the working directory of $(printf '%s' "$TASK_PROCESS_UNCOVERED_PIDS" | tr '\n' ' ') for $ID; none is in this task's process tree, so none is treated as a leak." >&2
   TASK_PROCESS_UNCOVERED_PIDS=
 }
 
