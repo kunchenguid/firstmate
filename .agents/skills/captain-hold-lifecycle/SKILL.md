@@ -20,6 +20,8 @@ Every unresolved question that belongs to the captain and is discovered while pr
 Prefer holding the work item the question gates over minting a new row; create a new task only when no work item exists to hold.
 Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
+A task that turns out to duplicate another captain-held task's question is not re-held, answered, or left on the queue: close it with `bin/fm-captain-hold.sh retire-duplicate <task-id> --surviving <surviving-task-id>`, which names the surviving task, never touches it, and never records a captain decision.
+If the surviving task is later itself retired against a third task, the earlier record's pointer goes stale; the remedy is re-running `retire-duplicate` on the earlier task, naming the new final surviving task.
 After inventorying the whole report and review surface, run `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` only when the reviewed surface leaves nothing waiting on the captain.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
 Run the command in the originating work's authoritative `FM_HOME`; secondmate-owned work registers in that secondmate home's backlog, and a question already held anywhere is never re-registered as a second row.

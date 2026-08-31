@@ -22,6 +22,7 @@
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
+#   fm-captain-hold.sh retire-duplicate <task-id> --surviving <surviving-task-id>
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
@@ -54,6 +55,27 @@
 # answered captain call. A hold that expired by date (`--until` in the past) is
 # still answerable: the surviving hold annotations, not tasks-axi's live
 # `held:` bit, prove the captain owned it.
+#
+# `retire-duplicate` closes a captain-held task that is a duplicate
+# registration of another captain call, WITHOUT recording any captain
+# decision. It exists because the only prior ways to shrink the queue were to
+# leave a known duplicate on it or to fabricate a decision the captain never
+# gave; both are worse than an explicit non-decision. `--surviving` names the
+# task that still carries the live question - it must already exist, carry
+# (or have carried, through a close) an actual captain hold, and not itself
+# already be retired as a duplicate (that would only chain to a dead end),
+# and this command never holds, answers, or otherwise touches it. The retired
+# task's
+# body records a duplicate-retirement block naming the surviving task and
+# stating plainly that no captain decision was made, so the record stays
+# distinguishable from an `answer` record forever, by reading the body alone:
+# it carries no `Captain decision:` text and a `Resolution mode:` of
+# `retired-duplicate` rather than answered, released, or repaired. An exact
+# replay against the same surviving task is idempotent; a task already closed
+# by other means, or already retired against a different surviving task, is
+# refused. `verify_hold_durable` (used by `complete` and `verify`) accepts a
+# retired duplicate as durable, so a completion attestation whose inventory
+# already names the duplicate key keeps verifying after the retirement.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer closes its matching captain-held task" is a single
@@ -100,10 +122,11 @@
 # `--none` is an explicit semantic attestation that the just-reviewed surface
 # has no unresolved captain call, and is refused while the origin still has an
 # open keyed status decision. With a non-empty inventory, every listed task is
-# verified durable (actively captain-held, or closed with a recorded answer),
-# the inventory is unioned idempotently into the metadata, and every still-open
-# keyed status decision is transferred to its durable owner with a
-# `captain-held [key=...]` status close naming the inventory. Later review
+# verified durable (actively captain-held, closed with a recorded answer, or
+# retired as a duplicate), the inventory is unioned idempotently into the
+# metadata, and every still-open keyed status decision is transferred to its
+# durable owner with a `captain-held [key=...]` status close naming the
+# inventory. Later review
 # passes may add ids. A post-teardown visual review can complete against the
 # surviving report and tasks without recreating task state.
 # `verify` is read-only and is called by scout teardown, so teardown cannot
@@ -340,8 +363,45 @@ resolution_block() {  # <mode>
     "$DECISION_DIGEST" "$1" "$DECISION_TEXT"
 }
 
+# A closed-as-duplicate record. Deliberately carries no `Captain decision:`
+# text and no decision digest, so it can never be mistaken for an answer:
+# no decision was made, only a duplicate registration was removed.
+duplicate_retirement_block() {  # <surviving-task-id>
+  printf 'Resolution recorded by fm-captain-hold.\nResolution mode: retired-duplicate\nSurviving task: %s\n\nNo captain decision was made on this task.\nIt duplicated an existing captain call; the surviving call is %s.\nAnswer %s instead - this task was closed only to remove a duplicate row from the captain queue.\n' \
+    "$1" "$1" "$1"
+}
+
+# A record written by `retire-duplicate` below, never by `answer`. Checks only
+# the newest record (via recorded_resolution_mode), matching how
+# recorded_decision_digest and recorded_resolution_mode already read just the
+# newest prepended record: a stale retirement block surviving underneath a
+# later genuine answer must not be misread as the current state.
+body_has_duplicate_retirement_record() {  # <task-body>
+  [ "$(recorded_resolution_mode "$1" || true)" = retired-duplicate ]
+}
+
+# The recorded surviving task id from a duplicate-retirement record.
+recorded_surviving_task() {  # <task-body>
+  local rest=$1
+  case "$rest" in
+    *"Surviving task: "*) rest=${rest#*"Surviving task: "} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%%\\n*}
+  rest=${rest%%$'\n'*}
+  printf '%s' "$rest"
+}
+
 # Durable state of one captain call: an active captain hold (annotations
-# surviving even when a date gate has expired) or a recorded captain answer.
+# surviving even when a date gate has expired), a recorded captain answer, or
+# a recorded duplicate retirement (explicitly no answer, but no longer live).
+# A duplicate-retirement record only counts once the close it describes
+# actually landed (state done): `retire-duplicate` writes the body record and
+# closes the task as two separate steps, and if `tasks-axi done` fails between
+# them the task is still open with that record sitting on top. Treating that
+# half-applied state as durable would let a completion attestation point at a
+# task that is not actually retired yet; an open task still falls through to
+# the active-hold check below instead, which is the true state it is in.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
   show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
@@ -351,10 +411,13 @@ verify_hold_durable() {  # <task-id>
   if body_has_resolution_record "$body"; then
     return 0
   fi
+  if [ "$state" = "done" ] && body_has_duplicate_retirement_record "$body"; then
+    return 0
+  fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
     return 0
   fi
-  fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+  fail "captain-held task $id is neither held for the captain, closed with a recorded captain answer, nor retired as a duplicate"
 }
 
 # Resolve one inventory entry or channel key to the task that carries it: the
@@ -444,27 +507,32 @@ command_hold() {
   printf '%s\n' "$id"
 }
 
-# Record a resolution block at the top of the task body, preserving the
-# previous body below it and archiving the pristine original.
-write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp
-  new_body=$(resolution_block "$mode")
+# Record a record block at the top of the task body, preserving the previous
+# body below it and archiving the pristine original.
+write_body_record() {  # <task-id> <new-record-block> <shown-body>
+  local id=$1 new_body=$2 body=$3 tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-body.XXXXXX") \
-    || fail "cannot stage the resolution record"
+    || fail "cannot stage the record"
   if ! printf '%s\n' "$new_body" > "$tmp"; then
     rm -f -- "$tmp"
-    fail "cannot stage the resolution record for $id"
+    fail "cannot stage the record for $id"
   fi
   if ! tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
     rm -f -- "$tmp"
-    fail "could not record the captain decision on $id"
+    fail "could not record the update on $id"
   fi
   rm -f -- "$tmp"
+}
+
+# Record a resolution block at the top of the task body, preserving the
+# previous body below it and archiving the pristine original.
+write_resolution_record() {  # <task-id> <mode> <shown-body>
+  write_body_record "$1" "$(resolution_block "$2")" "$3"
 }
 
 close_answered() {  # <task-id> <release-0-or-1>
@@ -497,6 +565,9 @@ command_answer() {
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
 
   if [ "$state" = "done" ]; then
+    if body_has_duplicate_retirement_record "$body"; then
+      fail "task $id was retired as a duplicate of $(recorded_surviving_task "$body" || echo unknown); it never received a captain decision, and answer cannot invent one retroactively - answer the surviving task instead, or if $id was retired in error, open a new task and hold it for the captain (a closed task cannot be re-held)"
+    fi
     if body_has_resolution_record "$body"; then
       # An exact compatible retry is an idempotent no-op; drift is rejected.
       [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
@@ -562,6 +633,61 @@ command_answer() {
     return 0
   fi
   fail "task $id is not held for the captain; hold it first or name the right task"
+}
+
+command_retire_duplicate() {
+  local id=${1:-} surviving='' show state hold_kind body recorded_surviving
+  local surviving_show surviving_hold_kind surviving_body
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --surviving) shift; surviving=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  validate_slug surviving-task-id "$surviving"
+  [ "$id" != "$surviving" ] || fail "task $id cannot be retired as a duplicate of itself"
+  require_tasks_axi
+  surviving_show=$(task_show "$surviving" 2>/dev/null) \
+    || fail "surviving task $surviving does not exist in $FM_HOME/data/backlog.md; name the real surviving call"
+  # tasks-axi keeps hold_kind through a close, so this is the same surviving
+  # proof `answer`'s repair path already trusts for the real captain call; a
+  # released answer clears hold_kind, so a recorded resolution also counts.
+  surviving_hold_kind=$(show_field_value "$surviving_show" hold_kind)
+  surviving_body=$(show_field "$surviving_show" body)
+  [ "$surviving_hold_kind" = captain ] || body_has_resolution_record "$surviving_body" \
+    || fail "surviving task $surviving was never a captain call; name the real surviving call"
+  if body_has_duplicate_retirement_record "$surviving_body"; then
+    fail "surviving task $surviving was itself retired as a duplicate of $(recorded_surviving_task "$surviving_body" || echo unknown); name that task as the real surviving call instead"
+  fi
+  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  state=$(show_field "$show" state)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  body=$(show_field "$show" body)
+
+  if [ "$state" = "done" ]; then
+    if body_has_duplicate_retirement_record "$body"; then
+      recorded_surviving=$(recorded_surviving_task "$body" || true)
+      [ "$recorded_surviving" = "$surviving" ] \
+        || fail "task $id was already retired as a duplicate of $recorded_surviving, not $surviving"
+      printf 'retired-duplicate: %s -> %s\n' "$id" "$surviving"
+      return 0
+    fi
+    fail "task $id is already closed and was not retired as a duplicate; use answer to record what closed it"
+  fi
+
+  [ "$hold_kind" = captain ] \
+    || fail "task $id is not held for the captain; nothing to retire as a duplicate"
+  write_body_record "$id" "$(duplicate_retirement_block "$surviving")" "$body"
+  tasks_axi "done" "$id" >/dev/null || fail "could not close duplicate captain-held task $id"
+  show=$(task_show "$id") || fail "task $id disappeared after closing"
+  [ "$(show_field "$show" state)" = "done" ] || fail "retiring $id as a duplicate did not close it"
+  body_has_duplicate_retirement_record "$(show_field "$show" body)" \
+    || fail "captain-held task $id did not retain its duplicate-retirement record"
+  printf 'retired-duplicate: %s -> %s\n' "$id" "$surviving"
 }
 
 # --- the one keyed-answer intake, and the source bindings that feed it --------
@@ -989,6 +1115,7 @@ EOF
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
+  retire-duplicate) shift; command_retire_duplicate "$@" ;;
   answers) shift; command_answers "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;
