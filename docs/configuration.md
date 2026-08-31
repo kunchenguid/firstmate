@@ -679,6 +679,14 @@ That adapter, and only that adapter, retries the one exact transient response a 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 0 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
 
+The pull-request follow-through adapter (`bin/fm-procevent-pr-follow.sh`) turns this channel into durable PR lifecycle tracking: one persistent source per PR identity, registered automatically by `bin/fm-pr-check.sh` whenever a PR becomes review-ready, that polls the forge through `gh` or `glab` and announces every new issue comment, inline review comment and reply, review submission and state change, head replacement, check-run or pipeline transition, and merge, close, or reopen for the PR's whole retained lifetime.
+The canonical source id is `prf-gh-<hash12>` or `prf-gl-<hash12>`, derived by SHA-256 from the validated provider-tagged identity, and the private cursor lives under `state/pr-follow/` - so tracking survives task cleanup, merge, restart, and duplicate or reordered API pages, and never ends by itself: the adapter never answers the runner's terminal check, merge never retires anything, and the one explicit auditable off switch is `bin/fm-procevent-pr-follow.sh retire <source-id> [--force]`.
+The first poll after registration stores the PR's current state silently, so a brand-new PR replays no creation noise; registration with `--backfill`, or the guarded `bin/fm-procevent-pr-follow.sh backfill` sweep over every PR recorded in this home, instead surfaces each currently unanswered inline review thread (last comment author is not the PR author and GitLab does not mark the thread resolved) exactly once.
+A failed fetch advances a persisted error streak, and past its budget the child publishes a diagnostic document carrying fixed text only - never a forged forge result - then waits one cadence before continuing, so recovery resumes from the durable cursor.
+Every remote title, author, path, name, and identifier is data: queries are fixed argv built from the validated identity re-derived from the cursor, output is consumed as structural field rows with bounded sanitized values, the wake line names only the source id and sequence, and the tracker has no capability to approve, merge, close, reopen, comment, push, or otherwise modify a PR.
+One captured document announces at most `FM_PR_FOLLOW_MAX_EVENTS` events, and per-collection maxima and state maps advance only to what was announced, so an overflowed poll re-announces its remainder next poll instead of losing it; state maps keep the `FM_PR_FOLLOW_MAP_LIMIT` highest ids.
+The handling procedure for `procevent pr-follow` wakes lives in `.agents/skills/process-event-sources/SKILL.md`.
+
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.
 Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, and a durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice.
@@ -831,6 +839,12 @@ FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sw
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
+FM_PR_FOLLOW_INTERVAL=300             # seconds between PR lifecycle follow-through polls
+FM_PR_FOLLOW_FETCH_TIMEOUT=60         # seconds allowed per forge fetch inside one follow-through poll
+FM_PR_FOLLOW_ERROR_BUDGET=3           # consecutive failed fetches before a follow-through diagnostic document
+FM_PR_FOLLOW_MAX_PAGES=5              # per-collection page bound inside one follow-through poll
+FM_PR_FOLLOW_MAX_EVENTS=60            # per-document event bound for follow-through results
+FM_PR_FOLLOW_MAP_LIMIT=40             # bounded review/check/thread map size per follow-through cursor
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh

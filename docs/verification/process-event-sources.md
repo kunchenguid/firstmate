@@ -206,3 +206,26 @@ Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.
 Both axes are therefore unaffected by construction rather than by assumption: every supported primary harness re-arms from that same exit, and every runtime backend supplies endpoint state only to the pane paths this change does not touch.
 While `state/.afk` exists the watcher stays one-shot as before, because this delivery ends the cycle exactly like the existing check path and leaves classification to the daemon.
+
+## PR lifecycle follow-through adapter
+
+Verified 2026-08-31 on macOS (Darwin 25.5.0, bash 3.2.57) with ShellCheck 0.11.0 and no forge credentials, entirely through `tests/fm-procevent-pr-follow.test.sh`, which stubs `gh` and `glab` with fixture-driven executables: `gh` serves the structural TSV rows its embedded jq would emit, while `glab` serves raw JSON so the adapter's own `JSON::PP` parsing is exercised for real.
+
+The suite proves the load-bearing guarantees end to end through the adapter's public commands plus the generic runner:
+
+- a silent first-registration baseline (`armed` -> first poll stores maxima, head, and state maps, emits nothing);
+- one announcement per forge event across open-PR comments, inline review comments and replies, review submissions and dismissals, head moves, check additions, pending transitions, regressions, and recoveries, merge, close, and reopen, and post-merge comments, each reaching the durable wake queue as the fixed line `check: procevent pr-follow <sid> <seq>` with no remote text;
+- restart and byte-identical replay safety (`handle` reports `already-applied` for a replayed generation and refuses a conflicting generation bound to the same sequence);
+- the bounded failure contract (three failed fetches produce one diagnostic document that invents no forge event, then recovery resumes from the durable cursor);
+- hostile remote payloads (`$(touch …)` in author, path, and check names) stay sanitized data, nothing executes, and a doctored cursor section is refused whole without an applied receipt;
+- task cleanup does not erase tracking, explicit `retire` is the only off switch and refuses while unhandled captures exist without `--force`, the backfill sweep is idempotent, and GitLab comments, pipelines, approvals, thread resolution, and merge flow through the real JSON parser.
+
+Exact commands:
+
+```sh
+bin/fm-test-run.sh tests/fm-procevent-pr-follow.test.sh   # 18 scenarios, three consecutive green runs
+bin/fm-test-run.sh tests/fm-pr-check-security.test.sh tests/fm-procevent.test.sh tests/fm-procevent-when.test.sh tests/fm-bootstrap.test.sh
+bin/fm-lint.sh
+```
+
+Boundary worth restating: the announced-only cursor means an overflowed poll re-announces its remainder next poll instead of losing it, and a document whose cursor merge was interrupted stays announced until a successful `handle`, so delivery is bounded-re-announcement, never exactly-once - the same durability boundary the runner documents above.

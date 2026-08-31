@@ -94,8 +94,8 @@
 #          reads or writes another home; the fleet snapshot's classifier and
 #          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
 #          transitions and restored In-flight rows print BOOTSTRAP_INFO facts.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (backlog_record_reconcile, secondmate_sync,
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          (backlog_record_reconcile, PR-follow backfill, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
 #          fleet_sync) while still
 #          printing every read-only detect line
@@ -105,7 +105,7 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          Unset/0 (the default) runs all seven sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -191,6 +191,26 @@ case "${FM_BOOTSTRAP_NETWORK:-all}" in
 esac
 local_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != only ]; }
 network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
+
+# Second mutating sweep at a locked local session boundary: arm durable PR
+# lifecycle follow-through for every PR already recorded in this home, each
+# with a one-shot backfill that surfaces currently unanswered review threads.
+# Local-only, bounded, and idempotent; it never talks to a forge. A refusal is
+# an actionable diagnostic because it means recorded PRs are not being
+# followed.
+pr_follow_backfill_sweep() {
+  local out
+  if ! out=$("$SCRIPT_DIR/fm-procevent-pr-follow.sh" backfill 2>&1); then
+    echo "PR_FOLLOW_BACKFILL: refused: $out"
+    return 0
+  fi
+  if printf '%s\n' "$out" | grep -q 'armed=0 already=[0-9]* skipped=0 capped=0'; then
+    # Nothing new to arm and nothing refused or skipped: silent, like a
+    # completed fleet refresh with no skips.
+    return 0
+  fi
+  echo "PR_FOLLOW_BACKFILL: $out"
+}
 
 network_mutation_authorized() {
   local expected=${FM_BOOTSTRAP_NETWORK_LOCK_PID:-} current
@@ -1386,6 +1406,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
       exit 1
     fi
   fi
+  pr_follow_backfill_sweep
   startup_memory_budget_setup
   if backlog_record_reconcile; then
     :

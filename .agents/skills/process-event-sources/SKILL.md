@@ -87,6 +87,12 @@ Two rules the commands cannot enforce for you:
   Here `<secondmate-id>` is the `<source-id>` with its `remote-reply-` prefix removed.
   The runner normally applies the result on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
   Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
+  `pr-follow` is the same kind of adapter: a captured PR lifecycle document is applied - cursor merge, backfill latch, and handled acknowledgement - only by
+  ```sh
+  bin/fm-procevent-pr-follow.sh handle <source-id> <sequence> <result-file>
+  ```
+  Read the document's `event:` lines as findings to act on under the ordinary review and merge owners, then run `handle`; never acknowledge a `pr-follow` wake through the generic command, because only the adapter advances the durable cursor.
+  A `pr-follow` source never retires itself - not after merge, not after close - so tracking runs until someone deliberately runs `bin/fm-procevent-pr-follow.sh retire <source-id>`, which refuses while unhandled captured results exist unless `--force`.
   Use the generic path below only after fully handling a result whose adapter has no applying command.
   [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
