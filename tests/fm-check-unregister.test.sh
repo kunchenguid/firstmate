@@ -115,6 +115,20 @@ test_empty_id_and_empty_state_refuse_without_stray_rm() {
   assert_present "$canary_sibling" "bad state override deleted a sibling"
   assert_rm_not_invoked "$log"
 
+  write_registered_check "$home" override-empty
+  status=0
+  : > "$log"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE='' \
+    "$UNREGISTER" override-empty >"$out" 2>"$err" || status=$?
+  expect_code 1 "$status" "unregister with explicitly empty state override"
+  assert_contains "$(cat "$err")" "state directory is unavailable" \
+    "empty state override refusal used the wrong stderr"
+  assert_present "$home/state/override-empty.check.sh" \
+    "empty state override deleted the home state check"
+  assert_present "$home/state/override-empty.check-trust" \
+    "empty state override deleted the home state trust binding"
+  assert_rm_not_invoked "$log"
+
   pass "empty id or missing state dir refuses loudly and never rms a stray path"
 }
 
