@@ -13,6 +13,7 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+GRANT="$ROOT/bin/fm-wake-grant.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
@@ -85,7 +86,7 @@ test_signal_catchup_without_running_watcher() {
 }
 
 test_stale_enqueue_before_suppressor() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  local dir state fakebin out drain_out capture_file window key pane_hash
   dir=$(make_case stale)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -100,8 +101,7 @@ test_stale_enqueue_before_suppressor() {
   # to its current signature so the per-poll signal scan does not pre-empt the
   # stale wake with a signal wake.
   printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
-  printf '%s' "$sig" > "$state/.seen-stale_status"
+  prime_status_seen "$state" "$state/stale.status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -120,7 +120,7 @@ test_stale_enqueue_before_suppressor() {
 # the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
 # suppressor - so a watcher killed between the two never swallows the surfaced finish.
 test_not_working_stale_enqueue_before_suppressor() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  local dir state fakebin out drain_out capture_file window key pane_hash
   dir=$(make_case stale-stopped)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -133,8 +133,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
   # signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stopped.status"); else sig=$(stat -c '%s:%Y' "$state/stopped.status"); fi
-  printf '%s' "$sig" > "$state/.seen-stopped_status"
+  prime_status_seen "$state" "$state/stopped.status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -162,9 +161,6 @@ test_check_output_is_queued() {
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
   check_file="$state/task.check.sh"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/1\n'
@@ -603,6 +599,209 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
   pass "slow annotation releases the append lock and a deleted status file fails open"
 }
 
+# Per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement").
+# Drives a MIXED queue snapshot - an unacked main-only check row alongside two
+# task-local rows the Pi supervision branch was granted - directly against
+# the real bin/fm-wake-drain.sh, independent of the Pi SDK. This is the core
+# safety property: a scoped actor's ack must never remove a row outside its
+# own eligible snapshot, no matter that row's sequence number relative to
+# what the actor presents or acks itself. Do not regress it.
+test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
+  local dir state out err sequence generation count
+  dir=$(make_case actor-scope)
+  state="$dir/state"
+
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" \
+    || fail "main-only append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  append_wake "$state" stale "fm-window" "stale: fm-window" || fail "stale append failed"
+
+  # The extension's own job (fm-branch-dispatch.ts) is granting exactly the
+  # two task-local rows; this test drives the bash consume contract those
+  # sequence numbers gate, independent of the Pi SDK.
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" actor-scope || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish actor-scope 2 3 || fail "branch grant publication failed"
+
+  out="$dir/branch-drain.out"
+  err="$dir/branch-drain.err"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$out" 2> "$err" \
+    || fail "branch-scoped drain failed: $(cat "$err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "branch drain omitted its eligible signal row"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$out" || fail "branch drain omitted its eligible stale row"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" && fail "branch drain presented the main-owned row"
+
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "branch drain omitted its acknowledgement boundary"
+  [ "$sequence" -eq 3 ] || fail "branch ack cutoff must be the max ELIGIBLE seq (3), got $sequence"
+
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch-scoped ack failed"
+
+  # The core no-swallow property: the main-only row - seq 1, BELOW the
+  # branch's own ack cutoff of 3 - must still be there.
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$state/.wake-queue" \
+    || fail "branch's scoped ack swallowed a main-owned row below its own cutoff"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$state/.wake-queue" \
+    && fail "branch's own eligible signal row was not consumed"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$state/.wake-queue" \
+    && fail "branch's own eligible stale row was not consumed"
+
+  # Main's own later, ordinary (unscoped) drain sees exactly what remains.
+  out="$dir/main-drain.out"
+  err="$dir/main-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  [ "$count" -eq 1 ] || fail "main's later drain should see exactly the one remaining main-owned row: $(cat "$out")"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main's later drain lost the main-owned row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "main's drain omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "main's ack failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the main-owned row survived main's own ack"
+
+  pass "a branch-actor scoped ack never swallows an unacked main-owned row, and main's later drain sees exactly what remains"
+}
+
+test_main_drain_excludes_rows_already_granted_to_branch() {
+  local dir state out err sequence generation
+  dir=$(make_case main-excludes-branch-grant)
+  state="$dir/state"
+
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" \
+    || fail "main-only append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" main-excludes || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish main-excludes 2 || fail "branch grant publication failed"
+
+  out="$dir/main-drain.out"
+  err="$dir/main-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main drain omitted its main-owned row"
+  ! grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "main drain presented a branch-granted row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ "$sequence" = 1 ] && [ -n "$generation" ] || fail "main acknowledgement did not bind only its presented row"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "main acknowledgement failed"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$state/.wake-queue" \
+    || fail "main acknowledgement consumed the branch-granted row"
+
+  out="$dir/branch-drain.out"
+  err="$dir/branch-drain.err"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$out" 2> "$err" \
+    || fail "branch drain failed: $(cat "$err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "branch lost its granted row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "branch acknowledgement left its handled row queued"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "branch acknowledgement retained its completed grant"
+
+  pass "main drain and acknowledgement exclude an active branch grant"
+}
+
+test_branch_grant_refuses_rows_already_claimed_by_main() {
+  local dir state rc
+  dir=$(make_case branch-refuses-main-claim)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" \
+    || fail "main presentation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" branch-refuses || fail "branch owner activation failed"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-refuses 1 || rc=$?
+  [ "$rc" -eq 3 ] || fail "branch grant did not report the existing main ownership: rc=$rc"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "refused branch grant published an ownership snapshot"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$dir/main.out" \
+    || fail "the main owner did not present its claimed row"
+
+  pass "branch grant cannot take a row already claimed by main"
+}
+
+test_actor_filter_precedes_same_key_deduplication() {
+  local dir state main_sequence main_generation branch_sequence branch_generation
+  dir=$(make_case actor-dedup-order)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: branch version" || fail "branch row append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" actor-dedup || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish actor-dedup 1 || fail "branch grant publication failed"
+  append_wake "$state" signal "task-a.status" "signal: main version" || fail "main row append failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main drain failed"
+  [ "$(awk -F '\t' '$3 == "signal" { print $2 }' "$dir/main.out")" = 2 ] \
+    || fail "main did not present its same-key claimed row"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch drain failed"
+  [ "$(awk -F '\t' '$3 == "signal" { print $2 }' "$dir/branch.out")" = 1 ] \
+    || fail "global deduplication hid the branch's older same-key row"
+
+  main_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
+  main_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
+  branch_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
+  branch_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$main_sequence" --recovery-generation "$main_generation" \
+    || fail "main same-key acknowledgement failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$branch_sequence" --recovery-generation "$branch_generation" \
+    || fail "branch same-key acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "same-key actor rows remained stranded"
+
+  pass "actor ownership filtering precedes same-key deduplication"
+}
+
+test_main_reclaims_a_grant_whose_branch_owner_exited() {
+  local dir state owner sequence generation
+  dir=$(make_case stale-branch-owner)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  sleep 30 &
+  owner=$!
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$owner" stale-owner || {
+    kill "$owner" 2>/dev/null || true
+    fail "branch owner activation failed"
+  }
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish stale-owner 1 || {
+    kill "$owner" 2>/dev/null || true
+    fail "branch grant publication failed"
+  }
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main reclaim drain failed"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$dir/main.out" \
+    || fail "main did not reclaim the dead branch owner's row"
+  [ ! -e "$state/.branch-eligible-rows" ] && [ ! -e "$state/.branch-eligible-owner" ] \
+    || fail "dead branch ownership evidence survived reclaim"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "reclaimed row acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "reclaimed branch row remained queued"
+
+  pass "main reclaims rows granted to an exited branch owner"
+}
+
+# A branch-actor drain or ack without a snapshot is a wiring bug, never
+# "nothing eligible": it must refuse loudly rather than silently draining or
+# acking nothing.
+test_branch_actor_without_eligible_snapshot_refuses() {
+  local dir state
+  dir=$(make_case actor-no-snapshot)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  if FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" >/dev/null 2>"$dir/err"; then
+    fail "a branch-actor drain with no eligible-row snapshot must refuse, not silently drain"
+  fi
+  grep -q "no branch-eligible row snapshot" "$dir/err" || fail "the refusal did not name the missing snapshot: $(cat "$dir/err")"
+  [ -s "$state/.wake-queue" ] || fail "the refused drain must leave the queue untouched"
+  pass "a branch-actor drain with no eligible-row snapshot refuses loudly instead of draining nothing"
+}
+
 test_wake_publish_requires_atomic_recovery_evidence() {
   local dir state fakebin real_mv rc out
   dir=$(make_case wake-publish-recovery-evidence)
@@ -1012,6 +1211,12 @@ test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
+test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
+test_main_drain_excludes_rows_already_granted_to_branch
+test_branch_grant_refuses_rows_already_claimed_by_main
+test_actor_filter_precedes_same_key_deduplication
+test_main_reclaims_a_grant_whose_branch_owner_exited
+test_branch_actor_without_eligible_snapshot_refuses
 test_wake_publish_requires_atomic_recovery_evidence
 test_legacy_generationless_wake_is_adopted
 test_stale_recovery_generation_cannot_touch_a_newer_episode

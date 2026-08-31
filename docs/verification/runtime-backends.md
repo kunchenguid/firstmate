@@ -111,6 +111,37 @@ pi-signed
 0.82.0
 ```
 
+### Harness-adapter instruction routing
+
+Two checks keep the evidence boundaries separate.
+`tests/fm-harness-adapter-references.test.sh` parses the router's declared JSON contract as normalized data and proves every selected reference is readable, which is structural evidence only.
+`tests/fm-harness-adapter-instructions-live-e2e.test.sh` is an opt-in development check that sends the directly loaded router and every operation scenario across all nine harness identities to a local Ollama model, requires the generated plan as normalized JSON, and makes no external-provider call.
+
+```sh
+FM_HARNESS_ADAPTER_INSTRUCTION_EVAL=1 FM_HARNESS_ADAPTER_LOCAL_MODEL=ambient-router-gemma4:e4b bin/fm-test-run.sh tests/fm-harness-adapter-instructions-live-e2e.test.sh
+```
+
+That local evaluation demonstrates instruction-driven scenario selection, but it does not claim that a native harness loaded the selected files.
+The guard prints the exact installed version or unavailable status for every native harness so absent tools and unexercised provider transports remain explicit rather than becoming passes.
+Native loader behavior still requires the applicable live agent-tool check; no uniform deterministic zero-provider transport currently spans Claude, Codex, OpenCode, and Pi, and the other five tools remain unavailable where their binaries are absent.
+
+Bounded output from the 2026-08-29 local run:
+
+```text
+ok - local model ambient-router-gemma4:e4b selected every operation scenario and all nine harness identities
+# native loader not claimed: claude 2.1.220 (Claude Code) is installed, but this harness-neutral evaluation does not exercise its provider transport
+# native loader not claimed: codex 0.147.0-alpha.6+local.4 is installed, but this harness-neutral evaluation does not exercise its provider transport
+# native loader not claimed: opencode 1.14.48 is installed, but this harness-neutral evaluation does not exercise its provider transport
+# native loader not claimed: pi 0.84.0 is installed, but this harness-neutral evaluation does not exercise its provider transport
+# unverified native loader: pi-signed is not installed on this machine
+# unverified native loader: grok is not installed on this machine
+# unverified native loader: kimi is not installed on this machine
+# unverified native loader: cursor is not installed on this machine
+# unverified native loader: muse is not installed on this machine
+# installed native tools recorded without overstating loader coverage: 4
+# unavailable native tools: pi-signed grok kimi cursor muse
+```
+
 The isolated process and endpoint checks used:
 
 ```sh
@@ -945,15 +976,71 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 ## Pi supervision branch
 
-The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its persistent second session through the Pi SDK surface: `createAgentSession`, `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage`, and the `before_provider_request` hook.
+The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its persistent second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage`, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
+In TUI mode, its `/supervision-model` model list is drawn with Pi's own `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder` through the extension context's `ui.custom` surface, which is what bounds and searches a long catalog.
 
-Evidence produced 2026-08-24 on macOS 15.7.3 arm64, Node v26.5.0, signed `pi` CLI 0.84.3:
+Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 
-- Real-SDK guard: `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against the globally installed `@earendil-works/pi-coding-agent` 0.84.3 printed `ok - real Pi SDK 0.84.3 accepts the branch session construction, preserves an unpromptable wake, and emits no lifecycle event for a refused turn`.
+- Real-SDK guard: `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against the globally installed `@earendil-works/pi-coding-agent` 0.81.1 printed `ok - real Pi SDK 0.81.1 accepts the branch session construction and preserves an unpromptable wake`.
   The guard reads no credentials and makes no provider call: an isolated empty `PI_CODING_AGENT_DIR` leaves model resolution empty, so the branch's first prompt fails fast and must prove the fallback that returns the wake to main.
-  The same emptiness is what the held-note clause measures: a prompt the SDK refuses to run emitted neither `agent_start` nor `agent_end`/`agent_settled` through handlers the real `DefaultResourceLoader` wired.
-  Measured limit of that clause on 0.84.3: with no credentials the SDK delivers no extension event at all, so this guard pins the refused-turn case and the wiring, not a successfully started turn's own end emission.
-- Strict typecheck: `tests/fm-pi-primary-types.test.sh` printed `ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.3` with the branch extension and dispatch lib included; it is what pins the `agent_end`/`agent_settled` event names against the installed package.
+  The same run confirms that a real `ModelRegistry` over that empty agent dir still exposes the picker-facing availability surface, then pins `openai/no-such-live-model` and proves that the branch's own `ModelRuntime` refuses the unresolvable pin instead of silently running supervision on main's model.
+- Model-pin precedence: the same guard run printed `ok - real Pi SDK 0.81.1 applies an explicit branch model on create and over a reopened session's recorded model`.
+  It declares a local `fm-live-fake` provider in an isolated `models.json`, never contacts it, and proves through `session.model` that an explicit model is applied on create, still wins over the model a reopened session recorded, and is absent-pin-restorable - the exact behavior a pin that must survive `/new`, `/resume`, `/fork`, and reload depends on.
+- Effort-pin vendor contract: the same guard run printed `ok - real Pi SDK 0.81.1 reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level`.
+  Over its own local never-contacted provider it confirms that `getSupportedThinkingLevels` still returns `["off","minimal","low","medium","high","xhigh","max"]` for a model mapping every extended level, narrows to `["off","minimal","low","medium","high"]` for a reasoning model mapping none, returns `["off"]` for a non-reasoning model, and that `clampThinkingLevel` lowers `max` to `high` on the narrow model while collapsing an unrecognized token to `off` - which is why the extension rejects an unrecognized pin before that clamp can see it.
+  It then proves through `session.thinkingLevel` that an explicit effort is applied on create, that a reopened session with no override restores its own recorded level, that an explicit effort beats that recorded level, and that an over-ceiling effort is clamped rather than refused.
+  The recorded-level cases need a session file Pi will actually restore from, and Pi flushes one only once an assistant message exists, so the guard appends the level change and that message through the real `SessionManager` rather than hand-writing the format.
+- Picker primitives: on 2026-08-26, after the final portable-shell and sentinel fixes, `bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh` again printed `ok - the installed Pi still bounds the picker's list and ranks its search` against the same installed 0.81.1 package.
+  That case imports the real `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder`, renders a 42-row catalog through the real `SelectList` at the visible bound the extension asks for, and fails naming the installed version if Pi stops exporting a primitive or stops bounding what it renders; it skips when no npm package is installed, and the portable stubbed cases in the same file hold the ordering, search, and branch-only-pin behavior everywhere.
+- Strict typecheck: `tests/fm-pi-primary-types.test.sh` printed `ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1` with the branch extension and its imported libraries included.
+  This typecheck is also the enforcement for the extension's declared effort vocabulary: its bidirectional assertion against Pi's own `getThinkingLevel` return type fails the moment Pi adds or removes a thinking level, so the runtime list used to reject an unrecognized hand-edited pin cannot drift into a stale Firstmate catalog.
+- Custom-message provider conversion: on 2026-08-26, `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against installed `@earendil-works/pi-coding-agent` 0.84.1 printed `ok - real Pi SDK 0.84.1 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model`.
+  The guard passes a typed captain outcome and a plain rendered routine note through Pi's exported `convertToLlm`, proves that `customType` and `display` are not model-visible identity, and classifies the resulting provider text with `bin/fm-operational-input.sh`.
 
-Scope of this evidence: the installed signed `pi` CLI (0.84.3 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
-The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running both commands above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+### 2026-08-28 Pi 0.84.4 SDK compatibility refresh
+
+The credential-free live guard and strict typecheck were rerun against the installed `@earendil-works/pi-coding-agent` 0.84.4 package after the Pi primary compatibility repair.
+The live guard used an isolated empty `PI_CODING_AGENT_DIR`, inspected no credentials, and made no provider call.
+
+```sh
+npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
+ok - real Pi SDK 0.84.4 accepts the branch session construction and preserves an unpromptable wake
+ok - real Pi SDK 0.84.4 applies an explicit branch model on create and over a reopened session's recorded model
+ok - real Pi SDK 0.84.4 reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level
+ok - real Pi SDK 0.84.4 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model
+FM_TEST_END 2026-08-29T01:01:01Z tests/fm-pi-branch-live-e2e.test.sh exit=0 duration_ms=2520 gate_skip=false
+```
+
+The focused extension suite also exercised the installed Pi 0.84.4 picker and outcome-renderer consumers; [`calm-mode-feasibility.md`](../calm-mode-feasibility.md#2026-08-28-pi-0844-outcome-renderer-compatibility-verification) owns the version-scoped renderer evidence.
+
+### 2026-08-31 delivery-time freshness re-verification against Pi 0.84.4
+
+The live guard and the strict typecheck were rerun after the supervision branch gained its delivery-time freshness boundary.
+That change moves every merge note's handoff to an idle-confirmed boundary and adds a refused-turn lifecycle assertion to the live guard, so the guard's own recorded line changes with it.
+The live guard still pointed `PI_CODING_AGENT_DIR` at an empty directory, read no credentials, and made no provider call.
+Environment: macOS 15.7.3 arm64, Node v26.5.0, installed `@earendil-works/pi-coding-agent` 0.84.4, signed `pi` CLI 0.84.4.
+
+```sh
+npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
+ok - real Pi SDK 0.84.4 accepts the branch session construction, preserves an unpromptable wake, and emits no lifecycle event for a refused turn
+ok - real Pi SDK 0.84.4 applies an explicit branch model on create and over a reopened session's recorded model
+ok - real Pi SDK 0.84.4 reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level
+ok - real Pi SDK 0.84.4 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model
+FM_TEST_END 2026-08-31T18:25:31Z tests/fm-pi-branch-live-e2e.test.sh exit=0 duration_ms=2509 gate_skip=false
+```
+
+Measured limit of the refused-turn clause on 0.84.4: with no credentials the SDK delivers no extension event at all, so this guard pins the refused-turn case and the fact that the real `DefaultResourceLoader` wires an extension's handlers, not a successfully started turn's own end emission.
+The `agent_start`, `agent_end`, and `agent_settled` event names the held-note release depends on are pinned separately by the strict typecheck above against the installed package.
+
+Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
+The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running the live guard, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.

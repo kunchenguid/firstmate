@@ -6,7 +6,7 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's five mutating sweeps, verified by their
+#     skipped (including bootstrap's seven mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: the safety preamble leads unchanged, live fleet
 #     state precedes the curated memory a truncated tail may take, and the
@@ -99,7 +99,7 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z'
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
   exit 0
 fi
 exit 0
@@ -714,6 +714,12 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
+  jq -e --arg home "$home" '
+    .schema == "fm-secondmate-home-summary.v1"
+    and .home == $home
+    and (.generated_epoch | type) == "number"
+  ' "$home/state/home-summary.json" >/dev/null \
+    || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 

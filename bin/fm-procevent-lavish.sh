@@ -5,13 +5,26 @@
 #   fm-procevent-lavish.sh arm <artifact.html>
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
+#   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
+#   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
+# read       Print a structured presentation of one already-captured result so a
+#            handler consumes every queued item without grepping the raw file.
+#            It is read-only over the capture: it does not arm, poll, or change
+#            what Lavish delivered. The session-ending freeform message
+#            (tag=message) is its own labeled field, printed first and distinct
+#            from per-element annotations. Declared and presented item counts,
+#            plus a completeness verdict, follow before all annotations so a
+#            partial read is obvious. Each annotation retains its element uid,
+#            selector, tag, and text, and captain-supplied body lines are visibly
+#            prefixed so they cannot forge structural labels. Empty message and
+#            annotation sections are reported explicitly.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -20,6 +33,28 @@
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
 #            calls, and the only place Lavish's notion of "ended" is decided.
+# silent     Exit 0 when the captured result is a routine no-op the runner should
+#            record and never announce; any other exit publishes the wake. This
+#            is the generic no-op contract bin/fm-procevent.sh calls, and the
+#            only place Lavish's notion of "nothing was said" is decided.
+#
+# AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
+# Closing a review surface that carried nothing is the single most common Lavish
+# result: the captain reads a board, says nothing, and closes it. Announcing that
+# put a wake in front of the handler whose entire content was that nothing
+# happened. `silent` therefore holds one narrow, positively-determined shape -
+# a session this adapter classifies `ended` that carries no queued content block
+# at all - and every other result stays announced.
+#
+# Deliberately narrow, in both directions. A `Send & End` close carrying the
+# captain's actual answer arrives as `status: feedback` with `session_ended`, so
+# it classifies `feedback`, never `ended`, and is announced exactly as before; so
+# is any `ended` result that still carries a `prompts` or `feedback` block, which
+# the published poll is not expected to produce but which must never be dropped
+# on that expectation. A `waiting` session, a `missing` one, an `unknown` or
+# unreadable result, and any error all stay announced, because none of them
+# positively proves nothing was said. Silence is only ever an absence this
+# adapter can see in the result, never an absence it assumes.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
@@ -36,6 +71,9 @@
 #
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
+#
+# `read` is the presentation command summarized above; keyed intake remains
+# the separate `answers` contract described here.
 #
 # It wraps ONLY the currently published interface, verified against 0.1.45:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
@@ -81,7 +119,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,107p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -303,6 +341,54 @@ cmd_terminal() {
   return 1
 }
 
+# Whether a completed result carries any queued content block at all. The
+# published response frames content as a top-level `prompts[N]{...}:` or
+# `feedback[N]{...}:` header whose rows are INDENTED, so this anchors on column
+# zero: an indented payload line is captain-supplied text and must never be able
+# to forge - or, here, to hide behind - a content header. Any recognized block
+# is content regardless of its declared count, while a malformed top-level
+# prompts or feedback header makes the result indeterminate.
+#
+# 0 = content present, 1 = provably no content, anything else = the check did
+# not complete. The caller must distinguish those three, because "the check
+# failed" is never proof that nothing was said.
+result_has_queued_content() {  # <result-file>
+  awk '
+    /^(prompts|feedback)\[[0-9]+\]\{[^}]*\}:[[:space:]]*$/ {
+      verdict = "present"
+      exit
+    }
+    /^(prompts|feedback)/ {
+      verdict = "indeterminate"
+      exit
+    }
+    END {
+      if (verdict == "present") exit 0
+      if (verdict == "indeterminate") exit 2
+      exit 1
+    }
+  ' "$1"
+}
+
+# Whether a captured result is a routine no-op the runner should record without
+# announcing, for the generic runner's silence seam. Lavish's notion of "nothing
+# was said" lives here and nowhere else: an ended session carrying no queued
+# content block is a board the captain closed without saying anything, and the
+# handler learns nothing from being told. Anything else - a real answer, a
+# missing or waiting session, an unreadable result - is announced.
+cmd_silent() {
+  local file=${1-} content_rc
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  [ "$(cmd_classify "$file")" = ended ] || return 1
+  result_has_queued_content "$file"
+  content_rc=$?
+  # Only a completed check that proved the result carries nothing declares
+  # silence; a check that could not complete announces, like every other
+  # uncertainty here.
+  [ "$content_rc" -eq 1 ]
+}
+
 # Print `key<TAB>answer<TAB>label[<TAB>mode]` for every structured choice the
 # captain submitted in a captured result; the optional mode column relays the
 # card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
@@ -384,6 +470,137 @@ cmd_answers() {
   ' "$file"
 }
 
+# Present one already-captured result for a handler. Body lines are prefixed
+# so a captain-supplied string cannot forge a section label. The session-ending
+# message is printed before the count line and before any annotation, because
+# that is the field a truncated grep of the raw capture historically dropped.
+cmd_read() {
+  local file=${1-} lifecycle session_ended
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  lifecycle=$(cmd_classify "$file")
+  session_ended=$(session_field "$file" session_ended)
+  perl -e '
+    use strict; use warnings;
+    my ($path, $lifecycle, $session_ended) = @ARGV;
+    open my $fh, "<", $path or exit 1;
+    my (@fields, $want, @rows);
+    while (my $line = <$fh>) {
+      if (!@fields) {
+        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
+        ($want, @fields) = ($1, split /,/, $2);
+        next;
+      }
+      last unless $line =~ /^\s/;
+      last if defined($want) && @rows >= $want;
+      chomp $line;
+      push @rows, $line;
+    }
+    close $fh;
+    $want = 0 unless defined $want;
+    my @parsed;
+    my $malformed = 0;
+    for my $row (@rows) {
+      $row =~ s/^\s+//;
+      my @vals;
+      while (length $row) {
+        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
+          push @vals, $1;
+        } else {
+          $row =~ s/^([^,]*)//;
+          push @vals, $1;
+        }
+        last unless $row =~ s/^,//;
+      }
+      if (@vals > @fields) {
+        my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
+        ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
+        if (defined $preserve) {
+          my $count = @vals - @fields + 1;
+          my @parts = splice @vals, $preserve, $count;
+          splice @vals, $preserve, 0, join(",", @parts);
+        }
+      }
+      if (@vals != @fields) {
+        $malformed++;
+        next;
+      }
+      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
+      my %f;
+      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+      push @parsed, \%f;
+    }
+    my $presented = scalar @parsed;
+    my $complete = ($presented == $want && !$malformed) ? "yes" : "no";
+    my @messages;
+    my @annotations;
+    for my $f (@parsed) {
+      my $tag = defined $f->{tag} ? $f->{tag} : "";
+      if ($tag eq "message") {
+        push @messages, $f;
+      } else {
+        push @annotations, $f;
+      }
+    }
+    sub emit_body {
+      my ($text) = @_;
+      $text = "" unless defined $text;
+      $text =~ s/\r\n/\n/g;
+      $text =~ s/\r/\n/g;
+      my @lines = split /\n/, $text, -1;
+      pop @lines if @lines && $lines[-1] eq "";
+      return if !@lines || (@lines == 1 && $lines[0] eq "");
+      print "| $_\n" for @lines;
+    }
+    if (@messages) {
+      print "SESSION-ENDING MESSAGE\n";
+      for my $i (0 .. $#messages) {
+        print "SESSION-ENDING MESSAGE PART ", ($i + 1), " of ", scalar(@messages), "\n" if @messages > 1;
+        my $body = defined $messages[$i]{prompt} && length $messages[$i]{prompt}
+          ? $messages[$i]{prompt}
+          : (defined $messages[$i]{text} ? $messages[$i]{text} : "");
+        emit_body($body);
+      }
+      print "END SESSION-ENDING MESSAGE\n";
+    } else {
+      print "SESSION-ENDING MESSAGE: (none)\n";
+    }
+    print "\n";
+    print "declared_items: $want\n";
+    print "presented_items: $presented\n";
+    print "malformed_items: $malformed\n";
+    print "complete: $complete\n";
+    print "lifecycle: $lifecycle\n";
+    print "session_ended: ", (length $session_ended ? $session_ended : "(unset)"), "\n";
+    print "annotation_count: ", scalar(@annotations), "\n";
+    print "session_ending_message_count: ", scalar(@messages), "\n";
+    print "\n";
+    if (@annotations) {
+      print "ANNOTATIONS\n";
+      my $n = 0;
+      for my $f (@annotations) {
+        $n++;
+        my $uid = defined $f->{uid} ? $f->{uid} : "";
+        my $selector = defined $f->{selector} ? $f->{selector} : "";
+        my $tag = defined $f->{tag} ? $f->{tag} : "";
+        print "ANNOTATION $n of ", scalar(@annotations), "\n";
+        print "element_uid: $uid\n";
+        print "element_selector: $selector\n";
+        print "tag: $tag\n";
+        print "text:\n";
+        my $body = defined $f->{text} && length $f->{text}
+          ? $f->{text}
+          : (defined $f->{prompt} ? $f->{prompt} : "");
+        emit_body($body);
+      }
+      print "END ANNOTATIONS\n";
+    } else {
+      print "ANNOTATIONS: (none)\n";
+    }
+    print "END LAVISH RESULT ($presented of $want)\n";
+  ' "$file" "$lifecycle" "$session_ended"
+}
+
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
@@ -391,7 +608,9 @@ case "${1-}" in
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
+  silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
+  read)      shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

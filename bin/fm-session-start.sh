@@ -31,9 +31,9 @@
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's six MUTATING sweeps
-#                       (legacy PR-check migration, secondmate convergence,
-#                       secondmate liveness, pending remote handoff retry,
-#                       X-mode artifact writes, fleet sync) also run only when
+#                       (same-home backlog reconciliation,
+#                       secondmate convergence, secondmate liveness, pending remote
+#                       handoff retry, X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
@@ -159,14 +159,16 @@
 # status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
 #
-# RUNTIME BOUND: the digest is now executed on a session-open hook (see
-# bin/fm-sessionstart-run.sh), which blocks session initialization while it
-# runs, so an unbounded digest is no longer merely slow - it can strand a whole
-# session behind one hung subprocess. Every remaining step is local, but local is
-# not the same as bounded: tool version probes, the backlog listing, and the
-# per-task endpoint reads are all unbounded subprocesses. So the whole digest
-# still runs as ONE bounded child of this script (FM_SESSION_START_TIMEOUT,
-# default 120s). The deferred network stage deliberately sits OUTSIDE that bound,
+# RUNTIME BOUND: the digest is now executed through a native session-open
+# adapter (see bin/fm-sessionstart-run.sh), which blocks either hook-driven
+# session initialization or Pi's first provider preflight while it runs, so an
+# unbounded digest is no longer merely slow - it can strand a whole session or
+# first turn behind one hung subprocess. Every remaining step is local, but
+# local is not the same as bounded: tool version probes, the backlog listing,
+# and the per-task endpoint reads are all unbounded subprocesses. So the whole
+# digest still runs as ONE bounded child of this script
+# (FM_SESSION_START_TIMEOUT, default 120s). The deferred network stage
+# deliberately sits OUTSIDE that bound,
 # in its own process group under its own aggregate deadline, so a truncated
 # digest neither waits for it nor orphans it unbounded. The
 # child writes the digest straight to this script's stdout, so everything it
@@ -188,8 +190,9 @@
 #             only lost its context (a /clear or a compaction). Skip the
 #             mutating sweeps that startup already reconciled - the stale Herdr
 #             projection cleanup and bootstrap's six mutating sweeps (fleet
-#             sync, secondmate convergence and liveness, PR-check migration,
-#             pending remote handoff retry, X-mode artifact writes) - and
+#             sync, same-home backlog reconciliation, secondmate convergence and
+#             liveness, pending remote handoff retry, X-mode
+#             artifact writes) - and
 #             re-emit the rest. Wake-queue presentation is NOT skipped: queued
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
@@ -610,7 +613,7 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'This session already took the helm at its own startup and has only lost its\n'
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
   printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
-  printf 'secondmate convergence and liveness, PR-check migration, pending remote handoff\n'
+  printf 'secondmate convergence and liveness, pending remote handoff\n'
   printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
 else
@@ -630,7 +633,7 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: PR-check migration, stale Herdr child cleanup,\n'
+    printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
     printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
     printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
@@ -647,6 +650,12 @@ if [ "$READ_ONLY" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
+  # A full locked start publishes this home's current structured summary.
+  # Publication is side-band and best-effort, so it can never change the
+  # session-start result. A context re-emit is not another session start.
+  if [ "$REEMIT" -eq 0 ]; then
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+  fi
   # Every network call this session start owes is launched HERE, detached and
   # bounded, so it runs concurrently with the whole digest below instead of in
   # front of it. Step 7 harvests whatever it has finished, without ever waiting.
