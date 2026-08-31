@@ -250,7 +250,7 @@ This guard is the refresh command after any harness upgrade; it spends a small n
 ## Herdr
 
 The compatibility floor is protocol 14.
-The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
+The whole real-Herdr lane's latest active verification uses Herdr 0.8.2 protocol 20 on native Windows and retains Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence remains where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
@@ -315,6 +315,31 @@ namespace_exit=0
 ```
 
 `tests/fm-backend-herdr.test.sh` pins the synthetic-mode acceptance, unsafe-ACL refusal, wrong-owner refusal, non-directory refusal, and unchanged Linux and macOS mode `0700` requirement through the adapter's executable lock-path behavior.
+
+### Native Windows projected-workspace ordering
+
+The native Windows transport and projected ordering proof was verified on 2026-08-31 against Herdr 0.8.2 protocol 20 and Python 3.13.
+Herdr's Windows `herdr.sock` path was a server-ownership marker, while the supported `interprocess` endpoint was the namespaced pipe derived from that same path.
+The mover connected through the Win32 named-pipe API, placed each projected worker immediately after the exact Firstmate workspace and its existing child block, and preserved every pre-existing workspace's relative order.
+The active workspace and active tab remained unchanged across create, move, final-label rename, and forced move failure.
+A successfully ordered worker published a version 2 restart binding.
+A forced transport failure left the task pane alive with the top-level `fm-<id> · pending p:<token>` label, retained only the version 1 attempt journal, and printed the concrete ordering warning rather than implying the unrelated preceding workspace was its parent.
+
+```sh
+HERDR_LAB_HELPER=/c/src/firstmate/bin/fm-herdr-lab.sh \
+HERDR_LAB_NAME_SEED=fix-herdr-windows-order-0831 \
+FM_HERDR_PRESENTATION_ORDERING_ONLY=1 \
+tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+Observed proof:
+
+```text
+ok - real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab
+ok - real Herdr lab: concurrent primary workers form one stable contiguous block without active workspace/tab drift
+ok - real Herdr lab: failed workspace.move stays explicit and cannot imply the wrong parent
+ok - real Herdr ordering validation completed on Herdr 0.8.2 with the default-session tripwire intact
+```
 
 ### Submit confirmation
 

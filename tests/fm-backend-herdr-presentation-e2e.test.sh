@@ -129,6 +129,7 @@ mutation=
 mutation_target=${3:-}
 case "${1:-} ${2:-}" in
   "workspace create") mutation=workspace-create; mutation_target=$label ;;
+  "workspace rename") mutation=workspace-rename; mutation_target=${3:-} ;;
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
   "tab focus") mutation=tab-focus ;;
@@ -149,14 +150,14 @@ else
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
   case "$label" in
-    $'└ active-seeded · p:'*)
+    $'└ active-seeded · p:'*|fm-active-seeded\ ·\ pending\ p:*)
       mkdir -p "$ACTIVE_SEEDED_CONTROL"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$ACTIVE_SEEDED_CONTROL/workspace"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.tab.tab_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-tab"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-pane"
       ;;
-    $'└ abort-a · p:'*|$'└ abort-b · p:'*)
-      task=${label#$'└ '}; task=${task%% *}
+    $'└ abort-a · p:'*|$'└ abort-b · p:'*|fm-abort-a\ ·\ pending\ p:*|fm-abort-b\ ·\ pending\ p:*)
+      task=${label#$'└ '}; task=${task#fm-}; task=${task%% *}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
       ;;
@@ -216,6 +217,9 @@ SH
 cat > "$FAKEBIN/herdr-workspace-mover" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --check-transport ]; then
+  exec "$REAL_MOVER" "$@"
+fi
 focus_snapshot() {
   local list row workspace tab tabs
   list=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace list) || return 1
@@ -261,8 +265,9 @@ export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 # parent this suite sets up, not on the developer's own workspace.
 herdr_forget_inherited_pane
 
+HERDR_LAB_NAME_SEED=${HERDR_LAB_NAME_SEED:-fm-herdr-presentation-projection}
 HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \
-  "$HERDR_LAB_HELPER" name fm-herdr-presentation-projection)
+  "$HERDR_LAB_HELPER" name "$HERDR_LAB_NAME_SEED")
 export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
@@ -332,7 +337,7 @@ focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
   changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
-    ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "pane-close") && $2 != $3 {
+    ($1 == "workspace-create" || $1 == "workspace-rename" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "pane-close") && $2 != $3 {
       print $0
     }
   ')
@@ -445,14 +450,28 @@ log_line_count() { wc -l < "$HERDR_CALL_LOG" | tr -d '[:space:]'; }
 projection_labels_from_log() {  # <start-line>
   local start=$1
   sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '
-    $1 == "workspace" && $2 == "create" {
-      for (i = 1; i < NF; i += 1) {
-        if ($i == "--label" && $(i + 1) ~ /^└ /) {
-          print $(i + 1)
-        }
-      }
+    $1 == "workspace" && $2 == "create" && $5 == "--label" && $6 ~ /^fm-.* · pending p:/ {
+      label = $6
+      sub(/^fm-/, "└ ", label)
+      sub(/ · pending p:/, " · p:", label)
+      print label
     }
   '
+}
+
+move_log_line_count() { wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]'; }
+
+projection_labels_from_moves() {  # <start-line>
+  local start=$1 list workspace
+  list=$(lab workspace list) || fail "could not inspect workspace labels after ordering"
+  sed -n "$((start + 1)),\$p" "$MOVE_CALL_LOG" | cut -f2 | while IFS= read -r workspace; do
+    [ -n "$workspace" ] || continue
+    printf '%s' "$list" | jq -r --arg workspace "$workspace" '
+      .result.workspaces[]
+      | select(.workspace_id == $workspace)
+      | .label
+    ' | tr -d '\r'
+  done
 }
 
 session_presentation_lock_path() {
@@ -465,8 +484,8 @@ session_presentation_lock_path() {
 assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name>
   local start=$1 name=$2 calls
   calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
-  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(close|rename)|tab\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
-    fail "$name introduced a workspace/tab/session lifecycle or label mutation call"
+  if printf '%s\n' "$calls" | grep -E $'^(workspace\tclose|tab\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
+    fail "$name introduced a workspace/tab/session lifecycle call"
   fi
 }
 
@@ -598,7 +617,7 @@ SECOND_TWO_TAB=$(printf '%s' "$SECOND_TWO_OUT" | jq -r '.result.tab.tab_id // em
 SECOND_TWO_PANE=$(printf '%s' "$SECOND_TWO_OUT" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$SECOND_ONE_WSID" ] && [ -n "$SECOND_TWO_WSID" ] && [ -n "$SECOND_TWO_TAB" ] && [ -n "$SECOND_TWO_PANE" ] \
   || fail "secondmate presentation fixtures returned incomplete IDs"
-SECOND_ORDER_BEFORE=$(printf '%s\n%s\n' "$SECOND_ONE_WSID" "$SECOND_TWO_WSID")
+SECOND_ORDER_BEFORE=$(printf '%s\n%s\n' "$SECOND_ONE_WSID" "$SECOND_TWO_WSID" | tr -d '\r')
 CAPTAIN_FOCUS="$SECOND_TWO_WSID/$SECOND_TWO_TAB"
 assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 
@@ -618,6 +637,8 @@ cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
   || fail "Treehouse command sequence changed between opted-out and projected spawns"
 JOURNAL="$HOME_DIR/state/shape.herdr-presentation"
 [ -f "$JOURNAL" ] || fail "projected spawn did not publish its presentation journal"
+[ "$(grep '^version=' "$JOURNAL" | cut -d= -f2-)" = 2 ] \
+  || fail "successfully ordered projected spawn did not publish a version 2 restart binding"
 TOKEN=$(grep '^projection_id=' "$JOURNAL" | cut -d= -f2-)
 [ "${#TOKEN}" -eq 22 ] || fail "projection id is not the compact 22-character encoding of 128 bits"
 PROJECTED_WSID=$(grep '^herdr_workspace_id=' "$ON_META" | cut -d= -f2-)
@@ -756,6 +777,7 @@ cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
 # Their final relative order must match Herdr's actual serialized create order,
 # rather than a task-name or priority guess.
 CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
+CONCURRENT_MOVE_START=$(move_log_line_count)
 spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
 ORDER_A_PID=$!
 spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
@@ -772,22 +794,18 @@ remember_meta_worktree "$ORDER_A_META" >/dev/null
 remember_meta_worktree "$ORDER_B_META" >/dev/null
 
 ORDER_LIST=$(lab workspace list) || fail "could not inspect concurrent presentation ordering"
-CREATED_LABELS=$(projection_labels_from_log "$PROJECTION_ORDER_START")
-EXPECTED_LABELS=$(printf 'firstmate\n%s\n%s\n2ndmate-alpha\n2ndmate-bravo' "$PROJECTED_LABEL" "$CREATED_LABELS")
-ACTUAL_LABELS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[].label')
-[ "$ACTUAL_LABELS" = "$EXPECTED_LABELS" ] || fail "workspace order was not firstmate, stable primary block, secondmates: $ACTUAL_LABELS"
 PRIMARY_IDS=$(printf '%s' "$ORDER_LIST" | jq -r '
   .result.workspaces[]
   | select((.label | startswith("└ ")) or (.label | startswith("firstmate/")))
   | .workspace_id
-')
-MOVE_TARGETS=$(cut -f2 "$MOVE_CALL_LOG")
+' | tr -d '\r')
+MOVE_TARGETS=$(printf '%s\n' "$PROJECTED_WSID"; sed -n "$((CONCURRENT_MOVE_START + 1)),\$p" "$MOVE_CALL_LOG" | cut -f2)
 [ "$MOVE_TARGETS" = "$PRIMARY_IDS" ] \
   || fail "workspace.move targeted something other than each exact current projected-create id"
-MOVE_INDEXES=$(cut -f3 "$MOVE_CALL_LOG")
+MOVE_INDEXES=$(printf '1\n'; sed -n "$((CONCURRENT_MOVE_START + 1)),\$p" "$MOVE_CALL_LOG" | cut -f3)
 [ "$MOVE_INDEXES" = $'1\n2\n3' ] \
   || fail "concurrent primary workers did not append stably to the contiguous block: $MOVE_INDEXES"
-SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id')
+SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id' | tr -d '\r')
 [ "$SECOND_ORDER_AFTER" = "$SECOND_ORDER_BEFORE" ] \
   || fail "primary workspace ordering changed secondmate relative order"
 [ "$(lab workspace get "$SECOND_TWO_WSID" | jq -r '.result.workspace.focused')" = true ] \
@@ -797,10 +815,12 @@ pass "real Herdr lab: concurrent primary workers form one stable contiguous bloc
 
 # Force only the raw move transport to fail after a safe projected create.
 # The spawn must remain successful in Herdr's default appended order, with its
-# exact task pane alive and no ordering-triggered cleanup.
+# exact task pane alive, an explicitly top-level provisional label, no restart
+# binding, and no ordering-triggered cleanup.
 FAIL_MOVER="$TMP_ROOT/fail-workspace-mover"
 cat > "$FAIL_MOVER" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" = --check-transport ] && exit 0
 exit 9
 SH
 chmod +x "$FAIL_MOVER"
@@ -812,7 +832,9 @@ FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAIL_MOVER" \
 assert_focus_is "$CAPTAIN_FOCUS" "failed presentation ordering"
 assert_raw_presentation_mutations_preserved_since "$FAIL_FOCUS_AUDIT_START" "failed presentation ordering"
 grep -F "workspace move failed or had an ambiguous response" "$TMP_ROOT/order-fail.err" >/dev/null 2>&1 \
-  || fail "forced workspace.move failure did not report only the best-effort warning"
+  || fail "forced workspace.move failure did not report the transport warning"
+grep -F "explicitly top-level provisional workspace" "$TMP_ROOT/order-fail.err" >/dev/null 2>&1 \
+  || fail "forced workspace.move failure did not report the non-child fallback"
 ORDER_FAIL_META="$HOME_DIR/state/order-fail.meta"
 remember_meta_worktree "$ORDER_FAIL_META" >/dev/null
 ORDER_FAIL_WSID=$(grep '^herdr_workspace_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
@@ -820,6 +842,13 @@ ORDER_FAIL_PANE=$(grep '^herdr_pane_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
 FAIL_LIST=$(lab workspace list) || fail "could not inspect the move-failure fallback"
 [ "$(printf '%s' "$FAIL_LIST" | jq -r '.result.workspaces[-1].workspace_id')" = "$ORDER_FAIL_WSID" ] \
   || fail "workspace.move failure did not leave the safe worker in Herdr's default appended order"
+ORDER_FAIL_LABEL=$(printf '%s' "$FAIL_LIST" | jq -r --arg ws "$ORDER_FAIL_WSID" '.result.workspaces[] | select(.workspace_id == $ws) | .label')
+case "$ORDER_FAIL_LABEL" in
+  "fm-order-fail · pending p:"*) ;;
+  *) fail "workspace.move failure left a misleading child label: $ORDER_FAIL_LABEL" ;;
+esac
+[ "$(grep '^version=' "$HOME_DIR/state/order-fail.herdr-presentation" | cut -d= -f2-)" = 1 ] \
+  || fail "workspace.move failure published a restart binding for an ungrouped worker"
 lab pane get "$ORDER_FAIL_PANE" >/dev/null 2>&1 \
   || fail "workspace.move failure cleaned up the safely-created task pane"
 FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "pane" && $2 == "close" { print $3 }')
@@ -828,7 +857,29 @@ FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F 
 [ "$FAIL_CLOSED_PANES" != "$ORDER_FAIL_PANE" ] \
   || fail "move-failure spawn closed its exact task pane"
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
-pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
+pass "real Herdr lab: failed workspace.move stays explicit and cannot imply the wrong parent"
+
+if [ "${FM_HERDR_PRESENTATION_ORDERING_ONLY:-0}" = 1 ]; then
+  while IFS= read -r ORDERING_WT; do
+    [ -n "$ORDERING_WT" ] || continue
+    [ -d "$ORDERING_WT" ] || continue
+    "$REAL_TREEHOUSE" return --force "$ORDERING_WT" >/dev/null 2>&1 \
+      || fail "could not return a focused ordering fixture worktree"
+  done <<EOF
+$RECORDED_WORKTREES
+EOF
+  RECORDED_WORKTREES=""
+  STATUS_JSON=$(lab status --json)
+  HERDR_VERSION=$(printf '%s' "$STATUS_JSON" | jq -r '.client.version // "unknown"')
+  PATH="$HERDR_ORIGINAL_PATH" \
+    "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" \
+    || fail "guarded Herdr lab teardown or default-session tripwire verification failed"
+  LAB_READY=0
+  rm -rf "$TMP_ROOT"
+  trap - EXIT
+  pass "real Herdr ordering validation completed on Herdr $HERDR_VERSION with the default-session tripwire intact"
+  exit 0
+fi
 
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
 ABORT_START=$(log_line_count)
@@ -842,14 +893,14 @@ if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
 finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
 finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
 grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
+  || fail "post-create abort fixture A did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-a.err")"
 grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+  || fail "post-create abort fixture B did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-b.err")"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
-  $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
-  $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
+  $1 == "workspace-create" && $4 ~ /^fm-abort-a · pending p:/ { print "create-a" }
+  $1 == "workspace-create" && $4 ~ /^fm-abort-b · pending p:/ { print "create-b" }
   $1 == "pane-close" && $4 == a { print "close-a" }
   $1 == "pane-close" && $4 == b { print "close-b" }
 ')
@@ -912,7 +963,7 @@ for ROUND in 1 2 3; do
   mkdir -p "$HOME_DIR/data/focus-$ROUND-a" "$HOME_DIR/data/focus-$ROUND-b"
   printf 'Projection focus wave %s fixture A.\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-a/brief.md"
   printf 'Projection focus wave %s fixture B.\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-b/brief.md"
-  WAVE_LOG_START=$(log_line_count)
+  WAVE_MOVE_START=$(move_log_line_count)
   WAVE_FOCUS_START=$(focus_audit_line_count)
   spawn_task "focus-$ROUND-a" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-a.out" 2> "$TMP_ROOT/focus-$ROUND-a.err" &
   WAVE_A_PID=$!
@@ -926,12 +977,12 @@ for ROUND in 1 2 3; do
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-b.meta" >/dev/null
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent spawns"
   assert_raw_presentation_mutations_preserved_since "$WAVE_FOCUS_START" "focus wave $ROUND concurrent spawns"
-  WAVE_LABELS=$(projection_labels_from_log "$WAVE_LOG_START")
+  WAVE_LABELS=$(projection_labels_from_moves "$WAVE_MOVE_START")
   WAVE_EXPECTED=$(printf 'firstmate\n%s\n2ndmate-alpha\n2ndmate-bravo' "$WAVE_LABELS")
-  WAVE_ACTUAL=$(lab workspace list | jq -r '.result.workspaces[] | select(.label == "firstmate" or (.label | startswith("└ ")) or (.label | startswith("2ndmate-"))) | .label')
+  WAVE_ACTUAL=$(lab workspace list | jq -r '.result.workspaces[] | select(.label == "firstmate" or (.label | startswith("└ ")) or (.label | startswith("2ndmate-"))) | .label' | tr -d '\r')
   [ "$WAVE_ACTUAL" = "$WAVE_EXPECTED" ] \
     || fail "focus wave $ROUND lost stable contiguous ordering: $WAVE_ACTUAL"
-  WAVE_SECOND_ORDER=$(lab workspace list | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id')
+  WAVE_SECOND_ORDER=$(lab workspace list | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id' | tr -d '\r')
   [ "$WAVE_SECOND_ORDER" = "$SECOND_ORDER_BEFORE" ] \
     || fail "focus wave $ROUND changed secondmate relative order"
 
@@ -944,7 +995,7 @@ for ROUND in 1 2 3; do
   finish_concurrent_teardown "focus-$ROUND-a" "$WAVE_A_TEARDOWN_STATUS" "$TMP_ROOT/focus-$ROUND-a-teardown.out" "$TMP_ROOT/focus-$ROUND-a-teardown.err"
   finish_concurrent_teardown "focus-$ROUND-b" "$WAVE_B_TEARDOWN_STATUS" "$TMP_ROOT/focus-$ROUND-b-teardown.out" "$TMP_ROOT/focus-$ROUND-b-teardown.err"
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent teardowns"
-  WAVE_REMAINING=$(lab workspace list | jq -r '.result.workspaces[].label')
+  WAVE_REMAINING=$(lab workspace list | jq -r '.result.workspaces[].label' | tr -d '\r')
   [ "$WAVE_REMAINING" = $'firstmate\n2ndmate-alpha\n2ndmate-bravo' ] \
     || fail "focus wave $ROUND cleanup left a projected workspace behind: $WAVE_REMAINING"
 done

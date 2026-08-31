@@ -112,8 +112,9 @@ Only the exact seeded default tab returned by the same workspace-create response
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
 
-Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
-`bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
+Protocol 16 exposes `workspace.move` over the named session transport but no CLI subcommand.
+`bin/backends/herdr-workspace-move.py` uses an AF_UNIX socket on Unix and Herdr's namespaced Windows named pipe on native Windows, sends only that whitelisted method, and verifies the complete returned workspace order.
+The small native Windows `herdr.sock` file is Herdr's server-ownership marker, not the communication endpoint; the mover maps the same configured path to the supported namespaced pipe.
 Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
 The shared lock namespace must be a current-user-owned, non-symlink directory; Linux and macOS additionally require mode `0700`.
 Native Windows Git Bash reports synthetic NTFS mode bits, so Firstmate does not treat its persistent `0755` report as privacy evidence and instead requires Windows PowerShell to prove that the directory is not a reparse point, is owned by the current identity, has a non-null DACL, and grants access only to that identity, SYSTEM, and built-in Administrators.
@@ -121,8 +122,10 @@ Existing legacy child labels may extend an already adjacent block read-only but 
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
 
 Ordering failure never fails the task spawn.
-Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
-The worker remains on the ordinary flat or Herdr-current-order path.
+A projected workspace begins with a top-level `fm-<id> · pending p:<token>` label that implies no parent.
+Only a verified move immediately after the exact parent and its existing contiguous child block permits the final `└ <id> · p:<token>` label and version 2 restart binding.
+Firstmate does not retry, adopt, reuse, close, or delete anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
+The worker remains alive in Herdr's current order with the provisional top-level label, an explicit warning, and no restart binding.
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.

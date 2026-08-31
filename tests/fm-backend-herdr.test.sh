@@ -2262,9 +2262,13 @@ test_projection_seeded_prune_refuses_active_tab() {
 }
 
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
-  local primary secondmate token
+  local pending primary secondmate token
   token='AbCdEfGhIjKlMnOpQrStUv'
   [ "${#token}" -eq 22 ] || fail "fixture token must be 22 characters"
+  pending=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_pending_workspace_label task-p2 '"$token" "$ROOT")
+  [ "$pending" = "fm-task-p2 · pending p:$token" ] \
+    || fail "provisional projection label was wrong: $pending"
+  case "$pending" in $'└ '*) fail "provisional projection label must not imply a parent" ;; esac
   primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label task-p2 '"$token" "$ROOT")
   [ "$primary" = "└ task-p2 · p:$token" ] \
     || fail "primary child label was wrong: $primary"
@@ -2282,6 +2286,27 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
     || fail "presentation fm- owner prefix was not stripped: $primary"
   case "$primary" in $'└ '*) ;; *) fail "label must start with U+2514 and one space" ;; esac
   pass "herdr presentation labels: └ concise-task · p:<full-token> for primary and secondmate children"
+}
+
+test_workspace_move_capability_rejects_unusable_transport() {
+  local dir log resp fb checker status
+  dir="$TMP_ROOT/workspace-move-transport"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; checker="$dir/checker"; : > "$log"
+  printf '%s\n' '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true}}' > "$resp/1.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/2.out"
+  cat > "$checker" <<'SH'
+#!/usr/bin/env bash
+exit 9
+SH
+  chmod +x "$checker"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVE_TRANSPORT_CHECKER="$checker" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_move_capable fmtest' "$ROOT"
+  status=$?
+  [ "$status" -eq 6 ] || fail "unusable native transport returned capability status $status instead of 6"
+  pass "herdr presentation ordering: capability rejects an unusable platform transport"
 }
 
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
@@ -2442,9 +2467,11 @@ SH
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate' "$ROOT" 2>&1)
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate; printf "\nverified=%s\n" "${FM_BACKEND_HERDR_PROJECTION_ORDER_VERIFIED:-unset}"' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "a workspace.move failure must not fail the projected spawn"
+  assert_contains "$out" "verified=0" \
+    "a failed workspace.move was marked as verified"
   assert_contains "$out" "workspace move failed or had an ambiguous response" \
     "workspace.move failure did not report the best-effort warning"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "workspace.move failure triggered workspace cleanup"
@@ -4782,6 +4809,7 @@ test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
+test_workspace_move_capability_rejects_unusable_transport
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block
 test_projection_order_foreign_legacy_child_is_read_only

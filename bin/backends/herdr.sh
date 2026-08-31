@@ -649,6 +649,14 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
+# fm_backend_herdr_projection_pending_workspace_label: provisional top-level
+# label used until exact owning-parent order is verified. It deliberately does
+# not use the child corner, so a failed or unavailable move cannot visually
+# imply that the worker belongs to an unrelated preceding workspace.
+fm_backend_herdr_projection_pending_workspace_label() {  # <task-id> <projection-id>
+  printf 'fm-%s · pending p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+}
+
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
 # path per live named Herdr session/socket, shared across every Firstmate home
 # that uses that session.
@@ -1027,9 +1035,10 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # the minimum protocol, and the exact whitelisted method and parameter
 # schema. Silent; each caller owns its own warning wording.
 # Return codes: 1 python3 missing, 2 protocol unreadable, 3 protocol too old,
-# 4 schema unreadable, 5 method or parameter schema unsupported.
+# 4 schema unreadable, 5 method or parameter schema unsupported,
+# 6 the platform transport is unusable.
 fm_backend_herdr_workspace_move_capable() {  # <session>
-  local session=$1 protocol schema
+  local session=$1 protocol schema checker
   command -v python3 >/dev/null 2>&1 || return 1
   protocol=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in
@@ -1042,6 +1051,8 @@ fm_backend_herdr_workspace_move_capable() {  # <session>
     and .schemas.request["$defs"].WorkspaceMoveParams.required == ["workspace_id", "insert_index"]
     and .schemas.request["$defs"].WorkspaceMoveParams.properties.insert_index.type == "integer"
   ' >/dev/null 2>&1 || return 5
+  checker=${FM_BACKEND_HERDR_WORKSPACE_MOVE_TRANSPORT_CHECKER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-workspace-move.py}
+  "$checker" --check-transport >/dev/null 2>&1 || return 6
 }
 
 # fm_backend_herdr_emptying_close_plan: choose the focus-safe removal for one
@@ -1345,6 +1356,8 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>]
   local session=$1 created=$2 parent=$3 parent_ws=${4:-} list analysis current desired socket mover response move_status focus_before move_capable
   local before_existing after_existing
+  # shellcheck disable=SC2034 # fm-spawn consumes this sourced-shell result flag.
+  FM_BACKEND_HERDR_PROJECTION_ORDER_VERIFIED=0
   [ -n "$parent" ] || {
     echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
     return 0
@@ -1431,7 +1444,11 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       return 0
       ;;
   esac
-  [ "$current" != "$desired" ] || return 0
+  if [ "$current" = "$desired" ]; then
+    # shellcheck disable=SC2034 # fm-spawn consumes this sourced-shell result flag.
+    FM_BACKEND_HERDR_PROJECTION_ORDER_VERIFIED=1
+    return 0
+  fi
 
   if fm_backend_herdr_workspace_move_capable "$session"; then
     move_capable=0
@@ -1456,6 +1473,10 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       echo "warning: herdr presentation ordering could not read the API schema; leaving worker in Herdr's current order" >&2
       return 0
       ;;
+    6)
+      echo "warning: herdr presentation ordering has no verified local transport for this named session; leaving worker in Herdr's current order" >&2
+      return 0
+      ;;
     *)
       echo "warning: herdr presentation ordering API support is unavailable or ambiguous; leaving worker in Herdr's current order" >&2
       return 0
@@ -1471,7 +1492,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering could not capture exact active workspace and tab; leaving worker in Herdr's current order" >&2
     return 0
   }
-  if response=$("$mover" "$socket" "$created" "$desired" 2>/dev/null); then
+  if response=$("$mover" "$socket" "$created" "$desired"); then
     move_status=0
   else
     move_status=$?
@@ -1505,8 +1526,43 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   after_existing=$(printf '%s' "$response" | jq -c --arg created "$created" '[.result.workspaces[] | select(.workspace_id != $created) | .workspace_id]' 2>/dev/null)
   if [ "$after_existing" != "$before_existing" ]; then
     echo "warning: herdr presentation workspace move did not preserve relative order; leaving worker running without cleanup" >&2
+    return 0
   fi
+  # shellcheck disable=SC2034 # fm-spawn consumes this sourced-shell result flag.
+  FM_BACKEND_HERDR_PROJECTION_ORDER_VERIFIED=1
   return 0
+}
+
+# fm_backend_herdr_projection_finalize_workspace_label: publish the child-style
+# label only after exact owning-parent order is verified. The exact workspace id
+# is the only mutation target, and the active workspace/tab is restored and
+# reverified around the rename.
+fm_backend_herdr_projection_finalize_workspace_label() {  # <session> <workspace-id> <label>
+  local session=$1 workspace_id=$2 label=$3 focus_before response
+  [ -n "$session" ] && [ -n "$workspace_id" ] && [ -n "$label" ] || return 1
+  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "warning: herdr presentation could not capture exact focus before finalizing the worker label; leaving its top-level provisional label" >&2
+    return 1
+  }
+  if response=$(fm_backend_herdr_cli "$session" workspace rename "$workspace_id" "$label" 2>/dev/null); then
+    :
+  else
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "workspace label finalize" || true
+    echo "warning: herdr presentation could not finalize the exact worker label; leaving its top-level provisional label" >&2
+    return 1
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "workspace label finalize" || {
+    echo "warning: herdr presentation label finalization did not preserve exact active focus; withholding restart binding" >&2
+    return 1
+  }
+  printf '%s' "$response" | jq -e --arg workspace "$workspace_id" --arg label "$label" '
+    .result.type == "workspace_info"
+    and .result.workspace.workspace_id == $workspace
+    and .result.workspace.label == $label
+  ' >/dev/null 2>&1 || {
+    echo "warning: herdr presentation label finalization returned an unverifiable workspace; withholding restart binding" >&2
+    return 1
+  }
 }
 
 # fm_backend_herdr_server_ensure: start the herdr server for <session>
