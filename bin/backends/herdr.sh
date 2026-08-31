@@ -824,24 +824,18 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
   return 0
 }
 
-# fm_backend_herdr_projection_close_pane_focus_preserving: close one exact
-# response-derived projection pane without leaving the captain focused
-# anywhere else.
-# If the target belongs to the active tab, exact tab preservation is
-# impossible, so cleanup refuses instead of changing focus.
-# When the close would empty the target workspace, Herdr 0.7.5's explicit
-# close moves focus to the workspace's neighbor, so the close is planned by
-# fm_backend_herdr_emptying_close_plan: reposition the doomed workspace
-# behind the focused one when needed, then end the pane's verified lone idle
-# shell so Herdr removes the emptied workspace through its focus-preserving
-# pane-death path. The exact-tab restore below remains the backstop, and any
-# ambiguity falls back to the plain explicit close, which the backstop masks
-# exactly as before this hardening.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
-  local session=$1 pane_id=$2 required_agent_state=${3:-}
-  local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
-  FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
-  [ -n "$pane_id" ] || return 0
+# fm_backend_herdr_projection_pane_focus_precheck: read-only check for
+# whether closing <pane-id> could preserve focus. Sets
+# FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE and
+# FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS on success for a caller that
+# goes on to perform the close. Callers that only need to know whether a
+# later close would refuse - for example a teardown preflight run before any
+# destructive step - can call this alone and act on its exit status.
+fm_backend_herdr_projection_pane_focus_precheck() {  # <session> <pane-id>
+  local session=$1 pane_id=$2
+  local before active_tab info target_pane target_tab target_ws
+  FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE=""
+  FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS=""
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe pane close" >&2
     return 1
@@ -862,6 +856,34 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
     return 1
   fi
+  FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE=$before
+  FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS=$target_ws
+  return 0
+}
+
+# fm_backend_herdr_projection_close_pane_focus_preserving: close one exact
+# response-derived projection pane without leaving the captain focused
+# anywhere else.
+# If the target belongs to the active tab, exact tab preservation is
+# impossible, so cleanup refuses instead of changing focus - see
+# fm_backend_herdr_projection_pane_focus_precheck, the single owner of that
+# up-front check.
+# When the close would empty the target workspace, Herdr 0.7.5's explicit
+# close moves focus to the workspace's neighbor, so the close is planned by
+# fm_backend_herdr_emptying_close_plan: reposition the doomed workspace
+# behind the focused one when needed, then end the pane's verified lone idle
+# shell so Herdr removes the emptied workspace through its focus-preserving
+# pane-death path. The exact-tab restore below remains the backstop, and any
+# ambiguity falls back to the plain explicit close, which the backstop masks
+# exactly as before this hardening.
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
+  local session=$1 pane_id=$2 required_agent_state=${3:-}
+  local before target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
+  FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
+  [ -n "$pane_id" ] || return 0
+  fm_backend_herdr_projection_pane_focus_precheck "$session" "$pane_id" || return 1
+  before=$FM_BACKEND_HERDR_PROJECTION_FOCUS_BEFORE
+  target_ws=$FM_BACKEND_HERDR_PROJECTION_FOCUS_TARGET_WS
   if [ -n "$required_agent_state" ]; then
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state

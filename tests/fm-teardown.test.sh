@@ -2016,6 +2016,122 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
+# Same fixture shape as configure_herdr_projection_teardown_case, except
+# workspace w1 - the workspace carrying the tracked presentation pane - is the
+# one reported focused, so the eventual close would target the captain's
+# active tab and must refuse (see fm_backend_herdr_projection_pane_focus_precheck).
+configure_herdr_projection_focused_tab_case() {  # <case-dir>
+  local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
+  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t2' \
+    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'version=1' \
+    'task_id=task-x1' \
+    "projection_id=$token" > "$case_dir/state/task-x1.herdr-presentation"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "workspace list")
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false}]}}'
+    ;;
+  "tab list")
+    case "$*" in
+      *"--workspace w1"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","focused":true}]}}' ;;
+      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    esac
+    ;;
+  "status --json")
+    printf '%s\n' '{"server":{"running":true}}'
+    ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}'
+    ;;
+  "pane get")
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
+    ;;
+  "pane close")
+    : > "${FM_FAKE_HERDR_CLOSE_ATTEMPTED:?}"
+    ;;
+  "agent get")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
+# treehouse succeeds instantly but leaves a marker behind whenever `return` is
+# invoked, so a test can assert the pool worktree slot was never reclaimed.
+add_marker_treehouse() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  : > "${TREEHOUSE_RETURN_MARKER:?}"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# Reproduces the reported ordering bug: the tracked presentation pane is the
+# captain's active tab, so the close refuses ("cannot preserve focus"). On
+# unfixed teardown this refusal is only discovered after the pool worktree
+# slot has already been returned, so records are retained pointing at a slot
+# a later rerun could reassign and reset out from under a new task. The fix
+# must detect this refusal before the pool slot is touched, refusing the
+# whole teardown with everything left intact for a plain rerun.
+test_herdr_projection_teardown_refuses_before_reclaiming_pool_slot_when_pane_is_focused() {
+  local case_dir log returned closed rc
+  case_dir=$(make_case herdr-projection-focused-tab)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_focused_tab_case "$case_dir"
+  add_marker_treehouse "$case_dir"
+  log="$case_dir/herdr.log"; returned="$case_dir/treehouse-returned"; closed="$case_dir/pane-closed"
+  : > "$log"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSE_ATTEMPTED="$closed" TREEHOUSE_RETURN_MARKER="$returned" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-projection-focused-tab: teardown succeeded while the presentation pane was the captain's active tab"
+  [ ! -e "$returned" ] \
+    || fail "herdr-projection-focused-tab: the pool worktree slot was reclaimed before the focused-tab refusal"
+  [ ! -e "$closed" ] \
+    || fail "herdr-projection-focused-tab: teardown attempted to close the captain's active tab"
+  [ -d "$case_dir/wt" ] \
+    || fail "herdr-projection-focused-tab: the task worktree was removed despite the refused teardown"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-projection-focused-tab: task records were removed despite the refused teardown"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-projection-focused-tab: the presentation journal was removed despite the refused teardown"
+  assert_grep "captain's active tab" "$case_dir/stderr" \
+    "herdr-projection-focused-tab: teardown did not explain the focus-unsafe refusal"
+
+  # A rerun with nothing changed must repeat the same clean refusal, never a
+  # slot reset: this is the regression's safe-rerun guarantee.
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSE_ATTEMPTED="$closed" TREEHOUSE_RETURN_MARKER="$returned" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-projection-focused-tab: teardown rerun succeeded while the pane was still the captain's active tab"
+  [ ! -e "$returned" ] \
+    || fail "herdr-projection-focused-tab: teardown rerun reclaimed the pool worktree slot"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-projection-focused-tab: teardown rerun removed task records instead of refusing cleanly"
+  pass "herdr projection teardown refuses up front, before reclaiming the pool slot, when the tracked pane is the captain's active tab, and reruns stay a safe refusal"
+}
+
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
 # worker is removed, and Fix 2: reap leaked descendant processes rooted under
 # the task's own worktree/tasktmp - both exercised through the real teardown
@@ -2625,6 +2741,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
+test_herdr_projection_teardown_refuses_before_reclaiming_pool_slot_when_pane_is_focused
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
