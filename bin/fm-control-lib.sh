@@ -233,12 +233,16 @@ fm_control_harness_kind_refusal() {  # <harness> <kind>
       # The remedy is per KIND because the resolution chains differ, and naming a
       # knob that cannot clear the refusal sends an operator to edit the wrong
       # file and hit the identical message again. A secondmate resolves through
-      # config/secondmate-harness FIRST (bin/fm-harness.sh's resolve_secondmate),
-      # so crew-harness alone cannot clear it, and crew-dispatch profiles are
-      # never consulted for a secondmate at all. It stays here rather than at the
-      # call sites so the one owner of the refusal owns its remedy too.
+      # config/secondmate-harness FIRST and falls back to config/crew-harness
+      # (bin/fm-harness.sh's resolve_secondmate), so BOTH knobs are named with the
+      # condition under which each works: naming only the first would be true but
+      # incomplete, and denying the second outright would be false in exactly the
+      # inherited-by-detection case this message opens with, where both are unset.
+      # crew-dispatch profiles are never consulted for a secondmate at all. It
+      # stays here rather than at the call sites so the one owner of the refusal
+      # owns its remedy too.
       case "$kind" in
-        secondmate) cursor_remedy='set config/secondmate-harness to a verified adapter such as codex or claude; it resolves ahead of config/crew-harness, so changing crew-harness alone will not clear this, and crew-dispatch profiles are not consulted for a secondmate' ;;
+        secondmate) cursor_remedy='set config/secondmate-harness to a verified adapter such as codex or claude, which always governs a secondmate, or set config/crew-harness while config/secondmate-harness is unset or "default", since a secondmate resolves the former first and falls back to the latter; crew-dispatch profiles are not consulted for a secondmate' ;;
         *) cursor_remedy='set config/crew-harness to a verified adapter such as codex or claude, or add a crew-dispatch profile eligible for this kind' ;;
       esac
       printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. The bar applies however cursor was selected, INCLUDING when firstmate inherited it by detecting its own runtime, because silently substituting another tool would change which adapter runs the captain's work without saying so. If this home is running inside cursor and resolved it that way, %s; firstmate will not choose one for you. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the invocation itself with --cursor-exemption attended or --cursor-exemption envelope:<name>, which both bin/fm-spawn.sh and bin/fm-control.sh's relaunch verb accept." "$kind" "$cursor_remedy"
