@@ -650,6 +650,14 @@ test_spawn_unattended_cursor_secondmate_is_refused() {
     "the secondmate refusal must name the knob that governs secondmate resolution"
   assert_not_contains "$out" "add a crew-dispatch profile" \
     "a secondmate refusal must not offer a dispatch profile, which it never consults"
+  # resolve_secondmate falls back to config/crew-harness while
+  # config/secondmate-harness is unset or "default", which is the state the
+  # inherited-by-detection case this message opens with is actually in, so the
+  # remedy must offer that knob under its condition rather than deny it.
+  assert_contains "$out" "config/crew-harness" \
+    "the secondmate refusal must also offer the knob it falls back to"
+  assert_not_contains "$out" "changing crew-harness alone will not clear this" \
+    "the remedy must not deny a knob that does clear the refusal when secondmate-harness is unset"
   pass "an unattended Cursor secondmate is refused before it can stall invisibly, naming the knob that clears it"
 }
 
