@@ -76,13 +76,22 @@ fs.symlinkSync = function (source, target, type) {
   return result;
 };
 JS
+  cat > "$fakebin/node-ambient-hook.cjs" <<'JS'
+const fs = require('node:fs');
+const symlinkSync = fs.symlinkSync;
+
+fs.symlinkSync = function (source, target, type) {
+  symlinkSync.call(this, source, target, type);
+  throw new Error('ambient preload ran');
+};
+JS
   local real_node
   real_node=$(command -v node)
   cat > "$fakebin/node" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_KILL_NODE_MODULES_PUBLISHER:-0}" = 1 ]; }; then
-  export NODE_OPTIONS="--require=$fakebin/node-race-hook.cjs"
+  exec "$real_node" --require="$fakebin/node-race-hook.cjs" "\$@"
 fi
 exec "$real_node" "\$@"
 SH
@@ -314,6 +323,22 @@ test_spawn_preserves_backing_after_ambiguous_publisher_exit() {
   pass "fm-spawn retains dependency backing after ambiguous publisher exit"
 }
 
+test_spawn_isolates_publisher_from_ambient_node_options() {
+  local rec id out status publication
+  id=node-modules-node-options-z9
+  rec=$(make_case ambient-node-options "$id")
+  read_case "$rec"
+
+  out=$(NODE_OPTIONS="--require=$FAKEBIN_DIR/node-ambient-hook.cjs" run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should isolate dependency publication from ambient Node options"
+  assert_contains "$out" "spawned $id" "isolated dependency publication did not launch the worker"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "ambient Node options prevented dependency publication"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$publication" ] || fail "ambient Node options left dependency publication dangling"
+  pass "fm-spawn isolates dependency publication from ambient Node options"
+}
+
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_ignores_published_beeline_consumers
@@ -322,5 +347,6 @@ test_spawn_cleans_staging_after_setup_failure
 test_spawn_cancels_after_staging_registration_interrupt
 test_spawn_preserves_publication_after_interrupt
 test_spawn_preserves_backing_after_ambiguous_publisher_exit
+test_spawn_isolates_publisher_from_ambient_node_options
 
 echo "# all fm-spawn-node-modules tests passed"

@@ -1405,12 +1405,12 @@ share_beeline_node_modules() {
 
   exclude_path '.fm-node-modules.*/'
   publication_link=$(basename "$staging_root")
-  NODE_MODULES_ABORT_CLEANUP=0
   publication_signal_status=
   trap 'publication_signal_status=130' INT
   trap 'publication_signal_status=143' TERM
+  NODE_MODULES_ABORT_CLEANUP=0
   publish_status=0
-  node - "$publication_link" "$target" <<'JS' || publish_status=$?
+  env -u NODE_OPTIONS node - "$publication_link" "$target" <<'JS' || publish_status=$?
 const fs = require('node:fs');
 
 process.on('SIGINT', () => {});
@@ -1423,7 +1423,6 @@ try {
   process.exit(4);
 }
 JS
-  trap - INT TERM
   case "$publish_status" in
     0)
       NODE_MODULES_ABORT_STAGING=
@@ -1435,6 +1434,7 @@ JS
     *)
       ;;
   esac
+  trap - INT TERM
   [ -z "$publication_signal_status" ] || return "$publication_signal_status"
   case "$publish_status" in
     0|3) ;;
