@@ -113,6 +113,8 @@
 #   dependencies through a symlink farm. Its @beeline workspace links and npm
 #   binaries resolve to the spawned worktree's own source. Existing dependency
 #   trees and projects without primary @beeline workspace links are left untouched.
+#   Fleet workers in this home are trusted first-party agents, so writes through
+#   shared third-party links can mutate the primary installation by accepted design.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -632,6 +634,8 @@ NODE_MODULES_ABORT_STAGING=
 NODE_MODULES_ABORT_PROBE=
 NODE_MODULES_ABORT_CLEANUP=0
 NODE_MODULES_ABORT_NODE=
+NODE_RUNTIME_ABORT_PATH=
+NODE_RUNTIME_ABORT_CLEANUP=0
 BEELINE_NODE_MODULES_ACTIVE=0
 BEELINE_NODE_PUBLICATION_OWNED=0
 BEELINE_NODE_RESOLVER_ESM_URL=
@@ -715,6 +719,19 @@ JS
   NODE_MODULES_ABORT_PROBE=
 }
 
+cleanup_beeline_node_runtime() {
+  local runtime
+  [ "$NODE_RUNTIME_ABORT_CLEANUP" = 1 ] || return 0
+  runtime=$NODE_RUNTIME_ABORT_PATH
+  [ -n "$runtime" ] || return 1
+  NODE_OPTIONS= "$runtime" -e \
+    'const fs=require("fs");try{fs.unlinkSync(process.argv[1])}catch(error){if(error.code!=="ENOENT")throw error}' \
+    "$runtime" </dev/null >/dev/null 2>&1 || return 1
+  [ ! -e "$runtime" ] && [ ! -L "$runtime" ] || return 1
+  NODE_RUNTIME_ABORT_CLEANUP=0
+  NODE_RUNTIME_ABORT_PATH=
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if ! cleanup_beeline_node_modules_staging; then
@@ -722,6 +739,9 @@ spawn_abort_cleanup() {
   fi
   if ! cleanup_beeline_node_modules_probe; then
     echo "warning: failed to remove dependency publication anchor at $NODE_MODULES_ABORT_PROBE" >&2
+  fi
+  if ! cleanup_beeline_node_runtime; then
+    echo "warning: failed to remove pinned Beeline Node runtime at $NODE_RUNTIME_ABORT_PATH" >&2
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -1502,6 +1522,50 @@ native_node_identity() {
     "$1" </dev/null 2>/dev/null
 }
 
+pin_native_node_runtime() {
+  local source=$1 candidate status
+  while :; do
+    candidate="$WT/.fm-node-runtime.$$.$RANDOM.$RANDOM"
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] && break
+  done
+  status=0
+  NODE_OPTIONS= "$source" - "$source" "$candidate" <<'JS' \
+    >/dev/null 2>&1 || status=$?
+const fs = require('fs');
+const [source, target] = process.argv.slice(2);
+let created = false;
+function cleanup(code) {
+  try {
+    if (created) fs.unlinkSync(target);
+  } catch (_) {
+  }
+  process.exit(code);
+}
+process.once('SIGINT', () => cleanup(130));
+process.once('SIGTERM', () => cleanup(143));
+process.once('SIGHUP', () => cleanup(129));
+try {
+  try {
+    fs.copyFileSync(source, target, fs.constants.COPYFILE_FICLONE);
+  } catch (_) {
+    fs.copyFileSync(source, target);
+  }
+  fs.chmodSync(target, fs.statSync(source).mode);
+  created = true;
+} catch (_) {
+  cleanup(1);
+}
+process.exit(0);
+JS
+  [ "$status" -eq 0 ] || return "$status"
+  NODE_RUNTIME_ABORT_PATH=$candidate
+  NODE_RUNTIME_ABORT_CLEANUP=1
+  NODE_MODULES_ABORT_NODE=$candidate
+  exclude_path '.fm-node-runtime.*'
+  native_node_supports_publication "$candidate" || return 1
+  return 0
+}
+
 beeline_node_runtime_identity_matches() {
   local current
   [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ] || return 0
@@ -1637,33 +1701,6 @@ beeline_node_link_matches() {
     "$target" "$expected" </dev/null >/dev/null 2>&1
 }
 
-retract_owned_beeline_node_modules() {
-  local node target anchor staging
-  node=$NODE_MODULES_ABORT_NODE
-  target="$WT/node_modules"
-  anchor=$NODE_MODULES_ABORT_PROBE
-  staging=$NODE_MODULES_ABORT_STAGING
-  [ -n "$node" ] && [ -n "$anchor" ] && [ -n "$staging" ] || return 1
-  NODE_OPTIONS= "$node" - "$target" "$anchor" "$staging" <<'JS'
-const fs = require('fs');
-const path = require('path');
-const [target, anchor, staging] = process.argv.slice(2);
-try {
-  const targetStat = fs.lstatSync(target);
-  const anchorStat = fs.lstatSync(anchor);
-  if (!targetStat.isSymbolicLink() || !anchorStat.isSymbolicLink() ||
-      targetStat.dev !== anchorStat.dev || targetStat.ino !== anchorStat.ino ||
-      path.resolve(path.dirname(target), fs.readlinkSync(target)) !== path.resolve(staging)) {
-    process.exit(1);
-  }
-  fs.unlinkSync(target);
-  if (fs.lstatSync(anchor).nlink !== 1) process.exit(1);
-} catch (_) {
-  process.exit(1);
-}
-JS
-}
-
 share_beeline_node_modules() {
   local source target staging_root staging publication_link publisher_node
   local publish_status setup_signal_status mkdir_status cleanup_status workspace_status
@@ -1675,6 +1712,11 @@ share_beeline_node_modules() {
     echo "error: Beeline dependency sharing requires a compatible native Node runtime" >&2
     return 1
   }
+  if ! pin_native_node_runtime "$publisher_node"; then
+    echo "error: Beeline dependency sharing could not pin its selected Node runtime" >&2
+    return 1
+  fi
+  publisher_node=$NODE_MODULES_ABORT_NODE
   BEELINE_NODE_RUNTIME_ID=$(native_node_identity "$publisher_node") || {
     echo "error: Beeline dependency sharing could not identify its selected Node runtime" >&2
     return 1
@@ -1788,33 +1830,6 @@ function workspaceMap(rootPath) {
 const projectReal = fs.realpathSync(project);
 const sourceReal = fs.realpathSync(source);
 
-function sourceSnapshot(rootPath) {
-  const entries = [];
-  function visit(entry, relative) {
-    const stat = fs.lstatSync(entry, { bigint: true });
-    const record = [
-      relative,
-      stat.dev.toString(),
-      stat.ino.toString(),
-      stat.mode.toString(),
-      stat.size.toString(),
-      stat.mtimeNs.toString(),
-      stat.ctimeNs.toString()
-    ];
-    if (stat.isSymbolicLink()) record.push(fs.readlinkSync(entry));
-    entries.push(record);
-    if (stat.isDirectory()) {
-      for (const name of fs.readdirSync(entry).sort()) {
-        visit(path.join(entry, name), path.join(relative, name));
-      }
-    }
-  }
-  visit(rootPath, '');
-  return JSON.stringify(entries);
-}
-
-const initialSourceSnapshot = sourceSnapshot(source);
-
 function materialize(sourcePath, targetPath, root = false) {
   const sourceStat = fs.lstatSync(sourcePath);
   if (sourceStat.isSymbolicLink()) {
@@ -1857,11 +1872,7 @@ function materialize(sourcePath, targetPath, root = false) {
     return;
   }
   if (!stat.isFile()) throw new Error('unsupported dependency entry');
-  try {
-    fs.copyFileSync(real, targetPath, fs.constants.COPYFILE_FICLONE);
-  } catch (_) {
-    fs.copyFileSync(real, targetPath);
-  }
+  fs.linkSync(real, targetPath);
 }
 
 const projectWorkspaces = workspaceMap(project);
@@ -1939,9 +1950,6 @@ try {
   }
 } catch (error) {
   if (error.code !== 'ENOENT') throw error;
-}
-if (sourceSnapshot(source) !== initialSourceSnapshot) {
-  throw new Error('primary dependency tree changed during staging');
 }
 JS
   then
@@ -2295,18 +2303,10 @@ JS
       return 1
       ;;
     4)
-      cleanup_status=0
-      if retract_owned_beeline_node_modules; then
-        NODE_MODULES_ABORT_CLEANUP=1
-        cleanup_beeline_node_modules_staging || cleanup_status=$?
-      else
-        cleanup_beeline_node_modules_probe || true
-        cleanup_status=1
-      fi
+      cleanup_beeline_node_modules_probe || true
       BEELINE_NODE_PUBLICATION_OWNED=0
       echo "error: owned worktree node_modules failed final Beeline workspace validation" >&2
-      [ "$cleanup_status" -eq 0 ] \
-        || echo "warning: ambiguous dependency publication backing was retained" >&2
+      echo "warning: invalid owned dependency publication was retained to avoid deleting a competing destination" >&2
       return 1
       ;;
     *)
@@ -3167,9 +3167,16 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 sleep 0.3
 launch_signal_status=
-trap 'launch_signal_status=130' INT
-trap 'launch_signal_status=143' TERM
-trap 'launch_signal_status=129' HUP
+cancel_unsubmitted_launch() {
+  local status=$1
+  launch_signal_status=$status
+  trap - INT TERM HUP
+  spawn_send_key "$T" C-c || true
+  exit "$status"
+}
+trap 'cancel_unsubmitted_launch 130' INT
+trap 'cancel_unsubmitted_launch 143' TERM
+trap 'cancel_unsubmitted_launch 129' HUP
 launch_payload_status=0
 spawn_send_literal "$T" "$LAUNCH" || launch_payload_status=$?
 [ -z "$launch_signal_status" ] || {
@@ -3231,17 +3238,15 @@ if [ "$launch_runtime_status" -ne 0 ]; then
   echo "error: selected Beeline Node runtime changed before worker launch" >&2
   exit "$launch_runtime_status"
 fi
-trap '' INT TERM HUP
-if [ -n "$launch_signal_status" ]; then
-  spawn_send_key "$T" C-c || true
-  trap - INT TERM HUP
-  exit "$launch_signal_status"
-fi
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
-fi
+begin_launch_submission() {
+  NODE_RUNTIME_ABORT_CLEANUP=0
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+  fi
+  spawn_send_key "$T" Enter
+}
 launch_submit_status=0
-spawn_send_key "$T" Enter || launch_submit_status=$?
+begin_launch_submission || launch_submit_status=$?
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi

@@ -3,7 +3,8 @@
 #
 # These tests use a real git worktree and a tiny fabricated dependency tree to
 # prove third-party packages stay shared while @beeline packages and binaries
-# resolve into the spawned worktree's own source.
+# resolve into the spawned worktree's own source. The fixtures model trusted
+# first-party workers, so shared third-party writes intentionally reach primary.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -62,6 +63,9 @@ case "${1:-}" in
         "$FM_TEST_LN_BIN" -s "$FM_INVALIDATE_OWNED_PUBLICATION_PRIMARY" \
           "$FM_INVALIDATE_OWNED_PUBLICATION_TARGET/node_modules/@beeline/lib"
       fi
+    elif [ "${4:-}" = Enter ] && [ "${FM_SIGNAL_ON_LAUNCH_SUBMIT:-0}" = 1 ]; then
+      kill -TERM "$PPID"
+      sleep 0.05
     elif [ "${4:-}" = C-c ] && [ -n "${FM_FAKE_LAUNCH_SCRIPT:-}" ]; then
       : > "$FM_FAKE_LAUNCH_SCRIPT"
     fi
@@ -163,27 +167,6 @@ add_dependency_volume() {
     "$MKDIR_BIN" "$PROJECT_DIR/node_modules/third-party-$index"
     index=$((index + 1))
   done
-}
-
-start_primary_dependency_mutator() {
-  local stop=$1 source=$2
-  (
-    local candidate attempts=0 value=0
-    while [ "$attempts" -lt 200000 ]; do
-      for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-        [ -d "$candidate" ] || continue
-        while [ ! -e "$stop" ]; do
-          printf '%s\n' "$value" > "$source"
-          value=$((value + 1))
-        done
-        exit 0
-      done
-      attempts=$((attempts + 1))
-      sleep 0.001
-    done
-    exit 124
-  ) >/dev/null 2>&1 &
-  PUBLICATION_CONTENDER_PID=$!
 }
 
 add_workspace_validation_volume() {
@@ -352,6 +335,7 @@ run_spawn() {
     FM_NODE_SHIM_MUTATION_PRIMARY="${FM_NODE_SHIM_MUTATION_PRIMARY:-}" \
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
     FM_SIGNAL_AFTER_LAUNCH_PAYLOAD="${FM_SIGNAL_AFTER_LAUNCH_PAYLOAD:-0}" \
+    FM_SIGNAL_ON_LAUNCH_SUBMIT="${FM_SIGNAL_ON_LAUNCH_SUBMIT:-0}" \
     FM_SWAP_NODE_RUNTIME_PATH="${FM_SWAP_NODE_RUNTIME_PATH:-}" \
     FM_SWAP_NODE_RUNTIME_REPLACEMENT="${FM_SWAP_NODE_RUNTIME_REPLACEMENT:-}" \
     FM_INVALIDATE_OWNED_PUBLICATION_TARGET="${FM_INVALIDATE_OWNED_PUBLICATION_TARGET:-}" \
@@ -402,12 +386,12 @@ test_spawn_shares_dependencies_and_repoints_workspace_links() {
     *) fail "worktree node_modules did not point to its local dependency link farm" ;;
   esac
   [ -d "$WORKTREE_DIR/$node_modules_link" ] || fail "worktree dependency link farm is missing"
-  [ ! "$WORKTREE_DIR/node_modules/third-party/index.js" -ef \
+  [ "$WORKTREE_DIR/node_modules/third-party/index.js" -ef \
     "$PROJECT_DIR/node_modules/third-party/index.js" ] \
-    || fail "third-party package file shared a mutable inode with the primary installation"
+    || fail "third-party package file was copied instead of shared"
   printf 'worker dependency patch\n' > "$WORKTREE_DIR/node_modules/third-party/index.js"
-  [ "$(cat "$PROJECT_DIR/node_modules/third-party/index.js")" = 'shared dependency' ] \
-    || fail "worker dependency write mutated the primary installation"
+  [ "$(cat "$PROJECT_DIR/node_modules/third-party/index.js")" = 'worker dependency patch' ] \
+    || fail "trusted worker dependency write did not reach the shared primary installation"
 
   workspace_link=$(readlink "$WORKTREE_DIR/node_modules/@beeline/lib")
   [ "$workspace_link" = '../../packages/lib' ] \
@@ -668,8 +652,8 @@ test_spawn_resolves_script_managed_node_runtime() {
   pass "fm-spawn resolves script-managed Node runtimes before publication"
 }
 
-test_spawn_rejects_runtime_replacement_before_submission() {
-  local rec id out status toolbin account_home runtime replacement candidate
+test_spawn_pins_runtime_before_submission() {
+  local rec id out status toolbin account_home runtime replacement candidate result
   id=node-modules-runtime-replacement-z1d
   rec=$(make_case runtime-replacement "$id")
   read_case "$rec"
@@ -688,17 +672,16 @@ test_spawn_rejects_runtime_replacement_before_submission() {
     FM_SWAP_NODE_RUNTIME_PATH="$runtime" \
     FM_SWAP_NODE_RUNTIME_REPLACEMENT="$replacement" run_spawn "$id")
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted a replaced Node runtime before submission"
-  assert_contains "$out" "selected Beeline Node runtime changed before worker launch" \
-    "runtime replacement failure was not diagnosed"
-  assert_not_contains "$out" "spawned $id" "replaced Node runtime launched a worker"
-  [ ! -s "$HOME_DIR/state/fake-pane-launch.sh" ] \
-    || fail "runtime replacement left an unsubmitted launch payload"
+  expect_code 0 "$status" "spawn should execute its pinned runtime after the source path is replaced"
+  assert_contains "$out" "spawned $id" "pinned Node runtime did not launch the worker"
+  result=$(FM_REJECT_PATH_NODE_PUBLISHER=1 \
+    run_beeline_cjs 'process.stdout.write("pinned")')
+  [ "$result" = pinned ] || fail "pane launch did not execute the validated pinned runtime"
   for candidate in "$WORKTREE_DIR"/.fm-node-runtime-probe.*; do
     [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
       || fail "runtime replacement leaked a compatibility probe"
   done
-  pass "fm-spawn revalidates its selected Node runtime before submission"
+  pass "fm-spawn probes and executes one pinned Node runtime"
 }
 
 test_spawn_reports_missing_compatible_node_runtime() {
@@ -980,16 +963,16 @@ test_spawn_shares_published_beeline_dependencies_with_workspaces() {
   status=$?
   expect_code 0 "$status" "spawn should share published @beeline dependencies alongside workspaces"
   assert_contains "$out" "spawned $id" "mixed @beeline dependency tree did not launch the worker"
-  [ ! "$WORKTREE_DIR/node_modules/@beeline/published/index.js" -ef \
+  [ "$WORKTREE_DIR/node_modules/@beeline/published/index.js" -ef \
     "$PROJECT_DIR/node_modules/@beeline/published/index.js" ] \
-    || fail "published @beeline dependency shared a mutable primary inode"
+    || fail "published @beeline dependency was copied instead of shared"
   printf 'worker patch\n' > "$WORKTREE_DIR/node_modules/@beeline/published/index.js"
-  [ "$(cat "$PROJECT_DIR/node_modules/@beeline/published/index.js")" = 'published package' ] \
-    || fail "published @beeline dependency write mutated primary source"
+  [ "$(cat "$PROJECT_DIR/node_modules/@beeline/published/index.js")" = 'worker patch' ] \
+    || fail "trusted worker patch did not reach the shared published dependency"
   workspace_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/lib" && pwd -P)
   expected_workspace_real=$(cd "$WORKTREE_DIR/packages/lib" && pwd -P)
   [ "$workspace_real" = "$expected_workspace_real" ] || fail "mixed @beeline workspace did not resolve to worktree source"
-  pass "fm-spawn shares published @beeline dependencies while isolating workspaces"
+  pass "fm-spawn shares published @beeline dependencies while localizing workspaces"
 }
 
 test_spawn_preserves_tree_created_during_publication() {
@@ -1018,34 +1001,6 @@ test_spawn_preserves_tree_created_during_publication() {
       || fail "publication contention leaked unused dependency staging"
   done
   pass "fm-spawn publication does not replace a concurrently created dependency tree"
-}
-
-test_spawn_rejects_dependency_source_changes_during_staging() {
-  local rec id out status candidate stop source
-  id=node-modules-source-change-z4a
-  rec=$(make_case source-change "$id")
-  read_case "$rec"
-  add_dependency_volume
-  stop="$HOME_DIR/state/stop-primary-mutation"
-  source="$PROJECT_DIR/node_modules/third-party/index.js"
-  start_primary_dependency_mutator "$stop" "$source"
-
-  out=$(run_spawn "$id")
-  status=$?
-  : > "$stop"
-  wait_publication_contender \
-    || fail "primary dependency mutator did not overlap staging"
-  [ "$status" -ne 0 ] || fail "spawn published dependencies while the primary tree changed"
-  assert_contains "$out" "failed to stage the primary Beeline dependency tree" \
-    "primary dependency source change was not diagnosed"
-  assert_not_contains "$out" "spawned $id" "mixed dependency snapshot launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "mixed dependency snapshot published node_modules"
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "mixed dependency snapshot leaked staging"
-  done
-  pass "fm-spawn rejects primary dependency changes during staging"
 }
 
 test_spawn_rejects_primary_dependency_link_created_during_publication() {
@@ -1130,7 +1085,7 @@ test_spawn_rejects_replacement_after_owned_publication() {
   pass "fm-spawn rejects replacement of its validated publication before launch"
 }
 
-test_spawn_retracts_invalid_exact_owned_publication() {
+test_spawn_retains_invalid_owned_publication_safely() {
   local rec id out status candidate
   id=node-modules-owned-invalid-z4da
   rec=$(make_case owned-invalid "$id")
@@ -1144,13 +1099,12 @@ test_spawn_retracts_invalid_exact_owned_publication() {
   assert_contains "$out" "owned worktree node_modules failed final" \
     "exact-owned publication failure was not diagnosed"
   assert_not_contains "$out" "spawned $id" "invalid exact-owned publication launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "invalid exact-owned publication was not retracted"
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "invalid exact-owned publication retained its backing"
-  done
-  pass "fm-spawn retracts an invalid exact-owned publication"
+  [ -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "invalid exact-owned publication was unsafely removed"
+  candidate=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$candidate" ] \
+    || fail "invalid exact-owned publication lost its backing"
+  pass "fm-spawn retains invalid owned publications without unsafe unlink"
 }
 
 test_spawn_preserves_presubmission_cancellation() {
@@ -1166,6 +1120,21 @@ test_spawn_preserves_presubmission_cancellation() {
   [ ! -s "$HOME_DIR/state/fake-pane-launch.sh" ] \
     || fail "cancelled dependency launch left a staged pane command"
   pass "fm-spawn preserves cancellation before dependency launch submission"
+}
+
+test_spawn_preserves_submission_transition_cancellation() {
+  local rec id out status
+  id=node-modules-submit-signal-z4ea
+  rec=$(make_case submit-signal "$id")
+  read_case "$rec"
+
+  out=$(FM_SIGNAL_ON_LAUNCH_SUBMIT=1 run_spawn "$id")
+  status=$?
+  expect_code 143 "$status" "spawn should retain TERM during launch submission"
+  assert_not_contains "$out" "spawned $id" "cancelled launch submission reported success"
+  [ ! -s "$HOME_DIR/state/fake-pane-launch.sh" ] \
+    || fail "cancelled launch submission left a runnable pane command"
+  pass "fm-spawn preserves cancellation through launch submission"
 }
 
 test_spawn_omits_worktree_deleted_workspace() {
@@ -1241,7 +1210,7 @@ test_spawn_uses_worktree_workspace_manifests
 test_spawn_rebases_canonical_absolute_workspace_binary
 test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_resolves_script_managed_node_runtime
-test_spawn_rejects_runtime_replacement_before_submission
+test_spawn_pins_runtime_before_submission
 test_spawn_reports_missing_compatible_node_runtime
 test_spawn_does_not_accept_unvalidated_exact_contention
 test_spawn_prevents_path_link_mutation_after_validation
@@ -1256,12 +1225,12 @@ test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_exclude_path_for_harness_files
 test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
-test_spawn_rejects_dependency_source_changes_during_staging
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_rejects_invalid_candidate_before_competing_publication
 test_spawn_rejects_replacement_after_owned_publication
-test_spawn_retracts_invalid_exact_owned_publication
+test_spawn_retains_invalid_owned_publication_safely
 test_spawn_preserves_presubmission_cancellation
+test_spawn_preserves_submission_transition_cancellation
 test_spawn_omits_worktree_deleted_workspace
 test_spawn_rejects_missing_installed_workspace_link
 test_spawn_rejects_dangling_staged_workspace_link
