@@ -43,7 +43,18 @@
     "core_path": "/absolute/installed/claude-obsidian/scripts/claude-obsidian.py",
     "core_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "module_path": "/absolute/installed/claude-obsidian/claude_obsidian/transaction.py",
-    "module_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    "module_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "dependency_root": "/absolute/installed/claude-obsidian",
+    "dependency_manifest": [
+      {
+        "path": "scripts/claude-obsidian.py",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "path": "claude_obsidian/transaction.py",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ]
   },
   "consumer": {
     "create_prefix_allowlist": [

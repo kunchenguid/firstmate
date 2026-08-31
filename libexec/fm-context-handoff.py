@@ -24,6 +24,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import stat
 import subprocess
 import sys
@@ -59,9 +60,12 @@ MAX_CONFIG_BYTES = 128 * 1024
 MAX_HOOK_BYTES = 1024 * 1024
 MAX_CORE_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_TRANSACTION_BUNDLE_BYTES = 128 * 1024
+MAX_TRANSACTION_DEPENDENCY_BYTES = 8 * 1024 * 1024
 MAX_TRANSACTION_WRITES = 16
 MAX_COMPACTION_RECORDS = 32
 HERDR_PROBE_TIMEOUT_SECONDS = 3.0
+HERDR_CAPABILITY_TIMEOUT_SECONDS = 1.0
+HERDR_PROMPT_TIMEOUT_SECONDS = 3.0
 PROMPT_TEXT = "/firstmate-context-handoff:consume"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 RECORD_ID = re.compile(r"^handoff-[0-9a-f]{48}$")
@@ -173,6 +177,7 @@ class StateLayout:
         locked = False
         try:
             fd = os.open(self.home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+            checkpoint("before-initialization-lock")
             fcntl.flock(fd, fcntl.LOCK_EX)
             locked = True
             for directory in (
@@ -412,6 +417,12 @@ def pausepoint(name: str) -> None:
         time.sleep(0.01)
 
 
+def checkpoint(name: str) -> None:
+    if os.environ.get("FM_HANDOFF_TESTING") != "1" or os.environ.get("FM_HANDOFF_TEST_CHECKPOINT") != name:
+        return
+    Path(os.environ["FM_HANDOFF_TEST_CHECKPOINT_MARKER"]).write_text("reached\n", encoding="utf-8")
+
+
 def rename_noreplace(source: Path, target: Path) -> None:
     if sys.platform.startswith("linux"):
         libc = ctypes.CDLL(None, use_errno=True)
@@ -505,6 +516,7 @@ def state_lock(layout: StateLayout) -> Iterator[None]:
     fd = os.open(layout.lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o600)
     os.chmod(layout.lock, 0o600)
     try:
+        checkpoint("before-state-lock")
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
@@ -585,6 +597,8 @@ def validate_runtime_config(config: Mapping[str, Any]) -> None:
         "core_sha256": str,
         "module_path": str,
         "module_sha256": str,
+        "dependency_root": str,
+        "dependency_manifest": list,
     }
     for values, required, code in (
         (vault, required_vault, "CONFIG_VAULT"),
@@ -600,6 +614,7 @@ def validate_runtime_config(config: Mapping[str, Any]) -> None:
     for field in ("core_sha256", "module_sha256"):
         if not HEX64.fullmatch(str(transaction[field])):
             raise HandoffError("CONFIG_TRANSACTION", f"transaction field {field} is not SHA-256")
+    validate_transaction_manifest(transaction)
     create_prefixes = consumer.get("create_prefix_allowlist")
     replace_paths = consumer.get("replace_path_allowlist")
     coupled = consumer.get("required_coupled_paths")
@@ -1064,9 +1079,9 @@ def _register_locked(home: Path, config: Mapping[str, Any] | None, args: argpars
         return {"status": "registered", "candidate_id": candidate_id}
     recover_orphan_queues_from_claims(layout, config)
     retire_stale_active_state(layout, args.source_harness, session_hash, config)
-    retryable_count = len(active_retryable_records(layout, config))
-    if retryable_count >= MAX_COMPACTION_RECORDS:
-        raise HandoffError("COMPACTION_BACKPRESSURE", "retryable compaction records must drain before another candidate can register")
+    active_count = len(active_queue_records(layout, config))
+    if active_count >= MAX_COMPACTION_RECORDS:
+        raise HandoffError("COMPACTION_BACKPRESSURE", "active handoff records must reach a terminal disposition before another candidate can register")
     claimed = claimed_candidate_ids(layout)
     pending_count = 0
     for path in layout.candidates.glob("candidate-*.json"):
@@ -1190,11 +1205,11 @@ def retryable_records(layout: StateLayout, source_harness: str, session_hash: st
     ]
 
 
-def active_retryable_records(layout: StateLayout, config: Mapping[str, Any]) -> list[dict[str, str]]:
+def active_queue_records(layout: StateLayout, config: Mapping[str, Any]) -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
     for path in sorted(layout.queue.glob("handoff-*.json")):
         queue = read_queue(layout, path.stem)
-        if queue.get("status") in {"acknowledged", "quarantined"} or queue.get("compaction") == "succeeded":
+        if queue.get("status") in {"acknowledged", "quarantined"}:
             continue
         envelope, digest = read_envelope(layout, path.stem, config, verify_sources=False)
         records.append(
@@ -1203,6 +1218,7 @@ def active_retryable_records(layout: StateLayout, config: Mapping[str, Any]) -> 
                 "envelope_sha256": digest,
                 "source_harness": str(envelope["source_harness"]),
                 "source_session_hash": str(envelope["source_session_hash"]),
+                "compaction": str(queue.get("compaction", "sealed")),
                 "updated_at": str(queue.get("updated_at", "")),
             }
         )
@@ -1255,19 +1271,19 @@ def retire_stale_active_state(
                 raise HandoffError("CREATE_ONLY_MISMATCH", "retired candidate evidence binds different bytes")
             durable_unlink(path)
 
-    retryable = active_retryable_records(layout, config)
-    while len(retryable) >= MAX_COMPACTION_RECORDS:
+    active = active_queue_records(layout, config)
+    while len(active) >= MAX_COMPACTION_RECORDS:
         stale_index = next(
             (
                 index
-                for index, item in enumerate(retryable)
-                if item["source_harness"] == source_harness and item["source_session_hash"] != session_hash
+                for index, item in enumerate(active)
+                if item["compaction"] != "succeeded" and item["source_harness"] == source_harness and item["source_session_hash"] != session_hash
             ),
             None,
         )
         if stale_index is None:
             break
-        item = retryable.pop(stale_index)
+        item = active.pop(stale_index)
         quarantine(
             layout,
             item["record_id"],
@@ -1945,7 +1961,7 @@ def probe_recipient(config: Mapping[str, Any], *, require_idle: bool = True) -> 
 
 
 def supports_atomic_generation_prompt(herdr: Path) -> bool:
-    completed = run_bounded([str(herdr), "agent", "prompt", "--help"], timeout=2.0)
+    completed = run_bounded([str(herdr), "agent", "prompt", "--help"], timeout=HERDR_CAPABILITY_TIMEOUT_SECONDS)
     if completed.returncode != 0:
         return False
     try:
@@ -1994,9 +2010,9 @@ def deliver_pending(home: Path) -> dict[str, Any]:
                 "--session",
                 recipient["session"],
                 "--timeout",
-                "5000",
+                "2000",
             ],
-            timeout=8.0,
+            timeout=HERDR_PROMPT_TIMEOUT_SECONDS,
         )
         prompt_matches = False
         if completed.returncode == 0:
@@ -2249,7 +2265,6 @@ def consume_compaction_binding(
         current_config = load_config(home, validate_active_bindings=False)
         if current_config != config:
             raise HandoffError("CONFIG_CHANGED", "handoff configuration changed during Claude compaction outcome")
-        require_active_process_binding(config, layout, validate_live_vault=False)
         path = compaction_binding_path(layout, config)
         if not path.exists():
             return None
@@ -2313,7 +2328,7 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
             return None
     if event_name in {"PostCompact", "StopFailure"}:
         terminal_config = load_config(home, validate_active_bindings=False)
-        if terminal_config is None or not config_enabled(terminal_config, "sealing_enabled"):
+        if terminal_config is None:
             return None
         session_id = payload.get("session_id")
         if not isinstance(session_id, str) or hash_session("claude", session_id) != terminal_config["recipient"]["agent_session_sha256"]:
@@ -2332,7 +2347,7 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
         return None
     if event_name == "PreToolUse":
         return guard_decision(home, config, payload)
-    if not config_enabled(config, "sealing_enabled") and not config_enabled(config, "consumer_enabled"):
+    if event_name not in {"PostCompact", "StopFailure"} and not config_enabled(config, "sealing_enabled") and not config_enabled(config, "consumer_enabled"):
         return None
     if event_name == "SessionStart":
         if not config_enabled(config, "consumer_enabled") or not bind_claude_session(home, config, payload):
@@ -2442,17 +2457,91 @@ def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, 
         return guard_deny("Delete, move, Git, installation, credential, and other mutation tools are not authorized for this Vault curator.")
     if lowered.startswith("mcp__") and tool_name not in HANDOFF_MCP_TOOLS:
         return guard_deny("Unrelated MCP tools are not authorized to mutate this Vault or outside paths.")
+    if tool_name in HANDOFF_MCP_TOOLS - {"mcp__firstmate-context-handoff__next_curated_handoff"}:
+        session_id = payload.get("session_id")
+        try:
+            if not isinstance(session_id, str) or hash_session("claude", session_id) != config["recipient"]["agent_session_sha256"]:
+                raise HandoffError("CONSUMER_SESSION", "hook session is not the configured Claude generation")
+            require_consumer_binding(home, config)
+        except HandoffError:
+            return guard_deny("The mutation-capable handoff tool is not bound to this exact live hook session and process generation.")
     return None
 
 
-def validate_transaction_core(config: Mapping[str, Any]) -> tuple[Path, Path, Path]:
+def validate_transaction_manifest(transaction: Mapping[str, Any]) -> tuple[Path, dict[str, str], str, str, str]:
+    root_value = transaction.get("dependency_root")
+    manifest = transaction.get("dependency_manifest")
+    if not isinstance(root_value, str) or not root_value or not isinstance(manifest, list) or not manifest:
+        raise HandoffError("CONFIG_TRANSACTION", "transaction dependency manifest is required")
+    root = Path(root_value).expanduser()
+    if not root.is_absolute() or path_has_symlink(root):
+        raise HandoffError("CONFIG_TRANSACTION", "transaction dependency root must be an absolute no-symlink directory")
+    try:
+        root = root.resolve(strict=True)
+    except OSError as exc:
+        raise HandoffError("CONFIG_TRANSACTION", "transaction dependency root is unavailable") from exc
+    if not root.is_dir():
+        raise HandoffError("CONFIG_TRANSACTION", "transaction dependency root is not a directory")
+    entries: dict[str, str] = {}
+    normalized: list[dict[str, str]] = []
+    for item in manifest:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+            raise HandoffError("CONFIG_TRANSACTION", "transaction dependency manifest entry is invalid")
+        relative = item.get("path")
+        digest = item.get("sha256")
+        if not safe_relative_path(relative) or not isinstance(digest, str) or not HEX64.fullmatch(digest) or relative in entries:
+            raise HandoffError("CONFIG_TRANSACTION", "transaction dependency manifest entry is invalid")
+        entries[str(relative)] = digest
+        normalized.append({"path": str(relative), "sha256": digest})
+    core = Path(str(transaction.get("core_path", ""))).expanduser()
+    module = Path(str(transaction.get("module_path", ""))).expanduser()
+    if not core.is_absolute() or not module.is_absolute() or path_has_symlink(core) or path_has_symlink(module):
+        raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint and module must be absolute no-symlink paths")
+    try:
+        core_relative = core.resolve(strict=True).relative_to(root).as_posix()
+        module_relative = module.resolve(strict=True).relative_to(root).as_posix()
+    except (OSError, ValueError) as exc:
+        raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint and module must be inside the dependency root") from exc
+    required = {core_relative}
+    if not (root / core_relative).is_file() or not (root / module_relative).is_file():
+        raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint or module is not a regular file")
+    if core_relative != module_relative:
+        module_root = (root / module_relative).parent
+        for path in sorted(module_root.rglob("*.py")):
+            if path.is_symlink() or not path.is_file():
+                raise HandoffError("CONFIG_TRANSACTION", "transaction package contains an unsafe Python dependency")
+            required.add(path.relative_to(root).as_posix())
+    if set(entries) != required:
+        raise HandoffError("CONFIG_TRANSACTION", "transaction dependency manifest must cover the complete executable package")
+    if entries.get(core_relative) != transaction.get("core_sha256") or entries.get(module_relative) != transaction.get("module_sha256"):
+        raise HandoffError("CONFIG_TRANSACTION", "transaction entrypoint or module hash differs from its dependency manifest")
+    normalized.sort(key=lambda item: item["path"])
+    return root, entries, sha256_bytes(canonical_json(normalized)), core_relative, module_relative
+
+
+@contextmanager
+def transaction_runtime(config: Mapping[str, Any], layout: StateLayout) -> Iterator[tuple[Path, Path, Path, str]]:
     transaction = config["transaction"]
     python_path = Path(transaction["python_path"])
     if not python_path.is_absolute() or path_has_symlink(python_path) or not python_path.resolve(strict=True).is_file():
-        raise HandoffError("PYTHON_IDENTITY", "transaction Python executable binding is unavailable")
-    core = validate_executable(transaction["core_path"], transaction["core_sha256"], "TRANSACTION_CORE_IDENTITY")
-    module = validate_executable(transaction["module_path"], transaction["module_sha256"], "TRANSACTION_MODULE_IDENTITY")
-    return python_path.resolve(strict=True), core, module
+        raise HandoffError("PYTHON_IDENTITY", "transaction interpreter binding is unavailable")
+    root, entries, manifest_sha, core_relative, module_relative = validate_transaction_manifest(transaction)
+    snapshot = Path(tempfile.mkdtemp(prefix=".transaction-runtime-", dir=layout.bindings))
+    os.chmod(snapshot, 0o700)
+    total = 0
+    try:
+        for relative, expected_sha in sorted(entries.items()):
+            source = root.joinpath(*PurePosixPath(relative).parts)
+            data = read_file_bytes(source, max_bytes=MAX_TRANSACTION_DEPENDENCY_BYTES, require_private=False)
+            total += len(data)
+            if total > MAX_TRANSACTION_DEPENDENCY_BYTES or sha256_bytes(data) != expected_sha:
+                raise HandoffError("TRANSACTION_DEPENDENCY_IDENTITY", "transaction dependency bytes no longer match the reviewed manifest")
+            target = snapshot.joinpath(*PurePosixPath(relative).parts)
+            ensure_private_directory(target.parent)
+            atomic_create(target, data)
+        yield python_path.resolve(strict=True), snapshot / core_relative, snapshot / module_relative, manifest_sha
+    finally:
+        shutil.rmtree(snapshot, ignore_errors=True)
 
 
 def safe_vault_target(vault: Path, relative: str) -> Path:
@@ -3001,9 +3090,9 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
     ensure_private_directory(bundle_dir)
     bundle_path = bundle_dir / f"{bundle_sha}.json"
     atomic_create(bundle_path, data)
-    python_path, core, module = validate_transaction_core(config)
     vault = validate_vault_binding(config)
-    plan, code = core_json_call([str(python_path), str(core), "transaction", "inspect", str(bundle_path), "--vault", str(vault)])
+    with transaction_runtime(config, layout) as (python_path, core, _module, manifest_sha):
+        plan, code = core_json_call([str(python_path), str(core), "transaction", "inspect", str(bundle_path), "--vault", str(vault)])
     if code != 0 or plan is None:
         raise HandoffError("TRANSACTION_INSPECT", "transaction core refused the proposed Save plan")
     if plan.get("schema") != TRANSACTION_PLAN_SCHEMA or plan.get("operation_id") != deterministic_operation_id(record_id) or plan.get("operation_type") != "save" or not HEX64.fullmatch(str(plan.get("input_bundle_sha256", ""))) or not HEX64.fullmatch(str(plan.get("approval_sha256", ""))):
@@ -3026,10 +3115,11 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
         "vault_identity": plan.get("vault_identity"),
         "changed_paths": reviewed_paths,
         "hashes": {key: reviewed_hashes[key] for key in sorted(reviewed_hashes)},
-        "core_path": str(core),
+        "core_path": str(config["transaction"]["core_path"]),
         "core_sha256": config["transaction"]["core_sha256"],
-        "module_path": str(module),
+        "module_path": str(config["transaction"]["module_path"]),
         "module_sha256": config["transaction"]["module_sha256"],
+        "dependency_manifest_sha256": manifest_sha,
         "reviewed_at": now_utc(),
     }
     approval_dir = layout.approvals / record_id
@@ -3098,7 +3188,6 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
         verified = verify_completed_transaction(home, config, record_id, approval)
         return {"status": "acknowledged", "record_id": record_id, "operation_id": verified["operation_id"], "changed_path_hashes": verified["changed_path_hashes"]}
     require_active_save_authority(layout, record_id, queue, approval)
-    python_path, core, _module = validate_transaction_core(config)
     vault = validate_vault_binding(config)
     bundle_path = Path(approval["bundle_path"])
     if sha256_file(bundle_path, max_bytes=MAX_TRANSACTION_BUNDLE_BYTES) != approval["bundle_file_sha256"]:
@@ -3140,12 +3229,15 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
             ),
         )
     try:
-        result, code = core_json_call(
-            [str(python_path), str(core), "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
-            expected_codes={0, 75},
-            on_spawn=bind_child,
-            release_gate=True,
-        )
+        with transaction_runtime(config, layout) as (python_path, core, _module, manifest_sha):
+            if approval.get("dependency_manifest_sha256") != manifest_sha:
+                raise HandoffError("SAVE_AUTHORITY_REVOKED", "reviewed Save plan does not bind the current transaction dependency manifest")
+            result, code = core_json_call(
+                [str(python_path), str(core), "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
+                expected_codes={0, 75},
+                on_spawn=bind_child,
+                release_gate=True,
+            )
     finally:
         durable_unlink(claim_path)
     if code == 75:
