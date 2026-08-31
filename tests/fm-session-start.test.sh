@@ -21,6 +21,11 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
+#   - the per-task usage-wall scan's shared budget: it covers every endpoint the
+#     digest cannot read as alive, including one with no window recorded; total
+#     cost stays a constant rather than growing with not-alive count; what the
+#     budget cut reads as unscanned rather than clean; and a healthy fleet
+#     spends none of it
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -72,6 +77,26 @@ new_world() {
 make_fake_toolchain() {
   local fakebin=$1
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  # quota-axi is stubbed like every other tool the digest shells out to, because
+  # the digest now reads headroom on every run. Without it, any host where
+  # quota-axi resolves inside BASE_PATH turns this unit suite into a real
+  # provider read: host-dependent results, a network call, and a verdict that
+  # depends on the runner's own quota. The stub's percentage is deliberately one
+  # no real gauge would report, so a regression that bypasses it is visible
+  # rather than silently live - the same guard tests/fm-fleet-snapshot-view.test.sh
+  # already uses for its own gauge.
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '0.1.40\n'; exit 0; fi
+cat <<'EOF'
+bin: /fake/quota-axi
+quota[1]{provider,scope,effectivePercentRemaining,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,73,projected_exhaustion,early,five_hour,"2026-08-27T02:19:59Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,limitingWindowId}:
+  claude,all_models,14400,five_hour
+EOF
+SH
+  chmod +x "$fakebin/quota-axi"
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -1347,6 +1372,341 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+# --- the wall scan's shared budget ------------------------------------------
+
+# make_fake_tmux_slow_capture <fakebin> <live-window>: liveness answers instantly
+# so the digest still reports each endpoint, but capture-pane hangs. That is the
+# post-wall shape: the scan is a pane read that normally costs milliseconds, and
+# costs its full bound exactly when a backend is wedged.
+make_fake_tmux_slow_capture() {
+  local fakebin=$1 live=$2
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  capture-pane) sleep 30; exit 0 ;;
+  display-message)
+    target=""
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "-t" ] && target="\$a"
+      prev="\$a"
+    done
+    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
+    exit 1
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+test_wall_scan_budget_is_shared_across_tasks() {
+  local rec root home fakebin out unbudgeted_out n
+  local exhausted scanned lines
+  rec=$(new_world wall-budget)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux_slow_capture "$fakebin" "fm-sess:live-window"
+
+  # Six dead endpoints: the shape a provider limit produces, because it strands
+  # every worker on that account inside the same minute.
+  for n in 1 2 3 4 5 6; do
+    printf 'window=fm-sess:dead-%s\nkind=ship\nbackend=tmux\n' "$n" > "$home/state/task-$n.meta"
+  done
+
+  out=$(FM_SESSION_START_WALL_TIMEOUT=1 FM_SESSION_START_WALL_BUDGET=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  unbudgeted_out=$(FM_SESSION_START_WALL_TIMEOUT=1 FM_SESSION_START_WALL_BUDGET=600 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  # What the budget cut must read as UNSCANNED, never as clean. That is the same
+  # rule the gauge follows: an unknown is unknown, not fine.
+  assert_contains "$out" "unknown reason=scan-budget-exhausted" \
+    "tasks the budget could not reach must be reported as unscanned"
+  assert_contains "$out" "was NOT checked" \
+    "the digest must say plainly which tasks went unchecked"
+  assert_not_contains "$out" "no-signature" \
+    "a budget-exhausted scan must never report a clean read"
+
+  # The shared-budget property itself, asserted on the scan's OWN disclosure
+  # rather than on a wall-clock difference between two runs. Timing the two runs
+  # against each other measured the whole digest, not the scan: the separation
+  # was about four seconds at one-second granularity, and the first run pays
+  # one-off baseline costs (the read-once and AGENTS markers) the second does
+  # not, so an unlucky machine could collapse the inequality with nothing
+  # regressed. What distinguishes a shared budget from a per-task bound is
+  # visible without a clock: a per-task bound would have spent its full second
+  # on each of the six wedged captures and scanned all six, while one 2s budget
+  # spent at 1s a scan can only afford a couple before it is gone.
+  # Anchored to the per-task verdict lines: the section's closing disclosure
+  # names the same reason in prose, and counting that as a seventh task made
+  # every count here one too high.
+  exhausted=$(printf '%s\n' "$out" | grep -c '^USAGE_WALL: task-.* reason=scan-budget-exhausted' || true)
+  [ "$exhausted" -ge 1 ] || fail "the budget never stopped any scan: $out"
+  scanned=$(( 6 - exhausted ))
+  [ "$scanned" -ge 1 ] || fail "the budget must still scan the first task: $out"
+  [ "$scanned" -le 3 ] \
+    || fail "a 2s budget over 1s captures scanned $scanned of 6 tasks, so the budget is per-task, not shared: $out"
+
+  # Bounding the scan must not silently drop tasks: every one still gets a line,
+  # under both budgets.
+  lines=$(printf '%s\n' "$out" | grep -c '^USAGE_WALL: task-' || true)
+  [ "$lines" -eq 6 ] || fail "every task must keep a scan line, got $lines: $out"
+  for n in 1 2 3 4 5 6; do
+    assert_contains "$unbudgeted_out" "USAGE_WALL: task-$n " "task-$n lost its scan line under a generous budget"
+  done
+  assert_not_contains "$unbudgeted_out" "scan-budget-exhausted" \
+    "a budget large enough for every task must not report one exhausted"
+  pass "session start: the per-task wall scan shares one budget and discloses what it did not check"
+}
+
+# The digest bounds `diagnose --endpoint-only`, and that command bounds its own
+# endpoint capture inside it. Whichever timer fires first decides what the reader
+# is told, and only the inner one can name the wedged capture, so the inner bound
+# must come from fm_inner_bound - which owns that rule and states exactly what it
+# guarantees. Left at its standalone default the capture bound is 15s, at or
+# above every per-scan bound the digest imposes, so the outer kill would always
+# land first and the concrete reason would be unreachable on the one path that
+# runs automatically. Driven at bounds with room to separate, because at one
+# second the derivation floors to the outer bound by design; this fails if either
+# bound is edited without the other, or if the derivation is dropped.
+test_wall_scan_bounds_the_capture_below_its_own_bound() {
+  local rec root home fakebin out
+  rec=$(new_world wall-inner-bound)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux_slow_capture "$fakebin" "fm-sess:live-window"
+  printf 'window=fm-sess:dead-window\nkind=ship\nbackend=tmux\n' > "$home/state/task-wedged.meta"
+
+  out=$(FM_SESSION_START_WALL_TIMEOUT=4 FM_SESSION_START_WALL_BUDGET=30 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "endpoint capture did not complete within 3s" \
+    "the scan must name the wedged capture, which only the inner bound can do"
+  assert_not_contains "$out" "reason=scan-did-not-complete" \
+    "an inner bound at or above the outer one reports the scan as unfinished instead of naming the wedged capture"
+
+  # The relationship holds as the outer bound moves, so the two cannot be edited
+  # apart: halve it and the reason halves with it rather than staying put.
+  out=$(FM_SESSION_START_WALL_TIMEOUT=8 FM_SESSION_START_WALL_BUDGET=30 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint capture did not complete within 6s" \
+    "the capture bound must be derived from the bound the digest imposes, not fixed"
+
+  # An operator who sets the inner knob explicitly still wins.
+  out=$(FM_SESSION_START_WALL_TIMEOUT=8 FM_SESSION_START_WALL_BUDGET=30 \
+    FM_USAGE_WALL_CAPTURE_TIMEOUT=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint capture did not complete within 2s" \
+    "an explicit FM_USAGE_WALL_CAPTURE_TIMEOUT must override the derived default"
+  pass "session start: the wall scan bounds its endpoint capture below its own bound"
+}
+
+# The scan's fallback names why the scan produced nothing, and only
+# bin/fm-timeout-lib.sh knows what a non-zero bounded exit means. The digest
+# passes operator-set FM_USAGE_WALL_* values through to the scan, and the child
+# refuses a bad one with a usage exit rather than a timeout - which a fixed
+# "did not complete" would report as the scan running out of time when it never
+# started. Driven through the real knob rather than a stub, because that is the
+# input that actually reaches it.
+test_wall_scan_fallback_names_the_true_reason() {
+  local rec root home fakebin out
+  rec=$(new_world wall-scan-reason)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+  printf 'window=fm-sess:dead-window\nkind=ship\nbackend=tmux\n' > "$home/state/task-refused.meta"
+
+  # The whole line, not the reason phrase alone: the same bad tunable also
+  # refuses the digest's headroom read, whose fallback already names a usage
+  # error, so a bare substring here would pass against a scan that still said
+  # nothing of the sort.
+  out=$(FM_USAGE_WALL_CAPTURE_TIMEOUT=0 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" \
+    "USAGE_WALL: task-refused unknown reason=the wall scan was refused as a usage error (exit 2) checked=none" \
+    "a scan refused for a bad tunable must name the usage error, not a timeout"
+  assert_not_contains "$out" "USAGE_WALL: task-refused unknown reason=the wall scan did not complete" \
+    "a scan that never started must not be reported as one that ran out of time"
+
+  # The timeout case still reads as a timeout, so routing through the owner did
+  # not simply relabel every failure as the new one.
+  make_fake_tmux_slow_capture "$fakebin" "fm-sess:live-window"
+  out=$(FM_SESSION_START_WALL_TIMEOUT=2 FM_USAGE_WALL_CAPTURE_TIMEOUT=30 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" \
+    "USAGE_WALL: task-refused unknown reason=the wall scan did not complete within 2s checked=none" \
+    "a scan the digest's own bound killed must still read as a timeout"
+  pass "session start: the wall scan's fallback names the true reason for a scan that produced nothing"
+}
+
+# An endpoint with NO recorded window is not alive either, and it is itself a
+# named recovery trigger, so it must get the same scan and the same routing text
+# as a dead one. It used to be the one not-alive state outside the surface three
+# tracked documents promised covered every not-alive endpoint.
+test_wall_scan_covers_an_endpoint_with_no_window() {
+  local rec root home fakebin out
+  rec=$(new_world wall-nowindow)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  printf 'kind=ship\nbackend=tmux\n' > "$home/state/task-nowindow.meta"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: unknown (no window recorded)" \
+    "an endpoint with no recorded window is still reported as such"
+  assert_contains "$out" "USAGE_WALL: task-nowindow unknown" \
+    "an endpoint with no window gets the same wall scan, and its honest answer is unknown"
+  assert_not_contains "$out" "USAGE_WALL: task-nowindow no-signature" \
+    "a task with no terminal to read must never be reported as read-and-clean"
+  assert_contains "$out" "load usage-limit-recovery before treating any of it as a crash" \
+    "a not-alive endpoint must carry the routing text, whatever made it not alive"
+  pass "session start: an endpoint with no recorded window is scanned like any other not-alive endpoint"
+}
+
+# The no-window scan draws from the SAME shared budget as the dead-endpoint
+# scans rather than getting a bound of its own. The fixture spends the whole
+# budget on wedged dead endpoints first (they sort before the no-window ones), so
+# a no-window task reached afterwards must report itself as unscanned exactly as
+# a dead one would - not quietly scanned outside the budget.
+test_wall_scan_budget_covers_no_window_endpoints() {
+  local rec root home fakebin out n
+  rec=$(new_world wall-nowindow-budget)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux_slow_capture "$fakebin" "fm-sess:live-window"
+
+  for n in 1 2 3 4; do
+    printf 'window=fm-sess:dead-%s\nkind=ship\nbackend=tmux\n' "$n" > "$home/state/d-$n.meta"
+  done
+  printf 'kind=ship\nbackend=tmux\n' > "$home/state/z-nowindow.meta"
+
+  out=$(FM_SESSION_START_WALL_TIMEOUT=1 FM_SESSION_START_WALL_BUDGET=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "USAGE_WALL: z-nowindow unknown reason=scan-budget-exhausted" \
+    "a no-window endpoint reached after the shared budget is spent must report itself unscanned"
+  assert_contains "$out" "was NOT checked" \
+    "the digest must name the tasks the budget could not reach"
+  pass "session start: no-window scans share the one fleet-state scan budget"
+}
+
+test_wall_scan_budget_leaves_a_healthy_fleet_alone() {
+  local rec root home fakebin out
+  rec=$(new_world wall-budget-healthy)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: alive" "a live endpoint is still reported alive"
+  assert_not_contains "$out" "scan-budget-exhausted" \
+    "a fleet with no dead endpoints must never spend or report the scan budget"
+  pass "session start: the scan budget costs a healthy fleet nothing"
+}
+
+# --- the fleet-state stage's share of the bound it SHARES --------------------
+#
+# The defect this pins was never the number 45. It was that two individually
+# sensible bounds - the headroom read and the shared wall-scan budget - were
+# never checked against the outer bound they share with every other stage of this
+# digest, so together they could take more than half of it in exactly the
+# post-wall state the stage exists for, truncating stages whose loss cannot be
+# recovered by following a link.
+#
+# The relationship is asserted here rather than reasoned about in prose, so an
+# edit to ANY of the three - the headroom timeout, the wall budget, or the
+# session-start timeout - fails this rather than passing quietly.
+# The digest reports an unmeasurable gauge as an unknown, and that unknown must
+# carry a reason that is TRUE. Every non-zero exit used to be called a timeout,
+# which sends a reader to wait out a bound that was never the problem; exit 2 is
+# a usage error and is reachable here because FM_USAGE_WALL_QUOTA_TIMEOUT is
+# passed through from the operator's environment. The status is also captured
+# from the run rather than read inside an `if !` branch, where `$?` is the
+# negation's own status and would report every failure as `exited 0`.
+test_digest_headroom_fallback_states_a_true_reason() {
+  local rec root home fakebin out
+  rec=$(new_world headroom-reason)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  out=$(FM_USAGE_WALL_QUOTA_TIMEOUT=not-a-number run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "usage error (exit 2)" \
+    "a usage error must be named as one rather than reported as a timeout"
+  assert_not_contains "$out" "did not complete within" \
+    "the digest must not claim a timeout that did not happen"
+  assert_not_contains "$out" "exited 0" \
+    "the reason must come from the run's own status, not from the negation's"
+  assert_contains "$out" "UNMEASURED, not healthy" \
+    "the unknown keeps the note that it is unmeasured rather than fine"
+  # A gauge that could not be RUN must read exactly like a gauge that could not
+  # be READ. The fallback used to emit only the reason and the note, so a reader
+  # or consumer scanning for the summary verdict found none on exactly the paths
+  # where the gauge failed. bin/fm-headroom-lib.sh now owns the shape.
+  assert_contains "$out" "HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1" \
+    "the fallback carries the same summary verdict every real unmeasurable reading carries"
+  assert_contains "$out" "HEADROOM_NEXT:" \
+    "and the same next step out of it"
+  pass "the digest headroom fallback states the real reason and emits a full unknown reading"
+}
+
+test_fleet_state_stage_fits_its_share_of_the_session_bound() {
+  local rec root home fakebin out
+  rec=$(new_world fleet-bounds)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
+
+  # The SHIPPED defaults, with nothing overridden: this is the assertion that
+  # fails if a future edit makes the stage take an unreasonable share.
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "FLEET_STATE_BOUNDS:"     "the shipped headroom and wall-scan defaults must fit inside their share of FM_SESSION_START_TIMEOUT"
+  # The gauge reading must come from the fixture's stub, never from the host's
+  # own quota-axi. This percentage is the stub's and no real gauge would report
+  # it, so a regression that bypasses the stub fails here instead of quietly
+  # making the suite host-dependent and network-bound.
+  assert_contains "$out" "pct=73" \
+    "the digest must read the fixture's gauge, not whatever gauge the host happens to have"
+
+  # And the check is live rather than vacuous: widen the wall budget past the
+  # share and the digest says so, naming all three numbers.
+  out=$(FM_SESSION_START_WALL_BUDGET=90 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "FLEET_STATE_BOUNDS:"     "a fleet-state stage over its share of the shared bound must be disclosed, not hidden"
+  assert_contains "$out" "of the 120s session-start bound"     "the disclosure names the outer bound the stage is measured against"
+  assert_contains "$out" "FM_SESSION_START_TIMEOUT"     "the disclosure names the knobs that resolve it"
+
+  # Lowering the outer bound reaches the same check from the other side.
+  out=$(FM_SESSION_START_TIMEOUT=60 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "FLEET_STATE_BOUNDS:"     "shrinking the shared outer bound must surface the same disproportion"
+  pass "session start: the fleet-state stage is checked against the bound it shares"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2485,6 +2845,14 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_wall_scan_budget_is_shared_across_tasks
+test_wall_scan_bounds_the_capture_below_its_own_bound
+test_wall_scan_fallback_names_the_true_reason
+test_wall_scan_covers_an_endpoint_with_no_window
+test_wall_scan_budget_covers_no_window_endpoints
+test_wall_scan_budget_leaves_a_healthy_fleet_alone
+test_fleet_state_stage_fits_its_share_of_the_session_bound
+test_digest_headroom_fallback_states_a_true_reason
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched

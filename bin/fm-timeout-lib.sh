@@ -139,3 +139,63 @@ fm_run_timed() {  # <seconds> <command...>
     *) return 124 ;;
   esac
 }
+
+# fm_run_timed_reason <rc> <bound-secs> <what>
+#   Print the concrete reason a bounded run failed, for a caller that must
+#   report an unknown rather than a result.
+#
+# Only 124 is a timeout. Reporting every non-zero exit as one states a reason
+# that can be false, and a false reason is worse than a vague one: it sends a
+# reader to wait out a bound that was never the problem. `fm-usage-wall.sh`
+# exits 2 for a usage error, which callers reach whenever they pass an operator
+# supplied value through to it, and 126/127 mean the script could not be run at
+# all. This lives here, beside the bound itself, because the same fallback is
+# written in more than one caller and the copies drift apart otherwise.
+fm_run_timed_reason() {  # <rc> <bound-secs> <what>
+  local rc=${1:-1} bound=${2:-0} what=${3:-the read}
+  case "$rc" in
+    124) printf 'the %s did not complete within %ss\n' "$what" "$bound" ;;
+    2) printf 'the %s was refused as a usage error (exit 2)\n' "$what" ;;
+    126) printf 'the %s could not be executed (exit 126)\n' "$what" ;;
+    127) printf 'the %s could not be found to run (exit 127)\n' "$what" ;;
+    *) printf 'the %s exited %s\n' "$what" "$rc" ;;
+  esac
+}
+
+# fm_inner_bound <outer-secs>
+#   The bound a caller should default a NESTED bounded read to, given the bound
+#   it is itself imposing on that read.
+#
+# An inner bound at or above the outer one is a false-unmeasurable generator.
+# The outer timer starts first and its kill therefore lands first, so a read
+# that was about to answer is reported as one that could not be read - in the
+# surfaces built to prevent exactly that. Three callers now nest a bounded read
+# inside a bound of their own (the session-start digest's headroom read and its
+# per-task wall scan, and the fleet view's headroom read), and the derivation
+# lives here rather than in each of them so the numbers cannot drift apart.
+# Callers point at this header rather than restating the rule: two independent
+# restatements of one rule is how this pair drifted apart before.
+#
+# Three quarters, floored at one second: enough headroom for the inner bound to
+# fire and its reason to be printed before the outer kill, and never zero, which
+# fm_run_timed's own contract above forbids. A caller that sets the inner
+# tunable explicitly still wins; this is only the default.
+#
+# WHAT THAT ACTUALLY GUARANTEES, stated exactly because the floor is a real
+# exception: the inner bound is BELOW the outer wherever there is room for it,
+# and never above. At `outer=1` there is no room - three quarters of one second
+# floors back to one - so the two are EQUAL, and that corner is reachable rather
+# than theoretical: the digest's wall scan derives its capture bound from
+# whatever is left of the shared budget, so the last scan before exhaustion runs
+# with `outer=1`. Nothing becomes false there, only less specific: the outer
+# kill wins the tie and the reader is told the outer read did not complete
+# rather than which inner read was wedged. Zero would be the real defect and is
+# what the floor exists to refuse, so the floor stays and the claim is stated
+# with its exception instead.
+fm_inner_bound() {  # <outer-secs>
+  local outer=${1:-0} inner
+  case "$outer" in ''|*[!0-9]*) outer=0 ;; esac
+  inner=$((outer * 3 / 4))
+  [ "$inner" -ge 1 ] || inner=1
+  printf '%s\n' "$inner"
+}

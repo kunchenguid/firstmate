@@ -43,10 +43,13 @@
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing, the
+#                       bounded provider-headroom gauge, every state/*.meta, a
+#                       bounded state/*.status tail, state/.afk, and a cheap
+#                       per-task endpoint-liveness read plus, for any endpoint
+#                       that is not alive, the cheap usage-wall scan that keeps
+#                       a provider limit from reading as a crash: read-only,
+#                       always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -265,6 +268,8 @@ stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-headroom-lib.sh
+. "$SCRIPT_DIR/fm-headroom-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
@@ -353,6 +358,44 @@ case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
+# Bounds for the two usage-wall reads in the fleet-state section. Both are local
+# and fast (a gauge read and a terminal capture), but "local" is not "bounded",
+# and this digest runs on a session-open hook that blocks the first turn.
+SESSION_START_HEADROOM_TIMEOUT=${FM_SESSION_START_HEADROOM_TIMEOUT:-20}
+case "$SESSION_START_HEADROOM_TIMEOUT" in ''|*[!0-9]*|0) SESSION_START_HEADROOM_TIMEOUT=20 ;; esac
+SESSION_START_WALL_TIMEOUT=${FM_SESSION_START_WALL_TIMEOUT:-15}
+case "$SESSION_START_WALL_TIMEOUT" in ''|*[!0-9]*|0) SESSION_START_WALL_TIMEOUT=15 ;; esac
+# One budget shared by every per-task wall scan, so the digest's total scan cost
+# is a constant rather than 15s x dead-endpoint-count. This matters because the
+# scan is cheapest when nothing is wrong and worst in exactly the state it was
+# built for: a provider limit strands every worker on that account at once, and
+# a home holding five or six dead endpoints would otherwise spend a minute and a
+# half before the operator learned anything. When the budget runs out the
+# remaining tasks are reported as unscanned, never folded into a clean result.
+# 30s, not 45s, and the reason is which stage pays for the difference. The wall
+# scan is explicitly a FIRST READ rather than a verdict, and the digest already
+# routes an operator to the full `diagnose` for the verdict, so the marginal 15s
+# buys little. The CONTEXT stage carries the captain's preferences and this
+# home's learnings and has NO equivalent pointer, so if a stage is truncated that
+# is the one whose loss cannot be recovered by following a link.
+SESSION_START_WALL_BUDGET=${FM_SESSION_START_WALL_BUDGET:-30}
+case "$SESSION_START_WALL_BUDGET" in ''|*[!0-9]*|0) SESSION_START_WALL_BUDGET=30 ;; esac
+# The two bounds above are individually sensible and SHARE an outer bound with
+# every other stage of this digest, and that shared bound was what nobody
+# checked: 20s + 45s put the fleet-state stage alone at more than half of the
+# 120s FM_SESSION_START_TIMEOUT, in exactly the post-wall state the stage exists
+# for. The relationship is asserted here rather than reasoned about in prose, so
+# a future edit to any of the three surfaces the disproportion instead of hiding
+# it. It reports; it does not clamp - firstmate and the captain decide, and an
+# operator who deliberately widens a bound still gets the bound they asked for.
+SESSION_START_FLEET_BOUND_WORST=$((SESSION_START_HEADROOM_TIMEOUT + SESSION_START_WALL_BUDGET))
+SESSION_START_OUTER_BOUND=${FM_SESSION_START_TIMEOUT:-120}
+case "$SESSION_START_OUTER_BOUND" in ''|*[!0-9]*|0) SESSION_START_OUTER_BOUND=120 ;; esac
+# Half the outer bound is the share. One stage of eight taking more than that
+# leaves the rest of the digest unable to finish, and truncation costs the stages
+# that have no pointer to recover from.
+SESSION_START_FLEET_BOUND_FITS=1
+[ $((SESSION_START_FLEET_BOUND_WORST * 2)) -le "$SESSION_START_OUTER_BOUND" ] || SESSION_START_FLEET_BOUND_FITS=0
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -809,8 +852,91 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
+# Headroom before dispatch. Deliberately here, at the top of the live-fleet
+# section and ahead of the inventory: this is where the next dispatch decision
+# gets made, and a provider limit reached mid-flight kills every worker on that
+# account inside the same minute. One bounded local gauge read; the command owns
+# every unmeasurable case and never reports an unread gauge as healthy.
+subsection "Headroom before dispatch"
+if [ "$SESSION_START_FLEET_BOUND_FITS" -eq 0 ]; then
+  printf 'FLEET_STATE_BOUNDS: this section may spend %ss (headroom %ss + wall scan %ss) of the %ss session-start bound.\n' \
+    "$SESSION_START_FLEET_BOUND_WORST" "$SESSION_START_HEADROOM_TIMEOUT" \
+    "$SESSION_START_WALL_BUDGET" "$SESSION_START_OUTER_BOUND"
+  printf 'FLEET_STATE_BOUNDS_NOTE: that is over half the whole digest, so later stages may be truncated - lower FM_SESSION_START_HEADROOM_TIMEOUT or FM_SESSION_START_WALL_BUDGET, or raise FM_SESSION_START_TIMEOUT.\n'
+fi
+# The gauge's own reading budget is defaulted under this bound by fm_inner_bound,
+# which owns that rule and states exactly what it guarantees. An operator who
+# sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
+HEADROOM_INNER_TIMEOUT=$(fm_inner_bound "$SESSION_START_HEADROOM_TIMEOUT")
+# The status is captured from the run itself, not read inside an `if !` branch,
+# where `$?` is the negation's own status and always 0 - which would report
+# every failure as `exited 0`, the same false-reason defect this fallback exists
+# to remove.
+FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER_TIMEOUT} \
+  fm_run_timed "$SESSION_START_HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null
+SESSION_START_HEADROOM_RC=$?
+if [ "$SESSION_START_HEADROOM_RC" -ne 0 ]; then
+  # Same fallback as bin/fm-fleet-view.sh, from the same two owners: only 124 is
+  # a timeout, and an unknown that names a reason which can be false is worse
+  # than one that names the real exit, while bin/fm-headroom-lib.sh owns the
+  # shape so a gauge that could not be RUN reads exactly like a gauge that could
+  # not be READ. `build=unknown` because the version was never read.
+  fm_headroom_unmeasurable_text \
+    "$(fm_run_timed_reason "$SESSION_START_HEADROOM_RC" "$SESSION_START_HEADROOM_TIMEOUT" 'headroom read')" \
+    'treat every provider as unproven when deciding what to dispatch' unknown unknown
+fi
+
 subsection "Work under way (state/*.meta)"
 META_FOUND=0
+NOT_ALIVE_FOUND=0
+WALL_BUDGET_LEFT=$SESSION_START_WALL_BUDGET
+WALL_BUDGET_EXHAUSTED=0
+
+# wall_scan <id>: one bounded first-read of whether this task's stranding is a
+# provider usage wall, drawn from the budget shared by the whole section.
+#
+# A dead endpoint is the observable condition a usage limit produces, and it
+# reads exactly like a crash, so the distinction is printed here rather than
+# left to depend on anyone remembering to look for it. A negative from this
+# cheap scan is deliberately `unknown`: the deciding evidence is in the pipeline
+# step logs, which the full `diagnose` reads. One function for every not-alive
+# branch, so no endpoint state can drift out of the scan by being written up
+# separately.
+wall_scan() {  # <task-id>
+  local scan_id=$1 scan_bound scan_started scan_out scan_rc
+  scan_bound=$SESSION_START_WALL_TIMEOUT
+  [ "$scan_bound" -le "$WALL_BUDGET_LEFT" ] || scan_bound=$WALL_BUDGET_LEFT
+  if [ "$scan_bound" -le 0 ]; then
+    WALL_BUDGET_EXHAUSTED=1
+    printf 'USAGE_WALL: %s unknown reason=scan-budget-exhausted checked=none\n' "$scan_id"
+    return 0
+  fi
+  scan_started=$(date +%s)
+  # The scan's own endpoint capture is bounded under this bound by fm_inner_bound,
+  # which owns that rule. Left at its standalone default the capture bound would
+  # sit at or above this one, this kill would land first, and every wedged
+  # endpoint would read as `scan-did-not-complete` instead of naming the wedged
+  # capture - the concrete reason the scan exists to produce. Derived per scan
+  # because this bound shrinks as the shared budget is spent, which is also what
+  # makes fm_inner_bound's one-second corner reachable here.
+  scan_out=$(FM_USAGE_WALL_CAPTURE_TIMEOUT=${FM_USAGE_WALL_CAPTURE_TIMEOUT:-$(fm_inner_bound "$scan_bound")} \
+    fm_run_timed "$scan_bound" \
+      "$SCRIPT_DIR/fm-usage-wall.sh" diagnose "$scan_id" --endpoint-only 2>/dev/null)
+  # Captured from the run itself rather than read after the pipeline, where it
+  # would be grep's status and never the scan's. The reason then comes from
+  # bin/fm-timeout-lib.sh, the one owner of what a non-zero bounded exit means,
+  # as the headroom fallback above and bin/fm-fleet-view.sh already do: only 124
+  # is a timeout, and this scan passes operator-set FM_USAGE_WALL_* values
+  # through to a child that refuses a bad one with exit 2, so a fixed
+  # "did not complete" here would report a scan that never started as one that
+  # ran out of time.
+  scan_rc=$?
+  printf '%s\n' "$scan_out" | grep '^USAGE_WALL:' ||
+    printf 'USAGE_WALL: %s unknown reason=%s checked=none\n' "$scan_id" \
+      "$(fm_run_timed_reason "$scan_rc" "$scan_bound" 'wall scan')"
+  WALL_BUDGET_LEFT=$((WALL_BUDGET_LEFT - ($(date +%s) - scan_started)))
+  [ "$WALL_BUDGET_LEFT" -ge 0 ] || WALL_BUDGET_LEFT=0
+}
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
@@ -826,9 +952,18 @@ for meta in "$STATE"/*.meta; do
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      NOT_ALIVE_FOUND=1
+      wall_scan "$id"
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'
+    # An endpoint with no recorded window is not alive either, and it is itself a
+    # named recovery trigger, so it gets the same scan from the same budget. Its
+    # honest answer is `unknown` - there is no terminal to read - and that is the
+    # point: the routing text below belongs on every endpoint the digest cannot
+    # read as alive, not only on the ones that record a window it can miss.
+    NOT_ALIVE_FOUND=1
+    wall_scan "$id"
   fi
 
   status="$STATE/$id.status"
@@ -839,6 +974,15 @@ for meta in "$STATE"/*.meta; do
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+if [ "$NOT_ALIVE_FOUND" -eq 1 ]; then
+  if [ "$WALL_BUDGET_EXHAUSTED" -eq 1 ]; then
+    printf '\nThe %ss shared scan budget ran out: every task marked scan-budget-exhausted above was NOT checked.\n' \
+      "$SESSION_START_WALL_BUDGET"
+    printf 'Those are unscanned, not clear - scan them with %s/bin/fm-usage-wall.sh diagnose <id>.\n' "$FM_ROOT"
+  fi
+  printf '\nA USAGE_WALL line above is a first read, not a verdict: run %s/bin/fm-usage-wall.sh diagnose <id>\n' "$FM_ROOT"
+  printf 'for the pipeline step logs, and load usage-limit-recovery before treating any of it as a crash.\n'
+fi
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0

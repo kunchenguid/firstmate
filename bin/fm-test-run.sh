@@ -212,7 +212,7 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-usage-wall.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -1136,8 +1136,20 @@ families_for_changed_path() {
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
+    bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-quota-axi-lib.sh)
+      # The version floor, its extraction and its comparison, read from three
+      # directions: bin/fm-bootstrap.sh's operator MISSING diagnostic
+      # (session-bootstrap), bin/fm-usage-wall.sh's headroom gauge
+      # (pure-contract-unit), and the secondmate sync fixture that serves a real
+      # `quota-axi --version` banner (secondmate). The extraction is a
+      # deliberately non-obvious regex, so an edit to it must select every suite
+      # that would catch a regression in it rather than only the first.
+      printf '%s\n' session-bootstrap
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
@@ -1199,6 +1211,14 @@ families_for_changed_path() {
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|\
     bin/fm-home-summary-refresh.sh)
+      printf '%s\n' snapshot-bearings
+      ;;
+    bin/fm-usage-wall.sh|bin/fm-headroom-lib.sh)
+      # The usage-wall surface is read from three places: its own contract
+      # tests, the session-start digest, and the heartbeat fleet view. The
+      # headroom library is the shape those same three emit an unknown in.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
       printf '%s\n' snapshot-bearings
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)

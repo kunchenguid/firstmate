@@ -5,15 +5,73 @@
 # FM_QUOTA_AXI_MIN follows the axi-family floor policy owned beside the floor
 # constants in bin/fm-bootstrap.sh.
 #
-# This file is the single owner of that version number. bin/fm-bootstrap.sh
-# turns a failing check into the operator-facing MISSING diagnostic, which is
-# what keeps an older build from reaching a dispatch intake at all.
+# This file is the single owner of that version number and of the comparison
+# against it. bin/fm-bootstrap.sh turns a failing check into the operator-facing
+# MISSING diagnostic, which is what keeps an older build from reaching a
+# dispatch intake at all.
+#
+# Three entry points, because a caller that has already read `quota-axi --version`
+# for its own output must not pay for a second invocation to learn whether that
+# same string clears the floor, and must not re-implement the parse to display it:
+#   fm_quota_axi_version_string <version-output>    extract the version, no exec.
+#   fm_quota_axi_version_at_least <version-output>  compare a string, no exec.
+#   fm_quota_axi_compatible [timeout]               read the version, then compare.
 
 FM_QUOTA_AXI_MIN=0.1.29
 
-fm_quota_axi_compatible() {
-  local timeout=${1:-} output parts major minor patch extra
+# The dotted version in a `quota-axi --version` banner, or nothing when the
+# string carries none. Pure: it runs nothing.
+#
+# It extracts the FIRST full dotted token and NOTHING ELSE. Two forms both get
+# this wrong in ways that reach the operator. The greedy form
+# (`s/.*\(...\).*/\1/`) silently returns the LAST token, so a banner that grows
+# a runtime suffix - `quota-axi 0.1.40 (node 22.14.0)` - would display and
+# floor-check `2.14.0`. A leading `[^0-9]*` is no anchor at all: on
+# `node v22 quota-axi 0.1.40` the leftmost match starts after `node v22`, and
+# because `sed` replaces only the matched span the unmatched prefix survives,
+# yielding `node v220.1.40`. That string then fails the integer comparisons
+# below, so a CURRENT build reads as `below-floor` in bin/fm-usage-wall.sh and as
+# `MISSING: quota-axi` in bin/fm-bootstrap.sh - a definite claim about a version
+# nobody measured, from the one surface whose rule is that an unmeasured fact is
+# never reported as measured.
+#
+# So the token is required to be preceded by a non-version character, and only
+# the token itself is kept. Every line is given a leading separator first, so a
+# version at the very start of a line takes the same path as one in mid-banner
+# rather than needing a second rule.
+fm_quota_axi_version_string() {  # <version-output>
+  printf '%s\n' "${1:-}" |
+    sed 's/^/ /' |
+    grep -o -E '[^0-9.][0-9]+\.[0-9]+\.[0-9]+' |
+    head -1 |
+    cut -c2-
+}
+
+# 0 when the version in $1 is at or above FM_QUOTA_AXI_MIN. Pure: it runs
+# nothing, so a caller holding a captured `--version` string pays no second
+# invocation, and the parse rule above has exactly one owner.
+fm_quota_axi_version_at_least() {  # <version-output>
+  local output=${1:-} version major minor patch extra
   local min_major min_minor min_patch min_extra
+  version=$(fm_quota_axi_version_string "$output")
+  IFS='.' read -r major minor patch extra <<< "$version"
+  # An unparseable version is incompatible, never assumed current, so a
+  # development or vendored build cannot pass a floor it was never checked against.
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  # The floor is compared from FM_QUOTA_AXI_MIN so bumping it needs one edit.
+  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$FM_QUOTA_AXI_MIN"
+  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
+  [ "$major" -gt "$min_major" ] && return 0
+  [ "$major" -eq "$min_major" ] || return 1
+  [ "$minor" -gt "$min_minor" ] && return 0
+  [ "$minor" -eq "$min_minor" ] || return 1
+  [ "$patch" -ge "$min_patch" ]
+}
+
+# 0 when the INSTALLED quota-axi clears the floor. Reads the version once and
+# hands the string to the comparator above.
+fm_quota_axi_compatible() {  # [timeout-secs]
+  local timeout=${1:-} output
   command -v quota-axi >/dev/null 2>&1 || return 1
   if [ -n "$timeout" ]; then
     case "$timeout" in
@@ -31,19 +89,5 @@ fm_quota_axi_compatible() {
   else
     output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
   fi
-  parts=$(printf '%s\n' "$output" |
-    sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
-    head -1)
-  IFS=' ' read -r major minor patch extra <<< "$parts"
-  # An unparseable version is incompatible, never assumed current, so a
-  # development or vendored build cannot pass a floor it was never checked against.
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  # The floor is compared from FM_QUOTA_AXI_MIN so bumping it needs one edit.
-  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$FM_QUOTA_AXI_MIN"
-  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
-  [ "$major" -gt "$min_major" ] && return 0
-  [ "$major" -eq "$min_major" ] || return 1
-  [ "$minor" -gt "$min_minor" ] && return 0
-  [ "$minor" -eq "$min_minor" ] || return 1
-  [ "$patch" -ge "$min_patch" ]
+  fm_quota_axi_version_at_least "$output"
 }

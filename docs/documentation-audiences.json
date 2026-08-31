@@ -51,48 +51,12 @@
       "target": "docs/documentation-audiences.md"
     },
     {
-      "source": "docs/documentation-audiences.md",
-      "target": "docs/documentation-audiences.json"
-    },
-    {
-      "source": "docs/calm.md",
-      "target": "docs/calm-mode-feasibility.md"
-    },
-    {
       "source": "docs/calm-mode-feasibility.md",
       "target": "docs/calm.md"
     },
     {
-      "source": "docs/sessionstart-nudge.md",
-      "target": "docs/verification/supervision.md"
-    },
-    {
-      "source": "docs/turnend-guard.md",
-      "target": "docs/verification/supervision.md"
-    },
-    {
-      "source": "docs/watcher-continuity.md",
-      "target": "docs/verification/supervision.md"
-    },
-    {
-      "source": "docs/wedge-alarm.md",
-      "target": "docs/verification/supervision.md"
-    },
-    {
-      "source": "docs/tmux-backend.md",
-      "target": "docs/verification/runtime-backends.md"
-    },
-    {
-      "source": "docs/herdr-backend.md",
-      "target": "docs/verification/runtime-backends.md"
-    },
-    {
-      "source": "docs/zellij-backend.md",
-      "target": "docs/verification/runtime-backends.md"
-    },
-    {
-      "source": "docs/orca-backend.md",
-      "target": "docs/verification/runtime-backends.md"
+      "source": "docs/calm.md",
+      "target": "docs/calm-mode-feasibility.md"
     },
     {
       "source": "docs/cmux-backend.md",
@@ -103,8 +67,48 @@
       "target": "docs/verification/runtime-backends.md"
     },
     {
+      "source": "docs/documentation-audiences.md",
+      "target": "docs/documentation-audiences.json"
+    },
+    {
+      "source": "docs/herdr-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/orca-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/sessionstart-nudge.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
+      "source": "docs/tmux-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
+    },
+    {
+      "source": "docs/turnend-guard.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
+      "source": "docs/usage-limit-survivability.md",
+      "target": "docs/verification/usage-limits.md"
+    },
+    {
+      "source": "docs/watcher-continuity.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
+      "source": "docs/wedge-alarm.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
+      "source": "docs/zellij-backend.md",
+      "target": "docs/verification/runtime-backends.md"
     }
   ],
   "surfaces": [
@@ -237,6 +241,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/usage-limit-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".greptile/rules.md",
       "audience": "maintainer-architecture"
     },
@@ -285,6 +293,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-hold-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -299,10 +311,6 @@
     {
       "path": "docs/configuration.md",
       "audience": "operator-current"
-    },
-    {
-      "path": "docs/captain-hold-lifecycle.md",
-      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/documentation-audiences.md",
@@ -413,6 +421,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/usage-limit-survivability.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
@@ -442,6 +454,10 @@
     },
     {
       "path": "docs/verification/trace-context.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/usage-limits.md",
       "audience": "maintainer-verification"
     },
     {

@@ -4,9 +4,33 @@
 # This command intentionally does not parse fleet state itself.
 # It shells out to fm-fleet-snapshot.sh --json and renders that stable
 # structured contract for humans.
+#
+# It also prints the provider-headroom gauge, because this view is the one
+# AGENTS.md section 8 has firstmate read at every heartbeat, and that is where
+# queued work gets dispatched. A limit reached mid-flight kills every worker on
+# that account inside the same minute, so the gauge belongs next to the
+# dispatch decision rather than in a command someone has to think of running.
+# bin/fm-usage-wall.sh owns the reading, including every unmeasurable case.
+#
+# The read is bounded here as well as inside that command, because this view is
+# rendered on the heartbeat path and its total cost has to be a constant.
+# FM_FLEET_VIEW_HEADROOM_TIMEOUT is that constant, and a bound hit prints the
+# same unknown line as any other unreadable gauge - never a healthy one, and
+# never a silently omitted section.
+#
+# The inner reading budget is defaulted under this outer bound by fm_inner_bound,
+# which owns that rule and states exactly what it guarantees. An operator who
+# sets FM_USAGE_WALL_QUOTA_TIMEOUT explicitly still wins.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-headroom-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-headroom-lib.sh"
+
+HEADROOM_TIMEOUT=${FM_FLEET_VIEW_HEADROOM_TIMEOUT:-30}
+case "$HEADROOM_TIMEOUT" in ''|*[!0-9]*|0) HEADROOM_TIMEOUT=30 ;; esac
 
 usage() {
   cat <<'EOF'
@@ -27,6 +51,25 @@ esac
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
 SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
+HEADROOM_INNER=$(fm_inner_bound "$HEADROOM_TIMEOUT")
+# Every non-zero exit used to be reported as a timeout, but only 124 is one.
+# `headroom` exits 2 on a usage error - reachable from here because
+# FM_USAGE_WALL_QUOTA_TIMEOUT is passed through from the operator's environment
+# and a non-numeric value is refused - and 126/127 when the script cannot be
+# executed at all. This surface's own rule is that an unknown carries its real
+# reason, so a reason that can be false is the one thing it must not print.
+HEADROOM=$(FM_USAGE_WALL_QUOTA_TIMEOUT=${FM_USAGE_WALL_QUOTA_TIMEOUT:-$HEADROOM_INNER} \
+  fm_run_timed "$HEADROOM_TIMEOUT" "$SCRIPT_DIR/fm-usage-wall.sh" headroom 2>/dev/null) || {
+  headroom_rc=$?
+  headroom_reason=$(fm_run_timed_reason "$headroom_rc" "$HEADROOM_TIMEOUT" 'headroom read')
+  # The WHOLE unknown reading travels with the fallback, from the one owner of
+  # its shape: an unknown that loses the note reads as absent rather than
+  # unmeasured, and one that loses HEADROOM_SUMMARY leaves a reader scanning for
+  # `verdict=` with no verdict at all on exactly the path where the gauge could
+  # not be read. `build=unknown` because the version was never read either.
+  HEADROOM=$(fm_headroom_unmeasurable_text "$headroom_reason" \
+    'treat every provider as unproven when deciding what to dispatch' unknown unknown)
+}
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;
@@ -94,3 +137,5 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "## Secondmates",
   .secondmate_guidance.note
 '
+
+printf '\n## Headroom\n\n%s\n' "$HEADROOM"

@@ -19,6 +19,18 @@ make_fakebin() {  # <dir>
 #!/usr/bin/env bash
 exit 0
 SH
+  # The view prints the provider-headroom gauge, so without this stub every
+  # view assertion below would query the real provider on any host that has
+  # quota-axi installed - a host-dependent test, and a real network read from
+  # a unit suite. The stub reports nothing readable, which the gauge is
+  # required to render as unknown rather than as healthy.
+  cat > "$fb/quota-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '0.1.40\n'; exit 0 ;;
+esac
+exit 1
+SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -52,7 +64,11 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  # quota-axi belongs in this list: `command -v` ignores a file that is not
+  # executable, so a non-executable stub is inert and the view falls through to
+  # the real gauge on any host that has one - a host-dependent test and a real
+  # provider read from a unit suite.
+  chmod +x "$fb/no-mistakes" "$fb/quota-axi" "$fb/tmux"
   printf '%s\n' "$fb"
 }
 
@@ -146,7 +162,7 @@ test_empty_fleet_json() {
       and .main_inventory.unstructured_current_count == 0
   ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
-  view=$(FM_HOME="$home" "$VIEW")
+  view=$(PATH="$(make_fakebin "$home"):$PATH" FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
   pass "empty fleet snapshot and view use explicit absence markers"
 }
@@ -603,6 +619,81 @@ test_view_renders_snapshot() {
   pass "fleet view renders the snapshot without secondmate peek guidance"
 }
 
+# The view prints the provider-headroom gauge on the heartbeat path, so a wedged
+# gauge must cost the view a bounded constant and must render as unknown - never
+# as healthy, and never as a silently missing section.
+test_view_headroom_is_bounded_and_unknown_reads_unknown() {
+  local home fakebin view started elapsed
+  home=$(make_home headroom-bound)
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '0.1.40
+'; exit 0 ;;
+esac
+sleep 60
+SH
+  chmod +x "$fakebin/quota-axi"
+
+  started=$(date +%s)
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FLEET_VIEW_HEADROOM_TIMEOUT=2 "$VIEW")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 20 ] \
+    || fail "a wedged gauge must not cost the view more than its own bound (took ${elapsed}s)"
+  assert_contains "$view" "unknown" "a gauge that could not be read must render as unknown"
+  assert_not_contains "$view" "HEADROOM: claude ok" "a wedged gauge must never render as healthy"
+  pass "fleet view bounds the headroom read and renders an unreadable gauge as unknown"
+}
+
+# The view's gauge must come from the fixture's stub, not from whatever gauge the
+# host happens to have installed. A stub that is present but NOT executable is
+# invisible to `command -v`, so the view silently falls through to the real
+# provider read - a host-dependent suite and a network read from a unit test.
+# This asserts the stub's own distinctive verdict, which the real gauge on any
+# host would not produce.
+test_view_headroom_reads_the_stubbed_gauge() {
+  local home fakebin view
+  home=$(make_home headroom-stub)
+  fakebin=$(make_fakebin "$home")
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "unknown reason=quota-axi exited 1" \
+    "the view must read the fixture's gauge, not the host's"
+  assert_not_contains "$view" "HEADROOM: claude ok" \
+    "a stubbed unreadable gauge must never render as a healthy reading"
+  pass "fleet view reads the stubbed gauge, so the suite is host-independent"
+}
+
+# The fallback used to attribute EVERY non-zero exit of the headroom command to a
+# timeout. `headroom` exits 2 on a usage error, which is reachable from the view
+# because FM_USAGE_WALL_QUOTA_TIMEOUT is passed through from the operator's
+# environment. A reason that can be false is the one thing this surface must not
+# print, and the UNMEASURED note must survive the fallback rather than leaving an
+# unknown that reads as merely absent.
+test_view_headroom_fallback_states_a_true_reason() {
+  local home fakebin view
+  home=$(make_home headroom-usage-error)
+  fakebin=$(make_fakebin "$home")
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_USAGE_WALL_QUOTA_TIMEOUT=not-a-number \
+    FM_FLEET_VIEW_HEADROOM_TIMEOUT=30 "$VIEW")
+  assert_contains "$view" "usage error (exit 2)" \
+    "a usage error must be named as one, not reported as a timeout"
+  assert_not_contains "$view" "did not complete within" \
+    "the view must not claim a timeout that did not happen"
+  assert_contains "$view" "UNMEASURED, not healthy" \
+    "the fallback must keep the note that an unknown is unmeasured rather than fine"
+  assert_contains "$view" "treat every provider as unproven" \
+    "the fallback must say what every other unmeasurable reading says, in the same words"
+  # The two fallback copies had already drifted, and both emitted two of the four
+  # lines a real unmeasurable reading emits - so a consumer scanning for the
+  # summary verdict found none on exactly the path where the gauge failed.
+  assert_contains "$view" "HEADROOM_SUMMARY: verdict=unknown measured=0 tight=0 wall=0 unknown=1" \
+    "the fallback must carry the summary verdict every real unmeasurable reading carries"
+  assert_contains "$view" "HEADROOM_NEXT:" \
+    "and the same next step out of it"
+  pass "fleet view fallback states the real reason and emits a full unknown reading"
+}
+
 test_view_renders_dead_secondmate_agent_status() {
   local home fakebin view
   home=$(make_home dead-secondmate)
@@ -799,6 +890,9 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_view_headroom_is_bounded_and_unknown_reads_unknown
+test_view_headroom_reads_the_stubbed_gauge
+test_view_headroom_fallback_states_a_true_reason
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
