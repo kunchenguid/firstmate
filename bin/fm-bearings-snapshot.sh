@@ -69,6 +69,8 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-branch-prefix-lib.sh
+. "$SCRIPT_DIR/fm-branch-prefix-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -210,6 +212,12 @@ if [ "$INCLUDE_PRS" = 1 ]; then
   if ! command -v gh >/dev/null 2>&1; then
     PR_STATUS='unavailable (gh not found)'
   else
+    # PR-to-task mapping uses the home this snapshot is about, not an
+    # assumed default, so a home with config/branch-prefix=ardy still maps
+    # ardy/<task-id> PR heads to the task (bin/fm-branch-prefix-lib.sh).
+    PR_PREFIX_HOME=$(printf '%s' "$SNAP" | jq -er '.fm_home') \
+      || { echo "fm-bearings-snapshot: invalid canonical snapshot (missing fm_home)" >&2; exit 1; }
+    PR_PREFIX=$(fm_branch_prefix_resolve "${FM_CONFIG_OVERRIDE:-$PR_PREFIX_HOME/config}") || exit 1
     # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
     repos=""
     while IFS= read -r u; do
@@ -239,11 +247,11 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" --arg bp "$PR_PREFIX" '
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+          task:(if (.headRefName // "" | startswith($bp + "/")) then (.headRefName | ltrimstr($bp + "/")) else "-" end),
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),
