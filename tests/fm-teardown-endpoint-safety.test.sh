@@ -265,6 +265,14 @@ test_orca_composite_worktree_id_shapes() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
     || fail "composite Orca worktree id with a spaced path refused"
 
+  write_orca_meta "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::/Users/O'Brien/worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "composite Orca worktree id with an apostrophe in the path refused"
+
+  write_orca_meta "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::/Users/café/wörktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "composite Orca worktree id with a unicode path refused"
+
   # shellcheck disable=SC2016 # The injection shapes must stay unexpanded literals.
   for bad in \
     "worktree-9" \

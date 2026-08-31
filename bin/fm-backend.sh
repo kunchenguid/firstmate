@@ -385,8 +385,9 @@ fm_backend_endpoint_atom_valid() {  # <value>
 
 # Orca worktree ids are composite: <repo-uuid>::<absolute worktree path>.
 # The left side is an ordinary endpoint atom; the right side is a filesystem
-# path, so it is validated as one (absolute, no shell metacharacters) rather
-# than with the atom class that would reject every legal '/'.
+# path, so it is validated as one (absolute, no control characters or shell
+# metacharacters) rather than with the atom class that would reject every
+# legal path character, e.g. an apostrophe in a username directory.
 fm_backend_orca_worktree_id_valid() {  # <value>
   local repo=${1%%::*} path=${1#*::}
   [ "$repo" != "$1" ] || return 1
@@ -394,8 +395,11 @@ fm_backend_orca_worktree_id_valid() {  # <value>
   case "$path" in
     ''|[!/]*) return 1 ;;
   esac
-  case "${path// /_}" in
-    *[!A-Za-z0-9._@%+/-]*) return 1 ;;
+  case "$path" in
+    *[[:cntrl:]]*) return 1 ;;
+  esac
+  case "$path" in
+    *[\`\$\;\&\|\<\>\"\\]*) return 1 ;;
   esac
 }
 
