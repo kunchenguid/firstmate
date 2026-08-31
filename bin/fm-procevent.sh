@@ -145,8 +145,11 @@
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
 # Receipt state is adapter-owned through one more seam of the same kind, and
-# this runner presents nothing anywhere. After a result is durably captured and
-# any keyed-answer feed has returned, the runner hands the adapter the outcome:
+# this runner presents nothing anywhere. The per-source boundary is held from
+# the durable capture through the seam, so a concurrent reconcile's publication
+# can never observe a capture before the adapter has acknowledged what it will
+# acknowledge. Within that hold, after any keyed-answer feed has returned, the
+# runner hands the adapter the outcome:
 # `bin/fm-procevent-<adapter>.sh receipt <source-id> <sequence> <result-file>
 # <outcome-file>`, where the outcome file states exactly what the intake
 # returned - `not-fed`, or `fed <exit>` plus its bounded output - so an adapter
@@ -838,15 +841,17 @@ EOF
     exit 0
   fi
 
+  # The per-source boundary is held from the durable capture through the
+  # receipt seam: a concurrent reconcile's publication must never observe a
+  # captured result before the seam has acknowledged what it will acknowledge.
+  # Publication itself runs after release, under its own acquisition, exactly
+  # as before. This wraps the extension and built-in capture paths alike.
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ "$extension_owner" -eq 1 ]; then
     durable="./$durable"
-  fi
-
-  if [ "$extension_owner" -eq 1 ]; then
-    :
   else
     durable=$(fm_procevent_capture "$STATE" "$id" "$adapter" "$out") \
-      || { rm -f -- "$out"; die "cannot durably capture the result"; }
+      || { fm_procevent_source_lock_release "$id"; rm -f -- "$out"; die "cannot durably capture the result"; }
   fi
   [ "$extension_owner" -eq 1 ] || rm -f -- "$out"
   STAGED_OUTPUT=
@@ -857,16 +862,15 @@ EOF
   # seam runs after the feed so a receipt can state the intake's verdict, and
   # before publication so recording a receipt can never delay a capture's wake.
   RECEIPT_OUTCOME=$(staging_file "$id" "$CLAIM_TOKEN.rcpt")
-  (umask 077; : > "$RECEIPT_OUTCOME") || die "cannot stage the receipt outcome"
+  (umask 077; : > "$RECEIPT_OUTCOME") || { fm_procevent_source_lock_release "$id"; die "cannot stage the receipt outcome"; }
   if [ "$extension_owner" -eq 0 ] \
     && feed_keyed_answers "$adapter" "$id" "$durable" "$RECEIPT_OUTCOME"; then
     printf 'answers-fed: %s\n' "$id"
   fi
-  # The per-source boundary is held across the receipt seam: a concurrent
-  # reconcile's publication must never observe the pre-seam instant of a capture
-  # the seam is about to acknowledge, and the seam marks its handled generations
-  # under this same hold instead of taking the boundary itself.
-  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  # The seam marks its handled generations under this same hold instead of
+  # taking the boundary itself; the runner holds it across capture, feed, and
+  # seam, so a concurrent reconcile can never publish a capture the seam is
+  # about to acknowledge.
   FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD=1 \
     adapter_receipt "$adapter" "$id" "$(fm_procevent_result_sequence "$durable")" \
       "$durable" "$RECEIPT_OUTCOME" || true

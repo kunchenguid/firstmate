@@ -5,6 +5,14 @@ Code head producing this evidence: `ebdb2fa274e267246d7f0bb0db47077ec1792767`
 This directory (screenshots, demo artifact, this manifest) is delivery evidence
 committed on top of that head; it contains no code.
 
+Note on the follow-up commit: after the screenshots were captured, one internal
+race was closed on this branch (a concurrent reconcile could rarely duplicate a
+capture's internal announcement before the receipt seam acknowledged it; the
+per-source boundary now spans capture through the seam). The change is not
+visible in the page or in any receipt text, so the screenshots below match the
+branch tip's behavior exactly, and the reproduction steps below are valid at
+the tip.
+
 ## What is committed
 
 - `screenshots/<state>-<variant>.png` for state in `success`, `partial`,
