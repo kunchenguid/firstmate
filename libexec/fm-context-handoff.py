@@ -1476,6 +1476,7 @@ def apply_pi_terminal_binding(layout: StateLayout, config: Mapping[str, Any], bi
 def seal_pi_attempt(home: Path, config: Mapping[str, Any], session_hash: str, trigger: str) -> dict[str, Any]:
     layout = StateLayout(home)
     with state_lock(layout):
+        replay_compaction_attempts(layout, config)
         claim = current_pi_process_claim()
         path = pi_compaction_binding_path(layout, session_hash)
         if path.exists():
@@ -2002,6 +2003,7 @@ def mark_pi_compaction(
         return {"status": "disabled"}
     layout = StateLayout(home)
     with state_lock(layout):
+        replay_compaction_attempts(layout, config)
         path = pi_compaction_binding_path(layout, session_hash)
         if not path.exists():
             write_receipt(layout, "compaction", "rejected", "pi-attempt-unbound", attempt_id=attempt_id, trigger=trigger)
