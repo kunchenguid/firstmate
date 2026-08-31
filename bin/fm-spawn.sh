@@ -1689,9 +1689,14 @@ try {
   if (target) {
     const sourceNames = new Set(fs.readdirSync(scope));
     const targetScope = path.join(target, '@beeline');
+    const worktreeReal = fs.realpathSync(worktree);
     for (const name of fs.readdirSync(targetScope)) {
       if (worktreeWorkspaces.has(name)) continue;
-      if (projectWorkspaces.has(name) || !sourceNames.has(name)) throw new Error('target-only package');
+      if (projectWorkspaces.has(name)) throw new Error('target-only package');
+      if (sourceNames.has(name)) continue;
+      if (!inside(fs.realpathSync(path.join(targetScope, name)), worktreeReal)) {
+        throw new Error('target-only package');
+      }
     }
   }
 } catch (error) {
@@ -2068,9 +2073,14 @@ function validateTarget(rootPath) {
     }
   }
   const sourceNames = new Set(fs.readdirSync(scope));
+  const worktreeReal = fs.realpathSync(worktree);
   for (const name of fs.readdirSync(targetScope)) {
     if (worktreeWorkspaces.has(name)) continue;
-    if (projectWorkspaces.has(name) || !sourceNames.has(name)) throw new Error('target-only package');
+    if (projectWorkspaces.has(name)) throw new Error('target-only package');
+    if (sourceNames.has(name)) continue;
+    if (!inside(fs.realpathSync(path.join(targetScope, name)), worktreeReal)) {
+      throw new Error('target-only package');
+    }
   }
 }
 
@@ -2309,9 +2319,14 @@ try {
     }
   }
   const sourceNames = new Set(fs.readdirSync(sourceScope));
+  const worktreeReal = fs.realpathSync(worktree);
   for (const name of fs.readdirSync(targetScope)) {
     if (worktreeWorkspaces.has(name)) continue;
-    if (projectWorkspaces.has(name) || !sourceNames.has(name)) throw new Error('target-only package');
+    if (projectWorkspaces.has(name)) throw new Error('target-only package');
+    if (sourceNames.has(name)) continue;
+    if (!inside(fs.realpathSync(path.join(targetScope, name)), worktreeReal)) {
+      throw new Error('target-only package');
+    }
   }
 } catch (_) {
   process.exit(exactOwned ? 4 : 1);

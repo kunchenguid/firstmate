@@ -849,6 +849,35 @@ test_spawn_leaves_existing_node_modules_untouched() {
   pass "fm-spawn leaves an existing worktree node_modules tree untouched"
 }
 
+test_spawn_accepts_branch_only_published_beeline_package() {
+  local rec id out status result
+  id=node-modules-branch-only-z2a
+  rec=$(make_case branch-only-package "$id")
+  read_case "$rec"
+  mkdir -p "$WORKTREE_DIR/node_modules/@beeline/feature-sdk"
+  printf 'worker install\n' > "$WORKTREE_DIR/node_modules/owned.txt"
+  ln -s ../../packages/lib "$WORKTREE_DIR/node_modules/@beeline/lib"
+  ln -s "$WORKTREE_DIR/packages/absolute-lib" "$WORKTREE_DIR/node_modules/@beeline/absolute-lib"
+  ln -s ../../packages/cli "$WORKTREE_DIR/node_modules/@beeline/cli"
+  printf '{"name":"@beeline/feature-sdk","version":"1.0.0","main":"index.js"}\n' \
+    > "$WORKTREE_DIR/node_modules/@beeline/feature-sdk/package.json"
+  printf 'module.exports = "branch-only";\n' \
+    > "$WORKTREE_DIR/node_modules/@beeline/feature-sdk/index.js"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should accept a branch-only installed @beeline package"
+  assert_contains "$out" "spawned $id" "branch-only @beeline package did not launch the worker"
+  assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
+    "spawn replaced an existing tree holding a branch-only @beeline package"
+  [ -f "$WORKTREE_DIR/node_modules/@beeline/feature-sdk/index.js" ] \
+    || fail "spawn mutated the branch-only @beeline package"
+  result=$(run_beeline_cjs 'process.stdout.write(require("@beeline/feature-sdk"));')
+  [ "$result" = branch-only ] \
+    || fail "branch-only @beeline package did not resolve from the worker tree"
+  pass "fm-spawn accepts branch-only installed @beeline packages in existing trees"
+}
+
 test_spawn_rejects_existing_primary_dependency_link() {
   local rec id out status
   id=node-modules-existing-primary-z2b
@@ -1342,6 +1371,7 @@ test_spawn_reports_missing_compatible_node_runtime
 test_spawn_does_not_accept_unvalidated_exact_contention
 test_spawn_prevents_path_link_mutation_after_validation
 test_spawn_leaves_existing_node_modules_untouched
+test_spawn_accepts_branch_only_published_beeline_package
 test_spawn_rejects_existing_primary_dependency_link
 test_spawn_rejects_target_only_primary_workspace_link
 test_spawn_rejects_dangling_existing_workspace_link
