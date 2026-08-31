@@ -526,6 +526,9 @@ test_meta_get_and_backend_of_meta() {
   [ "$(fm_meta_get "$meta" missing)" = "" ] || fail "fm_meta_get should print nothing for an absent key"
   [ "$(fm_backend_of_meta "$meta")" = tmux ] || fail "fm_backend_of_meta should default absent backend= to tmux"
 
+  printf 'window=stale\n' >> "$meta"
+  [ "$(fm_meta_get "$meta" window)" = "stale" ] || fail "fm_meta_get should return the LAST value when a key repeats"
+
   printf 'backend=tmux\n' >> "$meta"
   [ "$(fm_backend_of_meta "$meta")" = tmux ] || fail "fm_backend_of_meta should read an explicit backend=tmux"
 
