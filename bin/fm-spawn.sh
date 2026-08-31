@@ -109,12 +109,8 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   A fresh Beeline worktree shares the primary checkout's third-party npm
-#   dependencies through a symlink farm. Its @beeline workspace links and npm
-#   binaries resolve to the spawned worktree's own source. Existing dependency
-#   trees and projects without primary @beeline workspace links are left untouched.
-#   Fleet workers in this home are trusted first-party agents, so writes through
-#   shared third-party links can mutate the primary installation by accepted design.
+#   docs/architecture.md "Worktrees, not branches in your checkout" owns the
+#   Beeline dependency-sharing scope and trusted-fleet mutation boundary.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only

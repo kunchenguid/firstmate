@@ -587,7 +587,7 @@ test_spawn_shares_dependencies_across_filesystems() {
   case_dev=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
     'process.stdout.write(String(require("fs").statSync(process.argv[1]).dev));' "$PROJECT_DIR")
   shm_dev=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
-    'process.stdout.write(String(require("fs").statSync(process.argv[1]).dev));' "$shm_root")
+    'process.stdout.write(String(require("fs").statSync(process.argv[1]).dev));' /dev/shm)
   if [ "$case_dev" = "$shm_dev" ]; then
     pass "fm-spawn shares dependencies across filesystems # SKIP no distinct filesystem"
     return 0
