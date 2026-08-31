@@ -844,6 +844,7 @@ do_relaunch() {
   # Herdr can keep a shell registered after a rejected Fish command, so the
   # observed Pi relaunch needs one native identity/state snapshot as its proof.
   if [ "$BACKEND:$TARGET_HARNESS" = herdr:pi ]; then
+    fm_backend_source "$BACKEND" || die "the Herdr backend could not be loaded to verify the replacement Pi agent"
     elapsed=0
     while :; do
       identity=$(fm_backend_herdr_composer_identity "$T" 2>/dev/null || true)

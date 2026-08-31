@@ -496,6 +496,8 @@ test_herdr_pi_relaunch_rejects_a_surviving_shell() {
   expect_code 1 "${rc:-0}" "a surviving Herdr shell must not prove the replacement Pi agent started"$'\n'"$out"
   assert_contains "$out" "replacement Pi agent" \
     "the refusal should name the selected agent that never started"
+  assert_contains "$out" "Herdr reports 'shell'" \
+    "the refusal should identify the surviving shell that failed launch verification"
   pass "fm-control relaunch: Herdr rejects a surviving shell when the selected Pi agent never starts"
 }
 
