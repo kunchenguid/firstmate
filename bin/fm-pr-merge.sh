@@ -360,7 +360,7 @@ github_disable_auto_merge() {
       echo "verified: GitHub auto-merge is disabled for $URL" >&2
       return 0
     fi
-    printf 'error: could not disable GitHub auto-merge after the unmerged, unqueued outcome: %s\n' \
+    printf 'error: could not disable GitHub auto-merge after the outcome was not proven landed or queued at the recorded exact head: %s\n' \
       "${output:-no forge detail}" >&2
     return 1
   fi
@@ -376,14 +376,18 @@ github_disable_auto_merge() {
   echo "verified: GitHub auto-merge is disabled for $URL" >&2
 }
 
+github_clear_auto_merge_after_unproven_outcome() {
+  github_disable_auto_merge && return 0
+  echo "error: unresolved GitHub auto-merge hazard: the outcome is not proven landed or queued at the recorded exact head, and autoMergeRequest could not be verified clear" >&2
+  return 1
+}
+
 github_report_refused_outcome() {
   local cleanup_status=0
   printf 'error: GitHub merge outcome was not accepted: state=%s, merged=%s, isInMergeQueue=%s, headRefOid=%s, recordedGreenHead=%s\n' \
     "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" \
     "$FM_PR_GITHUB_HEAD" "$FM_PR_MERGE_HEAD" >&2
-  if [ "$FM_PR_GITHUB_MERGED" = false ] && [ "$FM_PR_GITHUB_QUEUED" = false ]; then
-    github_disable_auto_merge || cleanup_status=1
-  fi
+  github_clear_auto_merge_after_unproven_outcome || cleanup_status=1
   if ! github_state_is_open || [ "$FM_PR_GITHUB_MERGED" != false ] \
     || [ "$FM_PR_GITHUB_QUEUED" = true ]; then
     return "$cleanup_status"
@@ -424,11 +428,14 @@ case "$PROVIDER" in
             "$URL" "$FM_PR_GITHUB_HEAD" "$FM_PR_GITHUB_STATE" \
             "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
         fi
+      else
+        github_clear_auto_merge_after_unproven_outcome || true
       fi
       exit "$merge_status"
     fi
     if ! github_read_outcome; then
       github_report_forge_output "$merge_output"
+      github_clear_auto_merge_after_unproven_outcome || true
       exit 1
     fi
     if github_outcome_matches_recorded_head && [ "$FM_PR_GITHUB_MERGED" = true ]; then

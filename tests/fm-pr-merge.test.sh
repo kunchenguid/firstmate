@@ -533,6 +533,10 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
     "github-outcome-read-fails: a state-only fallback was consulted"
   assert_no_grep 'verified: ' "$case_dir/stdout" \
     "github-outcome-read-fails: an unproved merge was reported as verified"
+  assert_grep 'pr merge 57 --repo example/repo --disable-auto' "$case_dir/gh-axi.log" \
+    "github-outcome-read-fails: unreadable outcome did not attempt auto-merge cleanup"
+  assert_grep 'unresolved GitHub auto-merge hazard' "$case_dir/stderr" \
+    "github-outcome-read-fails: unverifiable auto-merge cleanup was not explicit"
   # The merge call itself returned success, so the pull request may well have
   # landed. Losing the reference here would leave teardown with nothing to
   # verify against and no merge poll to catch up.
@@ -541,6 +545,29 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   assert_present "$case_dir/state/task-x1.check.sh" \
     "github-outcome-read-fails: no merge poll was armed for a merge that may have landed"
   pass "fm-pr-merge keeps PR bookkeeping when it cannot read a successful merge call's outcome"
+}
+
+test_github_failed_merge_with_unreadable_outcome_clears_auto_merge() {
+  local case_dir rc
+  case_dir=$(make_case github-failed-merge-unreadable-outcome)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mock_outcome_read_fails "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/69 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-failed-merge-unreadable-outcome: the forge failure must propagate"
+  assert_grep 'pr merge 69 --repo example/repo --disable-auto' "$case_dir/gh-axi.log" \
+    "github-failed-merge-unreadable-outcome: failed merge did not attempt auto-merge cleanup"
+  assert_grep 'unresolved GitHub auto-merge hazard' "$case_dir/stderr" \
+    "github-failed-merge-unreadable-outcome: unverifiable cleanup was not explicit"
+  pass "fm-pr-merge attempts auto-merge cleanup after every unreadable failed outcome"
 }
 
 test_github_refusal_quotes_the_forge_output() {
@@ -1644,6 +1671,7 @@ test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
 test_github_implicit_auto_merge_is_disabled_before_refusal
 test_github_unreadable_outcome_keeps_pr_bookkeeping
+test_github_failed_merge_with_unreadable_outcome_clears_auto_merge
 test_github_refusal_quotes_the_forge_output
 test_github_unreadable_outcome_refusal_quotes_the_forge_output
 test_github_unrecognised_queue_method_still_names_the_queue

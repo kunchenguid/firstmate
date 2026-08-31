@@ -88,20 +88,20 @@ For each task:
 
    ```sh
    bin/fm-codex-app-task.sh reconcile <id> \
+     --thread <observed-thread-id> --host <observed-host-id> \
+     --generation <observed-generation> \
      --state <working-or-terminal-state> --detail '<bounded evidence>' \
      --event '<working|needs-decision|blocked|paused|done|failed>: <detail>'
    ```
 
+   Pass the thread, host, and generation attached to the observed result so a delayed prior-session result cannot mutate the current endpoint.
 7. Use the Desktop send tool for follow-ups. Never imitate a send by editing a
    transcript or local ledger.
-8. Reconcile the final state, then run
-   `bin/fm-codex-app-task.sh archive-preflight <id>`. Desktop archive removes
-   its app-owned worktree. The preflight allows a completed scout only when a
-   non-empty report is retained outside that worktree, and refuses ship tasks
-   until their implementation is independently landed or explicit discard is
-   authorized. Call the Desktop archive tool only after a successful
-   preflight. Generic `fm-teardown.sh` still refuses host-owned tasks and
-   preserves their Firstmate records.
+8. Reconcile the final state, then run `bin/fm-codex-app-task.sh archive-preflight <id> --report <absolute-firstmate-home>/data/<id>/report.md`.
+   Desktop archive removes its app-owned worktree.
+   The preflight allows a completed scout only when its non-empty canonical task report is retained at `data/<id>/report.md` outside that worktree, and refuses ship tasks until their implementation is independently landed or explicit discard is authorized.
+   Call the Desktop archive tool only after a successful preflight.
+   Generic `fm-teardown.sh` still refuses host-owned tasks and preserves their Firstmate records.
 
 Worker-written status lines are valid when Desktop permissions allow the exact
 Firstmate state path. When they do not, the primary records only transitions it

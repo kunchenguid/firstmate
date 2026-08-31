@@ -85,7 +85,13 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
     fi
     summary_rows=$(printf '%s\n' "$checks" | grep -c '^summary:[[:space:]]*' || true)
     summary=$(printf '%s\n' "$checks" | sed -n 's/^summary:[[:space:]]*//p')
-    if [ "$checks_status" -eq 0 ] && [ "$summary_rows" -eq 1 ] && summary_is_green "$summary"; then
+    canonical_rows=$(printf '%s\n' "$checks" \
+      | grep -c '^  Verify exact PR head,' || true)
+    canonical_pass_rows=$(printf '%s\n' "$checks" \
+      | grep -c '^  Verify exact PR head,pass$' || true)
+    if [ "$checks_status" -eq 0 ] && [ "$summary_rows" -eq 1 ] \
+      && [ "$canonical_rows" -eq 1 ] && [ "$canonical_pass_rows" -eq 1 ] \
+      && summary_is_green "$summary"; then
       total=$FM_PR_CI_TOTAL
       echo "green: $URL head=$EXPECTED_HEAD checks=$total"
       exit 0
@@ -96,6 +102,12 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
       echo "not-green: attempt=$attempt/$ATTEMPTS ambiguous check summary count=$summary_rows for head $EXPECTED_HEAD" >&2
     elif [ -z "$summary" ]; then
       echo "not-green: attempt=$attempt/$ATTEMPTS no terminal successful checks for head $EXPECTED_HEAD" >&2
+    elif [ "$canonical_rows" -eq 0 ]; then
+      echo "not-green: attempt=$attempt/$ATTEMPTS canonical Verify exact PR head check is missing for head $EXPECTED_HEAD" >&2
+    elif [ "$canonical_rows" -ne 1 ]; then
+      echo "not-green: attempt=$attempt/$ATTEMPTS ambiguous canonical Verify exact PR head check count=$canonical_rows for head $EXPECTED_HEAD" >&2
+    elif [ "$canonical_pass_rows" -ne 1 ]; then
+      echo "not-green: attempt=$attempt/$ATTEMPTS canonical Verify exact PR head check is not terminal-successful for head $EXPECTED_HEAD: $summary" >&2
     else
       echo "not-green: attempt=$attempt/$ATTEMPTS head=$EXPECTED_HEAD $summary" >&2
     fi

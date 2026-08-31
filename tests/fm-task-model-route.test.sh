@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-task-model-route-lib.sh
+. "$ROOT/bin/fm-task-model-route-lib.sh"
 
 ROUTE="$ROOT/bin/fm-task-model-route.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-model-route)
@@ -105,7 +107,7 @@ test_floors_and_user_override_precedence() {
     --override-model gpt-5.6-terra --override-effort ultra \
     --quota-candidate terra-primary gpt-5.6-terra ultra eligible none 'primary credentials have runway' \
     --quota-candidate terra-secondary gpt-5.6-terra ultra eligible none 'secondary credentials are available' \
-    --quota-candidate sol-primary gpt-5.6-sol high ineligible override-mismatch 'Sol credentials do not match the explicit override' \
+    --quota-candidate sol-primary gpt-5.6-sol high eligible none 'Sol credentials remain quota-eligible but are not the explicit override' \
     --resolved-profile terra-secondary \
     --resolved-model gpt-5.6-terra --resolved-effort ultra) \
     || fail "quota reconciliation after explicit override failed: $out"
@@ -114,8 +116,8 @@ test_floors_and_user_override_precedence() {
     "quota reconciliation mislabeled the explicit override"
   assert_grep $'resolved_profile\tterra-secondary' "$record" \
     "quota reconciliation omitted the profile selected for an explicit override"
-  assert_grep $'quota_candidate\tsol-primary\tgpt-5.6-sol\thigh\tineligible\toverride-mismatch\tSol credentials do not match the explicit override' "$record" \
-    "quota reconciliation omitted an ineligible configured profile under override"
+  assert_grep $'quota_candidate\tsol-primary\tgpt-5.6-sol\thigh\teligible\tnone\tSol credentials remain quota-eligible but are not the explicit override' "$record" \
+    "quota reconciliation falsified a candidate's independent quota eligibility under override"
 
   # Luna does not support ultra in the host-supported model catalog.
   set +e
@@ -171,14 +173,14 @@ test_quota_resolution_and_record_immutability() {
     --diagnosis 0 --diagnosis-evidence d \
     --verification 0 --verification-evidence e \
     --floor architecture \
-    --quota-candidate luna-primary gpt-5.6-luna medium ineligible below-floor 'candidate is below the floor' \
+    --quota-candidate luna-primary gpt-5.6-luna medium eligible none 'candidate has quota but is below the selection floor' \
     --quota-candidate sol-primary gpt-5.6-sol high eligible none 'candidate satisfies the floor' \
     --resolved-profile sol-primary \
     --resolved-model gpt-5.6-sol --resolved-effort high 2>&1) \
     || fail "configured below-floor candidate could not be recorded: $out"
   record="$HOME_DIR/data/below-floor/model-routing.tsv"
-  assert_grep $'quota_candidate\tluna-primary\tgpt-5.6-luna\tmedium\tineligible\tbelow-floor\tcandidate is below the floor' "$record" \
-    "routing record omitted the evaluated ineligible profile"
+  assert_grep $'quota_candidate\tluna-primary\tgpt-5.6-luna\tmedium\teligible\tnone\tcandidate has quota but is below the selection floor' "$record" \
+    "routing record falsified the below-floor profile's independent quota eligibility"
   assert_grep $'quota_candidate\tsol-primary\tgpt-5.6-sol\thigh\teligible\tnone\tcandidate satisfies the floor' "$record" \
     "routing record omitted the eligible selected profile"
 
@@ -232,11 +234,11 @@ test_quota_resolution_and_record_immutability() {
     --diagnosis 0 --diagnosis-evidence d \
     --verification 0 --verification-evidence e \
     --floor architecture \
-    --quota-candidate luna-primary gpt-5.6-luna medium ineligible below-floor 'candidate is below the floor' \
+    --quota-candidate luna-primary gpt-5.6-luna medium eligible none 'candidate has quota but is below the selection floor' \
     --quota-candidate sol-primary gpt-5.6-sol high eligible none 'candidate satisfies the floor' \
     --resolved-profile luna-primary \
     --resolved-model gpt-5.6-luna --resolved-effort medium 2>&1) || status=$?
-  expect_code 2 "$status" "quota resolution must not select an ineligible candidate"
+  expect_code 2 "$status" "quota resolution must not select an eligible candidate below the floor"
 
   record="$HOME_DIR/data/quota-task/model-routing.tsv"
   before=$(shasum -a 256 "$record" | awk '{print $1}')
@@ -253,7 +255,52 @@ test_quota_resolution_and_record_immutability() {
   pass "quota resolution is separate, floor-safe, and immutable"
 }
 
+test_task_identity_and_atomic_publication() {
+  local out status id record successes pid index
+  local -a pids=()
+  for id in . .. .hidden; do
+    status=0
+    out=$(route "$id" \
+      --ambiguity 0 --ambiguity-evidence a \
+      --boundary-clarity 0 --boundary-clarity-evidence b \
+      --risk 0 --risk-evidence c \
+      --diagnosis 0 --diagnosis-evidence d \
+      --verification 0 --verification-evidence e 2>&1) || status=$?
+    expect_code 2 "$status" "routing must reject hidden or traversal task id '$id'"
+  done
+  [ ! -e "$HOME_DIR/data/model-routing.tsv" ] \
+    || fail "dot-dot routing escaped the owned task directory"
+  [ ! -e "$HOME_DIR/data/.hidden" ] \
+    || fail "hidden task routing created undiscoverable state"
+
+  index=1
+  while [ "$index" -le 8 ]; do
+    route atomic-route \
+      --ambiguity 0 --ambiguity-evidence "candidate-$index" \
+      --boundary-clarity 0 --boundary-clarity-evidence b \
+      --risk 0 --risk-evidence c \
+      --diagnosis 0 --diagnosis-evidence d \
+      --verification 0 --verification-evidence e \
+      > "$TMP_ROOT/atomic-$index.out" 2>&1 &
+    pids+=("$!")
+    index=$((index + 1))
+  done
+  successes=0
+  for pid in "${pids[@]}"; do
+    if wait "$pid"; then
+      successes=$((successes + 1))
+    fi
+  done
+  [ "$successes" -eq 1 ] \
+    || fail "atomic route publication allowed $successes successful writers"
+  record="$HOME_DIR/data/atomic-route/model-routing.tsv"
+  fm_task_route_record_parse "$record" \
+    || fail "atomic route publication retained an incomplete record"
+  pass "task routing rejects hidden identities and publishes one immutable record"
+}
+
 test_score_bands_and_evidence_record
 test_floors_and_user_override_precedence
 test_quota_resolution_and_record_immutability
+test_task_identity_and_atomic_publication
 echo "# all task model route tests passed"

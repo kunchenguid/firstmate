@@ -50,7 +50,7 @@ fm_task_route_quota_candidate_selectable() {  # <model> <effort> <minimum-tier> 
 
 fm_task_route_quota_candidate_valid() {  # <profile> <model> <effort> <eligibility> <reason> <evidence> <minimum-tier> <override-model> <override-effort>
   local profile=$1 model=$2 effort=$3 eligibility=$4 reason=$5 evidence=$6
-  local minimum_tier=$7 override_model=$8 override_effort=$9 tier
+  local tier
   case "$profile" in ''|none|*[!A-Za-z0-9._@%:+-]*) return 1 ;; esac
   case "$model" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
   case "$effort" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
@@ -62,8 +62,6 @@ fm_task_route_quota_candidate_valid() {  # <profile> <model> <effort> <eligibili
       [ "$reason" = none ] || return 1
       tier=$(fm_task_route_model_tier "$model") || return 1
       fm_task_route_effort_supported "$tier" "$effort" || return 1
-      fm_task_route_quota_candidate_selectable "$model" "$effort" "$minimum_tier" \
-        "$override_model" "$override_effort"
       ;;
     ineligible)
       [ "$reason" != none ]

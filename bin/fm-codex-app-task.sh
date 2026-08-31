@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
@@ -18,6 +19,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-task-model-route-lib.sh
 . "$SCRIPT_DIR/fm-task-model-route-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -27,12 +32,13 @@ usage:
       --model <model> --effort <effort> --route-record <path>
       --session-envelope <small|normal|research>
       --mode <direct-PR|local-only> --yolo <on|off>
-  fm-codex-app-task.sh reconcile <id> --state <state> [--detail <text>]
+  fm-codex-app-task.sh reconcile <id> --thread <uuid> --host <host-id>
+      --generation <number> --state <state> [--detail <text>]
       [--event <status-line>]
   fm-codex-app-task.sh hard-stop <id> --reason <text> --handoff <external-path>
   fm-codex-app-task.sh resume <id> --thread <uuid> --host <host-id>
       --checkpoint <sha> --handoff <external-path>
-  fm-codex-app-task.sh archive-preflight <id> [--report <external-report>]
+  fm-codex-app-task.sh archive-preflight <id> [--report <firstmate-home>/data/<id>/report.md]
 
 states: working parked done blocked paused failed unknown
 EOF
@@ -50,7 +56,7 @@ die() {
 }
 
 valid_id() {
-  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  fm_task_id_creation_valid "$1"
 }
 
 valid_atom() {
@@ -98,6 +104,8 @@ require_owner() {
 
 TASK_MUTATION_LOCK=
 TASK_MUTATION_OWNER=
+TASK_META_LOCK=
+TASK_META_LOCK_HELD=0
 TASK_MUTATION_RECORD_PID=
 TASK_MUTATION_RECORD_IDENTITY=
 task_mutation_lock_record_parse() {
@@ -123,25 +131,82 @@ task_mutation_lock_release() {
   TASK_MUTATION_OWNER=
 }
 
+task_metadata_lock_release() {
+  if [ "$TASK_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TASK_META_LOCK" || true
+    TASK_META_LOCK_HELD=0
+  fi
+  TASK_META_LOCK=
+}
+
+task_mutation_cleanup() {
+  task_metadata_lock_release
+  task_mutation_lock_release
+}
+
+task_metadata_lock_acquire() {  # <task-id>
+  local id=$1
+  TASK_META_LOCK=$(fm_meta_lock_path "$STATE/$id.meta") \
+    || die "cannot resolve task $id metadata lock"
+  fm_lock_acquire_wait "$TASK_META_LOCK" \
+    || die "cannot acquire task $id metadata lock"
+  TASK_META_LOCK_HELD=1
+}
+
+task_mutation_recovery_die() {  # <recovery-lock> <message>
+  local recovery_lock=$1 message=$2
+  fm_lock_release "$recovery_lock" || true
+  die "$message"
+}
+
 task_mutation_lock_acquire() {  # <task-id>
-  local id=$1 lock owner identity self_record
+  local id=$1 lock owner identity self_record mtime age recovery_lock
   lock="$STATE/.$id.codex-app-mutation-lock"
+  recovery_lock="$STATE/.$id.codex-app-mutation-recovery.lock"
   identity=$(fm_process_command_identity "$$" fm-codex-app-task.sh) \
     || die "cannot establish task $id mutation process identity"
   self_record="codex-app-mutation:$$:$identity"
-  if ! mkdir -- "$lock" 2>/dev/null; then
-    owner=$(cat "$lock/owner" 2>/dev/null || true)
-    task_mutation_lock_record_parse "$owner" \
-      || die "task $id mutation lock is invalid; refusing concurrent mutation"
-    if [ "$(fm_process_command_identity "$TASK_MUTATION_RECORD_PID" \
-      fm-codex-app-task.sh 2>/dev/null || true)" = "$TASK_MUTATION_RECORD_IDENTITY" ]; then
-      die "task $id is already being mutated by process $TASK_MUTATION_RECORD_PID"
+  while ! mkdir -- "$lock" 2>/dev/null; do
+    fm_lock_acquire_wait "$recovery_lock" \
+      || die "cannot acquire task $id mutation recovery ownership"
+    if mkdir -- "$lock" 2>/dev/null; then
+      fm_lock_release "$recovery_lock" || true
+      break
     fi
-    rm -f -- "$lock/owner" 2>/dev/null || true
-    rmdir -- "$lock" 2>/dev/null || true
-    mkdir -- "$lock" 2>/dev/null \
-      || die "task $id mutation ownership changed while recovering a stale lock"
-  fi
+    owner=$(cat "$lock/owner" 2>/dev/null || true)
+    if [ -z "$owner" ] && [ -d "$lock" ] && [ ! -L "$lock" ] \
+      && [ ! -e "$lock/owner" ]; then
+      mtime=$(fm_path_mtime "$lock") \
+        || task_mutation_recovery_die "$recovery_lock" \
+          "task $id mutation lock is invalid; refusing concurrent mutation"
+      age=$(($(date +%s) - mtime))
+      [ "$age" -ge 0 ] || age=0
+      [ "$age" -ge 5 ] \
+        || task_mutation_recovery_die "$recovery_lock" \
+          "task $id mutation lock initialization is incomplete; retry after five seconds"
+      rmdir -- "$lock" 2>/dev/null \
+        || task_mutation_recovery_die "$recovery_lock" \
+          "task $id mutation ownership changed while recovering an incomplete lock"
+    else
+      task_mutation_lock_record_parse "$owner" \
+        || task_mutation_recovery_die "$recovery_lock" \
+          "task $id mutation lock is invalid; refusing concurrent mutation"
+      if [ "$(fm_process_command_identity "$TASK_MUTATION_RECORD_PID" \
+        fm-codex-app-task.sh 2>/dev/null || true)" = "$TASK_MUTATION_RECORD_IDENTITY" ]; then
+        task_mutation_recovery_die "$recovery_lock" \
+          "task $id is already being mutated by process $TASK_MUTATION_RECORD_PID"
+      fi
+      rm -f -- "$lock/owner" 2>/dev/null || true
+      rmdir -- "$lock" 2>/dev/null \
+        || task_mutation_recovery_die "$recovery_lock" \
+          "task $id mutation ownership changed while recovering a stale lock"
+    fi
+    if mkdir -- "$lock" 2>/dev/null; then
+      fm_lock_release "$recovery_lock" || true
+      break
+    fi
+    fm_lock_release "$recovery_lock" || true
+  done
   printf '%s\n' "$self_record" > "$lock/owner" || {
     rm -f -- "$lock/owner" 2>/dev/null || true
     rmdir -- "$lock" 2>/dev/null || true
@@ -154,10 +219,10 @@ task_mutation_lock_acquire() {  # <task-id>
   }
   TASK_MUTATION_LOCK=$lock
   TASK_MUTATION_OWNER=$self_record
-  trap task_mutation_lock_release EXIT
-  trap 'task_mutation_lock_release; exit 129' HUP
-  trap 'task_mutation_lock_release; exit 130' INT
-  trap 'task_mutation_lock_release; exit 143' TERM
+  trap task_mutation_cleanup EXIT
+  trap 'task_mutation_cleanup; exit 129' HUP
+  trap 'task_mutation_cleanup; exit 130' INT
+  trap 'task_mutation_cleanup; exit 143' TERM
 }
 
 resolve_git_checkout() {  # <checkout>
@@ -495,6 +560,7 @@ register_task() {
 
   require_owner
   task_mutation_lock_acquire "$id"
+  task_metadata_lock_acquire "$id"
   meta="$STATE/$id.meta"
   status="$STATE/$id.status"
   current="$STATE/$id.codex-app-current"
@@ -594,9 +660,13 @@ register_task() {
 reconcile_task() {
   local id=$1
   shift
-  local current_state='' detail='' event='' meta thread host
+  local current_state='' detail='' event='' observed_thread='' observed_host=''
+  local observed_generation='' meta thread host generation
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --thread) [ "$#" -ge 2 ] || usage; observed_thread=$2; shift 2 ;;
+      --host) [ "$#" -ge 2 ] || usage; observed_host=$2; shift 2 ;;
+      --generation) [ "$#" -ge 2 ] || usage; observed_generation=$2; shift 2 ;;
       --state) [ "$#" -ge 2 ] || usage; current_state=$2; shift 2 ;;
       --detail) [ "$#" -ge 2 ] || usage; detail=$2; shift 2 ;;
       --event) [ "$#" -ge 2 ] || usage; event=$2; shift 2 ;;
@@ -605,6 +675,13 @@ reconcile_task() {
   done
 
   valid_id "$id" || die_usage "invalid task id '$id'"
+  valid_thread "$observed_thread" \
+    || die_usage "invalid observed Codex Desktop thread id '$observed_thread'"
+  valid_atom "$observed_host" \
+    || die_usage "invalid observed Codex Desktop host id '$observed_host'"
+  case "$observed_generation" in
+    ''|*[!0-9]*|0|0*) die_usage "invalid observed session generation '$observed_generation'" ;;
+  esac
   valid_state "$current_state" \
     || die_usage "invalid current state '$current_state'"
   valid_scalar "$detail" || die_usage "current-state detail must be a single-line value"
@@ -615,6 +692,7 @@ reconcile_task() {
   esac
   require_owner
   task_mutation_lock_acquire "$id"
+  task_metadata_lock_acquire "$id"
   task_mutation_recovery_owner "$id" reconcile none
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || die "no metadata for Desktop task $id"
@@ -628,6 +706,11 @@ reconcile_task() {
     || die "task $id has no exact Desktop thread binding"
   host=$(exact_meta_value "$meta" codex_app_host_id) \
     || die "task $id has no exact Desktop host binding"
+  generation=$(exact_meta_value "$meta" session_generation) \
+    || die "task $id has no exact Desktop generation binding"
+  [ "$thread" = "$observed_thread" ] && [ "$host" = "$observed_host" ] \
+    && [ "$generation" = "$observed_generation" ] \
+    || die "task $id observed Desktop endpoint does not match its current thread, host, and generation binding"
   write_current "$id" "$thread" "$host" "$current_state" "$detail"
   [ -z "$event" ] || printf '%s\n' "$event" >> "$STATE/$id.status" \
     || die "current state changed, but status event could not be appended for $id"
@@ -728,6 +811,85 @@ hard_stop_journal_write() {  # <journal>
   mv -f -- "$tmp" "$journal" || { rm -f -- "$tmp"; return 1; }
 }
 
+HARD_STOP_RECEIPT_REQUEST=
+HARD_STOP_RECEIPT_CHECKPOINT=
+HARD_STOP_RECEIPT_HANDOFF=
+HARD_STOP_RECEIPT_THREAD=
+HARD_STOP_RECEIPT_HOST=
+HARD_STOP_RECEIPT_GENERATION=
+HARD_STOP_RECEIPT_WORKTREE=
+hard_stop_receipt_parse() {  # <receipt>
+  local receipt=$1 lines key value
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  lines=$(wc -l < "$receipt" | tr -d ' ')
+  [ "$lines" = 8 ] || return 1
+  [ "$(exact_meta_value "$receipt" version)" = 1 ] || return 1
+  for key in request_sha256 checkpoint handoff thread host generation worktree; do
+    value=$(exact_meta_value "$receipt" "$key") || return 1
+    valid_scalar "$value" || return 1
+  done
+  HARD_STOP_RECEIPT_REQUEST=$(exact_meta_value "$receipt" request_sha256)
+  HARD_STOP_RECEIPT_CHECKPOINT=$(exact_meta_value "$receipt" checkpoint)
+  HARD_STOP_RECEIPT_HANDOFF=$(exact_meta_value "$receipt" handoff)
+  HARD_STOP_RECEIPT_THREAD=$(exact_meta_value "$receipt" thread)
+  HARD_STOP_RECEIPT_HOST=$(exact_meta_value "$receipt" host)
+  HARD_STOP_RECEIPT_GENERATION=$(exact_meta_value "$receipt" generation)
+  HARD_STOP_RECEIPT_WORKTREE=$(exact_meta_value "$receipt" worktree)
+  [[ "$HARD_STOP_RECEIPT_REQUEST" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$HARD_STOP_RECEIPT_CHECKPOINT" | grep -Eq '^[0-9a-f]{40,64}$' \
+    || return 1
+  valid_thread "$HARD_STOP_RECEIPT_THREAD" \
+    && valid_atom "$HARD_STOP_RECEIPT_HOST" || return 1
+  case "$HARD_STOP_RECEIPT_GENERATION" in ''|*[!0-9]*|0|0*) return 1 ;; esac
+  [ -n "$HARD_STOP_RECEIPT_HANDOFF" ] && [ -n "$HARD_STOP_RECEIPT_WORKTREE" ]
+}
+
+hard_stop_receipt_matches() {  # <receipt> <request> <handoff> <meta> <current> <worktree>
+  local receipt=$1 request_hash=$2 handoff=$3 meta=$4 current=$5 worktree=$6
+  hard_stop_receipt_parse "$receipt" || return 1
+  [ "$HARD_STOP_RECEIPT_REQUEST" = "$request_hash" ] \
+    && [ "$HARD_STOP_RECEIPT_HANDOFF" = "$handoff" ] \
+    && [ "$HARD_STOP_RECEIPT_WORKTREE" = "$worktree" ] \
+    && [ "$(exact_meta_value "$meta" session_checkpoint)" = \
+      "$HARD_STOP_RECEIPT_CHECKPOINT" ] \
+    && [ "$(exact_meta_value "$meta" session_handoff)" = "$handoff" ] \
+    && [ "$(exact_meta_value "$meta" codex_app_thread_id)" = \
+      "$HARD_STOP_RECEIPT_THREAD" ] \
+    && [ "$(exact_meta_value "$meta" codex_app_host_id)" = \
+      "$HARD_STOP_RECEIPT_HOST" ] \
+    && [ "$(exact_meta_value "$meta" session_generation)" = \
+      "$HARD_STOP_RECEIPT_GENERATION" ] \
+    && [ "$(exact_meta_value "$current" thread_id)" = \
+      "$HARD_STOP_RECEIPT_THREAD" ] \
+    && [ "$(exact_meta_value "$current" host_id)" = \
+      "$HARD_STOP_RECEIPT_HOST" ] \
+    && [ "$(exact_meta_value "$current" state)" = paused ] \
+    && [ "$(git -C "$HARD_STOP_RECEIPT_WORKTREE" rev-parse HEAD 2>/dev/null)" = \
+      "$HARD_STOP_RECEIPT_CHECKPOINT" ] \
+    && [ -f "$handoff" ] && [ ! -L "$handoff" ] \
+    && grep -qx "checkpoint_sha: $HARD_STOP_RECEIPT_CHECKPOINT" "$handoff" \
+    && grep -qx "previous_thread_id: $HARD_STOP_RECEIPT_THREAD" "$handoff" \
+    && grep -qx "previous_host_id: $HARD_STOP_RECEIPT_HOST" "$handoff"
+}
+
+hard_stop_receipt_write() {  # <receipt> <request> <checkpoint> <handoff> <thread> <host> <generation> <worktree>
+  local receipt=$1 request_hash=$2 checkpoint=$3 handoff=$4 thread=$5 host=$6
+  local generation=$7 worktree=$8 tmp
+  tmp=$(umask 077; mktemp "$STATE/.hard-stop-receipt.XXXXXX") || return 1
+  {
+    printf 'version=1\n'
+    printf 'request_sha256=%s\n' "$request_hash"
+    printf 'checkpoint=%s\n' "$checkpoint"
+    printf 'handoff=%s\n' "$handoff"
+    printf 'thread=%s\n' "$thread"
+    printf 'host=%s\n' "$host"
+    printf 'generation=%s\n' "$generation"
+    printf 'worktree=%s\n' "$worktree"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$receipt" || { rm -f -- "$tmp"; return 1; }
+}
+
 task_mutation_recovery_owner() {  # <task-id> <operation> <request-sha256-or-none>
   local id=$1 operation=$2 request_hash=$3 transition hard_stop
   transition="$STATE/$id.codex-app-transition"
@@ -754,7 +916,7 @@ task_mutation_recovery_owner() {  # <task-id> <operation> <request-sha256-or-non
 hard_stop_task() {
   local id=$1
   shift
-  local reason='' handoff='' meta current worktree_real handoff_parent handoff_real journal
+  local reason='' handoff='' meta current worktree_real handoff_parent handoff_real journal receipt
   local thread host envelope generation checkpoint tmp pre_head index_tree head parent commit_tree subject
   local request_hash meta_preimage current_preimage hard_meta_stage hard_current_stage
   while [ "$#" -gt 0 ]; do
@@ -774,6 +936,7 @@ hard_stop_task() {
   fi
   require_owner
   task_mutation_lock_acquire "$id"
+  task_metadata_lock_acquire "$id"
   task_mutation_recovery_owner "$id" hard-stop none
   meta="$STATE/$id.meta"
   current="$STATE/$id.codex-app-current"
@@ -806,11 +969,25 @@ hard_stop_task() {
     || die "task $id has no session generation"
   case "$generation" in ''|*[!0-9]*) die "task $id has invalid session generation" ;; esac
   journal="$STATE/$id.hard-stop-journal"
+  receipt="$STATE/$id.codex-app-hard-stop-receipt"
   hard_meta_stage="$STATE/.$id.hard-stop.meta"
   hard_current_stage="$STATE/.$id.hard-stop.current"
   request_hash=$(desktop_transition_request_hash hard-stop "$id" "$reason" \
     "$handoff_real" "$thread" "$host" "$envelope" "$generation" "$worktree_real") \
     || die "cannot bind Desktop hard-stop request for $id"
+  if [ ! -e "$journal" ] && [ ! -L "$journal" ] \
+    && { [ -e "$receipt" ] || [ -L "$receipt" ]; }; then
+    hard_stop_receipt_parse "$receipt" \
+      || die "task $id has an invalid hard-stop completion receipt"
+    if [ "$HARD_STOP_RECEIPT_REQUEST" = "$request_hash" ]; then
+      hard_stop_receipt_matches "$receipt" "$request_hash" "$handoff_real" \
+        "$meta" "$current" "$worktree_real" \
+        || die "task $id hard-stop completion receipt no longer matches the completed transition"
+      printf 'hard-stop: %s checkpoint=%s handoff=%s\n' \
+        "$id" "$HARD_STOP_RECEIPT_CHECKPOINT" "$handoff_real"
+      return 0
+    fi
+  fi
   if [ -e "$journal" ] || [ -L "$journal" ]; then
     hard_stop_journal_parse "$journal" \
       || die "task $id has an invalid hard-stop recovery journal"
@@ -957,6 +1134,9 @@ hard_stop_task() {
   desktop_transition_publish_file "$id" "$hard_current_stage" "$current" \
     "$HARD_STOP_CURRENT_PREIMAGE" "$HARD_STOP_CURRENT_HASH" \
     || die "task $id current state changed during hard-stop recovery; refusing to overwrite it"
+  hard_stop_receipt_write "$receipt" "$request_hash" "$checkpoint" "$handoff_real" \
+    "$thread" "$host" "$generation" "$worktree_real" \
+    || die "cannot publish hard-stop completion receipt for $id"
   rm -f -- "$journal" || die "cannot retire hard-stop recovery journal for $id"
   rm -f -- "$hard_meta_stage" "$hard_current_stage" \
     || die "cannot retire hard-stop publication stages for $id"
@@ -1048,6 +1228,7 @@ resume_task() {
     || die_usage "cannot resolve session handoff: $handoff"
   require_owner
   task_mutation_lock_acquire "$id"
+  task_metadata_lock_acquire "$id"
   meta="$STATE/$id.meta"
   current="$STATE/$id.codex-app-current"
   receipt="$STATE/$id.codex-app-resume-receipt"
@@ -1141,7 +1322,7 @@ resume_task() {
 archive_preflight_task() {
   local id=$1
   shift
-  local report='' meta current kind worktree worktree_real report_real state
+  local report='' meta current kind worktree worktree_real report_real state canonical_report
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --report) [ "$#" -ge 2 ] || usage; report=$2; shift 2 ;;
@@ -1153,6 +1334,7 @@ archive_preflight_task() {
   valid_scalar "$report" || die_usage "report path must be a single-line value"
   require_owner
   task_mutation_lock_acquire "$id"
+  task_metadata_lock_acquire "$id"
   task_mutation_recovery_owner "$id" archive-preflight none
   meta="$STATE/$id.meta"
   current="$STATE/$id.codex-app-current"
@@ -1187,6 +1369,10 @@ archive_preflight_task() {
     || die "cannot resolve Desktop worktree for task $id"
   report_real=$(resolve_existing_file "$report") \
     || die "cannot resolve retained scout report: $report"
+  [ ! -L "$DATA/$id/report.md" ] \
+    || die "canonical retained scout report must not be a symbolic link: $DATA/$id/report.md"
+  canonical_report=$(resolve_existing_file "$DATA/$id/report.md") \
+    || die "Desktop scout $id requires the canonical retained report at $DATA/$id/report.md"
   [ -s "$report_real" ] \
     || die "retained scout report is empty: $report_real"
   case "$report_real" in
@@ -1194,6 +1380,8 @@ archive_preflight_task() {
       die "report is inside the Desktop worktree and would be deleted by archive: $report_real"
       ;;
   esac
+  [ "$report_real" = "$canonical_report" ] \
+    || die "retained scout report must be the canonical task report: $DATA/$id/report.md"
 
   printf 'archive-safe: %s scout report retained at %s\n' "$id" "$report_real"
 }

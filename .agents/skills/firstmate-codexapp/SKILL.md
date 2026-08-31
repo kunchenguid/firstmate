@@ -162,12 +162,15 @@ transition, reconcile only what the host actually reported:
 
 ```sh
 bin/fm-codex-app-task.sh reconcile <id> \
+  --thread <observed-thread-id> --host <observed-host-id> \
+  --generation <observed-generation> \
   --state <state> --detail '<bounded host evidence>' \
   --event '<valid-prefix>: <event detail>'
 ```
 
-Omit `--event` for a repeated poll with no new event. Never derive the new
-current state from the status log tail.
+Pass the thread, host, and generation attached to the observed result so a delayed prior-session result cannot mutate the current endpoint.
+Omit `--event` for a repeated poll with no new event.
+Never derive the new current state from the status log tail.
 
 ## Session Envelopes
 
@@ -219,21 +222,18 @@ worker mechanics through `AGENTS.md` section 9 in captain-facing updates.
 
 ## Archive
 
-Codex Desktop archive removes its app-owned worktree. Reconcile the terminal
-state, then run Firstmate's archive preflight before calling the host archive
-tool:
+Codex Desktop archive removes its app-owned worktree.
+Reconcile the terminal state, then run Firstmate's archive preflight before calling the host archive tool:
 
 ```sh
 bin/fm-codex-app-task.sh archive-preflight <id> \
-  --report <absolute-report-outside-the-desktop-worktree>
+  --report <absolute-firstmate-home>/data/<id>/report.md
 ```
 
-The preflight authorizes a completed scout only when its non-empty report is
-retained outside the Desktop worktree. It refuses ship tasks because archive
-would destroy an uncommitted or otherwise unlanded implementation artifact.
-Leave a refused terminal ship task idle and unarchived until its result is
-independently landed or the captain explicitly authorizes discard. Never treat
-archive as harmless sidebar cleanup.
+The preflight authorizes a completed scout only when its non-empty canonical task report is retained at `data/<id>/report.md` outside the Desktop worktree.
+It refuses ship tasks because archive would destroy an uncommitted or otherwise unlanded implementation artifact.
+Leave a refused terminal ship task idle and unarchived until its result is independently landed or the captain explicitly authorizes discard.
+Never treat archive as harmless sidebar cleanup.
 
 After a successful scout preflight, archive the exact task with the Desktop
 host tool. Generic `fm-teardown.sh` still refuses host-owned tasks and

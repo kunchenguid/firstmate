@@ -16,6 +16,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-task-model-route-lib.sh
 . "$SCRIPT_DIR/fm-task-model-route-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
   echo "usage: fm-task-model-route.sh <task-id> --ambiguity <0-2> --ambiguity-evidence <text> --boundary-clarity <0-2> --boundary-clarity-evidence <text> --risk <0-2> --risk-evidence <text> --diagnosis <0-2> --diagnosis-evidence <text> --verification <0-2> --verification-evidence <text> [--floor <name>] [--override-model <slug> --override-effort <effort>] [--quota-candidate <profile> <model> <effort> <eligible|ineligible> <reason> <evidence>]... [--resolved-profile <profile> --resolved-model <slug> --resolved-effort <effort>]" >&2
@@ -25,7 +27,7 @@ usage() {
 [ "$#" -ge 1 ] || usage
 ID=$1
 shift
-case "$ID" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
+fm_task_id_creation_valid "$ID" || usage
 
 AMBIGUITY='' AMBIGUITY_EVIDENCE=''
 BOUNDARY='' BOUNDARY_EVIDENCE=''
@@ -202,7 +204,11 @@ fm_task_route_record_parse "$TMP" || {
   echo "error: generated model route record did not satisfy the shared contract" >&2
   exit 1
 }
-mv -f -- "$TMP" "$RECORD" || exit 1
+ln "$TMP" "$RECORD" 2>/dev/null || {
+  echo "error: model route record already exists for $ID" >&2
+  exit 1
+}
+rm -f -- "$TMP" || true
 trap - EXIT HUP INT TERM
 printf 'routed: %s model=%s effort=%s total=%s precedence=%s record=%s\n' \
   "$ID" "$RESOLVED_MODEL" "$RESOLVED_EFFORT" "$TOTAL" "$PRECEDENCE" "$RECORD"

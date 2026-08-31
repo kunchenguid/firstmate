@@ -86,17 +86,25 @@ test_exact_head_green_contract() {
   local dir out status sha
   sha=1111111111111111111111111111111111111111
   dir="$TMP_ROOT/pr-green"
-  make_pr_fixture "$dir" "$sha" $'summary: 2 passed, 0 failed, 2 total\nchecks[2]{name,conclusion}:\n  verify,pass\n  policy,pass'
+  make_pr_fixture "$dir" "$sha" $'summary: 2 passed, 0 failed, 2 total\nchecks[2]{name,conclusion}:\n  Verify exact PR head,pass\n  policy,pass'
   out=$(run_pr_ci "$dir" "$sha") \
     || fail "exact-head wait rejected terminal success: $out"
   assert_contains "$out" "green: https://github.com/example/repo/pull/7 head=$sha checks=2" \
     "exact-head wait did not report the verified identity"
 
-  printf '%s\n' $'summary: 1 passed, 0 failed, 1 pending, 2 total\nchecks[2]{name,conclusion}:\n  verify,pass\n  policy,pending' > "$dir/checks"
+  printf '%s\n' $'summary: 1 passed, 0 failed, 1 pending, 2 total\nchecks[2]{name,conclusion}:\n  Verify exact PR head,pending\n  policy,pass' > "$dir/checks"
   status=0
   out=$(run_pr_ci "$dir" "$sha") || status=$?
   expect_code 1 "$status" "pending checks must not be green"
-  assert_contains "$out" "pending" "pending-check refusal was not diagnostic"
+  assert_contains "$out" "canonical Verify exact PR head check is not terminal-successful" \
+    "pending canonical-check refusal was not diagnostic"
+
+  printf '%s\n' $'summary: 2 passed, 0 failed, 2 total\nchecks[2]{name,conclusion}:\n  policy,pass\n  security,pass' > "$dir/checks"
+  status=0
+  out=$(run_pr_ci "$dir" "$sha") || status=$?
+  expect_code 1 "$status" "an all-pass summary without the canonical job must not be green"
+  assert_contains "$out" "canonical Verify exact PR head check is missing" \
+    "missing canonical-check refusal was not diagnostic"
 
   printf '%s\n' 2222222222222222222222222222222222222222 > "$dir/head"
   status=0
