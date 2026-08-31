@@ -348,4 +348,28 @@ assert_contains "$MISMATCH_OUT" "applies only to a cursor launch" \
   || fail "the mismatch refusal must land before any remote launch is dispatched"
 pass "remote route: a cursor exemption is refused on a non-cursor harness rather than recorded"
 
+# The forwarded envelope grant, end to end over the wire. Trace context is still
+# enabled here, so the parent sends BOTH self-describing trailing arguments -
+# `traceparent:<value>` and `exemption:<grant>` - which is the case an argument
+# count on the remote dispatcher silently rejected while each argument alone
+# passed. The grant is proven to have ARRIVED rather than merely been composed:
+# the remote host's own fm-spawn refuses an unattended cursor secondmate, so the
+# cursor launch appearing in the remote pane log is only reachable if
+# `--cursor-exemption` got there.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+printf 'cursor\n' > "$PARENT/config/secondmate-harness"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --cursor-exemption envelope:routing-benchmark >/dev/null 2>&1 \
+  || fail "an enveloped cursor remote secondmate should launch, so the grant must cross the wire"
+grep -q -- '--trust --auto-review --sandbox enabled' "$HERDR_LOG" \
+  || fail "the remote pane should have launched cursor under its sandboxed review posture"
+grep -q 'export TRACEPARENT=' "$HERDR_LOG" \
+  || fail "the carrier must still be delivered when an exemption argument rides alongside it"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
+  || fail "the parent record must carry the grant this remote launch was made under"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "the remote endpoint record must carry the grant its own spawn ran under"
+pass "remote route: an envelope grant and a carrier both cross the wire and reach the remote spawn"
+
 echo "ALL TESTS PASSED"

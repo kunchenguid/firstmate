@@ -1215,15 +1215,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
-  # Which recorded grant survives an unattended relaunch is owned by
-  # fm_control_cursor_exemption_inherited in bin/fm-control-lib.sh, not restated
-  # here: bin/fm-control.sh asks the SAME helper before it stops anything, so its
+  # Only CAPTURED here; which of it survives depends on the harness this relaunch
+  # resolves to, which is not known until below. fm_control_cursor_exemption_
+  # inherited in bin/fm-control-lib.sh is the one owner of that rule, and
+  # bin/fm-control.sh asks the SAME helper before it stops anything, so its
   # pre-stop capability answer is computed against the grant this launch will
   # really run under rather than the raw recorded value.
-  if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
-    CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
-      "$(fm_meta_get "$RELAUNCH_META" cursor_exemption)")
-  fi
+  RELAUNCH_RECORDED_EXEMPTION=$(fm_meta_get "$RELAUNCH_META" cursor_exemption)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1494,11 +1492,27 @@ esac
 # An unverified harness is skipped, not refused: a raw launch command is the
 # documented escape hatch for an adapter with no template. The canonicalization
 # inside the table still holds a raw `cursor-agent` command to the cursor rule.
+# The harness this spawn resolved to is finally known here, so a relaunch can now
+# ask the inheritance owner what its recorded grant is still worth. A grant that
+# does not survive onto this harness is dropped rather than carried into the
+# record below.
+if [ "$RELAUNCH" -eq 1 ] && [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
+  CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
+    "${RELAUNCH_RECORDED_EXEMPTION:-}" "$HARNESS")
+fi
+
 # A cursor exemption is meaningful only for a cursor launch. Accepting and
 # RECORDING one on another harness would leave a stale attested grant in that
 # task's meta, which a later relaunch onto cursor would read back as authority
 # nobody granted for cursor, so refuse the combination outright instead.
-if [ "$CURSOR_EXEMPTION_SET" -eq 1 ] && ! fm_control_cursor_exemption_applies "$HARNESS"; then
+#
+# This is keyed on the EFFECTIVE grant rather than on how the grant arrived. An
+# earlier revision asked whether the --cursor-exemption FLAG was passed, which
+# left the relaunch-inheritance path - which assigns a grant without setting that
+# flag - free to record a cursor grant on a non-cursor task. Asking about the
+# value that will actually be written keeps flag, inheritance, and any later
+# source behind this one check.
+if [ -n "$CURSOR_EXEMPTION" ] && ! fm_control_cursor_exemption_applies "$HARNESS"; then
   echo "error: $(fm_control_cursor_exemption_harness_refusal "$HARNESS")" >&2
   exit 1
 fi
