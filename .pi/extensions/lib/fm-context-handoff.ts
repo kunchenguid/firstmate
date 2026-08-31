@@ -88,6 +88,7 @@ function runHandoff(
   return new Promise((resolve) => {
     let stdout = "";
     let outputExceeded = false;
+    let adapterFailed = false;
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let child: ReturnType<typeof spawn> | undefined;
@@ -99,6 +100,7 @@ function runHandoff(
     };
     try {
       child = spawn(`${root}/bin/fm-context-handoff.py`, args, {
+        detached: process.platform !== "win32",
         env: { ...process.env, FM_HOME: fmHome },
         stdio: ["pipe", "pipe", "ignore"],
       });
@@ -111,9 +113,22 @@ function runHandoff(
       return;
     }
     const runningChild = child;
+    const terminateAdapter = (): void => {
+      adapterFailed = true;
+      try {
+        if (process.platform !== "win32" && runningChild.pid) process.kill(-runningChild.pid, "SIGKILL");
+        else runningChild.kill("SIGKILL");
+      } catch {
+        try {
+          runningChild.kill("SIGKILL");
+        } catch {
+          finish({ status: "adapter-failed" });
+        }
+      }
+    };
     if (!runningChild.stdout || !runningChild.stdin) {
-      runningChild.kill("SIGKILL");
-      finish({ status: "adapter-failed" });
+      terminateAdapter();
+      runningChild.once("close", () => finish({ status: "adapter-failed" }));
       return;
     }
     const childStdout = runningChild.stdout;
@@ -123,26 +138,23 @@ function runHandoff(
       ? testTimeout
       : 10_000;
     timeout = setTimeout(() => {
-      runningChild.kill("SIGKILL");
-      finish({ status: "adapter-failed" });
+      terminateAdapter();
     }, adapterTimeoutMs);
     childStdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       if (stdout.length + text.length > 64 * 1024) {
         outputExceeded = true;
-        runningChild.kill("SIGKILL");
-        finish({ status: "adapter-failed" });
+        terminateAdapter();
         return;
       }
       stdout += text;
     });
     childStdin.on("error", () => {
-      runningChild.kill("SIGKILL");
-      finish({ status: "adapter-failed" });
+      terminateAdapter();
     });
     runningChild.on("error", () => finish({ status: "adapter-failed" }));
     runningChild.on("close", (code) => {
-      if (code !== 0 || outputExceeded) {
+      if (code !== 0 || outputExceeded || adapterFailed) {
         finish({ status: "adapter-failed" });
         return;
       }

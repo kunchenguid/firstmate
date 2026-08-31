@@ -63,13 +63,13 @@ Automatic apply authority covers exactly one new note under a configured create 
 Deletion, move, canonical note replacement, merge, `.obsidian`, Git, GitHub, executable installation, credentials, sensitive content, ambiguity, and out-of-contract paths are quarantined.
 
 The consumer deterministically maps the handoff record ID to one transaction operation ID.
-It stages canonical bundle bytes privately, runs the exact byte-pinned installed transaction core's `inspect`, and stores the returned Vault-bound approval SHA-256.
+It stages canonical bundle bytes privately, verifies a reviewed manifest covering the entrypoint and every Python file in the installed transaction package, executes a private snapshot of those exact bytes for `inspect`, and stores the returned Vault-bound approval SHA-256 plus manifest identity.
 Commit accepts only the currently active bundle and approval while the record is pending or notified, invokes `claude-obsidian.transaction.v1` once, verifies the complete mode-0600 journal and result, every changed-path hash, complete journal state, exact bundle and approval correlation, and the absent mutation lock, and only then writes the source acknowledgement before transitioning the queue terminal.
 An identical retry is idempotent, changed handoff payload bytes quarantine, terminal dispositions revoke every prepared Save, and apply-complete-before-ack or acknowledgement-before-queue crashes heal from the verified transaction result or durable acknowledgement before any conflicting disposition can publish.
 Exit 75 leaves the record pending for a fresh read, rebuild, and inspect.
 
 The `PreToolUse` guard denies direct Write, Edit, NotebookEdit, shell mutation, unrelated MCP mutation, delete, move, Git, GitHub, installation, and credential tools in the curator session.
-Only the five exact tools exported by the bundled `firstmate-context-handoff` MCP server pass that MCP guard boundary.
+Only the five exact tools exported by the bundled `firstmate-context-handoff` MCP server pass that MCP guard boundary, and every mutation-capable one also requires the current hook session, process capability, and exact live Herdr generation.
 Save mutation is available only through the serialized MCP commit path, which holds the consumer state lock while revalidating the current hook session's process capability, exact live Herdr generation, source bytes, queue state, active private bundle, approval, and terminal state.
 The installed transaction core remains the primary confinement and recovery boundary because Claude command hooks cannot make their own startup or timeout infallible.
 
@@ -78,7 +78,7 @@ The installed transaction core remains the primary confinement and recovery boun
 Copy [`examples/context-handoff.json`](examples/context-handoff.json) to local `config/context-handoff.json` only after replacing every placeholder with reviewed local metadata.
 The four independent booleans are `registration_enabled`, `sealing_enabled`, `delivery_enabled`, and `consumer_enabled`.
 The example keeps all four false.
-The configuration stores no credential and must identify exact approved source roots, source/statement/classification eligibility contracts, provider classes, Vault path/device/inode, Herdr endpoint and session hash, Python executable, transaction entrypoint and module hashes, create prefixes, coupled replacement paths, and required coupled paths.
+The configuration stores no credential and must identify exact approved source roots, source/statement/classification eligibility contracts, provider classes, Vault path/device/inode, Herdr endpoint and session hash, Python executable, transaction dependency root and complete reviewed file manifest, create prefixes, coupled replacement paths, and required coupled paths.
 Registration is a closed allowlist: every contract binds the canonical source path and hash, statement hash, kind, confidence, sphere, provider class, and supersession set before the CLI can accept the candidate.
 
 Do not enable the real Vault as part of installation.
@@ -88,7 +88,7 @@ A later local activation must complete this checklist in order:
 2. Back up the selected Vault and verify the backup readback.
 3. Reconcile every current Vault writer without discarding work.
 4. Record the canonical Vault device and inode and the exact existing Herdr Claude endpoint and session-generation hash.
-5. Record fresh SHA-256 values for Herdr, the transaction entrypoint, and its transaction module.
+5. Record fresh SHA-256 values for Herdr and a complete manifest containing the transaction entrypoint plus every Python file below the installed transaction package.
 6. Run the focused synthetic suite and the model-free Pi and Claude hook smokes on the landed bytes.
 7. Load the plugin explicitly from its landed directory with a Vault-scoped Claude configuration.
 8. Record reviewed exact eligibility contracts, start with registration only, then sealing, then the consumer guard, and enable delivery last.
