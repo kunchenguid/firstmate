@@ -47,7 +47,7 @@ RAW_URL=$1
 shift
 
 BASE_BRANCH=
-AGAINST_BRANCHES=(main)
+AGAINST_BRANCHES=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --base)
@@ -69,6 +69,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "${#AGAINST_BRANCHES[@]}" -eq 0 ]; then
+  AGAINST_BRANCHES=(main)
+fi
+
 if ! fm_pr_url_parse "$RAW_URL" || [ "$FM_PR_PROVIDER" != github ]; then
   fail_closed "cannot parse a GitHub PR URL"
 fi
@@ -79,8 +83,46 @@ PR_NUMBER=$FM_PR_NUMBER
 
 CLONE=$(git rev-parse --show-toplevel 2>/dev/null) \
   || fail_closed "the current directory is not a Git clone"
-git -C "$CLONE" remote get-url origin >/dev/null 2>&1 \
+ORIGIN_URL=$(git -C "$CLONE" remote get-url origin 2>/dev/null) \
   || fail_closed "the Git clone has no origin remote"
+
+lowercase() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# Every branch and the PR head come from origin, so origin must be the same
+# repository the PR URL names. A local clone path carries no forge identity to
+# compare and is left to the branch and PR head fetches to reject.
+verify_origin_repo() {
+  local url=$1 host path
+  case "$url" in
+    file://*|/*|./*|../*|~*) return 0 ;;
+    *://*)
+      path=${url#*://}
+      host=${path%%/*}
+      case "$path" in
+        */*) path=${path#*/} ;;
+        *) path= ;;
+      esac
+      ;;
+    *:*)
+      host=${url%%:*}
+      path=${url#*:}
+      ;;
+    *) return 0 ;;
+  esac
+  host=${host#*@}
+  host=${host%%:*}
+  path=${path#/}
+  path=${path%/}
+  path=${path%.git}
+  [ "$(lowercase "$host")" = github.com ] \
+    || fail_closed "origin is not the PR repository: $url"
+  [ "$(lowercase "$path")" = "$(lowercase "$PR_OWNER/$PR_REPO")" ] \
+    || fail_closed "origin is not the PR repository: $url"
+}
+
+verify_origin_repo "$ORIGIN_URL"
 
 valid_branch() {
   local branch=$1
@@ -134,6 +176,19 @@ for branch in "${AGAINST_BRANCHES[@]}"; do
 done
 
 PR_HEAD_REF="refs/fm-pr-base-check/pull/$PR_NUMBER/head"
+PR_HEAD_REF_WRITTEN=false
+FILE_LIST_TMP=
+cleanup() {
+  local rc=$?
+  [ -z "$FILE_LIST_TMP" ] || rm -f -- "$FILE_LIST_TMP" || true
+  if [ "$PR_HEAD_REF_WRITTEN" = true ]; then
+    git -C "$CLONE" update-ref -d "$PR_HEAD_REF" >/dev/null 2>&1 || true
+  fi
+  return "$rc"
+}
+trap cleanup EXIT
+
+PR_HEAD_REF_WRITTEN=true
 git -C "$CLONE" fetch --quiet origin \
   "+refs/pull/$PR_NUMBER/head:$PR_HEAD_REF" >/dev/null 2>&1 \
   || fail_closed "cannot fetch PR head: $URL"
@@ -174,10 +229,6 @@ done <<<"$COMMIT_LINES"
 
 FILE_LIST_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-pr-base-check.XXXXXX") \
   || fail_closed "cannot create a temporary file list"
-cleanup() {
-  rm -f -- "$FILE_LIST_TMP"
-}
-trap cleanup EXIT
 git -C "$CLONE" diff --name-only -z "$BASE_REF...$PR_HEAD_REF" >"$FILE_LIST_TMP" \
   || fail_closed "cannot list changed PR files"
 
@@ -196,6 +247,9 @@ blob_id() {
 while IFS= read -r -d '' path; do
   pr_blob=$(blob_id "$PR_HEAD_REF" "$path") \
     || fail_closed "cannot determine the PR blob for file: $path"
+  # A path the PR deletes has no blob to attribute to an against branch, and
+  # the MISSING sentinel must never compare equal to another absent path.
+  [ "$pr_blob" != MISSING ] || continue
   base_blob=$(blob_id "$BASE_REF" "$path") \
     || fail_closed "cannot determine the base blob for file: $path"
   for index in "${!UNIQUE_AGAINST_BRANCHES[@]}"; do

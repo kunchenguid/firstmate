@@ -71,6 +71,10 @@
 #   (ax) the PR base guard catches foreign commits and foreign file content
 #   (ay) the PR base guard allows clean content and an agreed base/main blob
 #   (az) the merge path refuses the guard failure unless explicitly overridden
+#   (ba) the PR base guard allows deleting a file the against branch never had
+#   (bb) --against replaces the main default
+#   (bc) a foreign origin fails closed
+#   (bd) the PR base guard removes its fetched PR head ref on exit
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -108,7 +112,7 @@ REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin project remote seed number
+  local name=$1 case_dir fakebin project remote seed number pr_head
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$fakebin"
@@ -122,9 +126,11 @@ make_case() {
   printf 'pull request content\n' > "$seed/pr.txt"
   git -C "$seed" add pr.txt
   git -C "$seed" commit -qm 'test pull request content'
+  pr_head=$(git -C "$seed" rev-parse HEAD)
+  git -C "$seed" push -q "file://$remote" HEAD:refs/pull/template/head
   for number in 5 6 7 8 9 13 15 21 22 23 44 51 52 53 54 55 56 57 58 59 \
     60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 126; do
-    git -C "$seed" push -q "file://$remote" HEAD:"refs/pull/$number/head"
+    git -C "$remote" update-ref "refs/pull/$number/head" "$pr_head"
   done
   git clone -q "file://$remote" "$project"
   fm_write_meta "$case_dir/state/task-x1.meta" \
@@ -2101,6 +2107,7 @@ test_secondmate_without_parent_binding_is_loud() {
     "unbound-secondmate: a secondmate home fell back to the main-home record"
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
+GUARD_COMPONENT=apps/sdlc-ui/UI/src/app/components/workflow-preview/run-activity/run-activity.component.ts
 
 build_guard_project() {
   local case_dir=$1 mode=$2 seed remote project root_commit
@@ -2110,26 +2117,28 @@ build_guard_project() {
   fm_git_init_commit "$seed"
   root_commit=$(git -C "$seed" rev-parse HEAD)
   git -C "$seed" branch -M main
-  printf 'main component\n' > "$seed/component.ts"
+  mkdir -p "$seed/$(dirname "$GUARD_COMPONENT")"
+  printf 'main component\n' > "$seed/$GUARD_COMPONENT"
   printf 'agreed content\n' > "$seed/same.txt"
-  git -C "$seed" add component.ts same.txt
+  git -C "$seed" add "$GUARD_COMPONENT" same.txt
   git -C "$seed" commit -qm 'main component change'
   git -C "$seed" checkout -q -b feature/base "$root_commit"
-  printf 'base component\n' > "$seed/component.ts"
+  mkdir -p "$seed/$(dirname "$GUARD_COMPONENT")"
+  printf 'base component\n' > "$seed/$GUARD_COMPONENT"
   printf 'agreed content\n' > "$seed/same.txt"
-  git -C "$seed" add component.ts same.txt
+  git -C "$seed" add "$GUARD_COMPONENT" same.txt
   git -C "$seed" commit -qm 'feature base component change'
   git -C "$seed" checkout -q -b pr
   case "$mode" in
     content)
-      printf 'main component\n' > "$seed/component.ts"
-      git -C "$seed" add component.ts
+      printf 'main component\n' > "$seed/$GUARD_COMPONENT"
+      git -C "$seed" add "$GUARD_COMPONENT"
       git -C "$seed" commit -qm 'copy main component wholesale'
       ;;
     foreign-commit)
       git -C "$seed" merge --no-ff main -m 'merge main into PR' >/dev/null 2>&1 || {
-        git -C "$seed" checkout -q --ours component.ts
-        git -C "$seed" add component.ts
+        git -C "$seed" checkout -q --ours "$GUARD_COMPONENT"
+        git -C "$seed" add "$GUARD_COMPONENT"
         git -C "$seed" commit -qm 'merge main into PR'
       }
       ;;
@@ -2142,6 +2151,16 @@ build_guard_project() {
       printf 'only PR content\n' > "$seed/pr-only.txt"
       git -C "$seed" add pr-only.txt
       git -C "$seed" commit -qm 'clean PR content'
+      ;;
+    deleted)
+      git -C "$seed" checkout -q feature/base
+      printf 'base only scaffold\n' > "$seed/scaffold.txt"
+      git -C "$seed" add scaffold.txt
+      git -C "$seed" commit -qm 'base scaffold that main never had'
+      git -C "$seed" branch -qf pr
+      git -C "$seed" checkout -q pr
+      git -C "$seed" rm -q scaffold.txt
+      git -C "$seed" commit -qm 'delete the base scaffold'
       ;;
     *) fail "unknown guard fixture mode: $mode" ;;
   esac
@@ -2192,7 +2211,7 @@ test_base_guard_foreign_content_fails_with_file() {
   out=$(run_base_check "$case_dir" content)
   rc=$(printf '%s\n' "$out" | head -1)
   expect_code 1 "$rc" "base-foreign-content: foreign content should fail"
-  assert_contains "$out" 'foreign content: component.ts appears taken from main' \
+  assert_contains "$out" "foreign content: $GUARD_COMPONENT appears taken from main" \
     "base-foreign-content: file evidence is missing"
   pass "PR base guard catches wrong-branch file content"
 }
@@ -2206,6 +2225,64 @@ test_base_guard_agreed_blob_does_not_fail() {
   expect_code 0 "$rc" "base-agreed: agreed blob should pass"
   assert_contains "$out" 'PR base check: PASS' "base-agreed: pass summary is missing"
   pass "PR base guard allows content that base and main already share"
+}
+
+test_base_guard_deleted_base_file_does_not_fail() {
+  local case_dir out rc
+  case_dir="$TMP_ROOT/base-deleted"
+  mkdir -p "$case_dir"
+  out=$(run_base_check "$case_dir" deleted)
+  rc=$(printf '%s\n' "$out" | head -1)
+  expect_code 0 "$rc" "base-deleted: deleting a base-only file should pass"
+  assert_contains "$out" 'PR base check: PASS' "base-deleted: pass summary is missing"
+  pass "PR base guard allows a PR that deletes a file the against branch never had"
+}
+
+test_base_guard_uses_supplied_against_branches_only() {
+  local case_dir project out rc
+  case_dir="$TMP_ROOT/base-against-only"
+  mkdir -p "$case_dir"
+  project=$(build_guard_project "$case_dir" content)
+  git -C "$project" push -q origin --delete main
+  set +e
+  out=$( (cd "$project" && "$PR_BASE_CHECK" \
+    https://github.com/example/repo/pull/1 --base feature/base \
+    --against feature/base) 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "base-against-only: supplied --against should replace the main default"
+  assert_contains "$out" 'PR base check: PASS' "base-against-only: pass summary is missing"
+  pass "PR base guard uses only the supplied --against branches"
+}
+
+test_base_guard_refuses_a_foreign_origin() {
+  local case_dir project out rc
+  case_dir="$TMP_ROOT/base-foreign-origin"
+  mkdir -p "$case_dir"
+  project=$(build_guard_project "$case_dir" clean)
+  git -C "$project" remote set-url origin https://github.com/other/repo.git
+  set +e
+  out=$( (cd "$project" && "$PR_BASE_CHECK" \
+    https://github.com/example/repo/pull/1 --base feature/base) 2>&1 )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "base-foreign-origin: a mismatched origin should fail closed"
+  assert_contains "$out" 'origin is not the PR repository' \
+    "base-foreign-origin: refusal did not name the origin mismatch"
+  pass "PR base guard refuses an origin that is not the PR repository"
+}
+
+test_base_guard_removes_the_fetched_pr_ref() {
+  local case_dir project refs
+  case_dir="$TMP_ROOT/base-ref-cleanup"
+  mkdir -p "$case_dir"
+  project=$(build_guard_project "$case_dir" clean)
+  (cd "$project" && "$PR_BASE_CHECK" \
+    https://github.com/example/repo/pull/1 --base feature/base --against main) \
+    > "$case_dir/stdout" 2>&1 || fail "base-ref-cleanup: clean PR should pass"
+  refs=$(git -C "$project" for-each-ref --format='%(refname)' 'refs/fm-pr-base-check/**')
+  [ -z "$refs" ] || fail "base-ref-cleanup: guard left review refs behind: $refs"
+  pass "PR base guard removes the fetched PR head ref on exit"
 }
 
 test_merge_guard_refuses_and_override_proceeds() {
@@ -2229,7 +2306,7 @@ test_merge_guard_refuses_and_override_proceeds() {
   rc=$?
   set -e
   expect_code 1 "$rc" "merge-base-guard: failed guard should refuse merge"
-  assert_grep 'foreign content: component.ts appears taken from main' "$case_dir/stdout" \
+  assert_grep "foreign content: $GUARD_COMPONENT appears taken from main" "$case_dir/stdout" \
     "merge-base-guard: refusal omitted guard evidence"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "merge-base-guard: merge was invoked after guard failure"
@@ -2311,4 +2388,8 @@ test_base_guard_clean_pr_passes
 test_base_guard_foreign_commit_fails_with_subject
 test_base_guard_foreign_content_fails_with_file
 test_base_guard_agreed_blob_does_not_fail
+test_base_guard_deleted_base_file_does_not_fail
+test_base_guard_uses_supplied_against_branches_only
+test_base_guard_refuses_a_foreign_origin
+test_base_guard_removes_the_fetched_pr_ref
 test_merge_guard_refuses_and_override_proceeds
