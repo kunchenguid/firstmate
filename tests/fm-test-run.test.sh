@@ -241,11 +241,10 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm unmapped-test-asset-change
 
   rm "$repo/tests/assets/board-render-harness.mjs"
-  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-bearings-snapshot.test.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" \
-    "removed test asset leaves its changed consumer selected"
-  git -C "$repo" add tests/assets/board-render-harness.mjs tests/fm-bearings-snapshot.test.sh
+    "removed test asset selects its unchanged consumer"
+  git -C "$repo" add tests/assets/board-render-harness.mjs
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm removed-test-asset
 
   printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
