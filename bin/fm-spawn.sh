@@ -1617,10 +1617,26 @@ resolve_project_dir_arg() {
   esac
 }
 
+normalize_link_local_path() {  # collapses "//" and "." components so equivalent
+  local path=$1 part result=  # spellings (e.g. "config" and "./config/") compare equal
+  local -a parts
+  IFS=/ read -r -a parts <<< "$path"
+  for part in "${parts[@]}"; do
+    [ -n "$part" ] && [ "$part" != "." ] || continue
+    if [ -z "$result" ]; then
+      result=$part
+    else
+      result="$result/$part"
+    fi
+  done
+  printf '%s' "$result"
+}
+
 validate_link_local_paths() {  # validates against the primary project checkout
-  local path source path_bytes i j
+  local path source path_bytes i j normalized
   LINK_LOCAL_SOURCES=()
-  for path in "${LINK_LOCAL_PATHS[@]}"; do
+  for ((i = 0; i < ${#LINK_LOCAL_PATHS[@]}; i++)); do
+    path=${LINK_LOCAL_PATHS[$i]}
     [ -n "$path" ] || {
       echo "error: --link-local requires a non-empty relative project path" >&2
       return 1
@@ -1638,6 +1654,16 @@ validate_link_local_paths() {  # validates against the primary project checkout
       echo "error: --link-local path contains an invalid control byte" >&2
       return 1
     fi
+    normalized=$(normalize_link_local_path "$path")
+    [ -n "$normalized" ] || {
+      echo "error: --link-local path must not resolve to the project root: $path" >&2
+      return 1
+    }
+    # Recorded so every later use (worktree destination, conflict checks,
+    # state/<id>.meta, relaunch forwarding) sees one canonical spelling instead
+    # of comparing "config" against "./config/" as unrelated strings.
+    LINK_LOCAL_PATHS[i]=$normalized
+    path=$normalized
     source="$PROJ_ABS/$path"
     [ -e "$source" ] || {
       echo "error: --link-local path does not exist in the primary checkout: $path" >&2

@@ -166,6 +166,9 @@ test_link_local_refuses_conflicting_paths_before_linking() {
 repeated path|--link-local config/a.yaml --link-local config/a.yaml|repeated
 ancestor before descendant|--link-local config --link-local config/a.yaml|conflict, one is nested in the other
 descendant before ancestor|--link-local config/a.yaml --link-local config|conflict, one is nested in the other
+equivalent spelling with dot prefix|--link-local config --link-local ./config|repeated
+equivalent spelling with trailing slash|--link-local config/a.yaml --link-local config//a.yaml/|repeated
+equivalent ancestor spelling|--link-local ./config/ --link-local config/a.yaml|conflict, one is nested in the other
 ROWS
   pass "fm-spawn: link-local refuses a repeated or nested path before creating any symlink"
 }
