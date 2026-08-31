@@ -815,10 +815,11 @@ test_lifecycle_and_authority_snapshots() {
   marker="$EROOT/stale-paused"
   release="$EROOT/stale-release"
   (
-    export FM_HANDOFF_TEST_PAUSEPOINT=before-compaction-binding-lock
-    export FM_HANDOFF_TEST_PAUSE_MARKER="$marker"
-    export FM_HANDOFF_TEST_PAUSE_RELEASE="$release"
-    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook
+    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' |
+      FM_HANDOFF_TEST_PAUSEPOINT=before-compaction-binding-lock \
+      FM_HANDOFF_TEST_PAUSE_MARKER="$marker" \
+      FM_HANDOFF_TEST_PAUSE_RELEASE="$release" \
+      cli claude-hook
   ) > "$EROOT/stale-output" 2> "$EROOT/stale-error" &
   stale_pid=$!
   i=0
@@ -1032,10 +1033,10 @@ test_bounded_transports_and_delivery() {
   marker="$EROOT/herdr-snapshot-paused"
   release="$EROOT/herdr-snapshot-release"
   (
-    export FM_HANDOFF_TEST_PAUSEPOINT=after-recipient-probe
-    export FM_HANDOFF_TEST_PAUSE_MARKER="$marker"
-    export FM_HANDOFF_TEST_PAUSE_RELEASE="$release"
-    cli deliver
+    FM_HANDOFF_TEST_PAUSEPOINT=after-recipient-probe \
+      FM_HANDOFF_TEST_PAUSE_MARKER="$marker" \
+      FM_HANDOFF_TEST_PAUSE_RELEASE="$release" \
+      cli deliver
   ) > "$EROOT/herdr-snapshot-output" 2> "$EROOT/herdr-snapshot-error" &
   delivery_pid=$!
   i=0
@@ -1176,7 +1177,9 @@ PY
   done
   [ -f "$first_checkpoint" ] && [ -f "$second_checkpoint" ] || fail "concurrent initializers did not reach the shared durability boundary"
   [ ! -e "$FM_HOME/state/context-handoff" ] || fail "concurrent process bypassed the initialization durability boundary"
-  kill -0 "$first_pid" 2>/dev/null && kill -0 "$second_pid" 2>/dev/null || fail "concurrent initializer completed outside the shared boundary"
+  if ! kill -0 "$first_pid" 2>/dev/null || ! kill -0 "$second_pid" 2>/dev/null; then
+    fail "concurrent initializer completed outside the shared boundary"
+  fi
   : > "$release"
   wait "$holder" || fail "synthetic initialization boundary failed"
   wait "$first_pid" || fail "first serialized initializer failed"
@@ -1207,8 +1210,8 @@ test_pi_result_validation() {
       polluted) body='{"status":"empty","bindings":[]}' ;;
       empty) body='{"status":"empty"}' ;;
       disabled) body='{"status":"disabled"}' ;;
-      exited) body=exit ;;
-      hanging) body=hang ;;
+      exited) body='exit' ;;
+      hanging) body='hang' ;;
     esac
     if [ "$body" = exit ]; then
       cat > "$adapter_root/bin/fm-context-handoff.py" <<'EOF'
@@ -1552,12 +1555,12 @@ test_transaction_replay_and_rollback() {
   pause_release="$EROOT/release-gate-release"
   mkdir -p "$ambient"
   (
-    export PYTHONPATH="$ambient"
-    export FM_AMBIENT_TRANSACTION_MARKER="$ambient_marker"
-    export FM_HANDOFF_TEST_PAUSEPOINT=before-release-gate-spawn
-    export FM_HANDOFF_TEST_PAUSE_MARKER="$pause_marker"
-    export FM_HANDOFF_TEST_PAUSE_RELEASE="$pause_release"
-    commit_save "$record" "$approval"
+    PYTHONPATH="$ambient" \
+      FM_AMBIENT_TRANSACTION_MARKER="$ambient_marker" \
+      FM_HANDOFF_TEST_PAUSEPOINT=before-release-gate-spawn \
+      FM_HANDOFF_TEST_PAUSE_MARKER="$pause_marker" \
+      FM_HANDOFF_TEST_PAUSE_RELEASE="$pause_release" \
+      commit_save "$record" "$approval"
   ) > "$EROOT/isolated-apply-output" 2> "$EROOT/isolated-apply-error" &
   apply_pid=$!
   i=0
@@ -1882,8 +1885,8 @@ test_claude_lifecycle_and_plugin_discovery() {
   [ -z "$output" ] || fail "successful Claude PreCompact emitted content"
   marker=COMPACT_SUMMARY_MUST_NOT_PERSIST
   if (
-    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-terminal-before-queues
-    jq -nc --arg session "$CLAUDE_SESSION" --arg marker "$marker" '{hook_event_name:"PostCompact",session_id:$session,trigger:"manual",compact_summary:$marker,transcript_path:"/forbidden/transcript"}' | cli claude-hook
+    jq -nc --arg session "$CLAUDE_SESSION" --arg marker "$marker" '{hook_event_name:"PostCompact",session_id:$session,trigger:"manual",compact_summary:$marker,transcript_path:"/forbidden/transcript"}' |
+      FM_HANDOFF_TEST_FAILPOINT=after-compaction-terminal-before-queues cli claude-hook
   ) > "$EROOT/crash-post" 2> "$EROOT/crash-post-error"; then
     fail "Claude terminal compaction failpoint unexpectedly completed"
   fi
@@ -1932,10 +1935,11 @@ printf 'executed\n' > '$bash_marker'
 exit 0
 EOF
   (
-    export PYTHONPATH="$ambient"
-    export FM_AMBIENT_PLUGIN_MARKER="$ambient_marker"
-    export BASH_ENV="$ambient/bash-env"
-    jq -nc --arg session "$CLAUDE_SESSION" --arg path "$VAULT/blocked.md" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"Write",tool_input:{file_path:$path,content:"x"}}' | plugin_cli claude-hook
+    jq -nc --arg session "$CLAUDE_SESSION" --arg path "$VAULT/blocked.md" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"Write",tool_input:{file_path:$path,content:"x"}}' |
+      PYTHONPATH="$ambient" \
+      FM_AMBIENT_PLUGIN_MARKER="$ambient_marker" \
+      BASH_ENV="$ambient/bash-env" \
+      plugin_cli claude-hook
   ) > "$EROOT/plugin-out" 2> "$EROOT/plugin-error"
   adapter_status=$?
   [ "$adapter_status" -eq 2 ] && [ ! -s "$EROOT/plugin-out" ] || fail "Claude plugin adapter changed deny transport status"
@@ -2258,10 +2262,8 @@ test_durable_compaction_attempt() {
   register_statement 'Second bounded record joins the same compaction attempt.' next-step >/dev/null || fail "second attempt record did not register"
   second=$(seal_pi) || fail "second attempt seal failed"
   [ "$(printf '%s' "$second" | jq '.bindings | length')" = 2 ] || fail "retry attempt did not bind both records"
-  if (
-    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues
-    complete "$second" success
-  ) > "$EROOT/attempt-crash-out" 2> "$EROOT/attempt-crash-error"; then
+  if FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues \
+    complete "$second" success > "$EROOT/attempt-crash-out" 2> "$EROOT/attempt-crash-error"; then
     fail "compaction attempt failpoint unexpectedly completed"
   fi
   succeeded=$(jq -s '[.[] | select(.compaction=="succeeded")] | length' "$FM_HOME"/state/context-handoff/queue/handoff-*.json) || fail "could not read queue state"
@@ -2278,10 +2280,8 @@ test_durable_compaction_attempt() {
   complete "$first" failure >/dev/null || fail "first partial-attempt failure was not recorded"
   register_statement 'Second partial-attempt record must retain the shared journal.' next-step >/dev/null || fail "second partial-attempt record did not register"
   second=$(seal_pi) || fail "partial compaction attempt did not seal"
-  if (
-    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-record-apply
-    complete "$second" success
-  ) > "$EROOT/partial-out" 2> "$EROOT/partial-error"; then
+  if FM_HANDOFF_TEST_FAILPOINT=after-compaction-record-apply \
+    complete "$second" success > "$EROOT/partial-out" 2> "$EROOT/partial-error"; then
     fail "partial compaction failpoint unexpectedly completed"
   fi
   journal=$(find "$FM_HOME/state/context-handoff/bindings" -name 'attempt-*.json' -print -quit)
@@ -2435,10 +2435,11 @@ test_precompact_generation_and_timeout_margin() {
   marker="$EROOT/seal-paused"
   release="$EROOT/seal-release"
   (
-    export FM_HANDOFF_TEST_PAUSEPOINT=before-compaction-binding-lock
-    export FM_HANDOFF_TEST_PAUSE_MARKER="$marker"
-    export FM_HANDOFF_TEST_PAUSE_RELEASE="$release"
-    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook
+    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' |
+      FM_HANDOFF_TEST_PAUSEPOINT=before-compaction-binding-lock \
+      FM_HANDOFF_TEST_PAUSE_MARKER="$marker" \
+      FM_HANDOFF_TEST_PAUSE_RELEASE="$release" \
+      cli claude-hook
   ) > "$EROOT/paused-output" 2> "$EROOT/paused-error" &
   paused_pid=$!
   i=0
@@ -2513,8 +2514,8 @@ test_sessionstart_pending_eligibility() {
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "terminal recovery PreCompact failed"
   record=$(find "$FM_HOME/state/context-handoff/queue" -name 'handoff-*.json' -printf '%f\n' | sed 's/\.json$//' | head -1)
   if (
-    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues
-    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook
+    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' |
+      FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues cli claude-hook
   ) > "$EROOT/terminal-recovery-crash" 2> "$EROOT/terminal-recovery-error"; then
     fail "terminal recovery failpoint unexpectedly completed"
   fi
@@ -2576,10 +2577,8 @@ test_invalid_attempt_journal_retired() {
   register_statement 'A content-bound attempt cannot retain its ID after a status edit.' >/dev/null || fail "tampered attempt fixture did not register"
   seal=$(seal_pi) || fail "tampered attempt fixture did not seal"
   record=$(printf '%s' "$seal" | jq -r .record_id)
-  if (
-    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues
-    complete "$seal" success
-  ) > "$EROOT/tamper-out" 2> "$EROOT/tamper-error"; then
+  if FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues \
+    complete "$seal" success > "$EROOT/tamper-out" 2> "$EROOT/tamper-error"; then
     fail "tampered attempt fixture did not retain a journal"
   fi
   valid=$(find "$FM_HOME/state/context-handoff/bindings" -name 'attempt-*.json' -print -quit)

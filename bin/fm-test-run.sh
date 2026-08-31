@@ -1077,6 +1077,10 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
+    tests/fm-context-handoff.test.sh)
+      printf '%s\n' context-handoff-serial
+      printf '%s\n' live-harness-optin
+      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
@@ -1250,7 +1254,7 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
-    bin/fm-context-handoff.py|libexec/fm-context-handoff.py|tests/fm-context-handoff.test.sh|\
+    bin/fm-context-handoff.py|libexec/fm-context-handoff.py|\
     tests/fixtures/context-handoff-transaction-core.sh|schemas/claude-obsidian.handoff.v1.schema.json|\
     integrations/claude-context-handoff/*|\
     .pi/extensions/lib/fm-context-handoff.ts)
