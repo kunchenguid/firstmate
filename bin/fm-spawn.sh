@@ -486,7 +486,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
-  local remote_exemption_note remote_launch_refusal
+  local remote_exemption_note remote_launch_refusal remote_launch_qualifier
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -555,12 +555,19 @@ spawn_remote_secondmate() {
   # The shared refusal offers both grant forms because both are valid on an
   # ordinary launch, but only an envelope grant can describe a worker on another
   # host, so this route qualifies the shared text rather than forking a second
-  # copy of it. Without the qualifier the first message an operator reads sends
-  # half of them into the `attended` refusal below.
+  # copy of it. The qualifier is attached ONLY to the cursor refusal it explains:
+  # the composite also refuses this route for reasons that have nothing to do
+  # with a grant, and stapling cursor guidance onto those would answer a question
+  # the operator did not ask - or, on a non-cursor harness carrying a grant, tell
+  # them to drop the flag and to pass one in the same breath.
+  remote_launch_qualifier=
+  if fm_control_cursor_exemption_applies "$harness"; then
+    remote_launch_qualifier=" On this REMOTE secondmate route only --cursor-exemption envelope:<name> is accepted, because 'attended' asserts a person at this pane and cannot describe a worker on another host."
+  fi
   if ! remote_launch_refusal=$(fm_control_launch_refusal "$harness" secondmate "$CURSOR_EXEMPTION"); then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: $remote_launch_refusal On this REMOTE secondmate route only --cursor-exemption envelope:<name> is accepted, because 'attended' asserts a person at this pane and cannot describe a worker on another host." >&2
+    echo "error: ${remote_launch_refusal}${remote_launch_qualifier}" >&2
     return 1
   fi
   # `attended` asserts that a person is at THIS pane, which says nothing about a

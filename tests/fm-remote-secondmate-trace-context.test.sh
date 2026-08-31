@@ -433,4 +433,23 @@ assert_contains "$BOGUS_OUT" "unrecognized remote launch argument" \
   "a non-carrier bare argument must still fail closed on the self-describing contract"
 pass "wire: a bare argument that is not a carrier is still refused"
 
+# The receiver validates the grant it CONSUMES rather than trusting the sender.
+# The parent already refuses to compose `exemption:attended`, so this shape is
+# not reachable from a shipped caller - it is the trust boundary being closed on
+# its own side, because an attended grant honored here would attest to a person
+# at the SENDING pane for a worker on this host that nobody is watching.
+if ATTENDED_WIRE=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch \
+  ios cursor - - herdr exemption:attended 2>&1); then
+  fail "the wire receiver must refuse an attended grant, not forward it to the remote spawn"
+fi
+assert_contains "$ATTENDED_WIRE" "cannot carry an 'attended' cursor exemption" \
+  "the receiver refusal should say why attended cannot describe a worker on this host"
+if BOGUS_WIRE=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch \
+  ios cursor - - herdr exemption:not-a-grant 2>&1); then
+  fail "the wire receiver must refuse a grant that is not envelope-shaped"
+fi
+assert_contains "$BOGUS_WIRE" "forwards only exemption:envelope:<name>" \
+  "the receiver should name the only grant form the wire carries"
+pass "wire: the receiver forwards only an envelope grant, refusing attended and malformed grants"
+
 echo "ALL TESTS PASSED"

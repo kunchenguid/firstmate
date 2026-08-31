@@ -201,6 +201,19 @@ cmd_launch() {
         ;;
     esac
   done
+  # Only an envelope grant crosses the wire, and this is the boundary that
+  # CONSUMES the grant, so it validates what it accepts rather than trusting the
+  # sender to have validated what it sent. The parent already refuses to compose
+  # `exemption:attended`, so nothing shipped reaches this - which is exactly why
+  # it belongs here: an `attended` grant asserts a person at the PARENT's pane
+  # and would be honored on this host as an attestation for a worker nobody is
+  # watching.
+  case "$exemption" in
+    '') ;;
+    attended) die "a remote secondmate launch cannot carry an 'attended' cursor exemption: it asserts a person at the sending pane and says nothing about a worker on this host; send exemption:envelope:<name> instead" ;;
+    envelope:?*) ;;
+    *) die "unrecognized remote cursor exemption '$exemption'; a remote secondmate launch forwards only exemption:envelope:<name>" ;;
+  esac
 
   validate_id "$id"
   validate_home "$id"
