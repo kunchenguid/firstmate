@@ -63,6 +63,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
@@ -208,11 +210,18 @@ cmd_launch() {
   # it belongs here: an `attended` grant asserts a person at the PARENT's pane
   # and would be honored on this host as an attestation for a worker nobody is
   # watching.
+  #
+  # The SHAPE of a grant is asked of fm_control_cursor_exemption_valid rather
+  # than matched here, so this boundary enforces exactly the rule its declared
+  # owner enforces - including the bounded envelope name - instead of a looser
+  # local copy that would let a value the owner rejects cross the wire.
   case "$exemption" in
     '') ;;
     attended) die "a remote secondmate launch cannot carry an 'attended' cursor exemption: it asserts a person at the sending pane and says nothing about a worker on this host; send exemption:envelope:<name> instead" ;;
-    envelope:?*) ;;
-    *) die "unrecognized remote cursor exemption '$exemption'; a remote secondmate launch forwards only exemption:envelope:<name>" ;;
+    *)
+      fm_control_cursor_exemption_valid "$exemption" \
+        || die "unrecognized remote cursor exemption '$exemption'; a remote secondmate launch forwards only exemption:envelope:<name>, where <name> starts with a letter or digit and continues with letters, digits, '.', '_', or '-'"
+      ;;
   esac
 
   validate_id "$id"
