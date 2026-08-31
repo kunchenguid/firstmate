@@ -2425,7 +2425,7 @@ test_invalid_attempt_journal_retired() {
   mv "$valid.tmp" "$valid"
   seal_pi >/dev/null || fail "content-mismatched attempt journal wedged sealing"
   [ ! -e "$valid" ] || fail "content-mismatched attempt journal was not retired"
-  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "tampered attempt applied an outcome under its old ID"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "tampered replay journal erased the authenticated Pi terminal assignment"
   jq -se 'any(.[]; .reason=="compaction-attempt-record-invalid" and .failure_code=="COMPACTION_ATTEMPT")' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "content-mismatched attempt left no quarantine evidence"
   pass "invalid compaction attempt journals are retired"
 }
