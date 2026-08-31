@@ -407,4 +407,30 @@ assert_contains "$ATTENDED_OUT" "refused for an unattended secondmate launch" \
   || fail "the attended refusal must land before any remote launch is dispatched"
 pass "recovery: a recorded attended grant is never inherited, so it cannot resurrect a cursor secondmate"
 
+# Mixed-version wire contract, OLD parent against this NEW remote. Before the
+# self-describing tokens existed a parent sent its carrier as a bare positional
+# sixth argument, and a fleet upgrades one host at a time, so that shape must
+# still launch: rejecting it would break every carrier-bearing remote spawn from
+# a not-yet-upgraded parent, including ordinary codex launches that have nothing
+# to do with cursor. The launch verb is driven directly here because only the
+# remote half of the wire is under test; an upgraded parent no longer emits this
+# shape. A bare argument that is NOT a carrier must still be refused.
+LEGACY_TP='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+LEGACY_OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch \
+  ios codex - - herdr "$LEGACY_TP" 2>&1) \
+  || fail "an old parent's bare positional carrier must still launch: $LEGACY_OUT"
+grep -q "export TRACEPARENT=$LEGACY_TP" "$HERDR_LOG" \
+  || fail "the bare positional carrier must reach the remote pane as the traceparent it has always been"
+pass "wire: an older parent's bare positional carrier is still accepted as the traceparent"
+
+if BOGUS_OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch \
+  ios codex - - herdr not-a-carrier 2>&1); then
+  fail "a bare argument that is not a carrier must be refused, not guessed at"
+fi
+assert_contains "$BOGUS_OUT" "unrecognized remote launch argument" \
+  "a non-carrier bare argument must still fail closed on the self-describing contract"
+pass "wire: a bare argument that is not a carrier is still refused"
+
 echo "ALL TESTS PASSED"

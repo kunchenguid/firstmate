@@ -204,7 +204,8 @@ It stays available for exactly two cases, each requiring the per-spawn flag `--c
 The flag is deliberately per invocation rather than an exported variable, so one attended launch cannot silently exempt a later unattended spawn, and the grant is recorded as `cursor_exemption=` in the task's meta for audit.
 An envelope name must be letters, digits, `.`, `_`, or `-` starting on a letter or digit, and an explicitly passed grant is refused outright on a non-cursor harness on the local and remote spawn routes alike rather than recorded where a later relaunch onto cursor could read it back.
 A grant only inherited from a task's own record is dropped rather than refused when that task restarts onto a non-cursor harness, so a harness switch away from cursor succeeds and silently discards the grant.
-Across any restart of an existing task, including secondmate liveness recovery, an `envelope:<name>` grant is inherited and an `attended` one never is, and the control plane evaluates a relaunch against the grant that will really be in force so an unexemptable task is refused before its agent is stopped.
+Across a relaunch or a `--secondmate` spawn, the two paths that restart an existing task from its own record, an `envelope:<name>` grant is inherited and an `attended` one never is, while a fresh ship or scout spawn always requires the flag.
+The control plane evaluates a relaunch against the grant that will really be in force, so an unexemptable task is refused before its agent is stopped.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.

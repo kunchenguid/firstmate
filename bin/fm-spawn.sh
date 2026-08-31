@@ -1509,12 +1509,20 @@ esac
 # An unverified harness is skipped, not refused: a raw launch command is the
 # documented escape hatch for an adapter with no template. The canonicalization
 # inside the table still holds a raw `cursor-agent` command to the cursor rule.
-# The harness this spawn resolved to is finally known here, so a restart can now
+# The harness this spawn resolved to is finally known here, so a RESTART can now
 # ask the inheritance owner what the grant on this task's own record is still
 # worth. A grant that does not survive onto this harness is dropped rather than
-# carried into the record below. A fresh spawn has no record, so this resolves to
-# nothing and the flag remains the only way in.
-if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
+# carried into the record below.
+#
+# Restricted to the two paths that restart an EXISTING task from its own record:
+# `--relaunch`, and a `--secondmate` spawn, which is the shape firstmate's own
+# liveness recovery uses. An ordinary fresh ship or scout spawn is deliberately
+# excluded even when its id already has a stale record, because inheriting there
+# would hand a launch nobody granted an exemption for a grant from a previous
+# one - the ambient, implicit authority the per-invocation flag exists to
+# prevent. A fresh spawn keeps requiring the flag.
+if [ "$CURSOR_EXEMPTION_SET" -eq 0 ] &&
+  { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; }; then
   CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
     "$(spawn_recorded_cursor_exemption "$STATE" "$ID")" "$HARNESS")
 fi
