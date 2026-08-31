@@ -14,8 +14,8 @@
 #   - registry line records scope (from a filled charter brief) and project list
 #   - charter is copied into the subhome
 #   - remote-backed projects are cloned with their origin URL preserved
-#   - a no-mistakes project is initialized (init + doctor) in the NEW subhome clone
-#     and the parent project clone is never mutated (no write through a project)
+#   - direct-PR project clones require no legacy no-mistakes initialization and
+#     the parent project clone is never mutated (no write through a project)
 #   - spawn meta records kind=secondmate, home=, and the project list; launch runs
 #     in the subhome with the persistent charter and cleared operational overrides
 #   - a bare `fm-<id>` send targets the window recorded in THIS home's meta
@@ -56,8 +56,8 @@ EOF
   ALPHA_ORIGIN=$(git -C "$HOME_DIR/projects/alpha" remote get-url origin)
   BETA_ORIGIN=$(git -C "$HOME_DIR/projects/beta" remote get-url origin)
 
-  # One combined fakebin: tmux + treehouse (spawn/send/teardown) and no-mistakes
-  # (gamma initialization during seed).
+  # One combined fakebin: tmux + treehouse (spawn/send/teardown) and a legacy
+  # no-mistakes sentinel that must remain unused during direct-PR seeding.
   FAKEBIN=$(make_fake_tmux "$TMP_ROOT/fake")
   make_fake_no_mistakes "$TMP_ROOT/fake" >/dev/null
 
@@ -89,10 +89,10 @@ phase_seed() {
   [ "$(git -C "$SUB/projects/beta" remote get-url origin)" = "$BETA_ORIGIN" ] \
     || fail "direct-PR beta clone did not preserve its origin URL"
 
-  # no-mistakes init runs in the NEW clone, never the parent project.
-  assert_present "$SUB/projects/gamma/.no-mistakes-init" "no-mistakes project was not initialized in the subhome"
-  assert_present "$SUB/projects/gamma/.no-mistakes-doctor" "no-mistakes project was not doctored in the subhome"
-  assert_absent "$HOME_DIR/projects/gamma/.no-mistakes-init" "seed wrote no-mistakes state through the parent project"
+  # Direct-PR seeding never invokes or writes the retired no-mistakes initializer.
+  assert_absent "$SUB/projects/gamma/.no-mistakes-init" "seed invoked retired no-mistakes init in the subhome"
+  assert_absent "$SUB/projects/gamma/.no-mistakes-doctor" "seed invoked retired no-mistakes doctor in the subhome"
+  assert_absent "$HOME_DIR/projects/gamma/.no-mistakes-init" "seed wrote retired no-mistakes state through the parent project"
 
   # Registry line: scope from the filled brief, project list, no legacy owns field.
   assert_grep '- design - customer onboarding charter' "$HOME_DIR/data/secondmates.md" "registry summary not from the charter"
@@ -107,7 +107,7 @@ phase_seed() {
     || fail "beta delivery mode not preserved in the subhome"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after seed"
 
-  pass "seed: registry scope+projects, charter copied, clones+origins, no-mistakes init in subhome only"
+  pass "seed: registry scope+projects, charter copied, clones+origins, no legacy initialization"
 }
 
 phase_spawn() {
