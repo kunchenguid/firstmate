@@ -1694,6 +1694,29 @@ SH
   pass "tool-updates.check.sh survives the orphan guard and keeps running with no state/tool-updates.meta"
 }
 
+# tool-updates is exempt from the orphan guard's .meta requirement even when
+# its registration is broken (unlike x-watch's fixed-name bypass, tool-updates
+# is authorized through the ordinary custom-check trust path, so a missing or
+# invalid registration must still fall through to the rejected-checks branch
+# and keep surfacing rather than being silently absorbed for lacking a .meta).
+test_tool_updates_check_sh_unregistered_still_surfaces() {
+  local dir state fakebin out pid
+  dir=$(make_case tool-updates-unregistered-check-sh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/tool-updates.meta and no check-trust registration at all.
+  cat > "$state/tool-updates.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "should never run either, but must be reported"
+SH
+  chmod 700 "$state/tool-updates.check.sh"
+  watch_bg "$state" "$fakebin" "$out" FM_CHECK_INTERVAL=1
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not exit for an unregistered tool-updates.check.sh"
+  grep -F "check: rejected unauthenticated state checks:" "$out" | grep -F "tool-updates.check.sh" >/dev/null \
+    || fail "an unregistered tool-updates.check.sh was not reported: $(cat "$out")"
+  [ -e "$state/tool-updates.check.sh" ] || fail "tool-updates.check.sh was wrongly removed by the orphan guard"
+  pass "an unregistered tool-updates.check.sh keeps surfacing as a rejected check despite no state/tool-updates.meta"
+}
+
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
 
 test_actionable_signal_surfaced() {
@@ -4067,6 +4090,7 @@ test_orphan_check_sh_never_runs
 test_live_task_unregistered_check_sh_still_surfaces
 test_x_watch_check_sh_survives_orphan_guard_and_runs
 test_tool_updates_check_sh_survives_orphan_guard_and_runs
+test_tool_updates_check_sh_unregistered_still_surfaces
 test_actionable_signal_surfaced
 test_actionable_signal_survives_a_later_routine_append
 test_release_completion_survives_a_later_routine_append
