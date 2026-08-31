@@ -372,31 +372,19 @@ cursor_case() {
 # A stat shim that reports no birth time (GNU statx unsupported returns 0 for
 # %W) while still answering mtime, so the harvest must fall back to the meta
 # mtime for the window start instead of collapsing to the status mtime.
-nobirth_stat_bin() {  # <dir>
-  mkdir -p "$1"
-  cat > "$1/stat" <<'SH'
-#!/usr/bin/env bash
-fmt=""; file=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -f) exit 1 ;;
-    -c) fmt="$2"; shift 2 ;;
-    --) shift; file="$1"; shift ;;
-    *) file="$1"; shift ;;
-  esac
-done
-case "$fmt" in
-  %W) printf '0\n' ;;
-  %Y) /usr/bin/stat -f %m -- "$file" 2>/dev/null || /usr/bin/stat -c %Y -- "$file" ;;
-  *) exit 1 ;;
-esac
-SH
-  chmod +x "$1/stat"
-}
-
-fixedbirth_stat_bin() {  # <dir> <status-file> <birth-epoch>
-  mkdir -p "$1"
-  cat > "$1/stat" <<SH
+# stat_shim_bin <dir> [<status-file> <birth-epoch>] : put a stat shim on PATH
+# that answers mtime truthfully while controlling what the harvester reads for
+# a birth time. With no birth argument every file reports no usable birth time
+# (GNU statx unsupported returns 0 for %W), so the window must fall back; with
+# one, only <status-file> reports <birth-epoch>. The %Y branch captures the two
+# probes into separate assignments, exactly as the harvester's own
+# file_mtime_epoch does, so the second read replaces the first's output instead
+# of being appended to it (see bin/fm-watch.sh for why the shared-stdout
+# `stat -f ... || stat -c ...` form writes a filesystem dump on Linux).
+stat_shim_bin() {  # <dir> [<status-file> <birth-epoch>]
+  local dir=$1 statusfile=${2:-} birth=${3:-}
+  mkdir -p "$dir"
+  cat > "$dir/stat" <<SH
 #!/usr/bin/env bash
 fmt=""; file=""
 while [ "\$#" -gt 0 ]; do
@@ -408,12 +396,23 @@ while [ "\$#" -gt 0 ]; do
   esac
 done
 case "\$fmt" in
-  %W) if [ "\$file" = "$2" ]; then printf '%s\\n' "$3"; else printf '0\\n'; fi ;;
-  %Y) /usr/bin/stat -f %m -- "\$file" 2>/dev/null || /usr/bin/stat -c %Y -- "\$file" ;;
+  %W)
+    if [ -n "$statusfile" ] && [ "\$file" = "$statusfile" ]; then
+      printf '%s\\n' "$birth"
+    else
+      printf '0\\n'
+    fi
+    ;;
+  %Y)
+    t=\$(/usr/bin/stat -f %m -- "\$file" 2>/dev/null) \\
+      || t=\$(/usr/bin/stat -c %Y -- "\$file" 2>/dev/null) \\
+      || exit 1
+    printf '%s\\n' "\$t"
+    ;;
   *) exit 1 ;;
 esac
 SH
-  chmod +x "$1/stat"
+  chmod +x "$dir/stat"
 }
 
 claude_nobirth_case() {
@@ -441,7 +440,7 @@ JSON
   touch -t "$(touch_stamp $((base - 50)))" "$logdir/session.jsonl"
 
   fb="$TMP_ROOT/nobirth-fakebin"
-  nobirth_stat_bin "$fb"
+  stat_shim_bin "$fb"
   out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "birthless claude harvest should succeed"$'\n'"$out"
   ledger="$data/usage-ledger.jsonl"
@@ -678,7 +677,9 @@ SH
     "teardown warns one line when the harvest fails"
   assert_contains "$out" "teardown $id complete" \
     "teardown completes after a harvest failure"
-  pass "teardown integration: harvest failure is non-fatal"
+  [ -z "$(find "$data" -maxdepth 1 -name 'usage-ledger.jsonl.tmp.*' -print -quit)" ] \
+    || fail "a failed harvest left a ledger work file in the data dir"
+  pass "teardown integration: harvest failure is non-fatal and leaves no work file"
 }
 
 # --- row scope: a relaunch must not narrow the window -----------------------
@@ -716,7 +717,7 @@ JSON
   touch -t "$(touch_stamp $((base + 100)))" "$logdir/first-incarnation.jsonl"
 
   fb="$TMP_ROOT/relaunch-fakebin"
-  fixedbirth_stat_bin "$fb" "$state/$id.status" "$base"
+  stat_shim_bin "$fb" "$state/$id.status" "$base"
   out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "relaunch-scope harvest should succeed"$'\n'"$out"
   row=$(cat "$data/usage-ledger.jsonl")
@@ -749,7 +750,7 @@ relaunch_birthless_case() {
   touch -t "$(touch_stamp $((base + 600)))" "$state/$id.meta"
 
   fb="$TMP_ROOT/relaunch-nobirth-fakebin"
-  nobirth_stat_bin "$fb"
+  stat_shim_bin "$fb"
   out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "birthless relaunch harvest should succeed"$'\n'"$out"
   row=$(cat "$data/usage-ledger.jsonl")

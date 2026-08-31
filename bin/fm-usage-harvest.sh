@@ -431,5 +431,4 @@ jq -cn \
     completed_at:(if $completed == "" then null else $completed end),
     wall_secs:$wall, turns:$turns,
     input_tokens:$it, cached_input_tokens:$ct, output_tokens:$ot,
-    reasoning_tokens:$rt, source:$source}' >> "$DATA/usage-ledger.jsonl.tmp.$$"
-cat "$DATA/usage-ledger.jsonl.tmp.$$" >> "$LEDGER" && rm -f -- "$DATA/usage-ledger.jsonl.tmp.$$"
+    reasoning_tokens:$rt, source:$source}' >> "$LEDGER"
