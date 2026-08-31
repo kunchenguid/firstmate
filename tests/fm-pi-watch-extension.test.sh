@@ -1265,6 +1265,69 @@ EOF
   pass "Pi late unretired closes resume classified supervision"
 }
 
+test_pi_benign_attached_closes_refresh_retry_budget() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-benign-attached-close-root"
+  home="$TMP_ROOT/pi-benign-attached-close-home"
+  log="$TMP_ROOT/pi-benign-attached-close.log"
+  stop="$TMP_ROOT/pi-benign-attached-close.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -le 4 ]; then
+  printf 'watcher: attached pid=%s (beacon 0s)\n' "$$"
+  printf 'watcher: cycle closed actionably (reason delivered by its owner arm)\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-benign-attached-close", {}, undefined, undefined, {});
+for (let i = 0; i < 250; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length >= 5) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 5) throw new Error(`benign attached closes exhausted the retry budget after ${rows.length} arms`);
+if (prompts.length !== 0) throw new Error(`benign attached closes surfaced a failure prompt: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi must recognize owner-delivered attached closes as benign"
+  [ -z "$out" ] || fail "Pi benign attached-close test printed output: $out"
+  pass "Pi recognizes owner-delivered attached closes without exhausting failure retries"
+}
+
 test_pi_empty_close_retries_instead_of_disappearing() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-empty-close-root"
@@ -2476,6 +2539,71 @@ EOF
   pass "OpenCode late unretired closes resume classified supervision"
 }
 
+test_opencode_benign_attached_closes_refresh_retry_budget() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-benign-attached-close-root"
+  home="$TMP_ROOT/opencode-benign-attached-close-home"
+  log="$TMP_ROOT/opencode-benign-attached-close.log"
+  stop="$TMP_ROOT/opencode-benign-attached-close.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -le 4 ]; then
+  printf 'watcher: attached pid=%s (beacon 0s)\n' "$$"
+  printf 'watcher: cycle closed actionably (reason delivered by its owner arm)\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 250; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length >= 5) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 5) throw new Error(`benign attached closes exhausted the retry budget after ${rows.length} arms`);
+if (prompts.length !== 0) throw new Error(`benign attached closes surfaced a failure prompt: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must recognize owner-delivered attached closes as benign"
+  [ -z "$out" ] || fail "OpenCode benign attached-close test printed output: $out"
+  pass "OpenCode recognizes owner-delivered attached closes without exhausting failure retries"
+}
+
 test_opencode_empty_close_retries_instead_of_disappearing() {
   local plugin repo home log stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2819,6 +2947,7 @@ test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
+test_pi_benign_attached_closes_refresh_retry_budget
 test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
@@ -2836,6 +2965,7 @@ test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
+test_opencode_benign_attached_closes_refresh_retry_budget
 test_opencode_empty_close_retries_instead_of_disappearing
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock

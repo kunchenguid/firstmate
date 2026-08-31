@@ -132,9 +132,12 @@ async function sessionOwnsLock(paths) {
 
 function classifyArmClose(stdout, stderr, code, signal) {
   const combined = `${stdout}\n${stderr}`;
-  const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
+  const lines = combined.split(/\r?\n/);
+  const reason = lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
   if (reason) return { kind: "actionable", message: reason };
-  const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
+  const benignClose = lines.find((line) => line === "watcher: cycle closed actionably (reason delivered by its owner arm)");
+  if (benignClose) return { kind: "benign", message: benignClose };
+  const healthy = lines.find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
       kind: "failure",
@@ -420,6 +423,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       setArmStatus("failed");
       return;
     }
+    if (classification.kind === "benign") retryFailures = 0;
     void scheduleRetry(paths, sessionID, client, classification.message, predecessor);
   });
   armChild.on("error", (error) => {

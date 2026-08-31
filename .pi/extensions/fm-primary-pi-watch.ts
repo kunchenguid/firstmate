@@ -36,7 +36,7 @@ type ArmResult = {
 type LockOwnership = "owned" | "missing" | "other";
 
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "benign" | "failure";
   message: string;
 };
 
@@ -163,7 +163,10 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
-  const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
+  const lines = combined.split(/\r?\n/);
+  const benignClose = lines.find((line) => line === "watcher: cycle closed actionably (reason delivered by its owner arm)");
+  if (benignClose) return { kind: "benign", message: benignClose };
+  const healthy = lines.find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
       kind: "failure",
@@ -543,6 +546,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (owner.restoring) return;
+      if (classification.kind === "benign") owner.retryFailures = 0;
       scheduleRetry(owner, classification.message, predecessor);
     });
     armChild.on("error", (error: Error) => {
