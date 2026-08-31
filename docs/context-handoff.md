@@ -25,9 +25,10 @@ A Pi adapter launch, nonzero-exit, malformed-output, output-cap, or ten-second t
 Empty and disabled registers do not stop compaction when the adapter completes successfully.
 The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the complete bounded set of retryable and newly sealed records in that attempt and never infer success from the success event alone.
 
-The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, durable creation and fsync of every new state-directory entry, durable repair of non-private directory modes without repeatedly syncing unchanged directories, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
+The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, serialized durable creation and fsync of every new state-directory entry, durable repair of non-private directory modes without repeatedly syncing unchanged directories, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
 A retry recovers valid orphan envelopes, missing queues for claimed records, and incomplete claim sets without resealing different bytes.
-Registration applies bounded backpressure before the retry set or unsealed candidate set can exceed one recoverable compaction attempt, so draining the existing attempt always remains reachable.
+Sealing selects the deterministic candidate-ID prefix that fits both caps, preserves every remaining candidate identity for a later attempt, and drains a full retry set before sealing more candidates.
+Registration applies bounded backpressure to retryable records and unsealed candidates, so a reachable sequence of successful attempts always drains the register.
 Sealed envelopes, queue state, receipts, approval records, transaction bundle staging, quarantine records, and acknowledgements remain below `state/context-handoff/` in the effective Firstmate home and never enter the Vault.
 Disabling the feature leaves every one of those records intact.
 
@@ -46,11 +47,13 @@ When the installed Herdr protocol exposes no such precondition, delivery retains
 It supplies `PreCompact`, `PostCompact`, `SessionStart`, `StopFailure`, and `PreToolUse` handlers, one disabled-by-default consume skill, and one local stdio MCP server.
 The lifecycle adapter ignores `transcript_path` and `compact_summary`.
 Claude `PreCompact` seals only the separately registered Claude candidates for the configured session generation, durably binds that exact attempt across hook processes and retries, and calls no model.
+An exact matching session with an unhealthy endpoint or Vault binding writes a failure receipt and blocks compaction while genuinely foreign sessions remain ignored.
+Session-start publication is serialized and generation-monotonic, so a retired hook process cannot replace a newer process capability or restore stale MCP authority.
 Post-compact and session-start reporting exposes only bounded counts and generic next action, not record contents.
 
 The consumer revalidates the canonical envelope, item and byte caps, source hashes, source allowlist, provider class, sensitive categories, exact Vault object, queue hash, exact Herdr environment, and Claude session binding before showing one record to Claude.
 Claude may record `duplicate`, `not-durable`, `not-allowed`, or `needs-captain` as durable dispositions.
-Automatic apply authority covers only a new note under a configured create prefix plus the configured coupled index, log, and hot replacements in one `operation_type: save` bundle.
+Automatic apply authority covers exactly one new note under a configured create prefix plus the configured coupled index, log, and hot replacements in one `operation_type: save` bundle.
 Deletion, move, canonical note replacement, merge, `.obsidian`, Git, GitHub, executable installation, credentials, sensitive content, ambiguity, and out-of-contract paths are quarantined.
 
 The consumer deterministically maps the handoff record ID to one transaction operation ID.

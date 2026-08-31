@@ -5,11 +5,28 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
-command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
+require_tool() {
+  local name=$1
+  if [ "${FM_CONTEXT_HANDOFF_TEST_MISSING_TOOL:-}" = "$name" ] || ! command -v "$name" >/dev/null 2>&1; then
+    if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ]; then
+      fail "required context-handoff evidence tool is unavailable: $name"
+    fi
+    echo "skip: $name not found"
+    exit 0
+  fi
+}
+
+require_tool jq
+require_tool python3
+require_tool node
+
+if [ "${FM_CONTEXT_HANDOFF_PREREQ_ONLY:-0}" = 1 ]; then
+  exit 0
+fi
 
 CLI="$ROOT/bin/fm-context-handoff.py"
 CORE=$(realpath "$ROOT/tests/fixtures/context-handoff-transaction-core.py")
+PLUGIN="$ROOT/integrations/claude-context-handoff"
 TRANSACTION_CORE="$CORE"
 TRANSACTION_MODULE="$CORE"
 if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ]; then
@@ -21,6 +38,7 @@ fi
 TMP_ROOT=$(fm_test_tmproot context-handoff)
 FIXED_NOW=2026-08-30T20:00:00Z
 CAPABILITY=claude-process-generation-1
+PROCESS_GENERATION=1
 REGISTRATION_ENABLED=true
 SEALING_ENABLED=true
 DELIVERY_ENABLED=false
@@ -40,6 +58,10 @@ python_path() {
 
 fs_identity() {
   python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(f"{s.st_dev} {s.st_ino}")' "$1"
+}
+
+file_mode() {
+  python3 -c 'import os,stat,sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))' "$1"
 }
 
 session_hash() {
@@ -101,6 +123,7 @@ new_env() {
   FAKE_HERDR="$EROOT/fake-herdr"
   CLAUDE_SESSION=claude-session-generation-1
   CAPABILITY=claude-process-generation-1
+  PROCESS_GENERATION=1
   REGISTRATION_ENABLED=true
   SEALING_ENABLED=true
   DELIVERY_ENABLED=false
@@ -147,6 +170,7 @@ cli() {
       FM_HANDOFF_TESTING=1 \
       FM_HANDOFF_TEST_NOW="$FIXED_NOW" \
       FM_HANDOFF_TEST_PROCESS_CAPABILITY="$CAPABILITY" \
+      FM_HANDOFF_TEST_PROCESS_GENERATION="$PROCESS_GENERATION" \
       FM_HANDOFF_TEST_FAILPOINT="${FM_HANDOFF_TEST_FAILPOINT:-}" \
       PI_SESSION_ID=pi-session-1 \
       FAKE_HERDR_LOG="$HERDR_LOG" \
@@ -159,6 +183,30 @@ cli() {
       HERDR_TAB_ID=tab-1 \
       HERDR_PANE_ID=pane-1 \
       "$CLI" "$@"
+  )
+}
+
+plugin_cli() {
+  (
+    cd "$VAULT" || exit 1
+    env \
+      FM_HOME="$FM_HOME" \
+      HOME="$EROOT/synthetic-home" \
+      FM_HANDOFF_TESTING=1 \
+      FM_HANDOFF_TEST_NOW="$FIXED_NOW" \
+      FM_HANDOFF_TEST_PROCESS_CAPABILITY="$CAPABILITY" \
+      FM_HANDOFF_TEST_PROCESS_GENERATION="$PROCESS_GENERATION" \
+      PI_SESSION_ID=pi-session-1 \
+      FAKE_HERDR_LOG="$HERDR_LOG" \
+      FAKE_HERDR_PID="$HERDR_PID" \
+      FAKE_HERDR_MODE_FILE="$HERDR_MODE" \
+      FAKE_CLAUDE_SESSION="$CLAUDE_SESSION" \
+      FAKE_VAULT="$VAULT" \
+      HERDR_SESSION=lab \
+      HERDR_WORKSPACE_ID=workspace-1 \
+      HERDR_TAB_ID=tab-1 \
+      HERDR_PANE_ID=pane-1 \
+      "$PLUGIN/scripts/adapter.py" "$@"
   )
 }
 
@@ -263,10 +311,19 @@ commit_save() {
   mcp_content commit_handoff_save "$arguments"
 }
 
+test_required_prerequisite_status() {
+  if FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE=1 FM_CONTEXT_HANDOFF_TEST_MISSING_TOOL=node FM_CONTEXT_HANDOFF_PREREQ_ONLY=1 bash "$0" > "$TMP_ROOT/required-prerequisite-out" 2> "$TMP_ROOT/required-prerequisite-error"; then
+    fail "required evidence gate skipped a missing prerequisite"
+  fi
+  FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE=0 FM_CONTEXT_HANDOFF_TEST_MISSING_TOOL=node FM_CONTEXT_HANDOFF_PREREQ_ONLY=1 bash "$0" > "$TMP_ROOT/portable-prerequisite-out" 2> "$TMP_ROOT/portable-prerequisite-error" || fail "portable missing prerequisite did not remain a skip"
+  grep -q '^skip: node not found$' "$TMP_ROOT/portable-prerequisite-out" || fail "portable prerequisite skip was not explicit"
+  pass "required evidence prerequisite exit status"
+}
+
 test_sensitive_contracts() {
   local statement seal record bundle sensitive arguments result
   new_env sensitive
-  for statement in 'The taxpayer identifier is 123-45-6789.' 'Alice Smith account balance is EUR 5,000.'; do
+  for statement in 'The taxpayer identifier is 123-45-6789.' 'Taxpayer identifier is 12345678901.' 'Alice Smith account balance is EUR 5,000.'; do
     authorize "$statement"
     if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/error"; then
       fail "sensitive candidate passed an exact eligibility contract"
@@ -283,6 +340,20 @@ test_sensitive_contracts() {
   result=$(mcp_content prepare_handoff_save "$arguments")
   [ "$(printf '%s' "$result" | jq -r .code)" = BUNDLE_CONTENT ] || fail "sensitive Save content was accepted"
   pass "sensitive candidate and Save content rejection"
+}
+
+test_single_create_save() {
+  local seal record bundle expanded result
+  new_env single-create-save
+  enable_consumer
+  seal=$(make_ready) || fail "single-create Save fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  bundle=$(make_bundle "$record")
+  expanded=$(printf '%s' "$bundle" | jq -c '.expected_hashes["wiki/concepts/Second note.md"]=null | .writes += [{path:"wiki/concepts/Second note.md",mode:"create",content:"# Second note\n\nThis must require separate review.\n"}]')
+  result=$(prepare_save "$record" "$expanded")
+  [ "$(printf '%s' "$result" | jq -r .code)" = BUNDLE_DESTRUCTIVE ] || fail "automatic Save accepted multiple new notes"
+  pass "single-note automatic Save boundary"
 }
 
 test_queue_first_recovery() {
@@ -383,6 +454,77 @@ test_compaction_backpressure() {
   pass "bounded compaction backpressure and drain"
 }
 
+test_envelope_subset_drain() {
+  local i statement seal record item_count rounds claims
+  new_env envelope-subset
+  i=1
+  while [ "$i" -le 20 ]; do
+    statement="Bounded envelope item $i: $(printf '%01800d' 0 | tr 0 x)"
+    register_statement "$statement" >/dev/null || fail "could not register byte-bounded candidate $i"
+    i=$((i + 1))
+  done
+  rounds=0
+  while :; do
+    claims=$(find "$FM_HOME/state/context-handoff/claims" -type f -name 'candidate-*.json' | wc -l)
+    [ "$claims" -lt 20 ] || break
+    seal=$(seal_pi) || fail "byte-bounded candidate subset could not seal"
+    [ "$(printf '%s' "$seal" | jq -r .status)" = sealed ] || fail "byte-bounded subset returned a terminal seal failure"
+    record=$(printf '%s' "$seal" | jq -r .record_id)
+    item_count=$(jq '.items | length' "$FM_HOME/state/context-handoff/records/$record.json")
+    [ "$item_count" -gt 0 ] && [ "$item_count" -lt 20 ] || fail "seal did not choose a non-empty bounded subset"
+    complete "$seal" success >/dev/null || fail "byte-bounded subset compaction could not complete"
+    rounds=$((rounds + 1))
+    [ "$rounds" -le 4 ] || fail "byte-bounded candidates did not drain"
+  done
+  [ "$rounds" -ge 2 ] || fail "byte-cap regression did not require multiple deterministic subsets"
+  [ "$(find "$FM_HOME/state/context-handoff/claims" -type f -name 'candidate-*.json' | wc -l)" -eq 20 ] || fail "subset drain changed or lost candidate identities"
+  pass "deterministic byte-bounded envelope draining"
+}
+
+test_monotonic_claude_binding() {
+  local stale current
+  new_env monotonic-binding
+  enable_consumer
+  CAPABILITY=claude-process-generation-1
+  PROCESS_GENERATION=1
+  bind_claude >/dev/null || fail "initial Claude generation did not bind"
+  CAPABILITY=claude-process-generation-2
+  PROCESS_GENERATION=2
+  bind_claude >/dev/null || fail "replacement Claude generation did not bind"
+  CAPABILITY=claude-process-generation-1
+  PROCESS_GENERATION=1
+  bind_claude >/dev/null || fail "retired Claude hook transport failed"
+  stale=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$stale" | jq -r .code)" = CONSUMER_SESSION ] || fail "retired hook restored stale MCP authority"
+  CAPABILITY=claude-process-generation-2
+  PROCESS_GENERATION=2
+  current=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$current" | jq -r .status)" = empty ] || fail "current replacement generation lost MCP authority"
+  pass "replacement-monotonic Claude session binding"
+}
+
+test_claude_precompact_binding_failure() {
+  local statement arguments registered foreign blocked config_path
+  new_env claude-precompact-binding
+  enable_consumer
+  bind_claude >/dev/null || fail "Claude binding failed"
+  statement='Stop compaction when the exact Claude endpoint becomes unhealthy.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude endpoint failure fixture did not register"
+  config_path="$FM_HOME/config/context-handoff.json"
+  jq '.vault.inode += 1' "$config_path" > "$config_path.tmp" || fail "could not invalidate synthetic Vault binding"
+  chmod 600 "$config_path.tmp"
+  mv "$config_path.tmp" "$config_path"
+  foreign=$(jq -nc '{hook_event_name:"PreCompact",session_id:"foreign-session",trigger:"auto"}' | cli claude-hook) || fail "foreign Claude PreCompact did not remain ignorable"
+  [ -z "$foreign" ] || fail "foreign Claude session was blocked for another register"
+  blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "matching Claude PreCompact binding failure escaped the hook"
+  printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "unhealthy exact Claude endpoint failed open"
+  jq -e 'select(.reason=="claude-precompact-binding-failed")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "unhealthy Claude PreCompact wrote no durable failure receipt"
+  pass "fail-closed Claude PreCompact endpoint binding"
+}
+
 test_exit75_requires_fresh_inspect() {
   local seal record bundle prepared approval result fresh
   new_env exit75
@@ -469,10 +611,67 @@ test_directory_durability() {
   pass "durable private state directory creation"
 }
 
+test_serialized_directory_initialization() {
+  local first second marker release holder first_pid second_pid i
+  new_env serialized-directory-initialization
+  rm -rf "$FM_HOME/state/context-handoff"
+  first='First concurrent initializer must wait for the durable boundary.'
+  second='Second concurrent initializer must share the durable boundary.'
+  authorize "$first"
+  authorize "$second"
+  marker="$EROOT/home-lock-held"
+  release="$EROOT/home-lock-release"
+  python3 - "$FM_HOME" "$marker" "$release" <<'PY' &
+import fcntl
+import os
+import pathlib
+import sys
+import time
+
+fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+fcntl.flock(fd, fcntl.LOCK_EX)
+pathlib.Path(sys.argv[2]).write_text("held\n")
+while not pathlib.Path(sys.argv[3]).exists():
+    time.sleep(0.01)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+PY
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -f "$marker" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -f "$marker" ] || fail "synthetic durable initialization boundary was not held"
+  cli register --source-harness pi --kind gotcha --statement "$first" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > "$EROOT/first-register" 2> "$EROOT/first-error" &
+  first_pid=$!
+  cli register --source-harness pi --kind gotcha --statement "$second" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > "$EROOT/second-register" 2> "$EROOT/second-error" &
+  second_pid=$!
+  sleep 0.3
+  [ ! -e "$FM_HOME/state/context-handoff" ] || fail "concurrent process bypassed the initialization durability boundary"
+  kill -0 "$first_pid" 2>/dev/null && kill -0 "$second_pid" 2>/dev/null || fail "concurrent initializer completed outside the shared boundary"
+  : > "$release"
+  wait "$holder" || fail "synthetic initialization boundary failed"
+  wait "$first_pid" || fail "first serialized initializer failed"
+  wait "$second_pid" || fail "second serialized initializer failed"
+  [ "$(find "$FM_HOME/state/context-handoff/candidates" -type f -name 'candidate-*.json' | wc -l)" -eq 2 ] || fail "serialized initialization lost a concurrent candidate"
+  rm -rf "$FM_HOME/state/context-handoff"
+  mkdir -p "$FM_HOME/state/context-handoff"/{candidates,records,claims,queue,receipts,quarantine,acks,approvals,bundles,bindings}
+  chmod 700 "$FM_HOME/state/context-handoff" "$FM_HOME/state/context-handoff"/*
+  if FM_HANDOFF_TEST_FAILPOINT=before-initialization-boundary-fsync cli status > "$EROOT/orphan-status" 2> "$EROOT/orphan-error"; then
+    fail "orphan directory chain skipped its durable initialization boundary"
+  fi
+  [ ! -e "$FM_HOME/state/context-handoff/.initialized" ] || fail "failed initialization published its durable boundary"
+  cli status > /dev/null || fail "orphan directory chain could not recover"
+  [ "$(file_mode "$FM_HOME/state/context-handoff/.initialized")" = 600 ] || fail "recovered initialization boundary is not private"
+  pass "serialized durable state initialization"
+}
+
 test_pi_result_validation() {
   local adapter_root body
   new_env pi-result-validation
-  for case_name in malformed unknown polluted empty disabled; do
+  register_statement 'Cancel Pi compaction only when a non-empty durable register cannot seal.' >/dev/null || fail "Pi lifecycle candidate did not register"
+  for case_name in malformed unknown polluted empty disabled exited hanging; do
     adapter_root="$EROOT/$case_name"
     mkdir -p "$adapter_root/bin"
     case "$case_name" in
@@ -481,27 +680,71 @@ test_pi_result_validation() {
       polluted) body='{"status":"empty","bindings":[]}' ;;
       empty) body='{"status":"empty"}' ;;
       disabled) body='{"status":"disabled"}' ;;
+      exited) body=exit ;;
+      hanging) body=hang ;;
     esac
-    cat > "$adapter_root/bin/fm-context-handoff.py" <<EOF
+    if [ "$body" = exit ]; then
+      cat > "$adapter_root/bin/fm-context-handoff.py" <<'EOF'
+#!/usr/bin/env bash
+exit 7
+EOF
+    elif [ "$body" = hang ]; then
+      cat > "$adapter_root/bin/fm-context-handoff.py" <<'EOF'
+#!/usr/bin/env bash
+exec sleep 10
+EOF
+    else
+      cat > "$adapter_root/bin/fm-context-handoff.py" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' '$body'
 EOF
+    fi
     chmod 755 "$adapter_root/bin/fm-context-handoff.py"
   done
-  FM_HOME="$FM_HOME" EXT="$ROOT/.pi/extensions/lib/fm-context-handoff.ts" \
-  MALFORMED="$EROOT/malformed" UNKNOWN="$EROOT/unknown" POLLUTED="$EROOT/polluted" EMPTY="$EROOT/empty" DISABLED="$EROOT/disabled" \
+  FM_HOME="$FM_HOME" FM_HANDOFF_TESTING=1 FM_HANDOFF_TEST_NOW="$FIXED_NOW" PI_SESSION_ID=pi-session-1 \
+  EXT="$ROOT/.pi/extensions/lib/fm-context-handoff.ts" REAL_ROOT="$ROOT" MISSING="$EROOT/missing" \
+  MALFORMED="$EROOT/malformed" UNKNOWN="$EROOT/unknown" POLLUTED="$EROOT/polluted" EMPTY="$EROOT/empty" DISABLED="$EROOT/disabled" EXITED="$EROOT/exited" HANGING="$EROOT/hanging" \
   node --input-type=module <<'EOF' || fail "Pi result validation failed"
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT).href + `?v=${Date.now()}`);
 const ctx = { sessionManager:{ getSessionId(){ return "pi-session-1"; } } };
+const lifecycle = new Map();
+mod.registerContextHandoff({on(name, handler){lifecycle.set(name, handler);}}, process.env.REAL_ROOT, process.env.FM_HOME);
+for (const name of ["session_before_compact","session_compact","session_compact_failed"]) {
+  if (!lifecycle.has(name)) throw new Error(`missing lifecycle handler ${name}`);
+}
+process.env.FM_HANDOFF_TEST_FAILPOINT = "before-file-fsync";
+const blocked = await lifecycle.get("session_before_compact")({reason:"threshold"}, ctx);
+if (!blocked?.cancel) throw new Error("non-empty seal failure did not cancel Pi compaction");
+delete process.env.FM_HANDOFF_TEST_FAILPOINT;
+const sealed = await lifecycle.get("session_before_compact")({reason:"overflow"}, ctx);
+if (sealed?.cancel) throw new Error("durably sealed candidate cancelled Pi compaction");
+await lifecycle.get("session_compact_failed")({reason:"overflow"}, ctx);
+const retry = await lifecycle.get("session_before_compact")({reason:"overflow"}, ctx);
+if (retry?.cancel) throw new Error("failed Pi compaction did not retain its exact retry binding");
+await lifecycle.get("session_compact")({reason:"overflow"}, ctx);
+const emptyResult = await lifecycle.get("session_before_compact")({reason:"threshold"}, ctx);
+if (emptyResult?.cancel) throw new Error("explicit empty result cancelled Pi compaction");
 for (const [root, cancel] of [[process.env.MALFORMED,true],[process.env.UNKNOWN,true],[process.env.POLLUTED,true],[process.env.EMPTY,false],[process.env.DISABLED,false]]) {
   const handlers = new Map();
   mod.registerContextHandoff({on(name, handler){handlers.set(name, handler);}}, root, process.env.FM_HOME);
   const result = await handlers.get("session_before_compact")({reason:"threshold"}, ctx);
   if (Boolean(result?.cancel) !== cancel) throw new Error(`unexpected cancel result for ${root}`);
 }
+for (const root of [process.env.MISSING, process.env.EXITED]) {
+  const handlers = new Map();
+  mod.registerContextHandoff({on(name, handler){handlers.set(name, handler);}}, root, process.env.FM_HOME);
+  const result = await handlers.get("session_before_compact")({reason:"threshold"}, ctx);
+  if (!result?.cancel) throw new Error(`adapter process failure did not cancel Pi compaction: ${root}`);
+}
+process.env.FM_HANDOFF_TEST_ADAPTER_TIMEOUT_MS = "100";
+const hanging = new Map();
+mod.registerContextHandoff({on(name, handler){hanging.set(name, handler);}}, process.env.HANGING, process.env.FM_HOME);
+const started = Date.now();
+const timedOut = await hanging.get("session_before_compact")({reason:"threshold"}, ctx);
+if (!timedOut?.cancel || Date.now() - started > 2000) throw new Error("hanging Pi adapter did not cancel within its bound");
 EOF
-  pass "fail-closed Pi adapter result validation"
+  pass "model-free Pi lifecycle and fail-closed adapter validation"
 }
 
 test_completed_save_precedes_source_validation() {
@@ -525,16 +768,208 @@ test_completed_save_precedes_source_validation() {
   pass "completed Save recovery before source validation"
 }
 
+test_registration_lifecycle_retries() {
+  local first duplicate seal record claim queue recovered failed statement retry status
+  new_env registration-lifecycle
+  REGISTRATION_ENABLED=false
+  write_config
+  statement='Registration remains default-off until explicitly enabled.'
+  authorize "$statement"
+  if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/disabled-error"; then
+    fail "disabled candidate registration succeeded"
+  fi
+  REGISTRATION_ENABLED=true
+  write_config
+  first=$(register_statement 'Keep lifecycle retries bound to exact durable bytes.') || fail "enabled registration failed"
+  duplicate=$(register_statement 'Keep lifecycle retries bound to exact durable bytes.') || fail "idempotent registration failed"
+  [ "$(printf '%s' "$first" | jq -r .candidate_id)" = "$(printf '%s' "$duplicate" | jq -r .candidate_id)" ] || fail "identical registration changed candidate identity"
+  seal=$(seal_pi) || fail "registered candidate did not seal"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  [ "$(file_mode "$FM_HOME/state/context-handoff/records/$record.json")" = 600 ] || fail "sealed envelope is not private"
+  [ "$(hash_file "$FM_HOME/state/context-handoff/records/$record.json")" = "$(printf '%s' "$seal" | jq -r .envelope_sha256)" ] || fail "sealed envelope hash changed"
+  claim="$FM_HOME/state/context-handoff/claims/$(printf '%s' "$first" | jq -r .candidate_id).json"
+  queue="$FM_HOME/state/context-handoff/queue/$record.json"
+  rm -f "$claim" "$queue"
+  recovered=$(seal_pi) || fail "published envelope did not recover"
+  [ "$(printf '%s' "$recovered" | jq -r .record_id)" = "$record" ] && [ -f "$claim" ] && [ -f "$queue" ] || fail "orphan envelope recovery changed identity"
+  failed=$(complete "$recovered" failure) || fail "provider failure was not recorded"
+  [ "$(printf '%s' "$failed" | jq -r .status)" = compaction-failed ] || fail "provider failure was not durable"
+  statement='Bind a new candidate into the exact retry attempt.'
+  register_statement "$statement" >/dev/null || fail "new retry candidate did not register"
+  retry=$(seal_pi) || fail "failed compaction could not retry"
+  [ "$(printf '%s' "$retry" | jq '.bindings | length')" -eq 2 ] || fail "retry did not bind old and new records together"
+  complete "$retry" success >/dev/null || fail "multi-record retry could not succeed"
+  status=$(cli status) || fail "handoff status failed"
+  [ "$(printf '%s' "$status" | jq -r .counts.pending)" -eq 2 ] || fail "successful retry did not preserve both pending records"
+  pass "registration lifecycle and multi-record retry recovery"
+}
+
+test_quarantine_disable_and_disposition_recovery() {
+  local seal record result arguments queue before after
+  new_env source-quarantine
+  enable_consumer
+  seal=$(make_ready 'Revalidate the exact source before curation.') || fail "source quarantine fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  printf 'Changed after registration.\n' > "$SOURCE_FILE"
+  result=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$result" | jq -r .code)" = SOURCE_HASH_MISMATCH ] || fail "changed source was accepted"
+  [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = quarantined ] || fail "changed source was not quarantined"
+
+  new_env provider-quarantine
+  enable_consumer
+  seal=$(make_ready 'Revalidate the provider class before curation.') || fail "provider quarantine fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  jq '.allowed_provider_classes=["different-provider"]' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not change provider fixture"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
+  result=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$result" | jq -r .code)" = PROVIDER_CLASS ] || fail "refused provider class was accepted"
+  [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = quarantined ] || fail "refused provider class was not quarantined"
+
+  new_env payload-quarantine
+  enable_consumer
+  seal=$(make_ready 'Quarantine changed payload bytes under a stable record identity.') || fail "payload quarantine fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  jq '.items[0].statement="Changed payload under the same stable record ID."' "$FM_HOME/state/context-handoff/records/$record.json" > "$FM_HOME/state/context-handoff/records/$record.json.tmp" || fail "could not mutate payload fixture"
+  chmod 600 "$FM_HOME/state/context-handoff/records/$record.json.tmp"
+  mv "$FM_HOME/state/context-handoff/records/$record.json.tmp" "$FM_HOME/state/context-handoff/records/$record.json"
+  result=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$result" | jq -r .status)" = error ] || fail "changed payload bytes were accepted"
+  [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = quarantined ] || fail "changed payload bytes were not quarantined"
+
+  new_env disable-reenable
+  enable_consumer
+  seal=$(make_ready 'Preserve pending records across disable and re-enable.') || fail "disable fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  before=$(hash_file "$FM_HOME/state/context-handoff/records/$record.json")
+  SEALING_ENABLED=false
+  DELIVERY_ENABLED=false
+  CONSUMER_ENABLED=false
+  write_config
+  result=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$result" | jq -r .code)" = CONSUMER_DISABLED ] || fail "disabled consumer remained active"
+  after=$(hash_file "$FM_HOME/state/context-handoff/records/$record.json")
+  [ "$before" = "$after" ] || fail "disable changed a pending envelope"
+  CONSUMER_ENABLED=true
+  write_config
+  bind_claude >/dev/null || fail "re-enabled Claude generation did not bind"
+  result=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$result" | jq -r .record_id)" = "$record" ] || fail "re-enable did not resume the pending record"
+  arguments=$(jq -nc --arg record "$record" '{record_id:$record,disposition:"duplicate",rationale:"The durable fact already exists."}')
+  FM_HANDOFF_TEST_FAILPOINT=after-ack-before-queue mcp_response record_curation_disposition "$arguments" > /dev/null 2>&1 || true
+  [ -f "$FM_HOME/state/context-handoff/acks/$record.json" ] || fail "disposition crash did not leave a durable acknowledgement"
+  queue="$FM_HOME/state/context-handoff/queue/$record.json"
+  [ "$(jq -r .status "$queue")" != acknowledged ] || fail "disposition crash passed its queue transition"
+  result=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$result" | jq -r .status)" = empty ] && [ "$(jq -r .status "$queue")" = acknowledged ] || fail "disposition acknowledgement did not recover"
+  pass "quarantine, disable, and disposition recovery"
+}
+
+test_transaction_replay_and_rollback() {
+  local seal record bundle prepared approval result bundle_path
+  new_env transaction-replay
+  enable_consumer
+  seal=$(make_ready) || fail "transaction replay fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  bundle=$(make_bundle "$record")
+  prepared=$(prepare_save "$record" "$bundle") || fail "transaction inspect failed"
+  approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
+  result=$(commit_save "$record" "$approval")
+  [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "transaction did not acknowledge after verified apply"
+  result=$(commit_save "$record" "$approval")
+  [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "transaction replay was not idempotent"
+  [ ! -e "$VAULT/.vault-meta/mutation.lock" ] || fail "transaction replay left its mutation lock"
+
+  new_env transaction-rollback
+  enable_consumer
+  seal=$(make_ready 'Recover a rolled-back transaction before acknowledgement.') || fail "rollback fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  bundle=$(make_bundle "$record")
+  prepared=$(prepare_save "$record" "$bundle") || fail "rollback inspect failed"
+  approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
+  bundle_path="$FM_HOME/state/context-handoff/bundles/$record/$(printf '%s' "$prepared" | jq -r .bundle_sha256).json"
+  if FM_FIXTURE_FAIL_AFTER=1 "$(python_path)" "$TRANSACTION_CORE" transaction apply "$bundle_path" --vault "$VAULT" --approved-plan-sha256 "$approval" > "$EROOT/crash-output" 2> "$EROOT/crash-error"; then
+    fail "synthetic transaction crash unexpectedly completed"
+  fi
+  [ ! -e "$VAULT/wiki/concepts/Bounded retry.md" ] && [ ! -e "$VAULT/.vault-meta/mutation.lock" ] || fail "transaction crash did not roll back and release its lock"
+  [ ! -e "$FM_HOME/state/context-handoff/acks/$record.json" ] || fail "rolled-back transaction was acknowledged"
+  result=$(commit_save "$record" "$approval")
+  [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "rolled-back transaction did not recover on retry"
+  pass "transaction apply replay and rollback recovery"
+}
+
+test_claude_lifecycle_and_plugin_discovery() {
+  local statement arguments registered output marker adapter_status
+  new_env claude-plugin
+  enable_consumer
+  bind_claude >/dev/null || fail "Claude binding failed"
+  statement='Preserve only bounded curated bytes across Claude compaction.'
+  authorize "$statement" decision
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"decision",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude lifecycle candidate did not register"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"manual",transcript_path:"/forbidden/transcript"}' | cli claude-hook) || fail "Claude PreCompact failed"
+  [ -z "$output" ] || fail "successful Claude PreCompact emitted content"
+  marker=COMPACT_SUMMARY_MUST_NOT_PERSIST
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" --arg marker "$marker" '{hook_event_name:"PostCompact",session_id:$session,trigger:"manual",compact_summary:$marker,transcript_path:"/forbidden/transcript"}' | cli claude-hook) || fail "Claude PostCompact failed"
+  [ -z "$output" ] || fail "successful Claude PostCompact emitted content"
+  statement='Retry the exact Claude seal after a provider failure.'
+  authorize "$statement" next-step
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"next-step",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude retry candidate did not register"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "automatic Claude PreCompact failed"
+  [ -z "$output" ] || fail "automatic Claude PreCompact emitted content"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "Claude StopFailure failed"
+  [ -z "$output" ] || fail "Claude StopFailure emitted content"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "Claude compaction retry failed"
+  [ -z "$output" ] || fail "Claude retry emitted content"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" --arg marker "$marker" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto",compact_summary:$marker}' | cli claude-hook) || fail "Claude retry PostCompact failed"
+  [ -z "$output" ] || fail "Claude retry PostCompact emitted content"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"SessionStart",session_id:$session,source:"compact"}' | cli claude-hook) || fail "Claude compact SessionStart failed"
+  printf '%s' "$output" | jq -e '.systemMessage | test("bounded record\\(s\\) await Claude curation")' >/dev/null || fail "Claude compact SessionStart omitted bounded pending context"
+  if printf '%s' "$output" | grep -q 'handoff-[0-9a-f]'; then
+    fail "Claude compact SessionStart exposed a record identity"
+  fi
+  if grep -R -F -e "$marker" -e /forbidden/transcript "$FM_HOME/state/context-handoff" >/dev/null; then
+    fail "Claude lifecycle persisted summary or transcript input"
+  fi
+  jq -e '.name=="firstmate-context-handoff" and (.version | type=="string")' "$PLUGIN/.claude-plugin/plugin.json" >/dev/null || fail "Claude plugin manifest is not discoverable"
+  jq -e '(.hooks | keys | sort)==["PostCompact","PreCompact","PreToolUse","SessionStart","StopFailure"] and all(.hooks[]; length>0 and all(.[]; (.hooks | length)==1 and .hooks[0].type=="command" and .hooks[0].command=="python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook" and .hooks[0].timeout==10))' "$PLUGIN/hooks/hooks.json" >/dev/null || fail "Claude plugin hook lifecycle contract is incomplete"
+  jq -e '.mcpServers["firstmate-context-handoff"] | .command=="python3" and .args==["${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py","mcp-server"]' "$PLUGIN/.mcp.json" >/dev/null || fail "Claude plugin MCP discovery contract is incomplete"
+  jq -nc --arg session "$CLAUDE_SESSION" --arg path "$VAULT/blocked.md" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"Write",tool_input:{file_path:$path,content:"x"}}' | plugin_cli claude-hook > "$EROOT/plugin-out" 2> "$EROOT/plugin-error"
+  adapter_status=$?
+  [ "$adapter_status" -eq 2 ] && [ ! -s "$EROOT/plugin-out" ] || fail "Claude plugin adapter changed deny transport status"
+  jq -e '.hookSpecificOutput.permissionDecision=="deny"' "$EROOT/plugin-error" >/dev/null || fail "Claude plugin adapter did not preserve the mutation guard"
+  pass "Claude lifecycle and model-free plugin discovery"
+}
+
+test_required_prerequisite_status
 test_sensitive_contracts
+test_single_create_save
 test_queue_first_recovery
 test_registration_capability_lock
 test_compaction_backpressure
+test_envelope_subset_drain
+test_monotonic_claude_binding
+test_claude_precompact_binding_failure
 test_exit75_requires_fresh_inspect
 test_exact_mcp_guard
 test_bounded_transports_and_delivery
 test_directory_durability
+test_serialized_directory_initialization
 test_pi_result_validation
 test_completed_save_precedes_source_validation
+test_registration_lifecycle_retries
+test_quarantine_disable_and_disposition_recovery
+test_transaction_replay_and_rollback
+test_claude_lifecycle_and_plugin_discovery
 
 if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ]; then
   pass "exact-installed-transaction-core core=$(hash_file "$TRANSACTION_CORE") module=$(hash_file "$TRANSACTION_MODULE")"
