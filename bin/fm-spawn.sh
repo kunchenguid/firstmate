@@ -1633,6 +1633,15 @@ function materialize(sourcePath, targetPath, root = false) {
       fs.symlinkSync(target, targetPath);
       return;
     }
+    if (inside(canonical, projectReal)) {
+      const target = path.isAbsolute(link)
+        ? path.join(worktree, path.relative(projectReal, canonical))
+        : link;
+      fs.symlinkSync(target, targetPath);
+      return;
+    }
+    fs.symlinkSync(canonical, targetPath);
+    return;
   }
   const real = sourceStat.isSymbolicLink() ? fs.realpathSync(sourcePath) : sourcePath;
   const stat = fs.statSync(real);
@@ -1764,10 +1773,10 @@ JS
     return "$setup_signal_status"
   fi
   publish_status=0
-NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" "$PROJ_ABS" "$WT" "$source" <<'JS' || publish_status=$?
+NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" "$PROJ_ABS" "$WT" "$source" "$WT/.fm-node-modules.publish.lock" <<'JS' || publish_status=$?
 const fs = require('fs');
 const path = require('path');
-const [publication, target, project, worktree, source] = process.argv.slice(2);
+const [publication, target, project, worktree, source, publicationLock] = process.argv.slice(2);
 
 process.on('SIGINT', () => {});
 process.on('SIGTERM', () => {});
@@ -1848,33 +1857,62 @@ function targetUsesPublication() {
     path.resolve(path.dirname(target), link) === path.resolve(path.dirname(target), publication);
 }
 
-let created = false;
-
-try {
-  fs.symlinkSync(publication, target, 'dir');
-  created = true;
-} catch (error) {
-  if (error.code !== 'EEXIST') process.exit(4);
-}
-
-try {
-  validateTarget();
-  process.exit(created ? 0 : targetUsesPublication() ? 8 : 3);
-} catch (_) {
-  if (!created) process.exit(targetUsesPublication() ? 7 : 5);
-  if (publicationLink() !== publication) process.exit(7);
-  try {
-    fs.unlinkSync(target);
-  } catch (_) {
-    process.exit(7);
+function acquirePublicationLock() {
+  const deadline = Date.now() + 30000;
+  const waitState = new Int32Array(new SharedArrayBuffer(4));
+  while (true) {
+    try {
+      fs.mkdirSync(publicationLock);
+      return;
+    } catch (error) {
+      if (error.code !== 'EEXIST' || Date.now() >= deadline) throw error;
+      Atomics.wait(waitState, 0, 0, 10);
+    }
   }
-  if (publicationLink() !== null) process.exit(7);
-  process.exit(6);
 }
 
-if (!created) {
-  process.exit(4);
+let created = false;
+let status = 4;
+let lockHeld = false;
+
+try {
+  acquirePublicationLock();
+  lockHeld = true;
+  try {
+    fs.symlinkSync(publication, target, 'dir');
+    created = true;
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+  }
+  try {
+    validateTarget();
+    status = created ? 0 : targetUsesPublication() ? 8 : 3;
+  } catch (_) {
+    if (!created) {
+      status = targetUsesPublication() ? 7 : 5;
+    } else if (publicationLink() !== publication) {
+      status = 7;
+    } else {
+      try {
+        fs.unlinkSync(target);
+        status = publicationLink() === null ? 6 : 7;
+      } catch (_) {
+        status = 7;
+      }
+    }
+  }
+} catch (_) {
+  status = created || targetUsesPublication() ? 10 : 9;
+} finally {
+  if (lockHeld) {
+    try {
+      fs.rmdirSync(publicationLock);
+    } catch (_) {
+      status = created || targetUsesPublication() ? 10 : 9;
+    }
+  }
 }
+process.exit(status);
 JS
   case "$publish_status" in
     0|8)
@@ -1887,12 +1925,12 @@ JS
       cleanup_beeline_node_modules_staging || cleanup_status=$?
       [ "$cleanup_status" -eq 0 ] || publish_status=5
       ;;
-    4|5|6)
+    4|5|6|9)
       cleanup_status=0
       cleanup_beeline_node_modules_staging || cleanup_status=$?
       [ "$cleanup_status" -eq 0 ] || publish_status=5
       ;;
-    7)
+    7|10)
       NODE_MODULES_ABORT_CLEANUP=0
       NODE_MODULES_ABORT_STAGING=
       NODE_MODULES_ABORT_NODE=
@@ -1923,6 +1961,8 @@ JS
     5) echo "error: published Beeline dependency tree failed workspace validation" >&2; return 1 ;;
     6) echo "error: invalid Beeline dependency publication was retracted" >&2; return 1 ;;
     7) echo "error: Beeline dependency publication ownership became ambiguous; retained its backing tree" >&2; return 1 ;;
+    9) echo "error: Beeline dependency publication lock was unavailable" >&2; return 1 ;;
+    10) echo "error: Beeline dependency publication lock cleanup failed; retained its backing tree" >&2; return 1 ;;
     *) echo "error: Beeline dependency publisher exited unexpectedly" >&2; return 1 ;;
   esac
 }

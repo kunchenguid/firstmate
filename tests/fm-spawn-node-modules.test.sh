@@ -173,6 +173,11 @@ start_postpublication_workspace_mutator() {
         if [ -L "$staging/@beeline/$victim" ]; then
           "$RM_BIN" -f "$staging/@beeline/$victim"
           "$LN_BIN" -s "$primary" "$staging/@beeline/$victim"
+          while [ -d "$target/.fm-node-modules.publish.lock" ]; do
+            sleep 0.001
+          done
+          "$MKDIR_BIN" "$target/node_modules" || exit 2
+          printf 'competing install\n' > "$target/node_modules/owned.txt"
           exit 0
         fi
       fi
@@ -367,6 +372,38 @@ test_spawn_preserves_shared_dependency_symlinks() {
     "$WORKTREE_DIR/node_modules/third-party")
   [ "$result" = worker ] || fail "nested dependency symlink imported the primary workspace"
   pass "fm-spawn preserves dependency symlinks while rebasing primary targets"
+}
+
+test_spawn_preserves_external_package_root_symlinks() {
+  local rec id out status external first_link second_link result
+  id=node-modules-external-roots-z1aab
+  rec=$(make_case external-roots "$id")
+  read_case "$rec"
+  external="$TMP_ROOT/external-linked-package"
+  mkdir -p "$external"
+  printf 'module.exports = { value: "initial" };\n' > "$external/index.js"
+  ln -s "$external" "$PROJECT_DIR/node_modules/external-first"
+  ln -s "$external" "$PROJECT_DIR/node_modules/external-second"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should preserve external package-root links"
+  assert_contains "$out" "spawned $id" "external package-root publication did not launch the worker"
+  first_link=$(readlink "$WORKTREE_DIR/node_modules/external-first")
+  second_link=$(readlink "$WORKTREE_DIR/node_modules/external-second")
+  [ "$first_link" = "$external" ] && [ "$second_link" = "$external" ] \
+    || fail "external package roots were materialized instead of shared"
+  result=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
+    'const first = require(process.argv[1]); const second = require(process.argv[2]); process.stdout.write(String(first === second));' \
+    "$WORKTREE_DIR/node_modules/external-first" \
+    "$WORKTREE_DIR/node_modules/external-second")
+  [ "$result" = true ] || fail "external package-root aliases lost Node module identity"
+  printf 'module.exports = { value: "updated" };\n' > "$external/index.js"
+  result=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
+    'process.stdout.write(require(process.argv[1]).value);' \
+    "$WORKTREE_DIR/node_modules/external-first")
+  [ "$result" = updated ] || fail "external package-root updates were not shared live"
+  pass "fm-spawn preserves external package-root sharing and identity"
 }
 
 test_spawn_uses_worktree_workspace_manifests() {
@@ -804,15 +841,15 @@ test_spawn_retracts_invalid_owned_publication() {
   assert_contains "$out" "invalid Beeline dependency publication was retracted" \
     "post-publication validation failure was not diagnosed"
   assert_not_contains "$out" "spawned $id" "invalid owned publication launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "invalid owned publication left node_modules installed"
+  assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
+    "invalid publication rollback removed a cooperative competing install"
   for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
     [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
       || fail "invalid owned publication left its backing tree installed"
   done
   [ "$(readlink "$PROJECT_DIR/node_modules/@beeline/$victim")" = "../../packages/$victim" ] \
     || fail "invalid publication rollback mutated the primary dependency tree"
-  pass "fm-spawn retracts only its invalid owned dependency publication"
+  pass "fm-spawn retracts its invalid publication without removing a cooperative replacement"
 }
 
 test_spawn_omits_worktree_deleted_workspace() {
@@ -882,6 +919,7 @@ test_spawn_rejects_dangling_staged_workspace_link() {
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_shared_dependency_imports_worktree_workspace
 test_spawn_preserves_shared_dependency_symlinks
+test_spawn_preserves_external_package_root_symlinks
 test_spawn_uses_worktree_workspace_manifests
 test_spawn_rebases_canonical_absolute_workspace_binary
 test_spawn_publication_is_independent_of_path_node_wrappers
