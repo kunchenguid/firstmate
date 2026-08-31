@@ -60,7 +60,7 @@ For a "do X as soon as Y is true" request whose condition AND action are both ge
 bin/fm-procevent-when.sh arm <name> --condition <argv>... --action <argv>...
 ```
 
-[`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the watch's operating contract, while the adapter's header and `--help` own the flags, cadence, trust binding, and outcome document.
+[`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources) owns the watch's operating contract, while the adapter's header and `--help` own the flags, cadence, trust binding, and outcome document.
 Eligibility is a firstmate judgment made BEFORE arming, because the scripts cannot classify an argv: the action must be safe, reversible, and exact (for example `no-mistakes update --beta`, whose own guard refuses while a validation run is active).
 Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
@@ -88,7 +88,7 @@ Two rules the commands cannot enforce for you:
   The runner normally applies the result on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
   Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
   Use the generic path below only after fully handling a result whose adapter has no applying command.
-  [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
+  [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources) owns the automatic-application contract and its failure boundary.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
   ```sh
   bin/fm-procevent.sh handled <source-id> <sequence>
@@ -122,7 +122,7 @@ Supported by tests:
 - stored argv is executed directly, so an argument containing spaces or shell metacharacters is never re-split or interpreted;
 - oversized output is bounded rather than published whole or silently dropped.
 
-The `when` adapter's guarantees are part of the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent).
+The `when` adapter's guarantees are part of the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources).
 
 **Not true, and never to be claimed:** at-least-once, no-loss, or lossless delivery, and no generic exactly-once effect either - the handled acknowledgement only stops re-announcement, it says nothing about whether a paired external effect performed before the acknowledgement call actually completed, so a crash between that effect and the call can still repeat the effect on the next replay.
 

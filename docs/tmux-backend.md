@@ -1,16 +1,15 @@
 # tmux runtime backend
 
-tmux is Firstmate's verified reference runtime backend and the fully supported baseline for secondmate homes.
-[`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
+tmux is Firstmate's only supported runtime backend and the fully supported baseline for local secondmate homes.
+[`configuration.md`](configuration.md#runtime-backend) owns the lean runtime contract and metadata semantics.
 
 ## Setup
 
 Install tmux with `brew install tmux` or your platform package manager.
 The universal harness and toolchain requirements are in [`configuration.md`](configuration.md#toolchain).
 
-tmux is the hard default when no explicit setting or runtime auto-detection selects another backend.
-Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
-An explicit selection is also the opt-out from Herdr or cmux runtime auto-detection.
+tmux is the fixed runtime backend.
+`config/backend` and `FM_BACKEND` are ignored by the lean product contract.
 
 No provisioning is required before the first task.
 
@@ -76,7 +75,7 @@ The shared classifier accepts a shell glyph as an empty agent composer only insi
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
 Busy state is not read from rendered text on this backend.
-A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state contract owned by `bin/fm-busy-lib.sh`; [architecture](architecture.md#busy-state-is-semantic-per-adapter) owns its boundaries.
+A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state contract owned by `bin/fm-busy-lib.sh`; [architecture](architecture.md#busy-state-and-delivery) owns its boundaries.
 The one remaining rendered-tail reader is Grok's isolated fallback inside that contract, which can only classify a Grok task.
 The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
@@ -92,7 +91,7 @@ OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
 After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
 Ambiguous pending text never receives the busy-queue conversion.
-A second, baseline-gated conversion covers harnesses whose mid-turn screen the classifier cannot identify (Pi replaces its separated composer while working): when and only when the pane was idle before the text was typed, an idle-to-busy transition across the submit's own Enter confirms delivery, the same turn-started signal Herdr reads natively.
+A second, baseline-gated conversion covers harnesses whose mid-turn screen the classifier cannot identify (Pi replaces its separated composer while working): when and only when the pane was idle before the text was typed, an idle-to-busy transition across the submit's own Enter confirms delivery.
 Without that baseline, an `unknown` verdict is preserved untouched, so a busy-looking pane can never convert an unread composer into a confirmation.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 

@@ -1,11 +1,11 @@
-CONTRIBUTING.md:6:**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
+CONTRIBUTING.md:6:**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`] (https://github.com/kunchenguid/no-mistakes).**
 CONTRIBUTING.md:9:`no-mistakes` puts a local git proxy in front of your real remote.
 CONTRIBUTING.md:12:A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
 CONTRIBUTING.md:20:3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
 CONTRIBUTING.md:25:   git push no-mistakes
 CONTRIBUTING.md:28:6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
 CONTRIBUTING.md:29:   Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
-CONTRIBUTING.md:32:See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
+CONTRIBUTING.md:32:See the [no-mistakes quick start] (https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 CONTRIBUTING.md:40:  Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
 CONTRIBUTING.md:43:  A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` plus experimental `herdr`, `zellij`, `orca`, and `cmux`, while `codex-app` is documented only in `docs/codex-app-backend.md`.
 CONTRIBUTING.md:48:  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
@@ -18,8 +18,8 @@ CONTRIBUTING.md:78:bin/fm-lint.sh   # lint that shell surface plus GitHub workfl
 CONTRIBUTING.md:86:bin/fm-test-run.sh --all   # deliberate complete regression (optional local full walk; not no-mistakes Test)
 CONTRIBUTING.md:101:Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
 CONTRIBUTING.md:106:Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
-CONTRIBUTING.md:107:The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
-CONTRIBUTING.md:111:Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).
+CONTRIBUTING.md:107:The [Herdr backend guide] (docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification] (docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
+CONTRIBUTING.md:111:Open an issue, or talk to me on [Discord] (https://discord.gg/Wsy2NpnZDu).
 
 ## Initial Checkout State
 
@@ -76,27 +76,27 @@ AGENTS.md:550:For every Relay-linked terminal outcome, load that owner and use t
 AGENTS.md:553:Load `fmx-respond` before promising one, on a `public-followup ...` check wake, and whenever the session-start digest lists a public commitment awaiting delivery.
 README.md:16:      alt="Discord"
 README.md:45:- **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
-README.md:46:- **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
+README.md:46:- **Disposable worktrees** - each task runs in a clean [treehouse] (https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
 README.md:48:- **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 README.md:51:- **Optional Relay** - opt in with one local `.env` pairing token so firstmate can answer your public mentions on X and Discord alike, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-Relay behavior; a final reply promised in a thread becomes durable state that is reconciled from disk, so a restart or a compacted conversation cannot lose it; dry-run preview records would-be replies and dismissals locally before go-live.
 README.md:53:- **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
-README.md:133:Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
+README.md:133:Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation] (#documentation) below.
 README.md:149: │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows, herdr/zellij tabs, cmux workspaces, or Orca terminals
 README.md:162:Optional secondmates extend this to persistent local or whole-home remote second mates, dispatch profiles let you steer which harness handles which task, and opt-in Relay lets the same fleet answer public mentions.
-README.md:163:`codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
-README.md:165:Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional Relay, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
-README.md:202:- [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
-README.md:203:- [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
-README.md:207:- [docs/herdr-backend.md](docs/herdr-backend.md) - current setup, safety boundaries, and limits for the experimental Herdr backend.
-README.md:208:- [docs/zellij-backend.md](docs/zellij-backend.md) - current setup and limits for the experimental Zellij backend.
-README.md:209:- [docs/orca-backend.md](docs/orca-backend.md) - current setup and limits for the experimental Orca backend.
-README.md:210:- [docs/cmux-backend.md](docs/cmux-backend.md) - current setup, socket security, and limits for the experimental cmux backend.
-README.md:211:- [docs/codex-app-backend.md](docs/codex-app-backend.md) - the current blocked Codex App backend boundary and rollout contract.
+README.md:163:`codex-app` is not a runtime backend yet; [docs/codex-app-backend.md] (docs/codex-app-backend.md) owns the Codex App boundary.
+README.md:165:Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional Relay, fleet sync, and self-update - is in [docs/architecture.md] (docs/architecture.md).
+README.md:202:- [docs/configuration.md] (docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
+README.md:203:- [docs/remote-secondmates.md] (docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
+README.md:207:- [docs/herdr-backend.md] (docs/herdr-backend.md) - current setup, safety boundaries, and limits for the experimental Herdr backend.
+README.md:208:- [docs/zellij-backend.md] (docs/zellij-backend.md) - current setup and limits for the experimental Zellij backend.
+README.md:209:- [docs/orca-backend.md] (docs/orca-backend.md) - current setup and limits for the experimental Orca backend.
+README.md:210:- [docs/cmux-backend.md] (docs/cmux-backend.md) - current setup, socket security, and limits for the experimental cmux backend.
+README.md:211:- [docs/codex-app-backend.md] (docs/codex-app-backend.md) - the current blocked Codex App backend boundary and rollout contract.
 .github/workflows/no-mistakes-required.yml:1:name: Require no-mistakes
 .github/workflows/no-mistakes-required.yml:18:  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
 .github/workflows/no-mistakes-required.yml:23:    name: PR must be raised via no-mistakes
 .github/workflows/no-mistakes-required.yml:29:      - name: Verify no-mistakes signature in PR body
-.github/workflows/no-mistakes-required.yml:36:          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+.github/workflows/no-mistakes-required.yml:36:          marker='Updates from [git push no-mistakes] (https://github.com/kunchenguid/no-mistakes)'
 .github/workflows/no-mistakes-required.yml:38:            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
 .github/workflows/no-mistakes-required.yml:42:            echo "::error::This PR was not raised through no-mistakes."
 .github/workflows/no-mistakes-required.yml:44:            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
@@ -740,7 +740,7 @@ tests/fm-backend-herdr-launcher-workspace-e2e.test.sh:407:SM2_PANE=$(grep '^herd
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh:413:pass "real herdr E2E: a --secondmate launch still stands up that secondmate's own workspace instead of inheriting the launcher's"
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh:429:pass "real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact"
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh:437:pass "real herdr E2E: isolated lab session removed and default fleet session unchanged"
-docs/orca-backend.md:5:Firstmate agents load [`firstmate-orca`](../.agents/skills/firstmate-orca/SKILL.md) before operating or recovering this backend.
+docs/orca-backend.md:5:Firstmate agents load [`firstmate-orca`] (../.agents/skills/firstmate-orca/SKILL.md) before operating or recovering this backend.
 docs/orca-backend.md:15:- The `orca` CLI, installed with `brew install orca`.
 docs/orca-backend.md:18:Select Orca with local `config/backend` containing `orca`, `FM_BACKEND=orca` for one launch, or an explicit request to Firstmate.
 docs/orca-backend.md:21:Before any spawn mutates repository state, Firstmate requires `orca status --json` to report `reachable=true` and `state="ready"`.
@@ -752,7 +752,7 @@ docs/orca-backend.md:44:`terminal=` and `orca_worktree_id=` are the backend auth
 docs/orca-backend.md:49:Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
 docs/orca-backend.md:51:`fm-peek.sh` reads with `orca terminal read`.
 docs/orca-backend.md:78:tests/fm-backend-orca.test.sh
-docs/orca-backend.md:83:[`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.
+docs/orca-backend.md:83:[`verification/runtime-backends.md`] (verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.
 tests/fm-remote-entrypoint.test.sh:2:# fm-remote-entrypoint.sh installs as a PATH symlink under ~/.local/bin
 tests/fm-remote-entrypoint.test.sh:3:# (docs/remote-secondmates.md). SCRIPT_DIR must resolve to the real bin/
 tests/fm-remote-entrypoint.test.sh:4:# directory so it can source its sibling fm-remote-job-lib.sh, not to the
@@ -2049,7 +2049,7 @@ tests/fm-backend-cmux.test.sh:1120:test_dispatch_routes_cmux_backend
 tests/fm-backend-cmux.test.sh:1121:test_dispatch_busy_state_unknown_for_cmux
 tests/fm-backend-cmux.test.sh:1122:test_dispatch_composer_state_routes_cmux
 tests/fm-backend-cmux.test.sh:1166:test_secondmate_spawn_refuses_cmux_backend
-docs/remote-secondmates.md:7:The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session, and every path that provisions or launches one refuses a host that is not ready for it.
+docs/remote-secondmates.md:7:The remote second-mate agent itself always runs on the [Herdr backend] (herdr-backend.md) in the shared `fm-remote` session, and every path that provisions or launches one refuses a host that is not ready for it.
 docs/remote-secondmates.md:8:`fm-remote` is reserved for remote fleet work and must not be used for personal work.
 docs/remote-secondmates.md:9:The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
 docs/remote-secondmates.md:25:ln -s /absolute/path/to/firstmate/bin/fm-remote-entrypoint.sh ~/.local/bin/fm-remote-entrypoint.sh
@@ -3526,7 +3526,7 @@ tests/fm-remote-job.test.sh:564:  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE
 tests/fm-remote-job.test.sh:601:  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
 tests/fm-remote-job.test.sh:610:  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
 docs/trace-context.md:28:Ship and scout spawns reach that site on every spawn backend (`tmux`, `herdr`, `zellij`, `orca`, `cmux`); a Secondmate reaches it on every backend that accepts a Secondmate spawn (`tmux`, `herdr`, `zellij`), because `bin/fm-spawn.sh` rejects a Secondmate on `orca` and `cmux`.
-docs/trace-context.md:32:A Secondmate on a [remote route](remote-secondmates.md) never reaches that export site in the parent's own process: the parent hands the launch to the configured host, which runs its own `bin/fm-spawn.sh` there.
+docs/trace-context.md:32:A Secondmate on a [remote route] (remote-secondmates.md) never reaches that export site in the parent's own process: the parent hands the launch to the configured host, which runs its own `bin/fm-spawn.sh` there.
 tests/fm-transition-lib.test.sh:36:# Empty optional fields are allowed (herdr leaves workspace/agent empty on the
 bin/fm-public-followup-lib.sh:2:# fm-public-followup-lib.sh - shared gating and private-transport helpers for the
 bin/fm-public-followup-lib.sh:3:# deterministic public-followup consumer.
@@ -5183,33 +5183,33 @@ docs/configuration.md:14:`state/` holds runtime records such as task metadata, a
 docs/configuration.md:18:The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 docs/configuration.md:19:Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 docs/configuration.md:50:## Runtime backend (config/backend / FM_BACKEND)
-docs/configuration.md:53:`tmux` is the verified reference backend (see [`docs/tmux-backend.md`](tmux-backend.md)); `herdr`, `zellij`, `orca`, and `cmux` are experimental spawn backends (see [`docs/herdr-backend.md`](herdr-backend.md), [`docs/zellij-backend.md`](zellij-backend.md), [`docs/orca-backend.md`](orca-backend.md), and [`docs/cmux-backend.md`](cmux-backend.md)).
+docs/configuration.md:53:`tmux` is the verified reference backend (see [`docs/tmux-backend.md`] (tmux-backend.md)); `herdr`, `zellij`, `orca`, and `cmux` are experimental spawn backends (see [`docs/herdr-backend.md`] (herdr-backend.md), [`docs/zellij-backend.md`] (zellij-backend.md), [`docs/orca-backend.md`] (orca-backend.md), and [`docs/cmux-backend.md`] (cmux-backend.md)).
 docs/configuration.md:54:Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
 docs/configuration.md:55:New spawns choose the backend in this order: an explicit `--backend` flag that current authority for that exact task alone has authorized (a present captain instruction or the task's own accepted brief; never later-task precedent by analogy), then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 docs/configuration.md:56:If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
-docs/configuration.md:57:See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
+docs/configuration.md:57:See [`docs/cmux-backend.md`] (cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
 docs/configuration.md:58:Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
 docs/configuration.md:59:Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 docs/configuration.md:60:Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
 docs/configuration.md:61:`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
-docs/configuration.md:62:`codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
+docs/configuration.md:62:`codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`] (codex-app-backend.md) owns the Codex App boundary.
 docs/configuration.md:66:A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 docs/configuration.md:67:A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
-docs/configuration.md:68:A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
+docs/configuration.md:68:A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`] (cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 docs/configuration.md:72:A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 docs/configuration.md:73:A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 docs/configuration.md:74:An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 docs/configuration.md:75:A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
-docs/configuration.md:86:[`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, collision handling, and recovery behavior.
-docs/configuration.md:87:The local `config/herdr-presentation-spaces` file instead opts a home out of, or explicitly in to, Herdr's default-on disposable single-task visual projection; [Presentation spaces](herdr-backend.md#presentation-spaces) owns its accepted values, default, Herdr version floor, migration, behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
+docs/configuration.md:86:[`herdr-backend.md`] (herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, collision handling, and recovery behavior.
+docs/configuration.md:87:The local `config/herdr-presentation-spaces` file instead opts a home out of, or explicitly in to, Herdr's default-on disposable single-task visual projection; [Presentation spaces] (herdr-backend.md#presentation-spaces) owns its accepted values, default, Herdr version floor, migration, behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
 docs/configuration.md:89:For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
-docs/configuration.md:90:Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
+docs/configuration.md:90:Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`] (herdr-backend.md) instead of `herdr server stop`.
 docs/configuration.md:91:For normal zellij operations, `FM_ZELLIJ_SESSION` selects the named session and defaults to `firstmate`.
-docs/configuration.md:93:Use the guarded cleanup path described in [`docs/zellij-backend.md`](zellij-backend.md) instead of `kill-all-sessions` or `delete-all-sessions`.
+docs/configuration.md:93:Use the guarded cleanup path described in [`docs/zellij-backend.md`] (zellij-backend.md) instead of `kill-all-sessions` or `delete-all-sessions`.
 docs/configuration.md:94:cmux has no session layer at all - one workspace per task, in whatever cmux window is open - and its socket password (when configured) is read from local, gitignored `config/cmux-socket-password` under the effective config directory, never committed.
 docs/configuration.md:95:The caller-facing label remains `fm-<id>`, but the actual cmux workspace title is scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
-docs/configuration.md:96:Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
-docs/configuration.md:97:`config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+docs/configuration.md:96:Test cleanup must use the guarded path in [`docs/cmux-backend.md`] (cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
+docs/configuration.md:97:`config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`] (../.agents/skills/secondmate-provisioning/SKILL.md).
 docs/configuration.md:102:It currently supports only `tmux` and `herdr` supervisor panes.
 docs/configuration.md:103:Set `FM_SUPERVISOR_BACKEND=tmux|herdr` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`.
 docs/configuration.md:105:That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
@@ -5220,19 +5220,19 @@ docs/configuration.md:130:## Gate defaults (.no-mistakes.yaml)
 docs/configuration.md:132:The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
 docs/configuration.md:133:Storing evidence in the repo publishes each run's test artifacts to the orphan `no-mistakes/evidence` branch and links them from the PR body, instead of keeping them on local disk under the no-mistakes home.
 docs/configuration.md:134:That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
-docs/configuration.md:137:Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
-docs/configuration.md:171:[`remote-secondmates.md`](remote-secondmates.md) owns current remote setup, operation, and safety behavior.
-docs/configuration.md:175:For remote provisioning, including supplied project origins, follow [Remote second mates](remote-secondmates.md#provision-a-route).
+docs/configuration.md:137:Portable shard evidence and coverage rules are in [fm-test-portable-shards.md] (fm-test-portable-shards.md); [herdr-backend.md] (herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md] (verification/runtime-backends.md#herdr) owns active evidence.
+docs/configuration.md:171:[`remote-secondmates.md`] (remote-secondmates.md) owns current remote setup, operation, and safety behavior.
+docs/configuration.md:175:For remote provisioning, including supplied project origins, follow [Remote second mates] (remote-secondmates.md#provision-a-route).
 docs/configuration.md:182:Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
 docs/configuration.md:183:For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
-docs/configuration.md:187:Each seed writes an `.fm-secondmate-home` identity marker at the home root, alongside a durable `.fm-secondmate-parent` record of the home's route to its parent (see "Provision a route" in [`docs/remote-secondmates.md`](remote-secondmates.md)).
+docs/configuration.md:187:Each seed writes an `.fm-secondmate-home` identity marker at the home root, alongside a durable `.fm-secondmate-parent` record of the home's route to its parent (see "Provision a route" in [`docs/remote-secondmates.md`] (remote-secondmates.md)).
 docs/configuration.md:202:Bootstrap applies the same relative `FM_HOME` resolution only when embedding that home in the generated Relay poll shim; other transient consumers retain their existing shell-relative behavior.
 docs/configuration.md:203:For the herdr backend, `FM_HOME` also determines the workspace label used by the adapter.
 docs/configuration.md:204:For the zellij backend, `FM_HOME` does not split containers, but it determines the readable home prefix embedded in visible tab titles; use `FM_ZELLIJ_SESSION` when a separate zellij session is needed.
 docs/configuration.md:205:The full zellij home label also includes a short hash of the resolved `FM_ROOT` path.
 docs/configuration.md:206:For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 docs/configuration.md:207:The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
-docs/configuration.md:214:On Zellij, cmux, and Orca a Cursor steer lands, but `fm-send` reports delivery unconfirmed and exits non-zero because their shared submit core does not consult the busy footer; [runtime backend verification](verification/runtime-backends.md#cursor-agent-cli) owns the evidence and transcript-state boundary.
+docs/configuration.md:214:On Zellij, cmux, and Orca a Cursor steer lands, but `fm-send` reports delivery unconfirmed and exits non-zero because their shared submit core does not consult the busy footer; [runtime backend verification] (verification/runtime-backends.md#cursor-agent-cli) owns the evidence and transcript-state boundary.
 docs/configuration.md:297:The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, compatible gh-axi, chrome-devtools-axi, compatible lavish-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
 docs/configuration.md:300:In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 docs/configuration.md:301:The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
@@ -5248,7 +5248,7 @@ docs/configuration.md:340:It covers both public surfaces the relay supports: `@m
 docs/configuration.md:341:Both surfaces are the same opt-in and the same machinery - one pairing token, one relay poll, and one reply path - so everything below applies to Discord mentions unless a line names a platform explicitly.
 docs/configuration.md:344:Destructive, irreversible, or security-sensitive asks are flagged for trusted-channel confirmation instead of being executed from a public mention.
 docs/configuration.md:345:The relay uses owner-only routing: a mention delivered to a home is from that home's owner/captain, while its surrounding conversation context may still include other public accounts.
-docs/configuration.md:352:1. Sign in at [myfirstmate.io](https://myfirstmate.io) with X or Discord.
+docs/configuration.md:352:1. Sign in at [myfirstmate.io] (https://myfirstmate.io) with X or Discord.
 docs/configuration.md:353:2. For the Discord surface, use the dashboard's install link to add the myfirstmate bot to a server you administer; the X surface needs no install step.
 docs/configuration.md:355:4. Start a new firstmate session so bootstrap picks the token up, then mention `@myfirstmate` on X or mention the bot in a server where it is installed.
 docs/configuration.md:360:It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
@@ -5289,7 +5289,7 @@ docs/configuration.md:434:Work routed elsewhere reports a typed terminal result 
 docs/configuration.md:437:Activation is the same `.env` `FMX_PAIRING_TOKEN` contract as the rest of Relay, with no second flag.
 docs/configuration.md:438:A home without that token runs one file test and stops: no `tasks-axi` call, no backlog or request-context scan, and no `state/public-followup/` directory.
 docs/configuration.md:441:Unreconciled terminal results ride the existing 30-second relay poll rather than a new process or timer: `bin/fm-x-poll.sh` compares the pending-event signature against `surfaced` and wakes firstmate once per new result set.
-docs/configuration.md:445:See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind the restart end-to-end and the relay-disabled zero-overhead guarantee.
+docs/configuration.md:445:See [verification/public-followup.md] (verification/public-followup.md) for the current maintainer evidence behind the restart end-to-end and the relay-disabled zero-overhead guarantee.
 docs/configuration.md:480:The remote-secondmate reply adapter declares itself self-announcing: a captured reply reaches its local status mirror and settles its correlated pending-reply expectation without any handler step, the mirrored status bytes are the single wake for one remote note through the same signal classification a local secondmate's append gets, a byte-identical replayed capture adds no bytes and stays quiet, and only a capture the adapter could not fully apply is published as a `check` wake, whose adapter handling remains idempotent.
 docs/configuration.md:524:FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, and zellij/cmux home-title hash; also legacy whole-root override when FM_HOME is unset
 docs/configuration.md:530:FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
@@ -7016,7 +7016,7 @@ bin/fm-remote-file.sh:182:    TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-file.XX
 bin/fm-peek.sh:6:# A selector whose meta records remote_host= is a remote secondmate: its pane
 bin/fm-peek.sh:8:# capture (fm-remote-secondmate-control.sh), clamped to that command's
 bin/fm-peek.sh:34:    fm-remote-secondmate-control.sh capture "$REMOTE_ID" "$N" < /dev/null; then
-docs/verification/public-followup.md:10:[`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
+docs/verification/public-followup.md:10:[`docs/configuration.md`] (../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`] (../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 docs/verification/public-followup.md:21:bash tests/fm-public-followup.test.sh
 docs/verification/public-followup.md:40:ok - typed public-followup records carry only public-safe summaries and deliverables
 docs/verification/public-followup.md:46:The existing Relay suite is unchanged by this work:
@@ -9147,7 +9147,7 @@ bin/fm-ff-lib.sh:18:# (data/, state/, config/, projects/, .no-mistakes/), so it 
 docs/codex-app-backend.md:22:Firstmate backend scripts are shell entry points and can call tmux, Herdr, Zellij, Orca, and cmux directly.
 docs/codex-app-backend.md:29:These partial pieces do not authorize adding `codex-app` to the known or spawn-capable backend registries.
 docs/codex-app-backend.md:49:Once available, Firstmate should add a real `bin/backends/codex-app.sh`, persist `backend=codex-app` and `codex_app_thread_id=`, and route spawn, send, peek, watch, and cleanup through the shared dispatcher.
-docs/codex-app-backend.md:57:[`verification/runtime-backends.md`](verification/runtime-backends.md#codex-app-host-tools) owns the active Desktop host-tool smoke without exposing task-specific thread ids or local paths.
+docs/codex-app-backend.md:57:[`verification/runtime-backends.md`] (verification/runtime-backends.md#codex-app-host-tools) owns the active Desktop host-tool smoke without exposing task-specific thread ids or local paths.
 bin/fm-cursor-lib.sh:149:# Resolution order, shared by bin/fm-spawn.sh and bin/fm-remote-doctor.sh:
 bin/fm-backend.sh:6:# data/fm-backend-design-d7/herdr-addendum.md ("Events as the core
 bin/fm-backend.sh:10:# (tmux) path stays byte-identical. P2 adds bin/backends/herdr.sh, an
@@ -9377,12 +9377,12 @@ docs/zellij-backend.md:80:Zellij exposes no cursor-row or native agent-state sig
 docs/zellij-backend.md:91:Real test cleanup uses only an isolated non-`firstmate` session and the guard in `tests/zellij-test-safety.sh`; it never calls all-session deletion commands.
 docs/zellij-backend.md:108:tests/fm-backend-zellij.test.sh
 docs/zellij-backend.md:109:tests/fm-backend-zellij-smoke.test.sh
-docs/zellij-backend.md:113:[`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) records the active CLI matrix and lifecycle evidence.
+docs/zellij-backend.md:113:[`verification/runtime-backends.md`] (verification/runtime-backends.md#zellij) records the active CLI matrix and lifecycle evidence.
 docs/cmux-backend.md:1:# cmux runtime backend
 docs/cmux-backend.md:3:cmux is an experimental macOS GUI terminal backend.
 docs/cmux-backend.md:9:Pick cmux when you already use the app as your terminal and want task workspaces in its sidebar.
 docs/cmux-backend.md:10:cmux is macOS-only, GUI-first, and unsuitable for a headless or SSH-only Firstmate session.
-docs/cmux-backend.md:14:- cmux 0.64 or newer, installed from [cmux.com](https://cmux.com) or with `brew install --cask cmux`.
+docs/cmux-backend.md:14:- cmux 0.64 or newer, installed from [cmux.com] (https://cmux.com) or with `brew install --cask cmux`.
 docs/cmux-backend.md:19:The adapter prefers `command -v cmux` and otherwise uses `/Applications/cmux.app/Contents/Resources/bin/cmux`.
 docs/cmux-backend.md:23:cmux defaults to a control mode that rejects external shells, while Firstmate always controls it from an external process.
 docs/cmux-backend.md:24:Open Settings > Automation and choose a viable Socket Control Mode before the first cmux-backed spawn.
@@ -9416,7 +9416,7 @@ docs/cmux-backend.md:116:- cmux is experimental, macOS-only, GUI-first, and requ
 docs/cmux-backend.md:122:- Label lookup and recovery are currently scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot.
 docs/cmux-backend.md:128:tests/fm-backend-cmux.test.sh
 docs/cmux-backend.md:129:tests/fm-backend-cmux-smoke.test.sh
-docs/cmux-backend.md:132:[`verification/runtime-backends.md`](verification/runtime-backends.md#cmux) records the active source and live evidence, including socket modes and last-in-window cleanup.
+docs/cmux-backend.md:132:[`verification/runtime-backends.md`] (verification/runtime-backends.md#cmux) records the active source and live evidence, including socket modes and last-in-window cleanup.
 docs/documentation-audiences.json:30:    "docs/herdr-backend.md",
 docs/documentation-audiences.json:31:    "docs/zellij-backend.md",
 docs/documentation-audiences.json:32:    "docs/orca-backend.md",
@@ -9453,7 +9453,7 @@ bin/fm-session-start.sh:852:    printf '%s/bin/fm-public-followup.sh consume, th
 bin/fm-session-start.sh:853:    printf '%s/bin/fm-public-followup.sh deliver <id>. Load fmx-respond for the procedure.\n' "$FM_ROOT"
 bin/fm-session-start.sh:906:elif [ -f "$CONFIG/x-mode.env" ]; then
 bin/fm-session-start.sh:909:X mode is active, so the emitted block's cadence instruction applies.
-docs/scripts.md:6:The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarized in [architecture.md](architecture.md#no-mistakes-gate-authority-boundary), while `docs/sessionstart-nudge.md` covers the silent session-open hook use; `fm-gate-refuse-lib.sh`'s header owns its exact contract.
+docs/scripts.md:6:The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarized in [architecture.md] (architecture.md#no-mistakes-gate-authority-boundary), while `docs/sessionstart-nudge.md` covers the silent session-open hook use; `fm-gate-refuse-lib.sh`'s header owns its exact contract.
 docs/scripts.md:21:| `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
 docs/scripts.md:22:| `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
 docs/scripts.md:23:| `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |
@@ -9490,9 +9490,9 @@ docs/wedge-alarm.md:18:- `herdr` calls `herdr notification show` outside the sup
 docs/wedge-alarm.md:26:Every invocation is process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, which defaults to 10 seconds, including `command:`, `osascript`, `herdr`, and the test seam.
 docs/sessionstart-nudge.md:54:They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 docs/calm-mode-feasibility.md:260:The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continue to transport the same input selected by the harness adapter.
-docs/herdr-backend.md:15:- Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
+docs/herdr-backend.md:15:- Herdr protocol 14 or newer, installed from [herdr.dev] (https://herdr.dev).
 docs/herdr-backend.md:23:Select Herdr with local `config/backend` containing `herdr`, `FM_BACKEND=herdr` for one launch, or an explicit request to Firstmate.
-docs/herdr-backend.md:24:A remote second-mate agent is the one case with no choice: it always runs on Herdr, and [`remote-secondmates.md`](remote-secondmates.md) owns that requirement and the readiness its host must meet.
+docs/herdr-backend.md:24:A remote second-mate agent is the one case with no choice: it always runs on Herdr, and [`remote-secondmates.md`] (remote-secondmates.md) owns that requirement and the readiness its host must meet.
 docs/herdr-backend.md:29:Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
 docs/herdr-backend.md:32:The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
 docs/herdr-backend.md:73:A home opts out by writing `off` into local gitignored `config/herdr-presentation-spaces`, and forces the projection on by writing `on`.
@@ -9502,7 +9502,7 @@ docs/herdr-backend.md:118:Herdr 0.7.5's explicit close moves focus to a neighbor
 docs/herdr-backend.md:170:`tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
 docs/herdr-backend.md:171:`tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.
 docs/herdr-backend.md:172:`tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab.
-docs/herdr-backend.md:173:`tests/fm-backend-herdr-focus-flash-e2e.test.sh` reproduces the raw explicit-close focus steal on the installed release and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval; [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence.
+docs/herdr-backend.md:173:`tests/fm-backend-herdr-focus-flash-e2e.test.sh` reproduces the raw explicit-close focus steal on the installed release and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval; [`verification/runtime-backends.md`] (verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence.
 docs/herdr-backend.md:177:`herdr workspace create` seeds one default tab.
 docs/herdr-backend.md:186:`tests/fm-backend-herdr-prune-safety-e2e.test.sh` reproduces the collision in an isolated named session and proves the adopted pane remains untouched.
 docs/herdr-backend.md:191:backend=herdr
@@ -9529,62 +9529,62 @@ docs/herdr-backend.md:338:tests/fm-herdr-session-cleanup.test.sh
 docs/herdr-backend.md:339:tests/fm-herdr-session-cleanup-e2e.test.sh
 docs/herdr-backend.md:340:tests/fm-afk-inject-herdr-e2e.test.sh
 docs/herdr-backend.md:341:tests/fm-afk-pi-herdr-return-e2e.test.sh
-docs/herdr-backend.md:345:[`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) records the active version, CLI, projection, event, and lifecycle evidence without task-specific chronology.
+docs/herdr-backend.md:345:[`verification/runtime-backends.md`] (verification/runtime-backends.md#herdr) records the active version, CLI, projection, event, and lifecycle evidence without task-specific chronology.
 docs/architecture.md:12:Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or a Relay mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 docs/architecture.md:22:No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
 docs/architecture.md:42:The explicit resolution is written by the actor that answers, not the busy worker: `fm-send`'s `--resolve-key` appends the closing `resolved` line to this home's own copy of the ledger at answer time, which covers crewmates, local secondmates, and remote secondmates identically because a remote mate's escalations reach that local copy through the parent-replies ingest and only the answer message itself crosses the transport.
 docs/architecture.md:46:`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 docs/architecture.md:48:During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
-docs/architecture.md:69:Optional Relay integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#relay-env) owns its generated-artifact and dispatch mechanics.
+docs/architecture.md:69:Optional Relay integrates with the watcher only after explicit opt-in; [configuration.md] (configuration.md#relay-env) owns its generated-artifact and dispatch mechanics.
 docs/architecture.md:83:A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, if work, process-event sources, or Relay polling has an unhealthy model-aware supervision verdict, or if queued wakes are waiting to be drained.
 docs/architecture.md:86:On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work, a process-event source, or Relay polling needs supervision and no identity-matched watcher lock with a fresh beacon is live, blocking-capable Stop hooks block and nonblocking turn-end integrations force one bounded follow-up.
 docs/architecture.md:95:Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
 docs/architecture.md:96:Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr uses native agent-state submit confirmation on idle baselines, a composer empty fallback when native stays idle, and a pre-Enter rendered-footer transition when that baseline is unavailable.
 docs/architecture.md:97:The retries-exhausted queued-Enter decision is owned by `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; tmux and herdr provide only their backend-specific busy signals.
 docs/architecture.md:98:Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, and cmux contribute only a screen capture plus declarative styled, cursor, identity, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
-docs/architecture.md:101:The current operator boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
-docs/architecture.md:134:`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, metadata-only cleanup identity validation, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter ([`docs/tmux-backend.md`](tmux-backend.md)), and `bin/backends/herdr.sh` (P2), `bin/backends/zellij.sh` (P3), `bin/backends/orca.sh` (P4), and `bin/backends/cmux.sh` (P5) are experimental task-spawn adapters.
+docs/architecture.md:101:The current operator boundary is in [Composer and injection safety] (herdr-backend.md#composer-and-injection-safety).
+docs/architecture.md:134:`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, metadata-only cleanup identity validation, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter ([`docs/tmux-backend.md`] (tmux-backend.md)), and `bin/backends/herdr.sh` (P2), `bin/backends/zellij.sh` (P3), `bin/backends/orca.sh` (P4), and `bin/backends/cmux.sh` (P5) are experimental task-spawn adapters.
 docs/architecture.md:136:Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, which wins over cmux's primary `CMUX_WORKSPACE_ID` marker and documented fallback signals; auto-detected herdr or cmux prints a one-time opt-out notice, auto-detected tmux stays silent, and zellij and orca are never auto-detected (only explicit selection).
 docs/architecture.md:141:tmux, zellij, orca, and cmux expose no native busy primitive at all, so a task on those backends is classified purely from its adapter's own lifecycle record.
-docs/architecture.md:143:For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.
+docs/architecture.md:143:For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback] (herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification] (verification/runtime-backends.md#native-blocked-event) owns the active evidence.
 docs/architecture.md:144:The deeper session-start agent-process liveness probe is separate from that busy-state poll: tmux and Herdr have verified classifiers for secondmate recovery, Zellij remains unverified, and Orca and cmux do not support secondmate spawns.
-docs/architecture.md:145:Herdr is experimental and can be selected explicitly or by runtime auto-detection: Treehouse remains its worktree provider, [`herdr-backend.md`](herdr-backend.md) owns current setup and safety limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) owns active empirical evidence.
-docs/architecture.md:146:Herdr uses one tab per task; [Watching and task containers](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, and recovery scope.
-docs/architecture.md:147:Its default-on presentation projection may place one clean new task in a disposable workspace without changing endpoint authority or lifecycle ownership; [Presentation spaces](herdr-backend.md#presentation-spaces) owns that conditional design, the Herdr version floor its unconfigured default is gated behind, and its narrow home-local restored-shell cleanup at locked session start.
-docs/architecture.md:148:Zellij is experimental and selected only explicitly: Treehouse remains its worktree provider, [`zellij-backend.md`](zellij-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) owns active empirical evidence.
+docs/architecture.md:145:Herdr is experimental and can be selected explicitly or by runtime auto-detection: Treehouse remains its worktree provider, [`herdr-backend.md`] (herdr-backend.md) owns current setup and safety limits, and [`verification/runtime-backends.md`] (verification/runtime-backends.md#herdr) owns active empirical evidence.
+docs/architecture.md:146:Herdr uses one tab per task; [Watching and task containers] (herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, and recovery scope.
+docs/architecture.md:147:Its default-on presentation projection may place one clean new task in a disposable workspace without changing endpoint authority or lifecycle ownership; [Presentation spaces] (herdr-backend.md#presentation-spaces) owns that conditional design, the Herdr version floor its unconfigured default is gated behind, and its narrow home-local restored-shell cleanup at locked session start.
+docs/architecture.md:148:Zellij is experimental and selected only explicitly: Treehouse remains its worktree provider, [`zellij-backend.md`] (zellij-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`] (verification/runtime-backends.md#zellij) owns active empirical evidence.
 docs/architecture.md:149:Zellij's container shape is simpler than herdr's: one shared `firstmate` session, one tab per task, with no per-home workspace split; visible tab titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path.
 docs/architecture.md:150:Orca is experimental and selected only explicitly: Orca owns both worktree and terminal lifecycle, records `orca_worktree_id=` and `terminal=`, and removes worktrees through `orca worktree rm` only after the usual firstmate teardown checks pass.
-docs/architecture.md:151:[`orca-backend.md`](orca-backend.md) owns current behavior and limitations, while [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) owns active smoke evidence.
-docs/architecture.md:152:cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or by runtime auto-detection from its primary `CMUX_WORKSPACE_ID` marker plus documented fallback signals: Treehouse remains its worktree provider, [`cmux-backend.md`](cmux-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#cmux) owns active source and live evidence.
+docs/architecture.md:151:[`orca-backend.md`] (orca-backend.md) owns current behavior and limitations, while [`verification/runtime-backends.md`] (verification/runtime-backends.md#orca) owns active smoke evidence.
+docs/architecture.md:152:cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or by runtime auto-detection from its primary `CMUX_WORKSPACE_ID` marker plus documented fallback signals: Treehouse remains its worktree provider, [`cmux-backend.md`] (cmux-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`] (verification/runtime-backends.md#cmux) owns active source and live evidence.
 docs/architecture.md:153:cmux's container shape is one workspace per task with one surface, no per-home container split; workspace titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path, and `--secondmate` spawns are refused, mirroring Orca.
 docs/architecture.md:154:Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectable as a runtime backend.
-docs/architecture.md:158:Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
+docs/architecture.md:158:Crewmates never intentionally touch your project clone; [treehouse] (https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 docs/architecture.md:175:Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
 docs/architecture.md:176:The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot enable its own project instructions during validation.
 docs/architecture.md:177:Independently, `fm-spawn.sh`, `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
 docs/architecture.md:179:The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
 docs/architecture.md:183:Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
-docs/architecture.md:202:[`remote-secondmates.md`](remote-secondmates.md) owns current setup, supplied-origin provisioning, transport, relay, failure, and retirement behavior.
+docs/architecture.md:202:[`remote-secondmates.md`] (remote-secondmates.md) owns current setup, supplied-origin provisioning, transport, relay, failure, and retirement behavior.
 docs/architecture.md:203:`fm-home-seed.sh` provisions a local isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
-docs/architecture.md:206:Herdr secondmate and child placement follows the launcher-binding contract in [Watching and task containers](herdr-backend.md#watching-and-task-containers).
+docs/architecture.md:206:Herdr secondmate and child placement follows the launcher-binding contract in [Watching and task containers] (herdr-backend.md#watching-and-task-containers).
 docs/architecture.md:241:`no-mistakes` tasks run the full validation pipeline, `direct-PR` tasks open PRs without that pipeline, and `local-only` tasks stay local until firstmate performs an approved fast-forward merge.
 docs/architecture.md:244:`data/projects.md` records each project's standing posture and optional `+yolo` flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
 docs/architecture.md:245:`bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` skip and home seeding's refusal and no-mistakes initialization.
 docs/architecture.md:247:Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-viewable validation evidence to an orphan evidence branch that shares no history with code branches, so it never enters the crew branch or the default branch.
-docs/architecture.md:248:This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
+docs/architecture.md:248:This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`] (configuration.md) owns the setting.
 docs/architecture.md:254:## Optional Relay
 docs/architecture.md:256:Relay is opt-in presence for the shared `@myfirstmate` bot on both public surfaces it supports, X and Discord.
 docs/architecture.md:258:That token is standing authorization for firstmate to answer public mentions and act autonomously on normal reversible mention requests.
 docs/architecture.md:259:Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation instead of being executed from a public mention.
 docs/architecture.md:260:The relay uses owner-only routing: a mention delivered to a home is from that home's owner, while its surrounding conversation context may still include other public accounts.
-docs/architecture.md:261:On the locked session-start bootstrap step, that token creates the local polling and watcher-cadence artifacts described in the [Relay configuration reference](configuration.md#relay-env).
+docs/architecture.md:261:On the locked session-start bootstrap step, that token creates the local polling and watcher-cadence artifacts described in the [Relay configuration reference] (configuration.md#relay-env).
 docs/architecture.md:262:Without the token, the locked session-start bootstrap step removes those artifacts on opt-out and otherwise stays silent, so non-Relay users see no behavior change.
-docs/architecture.md:263:Newly offered mentions are stored as `state/x-inbox/<request_id>.json` and wake firstmate once per retained request ID; the [Relay configuration reference](configuration.md#relay-env) owns the durable offer-marker and re-offer contract.
-docs/architecture.md:264:The `fmx-respond` agent-only skill drains that inbox, uses the preserved Relay conversation context for continuity under the wire contract owned by the [Relay configuration reference](configuration.md#relay-env), classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.
+docs/architecture.md:263:Newly offered mentions are stored as `state/x-inbox/<request_id>.json` and wake firstmate once per retained request ID; the [Relay configuration reference] (configuration.md#relay-env) owns the durable offer-marker and re-offer contract.
+docs/architecture.md:264:The `fmx-respond` agent-only skill drains that inbox, uses the preserved Relay conversation context for continuity under the wire contract owned by the [Relay configuration reference] (configuration.md#relay-env), classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.
 docs/architecture.md:268:Work that spawns a longer-running task gets an acknowledgement reply first; `bin/fm-x-link.sh` records `x_request=`, `x_request_ts=`, `x_followups=0`, and optional reply-platform context in that task's `state/<id>.meta`, while durable per-request context preserves the original platform and budget independently of task links and inbox cleanup.
 docs/architecture.md:269:That link therefore reaches only work whose task record lives in the answering home; work routed to a secondmate is bound instead by a typed promised-final commitment registered with `--work-home secondmate:<id>`, and `bin/fm-x-link.sh` refuses a non-local task with that path named rather than leaving the public promise unbound.
 docs/architecture.md:270:Later milestone wakes use `bin/fm-x-followup.sh` to post up to three public-safe follow-ups through the relay's `connector/followup` endpoint, ending with a `--final` one for ordinary Relay-linked work. A typed promised-final commitment owns its terminal reply through `bin/fm-public-followup.sh`; after its receipt is validated, `bin/fm-x-followup.sh --clear <task-id>` removes any legacy link without posting another reply.
-docs/architecture.md:271:The [Relay configuration reference](configuration.md#relay-env) owns the exact context retention, platform-resolution, and fail-safe posting contract.
+docs/architecture.md:271:The [Relay configuration reference] (configuration.md#relay-env) owns the exact context retention, platform-resolution, and fail-safe posting contract.
 docs/architecture.md:272:If recovery relinks the same relay request onto a successor task, `fm-x-link.sh --carry-count <n> --carry-ts <epoch> --carry-platform <x|discord> --carry-max <n>` preserves the consumed follow-up count, original 7-day window, and reply split budget instead of granting a fresh local budget or falling back to the wrong platform.
 docs/architecture.md:274:Each follow-up is bounded by a local 7-day window and a 3-post cap; a successful non-final post increments the counter and keeps the link, while `--final`, reaching the cap, the window lapsing, or the relay itself rejecting an exhausted binding all clear it, and the helper is skipped for tasks that did not originate from a Relay mention.
 docs/architecture.md:275:Pure acknowledgments or mentions with nothing to answer are dismissed through `bin/fm-x-dismiss.sh`, which calls the relay's `connector/dismiss` endpoint and posts no text, then the local inbox file is cleared.
@@ -9594,7 +9594,7 @@ docs/architecture.md:284:It is therefore not carried in conversation memory at a
 docs/architecture.md:288:`bin/fm-x-reply.sh` remains the only thing that posts.
 docs/architecture.md:289:`bin/fm-public-followup.sh` composes those three and adds nothing of its own beyond the activation gate, a private terminal-event inbox, and the idempotent delivery sequence.
 docs/architecture.md:290:Work routed to another home reports a *typed* terminal result through `bin/fm-public-followup-emit.sh`; firstmate never recovers the source home, work id, outcome, or deliverables by parsing a free-form `done:` sentence, and the child never learns the thread.
-docs/architecture.md:293:The [Relay configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
+docs/architecture.md:293:The [Relay configuration reference] (configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
 docs/architecture.md:334:Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
 docs/architecture.md:335:For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 ## Baseline Context Metrics
