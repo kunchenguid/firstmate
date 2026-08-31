@@ -663,16 +663,6 @@ cleanup_beeline_node_modules_staging() {
   NODE_MODULES_ABORT_LINK=
 }
 
-abort_beeline_node_modules_registration() {
-  local status=$1
-  if [ -n "${staging_root:-}" ]; then
-    NODE_MODULES_ABORT_STAGING=$staging_root
-    NODE_MODULES_ABORT_TARGET=$target
-    NODE_MODULES_ABORT_LINK=$(basename "$staging_root")
-  fi
-  exit "$status"
-}
-
 spawn_abort_cleanup() {
   local status=$?
   cleanup_beeline_node_modules_staging
@@ -1352,8 +1342,7 @@ share_beeline_node_modules() {
   done
   [ "$has_beeline_workspace" = 1 ] || return 0
 
-  trap 'abort_beeline_node_modules_registration 130' INT
-  trap 'abort_beeline_node_modules_registration 143' TERM
+  trap '' INT TERM
   if ! staging_root=$(mktemp -d "$WT/.fm-node-modules.XXXXXX"); then
     trap - INT TERM
     return 1

@@ -48,8 +48,8 @@ last=
 for last in "\$@"; do :; done
 if [ "\${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" = 1 ] && [[ "\$last" = */.fm-node-modules.XXXXXX ]]; then
   out=\$("$real_mktemp" "\$@") || exit \$?
+  kill -TERM "\$PPID" "\$\$"
   printf '%s\n' "\$out"
-  kill -TERM "\$PPID"
   exit 0
 fi
 exec "$real_mktemp" "\$@"
@@ -241,22 +241,23 @@ test_spawn_cleans_staging_after_setup_failure() {
   pass "fm-spawn cleans dependency staging after setup failure"
 }
 
-test_spawn_cleans_staging_after_interrupt() {
-  local rec id out status candidate
+test_spawn_protects_staging_registration_from_interrupt() {
+  local rec id out status candidate published
   id=node-modules-interrupt-z6
   rec=$(make_case setup-interrupt "$id")
   read_case "$rec"
 
   out=$(FM_INTERRUPT_NODE_MODULES_CREATION=1 run_spawn "$id")
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn should stop when dependency publication is interrupted"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "interrupted setup left a dependency publication"
+  expect_code 0 "$status" "spawn should protect dependency staging registration from interruption"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "protected setup did not publish dependencies"
+  published=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$published" ] || fail "protected setup published a missing dependency tree"
   for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "interrupted setup leaked a staging dependency tree"
+    [ "$(basename "$candidate")" = "$published" ] \
+      || fail "interrupted staging registration leaked an orphaned dependency tree"
   done
-  pass "fm-spawn cleans dependency staging after interruption"
+  pass "fm-spawn protects dependency staging registration from interruption"
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links
@@ -264,6 +265,6 @@ test_spawn_leaves_existing_node_modules_untouched
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_cleans_staging_after_setup_failure
-test_spawn_cleans_staging_after_interrupt
+test_spawn_protects_staging_registration_from_interrupt
 
 echo "# all fm-spawn-node-modules tests passed"
