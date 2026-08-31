@@ -121,6 +121,20 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  # The two cases that exercise a SUCCESSFUL cursor relaunch reach
+  # fm_cursor_resolve_binary, an environmental check that lives past the shared
+  # composite, so without this stub they would pass or fail on whether the
+  # developer happens to have the vendor CLI installed. Cursor's resolver accepts
+  # a `cursor-agent` on PATH by name, which is the same stub
+  # tests/fm-spawn-dispatch-profile.test.sh uses for the same reason.
+  cat > "$fb/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  printf '%b\n' "Available models\ncursor-grok-4.5-high - Grok 4.5 High"
+fi
+exit 0
+SH
+  chmod +x "$fb/cursor-agent"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
