@@ -203,7 +203,11 @@ esac
 [ -n "$OUTCOME_TEXT" ] || die "outcome text is empty once whitespace and control characters are removed"
 
 # Canonical deliverables object: sorted keys, compact, so the same deliverables
-# always hash to the same identity regardless of flag order.
+# always hash to the same identity regardless of flag order. --deliverable is
+# repeatable with no cap on how many arrive, so the composed object reaches jq
+# through a file for the same argv reason as the outcome text below; the length
+# guard there keeps --argjson's fail-closed refusal of a missing or multi-value
+# document.
 DELIVERABLES_JSON=$(
   {
     i=0
@@ -225,7 +229,12 @@ esac
 [ "${#EVENT_ID}" -eq 64 ] || die "could not derive a usable event id" 1
 
 # jq bounds the outcome text by codepoint, so a long or non-ASCII sentence is
-# capped without ever splitting a multi-byte character.
+# capped without ever splitting a multi-byte character. That cap runs INSIDE the
+# jq program, so it cannot keep an unbounded sentence off argv: --outcome-text-file
+# reads a file or stdin, Linux caps a single argv entry at MAX_ARG_STRLEN
+# (128 KiB) whatever flag carries it, and the exec would fail with E2BIG before
+# jq ever ran. The text therefore reaches jq through a file as a raw string,
+# which keeps the codepoint-exact truncation semantics unchanged.
 EVENT_JSON=$(jq -Sc -n \
   --argjson schema_version "$FM_PF_EVENT_SCHEMA_VERSION" \
   --arg event_id "$EVENT_ID" \
@@ -235,14 +244,16 @@ EVENT_JSON=$(jq -Sc -n \
   --argjson generation "$GENERATION" \
   --arg source_home_id "$SOURCE_HOME" \
   --arg outcome_type "$OUTCOME" \
-  --argjson deliverables "$DELIVERABLES_JSON" \
-  --arg public_safe_outcome "$OUTCOME_TEXT" \
+  --slurpfile deliverables_doc <(printf '%s' "$DELIVERABLES_JSON") \
+  --rawfile public_safe_outcome <(printf '%s' "$OUTCOME_TEXT") \
   --argjson outcome_max "$FM_PF_OUTCOME_TEXT_MAX" \
   --arg occurred_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{schema_version:$schema_version, event_id:$event_id, obligation_id:$obligation_id,
     relation_id:$relation_id, work_id:$work_id, generation:$generation,
     source_home_id:$source_home_id, outcome_type:$outcome_type,
-    deliverables:$deliverables,
+    deliverables:(if ($deliverables_doc | length) != 1
+                  then error("fm-public-followup-emit: expected exactly one deliverables document")
+                  else $deliverables_doc[0] end),
     public_safe_outcome:($public_safe_outcome[0:$outcome_max]),
     occurred_at:$occurred_at, successor:null}') \
   || die "could not build the typed terminal event" 1

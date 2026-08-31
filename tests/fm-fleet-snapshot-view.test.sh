@@ -869,6 +869,77 @@ test_oversized_backlog_still_reads() {
   pass "a backlog past the single-argument size cap still reads through snapshot, home summary, and bearings"
 }
 
+# A single status-log line long enough to cross MAX_ARG_STRLEN on its own. It is
+# ordinary status-log text - one verb, one colon, one very long note - because
+# nothing bounds how much a worker writes on one line.
+write_oversized_status_line() {  # <status-file>
+  {
+    printf 'working: '
+    awk 'BEGIN { while (i++ < 4000) printf "a very long progress note that keeps on growing " }'
+    printf '\n'
+  } > "$1"
+}
+
+# Regression, and a worse failure than the oversized backlog above: the task's
+# own jq exec died with E2BIG while the snapshot still exited 0, so the task
+# disappeared from .tasks entirely and main_inventory then reported its backlog
+# row as an orphan, "in-flight backlog item has no child metadata". A supervisor
+# reading that would be told a live worker does not exist. The note also has to
+# survive whole, since renderers read it as the last event text.
+test_oversized_status_line_keeps_the_task() {
+  local home fakebin out line_bytes raw_len note_len
+  home=$(make_home oversized-status-line)
+  mkdir -p "$home/projects/big-worktree"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] big-line-task - Big Line Task (repo: alpha) (kind: ship) (since 2026-08-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/big-line-task.meta" \
+    "window=firstmate:fm-big-line-task" \
+    "worktree=$home/projects/big-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  write_oversized_status_line "$home/state/big-line-task.status"
+  fakebin=$(make_fakebin "$home")
+
+  # Prove the fixture actually crosses the cap this test exists for; a smaller
+  # line would make the whole case vacuous. Measured on disk, so the guard holds
+  # whether or not the snapshot manages to read the line at all.
+  line_bytes=$(LC_ALL=C wc -c < "$home/state/big-line-task.status" | tr -d ' ')
+  [ "$line_bytes" -gt 131072 ] \
+    || fail "fixture status line is only $line_bytes bytes; it must exceed the 131072-byte argv cap"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a status line larger than one argv entry"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot output must be valid JSON for an oversized status line"
+
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 1
+      and .tasks[0].id == "big-line-task"
+      and .main_inventory.valid == true
+      and (.main_inventory.orphan_in_flight | length) == 0
+  ' >/dev/null || fail "an oversized status line must not drop the task or invent an orphan"
+
+  raw_len=$(printf '%s' "$out" | jq -r '.tasks[0].paths.status_log.last_event.raw | length')
+  [ "$raw_len" -eq $((line_bytes - 1)) ] \
+    || fail "the recorded event must keep the whole line, got $raw_len of $((line_bytes - 1)) characters"
+  note_len=$(printf '%s' "$out" | jq -r '.tasks[0].paths.status_log.last_event.note | length')
+  [ "$note_len" -eq $((raw_len - 9)) ] \
+    || fail "the parsed note must keep the whole line, got $note_len of $raw_len characters"
+  printf '%s' "$out" | jq -e '
+    .tasks[0].paths.status_log.last_event.state == "working"
+      and .tasks[0].hints.last_event_text == .tasks[0].paths.status_log.last_event.raw
+  ' >/dev/null || fail "an oversized status line must still parse into verb and raw event text"
+  pass "a status line past the single-argument size cap keeps its task instead of dropping it"
+}
+
 # Regression: one registered secondmate whose home summary command exits 0 but
 # returns something unusable used to fail the whole snapshot for the entire
 # home. The unusable sample was carried into the record assembly, which could
@@ -921,6 +992,7 @@ test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_oversized_backlog_still_reads
+test_oversized_status_line_keeps_the_task
 test_unusable_secondmate_summary_degrades_to_unknown_record
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides

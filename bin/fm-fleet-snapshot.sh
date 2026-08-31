@@ -211,18 +211,25 @@ bool_json() {
   if [ "$1" = 1 ]; then printf 'true'; else printf 'false'; fi
 }
 
-# Unbounded JSON documents reach jq through --slurpfile and process
-# substitution, never --argjson. Linux caps a SINGLE argv entry at
-# MAX_ARG_STRLEN (128 KiB) independently of the far larger ARG_MAX, so exec
-# fails with E2BIG ("Argument list too long") once one document crosses it,
-# and this home's backlog, task list, and cross-home roll-ups all grow with
-# the fleet. Filters unwrap a slurped document with `doc($x; "x")`, which
-# accepts exactly one document the way --argjson accepts exactly one JSON
-# value: a producer that returned nothing, or that emitted a concatenated
-# multi-value stream, fails closed instead of binding null or silently
-# binding the first value and discarding the rest.
-# Small fixed-size values - counts, booleans, timestamps, single paths, single
-# status lines - stay on argv as ordinary --arg or --argjson.
+# The rule here is BOUNDEDNESS, not JSON shape and not which flag carries the
+# value. Linux caps a SINGLE argv entry at MAX_ARG_STRLEN (128 KiB)
+# independently of the far larger ARG_MAX, so exec fails with E2BIG ("Argument
+# list too long") once any one value crosses it - --arg hits that wall exactly
+# as --argjson does, and a cap written inside the jq program cannot protect an
+# exec that never happens.
+# A value stays on argv only when its PRODUCER bounds its length: ids, kinds,
+# backends, modes, timestamps, counts, booleans, single filesystem paths, and
+# the fixed state/source words fm-crew-state.sh emits.
+# Everything a caller, a status log, or another home can grow without limit
+# reaches jq through a file instead - --slurpfile for a JSON document, --rawfile
+# for a raw string - even when it is a single line of text. A status log line
+# has no producer bound at all, and this home's backlog, task list, and
+# cross-home roll-ups all grow with the fleet.
+# Filters unwrap a slurped document with `doc($x; "x")`, which accepts exactly
+# one document the way --argjson accepts exactly one JSON value: a producer that
+# returned nothing, or that emitted a concatenated multi-value stream, fails
+# closed instead of binding null or silently binding the first value and
+# discarding the rest.
 # shellcheck disable=SC2016 # jq filter text: $d and $name are jq variables.
 JQ_DOC='def doc($d; $name): if ($d | length) != 1 then error("fm-fleet-snapshot: expected exactly one JSON document for $" + $name + ", got " + ($d | length | tostring)) else $d[0] end;'
 
@@ -277,7 +284,8 @@ crew_state_json() {  # <id>
       esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
+  jq -n --rawfile raw <(printf '%s' "$raw") --arg state "$state" --arg source "$source" \
+    --rawfile detail <(printf '%s' "$detail") \
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
 
@@ -291,9 +299,9 @@ status_event_json() {  # <status-log>
   fi
   jq -n \
     --arg path "$log" \
-    --arg raw "$raw" \
-    --arg verb "$verb" \
-    --arg note "$note" \
+    --rawfile raw <(printf '%s' "$raw") \
+    --rawfile verb <(printf '%s' "$verb") \
+    --rawfile note <(printf '%s' "$note") \
     --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
 }
@@ -606,10 +614,10 @@ task_json_lines() {
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
-      --arg last_event_raw "$last_event_raw" \
-      --argjson current_state "$current_json" \
+      --rawfile last_event_raw <(printf '%s' "$last_event_raw") \
+      --slurpfile current_state <(printf '%s' "$current_json") \
       --argjson meta_path "$meta_json" \
-      --argjson status_log "$status_json" \
+      --slurpfile status_log <(printf '%s' "$status_json") \
       --argjson report "$report_json" \
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
@@ -620,6 +628,8 @@ task_json_lines() {
       --argjson report_present "$(bool_json "$report_present")" \
       "$JQ_DOC"'
       doc($open_decisions; "open_decisions") as $open_decisions
+      | doc($current_state; "current_state") as $current_state
+      | doc($status_log; "status_log") as $status_log
       | {
         id:$id,
         kind:$kind,
@@ -1354,7 +1364,8 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
-      terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --arg note "$event_note" '
+      terminal_contradiction=$(printf '%s' "$reconciliation" \
+        | jq -r --rawfile note <(printf '%s' "$event_note") '
         any(.activities[]; .verdict == "contradicts" and .summary == $note)')
       if [ "$terminal_contradiction" = true ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" true)
@@ -1364,7 +1375,8 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg observed "$SNAPSHOT_NOW" \
+        --rawfile current_reason <(printf '%s' "$current_reason") \
         --arg spawn_gen "$sampled_spawn_gen" \
         --argjson registered "$registered" --argjson summary_valid "$summary_valid" \
         --slurpfile summary <(printf '%s' "$summary") \
@@ -1373,7 +1385,8 @@ secondmate_current_json() {  # <parent-tasks-json>
         --slurpfile activity_scan <(printf '%s' "$activity_scan") \
         --slurpfile reconciliation <(printf '%s' "$reconciliation") \
         --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
-        --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" \
+        --rawfile event_raw <(printf '%s' "$event_raw") \
+        --rawfile event_note <(printf '%s' "$event_note") --argjson event_age "$event_age" \
         "$JQ_DOC"'
         doc($summary; "summary") as $summary
         | doc($decisions; "decisions") as $decisions
@@ -1407,9 +1420,12 @@ secondmate_current_json() {  # <parent-tasks-json>
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg observed "$SNAPSHOT_NOW" \
+        --rawfile reason <(printf '%s' "$reason") \
         --arg spawn_gen "$sampled_spawn_gen" \
-        --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
+        --arg provenance "$provenance" --arg freshness "$freshness" \
+        --rawfile event_raw <(printf '%s' "$event_raw") \
+        --rawfile event_note <(printf '%s' "$event_note") \
         --argjson registered "$registered" --argjson event_age "$event_age" \
         --slurpfile activities <(printf '%s' "$activities") \
         --slurpfile activity_scan <(printf '%s' "$activity_scan") \

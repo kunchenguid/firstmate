@@ -271,6 +271,56 @@ test_outcome_text_is_bounded_without_corrupting_characters() {
   pass "outcome text is collapsed to one line, bounded by codepoint, and never corrupts characters"
 }
 
+# Regression: --outcome-text-file reads a file or stdin, so the outcome sentence
+# has no producer bound at all. It used to ride to jq as a single --arg entry,
+# and Linux caps one argv entry at MAX_ARG_STRLEN (128 KiB), so a long report
+# body failed the exec with "Argument list too long" and the terminal event was
+# never published - the promised public reply simply never happened. The
+# 600-codepoint cap lives inside the jq program and could not help: it only runs
+# once jq is already running.
+test_oversized_outcome_text_file_still_emits() {
+  local home event text bytes
+  home=$(make_home outcome-text-oversized)
+  seed_commitment "$home" pf-big req-big discord main work-big
+
+  {
+    printf 'Shipped the caf\xc3\xa9 fix, and here is the rest of the report: '
+    awk 'BEGIN { while (i++ < 4000) printf "a very long report body that keeps on going " }'
+  } > "$home/outcome.txt"
+  bytes=$(LC_ALL=C wc -c < "$home/outcome.txt" | tr -d ' ')
+  [ "$bytes" -gt 131072 ] \
+    || fail "fixture outcome text is only $bytes bytes; it must exceed the 131072-byte argv cap"
+
+  "$EMIT" --home "$home" --obligation pf-big --relation rel-code \
+    --source-home main --work-id work-big --generation 1 --outcome pr-merged \
+    --deliverable pr_url=https://github.com/example/repo/pull/5 \
+    --outcome-text-file "$home/outcome.txt" >/dev/null \
+    || fail "emit must survive an outcome text larger than one argv entry ($bytes bytes)"
+  event=$(find "$home/state/public-followup/events" -name '*.json' | head -1)
+  [ -n "$event" ] || fail "an oversized outcome text must still publish a terminal event"
+  text=$(jq -r '.public_safe_outcome' "$event") \
+    || fail "the typed event must remain valid JSON for an oversized outcome text"
+  [ "${#text}" -eq 600 ] \
+    || fail "the oversized outcome must still be capped at 600 codepoints, got ${#text}"
+  case "$text" in
+    *café*) ;;
+    *) fail "codepoint bounding corrupted a multi-byte character: $text" ;;
+  esac
+
+  # The same text arriving on stdin takes the identical path and must agree
+  # byte for byte, so the bound cannot depend on how the text was supplied.
+  rm -f "$event"
+  "$EMIT" --home "$home" --obligation pf-big --relation rel-code \
+    --source-home main --work-id work-big --generation 1 --outcome pr-merged \
+    --deliverable pr_url=https://github.com/example/repo/pull/5 \
+    --outcome-text-file - < "$home/outcome.txt" >/dev/null \
+    || fail "emit must survive an oversized outcome text on stdin"
+  event=$(find "$home/state/public-followup/events" -name '*.json' | head -1)
+  [ "$(jq -r '.public_safe_outcome' "$event")" = "$text" ] \
+    || fail "stdin and file outcome text must produce the same bounded sentence"
+  pass "an outcome text past the single-argument size cap still publishes its terminal event"
+}
+
 # --- 1. the restart end-to-end -------------------------------------------------
 
 # The whole reported failure, start to finish, with no conversation memory
@@ -2280,6 +2330,7 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
 fi
 
 test_outcome_text_is_bounded_without_corrupting_characters
+test_oversized_outcome_text_file_still_emits
 test_restart_e2e_delivers_exactly_once
 test_duplicate_event_and_replay_are_noops
 test_invalid_events_are_refused_and_quarantined
