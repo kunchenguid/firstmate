@@ -335,7 +335,7 @@ seal_pi() {
 
 complete() {
   local seal=${1:?} outcome=${2:-success} payload
-  payload=$(printf '%s' "$seal" | jq -c '{attempt_id:.attempt_id,bindings:(.bindings // [{record_id:.record_id,envelope_sha256:.envelope_sha256}]),session_id:"pi-session-1",trigger:"threshold",reason:"synthetic-result"}') || fail "could not build compaction outcome"
+  payload=$(printf '%s' "$seal" | jq -c '{attempt_id:.attempt_id,bindings:(.bindings // [{record_id:.record_id,envelope_sha256:.envelope_sha256}]),session_id:"pi-session-1",trigger:.trigger,reason:"synthetic-result"}') || fail "could not build compaction outcome"
   printf '%s\n' "$payload" | cli compaction-outcome "$outcome"
 }
 
@@ -1240,7 +1240,7 @@ payload=$(cat)
 printf '%s\t%s\n' "$*" "$payload" >> "$FM_STALE_BINDING_LOG"
 if [ "$1" = seal ]; then
   if [ "$(cat "$FM_STALE_BINDING_MODE")" = sealed ]; then
-    printf '{"status":"sealed","attempt_id":"pi-attempt-333333333333333333333333333333333333333333333333","record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222","bindings":[{"record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}]}\n'
+    printf '{"status":"sealed","attempt_id":"pi-attempt-333333333333333333333333333333333333333333333333","record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222","bindings":[{"record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}],"trigger":"threshold"}\n'
   else
     printf '{"status":"empty"}\n'
   fi
@@ -1326,6 +1326,7 @@ const failureCalls = fs.readFileSync(process.env.FM_STALE_BINDING_LOG, "utf8").t
 if (failureCalls.length !== 2) throw new Error("failed Pi outcome was not retried until persistence confirmation");
 const failurePayload = JSON.parse(failureCalls.at(-1).split("\t")[1]);
 if (failurePayload.bindings?.[0]?.record_id !== "handoff-111111111111111111111111111111111111111111111111") throw new Error("retried Pi outcome lost its exact seal binding");
+if (failurePayload.trigger !== "threshold") throw new Error("retried Pi outcome replaced its server-owned trigger");
 const calls = fs.readFileSync(process.env.FM_STALE_BINDING_LOG, "utf8").trim().split("\n").filter(line => line.startsWith("compaction-outcome success"));
 if (calls.length !== 0) throw new Error("later no-op attempt emitted an unbound Pi outcome");
 fs.writeFileSync(process.env.FM_STALE_BINDING_MODE, "sealed\n");
@@ -2224,7 +2225,7 @@ test_durable_compaction_attempt() {
 }
 
 test_pi_attempt_authority_and_immutable_outcome() {
-  local seal conflict rejected succeeded duplicate opposite record
+  local seal retry conflict standalone rejected succeeded duplicate opposite record
   new_env pi-attempt-authority
   CAPABILITY=pi-process-one
   PROCESS_GENERATION=101
@@ -2232,6 +2233,12 @@ test_pi_attempt_authority_and_immutable_outcome() {
   register_statement 'Only one exact Pi process generation may own a compaction attempt.' >/dev/null || fail "Pi authority fixture did not register"
   seal=$(seal_pi) || fail "first Pi process did not seal"
   record=$(printf '%s' "$seal" | jq -r .record_id)
+  retry=$(printf '{"session_id":"pi-session-1"}\n' | cli seal --source-harness pi --trigger overflow) || fail "same-process Pi retry escaped bounded transport"
+  [ "$(printf '%s' "$retry" | jq -r .attempt_id)" = "$(printf '%s' "$seal" | jq -r .attempt_id)" ] || fail "same-process Pi retry replaced its durable attempt"
+  [ "$(printf '%s' "$retry" | jq -r .trigger)" = threshold ] || fail "same-process Pi retry replaced its immutable trigger"
+  standalone=$(printf '{"session_id":"pi-session-1"}\n' | cli seal --source-harness pi --trigger threshold --standalone) || fail "standalone Pi conflict escaped bounded transport"
+  [ "$(printf '%s' "$standalone" | jq -r .status)" = attempt-conflict ] || fail "standalone Pi seal bypassed its durable attempt"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "standalone Pi conflict changed the sealed queue"
 
   CAPABILITY=pi-process-two
   PROCESS_GENERATION=202
@@ -2243,7 +2250,7 @@ test_pi_attempt_authority_and_immutable_outcome() {
 
   CAPABILITY=pi-process-one
   PROCESS_GENERATION=101
-  succeeded=$(complete "$seal" success) || fail "owning Pi process could not persist success"
+  succeeded=$(complete "$retry" success) || fail "owning Pi process could not persist success"
   [ "$(printf '%s' "$succeeded" | jq -r .status)" = compaction-succeeded ] || fail "owning Pi process success was not applied"
   duplicate=$(complete "$seal" success) || fail "duplicate matching Pi outcome was not idempotent"
   [ "$(printf '%s' "$duplicate" | jq -r .status)" = compaction-succeeded ] || fail "duplicate matching Pi outcome changed its terminal result"
