@@ -73,7 +73,24 @@ case "$command_name" in
 esac
 if [ "$slow" -eq 1 ]; then
   printf 'START %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
-  sleep "$sleep_s"
+  if [ "$subcommand" = sync ]; then
+    # Hold the sync probe in flight until the fleet clone refresh has logged
+    # its fetch START, so the fetch/sweep overlap this suite asserts is
+    # event-ordered from this side too: a loaded host can delay the
+    # backgrounded fm-fleet-sync.sh until after the whole sync sweep would
+    # have finished, which is concurrency observed too late, not a
+    # serialization regression. Bounded below fleet_sync's 20s bootstrap
+    # timeout so a genuine serialized-after-sweeps regression still finishes
+    # the sweep and fails the overlap assertion instead of hanging.
+    tries=0
+    until grep -q '^START fleet-fetch ' "$log"; do
+      tries=$((tries + 1))
+      [ "$tries" -lt 200 ] || break
+      sleep 0.05
+    done
+  else
+    sleep "$sleep_s"
+  fi
   printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
 else
   printf 'QUICK %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
