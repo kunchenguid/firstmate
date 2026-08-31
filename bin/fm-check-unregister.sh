@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Retire an intentional custom watcher check and its trust binding.
 # Usage: fm-check-unregister.sh <id>
-# Pass only the id; this script resolves the home's state directory itself.
+# Pass only the id. An unset FM_STATE_OVERRIDE selects FM_HOME/state; an
+# explicitly empty override, an invalid id, or a resolved state path that is
+# not an existing non-symlink directory is refused before removal.
+# Each existing named artifact must be an ordinary single-link file on the
+# state directory's device; only <id>.check.sh and <id>.check-trust are removed.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
