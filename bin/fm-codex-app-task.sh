@@ -16,6 +16,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-task-model-route-lib.sh
+. "$SCRIPT_DIR/fm-task-model-route-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -23,7 +25,8 @@ usage:
   fm-codex-app-task.sh register <id> --thread <uuid> --host <host-id>
       --project <checkout> --worktree <desktop-worktree> --kind <kind>
       --model <model> --effort <effort> --route-record <path>
-      --session-envelope <small|normal|research> [--mode <mode>]
+      --session-envelope <small|normal|research>
+      --mode <direct-PR|local-only> --yolo <on|off>
   fm-codex-app-task.sh reconcile <id> --state <state> [--detail <text>]
       [--event <status-line>]
   fm-codex-app-task.sh hard-stop <id> --reason <text> --handoff <external-path>
@@ -73,6 +76,16 @@ valid_envelope() {
   return 1
 }
 
+valid_mode() {
+  case "$1" in direct-PR|local-only) return 0 ;; esac
+  return 1
+}
+
+valid_yolo() {
+  case "$1" in on|off) return 0 ;; esac
+  return 1
+}
+
 exact_meta_value() {
   fm_backend_meta_exact_value "$1" "$2" 2>/dev/null
 }
@@ -81,6 +94,39 @@ require_owner() {
   mkdir -p "$STATE" || die "cannot create Firstmate state directory $STATE"
   fm_session_lock_owned_by_self "$STATE" \
     || die "this process does not own the live Firstmate session lock; refusing Desktop task mutation"
+}
+
+resolve_git_checkout() {  # <checkout>
+  local checkout=$1 checkout_real top top_real
+  [ -d "$checkout" ] || return 1
+  checkout_real=$(CDPATH='' cd -- "$checkout" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$checkout_real" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_real=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$checkout_real" = "$top_real" ] || return 1
+  printf '%s\n' "$top_real"
+}
+
+resolve_git_common_dir() {  # <checkout>
+  local checkout=$1 common
+  common=$(git -C "$checkout" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in /*) ;; *) common="$checkout/$common" ;; esac
+  CDPATH='' cd -- "$common" 2>/dev/null && pwd -P
+}
+
+REGISTERED_WORKTREE=
+registered_worktree_validate() {  # <metadata>
+  local meta=$1 project worktree common project_real worktree_real
+  local project_common worktree_common
+  project=$(exact_meta_value "$meta" project) || return 1
+  worktree=$(exact_meta_value "$meta" worktree) || return 1
+  common=$(exact_meta_value "$meta" git_common_dir) || return 1
+  project_real=$(resolve_git_checkout "$project") || return 1
+  worktree_real=$(resolve_git_checkout "$worktree") || return 1
+  [ "$project_real" != "$worktree_real" ] || return 1
+  project_common=$(resolve_git_common_dir "$project_real") || return 1
+  worktree_common=$(resolve_git_common_dir "$worktree_real") || return 1
+  [ "$project_common" = "$common" ] && [ "$worktree_common" = "$common" ] || return 1
+  REGISTERED_WORKTREE=$worktree_real
 }
 
 write_current() {  # <task-id> <thread> <host> <state> <detail>
@@ -102,9 +148,9 @@ write_current() {  # <task-id> <thread> <host> <state> <detail>
 register_task() {
   local id=$1
   shift
-  local thread='' host='' project='' worktree='' kind='' model='' effort='' mode=''
+  local thread='' host='' project='' worktree='' kind='' model='' effort='' mode='' yolo=''
   local route_record='' envelope=''
-  local project_real worktree_real route_real route_id route_model route_effort
+  local project_real worktree_real git_common_dir route_real
   local meta current status meta_tmp status_tmp current_tmp
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -118,6 +164,7 @@ register_task() {
       --route-record) [ "$#" -ge 2 ] || usage; route_record=$2; shift 2 ;;
       --session-envelope) [ "$#" -ge 2 ] || usage; envelope=$2; shift 2 ;;
       --mode) [ "$#" -ge 2 ] || usage; mode=$2; shift 2 ;;
+      --yolo) [ "$#" -ge 2 ] || usage; yolo=$2; shift 2 ;;
       *) die_usage "unknown register argument '$1'" ;;
     esac
   done
@@ -129,27 +176,29 @@ register_task() {
   valid_atom "$model" || die_usage "invalid model '$model'"
   valid_atom "$effort" || die_usage "invalid effort '$effort'"
   valid_envelope "$envelope" || die_usage "invalid session envelope '$envelope'"
-  [ -n "$mode" ] || mode=$kind
-  valid_atom "$mode" || die_usage "invalid task mode '$mode'"
+  valid_mode "$mode" || die_usage "invalid task mode '$mode'"
+  valid_yolo "$yolo" || die_usage "invalid project yolo posture '$yolo'"
   if ! valid_scalar "$project" || ! valid_scalar "$worktree"; then
     die_usage "project and worktree paths must be single-line values"
   fi
-  [ -d "$project" ] || die_usage "project checkout does not exist: $project"
-  [ -d "$worktree" ] || die_usage "Desktop worktree does not exist: $worktree"
-  project_real=$(cd "$project" 2>/dev/null && pwd -P) \
-    || die_usage "cannot resolve project checkout: $project"
-  worktree_real=$(cd "$worktree" 2>/dev/null && pwd -P) \
-    || die_usage "cannot resolve Desktop worktree: $worktree"
+  project_real=$(resolve_git_checkout "$project") \
+    || die_usage "project checkout is not an exact Git worktree root: $project"
+  worktree_real=$(resolve_git_checkout "$worktree") \
+    || die_usage "Desktop worktree is not an exact Git worktree root: $worktree"
   [ "$project_real" != "$worktree_real" ] \
     || die_usage "Desktop task worktree must be isolated from the saved project checkout"
+  git_common_dir=$(resolve_git_common_dir "$project_real") \
+    || die_usage "cannot resolve project Git identity: $project_real"
+  [ "$(resolve_git_common_dir "$worktree_real")" = "$git_common_dir" ] \
+    || die_usage "Desktop worktree does not belong to the registered project checkout"
   route_real=$(realpath "$route_record" 2>/dev/null) \
     || die_usage "cannot resolve model route record: $route_record"
   [ -f "$route_real" ] && [ ! -L "$route_record" ] \
     || die_usage "model route record must be a regular file"
-  route_id=$(awk -F '\t' '$1=="task_id" {print $2; exit}' "$route_real")
-  route_model=$(awk -F '\t' '$1=="model" {print $2; exit}' "$route_real")
-  route_effort=$(awk -F '\t' '$1=="effort" {print $2; exit}' "$route_real")
-  [ "$route_id" = "$id" ] && [ "$route_model" = "$model" ] && [ "$route_effort" = "$effort" ] \
+  fm_task_route_record_parse "$route_real" \
+    || die_usage "model route record does not satisfy the complete routing contract"
+  [ "$FM_TASK_ROUTE_ID" = "$id" ] && [ "$FM_TASK_ROUTE_MODEL" = "$model" ] \
+    && [ "$FM_TASK_ROUTE_EFFORT" = "$effort" ] \
     || die_usage "model route record does not match task, model, and effort"
 
   require_owner
@@ -171,10 +220,11 @@ register_task() {
     printf 'endpoint_task_id=%s\n' "$id"
     printf 'worktree=%s\n' "$worktree_real"
     printf 'project=%s\n' "$project_real"
+    printf 'git_common_dir=%s\n' "$git_common_dir"
     printf 'harness=codex\n'
     printf 'kind=%s\n' "$kind"
     printf 'mode=%s\n' "$mode"
-    printf 'yolo=off\n'
+    printf 'yolo=%s\n' "$yolo"
     printf 'model=%s\n' "$model"
     printf 'effort=%s\n' "$effort"
     printf 'model_route_record=%s\n' "$route_real"
@@ -261,7 +311,7 @@ resolve_existing_file() {  # <path>
 hard_stop_task() {
   local id=$1
   shift
-  local reason='' handoff='' meta worktree worktree_real handoff_parent handoff_real
+  local reason='' handoff='' meta worktree_real handoff_parent handoff_real
   local thread host envelope generation checkpoint tmp
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -283,11 +333,9 @@ hard_stop_task() {
   [ -f "$meta" ] || die "no metadata for Desktop task $id"
   [ "$(fm_backend_of_meta "$meta")" = codex-app-host ] \
     || die "task $id is not a Codex Desktop host task"
-  worktree=$(exact_meta_value "$meta" worktree) \
-    || die "task $id has no exact Desktop worktree"
-  [ -d "$worktree/.git" ] || die "Desktop worktree is not a Git checkout: $worktree"
-  worktree_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) \
-    || die "cannot resolve Desktop worktree for task $id"
+  registered_worktree_validate "$meta" \
+    || die "task $id no longer matches its registered Git checkout identity"
+  worktree_real=$REGISTERED_WORKTREE
   handoff_parent=$(dirname "$handoff")
   [ -d "$handoff_parent" ] || die "handoff parent does not exist: $handoff_parent"
   handoff_parent=$(CDPATH='' cd -- "$handoff_parent" 2>/dev/null && pwd -P) \
@@ -377,7 +425,9 @@ resume_task() {
     || die "task $id is not a Codex Desktop host task"
   [ "$(exact_meta_value "$current" state)" = paused ] \
     || die "task $id must be paused at a hard session boundary before resume"
-  worktree=$(exact_meta_value "$meta" worktree) || die "task $id has no exact Desktop worktree"
+  registered_worktree_validate "$meta" \
+    || die "task $id no longer matches its registered Git checkout identity"
+  worktree=$REGISTERED_WORKTREE
   [ "$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" = "$checkpoint" ] \
     || die "Desktop worktree is not at requested checkpoint $checkpoint"
   recorded_checkpoint=$(exact_meta_value "$meta" session_checkpoint) \
@@ -440,8 +490,9 @@ archive_preflight_task() {
     || die "task $id is state=$state; archive requires reconciled done state"
   kind=$(exact_meta_value "$meta" kind) \
     || die "task $id has no exact task kind"
-  worktree=$(exact_meta_value "$meta" worktree) \
-    || die "task $id has no exact Desktop worktree"
+  registered_worktree_validate "$meta" \
+    || die "task $id no longer matches its registered Git checkout identity"
+  worktree=$REGISTERED_WORKTREE
 
   if [ "$kind" != scout ]; then
     die "archive would delete the retained ship worktree for task $id; preserve the Desktop task until its result is independently landed or explicit discard is authorized"

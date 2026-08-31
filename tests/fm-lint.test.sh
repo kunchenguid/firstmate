@@ -159,6 +159,7 @@ test_help_reports_the_complete_interface() {
   assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
   assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
   assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
+  assert_contains "$help" "--full" "fm-lint.sh --help omitted --full"
   pass "fm-lint.sh --help reports the complete executable interface"
 }
 
@@ -391,6 +392,23 @@ test_ci_forces_full_lint_even_with_empty_diff() {
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "CI=true did not force the full canonical file set"
   pass "fm-lint.sh forces a full lint in CI even when the local diff would be empty"
+}
+
+test_explicit_full_mode_ignores_local_diff_context() {
+  local tmp fakebin listed expected diff_file
+  tmp=$(fm_test_tmproot fm-lint-explicit-full)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  diff_file="$tmp/diff.nul"
+  : > "$diff_file"
+
+  listed=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    "$LINT" --full --list-files)
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "--full did not select the context-independent canonical file set"
+  pass "fm-lint.sh --full selects the complete canonical set on a local branch"
 }
 
 test_main_branch_forces_full_lint() {
@@ -1017,6 +1035,7 @@ test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff
+test_explicit_full_mode_ignores_local_diff_context
 test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
 test_zero_changed_files_exits_clean

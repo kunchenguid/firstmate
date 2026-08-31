@@ -77,7 +77,8 @@ For each task:
      --project <saved-project-checkout> --worktree <desktop-worktree> \
      --kind <ship-or-scout> --model <model> --effort <effort> \
      --route-record <absolute-routing-record> \
-     --session-envelope <small|normal|research>
+     --session-envelope <small|normal|research> \
+     --mode <direct-PR|local-only> --yolo <on|off>
    ```
 
 5. Verify `state/<id>.meta`, the writable status file, and
@@ -118,6 +119,9 @@ window=<desktop-thread-id>
 codex_app_thread_id=<desktop-thread-id>
 codex_app_host_id=<desktop-host-id>
 worktree=<actual-desktop-worktree>
+git_common_dir=<registered-project-git-common-directory>
+mode=<direct-PR-or-local-only>
+yolo=<on-or-off>
 model_route_record=<absolute-routing-record>
 session_envelope=<small-or-normal-or-research>
 session_generation=<positive-integer>
@@ -127,10 +131,9 @@ session_compaction_telemetry=unsupported
 session_output_telemetry=unsupported
 ```
 
-Endpoint validation requires one exact value for every binding and refuses a
-mismatched task id, thread id, host id, project, or worktree before mutation.
-Registration refuses to overwrite pre-existing task records and refuses a
-worktree that resolves to the saved project checkout.
+Endpoint validation requires one exact value for every binding and refuses a mismatched task id, thread id, host id, project, worktree, or Git common-directory identity before mutation.
+Registration refuses to overwrite pre-existing task records, accepts only `direct-PR` or `local-only` with an explicit `on` or `off` project `yolo` posture, and refuses a worktree that resolves to the saved project checkout.
+The shared routing parser requires the ordered five factors and their evidence, recomputes the score, floor, override, precedence, supported Desktop model, and effort, and rejects missing, duplicate, extra, or inconsistent rows.
 
 ## Session envelope boundary
 

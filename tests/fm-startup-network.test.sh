@@ -347,7 +347,7 @@ EOF
 # lock meanwhile, running the mutating sweeps would sweep underneath that
 # session, so they are refused - and the refusal is reported, not silent.
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands() {
-  local rec home root log report
+  local rec home root log report typed_lock
   rec=$(new_world lock-changed)
   IFS='|' read -r home root log <<EOF
 $rec
@@ -368,6 +368,15 @@ EOF
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the lock-authorized worker never published"
   assert_grep 'network=only detect_only=0' "$log" \
     "the worker refused sweeps for the very session that still holds the lock"
+
+  : > "$log"
+  typed_lock="codex-desktop:019ff1ae-966b-7643-ba01-48811234656e:$$"
+  printf '%s\n' "$typed_lock" > "$home/state/.lock"
+  CODEX_THREAD_ID=019ff1ae-966b-7643-ba01-48811234656e \
+    CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" run --locked 1 --lock-pid "$typed_lock"
+  assert_grep 'network=only detect_only=0' "$log" \
+    "the worker downgraded the exact live Codex Desktop lock to detect-only"
   pass "fm-startup-network: manual callers cannot forge mutation authority"
 }
 

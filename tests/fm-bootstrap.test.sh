@@ -935,7 +935,7 @@ SH
 }
 
 test_network_sweeps_recheck_lock_ownership() {
-  local case_dir fakebin fake_root marker out
+  local case_dir fakebin fake_root marker out typed_lock
   case_dir="$TMP_ROOT/network-lock-handoff"
   mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
@@ -963,6 +963,15 @@ SH
     "the stale worker did not report the refused handoff sweep"
   assert_contains "$out" "changed before project clone refresh" \
     "the stale worker did not report the refused clone refresh"
+  typed_lock="codex-desktop:019ff1ae-966b-7643-ba01-48811234656e:$$"
+  printf '%s\n' "$typed_lock" > "$case_dir/home/state/.lock"
+  rm -f "$marker"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only \
+    FM_BOOTSTRAP_NETWORK_LOCK_PID="$typed_lock" FM_FAKE_FLEET_SYNC_STARTED_MARKER="$marker" \
+    "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+  [ -f "$marker" ] \
+    || fail "the exact typed Desktop owner was denied the deferred mutating sweeps"
   pass "bootstrap: every deferred mutating sweep rechecks fleet-lock ownership"
 }
 

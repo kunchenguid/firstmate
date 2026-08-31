@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for merge polling on the
-# supported forges. Callers must validate task IDs and raw PR/MR URLs before
+# Shared validation and atomic artifact helpers for GitHub PR merge polling.
+# Callers must validate task IDs and raw PR/MR URLs before
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
@@ -11,6 +11,8 @@
 # instances, so the host is part of that identity rather than a constant. Every
 # consumer re-derives the identity from the stored URL and refuses any record
 # whose parts do not reconstruct that exact URL.
+# GitLab parsing is retained only to recognize and refuse inactive migration
+# records; active checking, polling, and merging are GitHub-only.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -158,15 +160,14 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
-# Parse a canonical PR or MR URL into the provider-tagged identity. Validation
+# Parse a canonical PR or legacy MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
 # unchanged, and GitLab gets its own host and namespace rules rather than a
 # loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
 # bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
-# instead, so a merge request on any instance resolves without a hardcoded host.
+# them empty so active callers can reject the recognized legacy identity.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -415,6 +416,7 @@ fm_pr_poll_registration_parse() {
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
+  [ "$provider" = github ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
@@ -467,6 +469,7 @@ fm_pr_poll_prepare() {
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
+  [ "$provider" = github ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1

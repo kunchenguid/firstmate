@@ -63,9 +63,19 @@ EOF
   printf '%s' "$thread" \
     | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
     || return 1
-  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  case "$pid" in ''|*[!0-9]*|0|1|0*) return 1 ;; esac
+  [ "$record" = "codex-desktop:$thread:$pid" ] || return 1
   FM_CODEX_DESKTOP_RECORD_THREAD=$thread
   FM_CODEX_DESKTOP_RECORD_PID=$pid
+}
+
+fm_session_lock_record_valid() {
+  local record=$1
+  case "$record" in
+    codex-desktop:*) fm_codex_desktop_parse_lock_record "$record" ;;
+    ''|*[!0-9]*) return 1 ;;
+    *) [ "$record" -ge 2 ] ;;
+  esac
 }
 
 # Known harness command names; extend when a new adapter is verified.
@@ -215,8 +225,7 @@ fm_session_lock_owner_alive() {
       fm_codex_desktop_parse_lock_record "$record" || return 1
       fm_pid_exists_for_signal "$FM_CODEX_DESKTOP_RECORD_PID"
       ;;
-    ''|*[!0-9]*) return 1 ;;
-    *) fm_harness_pid_alive "$record" ;;
+    *) fm_session_lock_record_valid "$record" && fm_harness_pid_alive "$record" ;;
   esac
 }
 

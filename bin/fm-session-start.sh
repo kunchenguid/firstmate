@@ -269,6 +269,12 @@ stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
+  PARENT_DESKTOP_LEASE=0
+  if fm_codex_desktop_thread_id >/dev/null 2>&1 && [ -t 0 ]; then
+    FM_CODEX_DESKTOP_LEASE_PID=$$
+    export FM_CODEX_DESKTOP_LEASE_PID
+    PARENT_DESKTOP_LEASE=1
+  fi
   SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
   # A non-positive or non-numeric budget is not a budget (`timeout 0` disables
   # the deadline outright), so an unusable value falls back to the default
@@ -321,19 +327,23 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     printf '%s\n' "$BAR"
   fi
   rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
+  if [ "$PARENT_DESKTOP_LEASE" -eq 1 ] && fm_session_lock_owned_by_self "$STATE"; then
+    RULE='================================================================================'
+    printf '\n%s\nDESKTOP SESSION LEASE\n%s\n' "$RULE" "$RULE"
+    printf 'Codex Desktop thread %s now owns this Firstmate home.\n' "$(fm_codex_desktop_thread_id)"
+    printf 'Keep this tracked PTY open while Firstmate work is under way; send "stop" only after supervision is no longer required.\n'
+    while IFS= read -r desktop_command; do
+      case "$desktop_command" in
+        stop) break ;;
+        '') : ;;
+        *) printf 'Desktop session lease is active; supported input: stop\n' ;;
+      esac
+    done
+  fi
   exit 0
 fi
 
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
-DESKTOP_LEASE=0
-
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
-if fm_codex_desktop_thread_id >/dev/null 2>&1 && [ -t 0 ]; then
-  FM_CODEX_DESKTOP_LEASE_PID=$$
-  export FM_CODEX_DESKTOP_LEASE_PID
-  DESKTOP_LEASE=1
-fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -961,9 +971,7 @@ EOF
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0
   COMPLETION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$COMPLETION_PID" in
-    ''|*[!0-9]*) COMPLETION_PID= ;;
-  esac
+  fm_session_lock_record_valid "$COMPLETION_PID" || COMPLETION_PID=
   COMPLETION_TMP=$(mktemp "$STATE/.session-start-complete.XXXXXX" 2>/dev/null || true)
   if [ -n "$COMPLETION_PID" ] && [ -n "$COMPLETION_TMP" ] \
     && printf '%s\n' "$COMPLETION_PID" > "$COMPLETION_TMP" 2>/dev/null \
@@ -978,20 +986,6 @@ if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
       printf '\nSESSION_START_AGENTS_BASELINE: not recorded - a later supported rebuild will re-emit AGENTS.md.\n'
     fi
   fi
-fi
-
-if [ "$DESKTOP_LEASE" -eq 1 ] && [ "$READ_ONLY" -eq 0 ] \
-  && fm_session_lock_owned_by_self "$STATE"; then
-  section "DESKTOP SESSION LEASE"
-  printf 'Codex Desktop thread %s now owns this Firstmate home.\n' "$(fm_codex_desktop_thread_id)"
-  printf 'Keep this tracked PTY open while Firstmate work is under way; send "stop" only after supervision is no longer required.\n'
-  while IFS= read -r desktop_command; do
-    case "$desktop_command" in
-      stop) break ;;
-      '') : ;;
-      *) printf 'Desktop session lease is active; supported input: stop\n' ;;
-    esac
-  done
 fi
 
 exit 0

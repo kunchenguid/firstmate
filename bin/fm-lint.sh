@@ -3,11 +3,11 @@
 #
 # Runs its file set with ShellCheck's default severity, extended analysis,
 # ambient configuration disabled, and one exact ShellCheck version. The
-# canonical verifier invokes this script with no arguments, so the rule set,
+# canonical verifier invokes this script with --full, so the rule set,
 # version, bounded execution, and diagnostics ordering cannot drift.
 # The explicit --fast mode is local-only and disables ShellCheck's extended
 # dataflow analysis while preserving ordinary shell lint checks. The canonical
-# verifier keeps the full-analysis no-argument default.
+# verifier keeps full analysis over the context-independent canonical set.
 # Tests stop source analysis at imported production modules because every
 # production shell is already a canonical, source-aware root of this same run.
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
@@ -37,6 +37,7 @@
 #
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
+#   fm-lint.sh --full                  lint the complete canonical file set
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
@@ -125,6 +126,7 @@ fm_lint_run_workflows() {
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
+FULL=0
 ANALYSIS_MODE=full
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do
@@ -150,6 +152,10 @@ while [ "$#" -gt 0 ]; do
     --fast)
       FAST=1
       ANALYSIS_MODE=fast
+      shift
+      ;;
+    --full)
+      FULL=1
       shift
       ;;
     --list-files)
@@ -216,11 +222,16 @@ fm_lint_is_canonical_root() {
 CHANGED_MODE=0
 EXPLICIT_PATHS=0
 if [ "$#" -gt 0 ]; then
+  [ "$FULL" -eq 0 ] || {
+    printf 'fm-lint.sh: --full does not accept explicit paths.\n' >&2
+    exit 2
+  }
   EXPLICIT_PATHS=1
   ROOTS=("$@")
 else
   full_lint=1
-  if [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
+  if [ "$FULL" -eq 0 ] \
+    && [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
     && command -v git >/dev/null 2>&1 \
     && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then

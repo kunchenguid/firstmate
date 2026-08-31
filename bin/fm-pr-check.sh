@@ -4,8 +4,8 @@
 # static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# Active exact-head delivery accepts GitHub pull request URLs only.
+# GitLab URL recognition remains inactive migration compatibility in fm-pr-lib.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -35,6 +35,14 @@ HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 
+# Bounded direct-PR currently has one exact-head check source: GitHub.
+# The legacy GitLab poll parser remains inactive migration compatibility, but a
+# provider with no exact head/check proof is ambiguous and cannot be armed.
+if [ "$PROVIDER" != github ]; then
+  echo "error: GitLab PR delivery is inactive migration compatibility; exact-head checking supports GitHub only" >&2
+  exit 1
+fi
+
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
@@ -49,14 +57,6 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   echo "error: pending PR poll retirement could not be validated" >&2
   exit 1
 }
-
-# Bounded direct-PR currently has one exact-head check source: GitHub.
-# The legacy GitLab poll parser remains inactive migration compatibility, but a
-# provider with no exact head/check proof is ambiguous and cannot be armed.
-if [ "$PROVIDER" != github ]; then
-  echo "error: exact-head PR verification currently supports GitHub only" >&2
-  exit 1
-fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 

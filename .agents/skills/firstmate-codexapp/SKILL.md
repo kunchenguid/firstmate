@@ -125,7 +125,8 @@ bin/fm-codex-app-task.sh register <id> \
   --project <project-checkout> --worktree <actual-worktree> \
   --kind <kind> --model <model> --effort <effort> \
   --route-record <absolute-routing-record> \
-  --session-envelope <small|normal|research>
+  --session-envelope <small|normal|research> \
+  --mode <direct-PR|local-only> --yolo <on|off>
 ```
 
 Registration must precede substantive supervision. Verify:
@@ -133,6 +134,8 @@ Registration must precede substantive supervision. Verify:
 - one exact `state/<id>.meta` binding;
 - `backend=codex-app-host`;
 - the exact thread id, host id, project, and worktree;
+- the project and worktree share the registered Git common-directory identity;
+- the exact `direct-PR` or `local-only` mode and actual project `yolo` posture;
 - the exact route record, envelope, and session generation;
 - `unsupported` rather than invented values for unavailable cost, context, compaction, and output telemetry;
 - a writable `state/<id>.status` return channel;

@@ -30,7 +30,15 @@ test_score_bands_and_evidence_record() {
     "routing record omitted ambiguity evidence"
   assert_grep $'boundary_clarity\t0\tone public command owns the change' "$record" \
     "routing record omitted boundary-clarity evidence"
+  assert_grep $'diagnosis_need\t0\tno defect investigation is needed' "$record" \
+    "routing record omitted diagnosis-need evidence"
+  assert_grep $'verification_quality\t0\tone deterministic test proves behavior' "$record" \
+    "routing record omitted verification-quality evidence"
   assert_grep $'total\t0' "$record" "routing record omitted the total"
+  assert_grep $'override_model\tnone' "$record" \
+    "routing record omitted the explicit no-override value"
+  assert_grep $'override_effort\tnone' "$record" \
+    "routing record omitted the explicit no-override effort"
 
   out=$(route terra-task \
     --ambiguity 1 --ambiguity-evidence a \
@@ -82,6 +90,10 @@ test_floors_and_user_override_precedence() {
   record="$HOME_DIR/data/override-task/model-routing.tsv"
   assert_grep $'precedence\tuser_override' "$record" \
     "routing record did not make override precedence inspectable"
+  assert_grep $'override_model\tgpt-5.6-terra' "$record" \
+    "routing record did not persist the explicit model override"
+  assert_grep $'override_effort\tultra' "$record" \
+    "routing record did not persist the explicit effort override"
 
   # Luna does not support ultra in the host-supported model catalog.
   set +e

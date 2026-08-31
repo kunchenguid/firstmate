@@ -15,6 +15,10 @@ make_verify_fixture() {
   cp "$VERIFY" "$dir/bin/fm-verify.sh"
   cat > "$dir/bin/fm-lint.sh" <<'SH'
 #!/usr/bin/env bash
+[ "$#" -eq 1 ] && [ "$1" = --full ] || {
+  printf 'expected canonical --full lint mode\n' >&2
+  exit 2
+}
 printf 'lint-ok\n'
 SH
   chmod +x "$dir/bin/fm-verify.sh" "$dir/bin/fm-lint.sh"

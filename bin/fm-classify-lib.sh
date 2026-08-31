@@ -1605,7 +1605,7 @@ crew_absorb_class() {  # <id>
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    case "$src" in run-step|pane|codex-app-host) printf 'working'; return ;; esac
   fi
   printf 'none'
 }

@@ -75,11 +75,17 @@ trap 'exit 1' HUP INT TERM
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ]; then
-    echo "lock acquired: harness pid $me"
+    case "$me" in
+      codex-desktop:*)
+        fm_codex_desktop_parse_lock_record "$me"
+        echo "lock acquired: Codex Desktop thread $FM_CODEX_DESKTOP_RECORD_THREAD"
+        ;;
+      *) echo "lock acquired: harness pid $me" ;;
+    esac
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+  if fm_session_lock_owner_alive "$old"; then
+    echo "error: another live firstmate session holds the lock; operate read-only until resolved" >&2
     exit 1
   fi
 fi

@@ -15,7 +15,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 }
 
 cd "$FM_ROOT"
-"$FM_ROOT/bin/fm-lint.sh"
+"$FM_ROOT/bin/fm-lint.sh" --full
 
 if ! { [ -f CLAUDE.md ] && [ ! -L CLAUDE.md ] && grep -qxF '@AGENTS.md' CLAUDE.md; }; then
   echo "error: CLAUDE.md must point to AGENTS.md" >&2

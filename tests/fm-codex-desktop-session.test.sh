@@ -26,6 +26,16 @@ chmod +x "$FAKEBIN/ps"
 THREAD_A=019ff1ae-966b-7643-ba01-48811234656e
 THREAD_B=019ff1ae-966b-7643-ba01-48811234656f
 
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$ROOT/bin/fm-session-lock-lib.sh"
+
+fm_session_lock_record_valid "codex-desktop:$THREAD_A:2" \
+  || fail "canonical Desktop lock record was rejected"
+! fm_session_lock_record_valid "codex-desktop:$THREAD_A:2:" \
+  || fail "Desktop lock record with trailing fields was accepted"
+! fm_session_lock_record_valid "codex-desktop:$THREAD_A:02" \
+  || fail "Desktop lock record with a non-canonical pid was accepted"
+
 sleep 300 &
 LEASE_A=$!
 LEASE_B=
@@ -87,21 +97,28 @@ SESSION_HOME="$TMP_ROOT/session-home"
 mkdir -p "$SESSION_HOME/data" "$SESSION_HOME/state" "$SESSION_HOME/config"
 case "$(uname -s)" in
   Darwin)
-    out=$(printf 'stop\n' | script -q /dev/null \
+    out=$({ sleep 3; printf 'stop\n'; } | script -q /dev/null \
       env CODEX_THREAD_ID="$THREAD_A" \
         CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
         FM_HOME="$SESSION_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_SESSION_START_TIMEOUT=2 \
         "$ROOT/bin/fm-session-start.sh" 2>&1)
     ;;
   *)
-    command="env CODEX_THREAD_ID=$THREAD_A CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' FM_HOME='$SESSION_HOME' FM_ROOT_OVERRIDE='$ROOT' '$ROOT/bin/fm-session-start.sh'"
-    out=$(printf 'stop\n' | script -q -c "$command" /dev/null 2>&1)
+    command="env CODEX_THREAD_ID=$THREAD_A CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' FM_HOME='$SESSION_HOME' FM_ROOT_OVERRIDE='$ROOT' FM_SESSION_START_TIMEOUT=2 '$ROOT/bin/fm-session-start.sh'"
+    out=$({ sleep 3; printf 'stop\n'; } | script -q -c "$command" /dev/null 2>&1)
     ;;
 esac
 assert_contains "$out" "lock acquired: Codex Desktop thread $THREAD_A" \
   "session start did not establish its own Desktop lease in a tracked PTY"
 assert_contains "$out" "DESKTOP SESSION LEASE" \
   "session start did not keep the Desktop lease active after printing the digest"
+if printf '%s\n' "$out" | grep -Fq 'STARTUP TRUNCATED'; then
+  TRUNCATED_LINE=$(printf '%s\n' "$out" | sed -n '/STARTUP TRUNCATED/=' | head -1)
+  DESKTOP_LEASE_LINE=$(printf '%s\n' "$out" | sed -n '/DESKTOP SESSION LEASE/=' | head -1)
+  [ "$DESKTOP_LEASE_LINE" -gt "$TRUNCATED_LINE" ] \
+    || fail "the Desktop lease ran inside the bounded digest child"
+fi
 
 pass "Codex Desktop session start holds the thread-bound lease in its tracked PTY"
 
@@ -111,14 +128,24 @@ TASK_WORKTREE="$TMP_ROOT/task-worktree"
 TASK_ID=desktop-scout
 HOST_ID=local-host-123
 ROUTE_RECORD="$TASK_HOME/data/$TASK_ID/model-routing.tsv"
-mkdir -p "$TASK_HOME/state" "$(dirname "$ROUTE_RECORD")" "$TASK_PROJECT" "$TASK_WORKTREE"
-cat > "$ROUTE_RECORD" <<'EOF'
-version	1
-task_id	desktop-scout
-model	gpt-5.6-sol
-effort	high
-EOF
+mkdir -p "$TASK_HOME/state" "$(dirname "$ROUTE_RECORD")" "$TASK_PROJECT"
+git -C "$TASK_PROJECT" init -q -b main
+git -C "$TASK_PROJECT" config user.name 'FirstMate Test'
+git -C "$TASK_PROJECT" config user.email 'firstmate-test@example.invalid'
+printf '%s\n' 'initial' > "$TASK_PROJECT/initial.txt"
+git -C "$TASK_PROJECT" add initial.txt
+git -C "$TASK_PROJECT" commit -q -m initial
+git -C "$TASK_PROJECT" worktree add -q -b desktop-scout-worktree "$TASK_WORKTREE"
+FM_HOME="$TASK_HOME" "$ROOT/bin/fm-task-model-route.sh" "$TASK_ID" \
+  --ambiguity 0 --ambiguity-evidence explicit \
+  --boundary-clarity 0 --boundary-clarity-evidence isolated \
+  --risk 0 --risk-evidence low \
+  --diagnosis 0 --diagnosis-evidence none \
+  --verification 0 --verification-evidence focused \
+  --floor architecture >/dev/null \
+  || fail "could not create the Desktop task model route"
 ROUTE_REAL=$(realpath "$ROUTE_RECORD")
+TASK_GIT_COMMON=$(realpath "$TASK_PROJECT/.git")
 sleep 300 &
 TASK_LEASE=$!
 printf 'codex-desktop:%s:%s\n' "$THREAD_A" "$TASK_LEASE" > "$TASK_HOME/state/.lock"
@@ -135,7 +162,8 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
     --model gpt-5.6-sol \
     --effort high \
     --route-record "$ROUTE_RECORD" \
-    --session-envelope research 2>&1) \
+    --session-envelope research \
+    --mode direct-PR --yolo off 2>&1) \
   || fail "Codex Desktop task registration failed: $out"
 assert_contains "$out" "registered: $TASK_ID -> Codex Desktop task $THREAD_B" \
   "task registration did not report the durable task binding"
@@ -159,6 +187,12 @@ assert_grep "model_route_record=$ROUTE_REAL" "$META" \
   "metadata did not persist the inspected model route"
 assert_grep "session_envelope=research" "$META" \
   "metadata did not persist the selected session envelope"
+assert_grep 'mode=direct-PR' "$META" \
+  "metadata did not persist bounded direct-PR delivery"
+assert_grep 'yolo=off' "$META" \
+  "metadata did not persist the actual project yolo posture"
+assert_grep "git_common_dir=$TASK_GIT_COMMON" "$META" \
+  "metadata did not bind the Desktop worktree to the saved checkout identity"
 assert_grep "session_cost_telemetry=unsupported" "$META" \
   "metadata fabricated exact Codex Desktop cost telemetry"
 assert_grep "session_context_telemetry=unsupported" "$META" \
@@ -219,6 +253,36 @@ assert_contains "$out" "owned by the Codex Desktop host" \
 
 pass "Codex Desktop tasks have durable endpoint identity and reconciled current state"
 
+BAD_ID=desktop-invalid-route
+BAD_WORKTREE="$TMP_ROOT/task-invalid-worktree"
+BAD_ROUTE="$TASK_HOME/data/$BAD_ID/model-routing.tsv"
+git -C "$TASK_PROJECT" worktree add -q -b desktop-invalid-worktree "$BAD_WORKTREE"
+FM_HOME="$TASK_HOME" "$ROOT/bin/fm-task-model-route.sh" "$BAD_ID" \
+  --ambiguity 0 --ambiguity-evidence explicit \
+  --boundary-clarity 0 --boundary-clarity-evidence isolated \
+  --risk 0 --risk-evidence low \
+  --diagnosis 0 --diagnosis-evidence none \
+  --verification 0 --verification-evidence focused >/dev/null \
+  || fail "could not create the malformed-route fixture"
+grep -v $'^verification_quality\t' "$BAD_ROUTE" > "$BAD_ROUTE.incomplete"
+mv "$BAD_ROUTE.incomplete" "$BAD_ROUTE"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" register "$BAD_ID" \
+    --thread 019ff1ae-966b-7643-ba01-488112346572 --host "$HOST_ID" \
+    --project "$TASK_PROJECT" --worktree "$BAD_WORKTREE" --kind scout \
+    --model gpt-5.6-luna --effort medium --route-record "$BAD_ROUTE" \
+    --session-envelope small --mode local-only --yolo off 2>&1) || status=$?
+expect_code 2 "$status" "Desktop registration must reject an incomplete route record"
+assert_contains "$out" "complete routing contract" \
+  "incomplete route refusal did not identify the shared routing contract"
+[ ! -e "$TASK_HOME/state/$BAD_ID.meta" ] \
+  || fail "incomplete route registration published durable task metadata"
+
+pass "Codex Desktop registration validates the complete shared route record"
+
 # Desktop archive removes the app-owned worktree. Firstmate must therefore
 # expose a fail-closed preflight instead of treating terminal state alone as
 # permission to destroy an uncommitted ship artifact.
@@ -246,19 +310,24 @@ SHIP_THREAD=019ff1ae-966b-7643-ba01-488112346570
 SHIP_PROJECT="$TMP_ROOT/ship-project"
 SHIP_WORKTREE="$TMP_ROOT/ship-worktree"
 SHIP_ROUTE="$TASK_HOME/data/$SHIP_ID/model-routing.tsv"
-mkdir -p "$SHIP_PROJECT" "$SHIP_WORKTREE" "$(dirname "$SHIP_ROUTE")"
-git -C "$SHIP_WORKTREE" init -q -b main
-git -C "$SHIP_WORKTREE" config user.name 'FirstMate Test'
-git -C "$SHIP_WORKTREE" config user.email 'firstmate-test@example.invalid'
-printf '%s\n' 'initial' > "$SHIP_WORKTREE/initial.txt"
-git -C "$SHIP_WORKTREE" add initial.txt
-git -C "$SHIP_WORKTREE" commit -q -m initial
-cat > "$SHIP_ROUTE" <<'EOF'
-version	1
-task_id	desktop-ship
-model	gpt-5.6-sol
-effort	high
-EOF
+mkdir -p "$SHIP_PROJECT" "$(dirname "$SHIP_ROUTE")"
+git -C "$SHIP_PROJECT" init -q -b main
+git -C "$SHIP_PROJECT" config user.name 'FirstMate Test'
+git -C "$SHIP_PROJECT" config user.email 'firstmate-test@example.invalid'
+printf '%s\n' 'initial' > "$SHIP_PROJECT/initial.txt"
+git -C "$SHIP_PROJECT" add initial.txt
+git -C "$SHIP_PROJECT" commit -q -m initial
+git -C "$SHIP_PROJECT" worktree add -q -b desktop-ship-worktree "$SHIP_WORKTREE"
+[ -f "$SHIP_WORKTREE/.git" ] \
+  || fail "hard-stop fixture is not a standard linked Git worktree"
+FM_HOME="$TASK_HOME" "$ROOT/bin/fm-task-model-route.sh" "$SHIP_ID" \
+  --ambiguity 0 --ambiguity-evidence explicit \
+  --boundary-clarity 0 --boundary-clarity-evidence isolated \
+  --risk 0 --risk-evidence low \
+  --diagnosis 0 --diagnosis-evidence none \
+  --verification 0 --verification-evidence focused \
+  --floor architecture >/dev/null \
+  || fail "could not create the Desktop ship model route"
 CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
@@ -266,8 +335,11 @@ CODEX_THREAD_ID="$THREAD_A" \
     --thread "$SHIP_THREAD" --host "$HOST_ID" \
     --project "$SHIP_PROJECT" --worktree "$SHIP_WORKTREE" \
     --kind ship --model gpt-5.6-sol --effort high \
-    --route-record "$SHIP_ROUTE" --session-envelope normal >/dev/null \
+    --route-record "$SHIP_ROUTE" --session-envelope normal \
+    --mode direct-PR --yolo on >/dev/null \
   || fail "could not register Desktop ship archive-preflight fixture"
+assert_grep 'yolo=on' "$TASK_HOME/state/$SHIP_ID.meta" \
+  "Desktop ship metadata did not retain the enabled project yolo posture"
 
 # A hard envelope boundary commits staged intended work only, writes a structured
 # handoff outside the app-owned worktree, and pauses the old endpoint. A fresh

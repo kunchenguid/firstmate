@@ -378,7 +378,7 @@ EOF
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
-# actively-running pipeline step (source run-step) or a busy pane (source pane);
+# actively-running pipeline step, a busy pane, or the exact Desktop host state;
 # everything else - a stale working: status-log line, a finished/parked/failed run,
 # an unknown/torn-down crew, or an empty id - is NOT provable, so it surfaces. The
 # fake fm-crew-state.sh (FM_CREW_STATE_BIN) returns a canned verdict per case.
@@ -394,6 +394,8 @@ test_crew_is_provably_working_classifier() {
   crew_is_provably_working a || fail "active run-step not treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   crew_is_provably_working a || fail "busy pane not treated as provably working"
+  FM_FAKE_CREW_STATE='state: working · source: codex-app-host · host reports working'
+  crew_is_provably_working a || fail "authoritative Desktop state not treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   ! crew_is_provably_working a || fail "stale status-log working: treated as provably working"
   FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
@@ -407,7 +409,7 @@ test_crew_is_provably_working_classifier() {
   FM_FAKE_CREW_STATE='state: working · source: run-step · x'
   ! crew_is_provably_working "" || fail "empty id treated as provably working"
   unset FM_FAKE_CREW_STATE
-  pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
+  pass "crew_is_provably_working: active run, pane, or Desktop host is provable; other states surface"
 }
 
 # status_is_paused: the shared pause verb test both consumers read (so neither
@@ -456,6 +458,8 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
+  FM_FAKE_CREW_STATE='state: working · source: codex-app-host · host reports working'
+  [ "$(crew_absorb_class a)" = working ] || fail "authoritative Desktop state not classed working"
   FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
