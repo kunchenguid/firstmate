@@ -512,6 +512,23 @@ assert_contains "$out" "captured:" "the replacement registration remains indepen
 pe_adapter "$HREPLACE" retire replace-src >/dev/null
 pass "terminal retirement preserves and releases a concurrently replaced registration"
 
+HIDENTICAL="$TMP_ROOT/hidentical"; new_home "$HIDENTICAL"
+PE_TRACKED+=("$HIDENTICAL|identical-src")
+IDENTICAL_TRIGGER="$TMP_ROOT/identical-trigger"
+pe_adapter "$HIDENTICAL" register endnow identical-src -- "$BLOCKER" "$IDENTICAL_TRIGGER" "identical terminal payload" >/dev/null
+pe_adapter "$HIDENTICAL" start identical-src > "$TMP_ROOT/identical-old.out" 2>&1 &
+identical_old_pid=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/identical-src.claim" || fail "the identical old registration was never claimed"
+pe_adapter "$HIDENTICAL" register endnow identical-src -- "$BLOCKER" "$IDENTICAL_TRIGGER" "identical terminal payload" >/dev/null
+touch "$IDENTICAL_TRIGGER"
+wait "$identical_old_pid" || fail "the identical old terminal runner failed"
+assert_contains "$(cat "$TMP_ROOT/identical-old.out")" "cannot retire terminal source" \
+  "an old runner refuses to retire an identical replacement generation"
+assert_present "$HIDENTICAL/state/procevent/identical-src.source" \
+  "an identical replacement registration survives the old runner"
+pe_adapter "$HIDENTICAL" retire identical-src >/dev/null
+pass "an identical generic registration still creates a replacement generation"
+
 HRETFAIL="$TMP_ROOT/hretfail"; new_home "$HRETFAIL"
 PE_TRACKED+=("$HRETFAIL|retire-fail-src")
 FAIL_RM_BIN=$(fm_fakebin "$TMP_ROOT/retire-fail-bin")

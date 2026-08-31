@@ -9,6 +9,7 @@ Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 install
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
+The optional Signal adapter was verified on 2026-08-20 on the same platform with a fake `signal-cli` and isolated home.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -86,6 +87,9 @@ Never at-least-once, no-loss, or lossless.
 
 ## What the runner does prove
 
+`tests/fm-procevent-signal.test.sh` uses real receive, retirement, account-discovery, send, interruption, and re-arm processes against a fake CLI.
+It proves that account discovery stalls while the receive owner holds the fake account lock, every CLI operation uses private canonically home-local state, catchable interruptions clean private temporaries and re-arm inbound receive, the supported send pins its opened input and carries its validated account and group through JSON-RPC standard input, success and ordinary failure re-arm the source, configured outbound labels are inserted once, live routing replacements are revalidated, unrelated messages do not publish captures, inbound message bytes remain unchanged, private identifiers and message bytes never enter an argv record, and repeated lifecycle commands leave one live owner.
+
 Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose completion is a process event, not a timer; for the two supervision-delivery rows below, by `tests/fm-watch-triage.test.sh` driving a real `bin/fm-watch.sh` over a real capture; and for adapter-owned application, by `tests/fm-remote-reply.test.sh` driving the real remote-reply relay end to end in an isolated home:
 
 | Guarantee | How it is proven |
@@ -116,6 +120,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | crashed leader with a live owned group | `SIGKILL` on only the runner leader leaves its blocking child group alive; reconcile then stops that surviving group before any replacement starts, never leaves two source processes running for one canonical source, and a generation with no leader and no surviving group is still reclaimed |
 | PID-reuse safety | retirement refuses to signal a live PID whose identity differs from the claim, and a reused PID never reaches the group-stop path because its leader is alive |
 | coherent ownership reads | a claim replacement held inside the source boundary blocks `list` until one complete generation is visible |
+| generation-bound source readiness | the Signal adapter publishes immediately before its foreground fake receive, immediate account-discovery failure cannot impersonate readiness, and only the live runner generation can publish or clear its marker; [`architecture.md`](../architecture.md) owns the accepted timing limit |
 | retire-start exclusion | a queued start revalidates registration after the serialized retirement boundary and executes no child |
 | uncertain identity | a live owner whose identity probe transiently fails is not signaled or released, and its registration remains for retry |
 | bounded home sweep | a non-mutating full-tree preflight precedes teardown, then registrations and claim-only owned sources retire through the ordinary safe path at each home-removal boundary |

@@ -664,6 +664,21 @@ A long-polling external process is registered as a *source* through its adapter,
 That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times at 5 second intervals, so an internal retry never reaches the runner as a captured result.
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 0 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
+The optional Signal adapter (`bin/fm-procevent-signal.sh`) is inert unless a home-local `config/signal-groups` file exists.
+The adapter requires exactly one `signal-cli` account provisioned beneath the effective `state/signal/data` directory and refuses ambiguous multi-account state.
+Create that private state boundary with `install -d -m 700 "$FM_HOME/state/signal" "$FM_HOME/state/signal/data"`.
+Provision that account through signal-cli's supported linking flow while passing `--data-dir "$FM_HOME/state/signal/data"` on every provisioning command; the adapter never reads signal-cli's global data directory.
+Create the empty routing file with `install -m 600 /dev/null "$FM_HOME/config/signal-groups"` after ensuring the home-local `config/` directory exists, then add private rows through an editor that preserves its mode.
+The adapter refuses a routing file whose mode is not `0600`.
+Each non-comment row in that private file is `selector<TAB>Signal group id<TAB>display label`, and the selector is the only identifier used in the adapter's commands.
+Use `bin/fm-procevent-signal.sh arm <selector>` to register a nonterminal receive source and `bin/fm-procevent-signal.sh send <selector> [message-file|-]` to send content from a file or standard input.
+A message file must be a regular non-symlink file, and the adapter pins its opened bytes before lifecycle work so later pathname replacement cannot substitute outbound content.
+All configured selectors share one account-scoped receive source, which routes each structured inbound message by its authenticated group id.
+The adapter retires the receive source before every `signal-cli` account or send operation and restores it after success, ordinary failure, or a catchable interruption.
+The adapter prefixes outbound content with the configured display label and colon exactly once, so each group can use its own private attribution label.
+The adapter canonically confines its configuration and state paths beneath the effective home, refusing ancestor symlinks that resolve elsewhere.
+The group mapping, account identifiers, message content, credentials, and captured Signal state remain home-local and are never printed in normal adapter output.
+Account and group identifiers are omitted from signal-cli process arguments, and outbound account, group, and message values enter signal-cli only through its JSON-RPC standard input.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.
@@ -812,6 +827,7 @@ FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-too
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
+FM_SIGNAL_COMMAND_TIMEOUT=30            # seconds allowed per Signal account-discovery, send, and restored-source readiness operation
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
