@@ -131,7 +131,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -147,7 +147,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   status=$?
   expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI" \
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
 }
@@ -345,7 +345,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -s workspace-write -a never -c sandbox_workspace_write.network_access=true" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -395,7 +395,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --permission-mode auto --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
   pass "claude receives --model and --effort profile flags"
@@ -412,7 +412,7 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -s workspace-write -a never -c sandbox_workspace_write.network_access=true" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
@@ -428,7 +428,7 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -s workspace-write -a never -c sandbox_workspace_write.network_access=true" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
@@ -494,14 +494,17 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
     --model cursor-grok-4.5-high --effort high)
   status=$?
-  expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
+  expect_code 0 "$status" "cursor scout spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
-    "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
+  assert_contains "$launch" "--trust --auto-review --sandbox enabled --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+    "cursor launch did not carry trust, review, sandbox, model, and exact workspace flags"
+  # --force / --yolo would defeat --sandbox enabled, so neither may reach the launch.
+  assert_not_contains "$launch" " --force" "cursor launch must not defeat its sandbox with --force"
+  assert_not_contains "$launch" " --yolo" "cursor launch must not defeat its sandbox with --yolo"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the
   # real installed names.
@@ -528,7 +531,7 @@ test_cursor_refuses_model_absent_from_live_catalog() {
   rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
     --model cursor-grok-4.5)
   status=$?
   expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
@@ -547,7 +550,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   read_case_record "$rec"
 
   FM_TEST_CURSOR_LIST_STATUS=124 \
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
       --model cursor-catalog-unreachable)
   status=$?
   expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
@@ -556,6 +559,38 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
     "failed catalog lookup incorrectly removed the requested model"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-catalog-unreachable default
   pass "cursor preserves the requested model when its live catalog is unreachable"
+}
+
+test_cursor_ship_spawn_is_refused_for_unattended_implementation() {
+  local rec id out status
+  id=profile-cursor-ship-bar-z6f
+  rec=$(make_spawn_case profile-cursor-ship-bar cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a cursor ship spawn must be refused, not launched into a pane that can park"
+  assert_contains "$out" "cursor cannot run an unattended ship spawn" \
+    "cursor ship refusal did not name the unattended ship spawn as the refused case"
+  assert_contains "$out" "codex" "cursor ship refusal must name codex as a supported alternative"
+  assert_contains "$out" "claude" "cursor ship refusal must name claude as a supported alternative"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor ship refusal must happen before any launch is sent"
+  pass "cursor ship spawns are refused and name codex and claude instead"
+}
+
+test_cursor_scout_spawn_is_still_allowed() {
+  local rec id out status launch
+  id=profile-cursor-scout-ok-z6g
+  rec=$(make_spawn_case profile-cursor-scout-ok cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "the cursor bar must be scoped to ship spawns and leave scouts working"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--trust --auto-review --sandbox enabled" \
+    "cursor scout launch did not keep the sandboxed review posture"
+  pass "cursor scout spawns are unaffected by the ship bar"
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
@@ -731,15 +766,12 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
 
-  # A creatable path: this spawn now pre-registers workspace trust in that store
-  # (bin/fm-claude-trust.sh), so an unwritable directory is a genuine blocker.
-  # The forwarding assertion below is what this case proves and is unchanged.
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FAST_MODE=1 claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -813,6 +845,8 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_ship_spawn_is_refused_for_unattended_implementation
+test_cursor_scout_spawn_is_still_allowed
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis

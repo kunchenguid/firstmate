@@ -1267,17 +1267,9 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    # Two independent controls disable claude's `/bug`/`/feedback` model-drafted
-    # feedback flow (the SendFeedback tool), deliberately layered so a fleet-launched
-    # agent never queues or submits a bug-report draft on the captain's behalf even
-    # under a managed Claude settings policy: CLAUDE_CODE_SEND_FEEDBACK=0 is read
-    # directly and is not subject to managed-settings precedence, while --settings
-    # '{"feedbackDrafts":"off"}' sets the documented settings key (Claude Code
-    # changelog 2.1.247) that a managed policy CAN override back on. Either control
-    # alone disables the feature; keep both so a managed override of one still
-    # leaves the other in force. Both are per-launch, scoped to this invocation only,
-    # and never touch the captain's global ~/.claude/settings.json.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Claude runs under its own approval classifier. Disabling fast mode keeps a
+    # captain's ambient fast-mode choice from degrading this unattended launch.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never -c sandbox_workspace_write.network_access=true "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1302,10 +1294,8 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
-    # --yolo does NOT cover and which would otherwise block every spawn, since
-    # each task gets a fresh worktree path cursor has never seen. --yolo is the
-    # --force alias whose TUI label is "Run Everything". --workspace pins the
+    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt and the
+    # review plus sandbox controls preserve Cursor's own confinement. --workspace pins the
     # exact worktree. -w/--worktree is deliberately never passed: it allocates a
     # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
     # isolation contract. The binary is resolved rather than named because
@@ -1314,7 +1304,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # gemini (Google Gemini CLI): a positional query starts the supervised
     # interactive session and auto-submits it, so the brief rides the launch
     # command exactly as it does for claude and grok (verified: a multi-line

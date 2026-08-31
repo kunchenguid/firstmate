@@ -8,15 +8,16 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Fact | Value |
 |---|---|
 | Binary | `fm_cursor_resolve_binary` in `../../../bin/fm-cursor-lib.sh` resolves stable launcher `cursor-agent` or legacy `agent`, never `cursor`; both symlink into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`, whose target auto-update replaces. |
-| Launch | Positional instructions with `--trust`, `--force`, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
+| Launch | Positional instructions with `--trust`, `--auto-review`, `--sandbox enabled`, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
 | Models | Use current-account `cursor-agent --list-models` or legacy `agent --list-models`; the drifting observed list had only `cursor-grok-4.5-high` and `cursor-grok-4.5-high-fast` for Grok plus several `xhigh` ids, so choose a returned reasoning id and never assume low or medium Grok. |
 | Busy state | `../../../bin/fm-busy-lib.sh` folds the per-conversation transcript as `cursor-transcript`: `role:user` opens and typed `turn_ended` closes success or abort, covering manual interrupt; nothing is armed or seeded, and this backend-agnostic source was identical on tmux and Herdr. |
 | Exit command | `/exit`. |
 | Interrupt | Single Escape returns the placeholder with no clear key; control makes no cancellation claim because an aborted transcript close appeared within seconds in some runs and not within twenty in others. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Cursor discovers Firstmate's user skills. |
 | Resume | No verified native pane resume; use deterministic relaunch. |
-| Autonomy | `--force` (footer `Run Everything`; `--yolo` is its documented alias), the only posture that never prompts. Measured on 2026.08.25: `--auto-review` runs a server classifier that prompts for whatever it does not deem safe, which parks an unattended pane, and `--sandbox enabled` confines writes under `--auto-review` but is overridden by `--force` at any flag order. So Firstmate does not pass `--sandbox enabled`, and a Cursor crewmate is NOT filesystem-confined. |
-| Trust | `--trust` suppresses the dialog; the autonomy flag does not, and every task has a fresh path. |
+| Autonomy | `--auto-review --sandbox enabled`, so the worker runs under Cursor's own review and sandbox controls. This replaced `--yolo` (the documented `--force` alias, footer `Run Everything`), which switched both off. Measured on 2026.08.25: `--sandbox enabled` genuinely confines writes under `--auto-review`, but `--force` overrides that confinement at any flag order, so Firstmate never passes `--force` or `--yolo`. |
+| Trust | `--trust` suppresses the dialog; the autonomy flags do not, and every task has a fresh path. |
+| Unattended work | Cursor is REFUSED for `kind=ship`; `fm-spawn.sh` exits with an error naming Codex and Claude. `--auto-review` prompts for whatever its classifier does not deem safe, an unattended crewmate pane has no approver, and the `cursor-transcript` fold keeps a parked pane reading as working, so the stall never surfaces as a hold. Scout and secondmate spawns are unaffected. |
 | Marker | `CURSOR_INVOKED_AS=cursor-agent` on agent and children, plus `CURSOR_AGENT=1` on child or tool processes; other `CURSOR_*` variables are not identity markers. |
 | Effort | No verified flag; `references/common/model-and-effort.md` owns unsupported-value handling. |
 | Composer | Bare borderless row with `→` (U+2192); de-emphasized placeholders `Plan, search, build anything` when fresh and `Add a follow-up` later. |
