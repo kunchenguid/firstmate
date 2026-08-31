@@ -669,8 +669,7 @@ hash_file_for_test() {
 
 install_pi_turnend_extension_fixture() {
   local root=$1
-  mkdir -p "$root/.pi/extensions"
-  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$root/.pi/extensions/fm-primary-turnend-guard.ts"
+  fm_test_install_pi_turnend_extension "$root/.pi/extensions"
 }
 
 install_pi_watch_extension_fixture() {

@@ -226,6 +226,16 @@ fm_git_add_origin() {
   git -C "$repo" remote add origin "file://$remote_abs"
 }
 
+fm_test_install_pi_turnend_extension() {
+  local destination=$1
+  mkdir -p "$destination/lib"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$destination/fm-primary-turnend-guard.ts"
+  cp \
+    "$ROOT/.pi/extensions/lib/fm-context-handoff.ts" \
+    "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$destination/lib/"
+}
+
 # fm_git_worktree <repo> <worktree> <branch>: initialize <repo> with one commit
 # and a local bare origin, then add a worktree on a fresh branch.
 fm_git_worktree() {
