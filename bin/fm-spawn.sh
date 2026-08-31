@@ -1567,6 +1567,7 @@ JS
   NODE_RUNTIME_ABORT_CLEANUP=1
   NODE_MODULES_ABORT_NODE=$candidate
   exclude_path '.fm-node-runtime.*'
+  exclude_path '.fm-node-runtime-probe.*'
   native_node_supports_publication "$candidate" || return 1
   return 0
 }
@@ -1877,7 +1878,12 @@ function materialize(sourcePath, targetPath, root = false) {
     return;
   }
   if (!stat.isFile()) throw new Error('unsupported dependency entry');
-  fs.linkSync(real, targetPath);
+  try {
+    fs.linkSync(real, targetPath);
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+    fs.symlinkSync(real, targetPath);
+  }
 }
 
 const projectWorkspaces = workspaceMap(project);
@@ -1985,7 +1991,7 @@ JS
     return "$setup_signal_status"
   fi
 
-  exclude_path '.fm-node-modules.*/'
+  exclude_path '.fm-node-modules.*'
   publication_link=${staging_root##*/}
   while :; do
     publication_probe="$WT/.fm-node-modules.probe.$$.$RANDOM.$RANDOM"
@@ -2096,11 +2102,27 @@ try {
     status = 6;
   }
   if (status !== 6) {
+    let published = false;
+    let existing = false;
     try {
       fs.linkSync(probe, target);
+      published = true;
       status = 0;
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+      if (error.code === 'EEXIST') existing = true;
+      else if (error.code !== 'EPERM' && error.code !== 'ENOTSUP') throw error;
+    }
+    if (!published && !existing) {
+      try {
+        fs.symlinkSync(publication, target, 'dir');
+        published = true;
+        status = 9;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        existing = true;
+      }
+    }
+    if (existing) {
       try {
         validateTarget(target);
         status = targetUsesPublication() ? 8 : 3;
@@ -2112,7 +2134,7 @@ try {
 } catch (_) {
   status = targetUsesPublication() ? 10 : 4;
 } finally {
-  if (probeCreated && status !== 0) {
+  if (probeCreated && status !== 0 && status !== 9) {
     try {
       fs.unlinkSync(probe);
     } catch (_) {
@@ -2127,6 +2149,11 @@ JS
       NODE_MODULES_ABORT_CLEANUP=0
       BEELINE_NODE_MODULES_ACTIVE=1
       BEELINE_NODE_PUBLICATION_OWNED=1
+      ;;
+    9)
+      NODE_MODULES_ABORT_CLEANUP=0
+      BEELINE_NODE_MODULES_ACTIVE=1
+      BEELINE_NODE_PUBLICATION_OWNED=2
       ;;
     8)
       cleanup_status=0
@@ -2184,7 +2211,7 @@ JS
   trap - INT TERM HUP
   [ -z "$setup_signal_status" ] || return "$setup_signal_status"
   case "$publish_status" in
-    0|3|8) ;;
+    0|3|8|9) ;;
     4) echo "error: failed to publish worktree node_modules atomically" >&2; return 1 ;;
     5) echo "error: published Beeline dependency tree failed workspace validation" >&2; return 1 ;;
     6) echo "error: invalid Beeline dependency candidate was rejected before publication" >&2; return 1 ;;
@@ -2246,7 +2273,7 @@ function workspaceMap(rootPath) {
 
 let exactOwned = false;
 try {
-  if (owned === '1') {
+  if (owned === '1' || owned === '2') {
     const anchorStat = fs.lstatSync(anchor);
     let targetStat;
     try {
@@ -2255,8 +2282,13 @@ try {
       if (error.code === 'ENOENT') process.exit(anchorStat.nlink === 1 ? 2 : 3);
       throw error;
     }
-    if (!targetStat.isSymbolicLink() || !anchorStat.isSymbolicLink() ||
-        targetStat.dev !== anchorStat.dev || targetStat.ino !== anchorStat.ino) {
+    if (!targetStat.isSymbolicLink() || !anchorStat.isSymbolicLink()) {
+      process.exit(anchorStat.nlink === 1 ? 2 : 3);
+    }
+    const sameIdentity = owned === '1'
+      ? targetStat.dev === anchorStat.dev && targetStat.ino === anchorStat.ino
+      : fs.readlinkSync(target) === fs.readlinkSync(anchor);
+    if (!sameIdentity) {
       process.exit(anchorStat.nlink === 1 ? 2 : 3);
     }
     exactOwned = true;

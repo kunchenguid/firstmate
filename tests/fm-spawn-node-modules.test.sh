@@ -574,6 +574,54 @@ test_spawn_preserves_external_scoped_dependency_symlinks() {
   pass "fm-spawn preserves external scoped dependency sharing"
 }
 
+test_spawn_shares_dependencies_across_filesystems() {
+  local rec id out status shm_root case_dev shm_dev result workspace_link
+  id=node-modules-xdev-z0f
+  rec=$(make_case xdev-share "$id")
+  read_case "$rec"
+  if [ ! -d /dev/shm ] || [ ! -w /dev/shm ]; then
+    pass "fm-spawn shares dependencies across filesystems # SKIP no writable /dev/shm"
+    return 0
+  fi
+  shm_root=$(TMPDIR=/dev/shm fm_test_tmproot fm-spawn-xdev)
+  case_dev=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
+    'process.stdout.write(String(require("fs").statSync(process.argv[1]).dev));' "$PROJECT_DIR")
+  shm_dev=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
+    'process.stdout.write(String(require("fs").statSync(process.argv[1]).dev));' "$shm_root")
+  if [ "$case_dev" = "$shm_dev" ]; then
+    pass "fm-spawn shares dependencies across filesystems # SKIP no distinct filesystem"
+    return 0
+  fi
+  git -C "$PROJECT_DIR" worktree add --quiet -b "wt-xdev-$id" "$shm_root/worktree"
+  WORKTREE_DIR="$shm_root/worktree"
+  printf 'module.exports = require("@beeline/lib");\n' \
+    > "$PROJECT_DIR/node_modules/third-party/index.js"
+  printf 'module.exports = "worker";\n' > "$WORKTREE_DIR/packages/lib/index.js"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should share dependencies across filesystems"
+  assert_contains "$out" "spawned $id" "cross-filesystem spawn did not launch the worker"
+  [ -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "cross-filesystem node_modules was not atomically published"
+  [ "$WORKTREE_DIR/node_modules/third-party/index.js" -ef \
+    "$PROJECT_DIR/node_modules/third-party/index.js" ] \
+    || fail "cross-filesystem third-party file was copied instead of shared"
+  workspace_link=$(readlink "$WORKTREE_DIR/node_modules/@beeline/lib")
+  [ "$workspace_link" = '../../packages/lib' ] \
+    || fail "cross-filesystem workspace package lost its worktree-relative npm link"
+  result=$(run_beeline_cjs \
+    'process.stdout.write(require(process.argv[1]));' \
+    "$WORKTREE_DIR/node_modules/third-party")
+  [ "$result" = worker ] \
+    || fail "cross-filesystem shared dependency imported the primary workspace source"
+  printf 'module.exports = "worker xdev patch";\n' \
+    > "$WORKTREE_DIR/node_modules/third-party/index.js"
+  [ "$(cat "$PROJECT_DIR/node_modules/third-party/index.js")" = 'module.exports = "worker xdev patch";' ] \
+    || fail "cross-filesystem dependency write did not reach the shared primary installation"
+  pass "fm-spawn shares dependencies across filesystems"
+}
+
 test_spawn_uses_worktree_workspace_manifests() {
   local rec id out status renamed_real expected_renamed_real new_real expected_new_real
   id=node-modules-worktree-manifests-z1aaa
@@ -975,6 +1023,33 @@ test_spawn_preserves_exclude_path_for_harness_files() {
   pass "fm-spawn preserves one-argument exclude-path setup for harness files"
 }
 
+test_spawn_keeps_dependency_artifacts_git_invisible() {
+  local rec id out status publication staging_count=0 runtime_count=0 candidate stray
+  id=node-modules-git-invisible-z3c
+  rec=$(make_case git-invisible "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed before checking git visibility"
+  assert_contains "$out" "spawned $id" "git visibility spawn did not launch the worker"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ -d "$candidate" ] && staging_count=$((staging_count + 1))
+  done
+  [ "$staging_count" -ge 1 ] || fail "spawn did not retain a dependency staging directory"
+  for candidate in "$WORKTREE_DIR"/.fm-node-runtime.*; do
+    [ -f "$candidate" ] && runtime_count=$((runtime_count + 1))
+  done
+  [ "$runtime_count" -ge 1 ] || fail "spawn did not retain a pinned Node runtime"
+  "$LN_BIN" -s "$publication" "$WORKTREE_DIR/.fm-node-modules.probe.99999.1.2"
+  "$MKDIR_BIN" "$WORKTREE_DIR/.fm-node-runtime-probe.99999.1.2"
+  printf 'probe scratch\n' > "$WORKTREE_DIR/.fm-node-runtime-probe.99999.1.2/scratch.txt"
+  stray=$(git -C "$WORKTREE_DIR" status --porcelain | grep '\.fm-node-' || true)
+  [ -z "$stray" ] || fail "dependency sharing artifacts are git-visible: $stray"
+  pass "fm-spawn keeps dependency sharing artifacts out of git status"
+}
+
 test_spawn_shares_published_beeline_dependencies_with_workspaces() {
   local rec id out status workspace_real expected_workspace_real
   id=node-modules-mixed-beeline-z3b
@@ -1110,7 +1185,7 @@ test_spawn_rejects_replacement_after_owned_publication() {
 }
 
 test_spawn_rejects_replacement_during_submission() {
-  local rec id out status
+  local rec id out status candidate anchor_count=0 stray
   id=node-modules-submit-replacement-z4daa
   rec=$(make_case submit-replacement "$id")
   read_case "$rec"
@@ -1126,6 +1201,13 @@ test_spawn_rejects_replacement_during_submission() {
     || fail "submission-boundary replacement left a runnable pane command"
   assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
     "submission-boundary validation mutated the competing dependency tree"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.probe.*; do
+    [ -L "$candidate" ] && anchor_count=$((anchor_count + 1))
+  done
+  [ "$anchor_count" -ge 1 ] \
+    || fail "submission-boundary replacement did not retain its ownership anchor"
+  stray=$(git -C "$WORKTREE_DIR" status --porcelain | grep '\.fm-node-' || true)
+  [ -z "$stray" ] || fail "retained publication anchor is git-visible: $stray"
   pass "fm-spawn validates publication ownership through submission"
 }
 
@@ -1250,6 +1332,7 @@ test_spawn_shared_dependency_imports_worktree_workspace
 test_spawn_preserves_shared_dependency_symlinks
 test_spawn_preserves_external_package_root_symlinks
 test_spawn_preserves_external_scoped_dependency_symlinks
+test_spawn_shares_dependencies_across_filesystems
 test_spawn_uses_worktree_workspace_manifests
 test_spawn_rebases_canonical_absolute_workspace_binary
 test_spawn_publication_is_independent_of_path_node_wrappers
@@ -1267,6 +1350,7 @@ test_spawn_rejects_worktree_workspace_alias
 test_spawn_rejects_stale_primary_workspace_link
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_exclude_path_for_harness_files
+test_spawn_keeps_dependency_artifacts_git_invisible
 test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
