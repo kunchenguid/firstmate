@@ -62,6 +62,7 @@ MAX_CORE_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_TRANSACTION_BUNDLE_BYTES = 128 * 1024
 MAX_TRANSACTION_DEPENDENCY_BYTES = 8 * 1024 * 1024
 MAX_ORPHAN_TRANSACTION_RUNTIMES = 8
+MAX_ORPHAN_HERDR_RUNTIMES = 8
 MAX_TRANSACTION_WRITES = 16
 MAX_COMPACTION_RECORDS = 32
 HERDR_PROBE_TIMEOUT_SECONDS = 3.0
@@ -536,6 +537,7 @@ def state_lock(layout: StateLayout) -> Iterator[None]:
         checkpoint("before-state-lock")
         fcntl.flock(fd, fcntl.LOCK_EX)
         recover_transaction_runtime_snapshots(layout)
+        recover_herdr_runtime_snapshots(layout)
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1540,6 +1542,14 @@ def matching_candidate_present(layout: StateLayout, source_harness: str, session
     return False
 
 
+def matching_nonempty_state(layout: StateLayout, source_harness: str, session_hash: str) -> bool:
+    try:
+        candidate_present = matching_candidate_present(layout, source_harness, session_hash)
+    except HandoffError:
+        candidate_present = True
+    return candidate_present or bool(retryable_records(layout, source_harness, session_hash, {}))
+
+
 def block_failed_claude_precompact(
     home: Path,
     config: Mapping[str, Any] | None,
@@ -1577,17 +1587,13 @@ def seal_with_failure_receipt(
 ) -> dict[str, Any]:
     try:
         return seal_candidates(home, source_harness, session_hash, trigger, verify_locked=verify_locked, reuse_locked=reuse_locked, commit_locked=commit_locked)
-    except HandoffError as exc:
+    except (HandoffError, OSError) as raw_exc:
+        exc = raw_exc if isinstance(raw_exc, HandoffError) else HandoffError("STATE_DURABILITY", "compaction binding publication was not durable")
         if exc.code == "GENERATION_REPLACED":
             raise
         layout = StateLayout(home)
         with state_lock(layout):
-            try:
-                candidate_present = matching_candidate_present(layout, source_harness, session_hash)
-            except HandoffError as candidate_exc:
-                candidate_present = True
-                exc = candidate_exc
-            if not candidate_present:
+            if not matching_nonempty_state(layout, source_harness, session_hash):
                 raise
             write_receipt(layout, "seal", "failed", "registered-candidate-validation-failed", source_harness=source_harness, trigger=trigger, failure_code=exc.code)
         return {"status": "seal-failed", "had_candidates": True, "reason": "registered-candidate-validation-failed"}
@@ -1595,7 +1601,7 @@ def seal_with_failure_receipt(
 
 def seal_binding_failure_receipt(
     home: Path,
-    static_config: Mapping[str, Any],
+    static_config: Mapping[str, Any] | None,
     source_harness: str,
     session_hash: str,
     trigger: str,
@@ -1603,11 +1609,7 @@ def seal_binding_failure_receipt(
 ) -> dict[str, Any]:
     layout = StateLayout(home)
     with state_lock(layout):
-        try:
-            candidate_present = matching_candidate_present(layout, source_harness, session_hash)
-        except HandoffError:
-            candidate_present = True
-        if not candidate_present and not retryable_records(layout, source_harness, session_hash, static_config):
+        if not matching_nonempty_state(layout, source_harness, session_hash):
             write_receipt(layout, "seal", "empty", "no-registered-candidates-unhealthy-binding", source_harness=source_harness, trigger=trigger, failure_code=exc.code)
             return {"status": "disabled"}
         write_receipt(layout, "seal", "failed", "seal-binding-failed", source_harness=source_harness, trigger=trigger, failure_code=exc.code)
@@ -1618,10 +1620,6 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
     if args.source_harness not in SOURCE_HARNESSES or args.trigger not in TRIGGERS:
         raise HandoffError("SEAL_ENUM", "seal source or trigger is invalid")
     home = resolve_home(args.fm_home)
-    static_config = load_config(home, validate_active_bindings=False)
-    if not config_enabled(static_config, "sealing_enabled"):
-        return {"status": "disabled"}
-    assert static_config is not None
     event = parse_event_stdin()
     supplied = event.get("session_id")
     if supplied is not None and not isinstance(supplied, str):
@@ -1630,11 +1628,22 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
         if not supplied:
             raise HandoffError("SESSION_ID", "Claude sealing requires its hook session_id")
         session_hash = hash_session("claude", supplied)
+    else:
+        raw_session = supplied or os.environ.get("FM_HANDOFF_SESSION_ID") or os.environ.get("PI_SESSION_ID")
+        if not raw_session:
+            raise HandoffError("PI_SESSION_UNBOUND", "Pi candidate sealing requires PI_SESSION_ID")
+        session_hash = hash_session("pi", raw_session)
+    try:
+        static_config = load_config(home, validate_active_bindings=False)
+    except HandoffError as exc:
+        return seal_binding_failure_receipt(home, None, args.source_harness, session_hash, args.trigger, exc)
+    if not config_enabled(static_config, "sealing_enabled"):
+        return {"status": "disabled"}
+    assert static_config is not None
+    if args.source_harness == "claude":
         expected = source_session_hash(static_config, "claude")
         if session_hash != expected:
             return {"status": "recipient-mismatch"}
-    else:
-        session_hash = source_session_hash(static_config, "pi", supplied)
     try:
         config = load_config(home)
     except HandoffError as exc:
@@ -1824,6 +1833,57 @@ def validate_executable(path_text: str, expected_sha: str, code: str) -> Path:
     return canonical
 
 
+def recover_herdr_runtime_snapshots(layout: StateLayout) -> None:
+    candidates = sorted(
+        path
+        for path in layout.bindings.iterdir()
+        if re.fullmatch(r"\.herdr-runtime-[a-z0-9_]+", path.name)
+    )
+    overflow = len(candidates) > MAX_ORPHAN_HERDR_RUNTIMES
+    changed = False
+    for path in candidates[:MAX_ORPHAN_HERDR_RUNTIMES]:
+        if path.is_symlink() or not path.is_dir():
+            raise HandoffError("HERDR_RUNTIME_UNSAFE", "orphan Herdr runtime is not a private directory")
+        info = path.stat()
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise HandoffError("HERDR_RUNTIME_UNSAFE", "orphan Herdr runtime is not private")
+        shutil.rmtree(path)
+        changed = True
+    if changed:
+        fsync_directory(layout.bindings)
+    if overflow:
+        raise HandoffError("HERDR_RUNTIME_BACKPRESSURE", "orphan Herdr runtime recovery exceeded its bounded batch")
+
+
+@contextmanager
+def herdr_runtime(config: Mapping[str, Any], layout: StateLayout) -> Iterator[Path]:
+    recipient = config["recipient"]
+    source = validate_executable(recipient["herdr_cli_path"], recipient["herdr_cli_sha256"], "HERDR_IDENTITY")
+    data = read_file_bytes(source, max_bytes=MAX_TRANSACTION_DEPENDENCY_BYTES, require_private=False)
+    if sha256_bytes(data) != recipient["herdr_cli_sha256"]:
+        raise HandoffError("HERDR_IDENTITY", "Herdr executable bytes changed before snapshotting")
+    recover_herdr_runtime_snapshots(layout)
+    snapshot = Path(tempfile.mkdtemp(prefix=".herdr-runtime-", dir=layout.bindings))
+    os.chmod(snapshot, 0o700)
+    executable = snapshot / source.name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(executable, flags, 0o700)
+    try:
+        offset = 0
+        while offset < len(data):
+            offset += os.write(fd, data[offset:])
+        os.fchmod(fd, 0o700)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    fsync_directory(snapshot)
+    try:
+        yield executable
+    finally:
+        shutil.rmtree(snapshot, ignore_errors=True)
+        fsync_directory(layout.bindings)
+
+
 def recipient_context_matches(config: Mapping[str, Any], *, require_environment: bool) -> bool:
     recipient = config["recipient"]
     vault = validate_vault_binding(config)
@@ -1999,9 +2059,17 @@ def recipient_agent_matches(config: Mapping[str, Any], agent: Any, *, require_id
     return True, session_value
 
 
-def probe_recipient(config: Mapping[str, Any], *, require_idle: bool = True) -> tuple[bool, str, Path, str | None]:
+def probe_recipient(
+    config: Mapping[str, Any],
+    layout: StateLayout,
+    *,
+    require_idle: bool = True,
+    herdr: Path | None = None,
+) -> tuple[bool, str, Path, str | None]:
+    if herdr is None:
+        with herdr_runtime(config, layout) as snapshot:
+            return probe_recipient(config, layout, require_idle=require_idle, herdr=snapshot)
     recipient = config["recipient"]
-    herdr = validate_executable(recipient["herdr_cli_path"], recipient["herdr_cli_sha256"], "HERDR_IDENTITY")
     completed = run_bounded([str(herdr), "agent", "get", recipient["pane_id"], "--session", recipient["session"]], timeout=HERDR_PROBE_TIMEOUT_SECONDS)
     if completed.returncode != 0:
         return False, "recipient-unavailable", herdr, None
@@ -2065,43 +2133,45 @@ def deliver_pending(home: Path, *, deadline_epoch: float | None = None) -> dict[
             update_queue(layout, record_id, reason=reason)
             write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
             return {"status": "pending", "reason": reason, "pending_count": len(pending)}
-        ready, reason, herdr, session_value = probe_recipient(config)
-        if not ready:
-            update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
-            write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
-            return {"status": "pending", "reason": reason, "pending_count": len(pending)}
-        if not session_value or not supports_atomic_idle_generation_prompt(herdr):
-            reason = "recipient-atomic-idle-generation-prompt-unsupported"
-            update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
-            write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
-            return {"status": "pending", "reason": reason, "pending_count": len(pending)}
-        if deadline_epoch is not None and deadline_epoch - time.time() < HERDR_PROMPT_TIMEOUT_SECONDS + DELIVERY_ACK_MARGIN_SECONDS:
-            reason = "delivery-deadline-insufficient"
-            update_queue(layout, record_id, reason=reason)
-            write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
-            return {"status": "pending", "reason": reason, "pending_count": len(pending)}
-        recipient = config["recipient"]
-        queue = read_queue(layout, record_id)
-        idempotency_key = delivery_idempotency_key(config, queue, record_id)
-        completed = run_bounded(
-            [
-                str(herdr),
-                "agent",
-                "prompt",
-                recipient["pane_id"],
-                PROMPT_TEXT,
-                "--expected-agent-session",
-                session_value,
-                "--session",
-                recipient["session"],
-                "--timeout",
-                "2000",
-                "--idempotency-key",
-                idempotency_key,
-                "--require-idle",
-            ],
-            timeout=HERDR_PROMPT_TIMEOUT_SECONDS,
-        )
+        with herdr_runtime(config, layout) as herdr:
+            ready, reason, _herdr, session_value = probe_recipient(config, layout, herdr=herdr)
+            if not ready:
+                update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
+                write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
+                return {"status": "pending", "reason": reason, "pending_count": len(pending)}
+            pausepoint("after-recipient-probe")
+            if not session_value or not supports_atomic_idle_generation_prompt(herdr):
+                reason = "recipient-atomic-idle-generation-prompt-unsupported"
+                update_queue(layout, record_id, reason=reason, attempts=int(read_queue(layout, record_id).get("attempts", 0)) + 1)
+                write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
+                return {"status": "pending", "reason": reason, "pending_count": len(pending)}
+            if deadline_epoch is not None and deadline_epoch - time.time() < HERDR_PROMPT_TIMEOUT_SECONDS + DELIVERY_ACK_MARGIN_SECONDS:
+                reason = "delivery-deadline-insufficient"
+                update_queue(layout, record_id, reason=reason)
+                write_receipt(layout, "delivery", "pending", reason, record_id=record_id, pending_count=len(pending))
+                return {"status": "pending", "reason": reason, "pending_count": len(pending)}
+            recipient = config["recipient"]
+            queue = read_queue(layout, record_id)
+            idempotency_key = delivery_idempotency_key(config, queue, record_id)
+            completed = run_bounded(
+                [
+                    str(herdr),
+                    "agent",
+                    "prompt",
+                    recipient["pane_id"],
+                    PROMPT_TEXT,
+                    "--expected-agent-session",
+                    session_value,
+                    "--session",
+                    recipient["session"],
+                    "--timeout",
+                    "2000",
+                    "--idempotency-key",
+                    idempotency_key,
+                    "--require-idle",
+                ],
+                timeout=HERDR_PROMPT_TIMEOUT_SECONDS,
+            )
         prompt_matches = False
         if completed.returncode == 0:
             try:
@@ -2300,7 +2370,7 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
         if current_config != config:
             return False
         try:
-            recipient_ready, _reason, _herdr, _session_value = probe_recipient(config, require_idle=False)
+            recipient_ready, _reason, _herdr, _session_value = probe_recipient(config, layout, require_idle=False)
         except HandoffError:
             return False
         if not recipient_ready:
@@ -2374,10 +2444,10 @@ def require_consumer_binding(home: Path, config: Mapping[str, Any]) -> None:
         raise HandoffError("CONSUMER_DISABLED", "the Claude handoff consumer is disabled")
     if not recipient_context_matches(config, require_environment=True):
         raise HandoffError("CONSUMER_ENDPOINT", "consumer process is not the exact authorized Herdr endpoint and Vault")
-    recipient_ready, _reason, _herdr, _session_value = probe_recipient(config, require_idle=False)
+    layout = StateLayout(home)
+    recipient_ready, _reason, _herdr, _session_value = probe_recipient(config, layout, require_idle=False)
     if not recipient_ready:
         raise HandoffError("CONSUMER_SESSION", "consumer process is not bound to the exact live Claude session generation")
-    layout = StateLayout(home)
     require_active_process_binding(config, layout)
 
 
@@ -2388,8 +2458,28 @@ def compaction_binding_path(layout: StateLayout, config: Mapping[str, Any], capa
     return layout.bindings / f"compaction-{endpoint_binding_key(config)}-{process_capability}.json"
 
 
-def outstanding_compaction_bindings(layout: StateLayout, config: Mapping[str, Any]) -> list[Path]:
-    return sorted(layout.bindings.glob(f"compaction-{endpoint_binding_key(config)}-*.json"))
+def outstanding_compaction_bindings(layout: StateLayout) -> list[Path]:
+    paths = sorted(layout.bindings.glob("compaction-*-*.json"))
+    if len(paths) > MAX_COMPACTION_RECORDS:
+        raise HandoffError("COMPACTION_BACKPRESSURE", "durable Claude compaction bindings exceed their global bound")
+    return paths
+
+
+def session_compaction_bindings_locked(
+    layout: StateLayout,
+    session_hash: str,
+) -> list[tuple[Path, dict[str, Any], list[dict[str, str]]]]:
+    matches: list[tuple[Path, dict[str, Any], list[dict[str, str]]]] = []
+    owned_records: set[str] = set()
+    for path in outstanding_compaction_bindings(layout):
+        value, bindings = read_compaction_binding_locked(layout, path)
+        record_ids = {item["record_id"] for item in bindings}
+        if owned_records & record_ids:
+            raise HandoffError("COMPACTION_BINDING", "multiple durable Claude attempts own the same sealed record")
+        owned_records.update(record_ids)
+        if value["session_hash"] == session_hash:
+            matches.append((path, value, bindings))
+    return matches
 
 
 def read_compaction_binding_locked(
@@ -2436,19 +2526,14 @@ def read_compaction_binding_locked(
 
 
 def reuse_compaction_binding_locked(layout: StateLayout, config: Mapping[str, Any]) -> dict[str, Any] | None:
-    paths = outstanding_compaction_bindings(layout, config)
-    if not paths:
+    matches = session_compaction_bindings_locked(layout, config["recipient"]["agent_session_sha256"])
+    if not matches:
         return None
-    path = compaction_binding_path(layout, config)
-    if paths != [path]:
+    if len(matches) != 1:
+        raise HandoffError("COMPACTION_BINDING", "Claude hook session owns multiple unresolved compaction attempts")
+    path, value, bindings = matches[0]
+    if value["process_capability_sha256"] != current_process_capability():
         raise HandoffError("GENERATION_REPLACED", "another Claude process generation has an unresolved compaction attempt")
-    value, bindings = read_compaction_binding_locked(
-        layout,
-        path,
-        config=config,
-        session_hash=config["recipient"]["agent_session_sha256"],
-        process_capability=current_process_capability(),
-    )
     if value.get("terminal_outcome") is not None:
         raise HandoffError("COMPACTION_RECOVERY_PENDING", "the durable Claude compaction outcome must recover before another attempt")
     return compaction_attempt_result("already-sealed", bindings)
@@ -2473,12 +2558,13 @@ def _persist_compaction_binding_locked(layout: StateLayout, config: Mapping[str,
         envelope, actual = read_envelope(layout, item["record_id"], config, verify_sources=False)
         if actual != item["envelope_sha256"] or envelope.get("source_harness") != "claude" or envelope.get("source_session_hash") != config["recipient"]["agent_session_sha256"]:
             raise HandoffError("COMPACTION_BINDING", "Claude PreCompact seal binding is inconsistent")
-    existing_paths = outstanding_compaction_bindings(layout, config)
-    if existing_paths:
-        if existing_paths != [path]:
+    existing = session_compaction_bindings_locked(layout, config["recipient"]["agent_session_sha256"])
+    if existing:
+        if len(existing) != 1 or existing[0][1]["process_capability_sha256"] != current_process_capability():
             raise HandoffError("GENERATION_REPLACED", "another Claude process generation has an unresolved compaction attempt")
-        existing = read_json_file(path, max_bytes=16 * 1024)
-        if not isinstance(existing, dict) or existing.get("process_capability_sha256") != current_process_capability() or normalize_compaction_bindings(existing.get("bindings")) != bindings or existing.get("trigger") != trigger:
+        existing_value = existing[0][1]
+        existing_bindings = existing[0][2]
+        if existing_bindings != bindings or existing_value.get("trigger") != trigger:
             raise HandoffError("COMPACTION_BINDING", "current Claude process generation already binds another compaction attempt")
         return
     binding = {
@@ -2491,6 +2577,7 @@ def _persist_compaction_binding_locked(layout: StateLayout, config: Mapping[str,
         "trigger": trigger,
         "bound_at": now_utc(),
     }
+    failpoint("before-compaction-binding-publication")
     atomic_replace(path, canonical_json(binding))
 
 
@@ -2518,13 +2605,9 @@ def clear_compaction_binding(home: Path, config: Mapping[str, Any]) -> None:
 
 def terminal_compaction_binding_locked(layout: StateLayout, session_hash: str) -> tuple[Path, dict[str, Any], list[dict[str, str]]] | None:
     capability = current_process_capability()
-    paths = sorted(layout.bindings.glob(f"compaction-*-{capability}.json"))
-    if len(paths) > MAX_COMPACTION_RECORDS:
-        raise HandoffError("COMPACTION_BACKPRESSURE", "durable Claude terminal bindings exceed their global bound")
     matches: list[tuple[Path, dict[str, Any], list[dict[str, str]]]] = []
-    for path in paths:
-        value, bindings = read_compaction_binding_locked(layout, path, process_capability=capability)
-        if value["session_hash"] == session_hash:
+    for path, value, bindings in session_compaction_bindings_locked(layout, session_hash):
+        if value["process_capability_sha256"] == capability:
             matches.append((path, value, bindings))
     if len(matches) > 1:
         raise HandoffError("COMPACTION_BINDING", "Claude terminal event matches multiple durable attempts")
@@ -2619,12 +2702,8 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
             return None
         layout = StateLayout(home)
         with state_lock(layout):
-            pending = sum(
-                1
-                for path in layout.queue.glob("handoff-*.json")
-                for queue in [read_queue(layout, path.stem)]
-                if queue.get("status") in {"pending", "notified"} and queue.get("compaction") == "succeeded"
-            )
+            locked_config = current_consumer_config(home)
+            pending = len(claimable_records_locked(home, locked_config, layout, suppress_invalid=True))
         if pending:
             output: dict[str, Any] = {"systemMessage": f"Curated context handoff: {pending} bounded record(s) await Claude curation."}
             if payload.get("source") == "compact":
@@ -2650,7 +2729,7 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
                 raise HandoffError("GENERATION_REPLACED", "the exact Claude endpoint changed before sealing")
             try:
                 require_active_process_binding(config, layout)
-                recipient_ready, _reason, _herdr, _session_value = probe_recipient(config, require_idle=False)
+                recipient_ready, _reason, _herdr, _session_value = probe_recipient(config, layout, require_idle=False)
             except HandoffError as generation_exc:
                 raise HandoffError("GENERATION_REPLACED", "the exact live Claude generation could not be revalidated") from generation_exc
             if not recipient_ready:
@@ -2776,6 +2855,35 @@ def validate_guard_tool_authority(
         raise HandoffError("SAVE_AUTHORITY_REVOKED", "Save commit approval no longer binds current reviewed bytes")
 
 
+def heal_guard_terminal_retry(
+    home: Path,
+    config: Mapping[str, Any],
+    layout: StateLayout,
+    tool_name: str,
+    tool_input: Any,
+) -> bool:
+    if not isinstance(tool_input, dict):
+        return False
+    record_id = tool_input.get("record_id")
+    if not isinstance(record_id, str) or not RECORD_ID.fullmatch(record_id):
+        return False
+    short_name = tool_name.removeprefix("mcp__firstmate-context-handoff__")
+    completed = find_completed_approval(home, config, record_id)
+    if completed is not None:
+        return short_name != "commit_handoff_save" or tool_input.get("approval_sha256") == completed.get("approval_sha256")
+    disposition_path = disposition_path_for(layout, record_id)
+    if short_name != "record_curation_disposition" or not disposition_path.exists():
+        return False
+    value = read_json_file(disposition_path, max_bytes=16 * 1024)
+    if (
+        not isinstance(value, dict)
+        or value.get("disposition") != tool_input.get("disposition")
+        or value.get("rationale") != tool_input.get("rationale")
+    ):
+        return False
+    return recover_terminal_disposition_ack(layout, record_id)
+
+
 def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any] | None:
     if not config_enabled(config, "consumer_enabled"):
         return None
@@ -2800,7 +2908,9 @@ def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, 
                 if current_config != config:
                     raise HandoffError("CONFIG_CHANGED", "guard configuration changed before authority validation")
                 require_consumer_binding(home, current_config)
-                validate_guard_tool_authority(current_config, layout, tool_name, payload.get("tool_input"))
+                tool_input = payload.get("tool_input")
+                if not heal_guard_terminal_retry(home, current_config, layout, tool_name, tool_input):
+                    validate_guard_tool_authority(current_config, layout, tool_name, tool_input)
         except HandoffError:
             return guard_deny("The mutation-capable handoff tool is not bound to current source, queue, approval, hook, and recipient authority.")
     return None
@@ -3263,6 +3373,69 @@ def verify_completed_transaction(home: Path, config: Mapping[str, Any], record_i
     return ack
 
 
+def run_approved_transaction_apply(
+    home: Path,
+    config: Mapping[str, Any],
+    layout: StateLayout,
+    record_id: str,
+    approval: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, int]:
+    approval_sha = str(approval.get("approval_sha256", ""))
+    if not HEX64.fullmatch(approval_sha):
+        raise HandoffError("APPROVAL_BINDING", "reviewed approval SHA is invalid")
+    vault = validate_vault_binding(config)
+    bundle_path = Path(str(approval.get("bundle_path", "")))
+    if sha256_file(bundle_path, max_bytes=MAX_TRANSACTION_BUNDLE_BYTES) != approval.get("bundle_file_sha256"):
+        raise HandoffError("BUNDLE_MISMATCH", "approved Save bundle bytes changed")
+    claim_path = execution_claim_path(layout, record_id)
+    owner_identity = process_identity(os.getpid())
+    if owner_identity is None:
+        raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "transaction owner identity could not be bound")
+    claim = {
+        "schema": EXECUTION_CLAIM_SCHEMA,
+        "record_id": record_id,
+        "operation_id": approval["operation_id"],
+        "approval_sha256": approval_sha,
+        "bundle_file_sha256": approval["bundle_file_sha256"],
+        "state": "spawning",
+        "owner_pid": os.getpid(),
+        "owner_start_token": owner_identity[0],
+        "claimed_at": now_utc(),
+    }
+    atomic_create(claim_path, canonical_json(claim))
+    if os.environ.get("FM_HANDOFF_TESTING") == "1" and os.environ.get("FM_HANDOFF_TEST_EXIT_AFTER_EXECUTION_CLAIM") == "1":
+        os._exit(87)
+
+    def bind_child(process: subprocess.Popen[bytes]) -> None:
+        identity = process_identity(process.pid)
+        if identity is None:
+            raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "transaction child identity could not be bound")
+        atomic_replace(
+            claim_path,
+            canonical_json(
+                {
+                    **claim,
+                    "state": "running",
+                    "child_pid": process.pid,
+                    "child_start_token": identity[0],
+                }
+            ),
+        )
+
+    try:
+        with transaction_runtime(config, layout) as (transaction_command, manifest_sha):
+            if approval.get("dependency_manifest_sha256") != manifest_sha:
+                raise HandoffError("SAVE_AUTHORITY_REVOKED", "reviewed Save plan does not bind the current transaction dependency manifest")
+            return core_json_call(
+                [*transaction_command, "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
+                expected_codes={0, 75},
+                on_spawn=bind_child,
+                release_gate=True,
+            )
+    finally:
+        durable_unlink(claim_path)
+
+
 def find_completed_approval(home: Path, config: Mapping[str, Any], record_id: str) -> dict[str, Any] | None:
     layout = StateLayout(home)
     operation_id = deterministic_operation_id(record_id)
@@ -3282,7 +3455,11 @@ def find_completed_approval(home: Path, config: Mapping[str, Any], record_id: st
         return verify_completed_transaction(home, config, record_id, approval)
     except HandoffError as exc:
         if exc.code in {"TRANSACTION_INCOMPLETE", "TRANSACTION_LOCK", "TRANSACTION_RECOVERY_PENDING"}:
-            return None
+            require_no_active_execution_claim(layout, record_id)
+            replayed, code = run_approved_transaction_apply(home, config, layout, record_id, approval)
+            if code != 0 or replayed is None or replayed.get("schema") != TRANSACTION_RESULT_SCHEMA or replayed.get("status") != "complete":
+                raise HandoffError("TRANSACTION_RECOVERY_PENDING", "transaction recovery did not reach a verified terminal result")
+            return verify_completed_transaction(home, config, record_id, approval)
         raise
 
 
@@ -3313,7 +3490,13 @@ def recover_terminal_disposition_ack(layout: StateLayout, record_id: str) -> boo
     return True
 
 
-def _mcp_next_locked(home: Path, config: Mapping[str, Any], layout: StateLayout) -> dict[str, Any]:
+def claimable_records_locked(
+    home: Path,
+    config: Mapping[str, Any],
+    layout: StateLayout,
+    *,
+    suppress_invalid: bool = False,
+) -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
     require_consumer_binding(home, config)
     for ack_path in sorted(layout.acks.glob("handoff-*.json")):
         validate_private_file(ack_path)
@@ -3322,6 +3505,7 @@ def _mcp_next_locked(home: Path, config: Mapping[str, Any], layout: StateLayout)
         queue = read_queue(layout, path.stem)
         if queue.get("status") in {"pending", "notified"} and queue.get("compaction") == "succeeded":
             candidates.append((str(queue.get("created_at", "")), path.stem))
+    claimable: list[tuple[str, dict[str, Any], dict[str, Any], str]] = []
     for _, record_id in sorted(candidates):
         if recover_terminal_disposition_ack(layout, record_id):
             continue
@@ -3331,8 +3515,23 @@ def _mcp_next_locked(home: Path, config: Mapping[str, Any], layout: StateLayout)
         if ack_path_for(layout, record_id).exists():
             quarantine(layout, record_id, "acknowledgement-recovery-incomplete")
             update_queue(layout, record_id, status="quarantined", reason="acknowledgement-recovery-incomplete")
+            if suppress_invalid:
+                continue
             raise HandoffError("ACK_INCOMPLETE", "durable acknowledgement could not be reconciled with its terminal result")
-        envelope, queue, digest = consumer_record(home, config, record_id)
+        try:
+            envelope, queue, digest = consumer_record(home, config, record_id)
+        except HandoffError:
+            if suppress_invalid:
+                continue
+            raise
+        claimable.append((record_id, envelope, queue, digest))
+    return claimable
+
+
+def _mcp_next_locked(home: Path, config: Mapping[str, Any], layout: StateLayout) -> dict[str, Any]:
+    claimable = claimable_records_locked(home, config, layout)
+    if claimable:
+        record_id, envelope, _queue, digest = claimable[0]
         return {
             "status": "ready",
             "record_id": record_id,
@@ -3377,7 +3576,6 @@ def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Ma
             "disposition": "saved",
             "operation_id": completed["operation_id"],
         }
-    _envelope, queue_before, _digest = consumer_record(home, config, record_id)
     value = {
         "schema": "firstmate.context-handoff.disposition.v1",
         "record_id": record_id,
@@ -3402,6 +3600,7 @@ def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Ma
             raise HandoffError("ACK_INCOMPLETE", "durable disposition acknowledgement could not be recovered")
         status = "quarantined" if disposition == "needs-captain" else "acknowledged"
         return {"status": status, "record_id": record_id, "disposition": disposition}
+    _envelope, queue_before, _digest = consumer_record(home, config, record_id)
     vault = validate_vault_binding(config)
     operation = vault / ".vault-meta" / "transactions" / deterministic_operation_id(record_id)
     if operation.exists() or (vault / ".vault-meta" / "mutation.lock").exists():
@@ -3754,7 +3953,7 @@ def command_mcp_server(args: argparse.Namespace) -> None:
             }
             sys.stdout.write(json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
             sys.stdout.flush()
-            continue
+            return
         request: Any = None
         try:
             request = json.loads(raw)

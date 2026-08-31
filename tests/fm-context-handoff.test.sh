@@ -108,6 +108,10 @@ write_config() {
     --arg herdr "$FAKE_HERDR" \
     --arg herdr_sha "$(hash_file "$FAKE_HERDR")" \
     --arg session_sha "$(session_hash claude "$CLAUDE_SESSION")" \
+    --arg endpoint_session "$ENDPOINT_SESSION" \
+    --arg endpoint_workspace "$ENDPOINT_WORKSPACE" \
+    --arg endpoint_tab "$ENDPOINT_TAB" \
+    --arg endpoint_pane "$ENDPOINT_PANE" \
     --arg python "$TRANSACTION_INTERPRETER" \
     --arg core "$TRANSACTION_CORE" \
     --arg core_sha "$(hash_file "$TRANSACTION_CORE")" \
@@ -125,7 +129,7 @@ write_config() {
       registration_allowlist:$allowlist[0],
       allowed_provider_classes:["anthropic-claude-obsidian"],
       vault:{path:$vault,device:$device,inode:$inode},
-      recipient:{herdr_cli_path:$herdr,herdr_cli_sha256:$herdr_sha,session:"lab",workspace_id:"workspace-1",tab_id:"tab-1",pane_id:"pane-1",agent:"claude",agent_session_sha256:$session_sha},
+      recipient:{herdr_cli_path:$herdr,herdr_cli_sha256:$herdr_sha,session:$endpoint_session,workspace_id:$endpoint_workspace,tab_id:$endpoint_tab,pane_id:$endpoint_pane,agent:"claude",agent_session_sha256:$session_sha},
       transaction:{python_path:$python,core_path:$core,core_sha256:$core_sha,module_path:$module,module_sha256:$module_sha,dependency_root:$dependency_root,dependency_manifest:$dependency_manifest},
       consumer:{create_prefix_allowlist:["wiki/concepts/","wiki/decisions/","wiki/projects/"],replace_path_allowlist:["wiki/hot.md","wiki/index.md","wiki/log.md"],required_coupled_paths:["wiki/hot.md","wiki/index.md","wiki/log.md"]}
     }' > "$temporary" || fail "could not write synthetic configuration"
@@ -147,6 +151,10 @@ new_env() {
   HERDR_EFFECTS="$EROOT/herdr-effects"
   FAKE_HERDR="$EROOT/fake-herdr"
   CLAUDE_SESSION=claude-session-generation-1
+  ENDPOINT_SESSION=lab
+  ENDPOINT_WORKSPACE=workspace-1
+  ENDPOINT_TAB=tab-1
+  ENDPOINT_PANE=pane-1
   CAPABILITY=claude-process-generation-1
   PROCESS_GENERATION=1
   LIVE_PROCESS_CAPABILITY=
@@ -183,7 +191,7 @@ if [ "$1 $2" = "agent get" ]; then
   [ "$mode" = mismatch ] && value=other-session
   status=idle
   [ "$mode" = busy ] && status=working
-  jq -nc --arg pane pane-1 --arg workspace workspace-1 --arg tab tab-1 --arg value "$value" --arg status "$status" --arg cwd "$FAKE_VAULT" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:$status,cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}}}}'
+  jq -nc --arg pane "$FAKE_ENDPOINT_PANE" --arg workspace "$FAKE_ENDPOINT_WORKSPACE" --arg tab "$FAKE_ENDPOINT_TAB" --arg value "$value" --arg status "$status" --arg cwd "$FAKE_VAULT" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:$status,cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}}}}'
   exit 0
 fi
 if [ "$1 $2" = "agent prompt" ] && [ "${3:-}" = --help ]; then
@@ -246,11 +254,14 @@ cli() {
       FAKE_HERDR_EFFECTS_FILE="$HERDR_EFFECTS" \
       FAKE_HERDR_MODE_FILE="$HERDR_MODE" \
       FAKE_CLAUDE_SESSION="$CLAUDE_SESSION" \
+      FAKE_ENDPOINT_WORKSPACE="$ENDPOINT_WORKSPACE" \
+      FAKE_ENDPOINT_TAB="$ENDPOINT_TAB" \
+      FAKE_ENDPOINT_PANE="$ENDPOINT_PANE" \
       FAKE_VAULT="$VAULT" \
-      HERDR_SESSION=lab \
-      HERDR_WORKSPACE_ID=workspace-1 \
-      HERDR_TAB_ID=tab-1 \
-      HERDR_PANE_ID=pane-1 \
+      HERDR_SESSION="$ENDPOINT_SESSION" \
+      HERDR_WORKSPACE_ID="$ENDPOINT_WORKSPACE" \
+      HERDR_TAB_ID="$ENDPOINT_TAB" \
+      HERDR_PANE_ID="$ENDPOINT_PANE" \
       "$CLI" "$@"
   )
 }
@@ -536,7 +547,7 @@ test_single_create_save() {
 }
 
 test_queue_first_recovery() {
-  local seal record claim queue retry
+  local seal record claim queue retry interrupted
   new_env queue-first-recovery
   register_statement 'Recover queue state before publishing a candidate claim.' >/dev/null || fail "recovery candidate registration failed"
   seal=$(seal_pi) || fail "recovery fixture seal failed"
@@ -544,9 +555,8 @@ test_queue_first_recovery() {
   claim=$(find "$FM_HOME/state/context-handoff/claims" -type f -name 'candidate-*.json' | head -1)
   queue="$FM_HOME/state/context-handoff/queue/$record.json"
   rm -f "$claim" "$queue"
-  if FM_HANDOFF_TEST_FAILPOINT=after-recovery-queue-before-claims seal_pi > /dev/null 2> "$EROOT/error"; then
-    fail "recovery failpoint did not interrupt claim publication"
-  fi
+  interrupted=$(FM_HANDOFF_TEST_FAILPOINT=after-recovery-queue-before-claims seal_pi) || fail "recovery failpoint escaped bounded classification"
+  [ "$(printf '%s' "$interrupted" | jq -r .status)" = seal-failed ] || fail "recovery failpoint did not cancel compaction"
   [ -f "$queue" ] || fail "recovery published no queue before claims"
   [ -z "$(find "$FM_HOME/state/context-handoff/claims" -type f -name 'candidate-*.json' -print -quit)" ] || fail "recovery published a claim before its queue"
   retry=$(seal_pi) || fail "queue-first recovery did not resume"
@@ -941,7 +951,7 @@ test_exact_mcp_guard() {
 }
 
 test_bounded_transports_and_delivery() {
-  local seal delivery framed pid i record payload registered idempotency_key first_prompt second_prompt
+  local seal delivery framed pid i record payload registered idempotency_key first_prompt second_prompt marker release delivery_pid
   new_env bounded-transport
   enable_consumer
   seal=$(make_ready 'Retain delivery until an exact atomic generation prompt exists.') || fail "delivery fixture failed"
@@ -996,6 +1006,34 @@ test_bounded_transports_and_delivery() {
   [ "$idempotency_key" = "$(cat "$HERDR_EFFECTS")" ] || fail "durable delivery state did not bind the recipient idempotency identity"
   grep -Fx "agent prompt pane-1 /firstmate-context-handoff:consume --expected-agent-session $CLAUDE_SESSION --session lab --timeout 2000 --idempotency-key $idempotency_key --require-idle" "$HERDR_LOG" >/dev/null || fail "delivery omitted the constant prompt or atomic idle generation authority"
 
+  new_env stable-herdr-snapshot
+  enable_consumer
+  seal=$(make_ready 'Use one verified Herdr executable identity through notification acknowledgement.') || fail "stable Herdr snapshot fixture failed"
+  DELIVERY_ENABLED=true
+  printf 'idempotent\n' > "$HERDR_MODE"
+  write_config
+  marker="$EROOT/herdr-snapshot-paused"
+  release="$EROOT/herdr-snapshot-release"
+  (
+    export FM_HANDOFF_TEST_PAUSEPOINT=after-recipient-probe
+    export FM_HANDOFF_TEST_PAUSE_MARKER="$marker"
+    export FM_HANDOFF_TEST_PAUSE_RELEASE="$release"
+    cli deliver
+  ) > "$EROOT/herdr-snapshot-output" 2> "$EROOT/herdr-snapshot-error" &
+  delivery_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -f "$marker" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -f "$marker" ] || fail "delivery did not reach the verified Herdr snapshot boundary"
+  printf '#!/usr/bin/env bash\nexit 99\n' > "$FAKE_HERDR"
+  chmod 755 "$FAKE_HERDR"
+  : > "$release"
+  wait "$delivery_pid" || fail "verified Herdr snapshot did not survive configured-path replacement"
+  [ "$(jq -r .status "$EROOT/herdr-snapshot-output")" = notified ] || fail "delivery re-executed replaced Herdr bytes after its initial probe"
+  [ "$(wc -l < "$HERDR_EFFECTS")" -eq 1 ] || fail "stable Herdr snapshot did not submit exactly one acknowledged prompt"
+
   new_env delivery-deadline
   enable_consumer
   registered=$(register_statement 'Persist compaction before declining an unsafe notification deadline.') || fail "deadline delivery candidate did not register"
@@ -1018,7 +1056,7 @@ test_bounded_transports_and_delivery() {
   dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' x > "$EROOT/frames"
   printf 'x\n{"jsonrpc":"2.0","id":2,"method":"ping"}\n' >> "$EROOT/frames"
   framed=$(cli mcp-server < "$EROOT/frames") || fail "MCP server failed while draining an oversized frame"
-  printf '%s' "$framed" | jq -se 'length==2 and .[0].id==null and .[0].error.code==-32000 and .[1].id==2' >/dev/null || fail "oversized MCP frame did not terminate its request before the following ping"
+  printf '%s' "$framed" | jq -se 'length==1 and .[0].id==null and .[0].error.code==-32000' >/dev/null || fail "oversized MCP frame did not terminate its transport after the bounded error"
 
   new_env bounded-subprocess
   enable_consumer
@@ -1472,8 +1510,11 @@ test_quarantine_disable_and_disposition_recovery() {
   [ -f "$FM_HOME/state/context-handoff/acks/$record.json" ] || fail "disposition crash did not leave a durable acknowledgement"
   queue="$FM_HOME/state/context-handoff/queue/$record.json"
   [ "$(jq -r .status "$queue")" != acknowledged ] || fail "disposition crash passed its queue transition"
-  result=$(mcp_content next_curated_handoff)
-  [ "$(printf '%s' "$result" | jq -r .status)" = empty ] && [ "$(jq -r .status "$queue")" = acknowledged ] || fail "disposition acknowledgement did not recover"
+  printf 'Source changed after the durable disposition acknowledgement.\n' > "$SOURCE_FILE"
+  jq -nc --arg session "$CLAUDE_SESSION" --argjson input "$arguments" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__record_curation_disposition",tool_input:$input}' | cli claude-hook > "$EROOT/disposition-recovery-guard" 2> "$EROOT/disposition-recovery-guard-error" || fail "disposition recovery guard transport failed"
+  [ ! -s "$EROOT/disposition-recovery-guard" ] && [ ! -s "$EROOT/disposition-recovery-guard-error" ] || fail "guard denied identical durable disposition recovery after source mutation"
+  result=$(mcp_content record_curation_disposition "$arguments")
+  [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] && [ "$(jq -r .status "$queue")" = acknowledged ] || fail "disposition acknowledgement did not recover"
   pass "quarantine, disable, and disposition recovery"
 }
 
@@ -1564,6 +1605,9 @@ PY
   jq '.state="applying"' "$transaction_dir/journal.json" > "$transaction_dir/journal.tmp" || fail "could not stage an incomplete correlated journal"
   chmod 600 "$transaction_dir/journal.tmp"
   mv "$transaction_dir/journal.tmp" "$transaction_dir/journal.json"
+  printf 'Source changed after the Vault transaction became durable.\n' > "$SOURCE_FILE"
+  jq -nc --arg session "$CLAUDE_SESSION" --arg record "$record" --arg approval "$approval" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__commit_handoff_save",tool_input:{record_id:$record,approval_sha256:$approval}}' | cli claude-hook > "$EROOT/recovery-guard-output" 2> "$EROOT/recovery-guard-error" || fail "guard terminal recovery transport failed"
+  [ ! -s "$EROOT/recovery-guard-output" ] && [ ! -s "$EROOT/recovery-guard-error" ] || fail "guard denied correlated transaction recovery after source mutation"
   result=$(commit_save "$record" "$approval")
   [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "complete result with an incomplete correlated journal did not replay"
   [ "$(jq -r .state "$transaction_dir/journal.json")" = complete ] || fail "transaction replay did not durably complete its journal"
@@ -1881,7 +1925,7 @@ test_claude_terminal_outcome_uses_durable_binding() {
 }
 
 test_claude_precompact_retry_binding() {
-  local i statement registered output records_before records_after claims_before claims_after
+  local i statement registered output records_before records_after claims_before claims_after binding_before binding_after
   new_env claude-precompact-retry
   enable_consumer
   i=1
@@ -1898,17 +1942,34 @@ test_claude_precompact_retry_binding() {
   records_before=$(find "$FM_HOME/state/context-handoff/records" -name 'handoff-*.json' | wc -l)
   claims_before=$(find "$FM_HOME/state/context-handoff/claims" -name 'candidate-*.json' | wc -l)
   [ "$records_before" -eq 1 ] && [ "$claims_before" -gt 0 ] && [ "$claims_before" -lt 20 ] || fail "Claude retry fixture did not leave a byte-bounded remainder"
+  binding_before=$(find "$FM_HOME/state/context-handoff/bindings" -name 'compaction-*.json' -print -quit)
+  ENDPOINT_PANE=pane-2
+  write_config
+  bind_claude >/dev/null || fail "moved Claude endpoint did not bind the same process capability"
   output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"manual"}' | cli claude-hook) || fail "same-capability Claude PreCompact retry failed"
   [ -z "$output" ] || fail "same-capability Claude PreCompact retry emitted content"
   records_after=$(find "$FM_HOME/state/context-handoff/records" -name 'handoff-*.json' | wc -l)
   claims_after=$(find "$FM_HOME/state/context-handoff/claims" -name 'candidate-*.json' | wc -l)
   [ "$records_after" -eq "$records_before" ] && [ "$claims_after" -eq "$claims_before" ] || fail "same-capability retry sealed candidates outside its outstanding binding"
+  binding_after=$(find "$FM_HOME/state/context-handoff/bindings" -name 'compaction-*.json' -print -quit)
+  [ "$binding_after" = "$binding_before" ] && [ "$(find "$FM_HOME/state/context-handoff/bindings" -name 'compaction-*.json' | wc -l)" -eq 1 ] || fail "endpoint move created a second outstanding Claude attempt"
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "same-capability retry binding did not accept its terminal outcome"
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "next Claude attempt did not drain the bounded remainder"
   records_after=$(find "$FM_HOME/state/context-handoff/records" -name 'handoff-*.json' | wc -l)
   claims_after=$(find "$FM_HOME/state/context-handoff/claims" -name 'candidate-*.json' | wc -l)
   [ "$records_after" -gt "$records_before" ] && [ "$claims_after" -gt "$claims_before" ] || fail "terminal persistence did not release the next bounded Claude seal"
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "next bounded Claude attempt did not record its terminal failure"
+
+  new_env compaction-binding-publication-failure
+  enable_consumer
+  bind_claude >/dev/null || fail "binding publication failure fixture did not bind Claude"
+  statement='A filesystem failure while publishing the terminal binding must block compaction.'
+  authorize "$statement"
+  registered=$(mcp_content register_curated_candidate "$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "binding publication failure candidate did not register"
+  output=$(FM_HANDOFF_TEST_FAILPOINT=before-compaction-binding-publication jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | FM_HANDOFF_TEST_FAILPOINT=before-compaction-binding-publication cli claude-hook) || fail "binding publication failure escaped its block transport"
+  printf '%s' "$output" | jq -e '.decision=="block"' >/dev/null || fail "binding publication filesystem failure did not block compaction"
+  jq -se 'any(.[]; .reason=="registered-candidate-validation-failed" and .failure_code=="STATE_DURABILITY")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "binding publication filesystem failure wrote no classified durable receipt"
   pass "same-capability Claude PreCompact retry binding"
 }
 
@@ -1941,6 +2002,14 @@ test_seal_binding_failure_receipt() {
   [ "$(printf '%s' "$seal" | jq -r .reason)" = seal-binding-failed ] || fail "unhealthy Vault binding reported an unrelated seal reason"
   [ -z "$(find "$FM_HOME/state/context-handoff/records" -type f -print -quit)" ] || fail "unhealthy Vault binding sealed a record"
   jq -se 'any(.[]; .reason=="seal-binding-failed" and .failure_code=="VAULT_IDENTITY")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "unhealthy seal-time binding wrote no durable receipt"
+
+  new_env malformed-seal-config-receipt
+  register_statement 'Malformed static configuration must still cancel nonempty Pi compaction.' >/dev/null || fail "malformed configuration fixture did not register"
+  printf '{\n' > "$FM_HOME/config/context-handoff.json"
+  chmod 600 "$FM_HOME/config/context-handoff.json"
+  seal=$(seal_pi) || fail "malformed configuration escaped the nonempty seal receipt boundary"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = seal-failed ] || fail "malformed configuration did not cancel nonempty Pi compaction"
+  jq -se 'any(.[]; .reason=="seal-binding-failed" and .failure_code=="RECORD_JSON")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "malformed static configuration wrote no durable nonempty failure receipt"
   pass "durable receipt for unhealthy seal-time bindings"
 }
 
@@ -2064,6 +2133,11 @@ test_sessionstart_pending_eligibility() {
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "SessionStart eligibility retry did not complete"
   output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"SessionStart",session_id:$session,source:"startup"}' | cli claude-hook) || fail "SessionStart transport failed after a successful compaction"
   printf '%s' "$output" | jq -e '.systemMessage | test("1 bounded record")' >/dev/null || fail "SessionStart omitted the one consumable record"
+  printf 'Source changed before the next claimability check.\n' > "$SOURCE_FILE"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"SessionStart",session_id:$session,source:"startup"}' | cli claude-hook) || fail "SessionStart claimability recovery failed"
+  [ -z "$output" ] || fail "SessionStart announced a record rejected by the serialized consumer boundary"
+  output=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$output" | jq -r .status)" = empty ] || fail "SessionStart and next_curated_handoff disagreed on claimability"
   pass "SessionStart announces only consumable records"
 }
 
