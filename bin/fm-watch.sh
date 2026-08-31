@@ -83,9 +83,8 @@
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
 #                          FM_SECONDMATE_WAKE_STALL_SECS without a later durable
-#                          actionable-wake handoff in that home, so no handling
-#                          turn has picked up the row; a handoff at or after the
-#                          row keeps the current turn quiet at any row age.
+#                          actionable-wake handoff in that home; a handoff at or
+#                          after the row keeps the detector quiet at any row age.
 #                          Observation is read-only and one parent receipt
 #                          suppresses repeats for that row
 # For normal supervision, resume the session-start primary-harness protocol
