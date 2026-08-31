@@ -11,7 +11,22 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-node-modules)
+if ! command -v node >/dev/null 2>&1; then
+  echo "ok - fm-spawn node_modules behavior # SKIP node unavailable"
+  exit 0
+fi
+for utility in ln mkdir rm readlink false; do
+  if ! command -v "$utility" >/dev/null 2>&1; then
+    echo "ok - fm-spawn node_modules behavior # SKIP $utility unavailable"
+    exit 0
+  fi
+done
 SYSTEM_NODE=$(NODE_OPTIONS= node -p 'process.execPath')
+LN_BIN=$(command -v ln)
+MKDIR_BIN=$(command -v mkdir)
+RM_BIN=$(command -v rm)
+READLINK_BIN=$(command -v readlink)
+FALSE_BIN=$(command -v false)
 
 make_fakebin() {
   local dir=$1 fakebin
@@ -34,17 +49,17 @@ SH
 set -u
 last=
 for last in "$@"; do :; done
-/bin/ln "$@" || exit $?
+"$FM_TEST_LN_BIN" "$@" || exit $?
 if [ -n "${FM_NODE_MODULES_MUTATION_TARGET:-}" ] \
    && [[ "$last" = */.fm-node-modules.*/.bin/beeline-cli ]]; then
   (
     while [ ! -L "$FM_NODE_MODULES_MUTATION_TARGET/node_modules" ]; do
       sleep 0.01
     done
-    publication=$(/usr/bin/readlink "$FM_NODE_MODULES_MUTATION_TARGET/node_modules")
+    publication=$("$FM_TEST_READLINK_BIN" "$FM_NODE_MODULES_MUTATION_TARGET/node_modules")
     staging="$FM_NODE_MODULES_MUTATION_TARGET/$publication"
-    /bin/rm -f "$staging/@beeline/lib"
-    /bin/ln -s "$FM_NODE_MODULES_MUTATION_PRIMARY" "$staging/@beeline/lib"
+    "$FM_TEST_RM_BIN" -f "$staging/@beeline/lib"
+    "$FM_TEST_LN_BIN" -s "$FM_NODE_MODULES_MUTATION_PRIMARY" "$staging/@beeline/lib"
   ) >/dev/null 2>&1 &
 fi
 exit 0
@@ -66,9 +81,9 @@ if [ -n "\${FM_NODE_SHIM_MUTATION_TARGET:-}" ]; then
       done
     done
     publication=\${candidate##*/}
-    /bin/ln -s "\$publication" "\$FM_NODE_SHIM_MUTATION_TARGET/node_modules" || exit 0
-    /bin/rm -f "\$candidate/@beeline/lib"
-    /bin/ln -s "\$FM_NODE_SHIM_MUTATION_PRIMARY" "\$candidate/@beeline/lib"
+    "$LN_BIN" -s "\$publication" "\$FM_NODE_SHIM_MUTATION_TARGET/node_modules" || exit 0
+    "$RM_BIN" -f "\$candidate/@beeline/lib"
+    "$LN_BIN" -s "\$FM_NODE_SHIM_MUTATION_PRIMARY" "\$candidate/@beeline/lib"
   ) >/dev/null 2>&1 &
 fi
 exec "$SYSTEM_NODE" "\$@"
@@ -79,22 +94,29 @@ SH
 }
 
 make_toolbin_without_node() {
-  local dir=$1 source name
+  local dir=$1 source name directory old_ifs
   mkdir -p "$dir"
-  for source in /usr/bin/* /bin/*; do
-    [ -x "$source" ] || continue
-    name=${source##*/}
-    [ "$name" = node ] && continue
-    [ ! -e "$dir/$name" ] && [ ! -L "$dir/$name" ] || continue
-    /bin/ln -s "$source" "$dir/$name"
+  old_ifs=$IFS
+  IFS=:
+  for directory in $PATH; do
+    [ -n "$directory" ] || directory=.
+    [ -d "$directory" ] || continue
+    for source in "$directory"/*; do
+      [ -x "$source" ] || continue
+      name=${source##*/}
+      [ "$name" = node ] && continue
+      [ ! -e "$dir/$name" ] && [ ! -L "$dir/$name" ] || continue
+      "$LN_BIN" -s "$source" "$dir/$name"
+    done
   done
+  IFS=$old_ifs
   printf '%s\n' "$dir"
 }
 
 add_dependency_volume() {
   local index=0
   while [ "$index" -lt 300 ]; do
-    /bin/mkdir "$PROJECT_DIR/node_modules/third-party-$index"
+    "$MKDIR_BIN" "$PROJECT_DIR/node_modules/third-party-$index"
     index=$((index + 1))
   done
 }
@@ -107,14 +129,14 @@ start_publication_contender() {
       for candidate in "$target"/.fm-node-modules.*; do
         [ -d "$candidate" ] || continue
         if [ -n "$primary" ]; then
-          /bin/ln -s "$primary" "$target/node_modules"
+          "$LN_BIN" -s "$primary" "$target/node_modules"
         else
-          /bin/mkdir "$target/node_modules" || exit 2
-          /bin/mkdir "$target/node_modules/@beeline"
+          "$MKDIR_BIN" "$target/node_modules" || exit 2
+          "$MKDIR_BIN" "$target/node_modules/@beeline"
           printf 'worker install\n' > "$target/node_modules/owned.txt"
-          /bin/ln -s ../../packages/lib "$target/node_modules/@beeline/lib"
-          /bin/ln -s "$target/packages/absolute-lib" "$target/node_modules/@beeline/absolute-lib"
-          /bin/ln -s ../../packages/cli "$target/node_modules/@beeline/cli"
+          "$LN_BIN" -s ../../packages/lib "$target/node_modules/@beeline/lib"
+          "$LN_BIN" -s "$target/packages/absolute-lib" "$target/node_modules/@beeline/absolute-lib"
+          "$LN_BIN" -s ../../packages/cli "$target/node_modules/@beeline/cli"
         fi
         exit 0
       done
@@ -199,6 +221,8 @@ run_spawn() {
     FM_NODE_SHIM_MUTATION_TARGET="${FM_NODE_SHIM_MUTATION_TARGET:-}" \
     FM_NODE_SHIM_MUTATION_PRIMARY="${FM_NODE_SHIM_MUTATION_PRIMARY:-}" \
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
+    FM_TEST_LN_BIN="$LN_BIN" FM_TEST_RM_BIN="$RM_BIN" \
+    FM_TEST_READLINK_BIN="$READLINK_BIN" \
     PATH="${FM_SPAWN_TEST_PATH:-$FAKEBIN_DIR:$PATH}" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -273,14 +297,15 @@ test_spawn_shared_dependency_imports_worktree_workspace() {
 }
 
 test_spawn_preserves_shared_dependency_symlinks() {
-  local rec id out status result alias_link
+  local rec id out status result alias_link root_alias_link
   id=node-modules-shared-symlink-z1aa
   rec=$(make_case shared-symlink "$id")
   read_case "$rec"
   mkdir "$PROJECT_DIR/node_modules/shared"
   printf 'module.exports = {};\n' > "$PROJECT_DIR/node_modules/shared/index.js"
   ln -s ../shared "$PROJECT_DIR/node_modules/third-party/alias"
-  printf 'const direct = require("../shared");\nconst alias = require("./alias");\nmodule.exports = direct === alias;\n' \
+  ln -s shared "$PROJECT_DIR/node_modules/root-alias"
+  printf 'const direct = require("../shared");\nconst alias = require("./alias");\nconst rootAlias = require("../root-alias");\nmodule.exports = direct === alias && direct === rootAlias;\n' \
     > "$PROJECT_DIR/node_modules/third-party/index.js"
 
   out=$(run_spawn "$id")
@@ -289,11 +314,43 @@ test_spawn_preserves_shared_dependency_symlinks() {
   assert_contains "$out" "spawned $id" "dependency symlink publication did not launch the worker"
   alias_link=$(readlink "$WORKTREE_DIR/node_modules/third-party/alias")
   [ "$alias_link" = ../shared ] || fail "shared dependency symlink topology changed"
+  root_alias_link=$(readlink "$WORKTREE_DIR/node_modules/root-alias")
+  [ "$root_alias_link" = shared ] || fail "package-root dependency symlink topology changed"
   result=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
     'process.stdout.write(String(require(process.argv[1])));' \
     "$WORKTREE_DIR/node_modules/third-party")
   [ "$result" = true ] || fail "shared dependency symlink changed module identity"
   pass "fm-spawn preserves shared dependency symlink topology and identity"
+}
+
+test_spawn_uses_worktree_workspace_manifests() {
+  local rec id out status renamed_real expected_renamed_real new_real expected_new_real
+  id=node-modules-worktree-manifests-z1aaa
+  rec=$(make_case worktree-manifests "$id")
+  read_case "$rec"
+  printf '{"name":"@beeline/renamed","version":"1.0.0","main":"index.js"}\n' \
+    > "$WORKTREE_DIR/packages/lib/package.json"
+  mkdir -p "$WORKTREE_DIR/packages/new"
+  printf '{"name":"@beeline/new","version":"1.0.0"}\n' \
+    > "$WORKTREE_DIR/packages/new/package.json"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should synthesize links from worktree workspace manifests"
+  assert_contains "$out" "spawned $id" "worktree workspace manifest publication did not launch the worker"
+  assert_absent "$WORKTREE_DIR/node_modules/@beeline/lib" \
+    "renamed workspace retained its obsolete primary package link"
+  renamed_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/renamed" && pwd -P)
+  expected_renamed_real=$(cd "$WORKTREE_DIR/packages/lib" && pwd -P)
+  [ "$renamed_real" = "$expected_renamed_real" ] \
+    || fail "renamed workspace did not resolve to its worktree source"
+  new_real=$(cd "$WORKTREE_DIR/node_modules/@beeline/new" && pwd -P)
+  expected_new_real=$(cd "$WORKTREE_DIR/packages/new" && pwd -P)
+  [ "$new_real" = "$expected_new_real" ] \
+    || fail "worktree-only workspace did not resolve to its worktree source"
+  [ "$(readlink "$PROJECT_DIR/node_modules/@beeline/lib")" = ../../packages/lib ] \
+    || fail "worktree manifest publication mutated the primary workspace link"
+  pass "fm-spawn makes worktree manifests authoritative for workspace links"
 }
 
 test_spawn_rebases_canonical_absolute_workspace_binary() {
@@ -345,8 +402,8 @@ test_spawn_resolves_script_managed_node_runtime() {
   account_home="$TMP_ROOT/script-node-account"
   mkdir -p "$account_home/.asdf/installs/nodejs/12/bin" \
     "$account_home/.asdf/installs/nodejs/22/bin"
-  /bin/ln -s /bin/false "$account_home/.asdf/installs/nodejs/12/bin/node"
-  /bin/ln -s "$SYSTEM_NODE" "$account_home/.asdf/installs/nodejs/22/bin/node"
+  "$LN_BIN" -s "$FALSE_BIN" "$account_home/.asdf/installs/nodejs/12/bin/node"
+  "$LN_BIN" -s "$SYSTEM_NODE" "$account_home/.asdf/installs/nodejs/22/bin/node"
 
   out=$(FM_REJECT_PATH_NODE_PUBLISHER=1 \
     FM_TEST_ACCOUNT_HOME="$account_home" \
@@ -499,7 +556,7 @@ test_spawn_rejects_worktree_workspace_alias() {
   id=node-modules-worktree-alias-z2f
   rec=$(make_case worktree-alias "$id")
   read_case "$rec"
-  /bin/rm -rf "$WORKTREE_DIR/packages/lib"
+  "$RM_BIN" -rf "$WORKTREE_DIR/packages/lib"
   ln -s "$PROJECT_DIR/packages/lib" "$WORKTREE_DIR/packages/lib"
 
   out=$(run_spawn "$id")
@@ -553,6 +610,9 @@ test_spawn_ignores_published_beeline_consumers() {
   rm "$PROJECT_DIR/packages/lib/package.json" \
     "$PROJECT_DIR/packages/absolute-lib/package.json" \
     "$PROJECT_DIR/packages/cli/package.json"
+  rm "$WORKTREE_DIR/packages/lib/package.json" \
+    "$WORKTREE_DIR/packages/absolute-lib/package.json" \
+    "$WORKTREE_DIR/packages/cli/package.json"
   mkdir "$PROJECT_DIR/node_modules/@beeline/published"
   printf 'published package\n' > "$PROJECT_DIR/node_modules/@beeline/published/index.js"
 
@@ -660,24 +720,22 @@ test_spawn_rejects_primary_dependency_link_created_during_publication() {
   pass "fm-spawn refuses contended dependency links whose workspaces resolve to primary source"
 }
 
-test_spawn_validates_staging_before_publication() {
-  local rec id out status candidate
-  id=node-modules-invalid-staging-z5b
-  rec=$(make_case invalid-staging "$id")
+test_spawn_omits_worktree_deleted_workspace() {
+  local rec id out status
+  id=node-modules-deleted-workspace-z5b
+  rec=$(make_case deleted-workspace "$id")
   read_case "$rec"
-  /bin/rm -rf "$WORKTREE_DIR/packages/absolute-lib"
+  "$RM_BIN" -rf "$WORKTREE_DIR/packages/absolute-lib"
 
   out=$(run_spawn "$id")
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn published staging with a missing worktree workspace"
-  assert_not_contains "$out" "spawned $id" "invalid dependency staging launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "invalid dependency staging published node_modules"
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "invalid dependency staging survived validation failure"
-  done
-  pass "fm-spawn validates workspace links before dependency publication"
+  expect_code 0 "$status" "spawn should omit a workspace deleted from the worktree"
+  assert_contains "$out" "spawned $id" "worktree workspace deletion did not launch the worker"
+  assert_absent "$WORKTREE_DIR/node_modules/@beeline/absolute-lib" \
+    "deleted worktree workspace retained its primary package link"
+  [ "$(readlink "$PROJECT_DIR/node_modules/@beeline/absolute-lib")" = "$PROJECT_DIR/packages/absolute-lib" ] \
+    || fail "worktree workspace deletion mutated the primary workspace link"
+  pass "fm-spawn omits workspaces deleted from the authoritative worktree"
 }
 
 test_spawn_rejects_missing_installed_workspace_link() {
@@ -727,6 +785,7 @@ test_spawn_rejects_dangling_staged_workspace_link() {
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_shared_dependency_imports_worktree_workspace
 test_spawn_preserves_shared_dependency_symlinks
+test_spawn_uses_worktree_workspace_manifests
 test_spawn_rebases_canonical_absolute_workspace_binary
 test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_resolves_script_managed_node_runtime
@@ -744,7 +803,7 @@ test_spawn_preserves_exclude_path_for_harness_files
 test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
-test_spawn_validates_staging_before_publication
+test_spawn_omits_worktree_deleted_workspace
 test_spawn_rejects_missing_installed_workspace_link
 test_spawn_rejects_dangling_staged_workspace_link
 

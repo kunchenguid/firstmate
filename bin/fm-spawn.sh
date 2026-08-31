@@ -1430,11 +1430,11 @@ function inside(child, parent) {
   return child === parent || child.startsWith(`${parent}${path.sep}`);
 }
 
-function workspaces() {
+function workspaceMap(rootPath) {
   const result = new Map();
-  const projectReal = fs.realpathSync(project);
+  const rootReal = fs.realpathSync(rootPath);
   for (const rootName of ['packages', 'apps']) {
-    const root = path.join(project, rootName);
+    const root = path.join(rootPath, rootName);
     let names;
     try {
       names = fs.readdirSync(root);
@@ -1455,7 +1455,7 @@ function workspaces() {
       if (!match) continue;
       if (result.has(match[1])) throw new Error('duplicate workspace');
       const real = fs.realpathSync(directory);
-      if (!inside(real, projectReal) || real === projectReal) throw new Error('workspace escaped project');
+      if (!inside(real, rootReal) || real === rootReal) throw new Error('workspace escaped project');
       result.set(match[1], { directory, real });
     }
   }
@@ -1463,18 +1463,18 @@ function workspaces() {
 }
 
 try {
-  const found = workspaces();
-  if (found.size === 0) process.exit(2);
-  const worktreeReal = fs.realpathSync(worktree);
+  const projectWorkspaces = workspaceMap(project);
+  const worktreeWorkspaces = workspaceMap(worktree);
+  if (worktreeWorkspaces.size === 0) process.exit(2);
   const scope = path.join(source, '@beeline');
-  for (const [name, workspace] of found) {
+  for (const [name, workspace] of worktreeWorkspaces) {
+    const projectWorkspace = projectWorkspaces.get(name);
     const sourceEntry = path.join(scope, name);
-    if (!fs.lstatSync(sourceEntry).isSymbolicLink()) throw new Error('workspace entry is not a link');
-    if (fs.realpathSync(sourceEntry) !== workspace.real) throw new Error('workspace entry is stale');
-    const expected = path.join(worktree, path.relative(project, workspace.directory));
-    const expectedReal = fs.realpathSync(expected);
-    if (!inside(expectedReal, worktreeReal) || expectedReal === worktreeReal) throw new Error('worktree workspace escaped');
-    if (target && fs.realpathSync(path.join(target, '@beeline', name)) !== expectedReal) {
+    if (projectWorkspace) {
+      if (!fs.lstatSync(sourceEntry).isSymbolicLink()) throw new Error('workspace entry is not a link');
+      if (fs.realpathSync(sourceEntry) !== projectWorkspace.real) throw new Error('workspace entry is stale');
+    }
+    if (target && fs.realpathSync(path.join(target, '@beeline', name)) !== workspace.real) {
       throw new Error('target workspace is stale');
     }
   }
@@ -1482,7 +1482,8 @@ try {
     const sourceNames = new Set(fs.readdirSync(scope));
     const targetScope = path.join(target, '@beeline');
     for (const name of fs.readdirSync(targetScope)) {
-      if (!sourceNames.has(name)) throw new Error('target-only package');
+      if (worktreeWorkspaces.has(name)) continue;
+      if (projectWorkspaces.has(name) || !sourceNames.has(name)) throw new Error('target-only package');
     }
   }
 } catch (error) {
@@ -1566,11 +1567,11 @@ function inside(child, parent) {
   return child === parent || child.startsWith(`${parent}${path.sep}`);
 }
 
-function workspaceMap() {
+function workspaceMap(rootPath) {
   const result = new Map();
-  const projectReal = fs.realpathSync(project);
+  const rootReal = fs.realpathSync(rootPath);
   for (const rootName of ['packages', 'apps']) {
-    const root = path.join(project, rootName);
+    const root = path.join(rootPath, rootName);
     let names;
     try {
       names = fs.readdirSync(root);
@@ -1591,18 +1592,32 @@ function workspaceMap() {
       if (!match) continue;
       if (result.has(match[1])) throw new Error('duplicate workspace');
       const real = fs.realpathSync(directory);
-      if (!inside(real, projectReal) || real === projectReal) throw new Error('workspace escaped project');
+      if (!inside(real, rootReal) || real === rootReal) throw new Error('workspace escaped project');
       result.set(match[1], { directory, real });
     }
   }
   return result;
 }
 
+const projectReal = fs.realpathSync(project);
+const sourceReal = fs.realpathSync(source);
+
 function materialize(sourcePath, targetPath, root = false) {
   const sourceStat = fs.lstatSync(sourcePath);
-  if (sourceStat.isSymbolicLink() && !root) {
-    fs.symlinkSync(fs.readlinkSync(sourcePath), targetPath);
-    return;
+  if (sourceStat.isSymbolicLink()) {
+    const link = fs.readlinkSync(sourcePath);
+    if (!root) {
+      fs.symlinkSync(link, targetPath);
+      return;
+    }
+    const canonical = fs.realpathSync(sourcePath);
+    if (inside(canonical, sourceReal)) {
+      const target = path.isAbsolute(link)
+        ? path.join(staging, path.relative(sourceReal, canonical))
+        : link;
+      fs.symlinkSync(target, targetPath);
+      return;
+    }
   }
   const real = sourceStat.isSymbolicLink() ? fs.realpathSync(sourcePath) : sourcePath;
   const stat = fs.statSync(real);
@@ -1621,8 +1636,8 @@ function materialize(sourcePath, targetPath, root = false) {
   }
 }
 
-const projectReal = fs.realpathSync(project);
-const workspaces = workspaceMap();
+const projectWorkspaces = workspaceMap(project);
+const worktreeWorkspaces = workspaceMap(worktree);
 for (const name of fs.readdirSync(source)) {
   if (name === '@beeline' || name === '.bin') continue;
   const sourceEntry = path.join(source, name);
@@ -1644,22 +1659,31 @@ for (const name of fs.readdirSync(source)) {
 const sourceScope = path.join(source, '@beeline');
 const targetScope = path.join(staging, '@beeline');
 fs.mkdirSync(targetScope);
+const createdWorkspaces = new Set();
 for (const name of fs.readdirSync(sourceScope)) {
   const sourceEntry = path.join(sourceScope, name);
   const targetEntry = path.join(targetScope, name);
-  const workspace = workspaces.get(name);
-  if (!workspace) {
+  const projectWorkspace = projectWorkspaces.get(name);
+  const worktreeWorkspace = worktreeWorkspaces.get(name);
+  if (!worktreeWorkspace) {
+    if (projectWorkspace) continue;
     materialize(sourceEntry, targetEntry, true);
     continue;
   }
-  if (!fs.lstatSync(sourceEntry).isSymbolicLink() || fs.realpathSync(sourceEntry) !== workspace.real) {
+  if (projectWorkspace &&
+      (!fs.lstatSync(sourceEntry).isSymbolicLink() || fs.realpathSync(sourceEntry) !== projectWorkspace.real)) {
     throw new Error('workspace entry is stale');
   }
-  const link = fs.readlinkSync(sourceEntry);
-  const target = path.isAbsolute(link)
-    ? path.join(worktree, path.relative(project, workspace.directory))
-    : link;
+  const link = projectWorkspace ? fs.readlinkSync(sourceEntry) : '';
+  const target = projectWorkspace && path.isAbsolute(link)
+    ? worktreeWorkspace.directory
+    : path.relative(targetScope, worktreeWorkspace.directory);
   fs.symlinkSync(target, targetEntry, 'dir');
+  createdWorkspaces.add(name);
+}
+for (const [name, workspace] of worktreeWorkspaces) {
+  if (createdWorkspaces.has(name)) continue;
+  fs.symlinkSync(path.relative(targetScope, workspace.directory), path.join(targetScope, name), 'dir');
 }
 
 const sourceBin = path.join(source, '.bin');
