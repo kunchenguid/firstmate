@@ -68,6 +68,8 @@ PROVIDER_CLASS = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 KINDS = {"decision", "preference", "gotcha", "project-fact", "next-step", "pointer"}
 CONFIDENCES = {"verified", "inferred"}
 SPHERES = {"privat", "geschaeftlich", "geteilt"}
+SENSITIVITY_CLASSES = {"ordinary-project-context", "financial-data", "customer-record", "personal-address"}
+ELIGIBLE_SENSITIVITY_CLASS = "ordinary-project-context"
 TRIGGERS = {"manual", "threshold", "overflow"}
 SOURCE_HARNESSES = {"pi", "claude"}
 DISPOSITIONS = {"duplicate", "not-durable", "not-allowed", "needs-captain"}
@@ -102,22 +104,23 @@ SENSITIVE_PATTERNS = [
         r"\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,})\b",
         r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}\b",
         r"\b(?:\d[ -]*?){13,19}\b",
-        r"\b(bank|payment|card|wire transfer|financial transaction)\b",
+        r"\b(bank account|payment card|wire transfer|financial transaction)\b",
         r"\btransaction(?:[_ -]?(?:id|number|details?|amount|reference))\b",
-        r"\b(customer|order record|shipping address|billing address)\b",
+        r"\b(customer (?:id|record|account|profile)|order record|shipping address|billing address)\b",
         r"\border(?:[_ -]?(?:id|number|no\.?))?\s*[:#]?\s*[A-Z0-9-]{4,}\b",
-        r"\b(street|road|avenue|postal address|zip code|postcode)\b",
+        r"\b(postal address|zip code|postcode)\b",
         r"\b(email body|message body|chat body|inbox message)\b",
         r"\b(local-only|strictly private|do not share)\b",
         r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
         r"\b\d{3}-\d{2}-\d{4}\b",
         r"\b(?:taxpayer|tax)(?:[_ -]?(?:id|identifier|identification|number))\b",
         r"\baccount balance\b",
-        r"\b(?:client|account holder|employee|patient)\b",
-        r"\b(?:salary|wages?|payroll|compensation|income|revenue|profit|invoice|financial (?:data|details?|records?))\b",
+        r"\b(?:account holder|employee|patient)\s+(?:id|record|number|profile)\b",
+        r"\bfinancial (?:data|details?|records?)\b",
+        r"\b(?:assets?|liabilit(?:y|ies)|salary|wages?|payroll|compensation|income|revenue|profit|invoice)\b.{0,48}\b(?:\d[\d,.]*\s*(?:euros?|dollars?|pounds?)|(?:USD|EUR|GBP|CAD|AUD|JPY|CHF)\s*[\d,.]+)\b",
         r"\b(?:home|residential|mailing|delivery)\s+address\b",
         r"\b\d{1,6}\s+[A-Z0-9][A-Z0-9 .'-]{1,80}\s(?:st(?:reet)?|rd|road|ave(?:nue)?|blvd|lane|ln|drive|dr|court|ct)\b",
-        r"\b(?:USD|EUR|GBP|CAD|AUD|JPY|CHF)\s*[\d,.]+\b",
+        r"\b(?:lives?|resides?)\s+at\s+\d{1,6}\s+[A-Z][A-Z0-9 .'-]{1,80}\b",
     )
 ]
 MUTATING_TOOL_NAMES = re.compile(
@@ -661,6 +664,7 @@ def normalize_registration_allowlist(config: Mapping[str, Any]) -> list[dict[str
         "kind",
         "confidence",
         "sphere",
+        "sensitivity_class",
         "provider_class",
         "supersedes",
     }
@@ -670,7 +674,7 @@ def normalize_registration_allowlist(config: Mapping[str, Any]) -> list[dict[str
             raise HandoffError("CONFIG_ELIGIBILITY", "an eligibility contract has unknown or missing fields")
         if not HEX64.fullmatch(str(contract.get("statement_sha256", ""))):
             raise HandoffError("CONFIG_ELIGIBILITY", "an eligibility contract statement hash is invalid")
-        if contract.get("kind") not in KINDS or contract.get("confidence") not in CONFIDENCES or contract.get("sphere") not in SPHERES:
+        if contract.get("kind") not in KINDS or contract.get("confidence") not in CONFIDENCES or contract.get("sphere") not in SPHERES or contract.get("sensitivity_class") not in SENSITIVITY_CLASSES:
             raise HandoffError("CONFIG_ELIGIBILITY", "an eligibility contract classification is invalid")
         provider = contract.get("provider_class")
         if not isinstance(provider, str) or not PROVIDER_CLASS.fullmatch(provider):
@@ -696,6 +700,7 @@ def normalize_registration_allowlist(config: Mapping[str, Any]) -> list[dict[str
                 "kind": contract["kind"],
                 "confidence": contract["confidence"],
                 "sphere": contract["sphere"],
+                "sensitivity_class": contract["sensitivity_class"],
                 "provider_class": provider,
                 "supersedes": sorted(supersedes),
             }
@@ -713,6 +718,7 @@ def eligibility_payload(
     kind: str,
     confidence: str,
     sphere: str,
+    sensitivity_class: str,
     provider_class: str,
     supersedes: Sequence[str],
 ) -> dict[str, Any]:
@@ -723,6 +729,7 @@ def eligibility_payload(
         "kind": kind,
         "confidence": confidence,
         "sphere": sphere,
+        "sensitivity_class": sensitivity_class,
         "provider_class": provider_class,
         "supersedes": sorted(supersedes),
     }
@@ -737,6 +744,7 @@ def eligibility_contract(
     kind: str,
     confidence: str,
     sphere: str,
+    sensitivity_class: str,
     provider_class: str,
     supersedes: Sequence[str],
 ) -> str:
@@ -747,6 +755,7 @@ def eligibility_contract(
         kind=kind,
         confidence=confidence,
         sphere=sphere,
+        sensitivity_class=sensitivity_class,
         provider_class=provider_class,
         supersedes=supersedes,
     )
@@ -780,6 +789,7 @@ def validate_item(item: Any, config: Mapping[str, Any], *, verify_source: bool =
         "source_sha256",
         "confidence",
         "sphere",
+        "sensitivity_class",
         "provider_class",
         "eligibility_sha256",
         "supersedes",
@@ -790,6 +800,10 @@ def validate_item(item: Any, config: Mapping[str, Any], *, verify_source: bool =
         raise HandoffError("ITEM_ID", "handoff item has an invalid item_id")
     if item.get("kind") not in KINDS or item.get("confidence") not in CONFIDENCES or item.get("sphere") not in SPHERES:
         raise HandoffError("ITEM_ENUM", "handoff item has an invalid allowlisted classification")
+    if item.get("sensitivity_class") not in SENSITIVITY_CLASSES:
+        raise HandoffError("ITEM_ENUM", "handoff item has an invalid sensitivity classification")
+    if item["sensitivity_class"] != ELIGIBLE_SENSITIVITY_CLASS:
+        raise HandoffError("SENSITIVE_CLASS", "sensitive or regulated classifications are not eligible")
     statement = validate_statement(item.get("statement"))
     provider = item.get("provider_class")
     if not isinstance(provider, str) or not PROVIDER_CLASS.fullmatch(provider):
@@ -813,6 +827,7 @@ def validate_item(item: Any, config: Mapping[str, Any], *, verify_source: bool =
         "kind": item["kind"],
         "confidence": item["confidence"],
         "sphere": item["sphere"],
+        "sensitivity_class": item["sensitivity_class"],
         "provider_class": provider,
         "supersedes": supersedes,
     }
@@ -830,6 +845,7 @@ def validate_item(item: Any, config: Mapping[str, Any], *, verify_source: bool =
         "source_sha256": source_sha,
         "confidence": item["confidence"],
         "sphere": item["sphere"],
+        "sensitivity_class": item["sensitivity_class"],
         "provider_class": provider,
         "eligibility_sha256": eligibility_sha,
         "supersedes": sorted(supersedes),
@@ -940,16 +956,27 @@ def update_queue(layout: StateLayout, record_id: str, **changes: Any) -> dict[st
     return current
 
 
-def read_candidate(path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+def read_candidate_binding(path: Path) -> dict[str, Any]:
     value = read_json_file(path, max_bytes=16 * 1024)
-    if not isinstance(value, dict) or value.get("schema") != CANDIDATE_SCHEMA:
+    expected_keys = {"schema", "candidate_id", "source_harness", "source_session_hash", "registered_at", "item"}
+    if not isinstance(value, dict) or set(value) != expected_keys or value.get("schema") != CANDIDATE_SCHEMA:
         raise HandoffError("CANDIDATE_RECORD", "candidate record is invalid")
     if value.get("source_harness") not in SOURCE_HARNESSES or not HEX64.fullmatch(str(value.get("source_session_hash", ""))):
         raise HandoffError("CANDIDATE_BINDING", "candidate source binding is invalid")
+    if not CANDIDATE_ID.fullmatch(str(value.get("candidate_id", ""))) or path.stem != value.get("candidate_id") or not isinstance(value.get("registered_at"), str) or not isinstance(value.get("item"), dict):
+        raise HandoffError("CANDIDATE_ID", "candidate stable ID is invalid")
+    return value
+
+
+def validate_candidate(value: Mapping[str, Any], path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     item = validate_item(value.get("item"), config)
     if item["item_id"] != value.get("candidate_id") or path.stem != value.get("candidate_id"):
         raise HandoffError("CANDIDATE_ID", "candidate stable ID is invalid")
     return {**value, "item": item}
+
+
+def read_candidate(path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+    return validate_candidate(read_candidate_binding(path), path, config)
 
 
 def _register_locked(home: Path, config: Mapping[str, Any] | None, args: argparse.Namespace, layout: StateLayout) -> dict[str, Any]:
@@ -961,6 +988,10 @@ def _register_locked(home: Path, config: Mapping[str, Any] | None, args: argpars
     statement = validate_statement(args.statement)
     if args.kind not in KINDS or args.confidence not in CONFIDENCES or args.sphere not in SPHERES:
         raise HandoffError("REGISTER_ENUM", "candidate classification is not allowlisted")
+    if args.sensitivity_class not in SENSITIVITY_CLASSES:
+        raise HandoffError("REGISTER_ENUM", "candidate sensitivity classification is not allowlisted")
+    if args.sensitivity_class != ELIGIBLE_SENSITIVITY_CLASS:
+        raise HandoffError("SENSITIVE_CLASS", "sensitive or regulated classifications are not eligible")
     if args.provider_class not in config["allowed_provider_classes"]:
         raise HandoffError("PROVIDER_CLASS", "candidate provider class is not authorized")
     supersedes = sorted(set(args.supersedes or []))
@@ -974,6 +1005,7 @@ def _register_locked(home: Path, config: Mapping[str, Any] | None, args: argpars
         kind=args.kind,
         confidence=args.confidence,
         sphere=args.sphere,
+        sensitivity_class=args.sensitivity_class,
         provider_class=args.provider_class,
         supersedes=supersedes,
     )
@@ -984,6 +1016,7 @@ def _register_locked(home: Path, config: Mapping[str, Any] | None, args: argpars
         "source_sha256": args.source_sha256,
         "confidence": args.confidence,
         "sphere": args.sphere,
+        "sensitivity_class": args.sensitivity_class,
         "provider_class": args.provider_class,
         "eligibility_sha256": eligibility_sha,
         "supersedes": supersedes,
@@ -1019,9 +1052,11 @@ def _register_locked(home: Path, config: Mapping[str, Any] | None, args: argpars
     for path in layout.candidates.glob("candidate-*.json"):
         if path.stem in claimed:
             continue
-        pending_candidate = read_candidate(path, config)
-        if pending_candidate["source_harness"] == args.source_harness and pending_candidate["source_session_hash"] == session_hash:
-            pending_count += 1
+        pending_binding = read_candidate_binding(path)
+        if pending_binding["source_harness"] != args.source_harness or pending_binding["source_session_hash"] != session_hash:
+            continue
+        validate_candidate(pending_binding, path, config)
+        pending_count += 1
     if pending_count >= MAX_ITEMS:
         raise HandoffError("CANDIDATE_BACKPRESSURE", "the bounded candidate register must seal before accepting another item")
     if load_config(home) != config:
@@ -1179,7 +1214,7 @@ def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger:
             if path.stem in claimed:
                 continue
             try:
-                candidate = read_candidate(path, config)
+                candidate_binding = read_candidate_binding(path)
             except HandoffError as exc:
                 write_receipt(
                     layout,
@@ -1195,8 +1230,26 @@ def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger:
                     "had_candidates": True,
                     "reason": "registered-candidate-validation-failed",
                 }
-            if candidate["source_harness"] == source_harness and candidate["source_session_hash"] == session_hash:
-                matching[candidate["candidate_id"]] = candidate
+            if candidate_binding["source_harness"] != source_harness or candidate_binding["source_session_hash"] != session_hash:
+                continue
+            try:
+                candidate = validate_candidate(candidate_binding, path, config)
+            except HandoffError as exc:
+                write_receipt(
+                    layout,
+                    "seal",
+                    "failed",
+                    "registered-candidate-validation-failed",
+                    source_harness=source_harness,
+                    trigger=trigger,
+                    failure_code=exc.code,
+                )
+                return {
+                    "status": "seal-failed",
+                    "had_candidates": True,
+                    "reason": "registered-candidate-validation-failed",
+                }
+            matching[candidate["candidate_id"]] = candidate
         recovered = recover_unclaimed_records(layout, config, matching)
         matching = {key: value for key, value in matching.items() if key not in recovered}
         for record_id in sorted(set(recovered.values())):
@@ -1468,23 +1521,48 @@ def run_bounded(
     timeout: float = 15.0,
     input_bytes: bytes | None = None,
     on_spawn: Callable[[subprocess.Popen[bytes]], None] | None = None,
+    release_gate: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     process: subprocess.Popen[bytes] | None = None
+    gate_read: int | None = None
+    gate_write: int | None = None
     selector = selectors.DefaultSelector()
     stdout = bytearray()
     stderr = bytearray()
     stdin_offset = 0
     deadline = time.monotonic() + timeout
     try:
+        process_command = list(command)
+        pass_fds: tuple[int, ...] = ()
+        if release_gate:
+            gate_read, gate_write = os.pipe()
+            process_command = [
+                sys.executable,
+                "-c",
+                "import os,sys;fd=int(sys.argv[1]);token=os.read(fd,1);os.close(fd);sys.exit(76) if token!=b'1' else os.execv(sys.argv[2],sys.argv[2:])",
+                str(gate_read),
+                *command,
+            ]
+            pass_fds = (gate_read,)
         process = subprocess.Popen(
-            list(command),
+            process_command,
             stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=os.environ.copy(),
+            pass_fds=pass_fds,
         )
+        if gate_read is not None:
+            os.close(gate_read)
+            gate_read = None
         if on_spawn is not None:
             on_spawn(process)
+        if gate_write is not None:
+            os.write(gate_write, b"1")
+            os.close(gate_write)
+            gate_write = None
+            if os.environ.get("FM_HANDOFF_TESTING") == "1" and os.environ.get("FM_HANDOFF_TEST_EXIT_AFTER_APPLY_SPAWN") == "1":
+                os._exit(86)
         assert process.stdout is not None and process.stderr is not None
         for stream, label in ((process.stdout, "stdout"), (process.stderr, "stderr")):
             os.set_blocking(stream.fileno(), False)
@@ -1539,6 +1617,12 @@ def run_bounded(
         raise HandoffError("SUBPROCESS_FAILED", "a bound local adapter did not complete") from exc
     finally:
         selector.close()
+        for descriptor in (gate_read, gate_write):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
         if process is not None:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
@@ -1687,6 +1771,12 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
     with state_lock(layout):
         current_config = load_config(home)
         if current_config != config:
+            return False
+        try:
+            recipient_ready, _reason, _herdr = probe_recipient(config, require_idle=False)
+        except HandoffError:
+            return False
+        if not recipient_ready:
             return False
         capability, generation = current_process_identity()
         binding_key = endpoint_binding_key(config)
@@ -2095,8 +2185,9 @@ def core_json_call(
     *,
     expected_codes: set[int] = {0},
     on_spawn: Callable[[subprocess.Popen[bytes]], None] | None = None,
+    release_gate: bool = False,
 ) -> tuple[dict[str, Any] | None, int]:
-    completed = run_bounded(command, timeout=30.0, on_spawn=on_spawn)
+    completed = run_bounded(command, timeout=30.0, on_spawn=on_spawn, release_gate=release_gate)
     if completed.returncode not in expected_codes:
         return None, completed.returncode
     if completed.returncode != 0:
@@ -2153,7 +2244,24 @@ def require_no_active_execution_claim(layout: StateLayout, record_id: str) -> No
     claim = read_json_file(path, max_bytes=16 * 1024)
     if not isinstance(claim, dict) or claim.get("schema") != EXECUTION_CLAIM_SCHEMA or claim.get("record_id") != record_id:
         raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "durable transaction execution claim is invalid")
-    if claim.get("state") == "running":
+    if claim.get("state") == "spawning":
+        pid = claim.get("owner_pid")
+        token = claim.get("owner_start_token")
+        if not isinstance(pid, int) or not isinstance(token, str) or not token:
+            raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "durable transaction owner identity is invalid")
+        identity = process_identity(pid) if isinstance(pid, int) else None
+        if identity is None and isinstance(pid, int):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                durable_unlink(path)
+                return
+            except PermissionError:
+                pass
+        elif identity is not None and (identity[0] != token or identity[1].upper().startswith("Z")):
+            durable_unlink(path)
+            return
+    elif claim.get("state") == "running":
         pid = claim.get("child_pid")
         token = claim.get("child_start_token")
         identity = process_identity(pid) if isinstance(pid, int) else None
@@ -2168,6 +2276,8 @@ def require_no_active_execution_claim(layout: StateLayout, record_id: str) -> No
         elif identity is not None and (identity[0] != token or identity[1].upper().startswith("Z")):
             durable_unlink(path)
             return
+    else:
+        raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "durable transaction execution claim has an invalid state")
     raise HandoffError("TRANSACTION_RECOVERY_PENDING", "a claimed transaction child must be confirmed reaped before another consumer transition")
 
 
@@ -2488,6 +2598,7 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
     record_id = arguments.get("record_id")
     bundle = arguments.get("bundle")
     duplicate_check = arguments.get("duplicate_check")
+    content_sensitivity = arguments.get("content_sensitivity")
     if not isinstance(record_id, str):
         raise HandoffError("PREPARE_INPUT", "Save preparation input is invalid")
     require_consumer_binding(home, config)
@@ -2504,6 +2615,11 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
         if duplicate_check.get("result") != "no-match" or not isinstance(searched, list) or not searched or len(searched) > 5 or not all(safe_relative_path(path) for path in searched):
             raise HandoffError("DUPLICATE_CHECK", "Save requires a bounded no-match duplicate search disposition")
         normalized = validate_save_bundle(config, record_id, bundle)
+        reviewed_paths = [write["path"] for write in normalized["writes"]]
+        if not isinstance(content_sensitivity, dict) or set(content_sensitivity) != set(reviewed_paths) or not all(isinstance(value, str) and value in SENSITIVITY_CLASSES for value in content_sensitivity.values()):
+            raise HandoffError("SENSITIVITY_CLASSIFICATION", "Save requires an exact sensitivity classification for every write path")
+        if any(value != ELIGIBLE_SENSITIVITY_CLASS for value in content_sensitivity.values()):
+            raise HandoffError("SENSITIVE_CLASS", "sensitive or regulated Save classifications are not eligible")
     except HandoffError as exc:
         quarantine(layout, record_id, f"curation-{exc.code.lower()}")
         update_queue(layout, record_id, status="quarantined", reason=f"curation-{exc.code.lower()}")
@@ -2521,7 +2637,6 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
         raise HandoffError("TRANSACTION_INSPECT", "transaction core refused the proposed Save plan")
     if plan.get("schema") != TRANSACTION_PLAN_SCHEMA or plan.get("operation_id") != deterministic_operation_id(record_id) or plan.get("operation_type") != "save" or not HEX64.fullmatch(str(plan.get("input_bundle_sha256", ""))) or not HEX64.fullmatch(str(plan.get("approval_sha256", ""))):
         raise HandoffError("TRANSACTION_PLAN", "transaction inspect result does not match the proposed Save bundle")
-    reviewed_paths = [write["path"] for write in normalized["writes"]]
     reviewed_hashes = {
         write["path"]: sha256_bytes(write["content"].encode("utf-8"))
         for write in normalized["writes"]
@@ -2620,6 +2735,9 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
         update_queue(layout, record_id, status="quarantined", reason="approved-bundle-payload-mismatch")
         raise HandoffError("BUNDLE_MISMATCH", "approved Save bundle bytes changed")
     claim_path = execution_claim_path(layout, record_id)
+    owner_identity = process_identity(os.getpid())
+    if owner_identity is None:
+        raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "transaction owner identity could not be bound")
     claim = {
         "schema": EXECUTION_CLAIM_SCHEMA,
         "record_id": record_id,
@@ -2627,9 +2745,13 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
         "approval_sha256": approval_sha,
         "bundle_file_sha256": approval["bundle_file_sha256"],
         "state": "spawning",
+        "owner_pid": os.getpid(),
+        "owner_start_token": owner_identity[0],
         "claimed_at": now_utc(),
     }
     atomic_create(claim_path, canonical_json(claim))
+    if os.environ.get("FM_HANDOFF_TESTING") == "1" and os.environ.get("FM_HANDOFF_TEST_EXIT_AFTER_EXECUTION_CLAIM") == "1":
+        os._exit(87)
 
     def bind_child(process: subprocess.Popen[bytes]) -> None:
         identity = process_identity(process.pid)
@@ -2646,14 +2768,12 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
                 }
             ),
         )
-        if os.environ.get("FM_HANDOFF_TESTING") == "1" and os.environ.get("FM_HANDOFF_TEST_EXIT_AFTER_APPLY_SPAWN") == "1":
-            os._exit(86)
-
     try:
         result, code = core_json_call(
             [str(python_path), str(core), "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
             expected_codes={0, 75},
             on_spawn=bind_child,
+            release_gate=True,
         )
     finally:
         durable_unlink(claim_path)
@@ -2685,6 +2805,7 @@ def mcp_register(home: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
         source_sha256=arguments.get("source_sha256"),
         confidence=arguments.get("confidence"),
         sphere=arguments.get("sphere"),
+        sensitivity_class=arguments.get("sensitivity_class"),
         provider_class=arguments.get("provider_class"),
         supersedes=arguments.get("supersedes") or [],
     )
@@ -2703,6 +2824,7 @@ def mcp_tool_schemas() -> list[dict[str, Any]]:
         "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "confidence": {"type": "string", "enum": sorted(CONFIDENCES)},
         "sphere": {"type": "string", "enum": sorted(SPHERES)},
+        "sensitivity_class": {"type": "string", "enum": sorted(SENSITIVITY_CLASSES)},
         "provider_class": {"type": "string"},
         "supersedes": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
     }
@@ -2733,10 +2855,11 @@ def mcp_tool_schemas() -> list[dict[str, Any]]:
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["record_id", "duplicate_check", "bundle"],
+                "required": ["record_id", "duplicate_check", "content_sensitivity", "bundle"],
                 "properties": {
                     "record_id": {"type": "string"},
                     "duplicate_check": {"type": "object"},
+                    "content_sensitivity": {"type": "object", "additionalProperties": {"type": "string", "enum": sorted(SENSITIVITY_CLASSES)}},
                     "bundle": {"type": "object"},
                 },
             },
@@ -2868,6 +2991,7 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--source-sha256", required=True)
     register.add_argument("--confidence", choices=sorted(CONFIDENCES), required=True)
     register.add_argument("--sphere", choices=sorted(SPHERES), required=True)
+    register.add_argument("--sensitivity-class", choices=sorted(SENSITIVITY_CLASSES), required=True)
     register.add_argument("--provider-class", required=True)
     register.add_argument("--supersedes", action="append", default=[])
 

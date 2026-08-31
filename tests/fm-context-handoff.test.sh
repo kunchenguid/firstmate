@@ -177,10 +177,11 @@ cli() {
       FM_HANDOFF_TEST_PAUSEPOINT="${FM_HANDOFF_TEST_PAUSEPOINT:-}" \
       FM_HANDOFF_TEST_PAUSE_MARKER="${FM_HANDOFF_TEST_PAUSE_MARKER:-$EROOT/pause-marker}" \
       FM_HANDOFF_TEST_PAUSE_RELEASE="${FM_HANDOFF_TEST_PAUSE_RELEASE:-$EROOT/pause-release}" \
+      FM_HANDOFF_TEST_EXIT_AFTER_EXECUTION_CLAIM="${FM_HANDOFF_TEST_EXIT_AFTER_EXECUTION_CLAIM:-}" \
       FM_HANDOFF_TEST_EXIT_AFTER_APPLY_SPAWN="${FM_HANDOFF_TEST_EXIT_AFTER_APPLY_SPAWN:-}" \
       FM_FIXTURE_APPLY_PAUSE_MARKER="${FM_FIXTURE_APPLY_PAUSE_MARKER:-}" \
       FM_FIXTURE_APPLY_PAUSE_RELEASE="${FM_FIXTURE_APPLY_PAUSE_RELEASE:-}" \
-      PI_SESSION_ID=pi-session-1 \
+      PI_SESSION_ID="${PI_SESSION_ID:-pi-session-1}" \
       FAKE_HERDR_LOG="$HERDR_LOG" \
       FAKE_HERDR_PID="$HERDR_PID" \
       FAKE_HERDR_MODE_FILE="$HERDR_MODE" \
@@ -224,14 +225,15 @@ enable_consumer() {
 }
 
 authorize() {
-  local statement=${1:?} kind=${2:-gotcha} temporary
+  local statement=${1:?} kind=${2:-gotcha} sensitivity_class=${3:-ordinary-project-context} temporary
   temporary="$ALLOWLIST.tmp"
   jq \
     --arg source "$SOURCE_FILE" \
     --arg source_sha "$(hash_file "$SOURCE_FILE")" \
     --arg statement_sha "$(hash_text "$statement")" \
     --arg kind "$kind" \
-    '. + [{source_record:$source,source_sha256:$source_sha,statement_sha256:$statement_sha,kind:$kind,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}] | unique_by(tojson)' \
+    --arg sensitivity_class "$sensitivity_class" \
+    '. + [{source_record:$source,source_sha256:$source_sha,statement_sha256:$statement_sha,kind:$kind,confidence:"verified",sphere:"privat",sensitivity_class:$sensitivity_class,provider_class:"anthropic-claude-obsidian",supersedes:[]}] | unique_by(tojson)' \
     "$ALLOWLIST" > "$temporary" || fail "could not extend registration allowlist"
   mv "$temporary" "$ALLOWLIST"
   write_config
@@ -248,6 +250,7 @@ register_statement() {
     --source-sha256 "$(hash_file "$SOURCE_FILE")" \
     --confidence verified \
     --sphere privat \
+    --sensitivity-class ordinary-project-context \
     --provider-class anthropic-claude-obsidian
 }
 
@@ -308,8 +311,9 @@ make_bundle() {
 }
 
 prepare_save() {
-  local record_id=${1:?} bundle=${2:?} arguments
-  arguments=$(jq -nc --arg record "$record_id" --argjson bundle "$bundle" '{record_id:$record,duplicate_check:{result:"no-match",searched_paths:["wiki/index.md"]},bundle:$bundle}') || fail "could not build prepare request"
+  local record_id=${1:?} bundle=${2:?} arguments content_sensitivity
+  content_sensitivity=$(printf '%s' "$bundle" | jq -c '.writes | map({key:.path,value:"ordinary-project-context"}) | from_entries') || fail "could not classify Save paths"
+  arguments=$(jq -nc --arg record "$record_id" --argjson bundle "$bundle" --argjson content_sensitivity "$content_sensitivity" '{record_id:$record,duplicate_check:{result:"no-match",searched_paths:["wiki/index.md"]},content_sensitivity:$content_sensitivity,bundle:$bundle}') || fail "could not build prepare request"
   mcp_content prepare_handoff_save "$arguments"
 }
 
@@ -331,19 +335,28 @@ test_required_prerequisite_status() {
 test_sensitive_contracts() {
   local statement seal record bundle sensitive arguments result
   new_env sensitive
+  register_statement 'The client uses API v2.' project-fact >/dev/null || fail "ordinary client project fact was rejected"
   for statement in \
     'The taxpayer identifier is 123-45-6789.' \
     'Taxpayer identifier is 12345678901.' \
     'Alice Smith account balance is EUR 5,000.' \
     "The client's salary is EUR 120,000." \
-    'Home address: 12 Main St.'; do
+    'The vendor assets total 120000 euros.' \
+    'Home address: 12 Main St.' \
+    'Alice lives at 42 Kingsway.'; do
     authorize "$statement"
-    if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/error"; then
+    if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/error"; then
       fail "sensitive candidate passed an exact eligibility contract"
     fi
     grep -q 'SENSITIVE_CONTENT' "$EROOT/error" || fail "sensitive candidate failed for the wrong reason"
   done
-  for sensitive in 'Account balance is EUR 5,000.' "The client's salary is EUR 120,000." 'Home address: 12 Main St.'; do
+  statement='The weekly release cadence is documented.'
+  authorize "$statement" gotcha financial-data
+  if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class financial-data --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/error"; then
+    fail "explicit forbidden sensitivity class was accepted"
+  fi
+  grep -q 'SENSITIVE_CLASS' "$EROOT/error" || fail "explicit sensitivity classification failed for the wrong reason"
+  for sensitive in 'Account balance is EUR 5,000.' "The client's salary is EUR 120,000." 'The vendor assets total 120000 euros.' 'Home address: 12 Main St.' 'Alice lives at 42 Kingsway.'; do
     new_env "sensitive-save-$(hash_text "$sensitive" | cut -c1-8)"
     enable_consumer
     seal=$(make_ready) || fail "sensitive bundle fixture failed"
@@ -351,11 +364,50 @@ test_sensitive_contracts() {
     bind_claude >/dev/null || fail "Claude binding failed"
     bundle=$(make_bundle "$record")
     bundle=$(printf '%s' "$bundle" | jq -c --arg sensitive "$sensitive" '.writes[0].content=("# Account\n\n"+$sensitive+"\n")')
-    arguments=$(jq -nc --arg record "$record" --argjson bundle "$bundle" '{record_id:$record,duplicate_check:{result:"no-match",searched_paths:["wiki/index.md"]},bundle:$bundle}')
+    arguments=$(jq -nc --arg record "$record" --argjson bundle "$bundle" --argjson content_sensitivity "$(printf '%s' "$bundle" | jq -c '.writes | map({key:.path,value:"ordinary-project-context"}) | from_entries')" '{record_id:$record,duplicate_check:{result:"no-match",searched_paths:["wiki/index.md"]},content_sensitivity:$content_sensitivity,bundle:$bundle}')
     result=$(mcp_content prepare_handoff_save "$arguments")
     [ "$(printf '%s' "$result" | jq -r .code)" = BUNDLE_CONTENT ] || fail "sensitive Save content was accepted"
   done
+  new_env sensitive-save-classification
+  enable_consumer
+  seal=$(make_ready) || fail "Save sensitivity classification fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  bundle=$(make_bundle "$record")
+  arguments=$(jq -nc --arg record "$record" --argjson bundle "$bundle" --argjson content_sensitivity "$(printf '%s' "$bundle" | jq -c '.writes | map({key:.path,value:"ordinary-project-context"}) | from_entries | .["wiki/concepts/Bounded retry.md"]="customer-record"')" '{record_id:$record,duplicate_check:{result:"no-match",searched_paths:["wiki/index.md"]},content_sensitivity:$content_sensitivity,bundle:$bundle}')
+  result=$(mcp_content prepare_handoff_save "$arguments")
+  [ "$(printf '%s' "$result" | jq -r .code)" = SENSITIVE_CLASS ] || fail "explicit forbidden Save sensitivity class was accepted"
   pass "sensitive candidate and Save content rejection"
+}
+
+test_foreign_candidate_isolation() {
+  local current_source foreign_source current_statement foreign_statement seal record
+  new_env foreign-candidate-isolation
+  current_statement='Current Pi work seals independently of foreign candidates.'
+  register_statement "$current_statement" project-fact >/dev/null || fail "current candidate did not register"
+  current_source=$SOURCE_FILE
+  foreign_source="$SOURCE/foreign.md"
+  printf 'Foreign durable facts.\n' > "$foreign_source"
+  SOURCE_FILE=$foreign_source
+  foreign_statement='Foreign Pi work belongs to another exact session.'
+  authorize "$foreign_statement" project-fact
+  PI_SESSION_ID=pi-session-foreign cli register \
+    --source-harness pi \
+    --kind project-fact \
+    --statement "$foreign_statement" \
+    --source-record "$foreign_source" \
+    --source-sha256 "$(hash_file "$foreign_source")" \
+    --confidence verified \
+    --sphere privat \
+    --sensitivity-class ordinary-project-context \
+    --provider-class anthropic-claude-obsidian >/dev/null || fail "foreign candidate did not register"
+  SOURCE_FILE=$current_source
+  printf 'Foreign source changed after registration.\n' > "$foreign_source"
+  seal=$(seal_pi) || fail "foreign stale source blocked current session sealing"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = sealed ] || fail "current session did not seal with foreign stale work present"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  jq -e --arg statement "$current_statement" '.items | length == 1 and .[0].statement == $statement' "$FM_HOME/state/context-handoff/records/$record.json" >/dev/null || fail "current envelope included foreign session work"
+  pass "foreign candidate ownership isolation"
 }
 
 test_single_create_save() {
@@ -432,7 +484,7 @@ test_registration_capability_lock() {
   bind_claude >/dev/null || fail "initial Claude binding failed"
   statement='A stale MCP process must not register for its replacement generation.'
   authorize "$statement"
-  args=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  args=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
   request=$(jq -nc --argjson arguments "$args" '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"register_curated_candidate",arguments:$arguments}}')
   state="$FM_HOME/state/context-handoff"
   binding=$(find "$state/bindings" -maxdepth 1 -type f ! -name 'compaction-*' | head -1)
@@ -491,7 +543,7 @@ test_compaction_backpressure() {
   done
   statement='Backpressure must leave an exact later success transition.'
   authorize "$statement"
-  if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/backpressure-error"; then
+  if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/backpressure-error"; then
     fail "compaction cap accepted an unrecoverable extra candidate"
   fi
   grep -q 'COMPACTION_BACKPRESSURE' "$EROOT/backpressure-error" || fail "compaction cap did not apply explicit backpressure"
@@ -553,23 +605,21 @@ test_monotonic_claude_binding() {
 }
 
 test_claude_precompact_binding_failure() {
-  local statement arguments registered foreign blocked config_path
+  local statement arguments registered foreign blocked
   new_env claude-precompact-binding
   enable_consumer
   bind_claude >/dev/null || fail "Claude binding failed"
   statement='Stop compaction when the exact Claude endpoint becomes unhealthy.'
   authorize "$statement"
-  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
   registered=$(mcp_content register_curated_candidate "$arguments")
   [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude endpoint failure fixture did not register"
-  config_path="$FM_HOME/config/context-handoff.json"
-  jq '.vault.inode += 1' "$config_path" > "$config_path.tmp" || fail "could not invalidate synthetic Vault binding"
-  chmod 600 "$config_path.tmp"
-  mv "$config_path.tmp" "$config_path"
+  printf 'unavailable\n' > "$HERDR_MODE"
   foreign=$(jq -nc '{hook_event_name:"PreCompact",session_id:"foreign-session",trigger:"auto"}' | cli claude-hook) || fail "foreign Claude PreCompact did not remain ignorable"
   [ -z "$foreign" ] || fail "foreign Claude session was blocked for another register"
   blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "matching Claude PreCompact binding failure escaped the hook"
   printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "unhealthy exact Claude endpoint failed open"
+  [ -z "$(find "$FM_HOME/state/context-handoff/records" -type f -print -quit)" ] || fail "unhealthy Herdr endpoint sealed Claude work"
   jq -e 'select(.reason=="claude-precompact-binding-failed")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "unhealthy Claude PreCompact wrote no durable failure receipt"
 
   new_env claude-retry-binding
@@ -577,15 +627,12 @@ test_claude_precompact_binding_failure() {
   bind_claude >/dev/null || fail "Claude retry binding failed"
   statement='Retryable Claude queues must block when their endpoint becomes unhealthy.'
   authorize "$statement"
-  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
   registered=$(mcp_content register_curated_candidate "$arguments")
   [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude retry-only fixture did not register"
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "Claude retry-only fixture did not seal"
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "Claude retry-only fixture did not record failure"
-  config_path="$FM_HOME/config/context-handoff.json"
-  jq '.vault.inode += 1' "$config_path" > "$config_path.tmp" || fail "could not invalidate retry-only Vault binding"
-  chmod 600 "$config_path.tmp"
-  mv "$config_path.tmp" "$config_path"
+  printf 'mismatch\n' > "$HERDR_MODE"
   blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "retry-only Claude binding failure escaped the hook"
   printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "retryable Claude queue failed open after endpoint failure"
   pass "fail-closed Claude PreCompact endpoint binding"
@@ -608,7 +655,7 @@ test_lifecycle_and_authority_snapshots() {
   bind_claude >/dev/null || fail "initial Claude generation did not bind"
   statement='Only the active Claude generation may publish a compaction attempt.'
   authorize "$statement"
-  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
   registered=$(mcp_content register_curated_candidate "$arguments")
   [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "retired PreCompact fixture did not register"
   marker="$EROOT/stale-paused"
@@ -808,9 +855,9 @@ PY
     i=$((i + 1))
   done
   [ -f "$marker" ] || fail "synthetic durable initialization boundary was not held"
-  cli register --source-harness pi --kind gotcha --statement "$first" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > "$EROOT/first-register" 2> "$EROOT/first-error" &
+  cli register --source-harness pi --kind gotcha --statement "$first" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian > "$EROOT/first-register" 2> "$EROOT/first-error" &
   first_pid=$!
-  cli register --source-harness pi --kind gotcha --statement "$second" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > "$EROOT/second-register" 2> "$EROOT/second-error" &
+  cli register --source-harness pi --kind gotcha --statement "$second" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian > "$EROOT/second-register" 2> "$EROOT/second-error" &
   second_pid=$!
   sleep 0.3
   [ ! -e "$FM_HOME/state/context-handoff" ] || fail "concurrent process bypassed the initialization durability boundary"
@@ -944,6 +991,80 @@ EOF
   pass "model-free Pi lifecycle and fail-closed adapter validation"
 }
 
+test_installed_pi_success_order() {
+  local pi_entry pi_root output expected
+  if ! command -v pi >/dev/null 2>&1; then
+    if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ] || [ "${FM_CONTEXT_HANDOFF_PI_SUCCESS_PROBE_ONLY:-0}" = 1 ]; then
+      fail "required installed Pi success-order probe is unavailable"
+    fi
+    printf 'skip: pi not found\n'
+    return
+  fi
+  pi_entry=$(realpath "$(command -v pi)")
+  pi_root=$(dirname "$(dirname "$(dirname "$pi_entry")")")
+  [ -f "$pi_root/dist/core/agent-session.js" ] || fail "installed Pi agent session is unavailable"
+  output=$(PI_ROOT="$pi_root" node --input-type=module <<'EOF'
+import { pathToFileURL } from "node:url";
+const { AgentSession } = await import(pathToFileURL(`${process.env.PI_ROOT}/dist/core/agent-session.js`));
+const events = [];
+let persisted = false;
+let entries = [];
+const entry = (id, parentId, text) => ({
+  type: "message",
+  id,
+  parentId,
+  timestamp: "2026-08-30T20:00:00.000Z",
+  message: { role: "user", content: text, timestamp: 1788120000000 },
+});
+const branch = [entry("old", null, "old ".repeat(5000)), entry("recent", "old", "recent")];
+const runner = {
+  hasHandlers: () => true,
+  async emit(event) {
+    if (event.type === "session_before_compact") {
+      events.push(`extension:${event.type}:${event.reason}`);
+      return { compaction: { summary: "synthetic", firstKeptEntryId: "recent", tokensBefore: 5001 } };
+    }
+    if (event.type === "session_compact") {
+      events.push(`extension:${event.type}:persisted=${persisted}`);
+    }
+  },
+};
+const probe = {
+  model: { provider: "synthetic" },
+  settingsManager: { getCompactionSettings: () => ({ keepRecentTokens: 1 }) },
+  sessionManager: {
+    getBranch: () => branch,
+    appendCompaction(summary, firstKeptEntryId, tokensBefore) {
+      persisted = true;
+      events.push("persistence:appendCompaction");
+      entries = [{ type: "compaction", summary, firstKeptEntryId, tokensBefore }];
+    },
+    getEntries: () => entries,
+    buildSessionContext: () => ({ messages: [] }),
+  },
+  agent: { state: { messages: [] }, hasQueuedMessages: () => false },
+  _extensionRunner: runner,
+  _getSummarizationRequestAuth: async model => ({ model, apiKey: undefined, headers: undefined, env: undefined }),
+  _runDefaultCompaction: async () => { throw new Error("synthetic extension compaction called a model"); },
+  _emit: event => events.push(`public:${event.type}:${event.reason}:aborted=${event.aborted ?? "unset"}`),
+  _emitSessionCompactFailed: AgentSession.prototype._emitSessionCompactFailed,
+};
+const continued = await AgentSession.prototype._runAutoCompaction.call(probe, "threshold", false);
+console.log([...events, `continued=${continued}`].join("\n"));
+EOF
+  ) || fail "installed Pi success-order probe failed"
+  expected=$(printf '%s\n' \
+    'public:compaction_start:threshold:aborted=unset' \
+    'extension:session_before_compact:threshold' \
+    'persistence:appendCompaction' \
+    'extension:session_compact:persisted=true' \
+    'public:compaction_end:threshold:aborted=false' \
+    'continued=false')
+  [ "$output" = "$expected" ] || fail "installed Pi success event preceded durable compaction persistence"
+  printf '%s\n' "$output"
+  pass "installed Pi persistence-before-success order"
+}
+
 test_completed_save_precedes_source_validation() {
   local seal record bundle prepared approval bundle_path result disposition
   new_env completed-save-source-change
@@ -972,7 +1093,7 @@ test_registration_lifecycle_retries() {
   write_config
   statement='Registration remains default-off until explicitly enabled.'
   authorize "$statement"
-  if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/disabled-error"; then
+  if cli register --source-harness pi --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian > /dev/null 2> "$EROOT/disabled-error"; then
     fail "disabled candidate registration succeeded"
   fi
   REGISTRATION_ENABLED=true
@@ -1131,6 +1252,26 @@ test_orphan_apply_execution_claim() {
   TRANSACTION_CORE=$CORE
   TRANSACTION_MODULE=$CORE
   TRANSACTION_INTERPRETER=$(realpath "$(command -v bash)")
+  new_env spawning-claim-recovery
+  enable_consumer
+  seal=$(make_ready 'Recover a durable execution claim before any child exists.') || fail "spawning claim fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "Claude binding failed"
+  bundle=$(make_bundle "$record")
+  prepared=$(prepare_save "$record" "$bundle") || fail "spawning claim inspect failed"
+  approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
+  arguments=$(jq -nc --arg record "$record" --arg approval "$approval" '{record_id:$record,approval_sha256:$approval}')
+  if (
+    export FM_HANDOFF_TEST_EXIT_AFTER_EXECUTION_CLAIM=1
+    mcp_response commit_handoff_save "$arguments"
+  ) > "$EROOT/spawning-parent-output" 2> "$EROOT/spawning-parent-error"; then
+    fail "synthetic MCP parent survived its pre-spawn crash"
+  fi
+  result=$(mcp_content record_curation_disposition "$(jq -nc --arg record "$record" '{record_id:$record,disposition:"duplicate",rationale:"The durable fact already exists."}')")
+  [ "$(printf '%s' "$result" | jq -r .disposition)" = duplicate ] || fail "orphan spawning claim did not recover"
+  [ ! -e "$VAULT/wiki/concepts/Bounded retry.md" ] || fail "pre-spawn crash allowed an unclaimed mutation"
+  [ ! -e "$FM_HOME/state/context-handoff/bindings/execution-$record.json" ] || fail "recovered spawning claim remained durable"
+
   new_env orphan-apply-claim
   enable_consumer
   seal=$(make_ready 'Keep terminal disposition behind the durable apply claim.') || fail "orphan apply fixture failed"
@@ -1189,7 +1330,7 @@ test_claude_lifecycle_and_plugin_discovery() {
   bind_claude >/dev/null || fail "Claude binding failed"
   statement='Preserve only bounded curated bytes across Claude compaction.'
   authorize "$statement" decision
-  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"decision",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"decision",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
   registered=$(mcp_content register_curated_candidate "$arguments")
   [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude lifecycle candidate did not register"
   output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"manual",transcript_path:"/forbidden/transcript"}' | cli claude-hook) || fail "Claude PreCompact failed"
@@ -1208,7 +1349,7 @@ test_claude_lifecycle_and_plugin_discovery() {
   fi
   statement='Retry the exact Claude seal after a provider failure.'
   authorize "$statement" next-step
-  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"next-step",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"next-step",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
   registered=$(mcp_content register_curated_candidate "$arguments")
   [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude retry candidate did not register"
   output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "automatic Claude PreCompact failed"
@@ -1237,8 +1378,14 @@ test_claude_lifecycle_and_plugin_discovery() {
   pass "Claude lifecycle and model-free plugin discovery"
 }
 
+if [ "${FM_CONTEXT_HANDOFF_PI_SUCCESS_PROBE_ONLY:-0}" = 1 ]; then
+  test_installed_pi_success_order
+  exit 0
+fi
+
 test_required_prerequisite_status
 test_sensitive_contracts
+test_foreign_candidate_isolation
 test_single_create_save
 test_queue_first_recovery
 test_invalid_candidate_receipts
@@ -1254,6 +1401,7 @@ test_bounded_transports_and_delivery
 test_directory_durability
 test_serialized_directory_initialization
 test_pi_result_validation
+test_installed_pi_success_order
 test_completed_save_precedes_source_validation
 test_registration_lifecycle_retries
 test_quarantine_disable_and_disposition_recovery
