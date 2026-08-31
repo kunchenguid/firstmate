@@ -69,6 +69,8 @@ A captain who will watch the pane themself adds `--cursor-exemption attended`; a
 An envelope name is bounded to letters, digits, `.`, `_`, and `-` starting on a letter or digit, so a grant cannot be unauditable or carry a line break into the task record.
 An explicitly passed grant is refused on a non-cursor harness rather than recorded, while one inherited from a task's own record is dropped when that task restarts onto another harness.
 Across a relaunch or a `--secondmate` respawn, the two paths that restart a task from its own record, an `envelope:<name>` grant is inherited while an `attended` one is not, because the person who attested may be gone by the time stuck-worker recovery relaunches; a fresh spawn always needs the flag.
+Automatic recovery of an enveloped cursor secondmate works on the remote route only, since the local liveness sweep does not act on a cursor endpoint.
+A relaunch that needs a fresh attestation takes the grant on the verb itself: `../../../bin/fm-control.sh <id> relaunch --cursor-exemption attended`.
 Without that flag the spawn is refused, so route ordinary unattended scouting to Codex or Claude instead.
 
 ## Primary integration

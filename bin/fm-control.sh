@@ -197,6 +197,8 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+NEW_CURSOR_EXEMPTION=
+CURSOR_EXEMPTION_SET=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -213,6 +215,7 @@ for control_arg in "$@"; do
         NOTE=$(cat "$control_arg")
         NOTE_SET=1
         ;;
+      cursor_exemption) NEW_CURSOR_EXEMPTION=$control_arg; CURSOR_EXEMPTION_SET=1 ;;
     esac
     control_want_value=
     continue
@@ -226,6 +229,8 @@ for control_arg in "$@"; do
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
+    --cursor-exemption) control_want_value=cursor_exemption ;;
+    --cursor-exemption=*) NEW_CURSOR_EXEMPTION=${control_arg#--cursor-exemption=}; CURSOR_EXEMPTION_SET=1 ;;
     --note-file) control_want_value=note_file ;;
     --note-file=*)
       [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
@@ -237,7 +242,16 @@ for control_arg in "$@"; do
 done
 if [ -n "$control_want_value" ]; then
   [ "$control_want_value" = note_file ] && die "--note-file requires a value"
+  [ "$control_want_value" = cursor_exemption ] && die "--cursor-exemption requires a value"
   die "--$control_want_value requires a value"
+fi
+# The grant a caller passes HERE is a fresh per-invocation attestation for this
+# relaunch, which is why `attended` is accepted on the verb even though it is
+# never inherited from the record. bin/fm-control-lib.sh stays the one owner of
+# what a grant may say, so an unusable value is refused before anything stops.
+if [ "$CURSOR_EXEMPTION_SET" -eq 1 ]; then
+  fm_control_cursor_exemption_valid "$NEW_CURSOR_EXEMPTION" \
+    || die "--cursor-exemption must be 'attended' (a person is in the pane) or 'envelope:<name>' where <name> starts with a letter or digit and continues with letters, digits, '.', '_', or '-'; '$NEW_CURSOR_EXEMPTION' names neither"
 fi
 
 if [ "$VERB" != relaunch ]; then
@@ -668,8 +682,12 @@ resolve_relaunch_profile() {
   # one inheritance owner in bin/fm-control-lib.sh, so this question is the
   # question the launch will actually be asked. The refusal text is shared for
   # the same reason.
-  RELAUNCH_EXEMPTION=$(fm_control_cursor_exemption_inherited \
-    "$(fm_meta_get "$META" cursor_exemption)" "$TARGET_HARNESS")
+  if [ "$CURSOR_EXEMPTION_SET" -eq 1 ]; then
+    RELAUNCH_EXEMPTION=$NEW_CURSOR_EXEMPTION
+  else
+    RELAUNCH_EXEMPTION=$(fm_control_cursor_exemption_inherited \
+      "$(fm_meta_get "$META" cursor_exemption)" "$TARGET_HARNESS")
+  fi
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" "$RELAUNCH_EXEMPTION" \
     || die "$(fm_control_harness_kind_refusal "$TARGET_HARNESS" "$KIND") Relaunching $ID onto it would stop the running agent for a launch that must be refused."
   # A model or effort chosen for the previous harness does not transfer to a
@@ -843,6 +861,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ "$CURSOR_EXEMPTION_SET" -eq 0 ] || spawn_args+=(--cursor-exemption "$NEW_CURSOR_EXEMPTION")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1

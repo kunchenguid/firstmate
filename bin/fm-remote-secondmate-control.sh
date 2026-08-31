@@ -160,11 +160,19 @@ cmd_route() {
 # Both directions of the mixed-version contract are stated here, because a fleet
 # upgrades one host at a time and either side can be the older one.
 #
-# NEW parent, OLD remote: the older host does not know `exemption:` and binds it
-# to its positional traceparent slot, which then fails validation there. That is
-# the intended degradation - the launch fails loudly on the remote instead of
-# silently proceeding without the grant, and a cursor secondmate that reaches
-# fm-spawn.sh with no exemption is refused by the unattended bar anyway.
+# NEW parent, OLD remote: the older host takes its carrier POSITIONALLY as $6
+# and caps the verb at six arguments, so what breaks first is `traceparent:`,
+# not `exemption:`. Once the parent's home enables config/trace-context the
+# parent appends `traceparent:<value>` as $6 on EVERY remote secondmate launch,
+# the older host binds that whole token - prefix included - into its traceparent
+# slot and forwards it as `--traceparent traceparent:00-...`, and its own
+# fm-spawn refuses the non-W3C value. The blast radius is therefore every
+# carrier-bearing launch to a not-yet-upgraded host, including ordinary codex and
+# claude launches that have nothing to do with cursor, not just an exempted one.
+# Adding a grant on top sends a seventh argument, which trips the older
+# dispatcher's six-argument cap and exits on usage before it binds anything.
+# Only the trace-off-plus-grant case mis-binds `exemption:` itself. Every one of
+# those is loud and fails closed: none launches unexempted.
 #
 # OLD parent, NEW remote: the older parent sends its carrier as a BARE positional
 # sixth argument, which matches neither prefix. Rejecting it would break every

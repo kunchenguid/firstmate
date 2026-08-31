@@ -907,6 +907,47 @@ test_relaunch_inherits_a_named_isolation_envelope_grant() {
 # later relaunch back onto cursor would read it out of that record as authority
 # nobody granted for cursor. The switch itself stays legitimate: the grant is
 # dropped, not the relaunch refused.
+# The refusal an attended cursor task hits names --cursor-exemption as the way
+# forward, so that flag has to work on the verb the operator was just using or
+# following the instruction produces a second error. It is a FRESH per-invocation
+# attestation for this relaunch, which is why `attended` is accepted here even
+# though it is never inherited from the record, and the pre-stop check must
+# evaluate the passed grant rather than the recorded one.
+test_relaunch_accepts_a_fresh_attended_grant_on_the_verb() {
+  local dir out rc
+  dir=$(new_case cursorattendedflag rl44)
+  add_ship_task "$dir" rl44 cursor
+  printf 'cursor_exemption=attended\n' >> "$dir/home/state/rl44.meta"
+
+  out=$(run_control "$dir" rl44 relaunch --note "captain is watching" \
+    --cursor-exemption attended); rc=$?
+  expect_code 0 "$rc" "a fresh attended attestation should let the relaunch through: $out"
+  assert_contains "$out" "relaunched rl44 harness=cursor" \
+    "the relaunch should proceed on cursor under the passed grant"
+  [ "$(meta_field "$dir" rl44 cursor_exemption)" = attended ] \
+    || fail "the grant this relaunch ran under must be recorded, got '$(meta_field "$dir" rl44 cursor_exemption)'"
+  assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
+  pass "fm-control relaunch: a fresh attended grant passed on the verb permits the relaunch"
+}
+
+# A grant the verb cannot use must be refused at parse time, before the
+# transaction starts, so a typo never costs a running agent.
+test_relaunch_refuses_a_malformed_grant_before_stopping() {
+  local dir out rc
+  dir=$(new_case cursorbadflag rl45)
+  add_ship_task "$dir" rl45 cursor
+  printf 'cursor_exemption=envelope:bench\n' >> "$dir/home/state/rl45.meta"
+
+  out=$(run_control "$dir" rl45 relaunch --note n --cursor-exemption "envelope:bad name"); rc=$?
+  expect_code 1 "$rc" "a malformed grant must be refused"
+  assert_contains "$out" "--cursor-exemption must be" \
+    "the refusal should name the accepted grant forms"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a malformed grant must be refused before the running agent is stopped"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
+  pass "fm-control relaunch: a malformed grant is refused before the agent is stopped"
+}
+
 test_relaunch_onto_another_harness_drops_the_cursor_grant() {
   local dir out
   dir=$(new_case cursorswitch rl43)
@@ -1606,6 +1647,8 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_relaunch_never_inherits_an_attended_cursor_grant
 test_control_relaunch_refuses_an_attended_cursor_grant_before_stopping
 test_relaunch_onto_another_harness_drops_the_cursor_grant
+test_relaunch_accepts_a_fresh_attended_grant_on_the_verb
+test_relaunch_refuses_a_malformed_grant_before_stopping
 test_relaunch_inherits_a_named_isolation_envelope_grant
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
