@@ -1663,42 +1663,6 @@ test_secondmate_teardown_refuses_process_events_without_sweep_script() {
   pass "secondmate teardown preserves state when process-event sweeping is unavailable"
 }
 
-test_secondmate_teardown_preserves_process_events_on_later_refusal() {
-  local home subhome fakebin log sweep_log err
-  home="$TMP_ROOT/procevent-later-refusal-home"
-  subhome="$TMP_ROOT/procevent-later-refusal-subhome"
-  sweep_log="$TMP_ROOT/procevent-later-refusal-sweep.log"
-  err="$TMP_ROOT/procevent-later-refusal.err"
-  mkdir -p "$home/state/public-followup/registry" "$home/data" "$subhome/state/procevent"
-  mark_firstmate_home "$subhome"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  printf 'adapter=lavish\n' > "$subhome/state/procevent/source.source"
-  install_fake_process_event_sweep "$subhome" "$sweep_log"
-  printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
-  printf 'work_home=secondmate:domain\nwork_id=domain\n' > "$home/state/public-followup/registry/obligation"
-  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  fakebin=$(make_fake_tmux "$TMP_ROOT/procevent-later-refusal-fake")
-  log="$TMP_ROOT/procevent-later-refusal-fake/tmux.log"
-  cat > "$fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$fakebin/tasks-axi"
-
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
-      FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/procevent-later-refusal-fake/pane.txt" \
-      FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" \
-      "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
-    fail "teardown bypassed a later public-followup refusal"
-  fi
-  grep -F 'still owes a public reply' "$err" >/dev/null || fail "later public-followup refusal was not reached"
-  [ ! -s "$sweep_log" ] || fail "later refusal retired process-event sources before teardown was authorized"
-  [ -e "$subhome/state/procevent/source.source" ] || fail "later refusal removed the process-event registration"
-  [ -d "$subhome" ] || fail "later refusal removed the secondmate home"
-  [ -e "$home/state/domain.meta" ] || fail "later refusal removed parent evidence"
-  pass "later teardown refusals preserve active process-event sources"
-}
 
 test_secondmate_force_teardown_sweeps_nested_homes() {
   local home subhome childhome subhome_abs childhome_abs fakebin log sweep_log
@@ -2944,7 +2908,6 @@ test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
 test_secondmate_teardown_sweeps_process_events_before_removal
 test_secondmate_teardown_refuses_process_events_without_sweep_script
-test_secondmate_teardown_preserves_process_events_on_later_refusal
 test_secondmate_force_teardown_sweeps_nested_homes
 test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return

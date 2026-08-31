@@ -501,7 +501,7 @@ test_bootstrap_relays_recovered_and_stuck() {
   advance_origin "$home" rec-clone C1
   git -C "$rec" checkout --detach --quiet
 
-  # Full bootstrap: no state/ dir -> secondmate sync no-ops; no .env -> X mode off.
+  # Full bootstrap: no state/ dir -> secondmate sync no-ops.
   # We only assert the fleet-sync relay lines; other detect lines are irrelevant.
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 

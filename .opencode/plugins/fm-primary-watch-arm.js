@@ -86,8 +86,7 @@ function effectivePaths(root) {
   const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || fmRoot;
   const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
-  const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
-  return { root: fmRoot, home: fmHome, state, config };
+  return { root: fmRoot, home: fmHome, state };
 }
 
 async function isPrimaryRoot(root, home) {
@@ -103,7 +102,6 @@ async function isPrimaryRoot(root, home) {
 
 function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
   try {
     return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
   } catch {
@@ -342,7 +340,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     FM_CONFIG_OVERRIDE: paths.config,
     FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
   };
-  const armChild = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
+  const armChild = spawn("bash", ["-lc", 'exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
     cwd: paths.root,
     env,
     stdio: ["ignore", "pipe", "pipe"],

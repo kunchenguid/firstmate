@@ -6,20 +6,17 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$REPO_ROOT}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
 HARNESS=
 READ_ONLY=0
 AFK=0
-X_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -48,11 +45,6 @@ while [ "$#" -gt 0 ]; do
     --afk)
       [ "$#" -gt 1 ] || { echo "error: --afk requires 0 or 1" >&2; exit 2; }
       AFK=$(bool_value "$2")
-      shift 2
-      ;;
-    --x-mode)
-      [ "$#" -gt 1 ] || { echo "error: --x-mode requires 0 or 1" >&2; exit 2; }
-      X_MODE=$(bool_value "$2")
       shift 2
       ;;
     --queue-pending)
@@ -90,27 +82,12 @@ esac
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-x_mode_env="$CONFIG/x-mode.env"
-
-shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
-x_mode_env_sh=$(shell_quote "$x_mode_env")
-
-if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
-  X_MODE=1
-fi
 
 render_snippet() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
-    line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
-    line=${line//__FM_X_MODE_ENV__/$x_mode_env}
     printf '%s\n' "$line"
   done < "$SNIPPET"
 }
@@ -129,10 +106,6 @@ repair_line() {
   if [ "$QUEUE_PENDING" -eq 1 ]; then
     prefix='After draining queued wakes, '
   fi
-  if [ "$X_MODE" -eq 1 ]; then
-    prefix="${prefix}source ${x_mode_env_sh} first, then "
-  fi
-
   case "$HARNESS" in
     claude)
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
@@ -204,11 +177,7 @@ if [ "$AFK" -eq 1 ]; then
 else
   printf '%s\n' '- Away mode: inactive.'
 fi
-if [ "$X_MODE" -eq 1 ]; then
-  printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
-else
-  printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
-fi
+printf '%s\n' '- Relay: removed; use the default watcher cadence.'
 ordinary_wake_line
 printf '\n'
 render_snippet

@@ -161,7 +161,6 @@ exclusion_reason() {
 list_parallel_candidates() {
   cat <<'EOF'
 tests/fm-arm-pretool-check.test.sh
-tests/fm-backend-herdr.test.sh
 tests/fm-brief.test.sh
 tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-cd-pretool-check.test.sh
@@ -170,7 +169,6 @@ tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-ensure-agents-md.test.sh
 tests/fm-grok-harness.test.sh
-tests/fm-herdr-lab.test.sh
 tests/fm-lint.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-pr-merge.test.sh
@@ -183,7 +181,6 @@ tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
-tests/fm-x-mode.test.sh
 EOF
 }
 
@@ -207,7 +204,6 @@ fm-teardown.test.sh
 fm-watcher-lock.test.sh
 fm-wake-queue.test.sh
 fm-afk-inject-e2e.test.sh
-fm-backend-herdr-smoke.test.sh
 fm-backend-cmux-smoke.test.sh
 fm-pi-primary-live-e2e.test.sh
 fm-quota-array-dispatch-live-e2e.test.sh

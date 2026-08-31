@@ -11,7 +11,7 @@
 #
 # It adds no second notification control plane: a completed result is published
 # as an ordinary `check` wake through the existing durable wake queue, which is
-# the same mechanism merge polls and X mode already use.
+# the same mechanism merge polls already use.
 #
 # DURABILITY BOUNDARY, stated precisely. This runner proves exactly one thing:
 # once a child process has exited and its output has been read, that output is

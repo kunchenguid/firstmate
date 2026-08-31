@@ -28,6 +28,10 @@ fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
 
+fm_lock_current_scope() {
+  printf '%s\n' "${BASH_SUBSHELL:-0}"
+}
+
 fm_pid_alive() {
   local pid=$1
   case "$pid" in
@@ -298,6 +302,7 @@ fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
     "$lockdir/pid" \
+    "$lockdir/scope" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/role" \
@@ -306,14 +311,17 @@ fm_lock_clean_known_files() {
 }
 
 fm_lock_set_role() {
-  local lockdir=$1 role=$2 current pid back
+  local lockdir=$1 role=$2 current scope pid lock_scope back
   case "$role" in
     autoarm|terminal-check) : ;;
     *) return 1 ;;
   esac
   current=${BASHPID:-$$}
+  scope=$(fm_lock_current_scope)
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  lock_scope=$(cat "$lockdir/scope" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 1
+  [ "${lock_scope:-0}" = "$scope" ] || return 1
   printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
   back=$(cat "$lockdir/role" 2>/dev/null || true)
   [ "$back" = "$role" ]
@@ -338,11 +346,15 @@ fm_lock_owner_dir() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
+  local ownerdir=$1 mypid scope back
   mypid=${BASHPID:-$$}
+  scope=$(fm_lock_current_scope)
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
+  printf '%s\n' "$scope" > "$ownerdir/scope" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  [ "$back" = "$mypid" ] || return 1
+  back=$(cat "$ownerdir/scope" 2>/dev/null || true)
+  [ "$back" = "$scope" ]
 }
 
 fm_lock_link_owner() {
@@ -387,14 +399,24 @@ fm_lock_claim_blocked_by_steal() {
 }
 
 fm_lock_claim() {
-  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
+  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid scope back
   mypid=${BASHPID:-$$}
+  scope=$(fm_lock_current_scope)
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
+  if ! { printf '%s\n' "$scope" > "$ownerdir/scope"; } 2>/dev/null; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   if [ "$back" != "$mypid" ]; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
+  back=$(cat "$ownerdir/scope" 2>/dev/null || true)
+  if [ "$back" != "$scope" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -792,7 +814,7 @@ fm_recovery_marker_reopen_announced() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 pid scope lock_scope steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -804,7 +826,9 @@ fm_lock_try_acquire() {
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
   # $() forks a subshell whose BASHPID is not this frame's pid.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  scope=$(fm_lock_current_scope)
+  lock_scope=$(cat "$lockdir/scope" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ] && [ "${lock_scope:-0}" = "$scope" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -900,20 +924,25 @@ fm_lock_acquire_wait() {
 }
 
 fm_lock_release() {
-  local lockdir=$1 pid current ownerdir
+  local lockdir=$1 pid current scope lock_scope ownerdir
   current=${BASHPID:-$$}
+  scope=$(fm_lock_current_scope)
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
     pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+    lock_scope=$(cat "$ownerdir/scope" 2>/dev/null || true)
     [ "$pid" = "$current" ] || return 0
+    [ "${lock_scope:-0}" = "$scope" ] || return 0
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  lock_scope=$(cat "$lockdir/scope" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
+  [ "${lock_scope:-0}" = "$scope" ] || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
 }

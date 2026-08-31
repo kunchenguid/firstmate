@@ -159,7 +159,7 @@ exit 0
 SH
   chmod +x "$home/bin/fm-guard.sh"
   git -C "$home" init -q
-  git -C "$home" add AGENTS.md bin/fm-guard.sh
+  git -C "$home" add -f AGENTS.md bin/fm-guard.sh
   git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
