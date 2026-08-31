@@ -63,6 +63,7 @@
         "source_sha256",
         "confidence",
         "sphere",
+        "sensitivity_class",
         "provider_class",
         "eligibility_sha256",
         "supersedes"
@@ -107,6 +108,14 @@
             "privat",
             "geschaeftlich",
             "geteilt"
+          ]
+        },
+        "sensitivity_class": {
+          "enum": [
+            "ordinary-project-context",
+            "financial-data",
+            "customer-record",
+            "personal-address"
           ]
         },
         "provider_class": {
