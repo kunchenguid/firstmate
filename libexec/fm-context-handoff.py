@@ -1881,6 +1881,8 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
             result = seal_pi_attempt(home, config, session_hash, args.trigger)
         except (HandoffError, OSError) as raw_exc:
             exc = raw_exc if isinstance(raw_exc, HandoffError) else HandoffError("STATE_DURABILITY", "Pi compaction binding publication was not durable")
+            if exc.code in {"TRANSACTION_RUNTIME_BACKPRESSURE", "HERDR_RUNTIME_BACKPRESSURE"}:
+                raise exc
             return seal_binding_failure_receipt(home, static_config, args.source_harness, session_hash, args.trigger, exc)
     else:
         result = seal_with_failure_receipt(home, args.source_harness, session_hash, args.trigger)
