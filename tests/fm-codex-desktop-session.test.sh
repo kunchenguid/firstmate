@@ -150,8 +150,8 @@ FM_HOME="$TASK_HOME" "$ROOT/bin/fm-task-model-route.sh" "$TASK_ID" \
   --risk 0 --risk-evidence low \
   --diagnosis 0 --diagnosis-evidence none \
   --verification 0 --verification-evidence focused \
-  --quota-candidates gpt-5.6-sol:high \
-  --quota-evidence 'current profile selected the available Sol candidate' \
+  --quota-candidate sol-primary gpt-5.6-sol high 'primary Sol profile has available quota' \
+  --resolved-profile sol-primary \
   --resolved-model gpt-5.6-sol --resolved-effort high >/dev/null \
   || fail "could not create the Desktop task model route"
 ROUTE_REAL=$(realpath "$ROUTE_RECORD")
@@ -206,6 +206,8 @@ assert_grep $'model\tgpt-5.6-luna' "$ROUTE_RECORD" \
   "quota-aware registration lost the deterministic five-factor result"
 assert_grep $'resolved_model\tgpt-5.6-sol' "$ROUTE_RECORD" \
   "quota-aware registration did not retain the resolved Desktop model"
+assert_grep $'resolved_profile\tsol-primary' "$ROUTE_RECORD" \
+  "quota-aware registration did not retain the selected Desktop profile"
 assert_grep "session_envelope=research" "$META" \
   "metadata did not persist the selected session envelope"
 assert_grep 'mode=direct-PR' "$META" \
@@ -369,7 +371,42 @@ FM_HOME="$TASK_HOME" "$ROOT/bin/fm-task-model-route.sh" "$SHIP_ID" \
   --verification 0 --verification-evidence focused \
   --floor architecture >/dev/null \
   || fail "could not create the Desktop ship model route"
-CODEX_THREAD_ID="$THREAD_A" \
+TRANSITION_FAILBIN="$TMP_ROOT/transition-failbin"
+TRANSITION_FAIL_ONCE="$TMP_ROOT/transition-fail-once"
+mkdir -p "$TRANSITION_FAILBIN"
+cat > "$TRANSITION_FAILBIN/mv" <<'SH'
+#!/usr/bin/env bash
+destination=
+for destination in "$@"; do :; done
+if [ -f "$FM_TEST_FAIL_ONCE" ] && [ "$destination" = "$FM_TEST_FAIL_DEST" ]; then
+  rm -f -- "$FM_TEST_FAIL_ONCE"
+  exit 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod +x "$TRANSITION_FAILBIN/mv"
+: > "$TRANSITION_FAIL_ONCE"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" FM_TEST_REAL_MV="$(command -v mv)" \
+  FM_TEST_FAIL_ONCE="$TRANSITION_FAIL_ONCE" \
+  FM_TEST_FAIL_DEST="$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  PATH="$TRANSITION_FAILBIN:$FAKEBIN:$SYSTEM_PATH" \
+  "$ROOT/bin/fm-codex-app-task.sh" register "$SHIP_ID" \
+    --thread "$SHIP_THREAD" --host "$HOST_ID" \
+    --project "$SHIP_PROJECT" --worktree "$SHIP_WORKTREE" \
+    --kind ship --model gpt-5.6-sol --effort high \
+    --route-record "$SHIP_ROUTE" --session-envelope normal \
+    --mode direct-PR --yolo on 2>&1) || status=$?
+expect_code 1 "$status" "interrupted Desktop registration must remain retryable"
+[ -f "$TASK_HOME/state/$SHIP_ID.codex-app-transition" ] \
+  || fail "interrupted Desktop registration left no recovery journal"
+[ -f "$TASK_HOME/state/$SHIP_ID.meta" ] \
+  || fail "registration interruption fixture did not publish its first artifact"
+[ ! -e "$TASK_HOME/state/$SHIP_ID.codex-app-current" ] \
+  || fail "registration interruption fixture unexpectedly published current state"
+out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" register "$SHIP_ID" \
@@ -377,8 +414,10 @@ CODEX_THREAD_ID="$THREAD_A" \
     --project "$SHIP_PROJECT" --worktree "$SHIP_WORKTREE" \
     --kind ship --model gpt-5.6-sol --effort high \
     --route-record "$SHIP_ROUTE" --session-envelope normal \
-    --mode direct-PR --yolo on >/dev/null \
-  || fail "could not register Desktop ship archive-preflight fixture"
+    --mode direct-PR --yolo on 2>&1) \
+  || fail "could not recover Desktop ship registration: $out"
+[ ! -e "$TASK_HOME/state/$SHIP_ID.codex-app-transition" ] \
+  || fail "recovered Desktop registration retained its journal"
 assert_grep 'yolo=on' "$TASK_HOME/state/$SHIP_ID.meta" \
   "Desktop ship metadata did not retain the enabled project yolo posture"
 
@@ -440,6 +479,25 @@ assert_grep 'state=paused' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
   "hard stop did not pause the old Desktop endpoint"
 
 SHIP_THREAD_2=019ff1ae-966b-7643-ba01-488112346571
+: > "$TRANSITION_FAIL_ONCE"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" FM_TEST_REAL_MV="$(command -v mv)" \
+  FM_TEST_FAIL_ONCE="$TRANSITION_FAIL_ONCE" \
+  FM_TEST_FAIL_DEST="$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  PATH="$TRANSITION_FAILBIN:$FAKEBIN:$SYSTEM_PATH" \
+  "$ROOT/bin/fm-codex-app-task.sh" resume "$SHIP_ID" \
+    --thread "$SHIP_THREAD_2" --host "$HOST_ID" \
+    --checkpoint "$SHIP_CHECKPOINT" --handoff "$SHIP_HANDOFF" 2>&1) \
+  || status=$?
+expect_code 1 "$status" "interrupted Desktop resume must remain retryable"
+[ -f "$TASK_HOME/state/$SHIP_ID.codex-app-transition" ] \
+  || fail "interrupted Desktop resume left no recovery journal"
+assert_grep "codex_app_thread_id=$SHIP_THREAD_2" "$TASK_HOME/state/$SHIP_ID.meta" \
+  "resume interruption fixture did not publish its first artifact"
+assert_grep 'state=paused' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "resume interruption fixture unexpectedly published current state"
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
@@ -447,6 +505,8 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
     --thread "$SHIP_THREAD_2" --host "$HOST_ID" \
     --checkpoint "$SHIP_CHECKPOINT" --handoff "$SHIP_HANDOFF" 2>&1) \
   || fail "fresh Desktop session could not resume the checkpoint: $out"
+[ ! -e "$TASK_HOME/state/$SHIP_ID.codex-app-transition" ] \
+  || fail "recovered Desktop resume retained its journal"
 assert_contains "$out" "generation=2" \
   "resume did not report the fresh session generation"
 assert_grep "codex_app_thread_id=$SHIP_THREAD_2" "$TASK_HOME/state/$SHIP_ID.meta" \

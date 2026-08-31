@@ -161,13 +161,142 @@ write_current() {  # <task-id> <thread> <host> <state> <detail>
     || { rm -f -- "$tmp"; die "cannot publish current state for $id"; }
 }
 
+desktop_transition_request_hash() {
+  local digest value
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(
+      for value in "$@"; do printf '%s\0' "$value"; done \
+        | env -u LC_CTYPE LC_ALL=C LANG=C shasum -a 256 2>/dev/null \
+        | awk '{print $1}'
+    )
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(
+      for value in "$@"; do printf '%s\0' "$value"; done \
+        | env -u LC_CTYPE LC_ALL=C LANG=C sha256sum 2>/dev/null \
+        | awk '{print $1}'
+    )
+  else
+    return 1
+  fi
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$digest"
+}
+
+DESKTOP_TRANSITION_OPERATION=
+DESKTOP_TRANSITION_REQUEST=
+DESKTOP_TRANSITION_META_HASH=
+DESKTOP_TRANSITION_CURRENT_HASH=
+DESKTOP_TRANSITION_STATUS_HASH=
+desktop_transition_journal_parse() {
+  local journal=$1 key lines value
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  lines=$(wc -l < "$journal" | tr -d ' ')
+  [ "$lines" = 6 ] || return 1
+  [ "$(exact_meta_value "$journal" version)" = 1 ] || return 1
+  for key in operation request_sha256 meta_sha256 current_sha256 status_sha256; do
+    value=$(exact_meta_value "$journal" "$key") || return 1
+    case "$key" in
+      operation) case "$value" in register|resume) ;; *) return 1 ;; esac ;;
+      status_sha256) [ "$value" = none ] || [[ "$value" =~ ^[0-9a-f]{64}$ ]] || return 1 ;;
+      *) [[ "$value" =~ ^[0-9a-f]{64}$ ]] || return 1 ;;
+    esac
+  done
+  DESKTOP_TRANSITION_OPERATION=$(exact_meta_value "$journal" operation)
+  DESKTOP_TRANSITION_REQUEST=$(exact_meta_value "$journal" request_sha256)
+  DESKTOP_TRANSITION_META_HASH=$(exact_meta_value "$journal" meta_sha256)
+  DESKTOP_TRANSITION_CURRENT_HASH=$(exact_meta_value "$journal" current_sha256)
+  DESKTOP_TRANSITION_STATUS_HASH=$(exact_meta_value "$journal" status_sha256)
+}
+
+desktop_transition_file_matches() {  # <path> <sha256>
+  local actual
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  actual=$(fm_task_route_sha256 "$1") || return 1
+  [ "$actual" = "$2" ]
+}
+
+desktop_transition_publish_file() {  # <task-id> <staged> <destination> <sha256>
+  local id=$1 staged=$2 destination=$3 expected_hash=$4 tmp
+  if desktop_transition_file_matches "$destination" "$expected_hash"; then
+    return 0
+  fi
+  tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-publish.XXXXXX") || return 1
+  cp -- "$staged" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return 1; }
+}
+
+desktop_transition_finish() {  # <task-id> <operation> <request-sha256>
+  local id=$1 operation=$2 request_hash=$3 journal meta_stage current_stage status_stage
+  local meta current status
+  journal="$STATE/$id.codex-app-transition"
+  meta_stage="$STATE/.$id.codex-app-transition.meta"
+  current_stage="$STATE/.$id.codex-app-transition.current"
+  status_stage="$STATE/.$id.codex-app-transition.status"
+  meta="$STATE/$id.meta"
+  current="$STATE/$id.codex-app-current"
+  status="$STATE/$id.status"
+  desktop_transition_journal_parse "$journal" || return 1
+  [ "$DESKTOP_TRANSITION_OPERATION" = "$operation" ] \
+    && [ "$DESKTOP_TRANSITION_REQUEST" = "$request_hash" ] || return 1
+  desktop_transition_file_matches "$meta_stage" "$DESKTOP_TRANSITION_META_HASH" \
+    && desktop_transition_file_matches "$current_stage" "$DESKTOP_TRANSITION_CURRENT_HASH" \
+    || return 1
+  if [ "$DESKTOP_TRANSITION_STATUS_HASH" != none ]; then
+    desktop_transition_file_matches "$status_stage" "$DESKTOP_TRANSITION_STATUS_HASH" \
+      || return 1
+  fi
+  desktop_transition_publish_file "$id" "$meta_stage" "$meta" \
+    "$DESKTOP_TRANSITION_META_HASH" || return 1
+  desktop_transition_publish_file "$id" "$current_stage" "$current" \
+    "$DESKTOP_TRANSITION_CURRENT_HASH" || return 1
+  if [ "$DESKTOP_TRANSITION_STATUS_HASH" != none ]; then
+    desktop_transition_publish_file "$id" "$status_stage" "$status" \
+      "$DESKTOP_TRANSITION_STATUS_HASH" || return 1
+  fi
+  rm -f -- "$journal" "$meta_stage" "$current_stage" "$status_stage" || return 1
+}
+
+desktop_transition_begin() {  # <task-id> <operation> <request-sha256> <meta> <current> [status]
+  local id=$1 operation=$2 request_hash=$3 meta_source=$4 current_source=$5
+  local status_source=${6:-} journal meta_stage current_stage status_stage
+  local meta_hash current_hash status_hash=none journal_tmp
+  journal="$STATE/$id.codex-app-transition"
+  meta_stage="$STATE/.$id.codex-app-transition.meta"
+  current_stage="$STATE/.$id.codex-app-transition.current"
+  status_stage="$STATE/.$id.codex-app-transition.status"
+  [ ! -e "$journal" ] || return 1
+  rm -f -- "$meta_stage" "$current_stage" "$status_stage" || return 1
+  mv -f -- "$meta_source" "$meta_stage" || return 1
+  mv -f -- "$current_source" "$current_stage" || return 1
+  if [ -n "$status_source" ]; then
+    mv -f -- "$status_source" "$status_stage" || return 1
+  fi
+  meta_hash=$(fm_task_route_sha256 "$meta_stage") || return 1
+  current_hash=$(fm_task_route_sha256 "$current_stage") || return 1
+  if [ -n "$status_source" ]; then
+    status_hash=$(fm_task_route_sha256 "$status_stage") || return 1
+  fi
+  journal_tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-transition.XXXXXX") || return 1
+  {
+    printf 'version=1\n'
+    printf 'operation=%s\n' "$operation"
+    printf 'request_sha256=%s\n' "$request_hash"
+    printf 'meta_sha256=%s\n' "$meta_hash"
+    printf 'current_sha256=%s\n' "$current_hash"
+    printf 'status_sha256=%s\n' "$status_hash"
+  } > "$journal_tmp" || { rm -f -- "$journal_tmp"; return 1; }
+  mv -f -- "$journal_tmp" "$journal" || { rm -f -- "$journal_tmp"; return 1; }
+  desktop_transition_finish "$id" "$operation" "$request_hash"
+}
+
 register_task() {
   local id=$1
   shift
   local thread='' host='' project='' worktree='' kind='' model='' effort='' mode='' yolo=''
   local route_record='' envelope=''
   local project_real worktree_real git_common_dir route_real route_hash
-  local meta current status meta_tmp status_tmp current_tmp
+  local meta current status meta_tmp status_tmp current_tmp request_hash journal
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --thread) [ "$#" -ge 2 ] || usage; thread=$2; shift 2 ;;
@@ -223,6 +352,43 @@ register_task() {
   meta="$STATE/$id.meta"
   status="$STATE/$id.status"
   current="$STATE/$id.codex-app-current"
+  journal="$STATE/$id.codex-app-transition"
+  request_hash=$(desktop_transition_request_hash register "$id" "$thread" "$host" \
+    "$project_real" "$worktree_real" "$git_common_dir" "$kind" "$model" "$effort" \
+    "$route_real" "$route_hash" "$envelope" "$mode" "$yolo") \
+    || die "cannot bind Desktop registration request for $id"
+  if [ -e "$journal" ]; then
+    desktop_transition_finish "$id" register "$request_hash" \
+      || die "cannot recover the journaled Desktop registration for $id"
+    printf 'registered: %s -> Codex Desktop task %s (host=%s worktree=%s)\n' \
+      "$id" "$thread" "$host" "$worktree_real"
+    return 0
+  fi
+  if [ -f "$meta" ] && [ ! -L "$meta" ] \
+    && [ -f "$status" ] && [ ! -L "$status" ] \
+    && [ -f "$current" ] && [ ! -L "$current" ] \
+    && [ "$(exact_meta_value "$meta" endpoint_task_id)" = "$id" ] \
+    && [ "$(exact_meta_value "$meta" codex_app_thread_id)" = "$thread" ] \
+    && [ "$(exact_meta_value "$meta" codex_app_host_id)" = "$host" ] \
+    && [ "$(exact_meta_value "$meta" project)" = "$project_real" ] \
+    && [ "$(exact_meta_value "$meta" worktree)" = "$worktree_real" ] \
+    && [ "$(exact_meta_value "$meta" git_common_dir)" = "$git_common_dir" ] \
+    && [ "$(exact_meta_value "$meta" kind)" = "$kind" ] \
+    && [ "$(exact_meta_value "$meta" model)" = "$model" ] \
+    && [ "$(exact_meta_value "$meta" effort)" = "$effort" ] \
+    && [ "$(exact_meta_value "$meta" model_route_record)" = "$route_real" ] \
+    && [ "$(exact_meta_value "$meta" model_route_sha256)" = "$route_hash" ] \
+    && [ "$(exact_meta_value "$meta" session_envelope)" = "$envelope" ] \
+    && [ "$(exact_meta_value "$meta" session_generation)" = 1 ] \
+    && [ "$(exact_meta_value "$meta" mode)" = "$mode" ] \
+    && [ "$(exact_meta_value "$meta" yolo)" = "$yolo" ] \
+    && [ "$(exact_meta_value "$current" thread_id)" = "$thread" ] \
+    && [ "$(exact_meta_value "$current" host_id)" = "$host" ] \
+    && [ "$(exact_meta_value "$current" state)" = working ]; then
+    printf 'registered: %s -> Codex Desktop task %s (host=%s worktree=%s)\n' \
+      "$id" "$thread" "$host" "$worktree_real"
+    return 0
+  fi
   [ ! -e "$meta" ] && [ ! -e "$status" ] && [ ! -e "$current" ] \
     || die "task $id already has durable state; refusing to overwrite it"
 
@@ -271,12 +437,9 @@ register_task() {
     die "cannot write staged current state for $id"
   }
 
-  if ! mv -f -- "$status_tmp" "$status" \
-    || ! mv -f -- "$current_tmp" "$current" \
-    || ! mv -f -- "$meta_tmp" "$meta"; then
-      rm -f -- "$meta_tmp" "$status_tmp" "$current_tmp"
-      die "cannot publish durable task state for $id; inspect $STATE before retrying"
-  fi
+  desktop_transition_begin "$id" register "$request_hash" \
+    "$meta_tmp" "$current_tmp" "$status_tmp" \
+    || die "cannot publish journaled durable task state for $id; retry the exact registration"
   printf 'registered: %s -> Codex Desktop task %s (host=%s worktree=%s)\n' \
     "$id" "$thread" "$host" "$worktree_real"
 }
@@ -516,6 +679,7 @@ resume_task() {
   shift
   local thread='' host='' checkpoint='' handoff='' meta current worktree handoff_real
   local recorded_checkpoint recorded_handoff old_thread generation next_generation tmp
+  local current_tmp request_hash journal
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --thread) [ "$#" -ge 2 ] || usage; thread=$2; shift 2 ;;
@@ -536,13 +700,18 @@ resume_task() {
   require_owner
   meta="$STATE/$id.meta"
   current="$STATE/$id.codex-app-current"
+  journal="$STATE/$id.codex-app-transition"
+  request_hash=$(desktop_transition_request_hash resume "$id" "$thread" "$host" \
+    "$checkpoint" "$handoff_real") || die "cannot bind Desktop resume request for $id"
+  if [ -e "$journal" ]; then
+    desktop_transition_finish "$id" resume "$request_hash" \
+      || die "cannot recover the journaled Desktop resume for $id"
+  fi
   [ -f "$meta" ] && [ -f "$current" ] || die "task $id has incomplete Desktop state"
   [ "$(fm_backend_of_meta "$meta")" = codex-app-host ] \
     || die "task $id is not a Codex Desktop host task"
   registered_route_validate "$meta" \
     || die "task $id no longer matches its immutable model route evidence"
-  [ "$(exact_meta_value "$current" state)" = paused ] \
-    || die "task $id must be paused at a hard session boundary before resume"
   registered_worktree_validate "$meta" \
     || die "task $id no longer matches its registered Git checkout identity"
   worktree=$REGISTERED_WORKTREE
@@ -556,6 +725,20 @@ resume_task() {
     || die "resume checkpoint or handoff does not match recorded hard stop"
   grep -qx "checkpoint_sha: $checkpoint" "$handoff_real" \
     || die "session handoff does not bind checkpoint $checkpoint"
+  if [ "$(exact_meta_value "$meta" codex_app_thread_id)" = "$thread" ] \
+    && [ "$(exact_meta_value "$meta" codex_app_host_id)" = "$host" ] \
+    && [ "$(exact_meta_value "$current" thread_id)" = "$thread" ] \
+    && [ "$(exact_meta_value "$current" host_id)" = "$host" ] \
+    && [ "$(exact_meta_value "$current" state)" = working ]; then
+    generation=$(exact_meta_value "$meta" session_generation) \
+      || die "task $id has no session generation"
+    case "$generation" in ''|*[!0-9]*) die "task $id has invalid session generation" ;; esac
+    printf 'resumed: %s generation=%s thread=%s checkpoint=%s\n' \
+      "$id" "$generation" "$thread" "$checkpoint"
+    return 0
+  fi
+  [ "$(exact_meta_value "$current" state)" = paused ] \
+    || die "task $id must be paused at a hard session boundary before resume"
   old_thread=$(exact_meta_value "$meta" codex_app_thread_id) \
     || die "task $id has no previous Desktop thread"
   [ "$thread" != "$old_thread" ] || die "resume requires a fresh Codex Desktop thread"
@@ -573,8 +756,20 @@ resume_task() {
     printf 'codex_app_host_id=%s\n' "$host"
     printf 'session_generation=%s\n' "$next_generation"
   } >> "$tmp"
-  mv -f -- "$tmp" "$meta" || die "cannot publish resumed metadata for $id"
-  write_current "$id" "$thread" "$host" working "resumed from checkpoint $checkpoint"
+  current_tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-current.XXXXXX") \
+    || { rm -f -- "$tmp"; die "cannot stage resumed current state for $id"; }
+  {
+    printf 'thread_id=%s\n' "$thread"
+    printf 'host_id=%s\n' "$host"
+    printf 'state=working\n'
+    printf 'updated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'detail=resumed from checkpoint %s\n' "$checkpoint"
+  } > "$current_tmp" || {
+    rm -f -- "$tmp" "$current_tmp"
+    die "cannot write staged resumed current state for $id"
+  }
+  desktop_transition_begin "$id" resume "$request_hash" "$tmp" "$current_tmp" \
+    || die "cannot publish journaled Desktop resume for $id; retry the exact resume"
   printf 'resumed: %s generation=%s thread=%s checkpoint=%s\n' \
     "$id" "$next_generation" "$thread" "$checkpoint"
 }

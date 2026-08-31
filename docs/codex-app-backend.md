@@ -135,8 +135,9 @@ session_output_telemetry=unsupported
 Endpoint validation requires one exact value for every binding and refuses a mismatched task id, thread id, host id, project, worktree, or Git common-directory identity before mutation.
 Registration refuses to overwrite pre-existing task records, accepts only `direct-PR` or `local-only` with an explicit `on` or `off` project `yolo` posture, and refuses a worktree that resolves to the saved project checkout.
 The shared routing parser requires the ordered five factors and their evidence, recomputes the score, floor, override, and deterministic selection, and rejects missing, duplicate, extra, or inconsistent rows.
-Quota candidates, quota evidence, and the final resolved model and effort are separate fields, and every quota candidate must remain at or above the recorded minimum tier.
+Each concrete quota profile records its own model, effort, and evidence, and the selected profile is separate from both the deterministic result and any explicit captain override.
 Registration binds the exact routing record digest and every later host mutation refuses changed routing evidence.
+Registration and resume share one digest-bound transition journal, so an exact retry completes the same metadata, current-state, and status publication after interruption.
 
 ## Session envelope boundary
 
