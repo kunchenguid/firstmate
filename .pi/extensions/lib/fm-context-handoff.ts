@@ -153,6 +153,7 @@ export function registerContextHandoff(
   let pendingSeal: SealBinding | null = null;
 
   pi.on("session_before_compact", async (event, ctx) => {
+    pendingSeal = null;
     const result = await runHandoff(
       root,
       fmHome,
@@ -173,7 +174,8 @@ export function registerContextHandoff(
 
   pi.on("session_compact", async (event) => {
     const binding = pendingSeal;
-    const result = await runHandoff(
+    pendingSeal = null;
+    await runHandoff(
       root,
       fmHome,
       ["compaction-outcome", "success"],
@@ -181,12 +183,12 @@ export function registerContextHandoff(
         ? { ...binding, reason: "pi-session-compact-succeeded" }
         : { trigger: event.reason, reason: "pi-session-compact-succeeded-without-seal-binding" },
     );
-    if (result.status === "compaction-succeeded") pendingSeal = null;
   });
 
   pi.on("session_compact_failed", async (event) => {
     const binding = pendingSeal;
-    const result = await runHandoff(
+    pendingSeal = null;
+    await runHandoff(
       root,
       fmHome,
       ["compaction-outcome", "failure"],
@@ -194,6 +196,5 @@ export function registerContextHandoff(
         ? { ...binding, reason: "pi-session-compact-failed" }
         : { trigger: event.reason, reason: "pi-session-compact-failed-without-seal-binding" },
     );
-    if (result.status === "compaction-failed") pendingSeal = null;
   });
 }
