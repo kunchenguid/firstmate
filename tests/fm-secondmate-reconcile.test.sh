@@ -201,6 +201,7 @@ hold_lock_until_released() {  # <lock> <ready> <release>
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2" "$3" &
 }
 
+
 test_an_inventory_mismatch_asks_the_mate_once_per_window() {
   local home mate fakebin snap out
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home once mate)
