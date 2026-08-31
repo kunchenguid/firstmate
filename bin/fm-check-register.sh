@@ -1,7 +1,30 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
+#
+# This header is the single owner of the authoring contract for a custom
+# state/<id>.check.sh that firstmate writes by hand. The watcher runs a state
+# check only when it is a trusted repository script, the byte-identified Relay
+# shim, or a custom check whose bytes still match the trust binding written
+# here; every other state check is rejected without execution.
+#
+# A custom check must be:
+#   - an ordinary single-link regular file at state/<id>.check.sh, mode 0700,
+#     directly under a non-symlinked state/ directory (a symlink, hardlink, or
+#     special file is refused rather than registered);
+#   - silent on the common path: it prints ONE line only when firstmate should
+#     wake, and prints nothing at all otherwise, because every line it prints
+#     becomes a wake;
+#   - finished inside FM_CHECK_TIMEOUT (default 30 seconds, owned by the
+#     watcher poll loop). A run the watcher kills prints nothing and records
+#     nothing, and would then repeat that silence on every poll.
+#
+# Registration is required BEFORE the watcher may execute the check, and it
+# binds the file's CURRENT bytes: edit the check and it stops running until it
+# is registered again.
+#
 # Usage: fm-check-register.sh <id>
-# Retire with fm-check-unregister.sh <id>; do not hand-compose an rm.
+# Retire with fm-check-unregister.sh <id>, or fm-teardown.sh for a spawned
+# task; do not hand-compose an rm against $STATE/$ID.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
