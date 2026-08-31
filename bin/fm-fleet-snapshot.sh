@@ -1301,6 +1301,15 @@ secondmate_current_json() {  # <parent-tasks-json>
           "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null)
         summary_rc=$?
       fi
+      # Every branch that gives up on a sample resets summary to '{}' before
+      # setting its reason. An unusable sample must never reach the fallback
+      # record assembly's --slurpfile below: jq fails there, and that failure
+      # cascades through the empty record, the accumulator's doc() guard, and
+      # the final assembly into a whole-snapshot exit 1. One unreadable home
+      # has to degrade to its own unknown-state record instead of breaking
+      # every fleet read in this home. The schema check below is -s with
+      # length == 1 for the same reason: two concatenated documents are just
+      # as unusable, and a bare jq -e would report only the last one's status.
       if [ "$summary_rc" -ne 0 ]; then
         summary='{}'
         [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
