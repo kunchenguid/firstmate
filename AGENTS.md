@@ -175,7 +175,7 @@ Load `delivery-completion` before handling a ready PR, landing or cleaning up a 
 Whenever work is under way, keep exactly one live supervision cycle using the session-start protocol; never use shell `&`, duplicate a healthy cycle, or end a turn blind.
 At the start of each wake-handling turn, present the durable wake queue before other action; the records remain durable until the handling turn runs the generation-bound `WAKE_ACK_REQUIRED` acknowledgement, and reconcile `OPEN DECISIONS` before continuing.
 Treat any `UNREAD STATUS` section as newly surfaced status that must be read this turn; those lines are not re-printed after that presentation.
-Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `decision-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
+Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 Use `bin/fm-crew-state.sh` rather than status history when current state matters.
 Follow the emitted wake-specific action, loading `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker.
 Waiting on healthy supervision is silent; no change is not progress, and an idle secondmate is healthy.
@@ -205,7 +205,7 @@ When the startup reminder says the weekly `/what-to-learn` ritual is overdue, me
 
 `data/backlog.md` is the durable work-item queue; agents and persistent secondmates are not items, and secondmate work belongs in that home's backlog.
 Update it on dispatch, completion, and decisions, then reconsider dependency- or time-blocked work after cleanup and fleet review.
-`decision-hold-lifecycle` owns unresolved investigation or visual-review decisions and their completion gate; load it before treating an investigation or visual review as complete, before ending a visual review that exposed a captain decision, and on any `RECORD DIVERGENCE` line from the wake drain; `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff.
+`captain-hold-lifecycle` owns unresolved investigation or visual-review captain calls and their completion gate; `decision-hold-lifecycle` remains only a compatibility shim for legacy decision-hold references; load the captain-hold skill before treating an investigation or visual review as complete and before ending a visual review that exposed a captain call; `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff.
 `.tasks.toml`, `docs/configuration.md`, and `tasks-axi --help` own schema and mechanics.
 Notes retain durable identifiers, dependencies, and artifact links, omit volatile copied state, and route reusable knowledge to section 6.
 

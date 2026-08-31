@@ -44,13 +44,14 @@
 #
 # A caller that disconnects before its job completes cancels it instead of
 # abandoning it: fm_remote_job_cancel writes a cancel marker into the record,
-# the worker skips a cancelled queued job and terminates a running cancelled
-# job's process group, and whichever side observes terminal publication reaps
-# the finalized record because no result consumer remains. fm_remote_job_wait
-# honors an optional FM_REMOTE_JOB_DISCONNECT_PROBE function name. When set,
-# the probe runs about once per second; a failure cancels the job and fails
-# the wait. The staging entrypoint arms it with a parent-liveness probe so an
-# ssh channel
+# waits for the worker to retire that exact record, and fails boundedly if
+# retirement cannot be confirmed. The worker skips a cancelled queued job and
+# terminates a running cancelled job's process group, and whichever side
+# observes terminal publication reaps the finalized record because no result
+# consumer remains. fm_remote_job_wait honors an optional
+# FM_REMOTE_JOB_DISCONNECT_PROBE function name. When set, the probe runs about
+# once per second; a failure cancels the job and fails the wait. The staging
+# entrypoint arms it with a parent-liveness probe so an ssh channel
 # that dies without delivering a signal still cancels the abandoned job.
 # Abandoned .stage.* staging litter older than
 # FM_REMOTE_JOB_STAGE_REAP_SECONDS is reaped by the worker's stale sweep.
@@ -106,6 +107,7 @@ FM_REMOTE_JOB_STDERR=
 FM_REMOTE_JOB_EXIT=
 FM_REMOTE_JOB_ERROR=
 FM_REMOTE_JOB_REPAIRED=0
+FM_REMOTE_JOB_PUBLISHED=0
 
 fm_remote_job_die() {
   printf 'error: %s\n' "$1" >&2
@@ -592,27 +594,45 @@ fm_remote_job_cancelled() { # <job-dir>
 # terminal publication; if publication already won the race, this function
 # reaps instead. Cancelling a job that disappeared is a harmless no-op.
 fm_remote_job_cancel() { # <account-home> <id>
-  local account_home=$1 id=$2 job state tmp
+  local account_home=$1 id=$2 job state tmp now deadline
   fm_remote_job_prepare_state "$account_home" || return 1
-  job=$(fm_remote_job_job_dir "$id" 2>/dev/null) || return 0
-  state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
-  if [ "$state" = 'done' ]; then
-    fm_remote_job_reap "$account_home" "$id" 2>/dev/null || true
+  fm_remote_job_safe_id "$id" || return 1
+  if [ ! -e "$FM_REMOTE_JOB_JOBS/$id" ] && [ ! -L "$FM_REMOTE_JOB_JOBS/$id" ]; then
     return 0
   fi
-  tmp=$(umask 077; mktemp "$job/.cancel.XXXXXX") || return 1
-  printf 'cancelled: caller disconnected or abandoned the job\n' > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$job/cancel" || return 1
+  job=$(fm_remote_job_job_dir "$id" 2>/dev/null) || {
+    [ ! -e "$FM_REMOTE_JOB_JOBS/$id" ] && [ ! -L "$FM_REMOTE_JOB_JOBS/$id" ] && return 0
+    return 1
+  }
   state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
   if [ "$state" = 'done' ]; then
     fm_remote_job_reap "$account_home" "$id" 2>/dev/null || true
+  else
+    tmp=$(umask 077; mktemp "$job/.cancel.XXXXXX") || return 1
+    printf 'cancelled: caller disconnected or abandoned the job\n' > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$job/cancel" || return 1
   fi
+  deadline=$(( $(date +%s) + FM_REMOTE_JOB_WAIT_GRACE ))
+  while [ -e "$job" ] || [ -L "$job" ]; do
+    [ -d "$job" ] && [ ! -L "$job" ] || return 1
+    state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
+    if [ "$state" = 'done' ]; then
+      fm_remote_job_reap "$account_home" "$id" 2>/dev/null || true
+    fi
+    [ ! -e "$job" ] && [ ! -L "$job" ] && return 0
+    now=$(date +%s)
+    [ "$now" -lt "$deadline" ] || return 1
+    sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+  done
+  return 0
 }
 
 fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdin is captured
   local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes queue_deadline owner_start
   shift 4
+  FM_REMOTE_JOB_ID=
+  FM_REMOTE_JOB_PUBLISHED=0
   fm_remote_job_prepare_state "$account_home" || return 1
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
     FM_REMOTE_JOB_ERROR="remote job root is unavailable or unsafe"
@@ -665,13 +685,31 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   fm_remote_job_safe_id "$id" || { rm -rf -- "$stage"; return 1; }
   destination="$FM_REMOTE_JOB_JOBS/$id"
   [ ! -e "$destination" ] && [ ! -L "$destination" ] || { rm -rf -- "$stage"; return 1; }
+  # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+  FM_REMOTE_JOB_ID=$id
+  if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
+    ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
+    rm -rf -- "$stage"
+    FM_REMOTE_JOB_ERROR="remote job caller disconnected during staging"
+    return 1
+  fi
   if ! fm_remote_job_next_seq "$stage" "$destination" >/dev/null; then
     rm -rf -- "$stage"
     FM_REMOTE_JOB_ERROR="cannot allocate and publish a remote job staging sequence"
     return 1
   fi
-  # shellcheck disable=SC2034 # Sourceable API consumed by callers that do not use command substitution.
-  FM_REMOTE_JOB_ID=$id
+  # Sourced entrypoints consume this publication boundary after stage returns.
+  # shellcheck disable=SC2034
+  FM_REMOTE_JOB_PUBLISHED=1
+  if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] &&
+    ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
+    fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || {
+      FM_REMOTE_JOB_ERROR="remote job caller disconnected during staging; cancellation remains unconfirmed for job $id"
+      return 1
+    }
+    FM_REMOTE_JOB_ERROR="remote job caller disconnected during staging"
+    return 1
+  fi
   printf '%s\n' "$id"
 }
 
@@ -728,7 +766,10 @@ fm_remote_job_wait() { # <account-home> <id>; honors FM_REMOTE_JOB_DISCONNECT_PR
     if [ -n "${FM_REMOTE_JOB_DISCONNECT_PROBE:-}" ] && [ "$now" -ge "$next_probe" ]; then
       next_probe=$((now + 1))
       if ! "$FM_REMOTE_JOB_DISCONNECT_PROBE"; then
-        fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || true
+        if ! fm_remote_job_cancel "$account_home" "$id" 2>/dev/null; then
+          FM_REMOTE_JOB_ERROR="remote job caller disconnected; cancellation failed and job $id remains recorded for retry"
+          return 1
+        fi
         FM_REMOTE_JOB_ERROR="remote job caller disconnected; the job was cancelled"
         return 1
       fi

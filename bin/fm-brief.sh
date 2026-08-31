@@ -634,7 +634,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-li
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 EOF
 SCOUT_DOD_COMMON=${SCOUT_DOD_COMMON%$'\n'}
-SCOUT_READER_DOD=${SCOUT_DOD_COMMON/captain-hold-lifecycle/decision-hold-lifecycle}
+SCOUT_READER_DOD=$SCOUT_DOD_COMMON
 
 # PUBLISH_SECTION is the single emitted publication-language contract owner.
 IFS= read -r -d '' PUBLISH_SECTION <<'EOF' || true

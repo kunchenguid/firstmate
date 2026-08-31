@@ -1,11 +1,11 @@
 # Decision hold lifecycle mechanism
 
-The normative policy is owned by `.agents/skills/decision-hold-lifecycle/SKILL.md` and is not restated here.
+The normative policy is owned by `.agents/skills/captain-hold-lifecycle/SKILL.md` and is not restated here.
 This document records the deterministic mechanism, structured surfaces, and privacy-safe regression evidence.
 
 ## Mechanism
 
-`bin/fm-decision-hold.sh` is the only lifecycle command for an investigation or visual review's unresolved captain decisions.
+`bin/fm-decision-hold.sh` is a compatibility command for the canonical captain-hold lifecycle.
 The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned decision stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
@@ -60,7 +60,7 @@ ok - report-only unresolved decision is reproduced and completion refuses before
 ok - non-forced scout teardown always requires durable inventory verification
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
 ok - completion and verification validate origins before constructing paths
-ok - ended visual review follows the same decision-hold completion owner
+ok - ended visual review follows the same captain-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed

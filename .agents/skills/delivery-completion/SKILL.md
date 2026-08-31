@@ -29,7 +29,7 @@ Retire one only on an explicit captain or main-firstmate decision after loading 
 
 A completed scout must leave a self-contained report before its scratch worktree or reader scratch directory can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
 A report may recommend implementation but does not authorize it.
-Before treating the investigation or any visual review as complete, load `decision-hold-lifecycle`; cleanup enforces that shared completion gate.
+Before treating the investigation or any visual review as complete, load `captain-hold-lifecycle`; cleanup enforces that shared completion gate.
 When implementation is separately authorized, promote an existing writer scout through `bin/fm-promote.sh` rather than creating a duplicate task.
 `bin/fm-promote.sh` refuses a reader scout, whose implementation dispatches as a fresh ship task.
 The promoted worker inventories scratch state, returns to a clean default-branch base, carries over only intended fix changes, creates the ship branch, follows the selected delivery path, leaves scratch commits and debug edits behind, and turns a reproduced bug into the regression test.

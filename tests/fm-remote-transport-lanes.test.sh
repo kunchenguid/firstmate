@@ -7,7 +7,7 @@
 # preserves exit status):
 #   T9: a job for home B completes while home A runs a long job, and two
 #       A-jobs execute strictly in stage order even when staged rapidly.
-#   T3: a caller killed mid-wait cancels its job - the worker never executes a
+#   T3: a caller killed during staging or mid-wait cancels its job - the worker never executes a
 #       cancelled queued job and terminates a running cancelled job's process
 #       group - and a caller whose parent dies without delivering a signal
 #       (the dead-ssh-channel shape) cancels the same way; afterwards a burst
@@ -165,6 +165,21 @@ wait_for_state() { # <id> <state>
   while [ "$i" -lt 200 ]; do
     [ "$(job_state "$1")" = "$2" ] && return 0
     i=$((i + 1))
+    sleep 0.05
+  done
+  return 1
+}
+
+RACE_PROBE_COUNT="$TMP_ROOT/post-publish-probe-count"
+: > "$RACE_PROBE_COUNT"
+post_publish_running_disconnect_probe() {
+  local calls
+  calls=$(cat "$RACE_PROBE_COUNT")
+  calls=$((calls + 1))
+  printf '%s\n' "$calls" > "$RACE_PROBE_COUNT"
+  [ "$calls" -lt 2 ] && return 0
+  for _ in $(seq 1 200); do
+    [ -f "$RACE_RUNNING_START" ] && return 1
     sleep 0.05
   done
   return 1
@@ -352,6 +367,71 @@ sleep 2
 assert_absent "$ORPHAN_FINISH" "a job abandoned by a signal-less disconnect ran to completion"
 pass "a signal-less caller disconnect cancels the abandoned job through the parent probe"
 
+STAGING_EFFECT="$TMP_ROOT/staging-disconnect-effect"
+# shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
+env FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+  FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  bash -c '
+    { printf "staging payload\n"; sleep 2; } | "$1/bin/fm-on.sh" --stdin ios fm-touch-job.sh "$2" >/dev/null 2>&1 &
+    for _ in $(seq 1 200); do
+      for stage in "$3"/jobs/.stage.*; do
+        [ -d "$stage" ] && exit 0
+      done
+      sleep 0.02
+    done
+    exit 1
+  ' _ "$ROOT" "$STAGING_EFFECT" "$STATE_ROOT" \
+  || fail "the staging-disconnect fixture did not observe an active staging record"
+for _ in $(seq 1 300); do
+  ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 || break
+  sleep 0.05
+done
+ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 \
+  && fail "a disconnected staging caller left a queued job record behind"
+sleep 1
+assert_absent "$STAGING_EFFECT" "a disconnected caller's staged job executed after publication"
+pass "a caller disconnect during stdin staging cancels before publication can escape"
+
+RACE_RUNNING_START="$TMP_ROOT/post-publish-running-start"
+RACE_RUNNING_FINISH="$TMP_ROOT/post-publish-running-finish"
+RACE_RETURN_ID="$TMP_ROOT/post-publish-return-id"
+RACE_RETURN_RECORD="$TMP_ROOT/post-publish-return-record"
+RACE_RETURN_ERROR="$TMP_ROOT/post-publish-return-error"
+: > "$RACE_PROBE_COUNT"
+set +e
+(
+  FM_REMOTE_JOB_WAIT_GRACE=0
+  FM_REMOTE_JOB_DISCONNECT_PROBE=post_publish_running_disconnect_probe
+  race_stage_rc=0
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" fm-two-phase-job.sh "$RACE_RUNNING_START" "$RACE_RUNNING_FINISH" 10 < /dev/null > /dev/null || race_stage_rc=$?
+  printf '%s\n' "${FM_REMOTE_JOB_ID:-}" > "$RACE_RETURN_ID"
+  if [ -n "${FM_REMOTE_JOB_ID:-}" ] && [ -d "$STATE_ROOT/jobs/$FM_REMOTE_JOB_ID" ] && [ ! -L "$STATE_ROOT/jobs/$FM_REMOTE_JOB_ID" ]; then
+    printf 'present\n' > "$RACE_RETURN_RECORD"
+  else
+    printf 'absent\n' > "$RACE_RETURN_RECORD"
+  fi
+  printf '%s\n' "${FM_REMOTE_JOB_ERROR:-}" > "$RACE_RETURN_ERROR"
+  exit "$race_stage_rc"
+)
+RACE_RC=$?
+set -e
+[ "$RACE_RC" -eq 1 ] || fail "the post-publication disconnect probe did not interrupt staging: rc=$RACE_RC"
+[ "$(cat "$RACE_PROBE_COUNT")" = 2 ] || fail "the post-publication disconnect window was not exercised"
+[ -s "$RACE_RETURN_ID" ] || fail "the post-publication cancellation lost the exact published job id"
+[ "$(cat "$RACE_RETURN_RECORD")" = present ] || fail "bounded cancellation did not retain the published job record"
+assert_grep 'cancellation remains unconfirmed for job job-' "$RACE_RETURN_ERROR" \
+  "bounded cancellation did not name the retained job"
+for _ in $(seq 1 200); do
+  [ ! -d "$STATE_ROOT/jobs/$(cat "$RACE_RETURN_ID")" ] && break
+  sleep 0.05
+done
+[ ! -d "$STATE_ROOT/jobs/$(cat "$RACE_RETURN_ID")" ] \
+  || fail "the post-publication cancellation record was not eventually retired"
+assert_absent "$RACE_RUNNING_FINISH" "a post-publication disconnect allowed a running job to finish"
+pass "post-publication cancellation retains identity until retirement is confirmed"
+
 # T3: after the cancellations, a burst of short bounded commands meets its own
 # budget - no convoy behind abandoned work.
 BURST_BEGAN=$(date +%s)
@@ -406,6 +486,156 @@ fm_on --stdin ios fm-stdin-probe.sh < "$TMP_ROOT/payload" > "$TMP_ROOT/payload-o
 assert_grep 'stdin=payload byte one' "$TMP_ROOT/payload-out" "--stdin did not deliver the payload"
 assert_grep 'stdin=payload byte two' "$TMP_ROOT/payload-out" "--stdin lost part of the payload"
 pass "--stdin still delivers a payload caller's bytes"
+
+test_failed_reclamation_reserves_home() {
+  local home="$TMP_ROOT/home-failed-reclaim"
+  local running="$STATE_ROOT/jobs/job-failed-reclaim-running"
+  local queued="$STATE_ROOT/jobs/job-failed-reclaim-queued"
+  local effect="$TMP_ROOT/failed-reclaim-effect"
+  local deadline
+  mkdir -p "$home" "$running/.claim" "$queued"
+  chmod 700 "$home" "$running" "$running/.claim" "$queued"
+  deadline=$(( $(date +%s) + 60 ))
+  printf 'running\n' > "$running/state"
+  printf '%s\n' "$home" > "$running/home"
+  ln -s "$TMP_ROOT/missing-supervisor" "$running/.claim/supervisor"
+  printf 'queued\n' > "$queued/state"
+  printf '%s\n' "$REMOTE_ROOT" > "$queued/root"
+  printf '%s\n' "$home" > "$queued/home"
+  printf '%s\n' "$deadline" > "$queued/queue_deadline"
+  printf '5\n' > "$queued/timeout"
+  printf '%s\0%s\0' fm-touch-job.sh "$effect" > "$queued/argv"
+  : > "$queued/stdin"
+  : > "$queued/stdout"
+  : > "$queued/stderr"
+  chmod 600 "$running/state" "$running/home" "$queued"/*
+  sleep 1
+  [ ! -e "$effect" ] || fail "a queued job ran after running-job reclamation failed"
+  [ "$(job_state "${queued##*/}")" = queued ] \
+    || fail "failed running-job reclamation did not retain the queued same-home reservation"
+  pass "failed running-job reclamation reserves the home against a second lane"
+}
+
+test_failed_reclamation_reserves_home
+
+test_failed_reclamation_with_unknown_home_blocks_all_lanes() {
+  local running="$STATE_ROOT/jobs/job-unknown-home-running"
+  local queued="$STATE_ROOT/jobs/job-unknown-home-queued"
+  local effect="$TMP_ROOT/unknown-home-effect"
+  local deadline
+  mkdir -p "$running/.claim" "$queued"
+  chmod 700 "$running" "$running/.claim" "$queued"
+  deadline=$(( $(date +%s) + 60 ))
+  printf 'running\n' > "$running/state"
+  ln -s "$TMP_ROOT/missing-supervisor" "$running/.claim/supervisor"
+  printf 'queued\n' > "$queued/state"
+  printf '%s\n' "$REMOTE_ROOT" > "$queued/root"
+  printf '%s\n' "$HOME_B" > "$queued/home"
+  printf '%s\n' "$deadline" > "$queued/queue_deadline"
+  printf '5\n' > "$queued/timeout"
+  printf '%s\0%s\0' fm-touch-job.sh "$effect" > "$queued/argv"
+  : > "$queued/stdin"
+  : > "$queued/stdout"
+  : > "$queued/stderr"
+  chmod 600 "$running/state" "$queued"/*
+  sleep 1
+  [ ! -e "$effect" ] || fail "a queued job ran while running-job custody had no valid home"
+  [ "$(job_state "${queued##*/}")" = queued ] \
+    || fail "unknown running-job home did not block scheduling globally"
+  pass "failed reclamation with unknown home blocks every new lane"
+}
+
+test_failed_reclamation_with_unknown_home_blocks_all_lanes
+
+test_failed_reclamation_with_absent_home_leaf_blocks_all_lanes() {
+  local home_parent="$TMP_ROOT/home-absent-parent"
+  local running="$STATE_ROOT/jobs/job-absent-home-running"
+  local queued="$STATE_ROOT/jobs/job-absent-home-queued"
+  local effect="$TMP_ROOT/absent-home-effect"
+  local deadline
+  mkdir -p "$home_parent" "$running/.claim" "$queued"
+  chmod 700 "$home_parent" "$running" "$running/.claim" "$queued"
+  deadline=$(( $(date +%s) + 60 ))
+  printf 'running\n' > "$running/state"
+  printf '%s\n' "$home_parent/missing-leaf" > "$running/home"
+  ln -s "$TMP_ROOT/missing-supervisor" "$running/.claim/supervisor"
+  printf 'queued\n' > "$queued/state"
+  printf '%s\n' "$REMOTE_ROOT" > "$queued/root"
+  printf '%s\n' "$HOME_B" > "$queued/home"
+  printf '%s\n' "$deadline" > "$queued/queue_deadline"
+  printf '5\n' > "$queued/timeout"
+  printf '%s\0%s\0' fm-touch-job.sh "$effect" > "$queued/argv"
+  : > "$queued/stdin"
+  : > "$queued/stdout"
+  : > "$queued/stderr"
+  chmod 600 "$running/state" "$running/home" "$queued"/*
+  sleep 1
+  [ ! -e "$effect" ] || fail "a queued job ran while running-job custody had an absent home leaf"
+  [ "$(job_state "${queued##*/}")" = queued ] \
+    || fail "an absent running-job home leaf did not block scheduling globally"
+  pass "failed reclamation with an absent home leaf blocks every new lane"
+}
+
+test_failed_reclamation_with_absent_home_leaf_blocks_all_lanes
+
+test_pid_reuse_keeps_live_group_lane_reserved() {
+  local home="$TMP_ROOT/home-pid-reuse"
+  local running="$STATE_ROOT/jobs/job-pid-reuse-running"
+  local queued="$STATE_ROOT/jobs/job-pid-reuse-queued"
+  local effect="$TMP_ROOT/pid-reuse-effect"
+  local descendant_file="$TMP_ROOT/pid-reuse-descendant"
+  local group_pid helper_pid descendant_pid deadline
+  mkdir -p "$home" "$running/.claim" "$queued"
+  chmod 700 "$home" "$running" "$running/.claim" "$queued"
+  python3 - "$descendant_file" <<'PY' &
+import os
+import subprocess
+import sys
+
+child = subprocess.Popen(["bash", "-c", "sleep 30 & wait"], preexec_fn=os.setsid)
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(str(child.pid))
+child.wait()
+PY
+  helper_pid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$descendant_file" ] && break
+    sleep 0.01
+  done
+  [ -s "$descendant_file" ] || fail "PID reuse fixture did not publish its process group"
+  group_pid=$(cat "$descendant_file")
+  descendant_pid=$(ps -o pid= -g "$group_pid" | awk -v leader="$group_pid" '$1 != leader && $1 ~ /^[0-9]+$/ { print $1; exit }')
+  [ -n "$descendant_pid" ] || fail "PID reuse fixture did not retain a live descendant"
+  kill -0 -- "-$group_pid" 2>/dev/null || fail "PID reuse fixture process group is not live"
+  kill -0 "$descendant_pid" 2>/dev/null || fail "PID reuse fixture descendant is not live"
+
+  deadline=$(( $(date +%s) + 60 ))
+  printf 'running\n' > "$running/state"
+  printf '%s\n' "$home" > "$running/home"
+  printf '%s\n' "$group_pid" > "$running/.claim/group"
+  printf 'pid-reused\n' > "$running/.claim/group_start"
+  printf 'queued\n' > "$queued/state"
+  printf '%s\n' "$REMOTE_ROOT" > "$queued/root"
+  printf '%s\n' "$home" > "$queued/home"
+  printf '%s\n' "$deadline" > "$queued/queue_deadline"
+  printf '5\n' > "$queued/timeout"
+  printf '%s\0%s\0' fm-touch-job.sh "$effect" > "$queued/argv"
+  : > "$queued/stdin"
+  : > "$queued/stdout"
+  : > "$queued/stderr"
+  chmod 600 "$running/state" "$running/home" "$running/.claim/group" \
+    "$running/.claim/group_start" "$queued"/*
+  sleep 1
+  [ ! -e "$effect" ] || fail "a queued job ran beside a live PID-reused process group"
+  [ "$(job_state "${queued##*/}")" = queued ] \
+    || fail "PID-reused live group did not retain the queued same-home reservation"
+  [ -e "$running/.claim/group" ] || fail "PID-reused live group claim was released"
+  kill -KILL -- "-$group_pid" 2>/dev/null || true
+  wait "$helper_pid" 2>/dev/null || true
+  pass "PID reuse keeps a live descendant group in one-lane custody"
+}
+
+test_pid_reuse_keeps_live_group_lane_reserved
 
 # Stage litter: an abandoned .stage.* older than the reap age does not survive
 # a worker pass, while fresh staging is left alone.

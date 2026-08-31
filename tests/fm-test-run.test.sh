@@ -47,7 +47,7 @@ exit 99
 SH
     chmod +x "$fakebin/$tool"
   done
-  PATH="$fakebin:$PATH" PYTHONNOUSERSITE=1 PYTHONPATH= \
+  PATH="$fakebin:$PATH" PYTHONNOUSERSITE=1 PYTHONPATH='' \
     bash -c '
       ROOT="'"$ROOT"'"
       # shellcheck source=tests/lib.sh
@@ -152,6 +152,7 @@ init_changed_fixture_repo() {
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
+    fm-bearings-board-render.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-backend-orca.test.sh \
@@ -179,6 +180,9 @@ init_changed_fixture_repo() {
   : >"$repo/tests/fixtures/flat-named.golden"
   : >"$repo/tests/fixtures/flat-orphan.golden"
   printf '# tests/fixtures/flat-named.golden\n' >>"$repo/tests/fm-brief.test.sh"
+  mkdir -p "$repo/tests/assets"
+  : >"$repo/tests/assets/board-render-harness.mjs"
+  printf '# tests/assets/board-render-harness.mjs\n' >>"$repo/tests/fm-bearings-board-render.test.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-launch-axis-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
@@ -361,6 +365,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
     || fail "unnamed single-file fixture failure is not actionable: $(cat "$tmp/err")"
   git -C "$repo" add tests/fixtures/flat-orphan.golden
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm flat-orphan-change
+
+  printf '\n' >>"$repo/tests/assets/board-render-harness.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-bearings-board-render.test.sh" \
+    "the board-render harness selects its consuming render suite"
+  git -C "$repo" add tests/assets/board-render-harness.mjs
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm board-render-harness-change
 
   mkdir -p "$repo/rejected"
   printf 'night report\n' >"$repo/gnhf-night-report.md"

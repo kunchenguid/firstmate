@@ -9,6 +9,18 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+
+fm_wake_queue_sequences_unique() {
+  local queue=${1:-}
+  [ -n "$queue" ] || return 1
+  [ -e "$queue" ] || return 0
+  awk -F '\t' '
+    NF != 5 || $2 !~ /^[0-9]+$/ { invalid=1; next }
+    { if (++seen[$2] > 1) duplicate=1 }
+    END { exit (invalid || duplicate) ? 1 : 0 }
+  ' "$queue"
+}
+
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -1416,7 +1428,7 @@ fm_wake_queued_keys() {
 
 fm_wake_queued_keys_locked() {
   local kind=$1
-  awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind && !seen[$4]++ { print $4 }' \
+  awk -F '\t' -v kind="$kind" 'NF == 5 && $3 == kind && !seen[$4]++ { print $4 }' \
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
@@ -1479,7 +1491,7 @@ fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff> [<rows-file>]
     fm_wake_secondmate_stall_receipt_write "$task" "$row_key" || return 1
   done < <(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
     BEGIN { if (rows != "") while ((getline line < rows) > 0) owned[line]=1 }
-    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
+    NF == 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
       && (rows == "" || ($2 in owned)) && $3 == "check" \
       && $4 ~ /^secondmate-wake-loop-[A-Za-z0-9._-]+-[0-9]+-[0-9]+$/ { print $4 }
   ' "$FM_WAKE_QUEUE" 2>/dev/null)
@@ -1510,7 +1522,7 @@ fm_wake_commit_remote_reply_quarantine_receipts_through() { # <cutoff> [<rows-fi
     fi
   done < <(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
     BEGIN { if (rows != "") while ((getline line < rows) > 0) owned[line]=1 }
-    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
+    NF == 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
       && (rows == "" || ($2 in owned)) && $3 == "check" \
       && $4 ~ /^remote-reply-quarantine:[A-Za-z0-9._-]+:[A-Fa-f0-9]{64}$/ { print $4 }
   ' "$FM_WAKE_QUEUE" 2>/dev/null)
@@ -1529,7 +1541,7 @@ fm_wake_restore_queue() {
 fm_wake_print_deduped() {
   local file=$1
   awk -F '\t' '
-    NF >= 5 {
+    NF == 5 {
       dedupe = $3 SUBSEP $4
       if ($3 == "heartbeat") {
         dedupe = "heartbeat"

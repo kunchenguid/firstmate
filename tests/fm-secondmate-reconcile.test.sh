@@ -702,6 +702,87 @@ test_a_row_with_no_identity_at_all_fails_loudly() {
   pass "a row with neither a spawn generation nor a host fails loudly instead of vanishing"
 }
 
+test_schema_valid_wrong_type_reconcile_collection_fails_loudly() {
+  local label value home mate fakebin snap out rc
+  for label in false number object string; do
+    case "$label" in
+      false) value=false ;;
+      number) value=123 ;;
+      object) value='{}' ;;
+      string) value='"bad"' ;;
+    esac
+    { read -r home; read -r mate; read -r fakebin; } < <(make_main_home "malformed-collection-$label" mate)
+    snap="$home/snapshot.json"
+    jq -n --argjson collection "$value" \
+      '{schema:"fm-bearings.v1",secondmate_reconcile:$collection}' > "$snap"
+
+    set +e
+    out=$(run_notify "$home" "$fakebin" "malformed-collection-$label" "$snap" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "a schema-valid $label reconciliation collection reported success: $out"
+    assert_contains "$out" "malformed secondmate reconciliation collection" \
+      "$label reconciliation input did not fail with an actionable diagnostic: $out"
+    [ "$(inbox_records "$home/state" mate)" -eq 0 ] \
+      || fail "$label reconciliation input still sent a nudge"
+    assert_absent "$home/state/mate.reconcile-nudged" \
+      "$label reconciliation input started a cooldown"
+  done
+  pass "schema-valid wrong-type reconciliation collections fail closed before delivery"
+}
+
+test_malformed_reconcile_members_fail_closed() {
+  local mode home mate fakebin snap out rc rows
+  for mode in only-invalid mixed; do
+    { read -r home; read -r mate; read -r fakebin; } < <(make_main_home "malformed-member-$mode" mate)
+    snap="$home/snapshot.json"
+    if [ "$mode" = only-invalid ]; then
+      rows='[{"id":123,"spawn_gen":"spawn-mate","host":"","kind":"orphan_in_flight","ids":[]}]'
+    else
+      rows='[{"id":"mate","spawn_gen":"spawn-mate","host":"","kind":"orphan_in_flight","ids":[]},{"id":123,"spawn_gen":"spawn-mate","host":"","kind":"orphan_in_flight","ids":[]}]'
+    fi
+    jq -n --argjson rows "$rows" '{schema:"fm-bearings.v1",secondmate_reconcile:$rows}' > "$snap"
+
+    set +e
+    out=$(run_notify "$home" "$fakebin" "malformed-member-$mode" "$snap" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$mode malformed reconciliation member reported success: $out"
+    assert_contains "$out" "malformed secondmate reconciliation collection" \
+      "$mode malformed reconciliation member lacked a fail-closed diagnostic: $out"
+    [ "$(inbox_records "$home/state" mate)" -eq 0 ] \
+      || fail "$mode malformed reconciliation member still sent a nudge"
+    assert_absent "$home/state/mate.reconcile-nudged" \
+      "$mode malformed reconciliation member started a cooldown"
+  done
+  pass "malformed reconciliation members fail closed before filtering"
+}
+
+test_malformed_current_records_fail_before_inventory_filter() {
+  local mode home mate fakebin snap out rc records
+  for mode in only-invalid mixed; do
+    { read -r home; read -r mate; read -r fakebin; } < <(make_main_home "malformed-current-record-$mode" mate)
+    snap="$home/snapshot.json"
+    if [ "$mode" = only-invalid ]; then
+      records='[{"id":123,"spawn_gen":"spawn-mate","host":"","reconcile_inventory":null}]'
+    else
+      records='[{"id":"mate","spawn_gen":"spawn-mate","host":"","reconcile_inventory":{"kind":"orphan_in_flight","ids":[]}},{"id":123,"spawn_gen":"spawn-mate","host":"","reconcile_inventory":null}]'
+    fi
+    jq -n --argjson records "$records" '{schema:"fm-fleet-snapshot.v1",secondmate_current:{records:$records}}' > "$snap"
+
+    set +e
+    out=$(run_notify "$home" "$fakebin" "malformed-current-record-$mode" "$snap" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$mode malformed current record reported success: $out"
+    assert_contains "$out" "malformed secondmate reconciliation collection" \
+      "$mode malformed current record lacked a fail-closed diagnostic: $out"
+    [ "$(inbox_records "$home/state" mate)" -eq 0 ] \
+      || fail "$mode malformed current record still sent a nudge"
+  done
+  pass "malformed current records fail closed before inventory filtering"
+}
+
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
 test_the_cooldown_starts_when_delivery_finishes
@@ -720,3 +801,6 @@ test_a_markerless_remote_secondmate_is_nudged_once_per_window
 test_a_stale_remote_route_is_refused
 test_route_replacement_during_send_is_refused
 test_a_row_with_no_identity_at_all_fails_loudly
+test_schema_valid_wrong_type_reconcile_collection_fails_loudly
+test_malformed_reconcile_members_fail_closed
+test_malformed_current_records_fail_before_inventory_filter

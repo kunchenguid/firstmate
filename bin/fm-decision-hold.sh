@@ -2,7 +2,7 @@
 # fm-decision-hold.sh - deterministic mechanics for durable captain decisions.
 #
 # The semantic policy is owned once by
-# .agents/skills/decision-hold-lifecycle/SKILL.md. This script never reads report,
+# .agents/skills/captain-hold-lifecycle/SKILL.md. This script never reads report,
 # visual-review, chat, or terminal prose to guess whether a decision exists.
 # The invoking agent inventories unresolved decisions, assigns stable keys, and
 # routes any dependent work. This script supplies deterministic identities,

@@ -93,10 +93,31 @@ REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin policybin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  policybin="$case_dir/policybin"
+  mkdir -p "$case_dir/state" "$fakebin" "$policybin"
+  cat > "$policybin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr checks")
+    printf 'summary: "%s"\n' "${FM_FAKE_GH_CHECKS_SUMMARY:-2 passed, 0 failed, 2 total}"
+    ;;
+  api\ *)
+    case "$*" in
+      *mergeable_state*) printf '%s\n' "${FM_FAKE_GH_MERGEABLE:-true}" ;;
+      *)
+        jq_filter=${4:-}
+        [ "${3:-}" = "--jq" ] && [ -n "$jq_filter" ] || exit 2
+        jq -n --arg body "${FM_FAKE_GH_PR_BODY:-}" "{body: \$body} | $jq_filter"
+        ;;
+    esac
+    ;;
+  *) exec "$FM_TEST_GH_AXI_DELEGATE" "$@" ;;
+esac
+SH
+  chmod +x "$policybin/gh-axi"
   # Initialize the project as a git repo so the fork's Review receipt gate
   # (firstmate_review_receipt_required) does not fire for non-Firstmate projects.
   git init --quiet "$case_dir/project" 2>/dev/null
@@ -156,6 +177,60 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+add_override_receipt_write_failure() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */.fm-pr-merge-meta.XXXXXX) exit 1 ;;
+esac
+command -p mktemp "$@"
+SH
+  chmod +x "$case_dir/fakebin/mktemp"
+}
+
+# Fails the receipt's final publish, so the staged file exists and has already
+# passed every validation when the write path gives up.
+add_override_receipt_publish_failure() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.fm-pr-merge-meta.*) exit 1 ;;
+  esac
+done
+command -p mv "$@"
+SH
+  chmod +x "$case_dir/fakebin/mv"
+}
+
+# Signals the merge itself mid-staging without failing the command, so only the
+# script's own signal and exit handling can remove the staged file.
+add_override_receipt_signal_during_staging() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.fm-pr-merge-meta.*)
+      command -p chmod "$@" || exit 1
+      kill -TERM "$PPID"
+      exit 0
+      ;;
+  esac
+done
+command -p chmod "$@"
+SH
+  chmod +x "$case_dir/fakebin/chmod"
+}
+
+assert_no_staged_merge_meta() {  # <case-dir> <msg>
+  local case_dir=$1 msg=$2 leftovers
+  leftovers=$(find "$case_dir/state" -maxdepth 1 -name '.fm-pr-merge-meta.*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$leftovers" = 0 ] || fail "$msg (found $leftovers)"
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
@@ -255,8 +330,15 @@ case_dir=$(dirname "$FM_TEST_GLAB_JSON")
 case "${1:-} ${2:-}" in
   "mr view")
     [ ! -e "$case_dir/glab-view-fails" ] || exit 1
-    if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ]; then
-      cat "$case_dir/mr-post.json"
+    if [ -e "$case_dir/glab-merge-called" ]; then
+      [ ! -e "$case_dir/glab-post-view-fails" ] || exit 1
+      if [ -e "$case_dir/glab-post-invalid" ]; then
+        printf '[]\n'
+      elif [ -e "$case_dir/glab-stays-open" ]; then
+        cat "$FM_TEST_GLAB_JSON"
+      else
+        cat "$case_dir/mr-post.json"
+      fi
     else
       cat "$FM_TEST_GLAB_JSON"
     fi
@@ -344,6 +426,16 @@ mirror_path_without() {
   done <<EOF
 $search
 EOF
+  # macOS's Perl dispatch rejects /usr/bin/shasum when it is reached through a
+  # differently named symlink. Preserve the command's real argv[0] in the
+  # synthetic PATH or poll authentication hashes become empty before this
+  # helper reaches the gh-less behavior it is meant to exercise.
+  if [ -L "$dir/shasum" ]; then
+    entry=$(readlink "$dir/shasum")
+    rm "$dir/shasum"
+    printf '#!/bin/sh\nexec "%s" "$@"\n' "$entry" > "$dir/shasum"
+    chmod +x "$dir/shasum"
+  fi
   ! PATH="$dir" command -v "$omit" >/dev/null 2>&1 \
     || fail "the $omit-free search path still resolved $omit"
 }
@@ -360,6 +452,7 @@ run_pr_merge() {
   FM_HOME="${FM_TEST_HOME:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
@@ -367,7 +460,7 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$case_dir/policybin:$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
   if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
@@ -1616,6 +1709,30 @@ test_gitlab_each_condition_refuses_independently() {
   pass "fm-pr-merge refuses on each GitLab pre-merge condition independently"
 }
 
+test_gitlab_mergeability_requires_boolean_fields() {
+  local case_dir rc name field
+  for name in conflicts discussions; do
+    case "$name" in
+      conflicts) field='conflicts="false"' ;;
+      discussions) field='discussions="true"' ;;
+    esac
+    case_dir=$(make_gitlab_case "gitlab-non-boolean-$name" "$field")
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "gitlab-non-boolean-$name: malformed mergeability data must refuse"
+    assert_grep 'could not read the GitLab merge request state before merging' \
+      "$case_dir/stderr" "gitlab-non-boolean-$name: malformed mergeability data was accepted"
+    [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+      || fail "gitlab-non-boolean-$name: a merge was attempted on malformed mergeability data"
+  done
+  pass "fm-pr-merge rejects non-boolean GitLab mergeability fields"
+}
+
 test_gitlab_reports_every_failing_condition() {
   local case_dir rc expected
   case_dir=$(make_gitlab_case gitlab-refuse-all \
@@ -1913,15 +2030,20 @@ test_gitlab_merge_reports_upward() {
 }
 
 test_queued_gitlab_merge_leaves_the_poll_armed() {
-  local case_dir
+  local case_dir rc
   case_dir=$(make_gitlab_case queued-gitlab-merge)
   mkdir -p "$case_dir/home"
   : >"$case_dir/glab-stays-open"
 
+  set +e
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$MR_URL" \
-    >"$case_dir/stdout" 2>"$case_dir/stderr" \
-    || fail "queued-gitlab-merge: accepted merge command failed"
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
 
+  expect_code 1 "$rc" "queued-gitlab-merge: unconfirmed merge should exit non-zero"
+  assert_grep 'landed state is opened' "$case_dir/stderr" \
+    "queued-gitlab-merge: the unconfirmed state was not named"
   assert_absent "$case_dir/state/.wake-queue" \
     "queued-gitlab-merge: a queued merge was reported as landed"
   [ -f "$case_dir/state/task-x1.check.sh" ] \
@@ -1929,6 +2051,31 @@ test_queued_gitlab_merge_leaves_the_poll_armed() {
   [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
     || fail "queued-gitlab-merge: a queued merge was marked as reported"
   pass "a queued GitLab merge stays silent and leaves confirmation to the armed poll"
+}
+
+test_gitlab_post_merge_confirmation_failures_leave_poll_armed() {
+  local case_dir rc name marker
+  for name in unreadable invalid; do
+    case_dir=$(make_gitlab_case "gitlab-post-confirm-$name")
+    marker="glab-post-view-fails"
+    [ "$name" = unreadable ] || marker="glab-post-invalid"
+    : > "$case_dir/$marker"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 2 "$rc" "gitlab-post-confirm-$name: confirmation failure should propagate"
+    assert_grep 'landed state could not be confirmed' "$case_dir/stderr" \
+      "gitlab-post-confirm-$name: confirmation failure was not reported"
+    [ -f "$case_dir/state/task-x1.check.sh" ] \
+      || fail "gitlab-post-confirm-$name: the merge poll was not left armed"
+    [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
+      || fail "gitlab-post-confirm-$name: an unconfirmed merge was marked as reported"
+  done
+  pass "GitLab confirmation failures propagate while their polls remain armed"
 }
 
 test_main_home_merge_leaves_a_durable_wake() {
@@ -2005,7 +2152,7 @@ test_distinct_merged_prs_keep_distinct_wakes() {
 }
 
 test_uncommitted_marker_retry_is_never_silent() {
-  local case_dir url count
+  local case_dir url count rc
   url=https://github.com/example/repo/pull/67
   case_dir=$(make_home_case uncommitted-wake-retry)
   add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -2026,9 +2173,12 @@ SH
   export FM_TEST_REAL_MV
   FM_TEST_REAL_MV=$(command -v mv)
 
+  set +e
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
-    >"$case_dir/stdout-1" 2>"$case_dir/stderr-1" \
-    || fail "uncommitted-wake-retry: landed merge was reported as failed"
+    >"$case_dir/stdout-1" 2>"$case_dir/stderr-1"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "uncommitted-wake-retry: outcome publication failure should propagate"
   assert_grep 'could not record the outcome' "$case_dir/stderr-1" \
     "uncommitted-wake-retry: failed marker commit was not loud"
   [ -f "$case_dir/state/task-x1.check.sh" ] \
@@ -2067,7 +2217,7 @@ test_secondmate_without_parent_binding_is_loud() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "unbound-secondmate: the merge itself landed and must not be reported as failed"
+  expect_code 3 "$rc" "unbound-secondmate: outcome publication failure should propagate"
   assert_grep 'could not report it upward' "$case_dir/stderr" \
     "unbound-secondmate: a merge that could not be reported upward said nothing about it"
   assert_absent "$case_dir/state/.wake-queue" \
@@ -2528,6 +2678,7 @@ test_gitlab_imposes_no_merge_method
 test_gitlab_extra_args_forwarded
 test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
+test_gitlab_mergeability_requires_boolean_fields
 test_gitlab_reports_every_failing_condition
 test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
@@ -2538,6 +2689,7 @@ test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward
 test_queued_gitlab_merge_leaves_the_poll_armed
+test_gitlab_post_merge_confirmation_failures_leave_poll_armed
 test_failed_merge_reports_nothing
 test_gitlab_refusal_reports_nothing
 test_main_home_merge_leaves_a_durable_wake

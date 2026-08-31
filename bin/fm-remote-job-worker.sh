@@ -272,8 +272,8 @@ worker_supervisor_identity_status() { # <job-dir> <pid>
 
 # A leaderless live group still belongs to the recorded execution: its PGID
 # cannot be reused while any old member survives, so it remains safe to signal.
-# A live leader whose start identity mismatches proves PID reuse and makes the
-# recorded group stale; an unreadable live leader stays indeterminate so the
+# A live leader whose start identity mismatches remains indeterminate while its
+# recorded group is live; an unreadable live leader stays indeterminate so the
 # stop loop retries rather than signaling or declaring the group dead.
 worker_group_identity_status() { # <job-dir> <pid>
   local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
@@ -285,6 +285,7 @@ worker_group_identity_status() { # <job-dir> <pid>
     return 1
   }
   [ "$recorded_start" = "$actual_start" ] && return 0
+  worker_process_or_group_alive group "$pid" && return 2
   return 1
 }
 
@@ -512,6 +513,13 @@ worker_read_text() { # <job-dir> <field> <max>
   [ -n "$value" ] || return 1
   [ "$(LC_ALL=C tr -cd '\000\015' < "$job/$field" | LC_ALL=C wc -c | tr -d ' ')" -eq 0 ] || return 1
   printf '%s\n' "$value"
+}
+
+worker_valid_home() { # <home>
+  local home=$1 canonical
+  [ -n "$home" ] || return 1
+  canonical=$(fm_remote_job_canonical_existing_dir "$home" 2>/dev/null) || return 1
+  [ "$canonical" = "$home" ]
 }
 
 worker_publish_result() { # <job-dir> <exit>
@@ -929,7 +937,7 @@ worker_lane_main() { # <job-id>
 }
 
 worker_process_once() { # <account-home>
-  local account_home=$1 job id state queue_deadline home seq candidates=''
+  local account_home=$1 job id state queue_deadline home seq candidates='' scheduling_blocked=0
   local reserved_index reserved_count home_reserved
   local reserved_homes=()
   worker_reap_finished_lanes
@@ -969,12 +977,20 @@ worker_process_once() { # <account-home>
         candidates="$candidates$seq"$'\t'"$id"$'\t'"$home"$'\n'
         ;;
       running)
-        worker_lane_owns_job "$job" || worker_reclaim_running_job "$job" || true
+        if ! worker_lane_owns_job "$job" && ! worker_reclaim_running_job "$job"; then
+          home=$(worker_read_text "$job" home 8192 2>/dev/null || true)
+          if worker_valid_home "$home"; then
+            reserved_homes+=("$home")
+          else
+            scheduling_blocked=1
+          fi
+        fi
         continue
         ;;
       *) continue ;;
     esac
   done
+  [ "$scheduling_blocked" -eq 0 ] || return 0
   [ -n "$candidates" ] || return 0
   while IFS=$'\t' read -r seq id home; do
     [ -n "$id" ] || continue

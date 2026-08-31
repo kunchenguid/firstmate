@@ -209,8 +209,10 @@ status_is_paused_or_captain_held() {  # <status-line>
 # ends at the first tag rather than special-casing "[key=...]".
 # Accept any number of bracketed metadata groups before the colon.
 status_line_is_parseable() {  # <status-line>
-  local line=$1 re='^[[:lower:]][[:lower:]-]*([[:space:]]+\[[^][]+\])*:[[:space:]]+.+$'
-  [[ "$line" =~ $re ]]
+  local line=$1 verb re='^[[:lower:]][[:lower:]-]*(([[:space:]]+corr=[0-9A-Fa-f]{16})|([[:space:]]+\[[^][]+\]))*:[[:space:]]+.+$'
+  [[ "$line" =~ $re ]] || return 1
+  verb=$(status_line_verb "$line")
+  [[ "$verb" =~ ^[[:lower:]][[:lower:]-]*$ ]]
 }
 
 #
@@ -1449,7 +1451,7 @@ crew_treehouse_holder_for_worktree() {  # <project> <abs> <raw-wt>
 }
 
 crew_worktree_custody_canonical_id() {  # <state> <abs>
-  local state=$1 abs=$2 id holder best_id best_lease lease proj wt
+  local state=$1 abs=$2 id holder best_id='' best_lease='' lease proj wt
   holder=
   for id in $(crew_worktree_claimants "$state" "$abs"); do
     wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)

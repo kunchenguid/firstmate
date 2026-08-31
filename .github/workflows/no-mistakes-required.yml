@@ -101,10 +101,7 @@ jobs:
               } >&2
               exit 1
             fi
-            # Bind the attestation to this PR's head: an attestation produced for an
-            # earlier commit is not proof this head passed the pipeline. The
-            # attestation's head_sha must exactly match the pull request head.
-            attestation_head=$(printf '%s' "$json" | jq -r '.head_sha // empty' 2>/dev/null) || attestation_head=''
+            attestation_head=$(printf '%s' "$json" | jq -er 'if (.head_sha | type) == "string" then .head_sha else empty end' 2>/dev/null) || attestation_head=''
             if [ -z "$attestation_head" ] || [ "$attestation_head" != "$PR_HEAD_SHA" ]; then
               {
                 echo "::error::The no-mistakes pipeline attestation is not bound to this pull request head."
@@ -121,6 +118,32 @@ jobs:
               exit 1
             fi
             echo "Attestation is bound to pull request head ${PR_HEAD_SHA}."
+            malformed_steps=$(printf '%s' "$json" | jq -r '
+              if (.steps | type) != "array" then
+                "steps"
+              elif any(.steps[]; (type != "object") or
+                ((.step | type) != "string") or (.step == "") or
+                ((.status | type) != "string")) then
+                "steps"
+              else
+                empty
+              end
+            ' 2>/dev/null) || malformed_steps='invalid'
+            if [ -n "$malformed_steps" ]; then
+              echo "::error::The no-mistakes pipeline attestation contains a malformed steps member." >&2
+              exit 1
+            fi
+            duplicate_steps=$(printf '%s' "$json" | jq -r '
+              if (.steps | type) == "array" then
+                ([.steps[] | select(type == "object") | .step] | group_by(.)[] | select(length > 1) | .[0])
+              else
+                empty
+              end
+            ' 2>/dev/null) || duplicate_steps='invalid'
+            if [ -n "$duplicate_steps" ]; then
+              echo "::error::The no-mistakes pipeline attestation contains duplicate step names: ${duplicate_steps}." >&2
+              exit 1
+            fi
             incomplete=''
             for required in review test document; do
               status=$(printf '%s' "$json" | jq -r --arg step "$required" \

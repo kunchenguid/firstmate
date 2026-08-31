@@ -221,12 +221,62 @@ cmd_notify() {
   # every field; it is passed in via --arg rather than written literally so no
   # raw control byte sits in this source file.
   row_sep=$(printf '\037')
-  rows=$(printf '%s' "$snapshot" | jq -r --arg sep "$row_sep" '
+  if ! rows=$(printf '%s' "$snapshot" | jq -r --arg sep "$row_sep" '
+    def valid_optional_text($pattern):
+      if . == null then true
+      elif type == "string" then test($pattern)
+      else false
+      end;
+    def valid_host:
+      if . == null then true
+      elif type == "string" then (test("[[:cntrl:]]") | not)
+      else false
+      end;
+    def valid_id:
+      if type == "string" then test("^[A-Za-z0-9._-]+$") else false end;
+    def valid_ids:
+      if . == null then true
+      elif type == "array" then all(.[]; type == "string")
+      else false
+      end;
+    def valid_inventory:
+      if type != "object" then false
+      else
+        (.kind | valid_optional_text("^.*$"))
+        and (.ids | valid_ids)
+      end;
+    def valid_bearings_member:
+      if type != "object" then false
+      else
+        (.id | valid_id)
+        and (.spawn_gen | valid_optional_text("^[A-Za-z0-9._-]*$"))
+        and (.host | valid_host)
+        and (.kind | valid_optional_text("^.*$"))
+        and (.ids | valid_ids)
+      end;
+    def valid_fleet_record:
+      if type != "object" then false
+      else
+        (.id | valid_id)
+        and (.spawn_gen | valid_optional_text("^[A-Za-z0-9._-]*$"))
+        and (.host | valid_host)
+        and (if .reconcile_inventory == null then true else (.reconcile_inventory | valid_inventory) end)
+      end;
     (if .schema == "fm-bearings.v1" then
-       (.secondmate_reconcile // [])[]
+       .secondmate_reconcile as $members
+       | if $members == null then []
+         elif ($members | type) != "array" then error("secondmate_reconcile is not an array")
+         elif any($members[]; (valid_bearings_member | not)) then error("secondmate_reconcile has a malformed member")
+         else $members[]
+         end
        | {id, spawn_gen:(.spawn_gen // ""), host:(.host // ""), kind:(.kind // ""), ids:(.ids // [])}
      else
-       (.secondmate_current.records // [])[]
+       .secondmate_current.records as $records
+       | if $records == null then []
+         elif ($records | type) != "array" then error("secondmate_current.records is not an array")
+         elif any($records[]; (valid_fleet_record | not)) then error("secondmate_current.records has a malformed reconciliation member")
+         else $records[]
+         end
        | select(.reconcile_inventory != null)
        | {id, spawn_gen:(.spawn_gen // ""), host:(.host // ""), kind:(.reconcile_inventory.kind // ""), ids:(.reconcile_inventory.ids // [])}
      end)
@@ -236,7 +286,9 @@ cmd_notify() {
     | .kind as $kind
     | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
     | [.id, .spawn_gen, .host, $kind]
-    | join($sep)')
+    | join($sep)'); then
+    fail "snapshot has a malformed secondmate reconciliation collection"
+  fi
 
   local id sampled_spawn_gen sampled_host expected_remote_host kind path last age now delivered_at reconcile_lock control_lock meta meta_lock did send_rc
   while IFS=$'\037' read -r id sampled_spawn_gen sampled_host kind; do

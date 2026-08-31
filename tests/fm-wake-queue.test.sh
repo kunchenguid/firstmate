@@ -735,6 +735,90 @@ test_branch_grant_refuses_rows_already_claimed_by_main() {
   pass "branch grant cannot take a row already claimed by main"
 }
 
+test_extra_field_row_cannot_be_granted_or_consumed() {
+  local dir state before out err rc
+  dir=$(make_case extra-field-row)
+  state="$dir/state"
+  printf '%s\n' '1700000000\t1\tsignal\ttask-a.status\tsignal: task-a.status\textra' > "$state/.wake-queue"
+  before="$dir/before"
+  cp "$state/.wake-queue" "$before"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "drain accepted a row with an extra durable field"
+  cmp -s "$before" "$state/.wake-queue" \
+    || fail "drain changed a row with an extra durable field"
+
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" extra-field || fail "branch owner activation failed"
+  out="$dir/grant.out"
+  err="$dir/grant.err"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish extra-field 1 > "$out" 2> "$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "branch grant accepted a row with an extra durable field"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "malformed row received a branch grant snapshot"
+  cmp -s "$before" "$state/.wake-queue" \
+    || fail "branch grant changed a row with an extra durable field"
+  pass "extra-field wake rows stay ungranted and unconsumed"
+}
+
+test_extra_field_inactive_outcome_cannot_be_acknowledged() {
+  local dir state out err before fingerprint rc
+  dir=$(make_case extra-field-inactive-outcome)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  before="$dir/before"
+  fingerprint=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+  mkdir -p "$state/terminal-outcomes"
+  printf '%s\n' 'schema=fm-terminal-outcome.v1' 'phase=presentation' > "$state/terminal-outcomes/$fingerprint.pending"
+  printf '1700000000\t1\tsignal\ttask-a.status\tsignal: task-a.status\n1700000001\t1\tcheck\tinactive-outcome:%s\tterminal outcome\textra\n' \
+    "$fingerprint" > "$state/.wake-queue"
+  cp "$state/.wake-queue" "$before"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "drain accepted mixed valid and malformed wake rows"
+  ! grep -Fq 'WAKE_ACK_REQUIRED:' "$err" \
+    || fail "malformed queue produced an acknowledgement boundary"
+  [ -f "$state/terminal-outcomes/$fingerprint.pending" ] \
+    || fail "an extra-field inactive outcome was acknowledged"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "an extra-field inactive outcome created a presented receipt"
+  cmp -s "$before" "$state/.wake-queue" \
+    || fail "malformed mixed queue changed before repair"
+  pass "extra-field inactive outcome rows cannot trigger acknowledgement"
+}
+
+test_duplicate_sequence_rows_fail_closed() {
+  local dir state before rc
+  dir=$(make_case duplicate-sequence)
+  state="$dir/state"
+  printf '1700000000\t7\tcheck\tx-inbox\tcheck: main-owned row\n1700000001\t7\tsignal\ttask-a.status\tsignal: branch-owned row\n' \
+    > "$state/.wake-queue"
+  before="$dir/before"
+  cp "$state/.wake-queue" "$before"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "main drain accepted duplicate durable sequence numbers"
+  cmp -s "$before" "$state/.wake-queue" || fail "main drain changed duplicate durable rows"
+
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" duplicate-sequence \
+    || fail "branch owner activation failed"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish duplicate-sequence 7 > "$dir/grant.out" 2> "$dir/grant.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "branch grant accepted duplicate durable sequence numbers"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "duplicate rows received a branch snapshot"
+  cmp -s "$before" "$state/.wake-queue" || fail "branch grant changed duplicate durable rows"
+
+  printf '7\n' > "$state/.branch-eligible-rows"
+  rc=0
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
+    > "$dir/branch.out" 2> "$dir/branch.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "branch drain accepted duplicate durable sequence numbers"
+  cmp -s "$before" "$state/.wake-queue" || fail "branch drain changed duplicate durable rows"
+  pass "duplicate durable sequence rows fail closed before grant, drain, or acknowledgement"
+}
+
 test_actor_filter_precedes_same_key_deduplication() {
   local dir state main_sequence main_generation branch_sequence branch_generation
   dir=$(make_case actor-dedup-order)
@@ -1227,6 +1311,9 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
 test_branch_grant_refuses_rows_already_claimed_by_main
+test_extra_field_row_cannot_be_granted_or_consumed
+test_extra_field_inactive_outcome_cannot_be_acknowledged
+test_duplicate_sequence_rows_fail_closed
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses

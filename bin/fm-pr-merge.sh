@@ -269,7 +269,12 @@ gitlab_verify_mergeable() {
   # becomes an empty string or the literal "null", neither of which satisfies any
   # check below, so an unreadable field refuses the merge instead of passing it.
   if ! fields=$(printf '%s' "$json" | jq -r '
-      if type == "object" then
+      if type != "object" then
+        error("merge request payload is not an object")
+      elif (.has_conflicts | type) != "boolean"
+        or (.blocking_discussions_resolved | type) != "boolean" then
+        error("merge request payload has non-boolean mergeability fields")
+      else
         "state=" + ((.state // "") | tostring),
         "detail=" + ((.detailed_merge_status // "") | tostring),
         "conflicts=" + (.has_conflicts | tostring),
@@ -277,8 +282,6 @@ gitlab_verify_mergeable() {
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring)
-      else
-        error("merge request payload is not an object")
       end' 2>/dev/null); then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
@@ -708,7 +711,11 @@ gitlab_confirm_merged() {
       "$URL" >&2
     return 2
   fi
-  [ "$state" = merged ]
+  if [ "$state" != merged ]; then
+    printf 'actionable: GitLab accepted the merge request for %s but its landed state is %s; the merge poll remains armed\n' \
+      "$URL" "$state" >&2
+    return 1
+  fi
 }
 
 # Record before either forge call. This arms the merge poll without claiming a
@@ -719,9 +726,7 @@ record_pr_metadata || exit 1
 case "$PROVIDER" in
   github)
     MISSING_REVIEW_OVERRIDE=0
-    FM_REVIEW_RECEIPT_REQUIRED=0
     if firstmate_review_receipt_required; then
-      FM_REVIEW_RECEIPT_REQUIRED=1
       if ! firstmate_review_recorded; then
         if [ "$ALLOW_MISSING_REVIEW" -ne 1 ]; then
           echo "error: refusing Firstmate merge without a recorded passing no-mistakes Review; pass --allow-missing-review only with explicit captain authorization" >&2
@@ -731,31 +736,30 @@ case "$PROVIDER" in
       fi
     fi
 
-    # The --allow-red gate applies only to the Firstmate repository (or an
-    # unresolvable project), matching the Review receipt gate's scope.
-    if [ "$FM_REVIEW_RECEIPT_REQUIRED" -eq 1 ]; then
-      CHECKS_OUTPUT=
-      MERGEABLE_OUTPUT=
-      CHECKS_GREEN=0
-      MERGEABLE_GREEN=0
-      if CHECKS_OUTPUT=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>&1); then
-        if printf '%s\n' "$CHECKS_OUTPUT" \
-          | grep -Eq '^summary: "[0-9]+ passed, 0 failed(, [0-9]+ skipped)?, [1-9][0-9]* total"$'; then
-          CHECKS_GREEN=1
-        fi
+    # Keep the all-project red-merge guard independent of the Firstmate-only
+    # Review receipt. Queue-aware outcome verification below is
+    # post-call evidence; it must not let a non-green PR reach the forge call.
+    CHECKS_OUTPUT=
+    MERGEABLE_OUTPUT=
+    CHECKS_GREEN=0
+    MERGEABLE_GREEN=0
+    if CHECKS_OUTPUT=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>&1); then
+      if printf '%s\n' "$CHECKS_OUTPUT" \
+        | grep -Eq '^summary: "[0-9]+ passed, 0 failed(, [0-9]+ skipped)?, [1-9][0-9]* total"$'; then
+        CHECKS_GREEN=1
       fi
-      if MERGEABLE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
-        --jq '.mergeable == true and .mergeable_state == "clean"' 2>&1); then
-        if printf '%s\n' "$MERGEABLE_OUTPUT" | grep -qx true; then
-          MERGEABLE_GREEN=1
-        fi
+    fi
+    if MERGEABLE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
+      --jq '.mergeable == true and .mergeable_state == "clean"' 2>&1); then
+      if printf '%s\n' "$MERGEABLE_OUTPUT" | grep -qx true; then
+        MERGEABLE_GREEN=1
       fi
-      if { [ "$CHECKS_GREEN" -ne 1 ] || [ "$MERGEABLE_GREEN" -ne 1 ]; } \
-        && [ "$ALLOW_RED" -ne 1 ]; then
-        echo "error: refusing to merge non-green PR $URL; pass --allow-red only with captain authorization" >&2
-        printf '%s\n' "$CHECKS_OUTPUT" "$MERGEABLE_OUTPUT" >&2
-        exit 1
-      fi
+    fi
+    if { [ "$CHECKS_GREEN" -ne 1 ] || [ "$MERGEABLE_GREEN" -ne 1 ]; } \
+      && [ "$ALLOW_RED" -ne 1 ]; then
+      echo "error: refusing to merge non-green PR $URL; pass --allow-red only with captain authorization" >&2
+      printf '%s\n' "$CHECKS_OUTPUT" "$MERGEABLE_OUTPUT" >&2
+      exit 1
     fi
 
     merge_output=
@@ -826,7 +830,7 @@ case "$PROVIDER" in
       --sha "$FM_PR_MERGE_HEAD" --yes "$@"
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
-    [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    [ "$gitlab_confirm_rc" -eq 0 ] || exit "$gitlab_confirm_rc"
     ;;
   *)
     echo "error: invalid PR merge request" >&2
@@ -849,3 +853,4 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+exit "$outcome_rc"

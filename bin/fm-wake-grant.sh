@@ -75,6 +75,10 @@ case "${1:-}" in
     rows_valid "$TMP" || exit 2
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
+    fm_wake_queue_sequences_unique "$FM_WAKE_QUEUE" || {
+      echo "wake grant: duplicate durable sequence numbers; refusing branch ownership" >&2
+      exit 1
+    }
     owner_matches '' "$generation" || exit 1
     replace=1
     if [ -e "$BRANCH_ROWS" ] || [ -L "$BRANCH_ROWS" ]; then
@@ -86,7 +90,7 @@ case "${1:-}" in
         while ((getline line < requested) > 0) wanted[line]=1
         while ((getline line < main) > 0) owned[line]=1
       }
-      NF >= 5 && $2 ~ /^[0-9]+$/ && $2 in wanted { present[$2]=1 }
+      NF == 5 && $2 ~ /^[0-9]+$/ && $2 in wanted { present[$2]=1 }
       END {
         for (seq in wanted) if (seq in owned) exit 3
         for (seq in wanted) if (!(seq in present)) exit 1

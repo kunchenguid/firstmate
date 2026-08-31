@@ -108,10 +108,13 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   }
 
   const eligibleSeqs: string[] = [];
+  const seenSeqs = new Set<string>();
   for (const line of rows) {
     const fields = line.split("\t");
-    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
+    if (fields.length !== 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
     const seq = fields[1];
+    if (seenSeqs.has(seq)) return UNSAFE_SCOPE;
+    seenSeqs.add(seq);
     const kind = fields[2];
     const key = fields[3];
     if (kind === "heartbeat") {
@@ -195,7 +198,7 @@ export function writeEligibleRowsSnapshot(
   grantScript: string,
   generation: string,
 ): EligibleRowsSnapshotResult {
-  if (seqs.length === 0 || seqs.some((seq) => !/^[0-9]+$/.test(seq))) return "error";
+  if (seqs.length === 0 || seqs.some((seq) => !/^[0-9]+$/.test(seq)) || new Set(seqs).size !== seqs.length) return "error";
   const status = runGrantScript(state, grantScript, ["publish", generation, ...seqs]);
   if (status === 0) return "published";
   if (status === 3) return "main-owned";

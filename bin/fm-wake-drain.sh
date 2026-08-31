@@ -105,7 +105,7 @@ claim_main_rows_locked() {
       while ((getline line < branch) > 0) reserved[line]=1
       while ((getline line < main) > 0) owned[line]=1
     }
-    NF >= 5 && $2 ~ /^[0-9]+$/ {
+    NF == 5 && $2 ~ /^[0-9]+$/ {
       present[$2]=1
       if (!($2 in reserved)) owned[$2]=1
     }
@@ -184,7 +184,7 @@ inactive_outcome_fingerprints() { # <sequence> <key-prefix> [<rows-file>]
     case "$key" in
       "$prefix"*) printf '%s\n' "${key#"$prefix"}" ;;
     esac
-  done < "$FM_WAKE_QUEUE"
+  done < <(awk -F '\t' 'NF == 5' "$FM_WAKE_QUEUE")
 }
 
 acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
@@ -393,6 +393,10 @@ trap 'exit 143' TERM
 
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
+fm_wake_queue_sequences_unique "$FM_WAKE_QUEUE" || {
+  echo "wake drain: duplicate durable sequence numbers; refusing to consume or acknowledge" >&2
+  exit 1
+}
 reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
@@ -440,12 +444,12 @@ if [ -n "$ACK_THROUGH" ]; then
     # sequence is below cutoff but not in the snapshot - is kept untouched.
     awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ELIGIBLE_ROWS_FILE" '
       BEGIN { while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) keep[line] = 1 }
-      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in keep) { print }
+      NF != 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in keep) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
   else
     awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$MAIN_ROWS_FILE" '
       BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
-      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) { print }
+      NF != 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
     fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" "$MAIN_ROWS_FILE" || {
       echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
@@ -563,7 +567,7 @@ else
 fi
 awk -F '\t' -v seqs="$ACTOR_ROWS_FILE" '
   BEGIN { while ((getline line < seqs) > 0) keep[line]=1 }
-  NF >= 5 && ($2 in keep)
+  NF == 5 && ($2 in keep)
 ' "$FM_WAKE_QUEUE" > "$DRAIN_VIEW_TMP" || exit 1
 RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_VIEW_TMP") || exit "$?"
 rm -f -- "$DRAIN_VIEW_TMP" || exit 1

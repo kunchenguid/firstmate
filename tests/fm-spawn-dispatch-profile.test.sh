@@ -157,7 +157,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  fm_fake_exit0 "$fakebin" pi-signed no-mistakes gh-axi gh tasks-axi
+  fm_fake_exit0 "$fakebin" cursor-agent pi-signed no-mistakes gh-axi gh tasks-axi
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -923,7 +923,7 @@ test_cursor_agent_threads_model_variant_and_records_effort() {
   expect_code 0 "$status" "cursor-agent spawn with a model-variant effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor-agent cursor-grok-4.6-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "cursor-agent --trust --force --model 'cursor-grok-4.6-high'" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/cursor-agent' --trust --force --model 'cursor-grok-4.6-high'" \
     "cursor-agent launch did not preserve the model variant"
   assert_not_contains "$launch" "encode launch-brief" \
     "cursor-agent launch must defer its encoded brief until the interactive composer is ready"
@@ -948,7 +948,7 @@ test_cursor_agent_delivers_encoded_brief_after_interactive_ready_for_persistent_
   launch=$(cat "$LAUNCH_LOG")
   first_launch=$(sed -n '1p' "$LAUNCH_LOG")
   expected_pointer="FIRSTMATE_OP: v1 launch-brief: Read the launch brief at $HOME_DIR/data/$id/brief.md and follow it exactly."
-  assert_contains "$first_launch" "cursor-agent --trust --force --model 'cursor-grok-4.6-high'" \
+  assert_contains "$first_launch" "'$FAKEBIN_DIR/cursor-agent' --trust --force --model 'cursor-grok-4.6-high'" \
     "cursor-agent ship launch lost its persistent interactive command"
   assert_not_contains "$first_launch" "encode launch-brief" \
     "cursor-agent ship launch must not pass the brief as a positional argument"
@@ -1028,6 +1028,30 @@ test_cursor_reader_launch_uses_noninteractive_brief_delivery() {
   assert_contains "$launch" 'encode launch-brief' \
     "reader Cursor launch omitted its typed launch brief"
   pass "reader Cursor launch uses non-interactive brief delivery through the confined process"
+}
+
+test_cursor_agent_missing_binary_refuses_before_endpoint_or_metadata() {
+  local rec id out status endpoint_log
+  id=profile-cursor-agent-missing-z7d
+  rec=$(make_spawn_case profile-cursor-agent-missing cursor-agent "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/cursor-agent"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  : > "$endpoint_log"
+  mkdir -p "$CASE_DIR/empty-home"
+
+  out=$(HOME="$CASE_DIR/empty-home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" \
+    FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model cursor-grok-4.6-high --effort high)
+  status=$?
+  expect_code 1 "$status" "a missing cursor-agent executable should refuse the spawn"
+  assert_contains "$out" "no verified cursor executable found" \
+    "missing cursor-agent refusal did not name the actionable requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing cursor-agent wrote task metadata"
+  [ ! -s "$endpoint_log" ] || fail "missing cursor-agent created an endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing cursor-agent typed a launch command"
+  pass "cursor-agent refuses safely before endpoint or task-state creation when unavailable"
 }
 
 test_pi_threads_model_and_max_effort() {
@@ -3663,6 +3687,7 @@ test_cursor_agent_threads_model_variant_and_records_effort
 test_cursor_agent_delivers_encoded_brief_after_interactive_ready_for_persistent_workers
 test_cursor_agent_refuses_unconfirmed_brief_submission
 test_cursor_reader_launch_uses_noninteractive_brief_delivery
+test_cursor_agent_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

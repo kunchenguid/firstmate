@@ -62,9 +62,8 @@
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
-# owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a fixed
-# partition of that exact set, not a rebalance of the current measured durations
-# (see docs/fm-test-portable-shards.md).
+# owned by bin/fm-test-isolation-proof.sh; portable parallel shards are
+# duration-balanced orders of that exact set (see docs/fm-test-portable-shards.md).
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never
@@ -351,24 +350,23 @@ tests/fm-slack-captain-channel.test.sh
 EOF
 }
 
-# Portable parallel shard 1: fixed partition of the proven-isolated set from the
-# 2026-07-29 LPT assignment plus tests/fm-slack-captain-channel.test.sh, inserted
-# afterwards without a rebalance. Later concurrent-proof refreshes in
-# docs/fm-test-isolation-proof.json restate durations without changing this
-# membership or its listed order, so neither tracks the current durations.
+# Portable parallel shard 1: duration-balanced order for the current partition,
+# using the measured timings in docs/fm-test-isolation-proof.json. Keep this
+# order aligned with that archive because --jobs 2 assigns each next script to
+# the worker that becomes available first.
 list_portable_parallel_1() {
   cat <<'EOF'
 tests/fm-x-mode.test.sh
-tests/fm-slack-captain-channel.test.sh
-tests/fm-cd-pretool-check.test.sh
-tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-test-run.test.sh
-tests/fm-composer-ghost.test.sh
-tests/fm-grok-harness.test.sh
+tests/fm-slack-captain-channel.test.sh
+tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-lint.test.sh
-tests/fm-pi-primary-types.test.sh
-tests/fm-review-diff.test.sh
+tests/fm-cd-pretool-check.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-composer-ghost.test.sh
 tests/fm-brief.test.sh
+tests/fm-review-diff.test.sh
+tests/fm-pi-primary-types.test.sh
 tests/fm-transition-lib.test.sh
 EOF
 }
@@ -557,7 +555,6 @@ tests/fm-muse-signals-live-e2e.test.sh 205
 tests/fm-nm-home-isolation.test.sh 59
 tests/fm-nm-prepare-home.test.sh 228
 tests/fm-nm-run-lib.test.sh 62
-tests/fm-no-mistakes-required.test.sh 72
 tests/fm-on.test.sh 504
 tests/fm-opencode-primary-live-e2e.test.sh 357
 tests/fm-operational-input.test.sh 164
@@ -1341,26 +1338,17 @@ families_for_changed_path() {
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
-    tests/fixtures/*/*)
-      # A fixture belongs to whichever suite reads its directory, found by the
-      # same reference scan used for shared helpers. Keyed on the directory
-      # rather than the file so adding a fixture selects the same suite.
-      # A removed fixture directory has no consuming suite left to select.
-      fixture_ref=${path#tests/fixtures/}
-      fixture_ref=${fixture_ref%%/*}
-      if [ -d "tests/fixtures/$fixture_ref" ]; then
-        families_for_test_reference "fixtures/$fixture_ref" \
-          || printf '%s\n' "__unmapped__:$path"
-      fi
+    tests/assets/board-render-harness.mjs)
+      printf '%s\n' __script__:fm-bearings-board-render.test.sh
       ;;
     tests/fixtures/*)
-      # A fixture kept as a single file directly under tests/fixtures/ is named
-      # in full by its consuming suite, so the same reference scan resolves it.
-      # A removed fixture file has no consuming suite left to select.
-      if [ -e "$path" ]; then
-        families_for_test_reference "fixtures/${path#tests/fixtures/}" \
-          || printf '%s\n' "__unmapped__:$path"
-      fi
+      fixture_ref=$path
+      while case "$fixture_ref" in tests/fixtures/*/*) true ;; *) false ;; esac; do
+        families_for_test_reference "$fixture_ref" && return 0
+        fixture_ref=${fixture_ref%/*}
+      done
+      families_for_test_reference "$fixture_ref" \
+        || printf '%s\n' "__unmapped__:$path"
       ;;
     bin/*)
       # A deleted script has no consuming suite left to select, the same rule

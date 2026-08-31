@@ -1,13 +1,42 @@
-# Water 7 fallback portable-parallel `--jobs 2` verification
+# Water 7 portable-parallel `--jobs 2` verification
 
 Audience: maintainer verification.
 
-This record supports the bounded in-lane parallelism retained by the Water 7 fallback for `portable-parallel-1` only.
-`portable-parallel-2` remains serial because `N=2` failed the acceptance oracle on commit `f2fc52e` and again on follow-up reruns.
+The active candidate-set evidence is [fm-test-isolation-proof.md](../fm-test-isolation-proof.md), and the current lane composition and timing inputs are [fm-test-portable-shards.md](../fm-test-portable-shards.md).
 Task chronology and delivery evidence beyond the measured runs stay in the PR.
 The Water 7 timing-summary regression behavior is covered by `tests/fm-ci-water7.test.sh`.
 
-## Acceptance oracle
+## 2026-08-30 current-candidate equivalence refresh
+
+The lane-1 serial-versus-parallel oracle was rerun at commit `b01228dc` after replacing the obsolete decision-hold candidate with `tests/fm-captain-hold-lifecycle.test.sh`, rebalancing the lane order, and completing the merge-composition fixes.
+Both commands selected the same 12 scripts, and every script produced the same `{exit=0, gate_skip=false}` result in serial and under `--jobs 2`.
+The serial run completed in 311655 ms with load averages `{ 3.90 4.23 4.51 }` before and `{ 3.51 3.97 4.31 }` after.
+The parallel run completed in 155463 ms with load averages `{ 3.51 3.97 4.31 }` before and `{ 5.57 4.54 4.48 }` after.
+This current exact-candidate result supersedes the historical `f2fc52e` oracle below for CI admission; the older repeated-run record remains as provenance for the original policy.
+
+```sh
+bin/fm-test-run.sh --lane portable-parallel-1 --json /tmp/portable-parallel-1-serial.json
+bin/fm-test-run.sh --lane portable-parallel-1 --jobs 2 --json /tmp/portable-parallel-1-jobs2.json
+```
+
+The compared result set is:
+
+```text
+tests/fm-brief.test.sh exit=0 gate_skip=false
+tests/fm-captain-hold-lifecycle.test.sh exit=0 gate_skip=false
+tests/fm-cd-pretool-check.test.sh exit=0 gate_skip=false
+tests/fm-composer-ghost.test.sh exit=0 gate_skip=false
+tests/fm-grok-harness.test.sh exit=0 gate_skip=false
+tests/fm-lint.test.sh exit=0 gate_skip=false
+tests/fm-pi-primary-types.test.sh exit=0 gate_skip=false
+tests/fm-review-diff.test.sh exit=0 gate_skip=false
+tests/fm-slack-captain-channel.test.sh exit=0 gate_skip=false
+tests/fm-test-run.test.sh exit=0 gate_skip=false
+tests/fm-transition-lib.test.sh exit=0 gate_skip=false
+tests/fm-x-mode.test.sh exit=0 gate_skip=false
+```
+
+## Historical acceptance oracle
 
 Verified 2026-08-20 on GNU bash 5.x under Linux.
 Every five-serial/five-parallel measurement in this record was taken at the single commit `f2fc52e`.
@@ -26,7 +55,7 @@ Coverage at `f2fc52e`, unchanged by every later commit on this branch:
 FM_TEST_COVERAGE ok total=143 parallel=25 serial=106 serial_shards=4 herdr=12
 ```
 
-### `portable-parallel-1` with `N=2` - accepted
+### Historical `portable-parallel-1` with `N=2` - accepted
 
 All nine serial-vs-parallel comparisons matched the `serial-portable-parallel-1-1` reference set.
 
@@ -56,7 +85,7 @@ tests/fm-x-mode.test.sh exit=0 gate_skip=false
 
 Mean wall time dropped from 162.6 s to 82.0 s (~50% of serial).
 
-### `portable-parallel-2` with `N=2` - rejected
+### Historical `portable-parallel-2` with `N=2` - rejected
 
 Initial oracle: four of five parallel runs matched serial; run 5 differed only on `tests/fm-backend-herdr.test.sh` (`exit=1` vs `exit=0`) with:
 
@@ -73,9 +102,9 @@ Wall-clock seconds from the initial oracle (`elapsed_s`):
 | serial | 149 | 150 | 177 | 177 | 171 | 164.8 |
 | parallel (`--jobs 2`) | 101 | 106 | 115 | 115 | 215 (`rc=1`) | 109.3 |
 
-`N=2` is not wired into CI for this lane until a new proof shows identical `{script,exit,gate_skip}` sets under load.
+At that historical point, `N=2` was not wired into CI for this lane until a new proof showed identical `{script,exit,gate_skip}` sets under load.
 
-## Landed fallback policy
+## Historical fallback policy
 
 `bin/fm-ci.sh`, invoked by `.github/workflows/ci-water7-fallback.yml` after primary CI failure or by manual dispatch:
 
@@ -83,6 +112,8 @@ Wall-clock seconds from the initial oracle (`elapsed_s`):
 bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1
 bin/fm-test-run.sh --lane portable-parallel-2
 ```
+
+The current Water 7 policy still invokes `portable-parallel-1` with `--jobs 2`; the 2026-08-30 refresh above re-proves that command after the candidate replacement and reorder.
 
 Measured opportunity on this host at acceptance time:
 
