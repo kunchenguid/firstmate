@@ -91,9 +91,9 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse and gemini are crewmate/scout
-# adapters only: neither has a primary supervision protocol, and bin/fm-spawn.sh
-# refuses a --secondmate launch on either.
+# Which task kinds an adapter is verified to run. muse is a crewmate/scout
+# adapter only: it has no primary supervision protocol, and bin/fm-spawn.sh
+# refuses a --secondmate launch on it.
 #
 # cursor is refused for EVERY ordinary unattended kind - ship, scout, AND
 # secondmate. It launches under --auto-review --sandbox enabled, which keeps a
@@ -103,32 +103,64 @@ fm_control_harness_family() {  # <recorded-harness>
 # stall never surfaces as a hold. A cursor secondmate is the worst case, because
 # a whole firstmate instance stalls invisibly.
 #
-# The optional third argument is the caller's EXEMPTION token, which is the only
+# The optional third argument is the caller's EXEMPTION grant, which is the only
 # opt-in past the cursor refusal:
-#   attended           - a person is in the pane and can answer the prompt.
-#   isolation-envelope - a separately proven outer envelope governs the worker.
+#   attended         - a person is in the pane and can answer the prompt.
+#   envelope:<name>  - the named outer isolation envelope governs the worker.
 # Any other value, including an empty one, is no exemption, so an ordinary
-# unattended spawn stays refused. No in-repo caller sets it today, so it must be
-# passed deliberately by whoever knows the launch is covered.
+# unattended spawn stays refused. The grant is PER TASK, never ambient: it
+# arrives as bin/fm-spawn.sh's --cursor-exemption flag and is recorded in that
+# task's own meta, so it can neither leak from one spawn to the next in a shell
+# nor be inherited by an unrelated spawn.
 #
-# This function is the ONE owner of the rule. bin/fm-spawn.sh asks it rather
-# than repeating the table, so the launch owner and the control plane cannot
-# drift. The control plane asks it BEFORE it stops anything, so an incompatible
-# relaunch target is refused while the current agent is still running rather
-# than after it has been stopped.
+# The harness is canonicalized first, so a raw launch command whose basename is
+# `cursor-agent` is held to the same rule as the `cursor` adapter name rather
+# than slipping past the table through the unverified-adapter escape hatch.
+#
+# This function is the ONE owner of which kinds an adapter may run: both muse's
+# secondmate rule and cursor's unattended rule live here only, and
+# bin/fm-spawn.sh asks it for every verified harness rather than repeating any
+# of it, so the launch owner and the control plane cannot drift. The control
+# plane asks it BEFORE it stops anything, so an incompatible relaunch target is
+# refused while the current agent is still running rather than after it has
+# been stopped.
 fm_control_harness_supports_kind() {  # <harness> <kind> [exemption]
-  local harness=${1-} kind=${2-} exemption=${3-}
-  fm_control_harness_supported "$harness" || return 1
-  case "$harness" in
+  local harness=${1-} kind=${2-} exemption=${3-} canonical
+  canonical=$(fm_control_harness_family "$harness") || return 1
+  fm_control_harness_supported "$canonical" || return 1
+  case "$canonical" in
     muse|gemini) [ "$kind" != secondmate ] || return 1 ;;
     cursor)
       case "$exemption" in
-        attended|isolation-envelope) ;;
+        attended|envelope:?*) ;;
         *) return 1 ;;
       esac
       ;;
   esac
   return 0
+}
+
+# The operator-facing reason a harness cannot run a kind. Both refusal sites -
+# the launch owner in bin/fm-spawn.sh and the pre-stop relaunch check in
+# bin/fm-control.sh - print this, so the diagnostic cannot drift from the table
+# above the way a hand-written message at each site would.
+fm_control_harness_kind_refusal() {  # <harness> <kind>
+  local harness=${1-} kind=${2-} canonical
+  canonical=$(fm_control_harness_family "$harness") || {
+    printf "'%s' is not a verified adapter, so it is not verified to run a %s task" "$harness" "$kind"
+    return 0
+  }
+  case "$canonical" in
+    muse)
+      printf 'muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates.'
+      ;;
+    cursor)
+      printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. Use codex or claude for unattended work. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the spawn itself with --cursor-exemption attended or --cursor-exemption envelope:<name>." "$kind"
+      ;;
+    *)
+      printf "'%s' is not verified to run a %s task" "$canonical" "$kind"
+      ;;
+  esac
 }
 
 # The key that cancels a running turn. Escape for every adapter except grok,

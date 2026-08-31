@@ -111,7 +111,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -178,7 +178,6 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
-#     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -186,7 +185,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse and gemini are crewmate/scout only and are refused for --secondmate.
+# log; muse is crewmate/scout only and is refused for --secondmate.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -194,15 +193,6 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# claude is the one harness whose pre-launch setup can REFUSE the spawn: before
-# any per-task state exists, and before its worktree .claude/settings.local.json
-# hooks are written, a non-secondmate claude launch pre-registers the worktree in
-# the launching user's own Claude trust store through bin/fm-claude-trust.sh,
-# because Claude's interactive workspace-trust dialog gates a fresh worktree and
-# firstmate cannot answer it. That helper's header owns the structural scope test
-# and every refusal; a failed registration stops this spawn rather than launching
-# a worker that would wedge on the dialog. A --secondmate launch never runs it,
-# so a claude secondmate home keeps its own one-time trust decision.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -330,6 +320,11 @@ fm_refuse_if_gate_agent
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+# The cursor unattended exemption is per invocation and never ambient: it is a
+# flag on THIS spawn, recorded in THIS task's meta, so one deliberate attended
+# launch cannot silently exempt a later unattended spawn in the same shell.
+CURSOR_EXEMPTION=
+CURSOR_EXEMPTION_SET=0
 KIND_SET=0
 HARNESS_ARG=
 MODEL=
@@ -361,6 +356,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      cursor-exemption) CURSOR_EXEMPTION=$a; CURSOR_EXEMPTION_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -384,6 +380,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --cursor-exemption) want_value=cursor-exemption ;;
+    --cursor-exemption=*) CURSOR_EXEMPTION=${a#--cursor-exemption=}; CURSOR_EXEMPTION_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -395,6 +393,13 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$CURSOR_EXEMPTION_SET" -eq 0 ] || [ -n "$CURSOR_EXEMPTION" ] || { echo "error: --cursor-exemption requires a non-empty value" >&2; exit 1; }
+if [ "$CURSOR_EXEMPTION_SET" -eq 1 ]; then
+  case "$CURSOR_EXEMPTION" in
+    attended|envelope:?*) ;;
+    *) echo "error: --cursor-exemption must be 'attended' (a person is in the pane) or 'envelope:<name>' (the named outer isolation envelope that governs this worker); '$CURSOR_EXEMPTION' names neither, and an unnamed grant could not be audited later" >&2; exit 1 ;;
+  esac
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1117,7 +1122,6 @@ SPAWN_TASK_LOCK_HELD=1
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
-RAW_LAUNCH=0
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -1168,6 +1172,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
+    CURSOR_EXEMPTION=$(fm_meta_get "$RELAUNCH_META" cursor_exemption)
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1202,7 +1209,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1267,9 +1274,37 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    # Claude runs under its own approval classifier. Disabling fast mode keeps a
-    # captain's ambient fast-mode choice from degrading this unattended launch.
+    #
+    # --permission-mode auto runs the worker under claude's OWN classifier
+    # ("approve/deny permission prompts") instead of --dangerously-skip-permissions,
+    # which bypassed every check. Auto mode is NOT unconditional: claude 2.1.251
+    # falls back to the prompting `default` mode when auto is unavailable for the
+    # plan, for the session model, while fast mode is on, or when the classifier
+    # transcript grows too long, and an unattended pane has nobody to answer the
+    # prompt it falls back to. CLAUDE_CODE_DISABLE_FAST_MODE=1 removes the one
+    # fallback trigger a launch can control (verified: the session then reports
+    # fast_mode_disabled_reason=disabled_by_env), so a captain's own /fast on
+    # cannot silently drop a crewmate back to interactive prompting. The
+    # remaining triggers are plan/model/server-side; the harness-adapters skill
+    # documents the resulting dialog so a degraded worker is recognizable.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # -s workspace-write -a never replaces --dangerously-bypass-approvals-and-sandbox:
+    # the worker runs under codex's OWN filesystem sandbox and never prompts,
+    # instead of running with both switched off. workspace-write confines writes
+    # to the task worktree plus /tmp and $TMPDIR, which is the intended blast
+    # radius for a crewmate. It also DENIES the supervision paths the crewmate
+    # contract needs outside that worktree; granting those back narrowly is a
+    # separate change and is deliberately not bundled here.
+    #
+    # sandbox_workspace_write.network_access=true is NOT part of that deferred
+    # write grant, it is a distinct axis: workspace-write confines NETWORK egress
+    # as well as writes, and codex defaults that key to false. Verified on codex
+    # 0.150.1 against a config-free CODEX_HOME - the worker's shell cannot resolve
+    # a host at all under the default, which would break `git push`, `gh`, and
+    # every dependency install the delivery contract needs. Setting it here rather
+    # than relying on the operator's own ~/.codex/config.toml makes the grant
+    # explicit and machine-independent; the write confinement above is unaffected
+    # (verified: a write outside the worktree is still denied with it on).
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never -c sandbox_workspace_write.network_access=true "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1289,13 +1324,29 @@ launch_template() {
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
+    # crewmate needs. grok's launch was deliberately left unchanged by the
+    # hardening that moved claude, codex, and cursor onto their own approval and
+    # sandbox controls: grok exposes no sandbox or classifier equivalent, so full
+    # auto-approval remains the only posture that keeps an unattended grok pane
+    # running. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt and the
-    # review plus sandbox controls preserve Cursor's own confinement. --workspace pins the
+    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which the
+    # autonomy flags do NOT cover and which would otherwise block every spawn,
+    # since each task gets a fresh worktree path cursor has never seen.
+    # --auto-review --sandbox enabled replaces the former --yolo (the --force
+    # alias whose TUI label is "Run Everything"): the worker runs under cursor's
+    # own review and sandbox controls rather than with both switched off. These
+    # were measured on cursor-agent 2026.08.25, not assumed. --sandbox enabled
+    # DOES confine writes under --auto-review (a write outside the worktree is
+    # denied), but --force defeats that confinement at any flag order, so --force
+    # and --yolo are deliberately NOT passed: either would claim a confinement
+    # the launch does not actually have. The accepted cost is that --auto-review
+    # runs a server classifier that "prompts for the rest", so a cursor pane CAN
+    # park on a dialog nobody is watching; the ship refusal below is what keeps
+    # that cost off the unattended implementation path.
+    # --workspace pins the
     # exact worktree. -w/--worktree is deliberately never passed: it allocates a
     # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
     # isolation contract. The binary is resolved rather than named because
@@ -1304,42 +1355,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # gemini (Google Gemini CLI): a positional query starts the supervised
-    # interactive session and auto-submits it, so the brief rides the launch
-    # command exactly as it does for claude and grok (verified: a multi-line
-    # brief submitted itself with no extra Enter, gemini-cli 0.58.0).
-    # -y (--yolo) auto-approves every tool call, which an unattended crewmate
-    # needs; the footer renders ` YOLO Ctrl+Y` while it is on and a WriteFile
-    # was verified to land with no approval gate.
-    # Every task worktree is a fresh path, so gemini refuses to start at all
-    # without a trust control. GEMINI_CLI_TRUST_WORKSPACE=true - NOT
-    # --skip-trust - is the one used, and the difference is load-bearing
-    # rather than cosmetic: the CLI's refusal message offers the two as
-    # equivalents, but a controlled A/B on one worktree (same config home,
-    # same prompt) showed --skip-trust runs the turn while leaving PROJECT
-    # configuration unloaded, so the project's own .agents/skills are never
-    # discovered. A firstmate-repo task needs exactly those, so the workspace
-    # is trusted.
-    # GEMINI_CLI_SYSTEM_SETTINGS_PATH points gemini at the firstmate-owned
-    # per-task settings file written below. It is deliberately NOT the
-    # worktree's .gemini/settings.json: unlike claude's settings.local.json,
-    # that path is the PROJECT's own committed settings file, so writing it
-    # would clobber a project's configuration and removing it at teardown
-    # would delete a tracked file. The system layer also makes the busy
-    # contract independent of the trust decision above (its hooks were
-    # verified firing under --skip-trust in an untrusted folder), and hook
-    # arrays MERGE across settings layers rather than overriding, so a
-    # project's own hooks still run alongside firstmate's.
-    # The foreign primary markers are cleared for the same reason cursor
-    # clears them: gemini does not clear an inherited CLAUDECODE, and
-    # bin/fm-harness.sh must not read a gemini worker as its launcher.
-    # gemini exposes no reasoning-effort flag (checked against 0.58.0
-    # --help), so the shared effort axis is deliberately omitted here and
-    # stays in task metadata only, per the record-and-omit contract.
-    # Its turn-end and busy-state signals do NOT ride the launch command:
-    # they are project hooks written into the worktree below.
-    gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1373,7 +1389,6 @@ launch_template() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1408,24 +1423,30 @@ case "$ARG3" in
     ;;
 esac
 
-# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
-# a firstmate instance, so it needs a primary supervision protocol.
-# gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
-# and this task verified only crewmate-side launch, busy state, interrupt, and
-# exit, so a gemini secondmate is refused rather than stood up on an unverified
-# supervision path. muse has none either, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
-  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
-fi
-
-if [ "$HARNESS" = cursor ] &&
-  ! fm_control_harness_supports_kind cursor "$KIND" "${FM_CURSOR_UNATTENDED_EXEMPTION-}"; then
-  echo "error: cursor is refused for an unattended $KIND spawn; use codex or claude, or provide a valid Cursor exemption." >&2
+# Which kinds a verified adapter may run is owned by
+# fm_control_harness_supports_kind in fm-control-lib.sh, and this asks it for
+# EVERY verified harness rather than repeating any rule here, so a future entry
+# in that table is enforced by the launch owner and the control plane alike. The
+# control plane asks the same question BEFORE it stops a running agent, which is
+# what keeps a refused relaunch from stranding a task with no agent at all.
+#
+# Two rules live in that table today. muse has no primary supervision protocol,
+# so it cannot run a secondmate. cursor launches under --auto-review --sandbox
+# enabled, which keeps a REAL filesystem sandbox but accepts that cursor's
+# server classifier prompts for any call it does not deem safe; an unattended
+# pane has no approver and the cursor-transcript busy fold keeps a parked pane
+# reading as working, so cursor is refused for ship, scout, and secondmate
+# alike, the last being the worst case because a whole firstmate instance stalls
+# invisibly. The non-prompting alternative (--force, and its documented --yolo
+# alias) defeats --sandbox enabled, so it is refused as false hardening rather
+# than shipped.
+#
+# An unverified harness is skipped, not refused: a raw launch command is the
+# documented escape hatch for an adapter with no template. The canonicalization
+# inside the table still holds a raw `cursor-agent` command to the cursor rule.
+if fm_control_harness_family "$HARNESS" >/dev/null &&
+  ! fm_control_harness_supports_kind "$HARNESS" "$KIND" "$CURSOR_EXEMPTION"; then
+  echo "error: $(fm_control_harness_kind_refusal "$HARNESS" "$KIND")" >&2
   exit 1
 fi
 
@@ -1563,7 +1584,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -2595,28 +2616,6 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Pre-register Claude's workspace trust for the worktree, at the first point the
-# worktree is known and before any per-task state is created below. The dialog
-# gates the pane before the brief is ever read, and it also gates loading the
-# project settings written further down, so nothing armed below takes effect
-# without it. bin/fm-claude-trust.sh owns the structural scope test and refuses
-# any path that is not this project's own isolated worktree; a refusal blocks the
-# spawn rather than launching a worker that would wedge on a dialog firstmate
-# cannot answer. Refusing here rather than beside the arm keeps this in the same
-# class as the two worktree refusals just above: no temp root, no retired
-# relaunch wiring and no busy record exists yet to strand, so the refusal names
-# the endpoint the same way they do and leaves nothing else behind.
-if [ "$KIND" != secondmate ]; then
-  case "$HARNESS" in
-    claude*)
-      if ! "$FM_ROOT/bin/fm-claude-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
-        echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
-        exit 1
-      fi
-      ;;
-  esac
-fi
-
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2661,8 +2660,7 @@ if [ "$KIND" != secondmate ]; then
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok stays on its isolated rendered-tail
   # fallback and standalone Kimi stays unknown until fm_busy_kimi_verified
-  # opens, so neither is armed here. Gemini IS armed: its BeforeAgent /
-  # AfterAgent / SessionEnd hooks are a verified open-close pair.
+  # opens, so neither is armed here.
   BUSY_GEN=
   case "$HARNESS" in
     codex*)
@@ -2679,15 +2677,6 @@ if [ "$KIND" != secondmate ]; then
         exit 1
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
-      ;;
-    gemini)
-      if [ "$RAW_LAUNCH" -eq 0 ]; then
-        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
-          echo "error: failed to arm the busy-state contract for $ID" >&2
-          exit 1
-        }
-        [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
-      fi
       ;;
     kimi*)
       # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
@@ -2722,40 +2711,6 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
-      ;;
-    gemini)
-      if [ "$RAW_LAUNCH" -eq 0 ]; then
-      # Semantic busy-state hooks (bin/fm-busy-lib.sh): BeforeAgent opens a
-      # turn and AfterAgent closes it, with SessionEnd closing on process
-      # shutdown so an abnormal end can never leave a stale busy record.
-      # Verified live on gemini-cli 0.58.0 as a clean open/close pair:
-      # mid-turn only BeforeAgent had fired, and AfterAgent followed at turn
-      # end. AfterAgent ALSO fires on a manual Escape interrupt (carrying
-      # prompt_response "[no response text]"), so unlike Claude a cancelled
-      # gemini turn closes its own record instead of leaving it busy.
-      # SessionEnd was observed firing TWICE for one /quit; the busy writer is
-      # idempotent for a repeated idle event, so the duplicate is harmless and
-      # deliberately not de-duplicated here.
-      # These are written into a FIRSTMATE-OWNED settings file under state/,
-      # reached through GEMINI_CLI_SYSTEM_SETTINGS_PATH on the launch command,
-      # never into the worktree's own .gemini/settings.json - that path is the
-      # PROJECT's committed settings file, so writing it would clobber a
-      # project's configuration and retiring it would delete a tracked file.
-      # Hook arrays MERGE across gemini's settings layers rather than
-      # overriding, so a project's own hooks still run alongside these.
-      # AfterAgent keeps the turn-ended NOTIFICATION touch for the watcher.
-      # Every hook command tolerates a refused event (|| true) so a stale-gen
-      # writer can never break gemini's own lifecycle, and each prints the
-      # empty JSON object gemini's hook contract requires on stdout.
-      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source gemini-hook"
-      g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
-      g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
-      g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
-      cat > "$STATE_REAL/$ID.gemini-settings.json" <<EOF
-{"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
-EOF
-      fi
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -3034,7 +2989,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort cursor_exemption busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3049,6 +3004,7 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ -z "$CURSOR_EXEMPTION" ] || echo "cursor_exemption=$CURSOR_EXEMPTION"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -3156,12 +3112,11 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
-  gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
+  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
@@ -3339,4 +3294,6 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_EXEMPTION_NOTE=
+[ -z "$CURSOR_EXEMPTION" ] || SPAWN_EXEMPTION_NOTE=" cursor_exemption=$CURSOR_EXEMPTION"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY$SPAWN_EXEMPTION_NOTE window=$META_WINDOW worktree=$WT"

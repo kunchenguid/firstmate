@@ -599,8 +599,7 @@ test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_PATH="$sm" \
-    FM_CURSOR_UNATTENDED_EXEMPTION=attended \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>&1 || rc=$?
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate --cursor-exemption attended >/dev/null 2>&1 || rc=$?
 
   [ "$rc" -eq 0 ] || {
     echo "skip: cursor executable not resolvable in this environment, so the launch could not be built"
@@ -640,7 +639,7 @@ test_spawn_unattended_cursor_secondmate_is_refused() {
     "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1) || rc=$?
 
   [ "$rc" -eq 1 ] || fail "an unattended cursor secondmate must be refused, got exit $rc"
-  assert_contains "$out" "cursor is refused for an unattended secondmate spawn" \
+  assert_contains "$out" "refused for an unattended secondmate launch" \
     "the cursor secondmate refusal did not name the refused kind"
   [ ! -s "$launchlog" ] || fail "the cursor secondmate refusal must happen before any launch is sent"
   pass "an unattended Cursor secondmate is refused before it can stall invisibly"

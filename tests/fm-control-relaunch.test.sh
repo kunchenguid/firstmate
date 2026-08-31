@@ -775,8 +775,10 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   out=$(run_control "$dir" sm7 relaunch --harness muse); rc=$?
   expect_code 1 "$rc" "a crewmate-only adapter should refuse a secondmate relaunch"
-  assert_contains "$out" "not verified to run a secondmate task" \
+  assert_contains "$out" "cannot run a secondmate" \
     "the refusal should name the kind the adapter cannot run"
+  assert_contains "$out" "no primary supervision protocol" \
+    "the refusal should give the adapter-specific reason, not a generic unverified line"
   [ "$(cat "$dir/fake/command")" = claude ] \
     || fail "the refusal must land before the running agent is stopped"
   [ "$(meta_field "$dir" sm7 harness)" = claude ] \

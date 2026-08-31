@@ -200,7 +200,8 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor`, plus `muse` and `gemini` for crewmates and scouts only; never dispatch on an unverified adapter.
 `cursor` is refused for every ordinary unattended kind (ship, scout, and secondmate), because its `--auto-review` classifier can park the pane on a prompt nobody is there to answer while the pane still reads as busy, so route unattended work to `codex` or `claude` instead.
-It stays available for exactly two cases, each requiring a deliberate `FM_CURSOR_UNATTENDED_EXEMPTION=attended` or `FM_CURSOR_UNATTENDED_EXEMPTION=isolation-envelope`: a launch with a person in the pane, or a worker governed by a separately proven outer isolation envelope.
+It stays available for exactly two cases, each requiring the per-spawn flag `--cursor-exemption attended` (a person is in the pane) or `--cursor-exemption envelope:<name>` (a worker governed by the named, separately proven outer isolation envelope).
+The flag is deliberately per invocation rather than an exported variable, so one attended launch cannot silently exempt a later unattended spawn, and the grant is recorded as `cursor_exemption=` in the task's meta for audit.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.

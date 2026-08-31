@@ -397,10 +397,16 @@ test_cursor_claims_no_unattended_kind_without_an_exemption() {
       && fail "an empty exemption must not let cursor claim a $kind task"
     fm_control_harness_supports_kind cursor "$kind" yes \
       && fail "an unrecognized exemption token must not let cursor claim a $kind task"
+    # A raw launch command records the binary basename, which must not slip past
+    # the cursor rule through the unverified-adapter escape hatch.
+    fm_control_harness_supports_kind cursor-agent "$kind" \
+      && fail "a recorded cursor-agent harness must be held to the cursor rule for $kind"
     fm_control_harness_supports_kind cursor "$kind" attended \
       || fail "an attended launch should let cursor run a $kind task"
-    fm_control_harness_supports_kind cursor "$kind" isolation-envelope \
-      || fail "a proven isolation envelope should let cursor run a $kind task"
+    fm_control_harness_supports_kind cursor "$kind" envelope:routing-benchmark \
+      || fail "a named isolation envelope should let cursor run a $kind task"
+    fm_control_harness_supports_kind cursor "$kind" envelope: \
+      && fail "an unnamed envelope grant must not let cursor claim a $kind task"
   done
   # The exemption is cursor's alone and must not widen any other adapter's table.
   fm_control_harness_supports_kind muse secondmate attended \
