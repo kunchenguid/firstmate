@@ -205,6 +205,7 @@ The flag is deliberately per invocation rather than an exported variable, so one
 An envelope name must be letters, digits, `.`, `_`, or `-` starting on a letter or digit, and an explicitly passed grant is refused outright on a non-cursor harness on the local and remote spawn routes alike rather than recorded where a later relaunch onto cursor could read it back.
 A grant only inherited from a task's own record is dropped rather than refused when that task restarts onto a non-cursor harness, so a harness switch away from cursor succeeds and silently discards the grant.
 Across a relaunch or a `--secondmate` spawn, the two paths that restart an existing task from its own record, an `envelope:<name>` grant is inherited and an `attended` one never is, while a fresh ship or scout spawn always requires the flag.
+Automatic liveness recovery reaches only a REMOTE cursor secondmate; a local one is reported as an unverified harness and needs an explicit relaunch.
 The control plane evaluates a relaunch against the grant that will really be in force, so an unexemptable task is refused before its agent is stopped.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
