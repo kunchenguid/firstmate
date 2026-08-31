@@ -165,22 +165,20 @@ start_publication_contender() {
 start_postpublication_workspace_mutator() {
   local target=$1 victim=$2 primary=$3
   (
-    local attempts=0 publication staging
+    local attempts=0 publication staging probe
     while [ "$attempts" -lt 20000 ]; do
-      if [ -L "$target/node_modules" ]; then
-        publication=$("$READLINK_BIN" "$target/node_modules")
+      for probe in "$target"/.fm-node-modules.probe.*; do
+        [ -L "$probe" ] || continue
+        publication=$("$READLINK_BIN" "$probe")
         staging="$target/$publication"
         if [ -L "$staging/@beeline/$victim" ]; then
           "$RM_BIN" -f "$staging/@beeline/$victim"
           "$LN_BIN" -s "$primary" "$staging/@beeline/$victim"
-          while [ -d "$target/.fm-node-modules.publish.lock" ]; do
-            sleep 0.001
-          done
           "$MKDIR_BIN" "$target/node_modules" || exit 2
           printf 'competing install\n' > "$target/node_modules/owned.txt"
           exit 0
         fi
-      fi
+      done
       attempts=$((attempts + 1))
       sleep 0.001
     done
@@ -375,15 +373,21 @@ test_spawn_preserves_shared_dependency_symlinks() {
 }
 
 test_spawn_preserves_external_package_root_symlinks() {
-  local rec id out status external first_link second_link result
+  local rec id out status external first_link second_link result relative_link relative_target
   id=node-modules-external-roots-z1aab
   rec=$(make_case external-roots "$id")
   read_case "$rec"
   external="$TMP_ROOT/external-linked-package"
   mkdir -p "$external"
-  printf 'module.exports = { value: "initial" };\n' > "$external/index.js"
+  printf 'module.exports = { value: "initial", workspace: require("@beeline/lib") };\n' \
+    > "$external/index.js"
   ln -s "$external" "$PROJECT_DIR/node_modules/external-first"
   ln -s "$external" "$PROJECT_DIR/node_modules/external-second"
+  relative_target=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
+    'process.stdout.write(require("path").relative(process.argv[1], process.argv[2]));' \
+    "$PROJECT_DIR/node_modules/third-party" "$external/index.js")
+  ln -s "$relative_target" "$PROJECT_DIR/node_modules/third-party/external-resource"
+  printf 'module.exports = "worker";\n' > "$WORKTREE_DIR/packages/lib/index.js"
 
   out=$(run_spawn "$id")
   status=$?
@@ -393,13 +397,20 @@ test_spawn_preserves_external_package_root_symlinks() {
   second_link=$(readlink "$WORKTREE_DIR/node_modules/external-second")
   [ "$first_link" = "$external" ] && [ "$second_link" = "$external" ] \
     || fail "external package roots were materialized instead of shared"
-  result=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
-    'const first = require(process.argv[1]); const second = require(process.argv[2]); process.stdout.write(String(first === second));' \
+  relative_link=$(readlink "$WORKTREE_DIR/node_modules/third-party/external-resource")
+  [ "$relative_link" = "$external/index.js" ] \
+    || fail "escaping relative dependency link changed its external target"
+  result=$(NODE_PATH="$WORKTREE_DIR/node_modules" \
+    NODE_OPTIONS='--require=__firstmate_beeline_workspace_resolver__.cjs' "$SYSTEM_NODE" -e \
+    'const first = require(process.argv[1]); const second = require(process.argv[2]); process.stdout.write(`${first === second}:${first.workspace}:${first.value}`);' \
     "$WORKTREE_DIR/node_modules/external-first" \
     "$WORKTREE_DIR/node_modules/external-second")
-  [ "$result" = true ] || fail "external package-root aliases lost Node module identity"
-  printf 'module.exports = { value: "updated" };\n' > "$external/index.js"
-  result=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
+  [ "$result" = true:worker:initial ] \
+    || fail "external package identity or worktree workspace resolution changed"
+  printf 'module.exports = { value: "updated", workspace: require("@beeline/lib") };\n' \
+    > "$external/index.js"
+  result=$(NODE_PATH="$WORKTREE_DIR/node_modules" \
+    NODE_OPTIONS='--require=__firstmate_beeline_workspace_resolver__.cjs' "$SYSTEM_NODE" -e \
     'process.stdout.write(require(process.argv[1]).value);' \
     "$WORKTREE_DIR/node_modules/external-first")
   [ "$result" = updated ] || fail "external package-root updates were not shared live"
@@ -823,7 +834,7 @@ test_spawn_rejects_primary_dependency_link_created_during_publication() {
   pass "fm-spawn refuses contended dependency links whose workspaces resolve to primary source"
 }
 
-test_spawn_retracts_invalid_owned_publication() {
+test_spawn_rejects_invalid_candidate_before_competing_publication() {
   local rec id out status candidate victim
   id=node-modules-postpublication-invalid-z4c
   rec=$(make_case postpublication-invalid "$id")
@@ -838,8 +849,8 @@ test_spawn_retracts_invalid_owned_publication() {
   wait_publication_contender \
     || fail "post-publication workspace mutator did not alter the published tree"
   [ "$status" -ne 0 ] || fail "spawn accepted a workspace mutation after publication"
-  assert_contains "$out" "invalid Beeline dependency publication was retracted" \
-    "post-publication validation failure was not diagnosed"
+  assert_contains "$out" "Beeline dependency" \
+    "candidate or competing-tree validation failure was not diagnosed"
   assert_not_contains "$out" "spawned $id" "invalid owned publication launched a worker"
   assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
     "invalid publication rollback removed a cooperative competing install"
@@ -849,7 +860,7 @@ test_spawn_retracts_invalid_owned_publication() {
   done
   [ "$(readlink "$PROJECT_DIR/node_modules/@beeline/$victim")" = "../../packages/$victim" ] \
     || fail "invalid publication rollback mutated the primary dependency tree"
-  pass "fm-spawn retracts its invalid publication without removing a cooperative replacement"
+  pass "fm-spawn rejects invalid candidates without touching non-cooperative replacements"
 }
 
 test_spawn_omits_worktree_deleted_workspace() {
@@ -939,7 +950,7 @@ test_spawn_preserves_exclude_path_for_harness_files
 test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
-test_spawn_retracts_invalid_owned_publication
+test_spawn_rejects_invalid_candidate_before_competing_publication
 test_spawn_omits_worktree_deleted_workspace
 test_spawn_rejects_missing_installed_workspace_link
 test_spawn_rejects_dangling_staged_workspace_link

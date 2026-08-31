@@ -629,8 +629,10 @@ SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 NODE_MODULES_ABORT_STAGING=
+NODE_MODULES_ABORT_PROBE=
 NODE_MODULES_ABORT_CLEANUP=0
 NODE_MODULES_ABORT_NODE=
+BEELINE_NODE_RESOLVER=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -650,15 +652,16 @@ parse_orca_worktree_result() {
 }
 
 cleanup_beeline_node_modules_staging() {
-  local staging node
+  local staging probe node
   [ "$NODE_MODULES_ABORT_CLEANUP" = 1 ] || return 0
   [ -n "$NODE_MODULES_ABORT_STAGING" ] || return 1
   [ -n "$NODE_MODULES_ABORT_NODE" ] || return 1
   staging=$NODE_MODULES_ABORT_STAGING
+  probe=$NODE_MODULES_ABORT_PROBE
   node=$NODE_MODULES_ABORT_NODE
   if ! (
     trap '' INT TERM HUP
-    NODE_OPTIONS= "$node" - "$staging" <<'JS'
+    NODE_OPTIONS= "$node" - "$probe" "$staging" <<'JS'
 const fs = require('fs');
 
 function remove(path) {
@@ -677,15 +680,36 @@ function remove(path) {
   }
 }
 
-remove(process.argv[2]);
+if (process.argv[2]) remove(process.argv[2]);
+remove(process.argv[3]);
 JS
   ); then
     return 1
   fi
+  [ -z "$probe" ] || { [ ! -e "$probe" ] && [ ! -L "$probe" ]; } || return 1
   [ ! -e "$staging" ] && [ ! -L "$staging" ] || return 1
   NODE_MODULES_ABORT_CLEANUP=0
   NODE_MODULES_ABORT_STAGING=
+  NODE_MODULES_ABORT_PROBE=
   NODE_MODULES_ABORT_NODE=
+}
+
+cleanup_beeline_node_modules_probe() {
+  local probe node
+  probe=$NODE_MODULES_ABORT_PROBE
+  [ -n "$probe" ] || return 0
+  node=$NODE_MODULES_ABORT_NODE
+  [ -n "$node" ] || return 1
+  NODE_OPTIONS= "$node" - "$probe" <<'JS' || return 1
+const fs = require('fs');
+try {
+  fs.unlinkSync(process.argv[2]);
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+JS
+  [ ! -e "$probe" ] && [ ! -L "$probe" ] || return 1
+  NODE_MODULES_ABORT_PROBE=
 }
 
 spawn_abort_cleanup() {
@@ -1522,6 +1546,8 @@ share_beeline_node_modules() {
   esac
   if [ -e "$target" ] || [ -L "$target" ]; then
     if beeline_workspace_links_match_worktree "$publisher_node" "$source" "$target"; then
+      [ ! -f "$target/__firstmate_beeline_workspace_resolver__.cjs" ] \
+        || BEELINE_NODE_RESOLVER="$target/__firstmate_beeline_workspace_resolver__.cjs"
       return 0
     fi
     echo "error: existing worktree node_modules failed Beeline workspace validation" >&2
@@ -1617,11 +1643,11 @@ function materialize(sourcePath, targetPath, root = false) {
     const link = fs.readlinkSync(sourcePath);
     if (!root) {
       const canonical = fs.realpathSync(sourcePath);
-      const target = path.isAbsolute(link) && inside(canonical, sourceReal)
-        ? path.join(staging, path.relative(sourceReal, canonical))
-        : path.isAbsolute(link) && inside(canonical, projectReal)
-          ? path.join(worktree, path.relative(projectReal, canonical))
-          : link;
+      const target = inside(canonical, sourceReal)
+        ? path.isAbsolute(link) ? path.join(staging, path.relative(sourceReal, canonical)) : link
+        : inside(canonical, projectReal)
+          ? path.isAbsolute(link) ? path.join(worktree, path.relative(projectReal, canonical)) : link
+          : canonical;
       fs.symlinkSync(target, targetPath);
       return;
     }
@@ -1663,7 +1689,7 @@ function materialize(sourcePath, targetPath, root = false) {
 const projectWorkspaces = workspaceMap(project);
 const worktreeWorkspaces = workspaceMap(worktree);
 for (const name of fs.readdirSync(source)) {
-  if (name === '@beeline' || name === '.bin') continue;
+  if (name === '@beeline' || name === '.bin' || name === '__firstmate_beeline_workspace_resolver__.cjs') continue;
   const sourceEntry = path.join(source, name);
   const targetEntry = path.join(staging, name);
   if (name.startsWith('@') && fs.statSync(sourceEntry).isDirectory()) {
@@ -1724,16 +1750,32 @@ try {
       }
       const link = fs.readlinkSync(sourceEntry);
       const resolved = path.resolve(path.dirname(sourceEntry), link);
-      const canonical = path.isAbsolute(link) ? fs.realpathSync(resolved) : resolved;
-      const target = path.isAbsolute(link) && inside(canonical, projectReal)
-        ? path.join(worktree, path.relative(projectReal, canonical))
-        : link;
+      const canonical = fs.realpathSync(resolved);
+      const target = inside(canonical, sourceReal)
+        ? path.isAbsolute(link) ? path.join(staging, path.relative(sourceReal, canonical)) : link
+        : inside(canonical, projectReal)
+          ? path.isAbsolute(link) ? path.join(worktree, path.relative(projectReal, canonical)) : link
+          : canonical;
       fs.symlinkSync(target, targetEntry);
     }
   }
 } catch (error) {
   if (error.code !== 'ENOENT') throw error;
 }
+fs.writeFileSync(path.join(staging, '__firstmate_beeline_workspace_resolver__.cjs'), `
+const Module = require('module');
+const path = require('path');
+const originalResolveFilename = Module._resolveFilename;
+const workspaceParent = new Module(path.join(__dirname, '.fm-beeline-resolver-entry.cjs'));
+workspaceParent.filename = path.join(__dirname, '.fm-beeline-resolver-entry.cjs');
+workspaceParent.paths = [__dirname];
+Module._resolveFilename = function (request, parent, isMain, options) {
+  if (/^@beeline\\/[^/]+(?:\\/.*)?$/.test(request)) {
+    return Reflect.apply(originalResolveFilename, this, [request, workspaceParent, isMain, options]);
+  }
+  return Reflect.apply(originalResolveFilename, this, [request, parent, isMain, options]);
+};
+`);
 JS
   then
     cleanup_status=0
@@ -1765,6 +1807,11 @@ JS
 
   exclude_path '.fm-node-modules.*/'
   publication_link=${staging_root##*/}
+  while :; do
+    publication_probe="$WT/.fm-node-modules.probe.$$.$RANDOM.$RANDOM"
+    [ ! -e "$publication_probe" ] && [ ! -L "$publication_probe" ] && break
+  done
+  NODE_MODULES_ABORT_PROBE=$publication_probe
   if [ -n "$setup_signal_status" ]; then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
@@ -1773,10 +1820,10 @@ JS
     return "$setup_signal_status"
   fi
   publish_status=0
-NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" "$PROJ_ABS" "$WT" "$source" "$WT/.fm-node-modules.publish.lock" <<'JS' || publish_status=$?
+NODE_OPTIONS= "$publisher_node" - "$publication_link" "$publication_probe" "$target" "$PROJ_ABS" "$WT" "$source" <<'JS' || publish_status=$?
 const fs = require('fs');
 const path = require('path');
-const [publication, target, project, worktree, source, publicationLock] = process.argv.slice(2);
+const [publication, probe, target, project, worktree, source] = process.argv.slice(2);
 
 process.on('SIGINT', () => {});
 process.on('SIGTERM', () => {});
@@ -1818,11 +1865,11 @@ function workspaceMap(rootPath) {
   return result;
 }
 
-function validateTarget() {
+function validateTarget(rootPath) {
   const projectWorkspaces = workspaceMap(project);
   const worktreeWorkspaces = workspaceMap(worktree);
   const scope = path.join(source, '@beeline');
-  const targetScope = path.join(target, '@beeline');
+  const targetScope = path.join(rootPath, '@beeline');
   for (const [name, workspace] of worktreeWorkspaces) {
     const projectWorkspace = projectWorkspaces.get(name);
     if (projectWorkspace) {
@@ -1857,58 +1904,39 @@ function targetUsesPublication() {
     path.resolve(path.dirname(target), link) === path.resolve(path.dirname(target), publication);
 }
 
-function acquirePublicationLock() {
-  const deadline = Date.now() + 30000;
-  const waitState = new Int32Array(new SharedArrayBuffer(4));
-  while (true) {
-    try {
-      fs.mkdirSync(publicationLock);
-      return;
-    } catch (error) {
-      if (error.code !== 'EEXIST' || Date.now() >= deadline) throw error;
-      Atomics.wait(waitState, 0, 0, 10);
-    }
-  }
-}
-
-let created = false;
 let status = 4;
-let lockHeld = false;
+let probeCreated = false;
 
 try {
-  acquirePublicationLock();
-  lockHeld = true;
+  fs.symlinkSync(publication, probe, 'dir');
+  probeCreated = true;
   try {
-    fs.symlinkSync(publication, target, 'dir');
-    created = true;
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-  }
-  try {
-    validateTarget();
-    status = created ? 0 : targetUsesPublication() ? 8 : 3;
+    validateTarget(probe);
   } catch (_) {
-    if (!created) {
-      status = targetUsesPublication() ? 7 : 5;
-    } else if (publicationLink() !== publication) {
-      status = 7;
-    } else {
+    status = 6;
+  }
+  if (status !== 6) {
+    try {
+      fs.linkSync(probe, target);
+      status = 0;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
       try {
-        fs.unlinkSync(target);
-        status = publicationLink() === null ? 6 : 7;
+        validateTarget(target);
+        status = targetUsesPublication() ? 8 : 3;
       } catch (_) {
-        status = 7;
+        status = targetUsesPublication() ? 7 : 5;
       }
     }
   }
 } catch (_) {
-  status = created || targetUsesPublication() ? 10 : 9;
+  status = targetUsesPublication() ? 10 : 4;
 } finally {
-  if (lockHeld) {
+  if (probeCreated) {
     try {
-      fs.rmdirSync(publicationLock);
+      fs.unlinkSync(probe);
     } catch (_) {
-      status = created || targetUsesPublication() ? 10 : 9;
+      status = targetUsesPublication() ? 10 : 4;
     }
   }
 }
@@ -1918,28 +1946,39 @@ JS
     0|8)
       NODE_MODULES_ABORT_CLEANUP=0
       NODE_MODULES_ABORT_STAGING=
+      NODE_MODULES_ABORT_PROBE=
       NODE_MODULES_ABORT_NODE=
+      BEELINE_NODE_RESOLVER="$target/__firstmate_beeline_workspace_resolver__.cjs"
       ;;
     3)
       cleanup_status=0
       cleanup_beeline_node_modules_staging || cleanup_status=$?
       [ "$cleanup_status" -eq 0 ] || publish_status=5
+      [ "$publish_status" -ne 3 ] || [ ! -f "$target/__firstmate_beeline_workspace_resolver__.cjs" ] \
+        || BEELINE_NODE_RESOLVER="$target/__firstmate_beeline_workspace_resolver__.cjs"
       ;;
-    4|5|6|9)
+    4|5|6)
       cleanup_status=0
       cleanup_beeline_node_modules_staging || cleanup_status=$?
       [ "$cleanup_status" -eq 0 ] || publish_status=5
       ;;
     7|10)
+      cleanup_status=0
+      cleanup_beeline_node_modules_probe || cleanup_status=$?
       NODE_MODULES_ABORT_CLEANUP=0
       NODE_MODULES_ABORT_STAGING=
       NODE_MODULES_ABORT_NODE=
+      [ "$cleanup_status" -eq 0 ] || publish_status=10
       ;;
     *)
       if beeline_node_link_matches "$publisher_node" "$target" "$publication_link"; then
+        cleanup_status=0
+        cleanup_beeline_node_modules_probe || cleanup_status=$?
         NODE_MODULES_ABORT_CLEANUP=0
         NODE_MODULES_ABORT_STAGING=
         NODE_MODULES_ABORT_NODE=
+        BEELINE_NODE_RESOLVER="$target/__firstmate_beeline_workspace_resolver__.cjs"
+        [ "$cleanup_status" -eq 0 ] || publish_status=10
       else
         cleanup_status=0
         cleanup_beeline_node_modules_staging || cleanup_status=$?
@@ -1959,10 +1998,9 @@ JS
     0|3|8) ;;
     4) echo "error: failed to publish worktree node_modules atomically" >&2; return 1 ;;
     5) echo "error: published Beeline dependency tree failed workspace validation" >&2; return 1 ;;
-    6) echo "error: invalid Beeline dependency publication was retracted" >&2; return 1 ;;
+    6) echo "error: invalid Beeline dependency candidate was rejected before publication" >&2; return 1 ;;
     7) echo "error: Beeline dependency publication ownership became ambiguous; retained its backing tree" >&2; return 1 ;;
-    9) echo "error: Beeline dependency publication lock was unavailable" >&2; return 1 ;;
-    10) echo "error: Beeline dependency publication lock cleanup failed; retained its backing tree" >&2; return 1 ;;
+    10) echo "error: Beeline dependency publication probe cleanup failed; retained its backing tree" >&2; return 1 ;;
     *) echo "error: Beeline dependency publisher exited unexpectedly" >&2; return 1 ;;
   esac
 }
@@ -2791,6 +2829,11 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+if [ -n "$BEELINE_NODE_RESOLVER" ]; then
+  beeline_node_path=$(shell_quote "$WT/node_modules")
+  spawn_send_text_line "$T" "export NODE_PATH=$beeline_node_path:\${NODE_PATH:-}"
+  spawn_send_text_line "$T" 'export NODE_OPTIONS="--require=__firstmate_beeline_workspace_resolver__.cjs ${NODE_OPTIONS:-}"'
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
