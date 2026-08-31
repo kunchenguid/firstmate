@@ -376,6 +376,19 @@ def failpoint(name: str) -> None:
         raise OSError(errno.EIO, f"injected {name}")
 
 
+def pausepoint(name: str) -> None:
+    if os.environ.get("FM_HANDOFF_TESTING") != "1" or os.environ.get("FM_HANDOFF_TEST_PAUSEPOINT") != name:
+        return
+    marker = Path(os.environ["FM_HANDOFF_TEST_PAUSE_MARKER"])
+    release = Path(os.environ["FM_HANDOFF_TEST_PAUSE_RELEASE"])
+    marker.write_text("paused\n", encoding="utf-8")
+    deadline = time.monotonic() + 5.0
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            raise HandoffError("TEST_PAUSE_TIMEOUT", "synthetic pausepoint timed out")
+        time.sleep(0.01)
+
+
 def rename_noreplace(source: Path, target: Path) -> None:
     if sys.platform.startswith("linux"):
         libc = ctypes.CDLL(None, use_errno=True)
@@ -507,12 +520,9 @@ def load_config(home: Path, *, validate_active_bindings: bool = True) -> dict[st
     canonical_roots: list[str] = []
     for root in roots:
         source_root = Path(root).expanduser()
-        try:
-            canonical = source_root.resolve(strict=True)
-        except OSError as exc:
-            raise HandoffError("CONFIG_SOURCE_ROOT", "an approved source root is unavailable") from exc
-        if path_has_symlink(source_root):
+        if not source_root.is_absolute() or path_has_symlink(source_root):
             raise HandoffError("CONFIG_SOURCE_ROOT", "an approved source root may not use symlinks")
+        canonical = source_root.resolve(strict=False)
         canonical_roots.append(str(canonical))
     value = dict(value)
     value["approved_source_roots"] = canonical_roots
@@ -574,7 +584,7 @@ def validate_runtime_config(config: Mapping[str, Any]) -> None:
         raise HandoffError("CONFIG_CONSUMER", "consumer create_prefix_allowlist is invalid")
     if not isinstance(replace_paths, list) or not replace_paths or not all(safe_relative_path(item) for item in replace_paths):
         raise HandoffError("CONFIG_CONSUMER", "consumer replace_path_allowlist is invalid")
-    if not isinstance(coupled, list) or not all(isinstance(item, str) and item in replace_paths for item in coupled):
+    if not isinstance(coupled, list) or not coupled or not all(isinstance(item, str) and item in replace_paths for item in coupled):
         raise HandoffError("CONFIG_CONSUMER", "consumer required_coupled_paths is invalid")
 
 
@@ -669,10 +679,7 @@ def normalize_registration_allowlist(config: Mapping[str, Any]) -> list[dict[str
         raw_source = Path(source_record).expanduser()
         if not raw_source.is_absolute() or path_has_symlink(raw_source):
             raise HandoffError("CONFIG_ELIGIBILITY", "an eligibility contract source path is invalid")
-        try:
-            source = raw_source.resolve(strict=True)
-        except OSError as exc:
-            raise HandoffError("CONFIG_ELIGIBILITY", "an eligibility contract source is unavailable") from exc
+        source = raw_source.resolve(strict=False)
         if not within(source, list(config["approved_source_roots"])) or {part.lower() for part in source.parts} & FORBIDDEN_SOURCE_PARTS:
             raise HandoffError("CONFIG_ELIGIBILITY", "an eligibility contract source is outside the approved category")
         normalized.append(
@@ -1048,7 +1055,7 @@ def recover_orphan_queues_from_claims(layout: StateLayout, config: Mapping[str, 
             record_claims.setdefault(record_id, set()).add(candidate_id)
     for record_id, candidate_ids in sorted(record_claims.items()):
         fsync_directory(layout.records)
-        envelope, digest = read_envelope(layout, record_id, config)
+        envelope, digest = read_envelope(layout, record_id, config, verify_sources=False)
         if not candidate_ids.issubset({item["item_id"] for item in envelope["items"]}):
             raise HandoffError("CLAIM_RECORD", "candidate claim does not belong to its sealed record")
         update_queue(layout, record_id, envelope_sha256=digest)
@@ -1061,7 +1068,7 @@ def recover_unclaimed_records(layout: StateLayout, config: Mapping[str, Any], ca
     if not wanted:
         return recovered
     for path in sorted(layout.records.glob("handoff-*.json")):
-        envelope, envelope_sha = read_envelope(layout, path.stem, config)
+        envelope, envelope_sha = read_envelope(layout, path.stem, config, verify_sources=False)
         matched = wanted & {item["item_id"] for item in envelope["items"]}
         if matched:
             fsync_directory(layout.records)
@@ -1086,7 +1093,7 @@ def retryable_records(layout: StateLayout, source_harness: str, session_hash: st
         queue = read_queue(layout, path.stem)
         if queue.get("status") in {"acknowledged", "quarantined"} or queue.get("compaction") == "succeeded":
             continue
-        envelope, digest = read_envelope(layout, path.stem, config)
+        envelope, digest = read_envelope(layout, path.stem, config, verify_sources=False)
         if envelope["source_harness"] == source_harness and envelope["source_session_hash"] == session_hash:
             candidates.append((str(queue.get("updated_at", "")), path.stem, digest))
     return [
@@ -1143,7 +1150,7 @@ def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger:
         recovered = recover_unclaimed_records(layout, config, matching)
         matching = {key: value for key, value in matching.items() if key not in recovered}
         for record_id in sorted(set(recovered.values())):
-            _, digest = read_envelope(layout, record_id, config)
+            _, digest = read_envelope(layout, record_id, config, verify_sources=False)
             attempt_bindings[record_id] = digest
         if not matching:
             if attempt_bindings:
@@ -1240,9 +1247,10 @@ def matching_candidate_present(layout: StateLayout, source_harness: str, session
 
 def block_failed_claude_precompact(home: Path, config: Mapping[str, Any], trigger: str, failure_code: str) -> dict[str, Any] | None:
     layout = StateLayout(home)
-    if not matching_candidate_present(layout, "claude", config["recipient"]["agent_session_sha256"]):
-        return None
     with state_lock(layout):
+        session_hash = config["recipient"]["agent_session_sha256"]
+        if not matching_candidate_present(layout, "claude", session_hash) and not retryable_records(layout, "claude", session_hash, config):
+            return None
         write_receipt(layout, "seal", "failed", "claude-precompact-binding-failed", source_harness="claude", trigger=trigger, failure_code=failure_code)
     return {"decision": "block", "reason": "Already-curated handoff candidates could not be bound to the exact Claude endpoint; compaction was stopped."}
 
@@ -1297,7 +1305,7 @@ def mark_compaction(home: Path, bindings: Sequence[Mapping[str, str]], succeeded
         verified: list[tuple[str, str]] = []
         for item in normalized:
             record_id = item["record_id"]
-            _, actual = read_envelope(layout, record_id, config)
+            _, actual = read_envelope(layout, record_id, config, verify_sources=False)
             queue = read_queue(layout, record_id)
             if actual != item["envelope_sha256"] or queue.get("envelope_sha256") != actual:
                 quarantine(layout, record_id, "record-payload-mismatch", expected_sha256=str(queue.get("envelope_sha256", "")), observed_sha256=actual)
@@ -1598,6 +1606,9 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
         return False
     layout = StateLayout(home)
     with state_lock(layout):
+        current_config = load_config(home)
+        if current_config != config:
+            return False
         capability, generation = current_process_identity()
         binding_key = endpoint_binding_key(config)
         path = layout.bindings / f"{binding_key}.json"
@@ -1628,15 +1639,7 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
     return True
 
 
-def require_consumer_binding(home: Path, config: Mapping[str, Any]) -> None:
-    if not config_enabled(config, "consumer_enabled"):
-        raise HandoffError("CONSUMER_DISABLED", "the Claude handoff consumer is disabled")
-    if not recipient_context_matches(config, require_environment=True):
-        raise HandoffError("CONSUMER_ENDPOINT", "consumer process is not the exact authorized Herdr endpoint and Vault")
-    recipient_ready, _reason, _herdr = probe_recipient(config, require_idle=False)
-    if not recipient_ready:
-        raise HandoffError("CONSUMER_SESSION", "consumer process is not bound to the exact live Claude session generation")
-    layout = StateLayout(home)
+def require_active_process_binding(config: Mapping[str, Any], layout: StateLayout) -> None:
     path = layout.bindings / f"{endpoint_binding_key(config)}.json"
     value = read_json_file(path, max_bytes=4096)
     capability, generation = current_process_identity()
@@ -1650,6 +1653,18 @@ def require_consumer_binding(home: Path, config: Mapping[str, Any]) -> None:
         or value.get("vault_path") != str(validate_vault_binding(config))
     ):
         raise HandoffError("CONSUMER_SESSION", "consumer session generation is not bound")
+
+
+def require_consumer_binding(home: Path, config: Mapping[str, Any]) -> None:
+    if not config_enabled(config, "consumer_enabled"):
+        raise HandoffError("CONSUMER_DISABLED", "the Claude handoff consumer is disabled")
+    if not recipient_context_matches(config, require_environment=True):
+        raise HandoffError("CONSUMER_ENDPOINT", "consumer process is not the exact authorized Herdr endpoint and Vault")
+    recipient_ready, _reason, _herdr = probe_recipient(config, require_idle=False)
+    if not recipient_ready:
+        raise HandoffError("CONSUMER_SESSION", "consumer process is not bound to the exact live Claude session generation")
+    layout = StateLayout(home)
+    require_active_process_binding(config, layout)
 
 
 def compaction_binding_path(layout: StateLayout, config: Mapping[str, Any]) -> Path:
@@ -1666,14 +1681,19 @@ def durable_unlink(path: Path) -> None:
 
 def persist_compaction_binding(home: Path, config: Mapping[str, Any], result: Mapping[str, Any], trigger: str) -> None:
     layout = StateLayout(home)
+    pausepoint("before-compaction-binding-lock")
     with state_lock(layout):
+        current_config = load_config(home)
+        if current_config != config:
+            raise HandoffError("CONFIG_CHANGED", "handoff configuration changed during Claude compaction binding")
+        require_active_process_binding(config, layout)
         path = compaction_binding_path(layout, config)
         if result.get("status") not in {"sealed", "already-sealed"}:
             durable_unlink(path)
             return
         bindings = normalize_compaction_bindings(result.get("bindings"))
         for item in bindings:
-            envelope, actual = read_envelope(layout, item["record_id"], config)
+            envelope, actual = read_envelope(layout, item["record_id"], config, verify_sources=False)
             if actual != item["envelope_sha256"] or envelope.get("source_harness") != "claude" or envelope.get("source_session_hash") != config["recipient"]["agent_session_sha256"]:
                 raise HandoffError("COMPACTION_BINDING", "Claude PreCompact seal binding is inconsistent")
         binding = {
@@ -2175,10 +2195,17 @@ def _mcp_next_locked(home: Path, config: Mapping[str, Any], layout: StateLayout)
     return {"status": "empty"}
 
 
-def mcp_next(home: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+def current_consumer_config(home: Path) -> dict[str, Any]:
+    config = load_config(home)
+    if config is None or not config_enabled(config, "consumer_enabled"):
+        raise HandoffError("CONSUMER_DISABLED", "the Claude handoff consumer is disabled")
+    return config
+
+
+def mcp_next(home: Path) -> dict[str, Any]:
     layout = StateLayout(home)
     with state_lock(layout):
-        return _mcp_next_locked(home, config, layout)
+        return _mcp_next_locked(home, current_consumer_config(home), layout)
 
 
 def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any], layout: StateLayout) -> dict[str, Any]:
@@ -2243,10 +2270,10 @@ def _mcp_disposition_locked(home: Path, config: Mapping[str, Any], arguments: Ma
     return {"status": status, "record_id": record_id, "disposition": disposition}
 
 
-def mcp_disposition(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+def mcp_disposition(home: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
     layout = StateLayout(home)
     with state_lock(layout):
-        return _mcp_disposition_locked(home, config, arguments, layout)
+        return _mcp_disposition_locked(home, current_consumer_config(home), arguments, layout)
 
 
 def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any], layout: StateLayout) -> dict[str, Any]:
@@ -2332,10 +2359,10 @@ def _mcp_prepare_save_locked(home: Path, config: Mapping[str, Any], arguments: M
     }
 
 
-def mcp_prepare_save(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+def mcp_prepare_save(home: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
     layout = StateLayout(home)
     with state_lock(layout):
-        return _mcp_prepare_save_locked(home, config, arguments, layout)
+        return _mcp_prepare_save_locked(home, current_consumer_config(home), arguments, layout)
 
 
 def load_approval(layout: StateLayout, record_id: str, approval_sha: str) -> dict[str, Any]:
@@ -2391,13 +2418,13 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
     return {"status": "acknowledged", "record_id": record_id, "operation_id": ack["operation_id"], "changed_path_hashes": ack["changed_path_hashes"]}
 
 
-def mcp_commit_save(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+def mcp_commit_save(home: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
     layout = StateLayout(home)
     with state_lock(layout):
-        return _mcp_commit_save_locked(home, config, arguments, layout)
+        return _mcp_commit_save_locked(home, current_consumer_config(home), arguments, layout)
 
 
-def mcp_register(home: Path, config: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+def mcp_register(home: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
     namespace = argparse.Namespace(
         fm_home=str(home),
         source_harness="claude",
@@ -2412,9 +2439,7 @@ def mcp_register(home: Path, config: Mapping[str, Any], arguments: Mapping[str, 
     )
     layout = StateLayout(home)
     with state_lock(layout):
-        current_config = load_config(home)
-        if current_config is None or not config_enabled(current_config, "consumer_enabled"):
-            raise HandoffError("CONSUMER_DISABLED", "the Claude handoff consumer is disabled")
+        current_config = current_consumer_config(home)
         require_consumer_binding(home, current_config)
         return _register_locked(home, current_config, namespace, layout)
 
@@ -2479,17 +2504,14 @@ def mcp_tool_schemas() -> list[dict[str, Any]]:
 
 
 def mcp_call(home: Path, name: str, arguments: Any) -> dict[str, Any]:
-    config = load_config(home)
-    if config is None or not config_enabled(config, "consumer_enabled"):
-        raise HandoffError("CONSUMER_DISABLED", "the Claude handoff consumer is disabled")
     if not isinstance(arguments, dict):
         raise HandoffError("MCP_ARGUMENTS", "MCP tool arguments must be an object")
     handlers = {
-        "register_curated_candidate": lambda: mcp_register(home, config, arguments),
-        "next_curated_handoff": lambda: mcp_next(home, config),
-        "record_curation_disposition": lambda: mcp_disposition(home, config, arguments),
-        "prepare_handoff_save": lambda: mcp_prepare_save(home, config, arguments),
-        "commit_handoff_save": lambda: mcp_commit_save(home, config, arguments),
+        "register_curated_candidate": lambda: mcp_register(home, arguments),
+        "next_curated_handoff": lambda: mcp_next(home),
+        "record_curation_disposition": lambda: mcp_disposition(home, arguments),
+        "prepare_handoff_save": lambda: mcp_prepare_save(home, arguments),
+        "commit_handoff_save": lambda: mcp_commit_save(home, arguments),
     }
     if name not in handlers:
         raise HandoffError("MCP_TOOL", "unknown context handoff MCP tool")

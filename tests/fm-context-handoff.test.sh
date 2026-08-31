@@ -25,14 +25,16 @@ if [ "${FM_CONTEXT_HANDOFF_PREREQ_ONLY:-0}" = 1 ]; then
 fi
 
 CLI="$ROOT/bin/fm-context-handoff.py"
-CORE=$(realpath "$ROOT/tests/fixtures/context-handoff-transaction-core.py")
+CORE=$(realpath "$ROOT/tests/fixtures/context-handoff-transaction-core.sh")
 PLUGIN="$ROOT/integrations/claude-context-handoff"
 TRANSACTION_CORE="$CORE"
 TRANSACTION_MODULE="$CORE"
+TRANSACTION_INTERPRETER=$(realpath "$(command -v bash)")
 if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ]; then
   TRANSACTION_ROOT=${FM_CONTEXT_HANDOFF_TRANSACTION_ROOT:-$HOME/claude-obsidian}
   TRANSACTION_CORE=$(realpath "$TRANSACTION_ROOT/scripts/claude-obsidian.py")
   TRANSACTION_MODULE=$(realpath "$TRANSACTION_ROOT/claude_obsidian/transaction.py")
+  TRANSACTION_INTERPRETER=$(realpath "$(command -v python3)")
   [ -f "$TRANSACTION_CORE" ] && [ -f "$TRANSACTION_MODULE" ] || fail "required installed claude-obsidian transaction core is unavailable"
 fi
 TMP_ROOT=$(fm_test_tmproot context-handoff)
@@ -87,7 +89,7 @@ write_config() {
     --arg herdr "$FAKE_HERDR" \
     --arg herdr_sha "$(hash_file "$FAKE_HERDR")" \
     --arg session_sha "$(session_hash claude "$CLAUDE_SESSION")" \
-    --arg python "$(python_path)" \
+    --arg python "$TRANSACTION_INTERPRETER" \
     --arg core "$TRANSACTION_CORE" \
     --arg core_sha "$(hash_file "$TRANSACTION_CORE")" \
     --arg module "$TRANSACTION_MODULE" \
@@ -172,6 +174,9 @@ cli() {
       FM_HANDOFF_TEST_PROCESS_CAPABILITY="$CAPABILITY" \
       FM_HANDOFF_TEST_PROCESS_GENERATION="$PROCESS_GENERATION" \
       FM_HANDOFF_TEST_FAILPOINT="${FM_HANDOFF_TEST_FAILPOINT:-}" \
+      FM_HANDOFF_TEST_PAUSEPOINT="${FM_HANDOFF_TEST_PAUSEPOINT:-}" \
+      FM_HANDOFF_TEST_PAUSE_MARKER="${FM_HANDOFF_TEST_PAUSE_MARKER:-$EROOT/pause-marker}" \
+      FM_HANDOFF_TEST_PAUSE_RELEASE="${FM_HANDOFF_TEST_PAUSE_RELEASE:-$EROOT/pause-release}" \
       PI_SESSION_ID=pi-session-1 \
       FAKE_HERDR_LOG="$HERDR_LOG" \
       FAKE_HERDR_PID="$HERDR_PID" \
@@ -522,7 +527,120 @@ test_claude_precompact_binding_failure() {
   blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "matching Claude PreCompact binding failure escaped the hook"
   printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "unhealthy exact Claude endpoint failed open"
   jq -e 'select(.reason=="claude-precompact-binding-failed")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "unhealthy Claude PreCompact wrote no durable failure receipt"
+
+  new_env claude-retry-binding
+  enable_consumer
+  bind_claude >/dev/null || fail "Claude retry binding failed"
+  statement='Retryable Claude queues must block when their endpoint becomes unhealthy.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude retry-only fixture did not register"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "Claude retry-only fixture did not seal"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "Claude retry-only fixture did not record failure"
+  config_path="$FM_HOME/config/context-handoff.json"
+  jq '.vault.inode += 1' "$config_path" > "$config_path.tmp" || fail "could not invalidate retry-only Vault binding"
+  chmod 600 "$config_path.tmp"
+  mv "$config_path.tmp" "$config_path"
+  blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "retry-only Claude binding failure escaped the hook"
+  printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "retryable Claude queue failed open after endpoint failure"
   pass "fail-closed Claude PreCompact endpoint binding"
+}
+
+test_lifecycle_and_authority_snapshots() {
+  local seal outcome statement arguments registered marker release stale_pid i record result lock_marker lock_release holder request_pid
+  new_env immutable-lifecycle
+  register_statement 'Producer lifecycle transitions bind immutable envelope bytes.' >/dev/null || fail "immutable lifecycle fixture did not register"
+  seal=$(seal_pi) || fail "immutable lifecycle fixture did not seal"
+  printf 'Mutable source changed after durable sealing.\n' > "$SOURCE_FILE"
+  outcome=$(complete "$seal" success) || fail "mutable source stranded a successful compaction"
+  [ "$(printf '%s' "$outcome" | jq -r .status)" = compaction-succeeded ] || fail "producer lifecycle revalidated mutable source state"
+
+  new_env retired-precompact
+  enable_consumer
+  bind_claude >/dev/null || fail "initial Claude generation did not bind"
+  statement='Only the active Claude generation may publish a compaction attempt.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "retired PreCompact fixture did not register"
+  marker="$EROOT/stale-paused"
+  release="$EROOT/stale-release"
+  (
+    export FM_HANDOFF_TEST_PAUSEPOINT=before-compaction-binding-lock
+    export FM_HANDOFF_TEST_PAUSE_MARKER="$marker"
+    export FM_HANDOFF_TEST_PAUSE_RELEASE="$release"
+    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook
+  ) > "$EROOT/stale-output" 2> "$EROOT/stale-error" &
+  stale_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -f "$marker" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -f "$marker" ] || fail "retired PreCompact did not reach its publication boundary"
+  CAPABILITY=claude-process-generation-2
+  PROCESS_GENERATION=2
+  bind_claude >/dev/null || fail "replacement Claude generation did not bind"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "replacement PreCompact did not publish"
+  : > "$release"
+  if wait "$stale_pid"; then
+    fail "retired PreCompact retained publication authority"
+  fi
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "replacement PostCompact lost its exact attempt"
+  record=$(find "$FM_HOME/state/context-handoff/queue" -type f -name 'handoff-*.json' -exec basename {} .json \;)
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "retired PreCompact overwrote the replacement attempt"
+
+  new_env stale-mcp-config
+  enable_consumer
+  make_ready 'Reload configuration inside the serialized MCP transition.' >/dev/null || fail "stale MCP fixture did not become ready"
+  bind_claude >/dev/null || fail "stale MCP fixture did not bind"
+  lock_marker="$EROOT/state-lock-held"
+  lock_release="$EROOT/state-lock-release"
+  python3 - "$FM_HOME/state/context-handoff/.lock" "$lock_marker" "$lock_release" <<'PY' &
+import fcntl
+import os
+import pathlib
+import sys
+import time
+
+fd = os.open(sys.argv[1], os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+pathlib.Path(sys.argv[2]).write_text("held\n")
+while not pathlib.Path(sys.argv[3]).exists():
+    time.sleep(0.01)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+PY
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -f "$lock_marker" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -f "$lock_marker" ] || fail "synthetic MCP state lock was not held"
+  mcp_content next_curated_handoff > "$EROOT/waiting-mcp" 2> "$EROOT/waiting-mcp-error" &
+  request_pid=$!
+  sleep 0.2
+  jq '.consumer_enabled=false' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not revoke MCP configuration"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
+  : > "$lock_release"
+  wait "$holder" || fail "synthetic MCP state lock failed"
+  wait "$request_pid" || fail "revoked MCP request transport failed"
+  result=$(cat "$EROOT/waiting-mcp")
+  [ "$(printf '%s' "$result" | jq -r .code)" = CONSUMER_DISABLED ] || fail "waiting MCP request retained stale configuration authority"
+
+  new_env empty-coupled-paths
+  enable_consumer
+  jq '.consumer.required_coupled_paths=[]' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not empty coupled replacement set"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
+  if cli status > "$EROOT/empty-coupled-output" 2> "$EROOT/empty-coupled-error"; then
+    fail "empty coupled replacement set enabled automatic Save authority"
+  fi
+  grep -q 'CONFIG_CONSUMER' "$EROOT/empty-coupled-error" || fail "empty coupled replacement set failed without its contract error"
+  pass "immutable lifecycle and serialized authority snapshots"
 }
 
 test_exit75_requires_fresh_inspect() {
@@ -668,7 +786,7 @@ PY
 }
 
 test_pi_result_validation() {
-  local adapter_root body
+  local adapter_root body stale_root
   new_env pi-result-validation
   register_statement 'Cancel Pi compaction only when a non-empty durable register cannot seal.' >/dev/null || fail "Pi lifecycle candidate did not register"
   for case_name in malformed unknown polluted empty disabled exited hanging; do
@@ -701,10 +819,32 @@ EOF
     fi
     chmod 755 "$adapter_root/bin/fm-context-handoff.py"
   done
+  stale_root="$EROOT/stale-binding"
+  mkdir -p "$stale_root/bin"
+  printf 'sealed\n' > "$stale_root/mode"
+  : > "$stale_root/log"
+  cat > "$stale_root/bin/fm-context-handoff.py" <<'EOF'
+#!/usr/bin/env bash
+set -u
+payload=$(cat)
+printf '%s\t%s\n' "$*" "$payload" >> "$FM_STALE_BINDING_LOG"
+if [ "$1" = seal ]; then
+  if [ "$(cat "$FM_STALE_BINDING_MODE")" = sealed ]; then
+    printf '{"status":"sealed","record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222","bindings":[{"record_id":"handoff-111111111111111111111111111111111111111111111111","envelope_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}]}\n'
+  else
+    printf '{"status":"empty"}\n'
+  fi
+  exit 0
+fi
+exit 7
+EOF
+  chmod 755 "$stale_root/bin/fm-context-handoff.py"
   FM_HOME="$FM_HOME" FM_HANDOFF_TESTING=1 FM_HANDOFF_TEST_NOW="$FIXED_NOW" PI_SESSION_ID=pi-session-1 \
   EXT="$ROOT/.pi/extensions/lib/fm-context-handoff.ts" REAL_ROOT="$ROOT" MISSING="$EROOT/missing" \
-  MALFORMED="$EROOT/malformed" UNKNOWN="$EROOT/unknown" POLLUTED="$EROOT/polluted" EMPTY="$EROOT/empty" DISABLED="$EROOT/disabled" EXITED="$EROOT/exited" HANGING="$EROOT/hanging" \
+  MALFORMED="$EROOT/malformed" UNKNOWN="$EROOT/unknown" POLLUTED="$EROOT/polluted" EMPTY="$EROOT/empty" DISABLED="$EROOT/disabled" EXITED="$EROOT/exited" HANGING="$EROOT/hanging" STALE="$stale_root" \
+  FM_STALE_BINDING_MODE="$stale_root/mode" FM_STALE_BINDING_LOG="$stale_root/log" \
   node --input-type=module <<'EOF' || fail "Pi result validation failed"
+import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT).href + `?v=${Date.now()}`);
 const ctx = { sessionManager:{ getSessionId(){ return "pi-session-1"; } } };
@@ -743,6 +883,16 @@ mod.registerContextHandoff({on(name, handler){hanging.set(name, handler);}}, pro
 const started = Date.now();
 const timedOut = await hanging.get("session_before_compact")({reason:"threshold"}, ctx);
 if (!timedOut?.cancel || Date.now() - started > 2000) throw new Error("hanging Pi adapter did not cancel within its bound");
+const stale = new Map();
+mod.registerContextHandoff({on(name, handler){stale.set(name, handler);}}, process.env.STALE, process.env.FM_HOME);
+if ((await stale.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("synthetic stale binding did not seal");
+await stale.get("session_compact_failed")({reason:"threshold"});
+fs.writeFileSync(process.env.FM_STALE_BINDING_MODE, "empty\n");
+if ((await stale.get("session_before_compact")({reason:"threshold"}, ctx))?.cancel) throw new Error("explicit no-op cancelled after outcome failure");
+await stale.get("session_compact")({reason:"threshold"});
+const calls = fs.readFileSync(process.env.FM_STALE_BINDING_LOG, "utf8").trim().split("\n").filter(line => line.startsWith("compaction-outcome success"));
+const payload = JSON.parse(calls.at(-1).split("\t")[1]);
+if (Object.hasOwn(payload, "bindings")) throw new Error("prior Pi binding crossed into a later no-op attempt");
 EOF
   pass "model-free Pi lifecycle and fail-closed adapter validation"
 }
@@ -758,11 +908,11 @@ test_completed_save_precedes_source_validation() {
   prepared=$(prepare_save "$record" "$bundle") || fail "Save prepare failed"
   approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
   bundle_path="$FM_HOME/state/context-handoff/bundles/$record/$(printf '%s' "$prepared" | jq -r .bundle_sha256).json"
-  "$(python_path)" "$TRANSACTION_CORE" transaction apply "$bundle_path" --vault "$VAULT" --approved-plan-sha256 "$approval" >/dev/null || fail "synthetic apply did not complete"
-  printf 'Changed after apply completed.\n' > "$SOURCE_FILE"
+  "$TRANSACTION_INTERPRETER" "$TRANSACTION_CORE" transaction apply "$bundle_path" --vault "$VAULT" --approved-plan-sha256 "$approval" >/dev/null || fail "synthetic apply did not complete"
+  rm "$SOURCE_FILE"
   disposition=$(jq -nc --arg record "$record" '{record_id:$record,disposition:"duplicate",rationale:"The durable fact already exists."}')
   result=$(mcp_content record_curation_disposition "$disposition")
-  [ "$(printf '%s' "$result" | jq -r .disposition)" = saved ] || fail "source change blocked completed-Save recovery"
+  [ "$(printf '%s' "$result" | jq -r .disposition)" = saved ] || fail "missing source blocked completed-Save recovery"
   [ -f "$FM_HOME/state/context-handoff/acks/$record.json" ] || fail "completed Save was not acknowledged"
   [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = acknowledged ] || fail "completed Save did not heal queue state"
   pass "completed Save recovery before source validation"
@@ -894,7 +1044,7 @@ test_transaction_replay_and_rollback() {
   prepared=$(prepare_save "$record" "$bundle") || fail "rollback inspect failed"
   approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
   bundle_path="$FM_HOME/state/context-handoff/bundles/$record/$(printf '%s' "$prepared" | jq -r .bundle_sha256).json"
-  if FM_FIXTURE_FAIL_AFTER=1 "$(python_path)" "$TRANSACTION_CORE" transaction apply "$bundle_path" --vault "$VAULT" --approved-plan-sha256 "$approval" > "$EROOT/crash-output" 2> "$EROOT/crash-error"; then
+  if FM_FIXTURE_FAIL_AFTER=1 "$TRANSACTION_INTERPRETER" "$TRANSACTION_CORE" transaction apply "$bundle_path" --vault "$VAULT" --approved-plan-sha256 "$approval" > "$EROOT/crash-output" 2> "$EROOT/crash-error"; then
     fail "synthetic transaction crash unexpectedly completed"
   fi
   [ ! -e "$VAULT/wiki/concepts/Bounded retry.md" ] && [ ! -e "$VAULT/.vault-meta/mutation.lock" ] || fail "transaction crash did not roll back and release its lock"
@@ -959,6 +1109,7 @@ test_compaction_backpressure
 test_envelope_subset_drain
 test_monotonic_claude_binding
 test_claude_precompact_binding_failure
+test_lifecycle_and_authority_snapshots
 test_exit75_requires_fresh_inspect
 test_exact_mcp_guard
 test_bounded_transports_and_delivery

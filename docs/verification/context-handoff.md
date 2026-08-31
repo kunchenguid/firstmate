@@ -17,7 +17,62 @@ The same source showed that `session_compact` is emitted only after the compacti
 The installed Claude executable SHA-256 was `fd5f10ff0eb58daec04900466b143ea98aab50abf208a422bc008eaec13f61f7`.
 The installed Claude executable strings contained `PreCompact`, `PostCompact`, `compact_summary`, `Compaction blocked by PreCompact hook`, and the current `hookSpecificOutput.permissionDecision` fields.
 
+The installed Pi and Claude source evidence was reproduced with these bounded read-only commands and exact paths:
+
+```sh
+pi_root=/var/home/sreazy/.local/share/node-v24.19.0/lib/node_modules/@earendil-works/pi-coding-agent
+claude_bin=/var/home/sreazy/.var/app/md.obsidian.Obsidian/data/claude/versions/2.1.251
+pi --version
+claude --version
+sha256sum "$pi_root/README.md" "$pi_root/docs/compaction.md" "$pi_root/docs/extensions.md" "$claude_bin"
+rg --no-filename -o 'session_before_compact|session_compact_failed|session_compact|manual|threshold|overflow' "$pi_root/dist/core/extensions/types.d.ts" "$pi_root/dist/core/agent-session.js" | sort -u
+strings "$claude_bin" | rg -o 'PreCompact|PostCompact|compact_summary|Compaction blocked by PreCompact hook|hookSpecificOutput|permissionDecision' | sort -u
+```
+
+The version and hash output was:
+
+```text
+0.84.3
+2.1.251 (Claude Code)
+80d08cf6a947f288d62da22d02f73b75636082cd733bd797ab89ae052d2582b1  /var/home/sreazy/.local/share/node-v24.19.0/lib/node_modules/@earendil-works/pi-coding-agent/README.md
+43166749858e6292c85905df4f0f9f189c487a384ae17ddcbbd99053943d62ef  /var/home/sreazy/.local/share/node-v24.19.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/compaction.md
+a174aa5d0ac91520cd5929753ff520f4aefe2cdc3719e91f8b06b5f198a10be6  /var/home/sreazy/.local/share/node-v24.19.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md
+fd5f10ff0eb58daec04900466b143ea98aab50abf208a422bc008eaec13f61f7  /var/home/sreazy/.var/app/md.obsidian.Obsidian/data/claude/versions/2.1.251
+```
+
+The normalized Pi source output was:
+
+```text
+manual
+overflow
+session_before_compact
+session_compact
+session_compact_failed
+threshold
+```
+
+The normalized Claude strings output was:
+
+```text
+Compaction blocked by PreCompact hook
+PostCompact
+PreCompact
+compact_summary
+hookSpecificOutput
+permissionDecision
+```
+
 The official Claude Markdown pages were fetched with `Accept: text/markdown` and matched the audit's recorded SHA-256 values exactly:
+
+```sh
+evidence_root=$(mktemp -d)
+for page in hooks hooks-guide context-window how-claude-code-works memory interactive-mode commands sessions plugins-reference plugin-marketplaces; do
+  curl --fail --silent --show-error --location --max-time 30 -H 'Accept: text/markdown' "https://code.claude.com/docs/en/$page" -o "$evidence_root/$page.md"
+  sha256sum "$evidence_root/$page.md"
+done
+```
+
+The exact normalized command output is the page-to-hash table below.
 
 | Page | SHA-256 |
 | --- | --- |
@@ -41,7 +96,21 @@ The installed clean `claude-obsidian` transaction entrypoint SHA-256 was `34f303
 The installed clean transaction module SHA-256 was `e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2`.
 The cache and clean checkout had the same two hashes.
 The exact module was used against synthetic Vaults for inspect, apply, conflict, result, journal, hash, mode, lock-removal, idempotent replay, and apply-complete-before-ack evidence.
-The byte-identified fallback fixture is [`context-handoff-transaction-core.py`](../../tests/fixtures/context-handoff-transaction-core.py) and covers the same public CLI shape when the installed product is unavailable in portable CI.
+The byte-identified fallback fixture is [`context-handoff-transaction-core.sh`](../../tests/fixtures/context-handoff-transaction-core.sh) and covers the same public CLI shape when the installed product is unavailable in portable CI.
+
+The installed transaction source identity was reproduced with:
+
+```sh
+transaction_root=/var/home/sreazy/claude-obsidian
+sha256sum "$transaction_root/scripts/claude-obsidian.py" "$transaction_root/claude_obsidian/transaction.py"
+```
+
+It produced:
+
+```text
+34f3030da4a0ebc223a5dfba7f7180638d08dffa3d044be33fa72234866900c2  /var/home/sreazy/claude-obsidian/scripts/claude-obsidian.py
+e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2  /var/home/sreazy/claude-obsidian/claude_obsidian/transaction.py
+```
 
 ## Deterministic focused suite
 
@@ -63,6 +132,7 @@ ok - bounded compaction backpressure and drain
 ok - deterministic byte-bounded envelope draining
 ok - replacement-monotonic Claude session binding
 ok - fail-closed Claude PreCompact endpoint binding
+ok - immutable lifecycle and serialized authority snapshots
 ok - exit-75 Save authority revocation
 ok - exact bundled MCP tool allowlist
 ok - bounded transports and fail-closed delivery
@@ -92,7 +162,6 @@ Its distinguishing final line was:
 
 ```text
 ok - exact-installed-transaction-core core=34f3030da4a0ebc223a5dfba7f7180638d08dffa3d044be33fa72234866900c2 module=e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2
-```
 
 ## Fresh-process model-free smokes
 
