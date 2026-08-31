@@ -835,6 +835,7 @@ fm_procevent_capture() {
     rm -f -- "$tmp" "$adapter_dest" "$generation_dest" "$extension_tmp"
     return 1
   fi
+  fm_procevent_sync_directory "$inbox" || return 1
   if ! mv -f -- "$tmp" "$dest"; then
     rm -f -- "$tmp" "$adapter_dest"
     [ -z "$extension_dest" ] || rm -f -- "$extension_dest"

@@ -83,14 +83,20 @@ wait_timeout_ms() {
 }
 
 cmd_arm() {
-  local id=${1-} source job registration
+  local id=${1-} source job registration wait_rc
   [ "$#" -eq 1 ] || usage
   consult_id_valid "$id" || die "invalid consult id"
   job=$("$SCRIPT_DIR/fm-consult.sh" job-id "$id") || exit 1
-  if ! "$SCRIPT_DIR/fm-consult.sh" wait-needed "$id"; then
-    printf 'not-armed: %s (already captured or finished)\n' "$id"
-    return 0
-  fi
+  "$SCRIPT_DIR/fm-consult.sh" wait-needed "$id"
+  wait_rc=$?
+  case "$wait_rc" in
+    0) ;;
+    1)
+      printf 'not-armed: %s (already captured or finished)\n' "$id"
+      return 0
+      ;;
+    *) die "consult completion state is invalid; background wait was not changed" ;;
+  esac
   case "$job" in job_[A-Za-z0-9_-]*) ;; *) die "consult has an invalid known job id" ;; esac
   source=$(source_id "$id") || exit 1
   registration="$FM_HOME/state/procevent/$source.source"

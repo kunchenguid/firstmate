@@ -176,6 +176,20 @@ assert_not_contains "$payload" "payload one" "source output never reaches the ev
 [ "$(printf '%s\n' "$payload" | grep -c .)" = 1 ] || fail "expected exactly one event, got: $payload"
 pass "one blocking completion yields exactly one bounded normalized event"
 
+HDURABLE="$TMP_ROOT/hdurable"; new_home "$HDURABLE"
+printf 'durable capture payload\n' > "$TMP_ROOT/durable-capture-payload"
+durable_capture_status=0
+FM_HOME="$HDURABLE" bash -c '
+  . "$1/bin/fm-pr-lib.sh"
+  . "$1/bin/fm-wake-lib.sh"
+  . "$1/bin/fm-procevent-lib.sh"
+  fm_procevent_sync_directory() { return 1; }
+  fm_procevent_capture "$2/state" durable-src consult "$3" "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+' _ "$ROOT" "$HDURABLE" "$TMP_ROOT/durable-capture-payload" >/dev/null 2>&1 || durable_capture_status=$?
+[ "$durable_capture_status" -ne 0 ] || fail "capture succeeded without a durable sidecar directory barrier"
+assert_absent "$HDURABLE/state/procevent-inbox/durable-src.1.result" "result commit marker appeared before sidecars were durably published"
+pass "capture publishes durable sidecars before its result commit marker"
+
 RESULT=$(first_result "$H1" src-one || true)
 [ -n "$RESULT" ] || fail "no durable result was captured"
 mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \

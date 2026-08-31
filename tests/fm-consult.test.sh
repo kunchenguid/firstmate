@@ -15,8 +15,46 @@ FAKE_BIN="$TMP_ROOT/fakebin"
 FAKE_STATE="$TMP_ROOT/pro-cli-state"
 WAIT_STARTED="$TMP_ROOT/wait-started"
 WAIT_RELEASE="$TMP_ROOT/wait-release"
+RESULT_STARTED="$TMP_ROOT/result-started"
+RESULT_RELEASE="$TMP_ROOT/result-release"
+REAL_SHASUM=$(command -v shasum 2>/dev/null || true)
+REAL_SHA256SUM=$(command -v sha256sum 2>/dev/null || true)
 mkdir -p "$FAKE_BIN" "$FAKE_STATE"
-export FAKE_STATE WAIT_STARTED WAIT_RELEASE
+export FAKE_STATE WAIT_STARTED WAIT_RELEASE RESULT_STARTED RESULT_RELEASE REAL_SHASUM REAL_SHA256SUM
+
+cat > "$FAKE_BIN/shasum" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "$REAL_SHASUM" ] || exit 127
+"$REAL_SHASUM" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ -n "${FM_CONSULT_MUTATE_INPUT_ONE:-}" ] && [ ! -e "${FM_CONSULT_MUTATE_MARK_ONE:-}" ]; then
+  printf '%s' "${FM_CONSULT_MUTATE_REPLACEMENT_ONE:-}" > "$FM_CONSULT_MUTATE_INPUT_ONE"
+  : > "$FM_CONSULT_MUTATE_MARK_ONE"
+elif [ "$rc" -eq 0 ] && [ -n "${FM_CONSULT_MUTATE_INPUT_TWO:-}" ] && [ ! -e "${FM_CONSULT_MUTATE_MARK_TWO:-}" ]; then
+  printf '%s' "${FM_CONSULT_MUTATE_REPLACEMENT_TWO:-}" > "$FM_CONSULT_MUTATE_INPUT_TWO"
+  : > "$FM_CONSULT_MUTATE_MARK_TWO"
+fi
+exit "$rc"
+SH
+chmod +x "$FAKE_BIN/shasum"
+
+cat > "$FAKE_BIN/sha256sum" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "$REAL_SHA256SUM" ] || exit 127
+"$REAL_SHA256SUM" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ -n "${FM_CONSULT_MUTATE_INPUT_ONE:-}" ] && [ ! -e "${FM_CONSULT_MUTATE_MARK_ONE:-}" ]; then
+  printf '%s' "${FM_CONSULT_MUTATE_REPLACEMENT_ONE:-}" > "$FM_CONSULT_MUTATE_INPUT_ONE"
+  : > "$FM_CONSULT_MUTATE_MARK_ONE"
+elif [ "$rc" -eq 0 ] && [ -n "${FM_CONSULT_MUTATE_INPUT_TWO:-}" ] && [ ! -e "${FM_CONSULT_MUTATE_MARK_TWO:-}" ]; then
+  printf '%s' "${FM_CONSULT_MUTATE_REPLACEMENT_TWO:-}" > "$FM_CONSULT_MUTATE_INPUT_TWO"
+  : > "$FM_CONSULT_MUTATE_MARK_TWO"
+fi
+exit "$rc"
+SH
+chmod +x "$FAKE_BIN/sha256sum"
 
 cat > "$FAKE_BIN/pro-cli" <<'SH'
 #!/usr/bin/env bash
@@ -55,6 +93,10 @@ case "${1-}:${2-}" in
   job:result)
     [ -n "${PRO_CLI_RESULT_JSON+x}" ] || exit 99
     printf '%s\n' "$PRO_CLI_RESULT_JSON"
+    if [ "${PRO_CLI_RESULT_HOLD:-0}" = 1 ]; then
+      : > "$RESULT_STARTED"
+      while [ ! -e "$RESULT_RELEASE" ]; do sleep 0.05; done
+    fi
     ;;
   --version:*)
     printf 'pro-cli fixture\n'
@@ -102,6 +144,14 @@ prepare_id() {  # <home> <question file>
 
 json_result_for() {  # <answer>
   perl -MJSON::PP -e 'print encode_json({ok => JSON::PP::true, data => {jobId => "job_fixture", result => $ARGV[0]}})' "$1"
+}
+
+raw_sha256() {
+  if [ -n "$REAL_SHASUM" ]; then
+    "$REAL_SHASUM" -a 256 "$1" | awk '{print $1}'
+  else
+    "$REAL_SHA256SUM" "$1" | awk '{print $1}'
+  fi
 }
 
 # Run one command under a real deadline. A credential FIFO has no writer, so a
@@ -188,6 +238,36 @@ replay_out=$(pa "$H1" handle "$id_one" 1 "$capture_one") || fail "completion rep
 assert_contains "$replay_out" "already-handled: $source_one 1" "replay does not authorize a second handling effect"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = 1 ] || fail "completion replay created another pro-cli job"
 pass "a known job completes through the process-event runner without blocking submission"
+
+H_INPUT_SNAPSHOT="$TMP_ROOT/home-input-snapshot"
+consult_home "$H_INPUT_SNAPSHOT"
+SNAPSHOT_QUESTION="$TMP_ROOT/snapshot-question.md"
+SNAPSHOT_SOURCE="$TMP_ROOT/snapshot-source.md"
+printf 'original question bytes\n' > "$SNAPSHOT_QUESTION"
+printf 'original source bytes\n' > "$SNAPSHOT_SOURCE"
+snapshot_question_hash=$(raw_sha256 "$SNAPSHOT_QUESTION")
+snapshot_source_hash=$(raw_sha256 "$SNAPSHOT_SOURCE")
+export FM_CONSULT_MUTATE_INPUT_ONE="$SNAPSHOT_QUESTION"
+export FM_CONSULT_MUTATE_REPLACEMENT_ONE='replacement question bytes'
+export FM_CONSULT_MUTATE_MARK_ONE="$TMP_ROOT/mutated-question"
+export FM_CONSULT_MUTATE_INPUT_TWO="$SNAPSHOT_SOURCE"
+export FM_CONSULT_MUTATE_REPLACEMENT_TWO='replacement source bytes'
+export FM_CONSULT_MUTATE_MARK_TWO="$TMP_ROOT/mutated-source"
+snapshot_out=$(fc "$H_INPUT_SNAPSHOT" prepare --question "$SNAPSHOT_QUESTION" --source-packet "$SNAPSHOT_SOURCE" --privacy internal-research) \
+  || fail "input snapshot preparation failed: $snapshot_out"
+unset FM_CONSULT_MUTATE_INPUT_ONE FM_CONSULT_MUTATE_REPLACEMENT_ONE FM_CONSULT_MUTATE_MARK_ONE
+unset FM_CONSULT_MUTATE_INPUT_TWO FM_CONSULT_MUTATE_REPLACEMENT_TWO FM_CONSULT_MUTATE_MARK_TWO
+snapshot_id=$(printf '%s\n' "$snapshot_out" | awk '/^prepared: / { print $2; exit }')
+snapshot_record="$H_INPUT_SNAPSHOT/data/consults/$snapshot_id"
+snapshot_record_question_hash=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{question_input_sha256}' "$snapshot_record/prepared.json")
+snapshot_record_source_hash=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{source_packet_sha256}' "$snapshot_record/prepared.json")
+[ "$snapshot_record_question_hash" = "$snapshot_question_hash" ] || fail "prepared question hash did not bind the staged question bytes"
+[ "$snapshot_record_source_hash" = "$snapshot_source_hash" ] || fail "prepared source hash did not bind the staged source bytes"
+assert_grep 'original question bytes' "$snapshot_record/question.md" "question publication uses the verified staged snapshot"
+assert_grep 'original source bytes' "$snapshot_record/question.md" "source publication uses the verified staged snapshot"
+assert_not_contains "$(<"$snapshot_record/question.md")" 'replacement question bytes' "question publication reread mutable caller input"
+assert_not_contains "$(<"$snapshot_record/question.md")" 'replacement source bytes' "source publication reread mutable caller input"
+pass "question and source hashes bind the exact published snapshots"
 
 if rg -F -- "$question_secret" "$ROOT" >/dev/null || rg -F -- "$answer_secret" "$ROOT" >/dev/null; then
   fail "private consultation content reached tracked repository files"
@@ -371,6 +451,90 @@ after_resume=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
   || fail "resumed request checkpoint overwrote immutable request evidence"
 assert_grep '"terminal":"SUBMITTED"' "$record_resume/submission.json" "request checkpoint resume records the known submitted job"
 pass "a request checkpoint before the attempt marker resumes without ambiguity"
+
+H_SUBMISSION_INVALID="$TMP_ROOT/home-submission-invalid"
+consult_home "$H_SUBMISSION_INVALID"
+id_submission_invalid=$(prepare_id "$H_SUBMISSION_INVALID" "$QUESTION_TWO")
+record_submission_invalid="$H_SUBMISSION_INVALID/data/consults/$id_submission_invalid"
+: > "$record_submission_invalid/submission.json"
+chmod 0600 "$record_submission_invalid/submission.json"
+before_submission_invalid=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+submission_invalid_status=0
+submission_invalid_out=$(fc "$H_SUBMISSION_INVALID" submit "$id_submission_invalid" 2>&1) || submission_invalid_status=$?
+[ "$submission_invalid_status" -ne 0 ] || fail "a malformed submission record was trusted or replaced"
+assert_contains "$submission_invalid_out" "submission terminal is invalid" "present malformed submission state fails closed"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_submission_invalid" ] || fail "malformed submission state created another job"
+
+H_SUBMISSION_UNMARKED="$TMP_ROOT/home-submission-unmarked"
+consult_home "$H_SUBMISSION_UNMARKED"
+id_submission_unmarked=$(prepare_id "$H_SUBMISSION_UNMARKED" "$QUESTION_TWO")
+record_submission_unmarked="$H_SUBMISSION_UNMARKED/data/consults/$id_submission_unmarked"
+printf '{"schema_version":1,"consult_id":"%s","attempted_at":"2026-01-01T00:00:00Z","pro_cli_version":"pro-cli fixture","pro_cli_source_revision":"UNAVAILABLE","job_id":"job_fixture","terminal":"SUBMITTED","error_code":null}\n' \
+  "$id_submission_unmarked" > "$record_submission_unmarked/submission.json"
+chmod 0600 "$record_submission_unmarked/submission.json"
+before_submission_unmarked=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+submission_unmarked_status=0
+submission_unmarked_out=$(fc "$H_SUBMISSION_UNMARKED" submit "$id_submission_unmarked" 2>&1) || submission_unmarked_status=$?
+[ "$submission_unmarked_status" -ne 0 ] || fail "SUBMITTED without its durable attempt marker was trusted"
+assert_contains "$submission_unmarked_out" "submission terminal is invalid" "post-attempt terminal requires its exact marker"
+assert_absent "$H_SUBMISSION_UNMARKED/state/procevent/consult-$id_submission_unmarked.source" "unmarked SUBMITTED state armed a waiter"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_submission_unmarked" ] || fail "unmarked SUBMITTED state created another job"
+pass "submission recovery rejects malformed and unmarked terminal state"
+
+H_RECEIPT_INVALID="$TMP_ROOT/home-receipt-invalid"
+consult_home "$H_RECEIPT_INVALID"
+id_receipt_invalid=$(prepare_id "$H_RECEIPT_INVALID" "$QUESTION_TWO")
+fc "$H_RECEIPT_INVALID" submit "$id_receipt_invalid" >/dev/null || fail "invalid-receipt fixture submit failed"
+source_receipt_invalid="consult-$id_receipt_invalid"
+record_receipt_invalid="$H_RECEIPT_INVALID/data/consults/$id_receipt_invalid"
+registration_receipt_invalid="$H_RECEIPT_INVALID/state/procevent/$source_receipt_invalid.source"
+generation_receipt_invalid=$(sed -n 's/^registration_generation=//p' "$registration_receipt_invalid")
+mkdir -p "$H_RECEIPT_INVALID/state/procevent-inbox"
+capture_receipt_invalid="$H_RECEIPT_INVALID/state/procevent-inbox/$source_receipt_invalid.1.result"
+printf '{"schema":"fm-consult-wait/1","consult_id":"%s","job_id":"job_fixture","wait_exit":0,"wait_timed_out":false,"job_status":"succeeded","error_code":null}\n' \
+  "$id_receipt_invalid" > "$capture_receipt_invalid"
+printf 'consult\n' > "${capture_receipt_invalid%.result}.adapter"
+printf 'schema=fm-procevent-capture-generation.v1\nregistration_generation=%s\n' "$generation_receipt_invalid" \
+  > "${capture_receipt_invalid%.result}.generation"
+chmod 0600 "$capture_receipt_invalid" "${capture_receipt_invalid%.result}.adapter" "${capture_receipt_invalid%.result}.generation"
+: > "$record_receipt_invalid/receipt.json"
+chmod 0600 "$record_receipt_invalid/receipt.json"
+receipt_invalid_status=0
+receipt_invalid_out=$(pa "$H_RECEIPT_INVALID" handle "$id_receipt_invalid" 1 "$capture_receipt_invalid" 2>&1) || receipt_invalid_status=$?
+[ "$receipt_invalid_status" -ne 0 ] || fail "an invalid receipt acknowledged the captured generation"
+assert_contains "$receipt_invalid_out" "receipt is invalid" "invalid receipt state fails closed during collection"
+assert_absent "${capture_receipt_invalid%.result}.handled" "invalid receipt state permanently acknowledged the completion"
+assert_present "$registration_receipt_invalid" "invalid receipt state retired the known-job registration"
+pass "receipt replay validates identity hashes terminal and advisory presence"
+
+H_RESULT_BOUNDARY="$TMP_ROOT/home-result-boundary"
+consult_home "$H_RESULT_BOUNDARY"
+id_result_boundary=$(prepare_id "$H_RESULT_BOUNDARY" "$QUESTION_TWO")
+fc "$H_RESULT_BOUNDARY" submit "$id_result_boundary" >/dev/null || fail "result-boundary fixture submit failed"
+record_result_boundary="$H_RESULT_BOUNDARY/data/consults/$id_result_boundary"
+capture_result_boundary="$TMP_ROOT/result-boundary-event.json"
+printf '{"schema":"fm-consult-wait/1","consult_id":"%s","job_id":"job_fixture","wait_exit":0,"wait_timed_out":false,"job_status":"succeeded","error_code":null}\n' \
+  "$id_result_boundary" > "$capture_result_boundary"
+chmod 0600 "$capture_result_boundary"
+result_boundary_secret="unvalidated-result-$(date +%s)-$$"
+PRO_CLI_RESULT_JSON=$(json_result_for "$result_boundary_secret")
+export PRO_CLI_STATUS_JSON='{"ok":true,"data":{"job":{"id":"job_fixture","status":"succeeded"}}}'
+export PRO_CLI_RESULT_JSON PRO_CLI_RESULT_HOLD=1
+rm -f -- "$RESULT_STARTED" "$RESULT_RELEASE"
+fc "$H_RESULT_BOUNDARY" collect "$id_result_boundary" "$capture_result_boundary" > "$TMP_ROOT/result-boundary.out" 2>&1 &
+result_boundary_pid=$!
+wait_for_file "$RESULT_STARTED" || fail "result-boundary collection did not reach raw result capture"
+kill -KILL "$result_boundary_pid" 2>/dev/null || fail "result-boundary collection could not be interrupted"
+wait "$result_boundary_pid" 2>/dev/null || true
+: > "$RESULT_RELEASE"
+unset PRO_CLI_RESULT_HOLD PRO_CLI_STATUS_JSON
+for stranded_result in "$record_result_boundary"/.result.*; do
+  [ ! -e "$stranded_result" ] || fail "unvalidated raw result was stranded inside the immutable consult record"
+done
+if rg -F -- "$result_boundary_secret" "$record_result_boundary" >/dev/null; then
+  fail "unvalidated advisory bytes entered the immutable consult record"
+fi
+pass "raw job results remain outside the immutable record until validation"
 
 # A captured terminal belongs to its publication generation, not a boot-volatile
 # device/inode. Reconcile must retire that exact source before it can start a
