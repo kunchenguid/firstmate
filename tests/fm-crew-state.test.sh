@@ -1285,7 +1285,8 @@ test_provably_working_via_runs_list_fallback() {
   running    fm/feat-provable ${short}  2026-07-02 22:05
 EOF
 )"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    crew_is_provably_working feat-provable \
     || fail "cross-branch attribution via the runs list was not treated as provably working"
   pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
 }
@@ -1305,7 +1306,8 @@ test_not_provably_working_when_stopped() {
 EOF
 )"
   FM_FAKE_BUSY=0
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-stopped \
+  FM_INACTIVE_NO_MISTAKES_COMPAT=1 PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    crew_is_provably_working feat-stopped \
     && fail "a stopped crew with no run anywhere and an idle pane was treated as provably working"
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
