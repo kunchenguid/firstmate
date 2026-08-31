@@ -103,10 +103,13 @@
 #   FM_USAGE_CLAUDE_DIR   default $HOME/.claude/projects
 #   FM_USAGE_CODEX_DIR    default $HOME/.codex/sessions
 #   FM_USAGE_PI_DIR       default $HOME/.pi/agent/sessions
+#   FM_USAGE_LEDGER_LOCK_WAIT      seconds to wait for the ledger lock, default 30
+#   FM_USAGE_HARVEST_APPEND_DELAY  test-only delay inside the ledger critical section
 #
 # Exit status: 0 on a successful or already-present harvest, 1 on a missing
-# task record, missing jq, or an unwritable ledger. Callers that must not
-# block (teardown) own their own guard.
+# task record, missing jq, an unwritable ledger, or a ledger lock still held by
+# a live concurrent harvest past FM_USAGE_LEDGER_LOCK_WAIT. Callers that must
+# not block (teardown) own their own guard.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# harvest the task's fleet usage-ledger row while its state files still exist
+# (best effort: bin/fm-usage-harvest.sh owns that ledger, and a harvest failure
+# only warns on stderr rather than blocking teardown),
 # clear volatile state, and CLOSE this home's backlog item for ship and scout
 # tasks before reporting success (a secondmate teardown closes none, since
 # secondmates are not backlog items), then refresh/prune the project's clone for
