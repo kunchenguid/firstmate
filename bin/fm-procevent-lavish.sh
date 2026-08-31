@@ -7,12 +7,24 @@
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
+#   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
+# read       Print a structured presentation of one already-captured result so a
+#            handler consumes every queued item without grepping the raw file.
+#            It is read-only over the capture: it does not arm, poll, or change
+#            what Lavish delivered. The session-ending freeform message
+#            (tag=message) is its own labeled field, printed first and distinct
+#            from per-element annotations. Declared and presented item counts,
+#            plus a completeness verdict, follow before all annotations so a
+#            partial read is obvious. Each annotation retains its element uid,
+#            selector, tag, and text, and captain-supplied body lines are visibly
+#            prefixed so they cannot forge structural labels. Empty message and
+#            annotation sections are reported explicitly.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -60,6 +72,9 @@
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
 #
+# `read` is the presentation command summarized above; keyed intake remains
+# the separate `answers` contract described here.
+#
 # It wraps ONLY the currently published interface, verified against 0.1.45:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
@@ -104,7 +119,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,92p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,107p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -455,6 +470,137 @@ cmd_answers() {
   ' "$file"
 }
 
+# Present one already-captured result for a handler. Body lines are prefixed
+# so a captain-supplied string cannot forge a section label. The session-ending
+# message is printed before the count line and before any annotation, because
+# that is the field a truncated grep of the raw capture historically dropped.
+cmd_read() {
+  local file=${1-} lifecycle session_ended
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  lifecycle=$(cmd_classify "$file")
+  session_ended=$(session_field "$file" session_ended)
+  perl -e '
+    use strict; use warnings;
+    my ($path, $lifecycle, $session_ended) = @ARGV;
+    open my $fh, "<", $path or exit 1;
+    my (@fields, $want, @rows);
+    while (my $line = <$fh>) {
+      if (!@fields) {
+        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
+        ($want, @fields) = ($1, split /,/, $2);
+        next;
+      }
+      last unless $line =~ /^\s/;
+      last if defined($want) && @rows >= $want;
+      chomp $line;
+      push @rows, $line;
+    }
+    close $fh;
+    $want = 0 unless defined $want;
+    my @parsed;
+    my $malformed = 0;
+    for my $row (@rows) {
+      $row =~ s/^\s+//;
+      my @vals;
+      while (length $row) {
+        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
+          push @vals, $1;
+        } else {
+          $row =~ s/^([^,]*)//;
+          push @vals, $1;
+        }
+        last unless $row =~ s/^,//;
+      }
+      if (@vals > @fields) {
+        my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
+        ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
+        if (defined $preserve) {
+          my $count = @vals - @fields + 1;
+          my @parts = splice @vals, $preserve, $count;
+          splice @vals, $preserve, 0, join(",", @parts);
+        }
+      }
+      if (@vals != @fields) {
+        $malformed++;
+        next;
+      }
+      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
+      my %f;
+      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+      push @parsed, \%f;
+    }
+    my $presented = scalar @parsed;
+    my $complete = ($presented == $want && !$malformed) ? "yes" : "no";
+    my @messages;
+    my @annotations;
+    for my $f (@parsed) {
+      my $tag = defined $f->{tag} ? $f->{tag} : "";
+      if ($tag eq "message") {
+        push @messages, $f;
+      } else {
+        push @annotations, $f;
+      }
+    }
+    sub emit_body {
+      my ($text) = @_;
+      $text = "" unless defined $text;
+      $text =~ s/\r\n/\n/g;
+      $text =~ s/\r/\n/g;
+      my @lines = split /\n/, $text, -1;
+      pop @lines if @lines && $lines[-1] eq "";
+      return if !@lines || (@lines == 1 && $lines[0] eq "");
+      print "| $_\n" for @lines;
+    }
+    if (@messages) {
+      print "SESSION-ENDING MESSAGE\n";
+      for my $i (0 .. $#messages) {
+        print "SESSION-ENDING MESSAGE PART ", ($i + 1), " of ", scalar(@messages), "\n" if @messages > 1;
+        my $body = defined $messages[$i]{prompt} && length $messages[$i]{prompt}
+          ? $messages[$i]{prompt}
+          : (defined $messages[$i]{text} ? $messages[$i]{text} : "");
+        emit_body($body);
+      }
+      print "END SESSION-ENDING MESSAGE\n";
+    } else {
+      print "SESSION-ENDING MESSAGE: (none)\n";
+    }
+    print "\n";
+    print "declared_items: $want\n";
+    print "presented_items: $presented\n";
+    print "malformed_items: $malformed\n";
+    print "complete: $complete\n";
+    print "lifecycle: $lifecycle\n";
+    print "session_ended: ", (length $session_ended ? $session_ended : "(unset)"), "\n";
+    print "annotation_count: ", scalar(@annotations), "\n";
+    print "session_ending_message_count: ", scalar(@messages), "\n";
+    print "\n";
+    if (@annotations) {
+      print "ANNOTATIONS\n";
+      my $n = 0;
+      for my $f (@annotations) {
+        $n++;
+        my $uid = defined $f->{uid} ? $f->{uid} : "";
+        my $selector = defined $f->{selector} ? $f->{selector} : "";
+        my $tag = defined $f->{tag} ? $f->{tag} : "";
+        print "ANNOTATION $n of ", scalar(@annotations), "\n";
+        print "element_uid: $uid\n";
+        print "element_selector: $selector\n";
+        print "tag: $tag\n";
+        print "text:\n";
+        my $body = defined $f->{text} && length $f->{text}
+          ? $f->{text}
+          : (defined $f->{prompt} ? $f->{prompt} : "");
+        emit_body($body);
+      }
+      print "END ANNOTATIONS\n";
+    } else {
+      print "ANNOTATIONS: (none)\n";
+    }
+    print "END LAVISH RESULT ($presented of $want)\n";
+  ' "$file" "$lifecycle" "$session_ended"
+}
+
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
@@ -464,6 +610,7 @@ case "${1-}" in
   terminal)  shift; cmd_terminal "$@" ;;
   silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
+  read)      shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

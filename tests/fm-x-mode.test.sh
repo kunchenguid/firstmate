@@ -780,7 +780,7 @@ test_bootstrap_does_not_announce_when_arm_fails() {
 test_bootstrap_does_not_follow_x_artifact_symlinks() {
   local home shim_target cadence_target out
   home="$TMP_ROOT/boot-linked-artifacts"
-  mkdir -p "$home/state" "$home/config" "$home/external-quarantine"
+  mkdir -p "$home/state" "$home/config"
   printf 'FMX_PAIRING_TOKEN=tok-linked\n' > "$home/.env"
   shim_target="$home/external-shim"
   cadence_target="$home/external-cadence"
@@ -789,7 +789,6 @@ test_bootstrap_does_not_follow_x_artifact_symlinks() {
   chmod 0640 "$shim_target" "$cadence_target"
   ln -s "$shim_target" "$home/state/x-watch.check.sh"
   ln -s "$cadence_target" "$home/config/x-mode.env"
-  ln -s "$home/external-quarantine" "$home/state/.pr-check-quarantine"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>"$home/bootstrap.err")
 
@@ -2468,6 +2467,77 @@ test_meta_rewrites_do_not_depend_on_tmpdir() {
   pass "meta rewrites are independent of TMPDIR"
 }
 
+# The shared publisher must refuse a symlink at state/<id>.meta so Relay field
+# rewrites cannot follow it and overwrite the target. Each helper is a real
+# rewrite path: link, follow-up counter, and clear.
+test_meta_helpers_refuse_a_symlinked_task_record() {
+  local home meta target original rc leftover fakebin
+
+  assert_symlink_untouched() {
+    local why=$1
+    [ -L "$meta" ] || fail "$why replaced or removed the symlink record"
+    cmp -s "$target" "$original" \
+      || fail "$why rewrote the symlink target in place"
+    leftover=$(find "$home/state" -maxdepth 1 -name '.*.fm-x.*' -print 2>/dev/null || true)
+    [ -z "$leftover" ] || fail "$why left a staging file after a refused publish: $leftover"
+  }
+
+  home="$TMP_ROOT/meta-symlink"
+  mkdir -p "$home/state"
+  meta="$home/state/sym-task.meta"
+  target="$TMP_ROOT/meta-symlink-foreign.meta"
+  original="$TMP_ROOT/meta-symlink-foreign.expected"
+
+  printf '%s\n' 'window=w' 'kind=ship' 'mode=no-mistakes' 'yolo=off' > "$target"
+  cp "$target" "$original"
+  ln -s "$target" "$meta"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    "$ROOT/bin/fm-x-link.sh" sym-task req-sym >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "link through a symlink record should refuse"
+  assert_no_grep "x_request=" "$target" "link wrote an X request through the symlink"
+  assert_symlink_untouched "link"
+
+  printf '%s\n' 'window=w' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    'x_request=req-sym' 'x_request_ts=1700000000' 'x_followups=0' \
+    'x_platform=x' 'x_reply_max_chars=280' > "$target"
+  cp "$target" "$original"
+  rm -f "$meta"
+  ln -s "$target" "$meta"
+
+  FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --clear sym-task >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "clear through a symlink record should refuse"
+  assert_grep "x_request=req-sym" "$target" "clear removed the X request through the symlink"
+  assert_symlink_untouched "clear"
+
+  rm -f "$meta" "$target"
+  ln -s "$target" "$meta"
+  FM_HOME="$home" STATE="$home/state" ROOT="$ROOT" META="$meta" bash -c '
+    . "$ROOT/bin/fm-x-lib.sh"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fmx_meta_link_clear "$META"
+  ' >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "the clear helper should refuse a dangling symlink record"
+  [ -L "$meta" ] || fail "the clear helper replaced or removed the dangling symlink record"
+  [ ! -e "$target" ] || fail "the clear helper created the dangling symlink target"
+  leftover=$(find "$home/state" -maxdepth 1 -name '.*.fm-x.*' -print 2>/dev/null || true)
+  [ -z "$leftover" ] || fail "the clear helper left a staging file after refusing a dangling symlink: $leftover"
+
+  printf '%s\n' 'window=w' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    'x_request=req-sym' 'x_request_ts=1700000000' 'x_followups=0' \
+    'x_platform=x' 'x_reply_max_chars=280' > "$target"
+  cp "$target" "$original"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-sym\n' > "$home/.env"
+  FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-x-followup.sh" sym-task - <<<"milestone update" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "a follow-up through a symlink record should refuse"
+  assert_absent "$home/state/x-outbox/req-sym.json" \
+    "a refused symlink record still published a follow-up"
+  assert_grep "x_followups=0" "$target" "a refused follow-up incremented the counter through the symlink"
+  assert_symlink_untouched "follow-up"
+  pass "x-lib meta helpers refuse a symlinked task record and leave its target untouched"
+}
+
 test_link_rejects_unsafe_and_missing() {
   local home rc
   home="$TMP_ROOT/link-bad"; mkdir -p "$home/state"
@@ -2942,6 +3012,7 @@ test_link_carry_count_and_ts_preserve_followup_binding
 test_link_recovery_relink_carries_discord_context_after_inbox_drain
 test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
+test_meta_helpers_refuse_a_symlinked_task_record
 test_link_rejects_unsafe_and_missing
 test_link_missing_task_without_secondmates_stays_plain
 test_link_refuses_secondmate_routed_task_with_promised_final_pointer

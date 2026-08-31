@@ -27,6 +27,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
@@ -46,7 +47,32 @@ export function getMarkdownTheme() {
   return {};
 }
 
+export function keyHint(_keybinding, description) {
+  return `ctrl+o ${description}`;
+}
+
+export class ToolExecutionComponent {
+  updateResult(result) {
+    this.result = result;
+  }
+  render() {
+    return (this.result?.content ?? [])
+      .filter((item) => item.type === "text")
+      .flatMap((item) => item.text.split("\n"));
+  }
+}
+
 export class UserMessageComponent {}
+
+export class DynamicBorder {
+  constructor(color) {
+    this.color = color;
+  }
+  invalidate() {}
+  render() {
+    return ["--"];
+  }
+}
 
 export class ModelRuntime {
   constructor() {
@@ -113,7 +139,12 @@ export function createBashToolDefinition(cwd, options) {
     parameters: { type: "object" },
     __cwd: cwd,
     __options: options,
-    execute: async () => ({ content: [], details: undefined }),
+    execute: async (_toolCallId, params) => {
+      if (!globalThis.__fmExecuteBranchBash) return { content: [], details: undefined };
+      const initial = { command: String(params.command ?? ""), cwd, env: { ...process.env } };
+      const context = options.spawnHook ? options.spawnHook(initial) : initial;
+      return globalThis.__fmExecuteBranchBash(context);
+    },
   };
 }
 
@@ -135,6 +166,7 @@ export async function createAgentSession(options) {
       }
       session.ops.push({ kind: "prompt", text });
       (globalThis.__fmPrompts ??= []).push(text);
+      await globalThis.__fmOnBranchPrompt?.({ session, text });
     },
     async sendCustomMessage(message, opts) {
       if (globalThis.__fmMirrorGate) {
@@ -228,6 +260,64 @@ export class Box extends Container {
     this.bgFn = bgFn;
   }
 }
+
+export class Input {
+  constructor() {
+    this.value = "";
+    this.focused = false;
+  }
+  getValue() {
+    return this.value;
+  }
+  setValue(value) {
+    this.value = value;
+  }
+  handleInput(data) {
+    this.value = data === "\u007f" ? this.value.slice(0, -1) : this.value + data;
+  }
+  invalidate() {}
+  render() {
+    return [this.value];
+  }
+}
+
+// Records every construction so a driver can assert the rows and the visible
+// bound the extension asked Pi's real SelectList for. Navigation keys arrive
+// as their keybinding ids because the driver's fake keybindings manager
+// matches an id against the raw key data.
+export class SelectList {
+  constructor(items, maxVisible, theme) {
+    this.items = items;
+    this.maxVisible = maxVisible;
+    this.theme = theme;
+    this.selectedIndex = 0;
+    (globalThis.__fmPickerLists ??= []).push({ items: items.map((item) => ({ ...item })), maxVisible });
+  }
+  handleInput(data) {
+    if (data === "tui.select.down") {
+      this.selectedIndex = Math.min(this.selectedIndex + 1, this.items.length - 1);
+    } else if (data === "tui.select.up") {
+      this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+    } else if (data === "tui.select.confirm") {
+      const item = this.items[this.selectedIndex];
+      if (item) this.onSelect?.(item);
+    } else if (data === "tui.select.cancel") {
+      this.onCancel?.();
+    }
+  }
+  getSelectedItem() {
+    return this.items[this.selectedIndex] ?? null;
+  }
+  invalidate() {}
+  render() {
+    return this.items.slice(0, this.maxVisible).map((item) => item.label);
+  }
+}
+
+export function fuzzyFilter(items, query, getText) {
+  const needle = query.toLowerCase();
+  return items.filter((item) => getText(item).toLowerCase().includes(needle));
+}
 JS
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
@@ -262,7 +352,8 @@ JS
 # Shared driver preamble: a fake main-session ExtensionAPI with a synchronous
 # event bus (mirrors pi's EventEmitter-backed bus), captured handlers, and
 # captured main-bound messages.
-DRIVER_PRELUDE=$(cat <<'JS'
+DRIVER_PRELUDE_FILE="$TMP_ROOT/driver-prelude.js"
+cat > "$DRIVER_PRELUDE_FILE" <<'JS'
 const { spawnSync } = await import("node:child_process");
 const { mkdirSync, writeFileSync } = await import("node:fs");
 const { pathToFileURL } = await import("node:url");
@@ -323,6 +414,60 @@ function makeCtx(extra) {
       },
     },
     ...(extra ?? {}),
+  };
+}
+
+// A TUI-mode context whose ui.custom runs the extension's real picker
+// component headlessly: the factory receives a fake renderer, a pass-through
+// theme, and a keybindings manager that matches a keybinding id against the
+// raw key data, and then the next queued keystroke script is fed to the
+// component's own handleInput. Keystrokes are either a keybinding id
+// (navigation) or literal characters (search). mainModelWrites records every
+// attempt to move the captain's own model, which pinning the branch must
+// never do.
+const uiKeystrokes = [];
+const mainModelWrites = [];
+function makeTuiCtx(extra) {
+  const base = makeCtx(extra);
+  return {
+    ...base,
+    get model() {
+      return mainModel;
+    },
+    mode: "tui",
+    settingsManager: {
+      setDefaultModelAndProvider(provider, id) {
+        mainModelWrites.push({ provider, id });
+      },
+    },
+    setModel(provider, id) {
+      mainModelWrites.push({ provider, id });
+    },
+    ui: {
+      ...base.ui,
+      async custom(factory) {
+        let result;
+        let settled = false;
+        const component = await factory(
+          {
+            requestRender() {},
+          },
+          { fg: (_color, text) => text, bold: (text) => text },
+          { matches: (data, id) => data === id },
+          (value) => {
+            result = value;
+            settled = true;
+          },
+        );
+        component.render(80);
+        for (const key of uiKeystrokes.shift() ?? ["tui.select.confirm"]) {
+          if (settled) break;
+          component.handleInput(key);
+        }
+        if (!settled) throw new Error("the picker script ended without a selection or a cancellation");
+        return result;
+      },
+    },
   };
 }
 
@@ -411,7 +556,7 @@ function outcomeScript(args) {
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 JS
-)
+DRIVER_PRELUDE=$(cat "$DRIVER_PRELUDE_FILE")
 
 test_branch_dispatch_two_stage_filter_and_prefix_contract() {
   local repo home out status
@@ -521,6 +666,18 @@ if (!sentToMain[2].message.content.includes("task-9: PR https://example.com/pr/9
 if (/branch merged|\[routine\]|\[captain\]/.test(sentToMain[2].message.content)) {
   throw new Error(`captain note still has boilerplate: ${sentToMain[2].message.content}`);
 }
+// What main's model actually receives. Pi keeps only `content` when it turns a
+// custom message into a provider message - customType, display, and details are
+// all dropped - so `content` IS the delivered payload, and these two files are
+// the exact bytes main's model would read. The bash side classifies them with
+// the REAL bin/fm-operational-input.sh so the protocol's own executable, not a
+// pattern in this test, decides what was delivered. Pi's half of that contract
+// is proven separately against the real SDK in fm-pi-branch-live-e2e.test.sh.
+writeFileSync(`${home}/state/delivered-captain-note`, sentToMain[2].message.content);
+writeFileSync(`${home}/state/delivered-routine-note`, sentToMain[0].message.content);
+if (sentToMain.filter((sent) => sent.options.triggerTurn).length !== 1) {
+  throw new Error("one captain outcome must open exactly one turn on main");
+}
 
 // The store (the owned durable contract) holds all three outcomes in order,
 // and each merged note advanced the read cursor.
@@ -548,6 +705,23 @@ if (calmOffCall.constructor.name !== "Box" || calmOffCall.paddingX !== 1 || calm
 }
 if (calmOffResult.constructor.name !== "Container" || calmOffCall.children[0]?.text !== "fm_branch_outcomes" || calmOffCall.children[1]?.text !== "OUTCOME_DUMP") {
   throw new Error("fm_branch_outcomes changed its ordinary call or result rendering");
+}
+const legacyStockResult = {
+  content: [{
+    type: "text",
+    text: Array.from({ length: 12 }, (_, index) => `LEGACY_OUTCOME_${String(index + 1).padStart(2, "0")}`).join("\n"),
+  }],
+};
+const legacyRenderContext = { state: {}, isError: false, isPartial: false };
+const legacyCall = outcomesTool.renderCall({}, renderTheme, legacyRenderContext);
+outcomesTool.renderResult(legacyStockResult, { expanded: false, isPartial: false }, renderTheme, legacyRenderContext);
+const collapsedLegacyText = legacyCall.children[1]?.text;
+if (!collapsedLegacyText?.includes("LEGACY_OUTCOME_12") || collapsedLegacyText.includes("more lines")) {
+  throw new Error("legacy all-line stock capability did not preserve collapsed Calm-off output");
+}
+outcomesTool.renderResult(legacyStockResult, { expanded: true, isPartial: false }, renderTheme, legacyRenderContext);
+if (legacyCall.children[1]?.text !== collapsedLegacyText) {
+  throw new Error("legacy all-line stock capability changed expanded Calm-off output");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 const calmOnCall = outcomesTool.renderCall({}, renderTheme, renderContext);
@@ -623,6 +797,292 @@ EOF
     *) fail "cache key line missing from driver output: $out" ;;
   esac
   pass "branch owns accepted wakes with a stable prefix contract and verdict-driven merge delivery"
+
+  # The delivered captain payload must identify itself to main's model. When it
+  # did not, main could not tell an incoming outcome from its own earlier answer
+  # and re-emitted that answer instead of relaying the outcome, silently losing
+  # it. The real protocol executable is the oracle here: it decides the kind and
+  # extracts the body, so this asserts delivered behavior rather than a shape
+  # this test already knows.
+  local kind body
+  kind=$(./bin/fm-operational-input.sh kind < "$home/state/delivered-captain-note") \
+    || fail "captain outcome reaches main's model as unattributed text the model cannot tell from its own answer"
+  [ "$kind" = branch-outcome ] \
+    || fail "captain outcome delivered as kind '$kind', not branch-outcome"
+  body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-captain-note") \
+    || fail "captain outcome envelope carries no readable body"
+  case "$body" in
+    *"This is a supervision outcome delivered automatically by the supervision branch."*"It was not typed by the captain."*"task-9: PR https://example.com/pr/9"*) ;;
+    *) fail "captain outcome body lost its self-description or the outcome itself: $body" ;;
+  esac
+  # Event ownership and conversational judgment are separate contracts. The
+  # delivered instruction forbids reprocessing the fleet event but leaves main
+  # free to decide how the outcome belongs in the captain conversation.
+  case "$body" in
+    *"The fleet event is already handled: do not re-drain, re-run, or acknowledge it."*) ;;
+    *) fail "captain outcome body lost the event-ownership boundary: $body" ;;
+  esac
+  case "$body" in
+    *"This outcome is captain-facing: give the captain a visible response now."*"Use your judgment over the wording and how to incorporate it, not whether to surface it."*) ;;
+    *) fail "captain outcome body made visibility optional or removed wording judgment: $body" ;;
+  esac
+  case "$body" in
+    *"An outcome that directly answers an explicit captain request is captain-facing"*"regardless of whether it is healthy, routine, measured, actionable, or requires a decision."*) ;;
+    *) fail "captain outcome body lost the unconditional explicit-request rule: $body" ;;
+  esac
+  # The routine note is rendered in the TUI, and its renderer reads the glyph off
+  # the front of this same string, so it must stay plain text.
+  if ./bin/fm-operational-input.sh kind < "$home/state/delivered-routine-note" >/dev/null 2>&1; then
+    fail "routine note must stay plain rendered text, not typed operational input"
+  fi
+  pass "a captain outcome reaches main's model as typed, self-describing input while routine notes stay plain"
+}
+
+test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
+  local repo home out status
+  repo="$TMP_ROOT/requested-outcome-root"
+  home="$TMP_ROOT/requested-outcome-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, mainTools, home, realRoot }; })()`);
+const { fire, dispatch, settle, sentToMain, outcomeScript, mainTools, home, realRoot } = globalThis.__t;
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const fleetOperations = [];
+globalThis.__fmExecuteBranchBash = async (context) => {
+  const actor = spawnSync(
+    "bash",
+    ["-c", '. "$1"; fm_lease_actor', "_", `${realRoot}/bin/fm-lease-lib.sh`],
+    { encoding: "utf8", cwd: context.cwd, env: context.env },
+  );
+  if (actor.status !== 0) throw new Error(`branch bash actor resolution failed: ${actor.stderr}`);
+  const result = spawnSync("bash", ["-c", context.command], {
+    encoding: "utf8",
+    cwd: context.cwd,
+    env: context.env,
+  });
+  fleetOperations.push({ command: context.command, actor: actor.stdout.trim(), status: result.status });
+  return {
+    content: [{ type: "text", text: `${result.stdout}${result.stderr}` }],
+    details: { stdout: result.stdout, stderr: result.stderr, exitCode: result.status, actor: actor.stdout.trim() },
+    isError: result.status !== 0,
+  };
+};
+
+async function runFleetCommand(session, args) {
+  const bash = session.options.customTools.find((tool) => tool.name === "bash");
+  const command = ["bin/fm-wake-drain.sh", ...args].join(" ");
+  const result = await bash.execute(`fleet-${fleetOperations.length}`, { command }, undefined, undefined, {});
+  if (result.isError) throw new Error(`fleet command failed: ${JSON.stringify(result)}`);
+  return result.details;
+}
+
+function directlyRequestsResourceReport(mirror) {
+  const latestCaptain = mirror.at(-1) ?? "";
+  const words = new Set(latestCaptain.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const requestsDelivery = ["give", "provide", "send", "show"].some((word) => words.has(word));
+  const namesReport = ["report", "status", "measurement"].some((word) => words.has(word));
+  const namesResources = ["resource", "resources", "cpu", "memory"].some((word) => words.has(word));
+  return requestsDelivery && namesReport && namesResources;
+}
+
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const mirror = session.ops
+    .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+    .map((op) => op.message.content);
+  const directlyRequested = directlyRequestsResourceReport(mirror);
+  const drained = await runFleetCommand(session, []);
+  const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
+  if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const verdictDescription = report.parameters.properties.verdict.description;
+  if (!verdictDescription.includes("unconditionally") ||
+      !verdictDescription.includes("directly answers an explicit captain request") ||
+      !verdictDescription.includes("regardless of whether it is healthy, routine, measured, actionable, or requires a decision")) {
+    throw new Error(`branch provider received conflicting verdict semantics: ${verdictDescription}`);
+  }
+  const result = await report.execute(
+    `resource-result-${fleetOperations.length}`,
+    {
+      task: "task-resource",
+      verdict: directlyRequested ? "captain" : "routine",
+      summary: "healthy resource report: CPU 12%, memory 41%",
+      wake: "signal: healthy resource result",
+    },
+    undefined,
+    undefined,
+    {},
+  );
+  if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
+  await runFleetCommand(session, ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
+};
+
+const explicitRequest = "Please give me a fresh mini system-resource report.";
+const longRequests = [
+  `${explicitRequest}${" head context".repeat(500)}`,
+  `${"middle context ".repeat(250)}${explicitRequest}${" middle context".repeat(250)}`,
+  `${"tail context ".repeat(500)}${explicitRequest}`,
+];
+const requestedPrompts = [...longRequests, "FIRSTMATE give me a fresh system-resource report."];
+// Match Pi's real AgentSession.prompt ordering: before_agent_start receives
+// the expanded prompt before _runAgentPrompt appends its user message to the
+// SessionManager. Keeping entries stale at the hook boundary is the regression.
+const entries = [];
+const mainCtx = {
+  model: { provider: "anthropic", id: "main-model" },
+  sessionManager: {
+    getSessionFile: () => `${home}/main.jsonl`,
+    getEntries: () => entries,
+  },
+};
+const operational = spawnSync(
+  "bash",
+  [`${realRoot}/bin/fm-operational-input.sh`, "encode", "watcher"],
+  { encoding: "utf8", input: "operational watcher injection" },
+);
+if (operational.status !== 0) throw new Error(`could not create operational input: ${operational.stderr}`);
+fire("before_agent_start", { prompt: operational.stdout }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: operational.stdout } });
+const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
+fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
+fire("agent_start", {}, mainCtx);
+fire("agent_end", {}, mainCtx);
+const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
+fire("before_agent_start", { prompt: legacyOperational }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: legacyOperational } });
+fire("agent_start", {}, mainCtx);
+const unsolicited = dispatch("signal: healthy resource result");
+if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
+await settle(() => fleetOperations.length === 2, "unsolicited result acknowledgement");
+if (sentToMain.length !== 1 || sentToMain[0].options.triggerTurn) {
+  throw new Error(`unsolicited healthy result opened a main turn: ${JSON.stringify(sentToMain)}`);
+}
+const sailboat = sentToMain[0];
+if (sailboat.message.display !== true || !sailboat.message.content.startsWith("⛵ task-resource:")) {
+  throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sailboat)}`);
+}
+
+const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+if (!outcomes) throw new Error("main did not receive its outcome-reading permission surface");
+const visibleToMain = await outcomes.execute("main-reads-sailboat", { recent: 1 }, undefined, undefined, {});
+const mainOutcomeText = visibleToMain.content.map((item) => item.text ?? "").join("\n");
+if (visibleToMain.isError || !mainOutcomeText.includes("healthy resource report: CPU 12%, memory 41%")) {
+  throw new Error(`main could not use the sailboat content through its existing permission path: ${JSON.stringify(visibleToMain)}`);
+}
+if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocessed the fleet event");
+
+for (let index = 0; index < requestedPrompts.length; index += 1) {
+  const content = requestedPrompts[index];
+  if (index < longRequests.length && content.length <= 4000) {
+    throw new Error(`request fixture ${index} did not exceed the mirror bound`);
+  }
+  fire("before_agent_start", { prompt: content }, mainCtx);
+  // Pi persists this only after every before_agent_start handler has returned.
+  entries.push({ type: "message", message: { role: "user", content } });
+  fire("agent_start", {}, mainCtx);
+  const requested = dispatch("signal: healthy resource result");
+  if (!requested.accepted) throw new Error(`branch did not accept requested result ${index}`);
+  await settle(() => fleetOperations.length === 4 + (index * 2), `requested result ${index} acknowledgement`);
+  const deliveredRequestMirror = globalThis.__fmSessions[0].ops
+    .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+    .at(-1)?.message.content;
+  if (deliveredRequestMirror !== `[captain] ${content}`) {
+    throw new Error(`pre-turn-end mirror changed long captain request ${index}`);
+  }
+  const turns = sentToMain.filter((sent) => sent.options.triggerTurn === true);
+  if (turns.length !== index + 1 || turns.at(-1).options.deliverAs !== "followUp") {
+    throw new Error(`requested result ${index} did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
+  }
+}
+const mirroredCaptainText = globalThis.__fmSessions[0].ops
+  .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+  .map((op) => op.message.content);
+for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
+  const copies = mirroredCaptainText.filter((text) => text === `[captain] ${content}`).length;
+  if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
+}
+if (mirroredCaptainText.some((text) =>
+  text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
+)) {
+  throw new Error("canonical current or legacy operational input entered captain mirror context");
+}
+if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
+if (sentToMain.length !== 5) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
+if (fleetOperations.length !== 10 || fleetOperations.some((operation) => operation.status !== 0)) {
+  throw new Error(`fleet event ownership repeated or failed work: ${JSON.stringify(fleetOperations)}`);
+}
+if (fleetOperations.some((operation) => operation.actor !== "branch")) {
+  throw new Error(`main took fleet-event ownership: ${JSON.stringify(fleetOperations)}`);
+}
+if (existsSync(`${home}/state/.wake-queue`) && readFileSync(`${home}/state/.wake-queue`, "utf8") !== "") {
+  throw new Error("acknowledged fleet wake remained queued for another owner");
+}
+const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+if (rows.length !== 5 || rows[0].verdict !== "routine" || rows.slice(1).some((row) => row.verdict !== "captain")) {
+  throw new Error(`provider classifications were not recorded once in order: ${JSON.stringify(rows)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes remained unread for redelivery");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "requested and unsolicited healthy outcomes must follow their distinct public delivery paths: $out"
+  pass "requested and unsolicited healthy outcomes keep distinct delivery and event ownership"
+}
+
+test_captain_outcome_encoding_failure_delivers_plain_instruction() {
+  local repo home out status
+  repo="$TMP_ROOT/encoding-fallback-root"
+  home="$TMP_ROOT/encoding-fallback-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_OPERATIONAL_INPUT_SCRIPT="$repo/bin/missing-operational-input" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, sentToMain }; })()`);
+const { dispatch, settle, sentToMain } = globalThis.__t;
+
+if (!dispatch("signal: encoding fallback probe").accepted) {
+  throw new Error("branch did not accept the encoding-fallback wake");
+}
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "encoding-fallback branch prompt");
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const result = await report.execute(
+  "encoding-fallback",
+  { task: "task-fallback", verdict: "captain", summary: "PR https://example.com/pr/fallback is ready" },
+  undefined,
+  undefined,
+  {},
+);
+if (result.isError) throw new Error(`fallback report failed: ${JSON.stringify(result)}`);
+if (sentToMain.length !== 1) throw new Error(`fallback delivered ${sentToMain.length} notes instead of one`);
+const delivered = sentToMain[0];
+if (delivered.message.display !== false) throw new Error("fallback captain note became visible");
+if (delivered.options.triggerTurn !== true || delivered.options.deliverAs !== "followUp") {
+  throw new Error(`fallback changed turn delivery: ${JSON.stringify(delivered.options)}`);
+}
+if (delivered.message.content.includes("FIRSTMATE_OP:")) {
+  throw new Error(`fallback unexpectedly carried an envelope: ${delivered.message.content}`);
+}
+if (!delivered.message.content.includes("The fleet event is already handled: do not re-drain, re-run, or acknowledge it.") ||
+    !delivered.message.content.includes("This outcome is captain-facing: give the captain a visible response now.") ||
+    !delivered.message.content.includes("Use your judgment over the wording and how to incorporate it, not whether to surface it.") ||
+    !delivered.message.content.includes("task-fallback: PR https://example.com/pr/fallback is ready")) {
+  throw new Error(`fallback lost its instruction or outcome: ${delivered.message.content}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "captain outcome encoding failure must degrade to plain instructed delivery: $out"
+  pass "a broken operational encoder still delivers one invisible instructed captain outcome as a follow-up"
 }
 
 test_branch_cache_key_is_per_home_stable() {
@@ -1054,13 +1514,13 @@ const { fire, dispatch, settle, home } = globalThis.__t;
 import { existsSync, readFileSync } from "node:fs";
 
 const entries = [
-  { type: "message", message: { role: "user", content: "never merge task-7 without my word" } },
+  { type: "message", message: { role: "user", content: `never merge task-7 without my word ${"h".repeat(5000)} old-history-tail` } },
   { type: "message", message: { role: "assistant", content: [{ type: "text", text: "aye, holding task-7" }, { type: "toolCall", id: "t1" }] } },
   { type: "message", message: { role: "user", content: "⁣FIRSTMATE_OP: v1 watcher: operational injection" } },
   { type: "message", message: { role: "toolResult", content: "tool output stays in main" } },
   { type: "custom", message: { role: "custom", customType: "fm-branch-merge", content: "merged note" } },
   { type: "compaction", summary: "compacted" },
-  { type: "message", message: { role: "user", content: `pad ${"x".repeat(5000)}` } },
+  { type: "message", message: { role: "user", content: `pad ${"x".repeat(5000)}\ntail: retain this request` } },
 ];
 const ctx = {
   sessionManager: {
@@ -1083,9 +1543,15 @@ if (JSON.stringify(kinds) !== JSON.stringify(["custom", "custom", "custom", "pro
 const mirrored = session.ops.filter((op) => op.kind === "custom").map((op) => op.message);
 if (mirrored.some((m) => m.customType !== "fm-main-mirror")) throw new Error("mirror used the wrong custom type");
 if (mirrored.some((m) => m.display !== false)) throw new Error("mirrored context must be silent");
-if (mirrored[0].content !== "[captain] never merge task-7 without my word") throw new Error(`bad captain mirror: ${mirrored[0].content}`);
+if (!mirrored[0].content.startsWith("[captain] never merge task-7 without my word") ||
+    !mirrored[0].content.includes("[mirror truncated:") ||
+    !mirrored[0].content.endsWith("old-history-tail")) {
+  throw new Error(`older captain history was not bounded: ${mirrored[0].content}`);
+}
 if (mirrored[1].content !== "[main] aye, holding task-7") throw new Error(`bad main mirror: ${mirrored[1].content}`);
-if (!mirrored[2].content.includes("[mirror truncated at 4000 characters]")) throw new Error("long dialog was not capped");
+if (mirrored[2].content !== `[captain] ${entries[6].message.content}`) {
+  throw new Error("current captain dialog was not preserved completely");
+}
 if (mirrored.some((m) => m.content.includes("operational injection") || m.content.includes("tool output") || m.content.includes("merged note"))) {
   throw new Error("mirror leaked operational, tool, or merge-note traffic");
 }
@@ -1646,6 +2112,135 @@ EOF
   pass "unpinned branches follow main effort changes live while pinned branches stay fixed"
 }
 
+test_supervision_model_picker_is_bounded_searchable_and_branch_only() {
+  local repo home out status
+  repo="$TMP_ROOT/pickerux-root"
+  home="$TMP_ROOT/pickerux-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, makeCtx, makeTuiCtx, commands, registryModels, uiSelections, uiKeystrokes, mainModelWrites, home }; })()`);
+const { fire, makeCtx, makeTuiCtx, commands, registryModels, uiSelections, uiKeystrokes, mainModelWrites, home } = globalThis.__t;
+import { readFileSync } from "node:fs";
+
+// A catalog long enough that rendering it whole would run off a terminal,
+// plus one distinctively named model to search for and one model the
+// isolated branch runtime cannot run.
+registryModels.push({ provider: "anthropic", id: "main-model" });
+for (let i = 1; i <= 30; i += 1) registryModels.push({ provider: "anthropic", id: `bulk-model-${i}` });
+registryModels.push({ provider: "openai-codex", id: "cheap-oauth", authKind: "oauth" });
+registryModels.push({ provider: "dynamic", id: "extension-only", branchAvailable: false });
+
+const command = commands.get("supervision-model");
+if (!command) throw new Error("the supervision-model command was not registered");
+fire("session_start", {}, makeCtx());
+
+// The captain types a search query and confirms the one row it leaves.
+globalThis.__fmPickerLists = [];
+uiKeystrokes.push(["c", "h", "e", "a", "p", "tui.select.confirm"]);
+uiSelections.push(undefined); // the effort step is cancelled, leaving that choice alone
+await command.handler("", makeTuiCtx());
+
+const lists = globalThis.__fmPickerLists;
+if (lists.length < 2) throw new Error(`typing a query must rebuild the list: ${JSON.stringify(lists.map((l) => l.items.length))}`);
+const opened = lists[0];
+if (opened.maxVisible !== 10) {
+  throw new Error(`the model list must stay bounded rather than rendering every row: maxVisible=${opened.maxVisible}`);
+}
+if (opened.items[0].label !== "Follow main (anthropic/main-model)") {
+  throw new Error(`following main must be the first row: ${JSON.stringify(opened.items.slice(0, 2))}`);
+}
+if (opened.items.length !== 33) {
+  throw new Error(`the opened list must offer following main plus every branch-runnable model: ${opened.items.length}`);
+}
+if (opened.items.some((item) => item.label.includes("extension-only"))) {
+  throw new Error("the picker widened past the branch runtime's eligibility filter");
+}
+const filtered = lists[lists.length - 1];
+if (filtered.items.length !== 1 || filtered.items[0].value !== "openai-codex/cheap-oauth") {
+  throw new Error(`the search query did not narrow the list: ${JSON.stringify(filtered.items)}`);
+}
+
+// The pick lands on the supervision branch alone.
+if (readFileSync(`${home}/config/supervision-branch-model`, "utf8") !== "openai-codex/cheap-oauth\n") {
+  throw new Error("the searched-for pick was not persisted as the supervision branch model");
+}
+if (mainModelWrites.length !== 0) {
+  throw new Error(`pinning the branch moved the captain's own model: ${JSON.stringify(mainModelWrites)}`);
+}
+if (makeCtx().model.id !== "main-model") throw new Error("the captain's own conversation model changed");
+
+// A query that matches following main keeps that row first, and escape
+// leaves every choice standing.
+globalThis.__fmPickerLists = [];
+uiKeystrokes.push(["m", "a", "i", "n", "tui.select.cancel"]);
+await command.handler("", makeTuiCtx());
+const mainQuery = globalThis.__fmPickerLists[globalThis.__fmPickerLists.length - 1];
+if (mainQuery.items[0].label !== "Follow main (anthropic/main-model)") {
+  throw new Error(`a matching query must keep following main first: ${JSON.stringify(mainQuery.items.slice(0, 2))}`);
+}
+if (mainQuery.items.length < 2) throw new Error("a matching query dropped the models it also matched");
+if (readFileSync(`${home}/config/supervision-branch-model`, "utf8") !== "openai-codex/cheap-oauth\n") {
+  throw new Error("cancelling the picker changed the standing pin");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the model picker must be bounded, searchable, and branch-only: $out"
+  pass "supervision-model opens a bounded searchable list, follow main first, and pins the branch alone"
+}
+
+test_branch_model_picker_keeps_follow_main_first_under_ranking() {
+  local repo out status
+  repo="$TMP_ROOT/pickerlib-root"
+  mkdir -p "$repo/.pi/extensions/lib"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+  LIB="$repo/.pi/extensions/lib/fm-branch-model-picker.ts" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const { buildBranchModelItems, filterBranchPickerItems, BRANCH_PICKER_MAX_VISIBLE, FOLLOW_MAIN_VALUE } = await import(
+  pathToFileURL(process.env.LIB).href
+);
+
+const items = buildBranchModelItems("Follow main (anthropic/main-model)", ["anthropic/main-model", "openai/mainly-cheap"], null);
+if (items[0].value !== FOLLOW_MAIN_VALUE) throw new Error("following main must be built as the first row");
+if (items[0].description !== "current") throw new Error("an absent pin must mark following main as the current choice");
+if (items[2].description !== undefined) throw new Error("a model that is not pinned must not be marked current");
+
+const pinned = buildBranchModelItems("Follow main (anthropic/main-model)", ["anthropic/main-model"], "anthropic/main-model");
+if (pinned[0].description !== undefined) throw new Error("a pinned branch must not mark following main as current");
+if (pinned[1].description !== "current") throw new Error("the pinned model must be marked as the current choice");
+
+// A ranking filter is free to sort a better match ahead of following main;
+// the picker must still show following main first whenever it matches.
+const rankReversing = (list, query, getText) =>
+  list.filter((item) => getText(item).toLowerCase().includes(query.toLowerCase())).reverse();
+const matched = filterBranchPickerItems(items, "main", rankReversing);
+if (matched[0].value !== FOLLOW_MAIN_VALUE) {
+  throw new Error(`ranking moved following main out of first place: ${JSON.stringify(matched)}`);
+}
+if (matched.length !== 3) throw new Error(`a matching query dropped rows it should keep: ${JSON.stringify(matched)}`);
+
+const narrowed = filterBranchPickerItems(items, "openai", rankReversing);
+if (narrowed.length !== 1 || narrowed[0].value !== "openai/mainly-cheap") {
+  throw new Error(`a query that excludes following main must drop it: ${JSON.stringify(narrowed)}`);
+}
+const unfiltered = filterBranchPickerItems(items, "   ", rankReversing);
+if (unfiltered.length !== items.length || unfiltered[0].value !== FOLLOW_MAIN_VALUE) {
+  throw new Error("an empty query must keep the built order");
+}
+if (BRANCH_PICKER_MAX_VISIBLE !== 10) throw new Error("the picker must keep a bounded visible row count");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the picker's ordering and filtering must hold: $out"
+  pass "branch model picker keeps follow main first and filters the eligible catalog"
+}
+
 test_supervision_model_command_picks_effort_after_the_model() {
   local repo home out status
   repo="$TMP_ROOT/effortcmd-root"
@@ -2180,6 +2775,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   home="$TMP_ROOT/dispatch-classify-home"
   mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
   LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2323,6 +2919,98 @@ EOF
   pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
+# The model picker's bounded scrolling and its search ranking are Pi's own
+# SelectList and fuzzyFilter, so the guarantee only holds while the installed
+# Pi still exports them and still bounds what it renders. Stubs cannot answer
+# that, so this runs against the real package and skips when it is absent.
+test_real_pi_picker_primitives_stay_bounded_and_searchable() {
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for the Pi picker primitives test"
+    return
+  fi
+  local package_dir fixture original_dir out status
+  package_dir=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
+  if [ ! -f "$package_dir/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return
+  fi
+  fixture="$TMP_ROOT/real-picker-primitives"
+  mkdir -p "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/lib/fm-branch-model-picker.ts"
+  ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  original_dir=$PWD
+  cd "$fixture" || fail "could not enter the Pi picker primitives fixture"
+  LIB="$fixture/lib/fm-branch-model-picker.ts" PI_VERSION_FILE="$package_dir/package.json" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+
+const version = JSON.parse(readFileSync(process.env.PI_VERSION_FILE, "utf8")).version;
+const { Input, SelectList, fuzzyFilter } = await import("@earendil-works/pi-tui");
+const { DynamicBorder } = await import("@earendil-works/pi-coding-agent");
+for (const [name, value] of [
+  ["Input", Input],
+  ["SelectList", SelectList],
+  ["fuzzyFilter", fuzzyFilter],
+  ["DynamicBorder", DynamicBorder],
+]) {
+  if (typeof value !== "function") {
+    throw new Error(`installed pi ${version} no longer exports ${name}, which the supervision model picker renders through`);
+  }
+}
+
+const { buildBranchModelItems, filterBranchPickerItems, BRANCH_PICKER_MAX_VISIBLE } = await import(
+  pathToFileURL(process.env.LIB).href
+);
+const labels = Array.from({ length: 40 }, (_, i) => `anthropic/bulk-model-${i + 1}`);
+labels.push("openai-codex/cheap-oauth");
+const items = buildBranchModelItems("Follow main (anthropic/main-model)", labels, null);
+
+// Pi's own list renders a bounded window plus at most one scroll indicator,
+// which is what keeps a long catalog inside the dialog.
+const passthrough = (text) => text;
+const list = new SelectList(items, BRANCH_PICKER_MAX_VISIBLE, {
+  selectedPrefix: passthrough,
+  selectedText: passthrough,
+  description: passthrough,
+  scrollInfo: passthrough,
+  noMatch: passthrough,
+});
+const lines = list.render(80);
+if (lines.length > BRANCH_PICKER_MAX_VISIBLE + 1) {
+  throw new Error(`installed pi ${version} rendered ${lines.length} rows for ${items.length} models instead of a bounded window`);
+}
+if (!lines[0].includes("Follow main")) {
+  throw new Error(`installed pi ${version} did not render the first row the picker opens on`);
+}
+
+// Pi's own fuzzy ranking drives the search box, and following main stays first.
+const searched = filterBranchPickerItems(items, "cheap", fuzzyFilter);
+if (searched.length !== 1 || searched[0].value !== "openai-codex/cheap-oauth") {
+  throw new Error(`installed pi ${version} fuzzy search did not narrow the catalog: ${JSON.stringify(searched)}`);
+}
+const mainSearch = filterBranchPickerItems(items, "main", fuzzyFilter);
+if (mainSearch.length === 0 || mainSearch[0].label !== "Follow main (anthropic/main-model)") {
+  throw new Error(`installed pi ${version} fuzzy ranking moved following main out of first place`);
+}
+
+// The search box is Pi's own single-line input.
+const input = new Input();
+input.handleInput("c");
+input.handleInput("h");
+if (input.getValue() !== "ch") {
+  throw new Error(`installed pi ${version} Input no longer accumulates typed characters for the picker's search box`);
+}
+JS
+  status=$?
+  cd "$original_dir" || fail "could not leave the Pi picker primitives fixture"
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the installed Pi must still provide the picker's bounded searchable primitives: $out"
+  [ -z "$out" ] || fail "Pi picker primitives test printed output: $out"
+  pass "the installed Pi still bounds the picker's list and ranks its search"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   if ! command -v node >/dev/null 2>&1; then
     echo "skip: node not found for Pi outcomes rendering test"
@@ -2338,6 +3026,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
@@ -2385,7 +3074,23 @@ delete stockDefinition.renderResult;
 
 const args = { recent: 2 };
 const result = {
-  content: [{ type: "text", text: "\x1b[31mOUTCOME_ONE\x1b[0m\r\nOUT\u0000COME_TWO\uFFF9" }],
+  content: [{
+    type: "text",
+    text: [
+      "\x1b[31mOUTCOME_ONE\x1b[0m",
+      "OUT\u0000COME_TWO\uFFF9",
+      "OUTCOME_THREE",
+      "OUTCOME_FOUR",
+      "OUTCOME_FIVE",
+      "OUTCOME_SIX",
+      "OUTCOME_SEVEN",
+      "OUTCOME_EIGHT",
+      "OUTCOME_NINE",
+      "OUTCOME_TEN",
+      "OUTCOME_ELEVEN",
+      "OUTCOME_TWELVE",
+    ].join("\r\n"),
+  }],
   details: { ok: true },
   isError: false,
 };
@@ -2397,8 +3102,24 @@ for (const row of [stockRow, actualRow]) {
   row.setArgsComplete();
   row.updateResult(result);
 }
-if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+const collapsedStock = stockRow.render(100);
+const collapsedActual = actualRow.render(100);
+if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedStock)) {
   throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
+}
+const collapsedText = collapsedStock.join("\n");
+if (collapsedText.includes("OUTCOME_TWELVE") || !collapsedText.includes("more lines") || !collapsedText.includes("to expand")) {
+  throw new Error("stock rendering fixture did not exercise its collapsed preview and expansion hint");
+}
+stockRow.setExpanded(true);
+actualRow.setExpanded(true);
+const expandedStock = stockRow.render(100);
+const expandedActual = actualRow.render(100);
+if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
+  throw new Error("expanded Calm-off ToolExecutionComponent rendering differs from Pi stock");
+}
+if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
+  throw new Error("stock rendering fixture did not exercise expanded output");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 actualRow.invalidate();
@@ -2430,7 +3151,10 @@ JS
 }
 
 test_outcomes_tool_uses_stock_execution_and_export_consumers
+test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
+test_captain_outcome_encoding_failure_delivers_plain_instruction
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
@@ -2444,6 +3168,8 @@ test_branch_session_persists_across_process_restarts
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default
 test_unpinned_branch_follows_main_model_changes_live
 test_supervision_model_command_persists_and_rebinds_the_live_branch
+test_supervision_model_picker_is_bounded_searchable_and_branch_only
+test_branch_model_picker_keeps_follow_main_first_under_ranking
 test_branch_effort_pin_applies_and_absent_pin_follows_main
 test_unpinned_branch_follows_main_effort_changes_live
 test_supervision_model_command_picks_effort_after_the_model
