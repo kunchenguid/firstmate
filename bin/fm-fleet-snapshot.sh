@@ -103,6 +103,8 @@ esac
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
+FM_SNAPSHOT_ENDPOINT_TIMEOUT=${FM_SNAPSHOT_ENDPOINT_TIMEOUT:-2}
+FM_SNAPSHOT_TASK_STATE_JOBS=${FM_SNAPSHOT_TASK_STATE_JOBS:-32}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -134,6 +136,8 @@ case "$FM_SNAPSHOT_SECONDMATES" in
 esac
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_ENDPOINT_TIMEOUT "$FM_SNAPSHOT_ENDPOINT_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_TASK_STATE_JOBS "$FM_SNAPSHOT_TASK_STATE_JOBS"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
@@ -185,6 +189,12 @@ bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Each per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
 (default 10 seconds), so one unreachable remote secondmate host cannot extend
 the snapshot without limit; a read that hits the bound reports state unknown.
+Task current-state and endpoint evidence is collected concurrently under
+FM_SNAPSHOT_TASK_STATE_JOBS (default 32).
+In home-summary mode, ordinary task endpoint presence is derived from that
+bounded current-state read when it proves presence or absence; local secondmate
+agent-alive checks are bounded by FM_SNAPSHOT_ENDPOINT_TIMEOUT (default 2
+seconds), and timed-out endpoint evidence reports unknown rather than absent.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -204,6 +214,11 @@ case "${1:---json}" in
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
+case "${FM_SNAPSHOT_BOUND_ENDPOINTS:-auto}" in
+  auto) [ "$OUTPUT_MODE" = secondmate-home-summary ] && FM_SNAPSHOT_BOUND_ENDPOINTS=1 || FM_SNAPSHOT_BOUND_ENDPOINTS=0 ;;
+  0|1) ;;
+  *) FM_SNAPSHOT_BOUND_ENDPOINTS=1 ;;
+esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
@@ -216,6 +231,30 @@ path_present_json() {  # <path>
   [ -e "$1" ] && present=1
   jq -n --arg path "$1" --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present}'
+}
+
+snapshot_mktemp_dir() {  # <template>
+  if command -v mktemp >/dev/null 2>&1; then
+    mktemp -d "$1"
+  elif [ -x /usr/bin/mktemp ]; then
+    /usr/bin/mktemp -d "$1"
+  elif [ -x /bin/mktemp ]; then
+    /bin/mktemp -d "$1"
+  else
+    return 1
+  fi
+}
+
+snapshot_rm_rf() {  # <path>
+  if command -v rm >/dev/null 2>&1; then
+    rm -rf -- "$1"
+  elif [ -x /bin/rm ]; then
+    /bin/rm -rf -- "$1"
+  elif [ -x /usr/bin/rm ]; then
+    /usr/bin/rm -rf -- "$1"
+  else
+    return 1
+  fi
 }
 
 meta_value() {  # <meta-file> <key>
@@ -281,6 +320,79 @@ status_event_json() {  # <status-log>
     --arg note "$note" \
     --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+}
+
+backend_target_exists_json_value() {  # <backend> <target> <expected-label>
+  local backend=$1 target=$2 expected=$3 rc
+  if [ -z "$target" ]; then
+    printf 'null'
+    return 0
+  fi
+  if [ "${FM_SNAPSHOT_BOUND_ENDPOINTS:-0}" != 1 ]; then
+    if fm_backend_target_exists "$backend" "$target" "$expected" >/dev/null 2>&1; then
+      printf 'true'
+    else
+      printf 'false'
+    fi
+    return 0
+  fi
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  if fm_run_timed "$FM_SNAPSHOT_ENDPOINT_TIMEOUT" env \
+    FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    bash -c '
+      trap "exit 124" TERM
+      backend_lib=$1 backend=$2 target=$3 expected=$4
+      . "$backend_lib"
+      fm_backend_target_exists "$backend" "$target" "$expected"
+      rc=$?
+      [ "$rc" -eq 0 ] && exit 0
+      [ "$rc" -eq 124 ] && exit 124
+      exit 42
+    ' fm-endpoint-probe "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$expected" \
+      >/dev/null 2>&1; then
+    printf 'true'
+    return 0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    42) printf 'false' ;;
+    *) printf 'null' ;;
+  esac
+}
+
+backend_agent_alive_value() {  # <backend> <target>
+  local backend=$1 target=$2 out rc
+  if [ -z "$target" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  out=$(fm_run_timed "$FM_SNAPSHOT_ENDPOINT_TIMEOUT" env \
+    FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    bash -c '. "$1"; fm_backend_agent_alive "$2" "$3"' \
+      fm-agent-alive-probe "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" \
+      2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  out=$(printf '%s\n' "$out" | tail -1)
+  case "$out" in
+    alive|dead|unknown) printf '%s' "$out" ;;
+    *) printf 'unknown' ;;
+  esac
 }
 
 first_pr_url_in_file() {  # <file>
@@ -443,15 +555,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   ' < "$backlog"
 }
 
-task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+task_json_one() {  # <meta-file>
+  local meta=$1 id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source current_detail pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
-
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
+  [ -e "$meta" ] || return 0
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
@@ -492,6 +602,7 @@ task_json_lines() {
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    current_detail=$(printf '%s' "$current_json" | jq -r '.detail // ""')
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -547,15 +658,27 @@ task_json_lines() {
         agent_alive=unknown
       fi
     else
-      if [ -n "$target" ]; then
-        if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
-          endpoint_exists=true
-        else
-          endpoint_exists=false
-        fi
+      if [ "${FM_SNAPSHOT_BOUND_ENDPOINTS:-0}" = 1 ]; then
+        case "$current_source" in
+          pane|status-log) endpoint_exists=true ;;
+          none)
+            if [ "$current_detail" = "backend target gone: $target" ]; then
+              endpoint_exists=false
+            else
+              endpoint_exists=null
+            fi
+            ;;
+          *) endpoint_exists=null ;;
+        esac
+      else
+        endpoint_exists=$(backend_target_exists_json_value "$backend" "$target" "fm-$id")
       fi
       if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+        if [ "${FM_SNAPSHOT_BOUND_ENDPOINTS:-0}" = 1 ]; then
+          agent_alive=$(backend_agent_alive_value "$backend" "$target")
+        else
+          agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+        fi
       fi
     fi
 
@@ -646,7 +769,47 @@ task_json_lines() {
              return_channel_note:null}
           end)
       }'
-  done | jq -s 'sort_by(.id)'
+}
+
+task_json_lines() {
+  local meta tmpdir index=0 out rc=0 pid
+  local -a batch_pids=()
+  tmpdir=$(snapshot_mktemp_dir "${TMPDIR:-/tmp}/fm-fleet-snapshot-tasks.XXXXXX") || return 1
+
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    index=$((index + 1))
+    out=$(printf '%s/%06d.json' "$tmpdir" "$index")
+    ( task_json_one "$meta" > "$out" ) &
+    batch_pids+=("$!")
+    if [ "${#batch_pids[@]}" -ge "$FM_SNAPSHOT_TASK_STATE_JOBS" ]; then
+      for pid in "${batch_pids[@]}"; do
+        wait "$pid" || rc=1
+      done
+      batch_pids=()
+      if [ "$rc" -ne 0 ]; then
+        snapshot_rm_rf "$tmpdir" || true
+        return 1
+      fi
+    fi
+  done
+  for pid in "${batch_pids[@]}"; do
+    wait "$pid" || rc=1
+  done
+  if [ "$rc" -ne 0 ]; then
+    snapshot_rm_rf "$tmpdir" || true
+    return 1
+  fi
+  if [ "$index" -eq 0 ]; then
+    snapshot_rm_rf "$tmpdir" || true
+    jq -n '[]'
+    return $?
+  fi
+
+  jq -s 'sort_by(.id)' "$tmpdir"/*.json
+  rc=$?
+  snapshot_rm_rf "$tmpdir" || true
+  return "$rc"
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks

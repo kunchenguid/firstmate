@@ -947,6 +947,112 @@ case "$order_out" in
 esac
 pass "failure records preserve refresh attempt ordering"
 
+LARGE_HOME="$TMP_ROOT/large-mixed-home"
+LARGE_BIN="$TMP_ROOT/largebin"
+mkdir -p "$LARGE_HOME/state" "$LARGE_HOME/data" "$LARGE_HOME/config" \
+  "$LARGE_HOME/projects" "$LARGE_BIN"
+printf '# Seeded Firstmate home\n' > "$LARGE_HOME/AGENTS.md"
+printf 'large\n' > "$LARGE_HOME/.fm-secondmate-home"
+{
+  printf '## In flight\n'
+  for i in $(seq -w 1 12); do
+    printf -- '- [ ] slow-%s - Slow current-state and endpoint probe (repo: firstmate) (kind: scout) (since 2026-08-28)\n' "$i"
+  done
+  for i in $(seq -w 1 6); do
+    printf -- '- [ ] dead-%s - Dead endpoint probe (repo: firstmate) (kind: scout) (since 2026-08-28)\n' "$i"
+  done
+  for i in $(seq -w 1 6); do
+    printf -- '- [ ] paused-%s - Paused endpoint probe (repo: firstmate) (kind: scout) (since 2026-08-28)\n' "$i"
+  done
+  printf '\n## Queued\n\n## Done\n'
+} > "$LARGE_HOME/data/backlog.md"
+for i in $(seq -w 1 12); do
+  mkdir -p "$LARGE_HOME/projects/slow-$i"
+  fm_write_meta "$LARGE_HOME/state/slow-$i.meta" \
+    "window=fmtest:slow-$i" \
+    "worktree=$LARGE_HOME/projects/slow-$i" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=no-mistakes" \
+    "spawn_gen=fm.slow$i"
+done
+for i in $(seq -w 1 6); do
+  mkdir -p "$LARGE_HOME/projects/dead-$i"
+  fm_write_meta "$LARGE_HOME/state/dead-$i.meta" \
+    "window=fmtest:dead-$i" \
+    "worktree=$LARGE_HOME/projects/dead-$i" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=no-mistakes" \
+    "spawn_gen=fm.dead$i"
+done
+for i in $(seq -w 1 6); do
+  mkdir -p "$LARGE_HOME/projects/paused-$i"
+  fm_write_meta "$LARGE_HOME/state/paused-$i.meta" \
+    "window=fmtest:paused-$i" \
+    "worktree=$LARGE_HOME/projects/paused-$i" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=no-mistakes" \
+    "spawn_gen=fm.paused$i"
+  paused_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$LARGE_HOME/state" "paused-$i")
+  "$ROOT/bin/fm-busy-event.sh" apply "$LARGE_HOME/state" "paused-$i" idle \
+    --gen "$paused_gen" --source claude-hook --event stop
+  printf 'paused: waiting for the fixture dependency\n' \
+    > "$LARGE_HOME/state/paused-$i.status"
+done
+cat > "$LARGE_BIN/tmux" <<'SH'
+#!/usr/bin/env bash
+trap 'exit 124' TERM
+cmd=${1:-}
+target=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -t) shift; target=${1:-} ;;
+  esac
+  shift || break
+done
+case "${target:-}" in
+  *slow*) sleep 5 ;;
+  *dead*) exit 1 ;;
+esac
+case "$cmd" in
+  capture-pane) printf 'fixture pane\n> \n' ;;
+  *) printf '%%1\n' ;;
+esac
+exit 0
+SH
+chmod +x "$LARGE_BIN/tmux"
+large_started=$(date +%s)
+PATH="$LARGE_BIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_HOME_SUMMARY_TIMEOUT=12 FM_SNAPSHOT_CREW_STATE_TIMEOUT=1 \
+  FM_SNAPSHOT_ENDPOINT_TIMEOUT=1 FM_SNAPSHOT_TASK_STATE_JOBS=32 \
+  FM_SNAPSHOT_SECONDMATE_CHILDREN=40 \
+  "$WRITER" || fail "large mixed fleet did not publish within its existing bounded path: $(cat "$LARGE_HOME/state/.home-summary-refresh.log" 2>/dev/null)"
+large_elapsed=$(( $(date +%s) - large_started ))
+[ "$large_elapsed" -lt 10 ] \
+  || fail "large mixed fleet publication took $large_elapsed seconds"
+large_mode=$(stat -c '%a' "$LARGE_HOME/state/home-summary.json" 2>/dev/null \
+  || stat -f '%Lp' "$LARGE_HOME/state/home-summary.json" 2>/dev/null)
+[ "$large_mode" = 600 ] \
+  || fail "large mixed fleet publication mode was $large_mode, not 600"
+jq -e --arg home "$LARGE_HOME" '
+  .schema == "fm-secondmate-home-summary.v1"
+  and .home == $home
+  and .counts.endpoints == 24
+  and (.endpoints | length) == 24
+  and ((.endpoints | map(.id)) == (.endpoints | map(.id) | sort))
+  and any(.endpoints[]; .id == "slow-01" and .state == "unknown" and .endpoint.exists == null)
+  and any(.endpoints[]; .id == "dead-1" and .state == "unknown" and (.endpoint.exists == false or .endpoint.exists == null))
+  and any(.endpoints[]; .id == "paused-1" and .state == "paused" and .endpoint.exists == true)
+' "$LARGE_HOME/state/home-summary.json" >/dev/null \
+  || fail "large mixed fleet publication lost deterministic bounded endpoint evidence"
+pass "large mixed fleet home-summary publication bounds slow and dead endpoint probes"
+
 report_out=$(run_bootstrap_detect "$REPORT_HOME")
 printf '%s\n' "$report_out" \
   | grep -F 'HOME_SUMMARY: this home has never published state/home-summary.json' \
