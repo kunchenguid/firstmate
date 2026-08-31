@@ -91,8 +91,10 @@ if (@ARGV && $ARGV[0] eq 'handoff') {
 
 my ($registry_fd, $inbox_fd, $reservation_fd, $id, $adapter, $extension_id, $extension_version, $capability_version,
     $package_digest, $binding_digest, $claim_token, $runner_name, $output_name,
-    $runner_pid, $claim_identity, $limit, @command) = @ARGV;
+    $runner_pid, $claim_identity, $registration_generation, $limit, @command) = @ARGV;
 die "missing command\n" unless @command && shift(@command) eq "--";
+die "invalid registration generation\n" unless defined $registration_generation
+  && $registration_generation =~ /\Asha256:[a-f0-9]{64}\z/;
 die "invalid limit\n" unless defined $limit && $limit =~ /\A\d+\z/;
 our ($registry_dir, $registry, $reservation_dir, $reservation_root, $sequence);
 
@@ -229,6 +231,7 @@ my $nonce = ".$prefix.$$";
 my $result_tmp = "$nonce.result";
 my $adapter_tmp = "$nonce.adapter";
 my $extension_tmp = "$nonce.extension";
+my $generation_tmp = "$nonce.generation";
 my $result = open_new($result_tmp);
 seek($stage, 0, 0) or fail("cannot rewind staged output");
 copy_all($stage, $result);
@@ -240,8 +243,12 @@ close($adapter_file) or fail("cannot close adapter evidence");
 my $extension_file = open_new($extension_tmp);
 write_all($extension_file, join("\n", "schema=fm-procevent-extension-owner.v1", "extension_id=$extension_id", "extension_version=$extension_version", "capability_version=$capability_version", "package_digest=$package_digest", "binding_digest=$binding_digest", ""));
 close($extension_file) or fail("cannot close extension evidence");
+my $generation_file = open_new($generation_tmp);
+write_all($generation_file, "schema=fm-procevent-capture-generation.v1\nregistration_generation=$registration_generation\n");
+close($generation_file) or fail("cannot close generation evidence");
 publish_new($adapter_tmp, "$prefix.adapter");
 publish_new($extension_tmp, "$prefix.extension");
+publish_new($generation_tmp, "$prefix.generation");
 publish_new($result_tmp, "$prefix.result");
 my @inbox_stat = stat($inbox_dir);
 my @result_stat = stat("$prefix.result");

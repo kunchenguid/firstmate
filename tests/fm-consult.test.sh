@@ -154,6 +154,54 @@ raw_sha256() {
   fi
 }
 
+assert_tracked_secret_absent() {  # <secret> <diagnostic>
+  local rc=0
+  git -C "$ROOT" grep -F -l -- "$1" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) fail "$2" ;;
+    1) ;;
+    *) fail "tracked-file privacy scan could not complete" ;;
+  esac
+}
+
+assert_tree_secret_absent() {  # <secret> <directory> <diagnostic>
+  local rc=0
+  grep -r -F -l -- "$1" "$2" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) fail "$3" ;;
+    1) ;;
+    *) fail "private-boundary scan could not complete" ;;
+  esac
+}
+
+write_ready_request() {  # <consult directory> <consult id>
+  local dir=$1 id=$2 model reasoning privacy question_hash contract_hash source_hash observed
+  model=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{model}' "$dir/prepared.json")
+  reasoning=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{reasoning}' "$dir/prepared.json")
+  privacy=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{privacy_classification}' "$dir/prepared.json")
+  source_hash=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{source_packet_sha256} // ""' "$dir/prepared.json")
+  question_hash=$(raw_sha256 "$dir/question.md")
+  contract_hash=$(raw_sha256 "$dir/contract.md")
+  observed=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  perl -MJSON::PP -e '
+    my ($id, $model, $reasoning, $privacy, $question, $contract, $source, $observed) = @ARGV;
+    print JSON::PP->new->canonical->encode({
+      schema_version => 1, consult_id => $id, created_at => $observed,
+      question_sha256 => $question, contract_sha256 => $contract,
+      source_packet_sha256 => length($source) ? $source : undef,
+      model => $model, reasoning => $reasoning, privacy_classification => $privacy,
+      retries => 0, conversation_retention => "temporary",
+      preflight => { recorded_at => $observed, doctor => { available => JSON::PP::true, kind => "doctor", ready => JSON::PP::true } },
+      limits_observed_at => $observed,
+      limits_observed => { available => JSON::PP::true, kind => "limits", account => { planType => "pro" },
+        observedLimits => [{ featureName => $model, remaining => 1, observedAt => $observed }] },
+      redaction_declaration => "fixture"
+    }), "\n";
+  ' "$id" "$model" "$reasoning" "$privacy" "$question_hash" "$contract_hash" "$source_hash" "$observed" \
+    > "$dir/request.json"
+  chmod 0600 "$dir/request.json"
+}
+
 # Run one command under a real deadline. A credential FIFO has no writer, so a
 # direct cookie read would block and make this guard fail rather than merely
 # relying on a content scan after the fact.
@@ -278,12 +326,10 @@ assert_not_contains "$(<"$snapshot_record/question.md")" 'replacement question b
 assert_not_contains "$(<"$snapshot_record/question.md")" 'replacement source bytes' "source publication reread mutable caller input"
 pass "question and source hashes bind the exact published snapshots"
 
-if rg -F -- "$question_secret" "$ROOT" >/dev/null || rg -F -- "$answer_secret" "$ROOT" >/dev/null; then
-  fail "private consultation content reached tracked repository files"
-fi
-if rg -F -- "$answer_secret" "$H1/state" >/dev/null || rg -F -- "$credential_secret" "$H1/data" >/dev/null; then
-  fail "answer or credentials escaped their private boundary"
-fi
+assert_tracked_secret_absent "$question_secret" "private question content reached tracked repository files"
+assert_tracked_secret_absent "$answer_secret" "private advisory content reached tracked repository files"
+assert_tree_secret_absent "$answer_secret" "$H1/state" "advisory content escaped into runtime state"
+assert_tree_secret_absent "$credential_secret" "$H1/data" "credential content escaped into consultation data"
 assert_not_contains "$(<"$FAKE_STATE/argv.log")" " ask " "consult capability never falls back to pro-cli ask"
 assert_grep 'job create @question.md --json --retries 0 --temporary' "$FAKE_STATE/argv.log" "submission uses the required non-waiting durable invocation with retries disabled"
 pass "questions answers and credentials stay out of tracked files events and command output"
@@ -484,11 +530,7 @@ H_RESUME="$TMP_ROOT/home-request-resume"
 consult_home "$H_RESUME"
 id_resume=$(prepare_id "$H_RESUME" "$QUESTION_TWO")
 record_resume="$H_RESUME/data/consults/$id_resume"
-prepared_model=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{model}' "$record_resume/prepared.json")
-observed_now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-printf '{"schema_version":1,"consult_id":"%s","model":"%s","preflight":{"doctor":{"available":true,"ready":true}},"limits_observed":{"available":true,"account":{"planType":"pro"},"observedLimits":[{"featureName":"%s","remaining":1,"observedAt":"%s"}]}}\n' \
-  "$id_resume" "$prepared_model" "$prepared_model" "$observed_now" > "$record_resume/request.json"
-chmod 0600 "$record_resume/request.json"
+write_ready_request "$record_resume" "$id_resume"
 request_hash_before=$(shasum -a 256 "$record_resume/request.json" | awk '{print $1}')
 before_resume=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
 resume_out=$(fc "$H_RESUME" submit "$id_resume") || fail "pre-attempt request checkpoint did not resume submission: $resume_out"
@@ -499,6 +541,35 @@ after_resume=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
   || fail "resumed request checkpoint overwrote immutable request evidence"
 assert_grep '"terminal":"SUBMITTED"' "$record_resume/submission.json" "request checkpoint resume records the known submitted job"
 pass "a request checkpoint before the attempt marker resumes without ambiguity"
+
+# A recovered request is also the immutable source for the final receipt.
+# Missing receipt bindings must therefore stop before the one-shot create call,
+# rather than strand a submitted consultation that can never be collected.
+for missing_binding in reasoning created_at limits_observed_at; do
+  H_REQUEST_BINDING="$TMP_ROOT/home-request-binding-$missing_binding"
+  consult_home "$H_REQUEST_BINDING"
+  id_request_binding=$(prepare_id "$H_REQUEST_BINDING" "$QUESTION_TWO")
+  record_request_binding="$H_REQUEST_BINDING/data/consults/$id_request_binding"
+  write_ready_request "$record_request_binding" "$id_request_binding"
+  perl -MJSON::PP -e '
+    my ($file, $field) = @ARGV;
+    my $v = decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> });
+    delete $v->{$field};
+    open my $out, ">", $file or die;
+    print {$out} JSON::PP->new->canonical->encode($v), "\n";
+  ' "$record_request_binding/request.json" "$missing_binding"
+  before_request_binding=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+  request_binding_status=0
+  request_binding_out=$(fc "$H_REQUEST_BINDING" submit "$id_request_binding" 2>&1) || request_binding_status=$?
+  [ "$request_binding_status" -ne 0 ] || fail "a recovered request without $missing_binding reached submission"
+  assert_contains "$request_binding_out" "durable preflight record could not be classified" \
+    "a recovered request without $missing_binding did not fail at its durable boundary"
+  [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_request_binding" ] \
+    || fail "a recovered request without $missing_binding created a consultation job"
+  assert_absent "$record_request_binding/submission-attempt.json" \
+    "a recovered request without $missing_binding crossed the submission marker"
+done
+pass "recovered requests require every immutable receipt binding before submission"
 
 H_SUBMISSION_INVALID="$TMP_ROOT/home-submission-invalid"
 consult_home "$H_SUBMISSION_INVALID"
@@ -638,9 +709,8 @@ unset PRO_CLI_RESULT_HOLD PRO_CLI_STATUS_JSON
 for stranded_result in "$record_result_boundary"/.result.*; do
   [ ! -e "$stranded_result" ] || fail "unvalidated raw result was stranded inside the immutable consult record"
 done
-if rg -F -- "$result_boundary_secret" "$record_result_boundary" >/dev/null; then
-  fail "unvalidated advisory bytes entered the immutable consult record"
-fi
+assert_tree_secret_absent "$result_boundary_secret" "$record_result_boundary" \
+  "unvalidated advisory bytes entered the immutable consult record"
 pass "raw job results remain outside the immutable record until validation"
 
 # A matching registration generation alone cannot make a foreign payload

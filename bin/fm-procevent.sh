@@ -666,6 +666,7 @@ cmd_start() {
       extension_request_id=$(extension_source_request_id "$adapter" "$id" "$extension_sequence" \
         "$FM_PROCEVENT_EXTENSION_REGISTRATION_TOKEN" "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST") \
         || { fm_procevent_source_lock_release "$id"; die "cannot derive extension request identity: $id"; }
+      registration_generation=$FM_PROCEVENT_EXTENSION_REGISTRATION_TOKEN
       ARGV=("$EXTENSION_HOST" process-event "$adapter" source.poll \
         --source-id "$id" --config-ref "$FM_PROCEVENT_EXTENSION_CONFIG_REF" \
         --request-id "$extension_request_id" \
@@ -701,7 +702,7 @@ cmd_start() {
   claimed=$?
   fm_procevent_source_lock_release "$id"
   case "$claimed" in
-    0) [ "$extension_owner" -eq 1 ] || [ -n "$registration_generation" ] || die "claimed source has no stable registration generation: $id" ;;
+    0) [ -n "$registration_generation" ] || die "claimed source has no stable registration generation: $id" ;;
     2) printf 'already owned: %s\n' "$id"; exit 0 ;;
     *) die "cannot claim source: $id" ;;
   esac
@@ -769,7 +770,8 @@ cmd_start() {
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
       "$FM_PROCEVENT_EXTENSION_VERSION" "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
       "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" "$FM_PROCEVENT_EXTENSION_BINDING_DIGEST" \
-      "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" "$MAX_OUTPUT_BYTES" -- "${ARGV[@]}") \
+      "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" \
+      "$registration_generation" "$MAX_OUTPUT_BYTES" -- "${ARGV[@]}") \
       || die "cannot safely stage the extension result"
     IFS=$'\t' read -r capture_state durable rc truncated reservation_terminal reservation_silent <<EOF
 $capture_state

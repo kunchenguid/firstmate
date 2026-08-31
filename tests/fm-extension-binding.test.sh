@@ -57,6 +57,9 @@ crash_cleanup_group_pid=
 crash_cleanup_release=
 crash_silent_start_pid=
 crash_silent_runner_pid=
+terminal_recovery_start_pid=
+terminal_recovery_runner_pid=
+terminal_recovery_release=
 override_crash_start_pid=
 override_crash_runner_pid=
 section_coordinator_pid=
@@ -91,6 +94,9 @@ extension_test_cleanup() {
   [ -z "$crash_cleanup_release" ] || touch "$crash_cleanup_release" 2>/dev/null || true
   [ -z "$crash_silent_start_pid" ] || kill -TERM "$crash_silent_start_pid" 2>/dev/null || true
   [ -z "$crash_silent_runner_pid" ] || kill -TERM -"$crash_silent_runner_pid" 2>/dev/null || true
+  [ -z "$terminal_recovery_release" ] || touch "$terminal_recovery_release" 2>/dev/null || true
+  [ -z "$terminal_recovery_start_pid" ] || kill -TERM "$terminal_recovery_start_pid" 2>/dev/null || true
+  [ -z "$terminal_recovery_runner_pid" ] || kill -TERM -"$terminal_recovery_runner_pid" 2>/dev/null || true
   [ -z "$override_crash_start_pid" ] || kill -TERM "$override_crash_start_pid" 2>/dev/null || true
   [ -z "$override_crash_runner_pid" ] || kill -TERM -"$override_crash_runner_pid" 2>/dev/null || true
   [ -z "$handshake_orphan_pid" ] || kill -KILL "$handshake_orphan_pid" 2>/dev/null || true
@@ -245,6 +251,12 @@ elif mode in ("replay", "replay-no-result"):
         except FileNotFoundError: prior = 0
         open(count_path, "w", encoding="utf-8").write(f"{prior + 1}\n")
     raw(success({"status":"no-result", "output":""} if mode == "replay-no-result" else {"status":"result", "output":f"replay {request['request_id']}\n"}))
+elif request["operation"] == "source.poll" and mode.startswith("terminal-recovery|"):
+    _, block_marker, block_release, count_path = mode.split("|", 3)
+    try: count = int(open(count_path, encoding="utf-8").read())
+    except FileNotFoundError: count = 0
+    with open(count_path, "w", encoding="utf-8") as output: output.write(f"{count + 1}\n")
+    raw(success({"status":"result", "output":f"external evidence: {mode}\n"}))
 elif mode.startswith("active-block|"):
     _, block_marker, block_release = mode.split("|", 2)
     write_exclusive(block_marker, f"{os.getpid()}\n")
@@ -252,7 +264,14 @@ elif mode.startswith("active-block|"):
     raw(success({"status":"result", "output":"active runner completed\n"}))
 elif request["operation"] == "source.poll": raw(success({"status":"no-result" if mode == "no-result" else "result", "output":"" if mode == "no-result" else f"external evidence: {mode}\n"}))
 elif request["operation"] == "result.classify": raw(success({"classification":"external-ready"}))
-elif request["operation"] == "result.terminal": raw(success({"value":True}))
+elif request["operation"] == "result.terminal":
+    content = request.get("input", {}).get("content", "")
+    if content.startswith("external evidence: terminal-recovery|"):
+        _, block_marker, block_release, _ = content.rstrip("\n").split("|", 3)
+        try: write_exclusive(block_marker, f"{os.getpid()}\n")
+        except FileExistsError: pass
+        while not os.path.exists(block_release): time.sleep(.01)
+    raw(success({"value":True}))
 elif request["operation"] == "result.silent":
     content = request.get("input", {}).get("content", "")
     if content == "external evidence: crash-silent\\n":
@@ -1086,6 +1105,41 @@ assert_absent "$H_FLOW/state/procevent/crash-silent-source.source" "terminal ret
 assert_absent "$H_FLOW/state/procevent/.extension-binding-lifecycle.lock" "inner host crash left a lifecycle lock behind"
 FM_HOME="$H_FLOW" "$PROCEVENT" handled crash-silent-source 1 >/dev/null
 pass "inner result.silent host crash releases the parent lifecycle lock before terminal retry"
+
+# A terminal extension capture must carry the registration generation needed by
+# reconcile. Kill the runner after durable capture but before retirement, then
+# prove recovery retires that exact generation without polling the source again.
+terminal_recovery_marker="$TMP_ROOT/terminal-recovery.marker"
+terminal_recovery_release="$TMP_ROOT/terminal-recovery.release"
+terminal_recovery_count="$TMP_ROOT/terminal-recovery.count"
+FM_HOME="$H_FLOW" "$PROCEVENT" register-extension ext-flow terminal-recovery-source \
+  --config-ref "terminal-recovery|$terminal_recovery_marker|$terminal_recovery_release|$terminal_recovery_count" >/dev/null
+FM_HOME="$H_FLOW" "$PROCEVENT" start terminal-recovery-source > "$TMP_ROOT/terminal-recovery-start.out" 2>&1 &
+terminal_recovery_start_pid=$!
+wait_for_file "$terminal_recovery_marker" || fail "terminal recovery fixture never reached post-capture classification"
+terminal_recovery_result="$H_FLOW/state/procevent-inbox/terminal-recovery-source.1.result"
+assert_present "$terminal_recovery_result" "terminal recovery fixture published no durable result"
+assert_present "${terminal_recovery_result%.result}.generation" "terminal extension capture omitted its registration generation"
+terminal_recovery_claim="$TMP_ROOT/claims/terminal-recovery-source.claim"
+assert_present "$terminal_recovery_claim" "terminal recovery fixture published no runner claim"
+terminal_recovery_runner_pid=$(sed -n '2p' "$terminal_recovery_claim")
+kill -KILL -"$terminal_recovery_runner_pid" 2>/dev/null || fail "could not stop the terminal extension runner at the recovery cut"
+wait "$terminal_recovery_start_pid" 2>/dev/null || true
+terminal_recovery_start_pid=
+terminal_recovery_runner_pid=
+: > "$terminal_recovery_release"
+terminal_recovery_out=$(FM_HOME="$H_FLOW" "$PROCEVENT" reconcile) \
+  || fail "terminal extension capture recovery failed: $terminal_recovery_out"
+assert_contains "$terminal_recovery_out" "terminal-recovered=1" \
+  "reconcile did not retire the captured extension generation"
+assert_absent "$H_FLOW/state/procevent/terminal-recovery-source.source" \
+  "captured terminal extension source remained registered"
+[ "$(cat "$terminal_recovery_count")" = 1 ] \
+  || fail "terminal extension recovery polled the external source more than once"
+FM_HOME="$H_FLOW" "$PROCEVENT" handled terminal-recovery-source 1 >/dev/null
+terminal_recovery_release=
+pass "terminal extension capture recovery retires its generation without repeating the source effect"
+
 wrong_binding_digest="sha256:$(printf '0%.0s' {1..64})"
 expect_failure "expected binding identity" env FM_HOME="$H_FLOW" "$HOST" retire-binding org.example.flow --if-binding-digest "$wrong_binding_digest"
 assert_present "$H_FLOW/config/extensions.d/org.example.flow.json" "stale identity retired the local binding"
@@ -1607,7 +1661,8 @@ rm "$capture_signal_authority"
 capture_signal=$(perl "$ROOT/bin/fm-procevent-extension-capture.pl" \
   9 8 6 capture-signal-source ext-flow org.example.flow 1.2.3 1 \
   "sha256:$(printf 'a%.0s' {1..64})" "sha256:$(printf 'b%.0s' {1..64})" signal-token \
-  capture-signal-source.runner .capture-signal.output "$$" "$forged_claim_identity" 1024 -- perl -e 'kill "KILL", $$')
+  capture-signal-source.runner .capture-signal.output "$$" "$forged_claim_identity" \
+  "sha256:$(printf 'c%.0s' {1..64})" 1024 -- perl -e 'kill "KILL", $$')
 exec 9<&-
 exec 6<&-
 exec 8<&-
@@ -1634,7 +1689,8 @@ ln -s "$TMP_ROOT/capture-swap-outside" "$capture_swap_inbox"
 capture_swap=$(perl "$ROOT/bin/fm-procevent-extension-capture.pl" \
   9 8 6 capture-swap-source ext-flow org.example.flow 1.2.3 1 \
   "sha256:$(printf 'a%.0s' {1..64})" "sha256:$(printf 'b%.0s' {1..64})" swap-token \
-  capture-swap-source.runner .capture-swap.output "$$" "$forged_claim_identity" 1024 -- /bin/printf 'pinned helper result')
+  capture-swap-source.runner .capture-swap.output "$$" "$forged_claim_identity" \
+  "sha256:$(printf 'c%.0s' {1..64})" 1024 -- /bin/printf 'pinned helper result')
 exec 9<&-
 exec 6<&-
 exec 8<&-

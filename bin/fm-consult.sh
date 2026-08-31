@@ -280,14 +280,19 @@ limits_observation_terminal() {  # <file> <canonical model>; LIMIT_REACHED|LIMIT
   ' "$1" "$2" "${FM_CONSULT_LIMITS_MAX_AGE_SECONDS:-900}"
 }
 
-request_preflight_terminal() {  # <request.json> <canonical model> <consult id>
+request_preflight_terminal() {  # <request.json> <canonical model> <reasoning> <consult id>
   perl -MJSON::PP -e '
     use Time::Piece;
-    my ($file, $model, $max_age, $id) = @ARGV;
+    my ($file, $model, $reasoning, $max_age, $id) = @ARGV;
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
     sub out { print "$_[0]\n"; exit 0 }
     exit 1 unless ref($v) eq "HASH" && ($v->{schema_version} // 0) == 1;
-    exit 1 unless ($v->{consult_id} // "") eq $id && ($v->{model} // "") eq $model;
+    exit 1 unless ($v->{consult_id} // "") eq $id && ($v->{model} // "") eq $model
+      && ($v->{reasoning} // "") eq $reasoning;
+    for my $field (qw(created_at limits_observed_at)) {
+      exit 1 unless defined($v->{$field}) && !ref($v->{$field})
+        && $v->{$field} =~ /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+    }
     exit 1 unless ref($v->{preflight}) eq "HASH";
     my $doctor = $v->{preflight}{doctor};
     exit 1 unless ref($doctor) eq "HASH" && ref($doctor->{available}) eq "JSON::PP::Boolean";
@@ -311,7 +316,7 @@ request_preflight_terminal() {  # <request.json> <canonical model> <consult id>
     my $observed = eval { Time::Piece->strptime($entry->{observedAt}, "%Y-%m-%dT%H:%M:%SZ")->epoch };
     out("LIMITS_INDETERMINATE") unless defined($observed) && time() >= $observed && time() - $observed <= $max_age;
     out($entry->{remaining} == 0 ? "LIMIT_REACHED" : "LIMITS_READY");
-  ' "$1" "$2" "${FM_CONSULT_LIMITS_MAX_AGE_SECONDS:-900}" "$3"
+  ' "$1" "$2" "$3" "${FM_CONSULT_LIMITS_MAX_AGE_SECONDS:-900}" "$4"
 }
 
 json_create_job_id() {  # <file>
@@ -362,7 +367,7 @@ stage_input() {  # <source>; prints private staged path
 }
 
 submission_terminal() {  # <directory>
-  local dir=$1 file="$1/submission.json" id terminal attempted recorded_attempt model preflight_terminal
+  local dir=$1 file="$1/submission.json" id terminal attempted recorded_attempt model reasoning preflight_terminal
   id=$(basename "$dir")
   [ -f "$file" ] && [ ! -L "$file" ] && private_mode "$file" 600 || return 1
   terminal=$(perl -MJSON::PP -e '
@@ -397,7 +402,8 @@ submission_terminal() {  # <directory>
       else
         request_exists "$dir" || return 1
         model=$(json_path_string "$dir/prepared.json" model) || return 1
-        preflight_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$id") || return 1
+        reasoning=$(json_path_string "$dir/prepared.json" reasoning) || return 1
+        preflight_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$reasoning" "$id") || return 1
         [ "$preflight_terminal" = "$terminal" ] || return 1
       fi
       ;;
@@ -405,7 +411,8 @@ submission_terminal() {  # <directory>
       [ ! -e "$dir/submission-attempt.json" ] && [ ! -L "$dir/submission-attempt.json" ] || return 1
       request_exists "$dir" || return 1
       model=$(json_path_string "$dir/prepared.json" model) || return 1
-      preflight_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$id") || return 1
+      reasoning=$(json_path_string "$dir/prepared.json" reasoning) || return 1
+      preflight_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$reasoning" "$id") || return 1
       [ "$preflight_terminal" = "$terminal" ] || return 1
       ;;
   esac
@@ -798,7 +805,7 @@ cmd_submit_locked() {
       *) die "limits observation could not be classified" ;;
     esac
   else
-    limit_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$id" 2>/dev/null || true)
+    limit_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$reasoning" "$id" 2>/dev/null || true)
     case "$limit_terminal" in
       LIMITS_READY) ;;
       AUTH_UNAVAILABLE|LIMIT_REACHED|LIMITS_INDETERMINATE)

@@ -175,12 +175,19 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
 }
 
 fm_procevent_registration_generation_locked() {  # <state> <source-id>
-  local state=$1 id=$2 registration line generation
+  local state=$1 id=$2 registration line generation extension_state
   fm_procevent_source_id_valid "$id" || return 1
   registration="$(fm_procevent_registry_dir "$state")/$id.source"
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   [ "$(fm_pr_file_mode "$registration")" = 600 ] || return 1
   line=$(sed -n '2p' "$registration") || return 1
+  if [ "$line" = owner=extension ]; then
+    fm_procevent_extension_registration_load_locked "$state" "$id"
+    extension_state=$?
+    [ "$extension_state" -eq 0 ] || return 1
+    printf '%s\n' "$FM_PROCEVENT_EXTENSION_REGISTRATION_TOKEN"
+    return 0
+  fi
   generation=${line#registration_generation=}
   [ "$line" = "registration_generation=$generation" ] || return 1
   fm_procevent_digest_valid "$generation" || return 1
