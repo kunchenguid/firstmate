@@ -44,11 +44,12 @@ fm_pid_exists_for_signal() {  # <pid>
   return 1
 }
 
-fm_codex_desktop_lease_identity() {  # <pid>
-  local pid=$1 args started digest
+fm_process_command_identity() {  # <pid> <expected-command>
+  local pid=$1 expected=$2 args started digest
+  [ -n "$expected" ] || return 1
   fm_pid_exists_for_signal "$pid" || return 1
   args=$(ps -ww -o args= -p "$pid" 2>/dev/null) || return 1
-  case "$args" in *fm-session-start.sh*) ;; *) return 1 ;; esac
+  case "$args" in *"$expected"*) ;; *) return 1 ;; esac
   started=$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null) || return 1
   started=$(printf '%s\n' "$started" | awk '{$1=$1; print}')
   [ -n "$started" ] || return 1
@@ -63,6 +64,10 @@ fm_codex_desktop_lease_identity() {  # <pid>
   fi
   [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s\n' "$digest"
+}
+
+fm_codex_desktop_lease_identity() {  # <pid>
+  fm_process_command_identity "$1" fm-session-start.sh
 }
 
 fm_codex_desktop_new_lock_record() {

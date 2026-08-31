@@ -17,7 +17,7 @@ cat > "$FAKEBIN/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
   *"comm="*) printf '%s\n' bash ;;
-  *"args="*) printf '%s\n' "${FM_TEST_PS_ARGS:-bash /fixture/bin/fm-session-start.sh}" ;;
+  *"args="*) printf '%s\n' "${FM_TEST_PS_ARGS:-bash /fixture/bin/fm-session-start.sh /fixture/bin/fm-codex-app-task.sh}" ;;
   *"lstart="*) printf '%s\n' "${FM_TEST_PS_START:-Mon Aug 31 10:00:00 2026}" ;;
   *"ppid="*) printf '%s\n' 1 ;;
   *) exit 1 ;;
@@ -227,6 +227,22 @@ assert_grep "session_output_telemetry=unsupported" "$META" \
 assert_grep "state=working" "$CURRENT" \
   "newly registered Desktop task did not start in working state"
 
+MUTATION_LOCK="$TASK_HOME/state/.$TASK_ID.codex-app-mutation-lock"
+STALE_MUTATION_IDENTITY=$(FM_TEST_PS_START='Mon Aug 31 09:59:59 2026' \
+  fm_process_command_identity "$TASK_LEASE" fm-codex-app-task.sh) \
+  || fail "could not create a stale task mutation identity"
+mkdir "$MUTATION_LOCK"
+printf 'codex-app-mutation:%s:%s\n' "$TASK_LEASE" "$STALE_MUTATION_IDENTITY" \
+  > "$MUTATION_LOCK/owner"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
+    --state working --detail 'recovered stale mutation owner' >/dev/null \
+  || fail "a reused task mutation pid was treated as the live owner"
+[ ! -e "$MUTATION_LOCK" ] \
+  || fail "stale task mutation ownership was not retired"
+
 state=$(FM_HOME="$TASK_HOME" "$ROOT/bin/fm-crew-state.sh" "$TASK_ID")
 assert_contains "$state" "state: working · source: codex-app-host" \
   "crew-state did not read the Desktop host's authoritative current-state record"
@@ -406,6 +422,15 @@ expect_code 1 "$status" "interrupted Desktop registration must remain retryable"
   || fail "registration interruption fixture did not publish its first artifact"
 [ ! -e "$TASK_HOME/state/$SHIP_ID.codex-app-current" ] \
   || fail "registration interruption fixture unexpectedly published current state"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
+    --state 'done' --detail 'must wait for registration recovery' 2>&1) || status=$?
+expect_code 1 "$status" "a sibling mutation must not cross interrupted registration"
+assert_contains "$out" 'interrupted register mutation' \
+  "registration recovery refusal did not name its active mutation"
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
@@ -453,6 +478,52 @@ expect_code 1 "$status" "an interrupted checkpoint publication must remain retry
   || fail "interrupted hard stop left no recovery journal"
 [ ! -e "$SHIP_HANDOFF" ] \
   || fail "interrupted checkpoint fixture unexpectedly published the handoff"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
+    --state 'done' --detail 'must wait for hard-stop recovery' 2>&1) || status=$?
+expect_code 1 "$status" "a sibling mutation must not cross interrupted hard stop"
+assert_contains "$out" 'interrupted hard-stop mutation' \
+  "hard-stop recovery refusal did not name its active mutation"
+: > "$TRANSITION_FAIL_ONCE"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" FM_TEST_REAL_MV="$(command -v mv)" \
+  FM_TEST_FAIL_ONCE="$TRANSITION_FAIL_ONCE" \
+  FM_TEST_FAIL_DEST="$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  PATH="$TRANSITION_FAILBIN:$FAKEBIN:$SYSTEM_PATH" \
+  "$ROOT/bin/fm-codex-app-task.sh" hard-stop "$SHIP_ID" \
+    --reason 'session envelope hard boundary' --handoff "$SHIP_HANDOFF" 2>&1) \
+  || status=$?
+expect_code 1 "$status" "interrupted hard-stop publication must remain retryable"
+[ -f "$TASK_HOME/state/$SHIP_ID.hard-stop-journal" ] \
+  || fail "interrupted hard-stop state publication retired its recovery journal"
+SHIP_HANDOFF_REAL=$(realpath "$SHIP_HANDOFF")
+assert_grep "session_handoff=$SHIP_HANDOFF_REAL" "$TASK_HOME/state/$SHIP_ID.meta" \
+  "hard-stop interruption fixture did not publish its first task record: $out"
+assert_grep 'state=working' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "hard-stop interruption fixture unexpectedly published paused state"
+cp "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "$TASK_HOME/state/$SHIP_ID.codex-app-current.preimage"
+sed 's/^state=.*/state=done/' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  > "$TASK_HOME/state/$SHIP_ID.codex-app-current.newer"
+mv "$TASK_HOME/state/$SHIP_ID.codex-app-current.newer" \
+  "$TASK_HOME/state/$SHIP_ID.codex-app-current"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" hard-stop "$SHIP_ID" \
+    --reason 'session envelope hard boundary' --handoff "$SHIP_HANDOFF" 2>&1) \
+  || status=$?
+expect_code 1 "$status" "hard-stop retry must preserve a newer current state"
+assert_grep 'state=done' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "hard-stop retry overwrote a newer current state"
+mv "$TASK_HOME/state/$SHIP_ID.codex-app-current.preimage" \
+  "$TASK_HOME/state/$SHIP_ID.codex-app-current"
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
@@ -522,13 +593,16 @@ assert_grep "codex_app_thread_id=$SHIP_THREAD_2" "$TASK_HOME/state/$SHIP_ID.meta
   "resume interruption fixture did not publish its first artifact"
 assert_grep 'state=paused' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
   "resume interruption fixture unexpectedly published current state"
-CODEX_THREAD_ID="$THREAD_A" \
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --state 'done' --detail 'new endpoint completed during resume recovery' \
-    --event 'done: new endpoint completed during resume recovery' >/dev/null \
-  || fail "could not publish a newer reconciled state during resume recovery"
+    --state 'done' --detail 'must wait for resume recovery' \
+    --event 'done: must wait for resume recovery' 2>&1) || status=$?
+expect_code 1 "$status" "a sibling mutation must not cross interrupted resume"
+assert_contains "$out" 'interrupted resume mutation' \
+  "resume recovery refusal did not name its active mutation"
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
@@ -544,11 +618,21 @@ assert_grep "codex_app_thread_id=$SHIP_THREAD_2" "$TASK_HOME/state/$SHIP_ID.meta
   "resume did not bind the fresh Desktop task"
 assert_grep 'session_generation=2' "$TASK_HOME/state/$SHIP_ID.meta" \
   "resume did not advance the session generation"
-assert_grep 'state=done' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
-  "resume retry overwrote the newer reconciled current state"
+assert_grep 'state=working' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "resume retry did not complete its journaled current state"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
+    --state 'done' --detail 'new endpoint completed after resume recovery' \
+    --event 'done: new endpoint completed after resume recovery' >/dev/null \
+  || fail "could not publish a newer reconciled state after resume recovery"
 [ "$(grep -cFx 'done: new endpoint completed during resume recovery' \
+  "$TASK_HOME/state/$SHIP_ID.status")" = 0 ] \
+  || fail "a refused sibling mutation published a status event"
+[ "$(grep -cFx 'done: new endpoint completed after resume recovery' \
   "$TASK_HOME/state/$SHIP_ID.status")" = 1 ] \
-  || fail "resume retry lost or duplicated the newer status event"
+  || fail "post-recovery reconciliation lost or duplicated its status event"
 RESUME_RECEIPT="$TASK_HOME/state/$SHIP_ID.codex-app-resume-receipt"
 assert_grep "old_thread_id=$SHIP_THREAD" "$RESUME_RECEIPT" \
   "resume receipt omitted the previous Desktop thread"

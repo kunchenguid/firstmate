@@ -39,7 +39,8 @@ make_case() {
     'merged=true' \
     'queued=false' \
     'base=main' \
-    'auto=false' > "$case_dir/github-outcome"
+    'auto=false' \
+    'head=0000000000000000000000000000000000000000' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
   : > "$case_dir/gh.log"
   chmod 0600 "$case_dir/state/task-x1.meta"
@@ -53,6 +54,10 @@ make_case() {
 # headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
+  if [ -f "$case_dir/github-outcome" ]; then
+    sed "s/^head=.*/head=$head/" "$case_dir/github-outcome" > "$case_dir/github-outcome.tmp"
+    mv "$case_dir/github-outcome.tmp" "$case_dir/github-outcome"
+  fi
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -128,6 +133,9 @@ SH
 # real merge failure is distinguishable from the recording step.
 add_gh_mocks_merge_fails() {
   local case_dir=$1
+  sed 's/^head=.*/head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
+    "$case_dir/github-outcome" > "$case_dir/github-outcome.tmp"
+  mv "$case_dir/github-outcome.tmp" "$case_dir/github-outcome"
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -283,13 +291,15 @@ run_pr_merge() {
 }
 
 write_github_outcome() {
-  local case_dir=$1 state=$2 merged=$3 queued=$4 base=$5 auto=${6:-false}
+  local case_dir=$1 state=$2 merged=$3 queued=$4 base=$5 auto=${6:-false} head=${7:-}
+  [ -n "$head" ] || head=$(sed -n 's/^head=//p' "$case_dir/github-outcome")
   printf '%s\n' \
     "state=$state" \
     "merged=$merged" \
     "queued=$queued" \
     "base=$base" \
-    "auto=$auto" > "$case_dir/github-outcome"
+    "auto=$auto" \
+    "head=$head" > "$case_dir/github-outcome"
 }
 
 test_pending_checks_refuse_merge() {
@@ -517,10 +527,10 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   set -e
 
   expect_code 1 "$rc" "github-outcome-read-fails: an unreadable outcome must fail"
-  assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
+  assert_grep 'could not read the exact-head GitHub pull request outcome after the merge attempt' \
     "$case_dir/stderr" "github-outcome-read-fails: the unreadable outcome was not reported"
-  assert_grep 'the gh read failed and the gh-axi view could not prove the outcome either' \
-    "$case_dir/stderr" "github-outcome-read-fails: the refusal did not name both failed reads"
+  assert_no_grep '^pr view ' "$case_dir/gh-axi.log" \
+    "github-outcome-read-fails: a state-only fallback was consulted"
   assert_no_grep 'verified: ' "$case_dir/stdout" \
     "github-outcome-read-fails: an unproved merge was reported as verified"
   # The merge call itself returned success, so the pull request may well have
@@ -568,7 +578,7 @@ SH
     "github-refusal-quotes-forge: the forge's own explanation was discarded on the refusal"
   assert_grep "not this script's verdict" "$case_dir/stderr" \
     "github-refusal-quotes-forge: the forge's text was not marked as the forge's own"
-  assert_grep 'error: GitHub merge outcome was not successful: state=OPEN, merged=false, isInMergeQueue=false' \
+  assert_grep 'error: GitHub merge outcome was not accepted: state=OPEN, merged=false, isInMergeQueue=false' \
     "$case_dir/stderr" "github-refusal-quotes-forge: the wrapper's own verdict was lost"
   # A forge sentence about the merge queue must never stand on its own line, or
   # it reads as this script's verdict rather than as quoted forge output.
@@ -772,7 +782,7 @@ SH
   set -e
 
   expect_code 1 "$rc" "github-unreadable-outcome-quotes-forge: an unreadable outcome must fail"
-  assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
+  assert_grep 'could not read the exact-head GitHub pull request outcome after the merge attempt' \
     "$case_dir/stderr" \
     "github-unreadable-outcome-quotes-forge: the unreadable outcome was not reported"
   assert_grep 'error: > will be added to the merge queue when all requirements are met' \
@@ -788,7 +798,7 @@ SH
   pass "fm-pr-merge quotes the forge output when it cannot read the outcome either"
 }
 
-test_github_failed_gh_read_falls_back_to_gh_axi() {
+test_github_failed_exact_head_read_refuses_state_fallback() {
   local case_dir rc
   case_dir=$(make_case github-gh-read-falls-back)
   mkdir -p "$case_dir/wt"
@@ -803,14 +813,14 @@ test_github_failed_gh_read_falls_back_to_gh_axi() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "github-gh-read-falls-back: a merge the gh-axi view proves must succeed"
-  assert_grep 'pr view 63 --repo example/repo' "$case_dir/gh-axi.log" \
-    "github-gh-read-falls-back: the gh-axi view was never consulted after gh's read failed"
-  assert_grep 'verified: https://github.com/example/repo/pull/63 is merged' \
-    "$case_dir/stdout" "github-gh-read-falls-back: the proven merge was not reported"
+  expect_code 1 "$rc" "github-gh-read-falls-back: state alone must not prove the exact head"
+  assert_no_grep 'pr view 63 --repo example/repo' "$case_dir/gh-axi.log" \
+    "github-gh-read-falls-back: the state-only fallback was consulted"
+  assert_no_grep 'verified: https://github.com/example/repo/pull/63 is merged' \
+    "$case_dir/stdout" "github-gh-read-falls-back: state-only evidence was reported as verified"
   assert_grep 'pr=https://github.com/example/repo/pull/63' "$case_dir/state/task-x1.meta" \
-    "github-gh-read-falls-back: the merged PR was not recorded for teardown"
-  pass "fm-pr-merge falls back to the gh-axi view when gh's read fails"
+    "github-gh-read-falls-back: the attempted PR was not retained for later verification"
+  pass "fm-pr-merge refuses state-only fallback after an exact-head read failure"
 }
 
 test_github_failed_merge_names_an_observed_landed_state() {
@@ -991,6 +1001,41 @@ test_github_queued_outcome_is_verified() {
   assert_grep 'pr=https://github.com/example/repo/pull/53' "$case_dir/state/task-x1.meta" \
     "github-verified-queued: the queued PR was not recorded for teardown"
   pass "fm-pr-merge accepts and accurately reports a GitHub merge-queue entry"
+}
+
+test_github_different_head_never_proves_merged_or_queued() {
+  local case_dir rc state merged queued suffix
+  for suffix in merged queued; do
+    case_dir=$(make_case "github-different-head-$suffix")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    if [ "$suffix" = merged ]; then
+      state=MERGED
+      merged=true
+      queued=false
+    else
+      state=OPEN
+      merged=false
+      queued=true
+    fi
+    write_github_outcome "$case_dir" "$state" "$merged" "$queued" main false \
+      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    : > "$case_dir/gh-axi.log"
+    : > "$case_dir/gh.log"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/79 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "github-different-head-$suffix: a different head must fail"
+    assert_grep 'headRefOid=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, recordedGreenHead=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+      "$case_dir/stderr" "github-different-head-$suffix: refusal omitted both exact heads"
+    assert_no_grep 'verified: ' "$case_dir/stdout" \
+      "github-different-head-$suffix: a different head was reported as verified"
+  done
+  pass "fm-pr-merge rejects merged and queued outcomes for a different head"
 }
 
 test_github_queue_required_refusal_names_strict_boundary() {
@@ -1606,13 +1651,14 @@ test_github_unreadable_queue_rules_are_not_reported_as_no_queue
 test_github_no_queue_rule_says_nothing_about_a_queue
 test_github_fallback_view_refusal_says_the_queue_was_unobservable
 test_github_auto_merge_refuses_before_side_effects
-test_github_failed_gh_read_falls_back_to_gh_axi
+test_github_failed_exact_head_read_refuses_state_fallback
 test_github_failed_merge_names_an_observed_landed_state
 test_github_without_gh_still_uses_gh_axi_merge
 test_github_without_gh_failed_read_keeps_bookkeeping
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified
+test_github_different_head_never_proves_merged_or_queued
 test_github_queue_required_refusal_names_strict_boundary
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge

@@ -52,21 +52,23 @@ fm_task_route_quota_candidate_valid() {  # <profile> <model> <effort> <eligibili
   local profile=$1 model=$2 effort=$3 eligibility=$4 reason=$5 evidence=$6
   local minimum_tier=$7 override_model=$8 override_effort=$9 tier
   case "$profile" in ''|none|*[!A-Za-z0-9._@%:+-]*) return 1 ;; esac
+  case "$model" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  case "$effort" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
   case "$eligibility" in eligible|ineligible) ;; *) return 1 ;; esac
   case "$reason" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
   case "$evidence" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
-  tier=$(fm_task_route_model_tier "$model") || return 1
-  fm_task_route_effort_supported "$tier" "$effort" || return 1
-  case "$eligibility:$reason" in
-    eligible:none) ;;
-    ineligible:none) return 1 ;;
-    ineligible:*) ;;
-    *) return 1 ;;
+  case "$eligibility" in
+    eligible)
+      [ "$reason" = none ] || return 1
+      tier=$(fm_task_route_model_tier "$model") || return 1
+      fm_task_route_effort_supported "$tier" "$effort" || return 1
+      fm_task_route_quota_candidate_selectable "$model" "$effort" "$minimum_tier" \
+        "$override_model" "$override_effort"
+      ;;
+    ineligible)
+      [ "$reason" != none ]
+      ;;
   esac
-  if [ "$eligibility" = eligible ]; then
-    fm_task_route_quota_candidate_selectable "$model" "$effort" "$minimum_tier" \
-      "$override_model" "$override_effort"
-  fi
 }
 
 fm_task_route_sha256() {

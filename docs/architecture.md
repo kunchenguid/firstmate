@@ -289,9 +289,9 @@ PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and an
 The helper requires a full canonical URL and rejects malformed URLs or repo override flags before recording merge state.
 A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, and preserves explicit merge-method flags.
 GitLab merge request URLs remain recognizable only as [inactive migration compatibility](gitlab-merge-watch.md); active checking, polling, and merging refuse them without invoking `glab` or publishing new poll state.
-After the GitHub command returns, the script confirms the PR actually landed or entered the merge queue, and only a confirmed landing records a landed outcome.
+After the GitHub command returns, the script confirms the PR actually landed or entered the merge queue at the recorded exact green head, and only a confirmed exact-head landing records a landed outcome.
 On GitHub an outcome that is neither merged nor queued is refused loudly and non-zero, naming the observed state, and a base branch that requires the merge queue is refused with its configured method and the strict no-auto boundary rather than having a merge method chosen on the caller's behalf.
-A queued result is accepted only when the live post-command read proves queue membership for the recorded exact head.
+A merged or queued result is accepted only when the live post-command read proves that state for the recorded exact head, and state-only fallback output is never sufficient.
 The strict exact-head merge path rejects caller `--auto` before recording metadata or contacting GitHub.
 When a direct merge leaves the PR unmerged and unqueued, the path verifies `autoMergeRequest` is absent and disables and re-reads it if GitHub implicitly armed auto-merge.
 Every GitHub refusal states what it could not observe as plainly as what it did, so an unreadable branch-rule response, an unrecognised queue method, and a merge queue no available read can see are each named rather than left to look like a base branch with no queue at all.

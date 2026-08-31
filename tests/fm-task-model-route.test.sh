@@ -182,6 +182,48 @@ test_quota_resolution_and_record_immutability() {
   assert_grep $'quota_candidate\tsol-primary\tgpt-5.6-sol\thigh\teligible\tnone\tcandidate satisfies the floor' "$record" \
     "routing record omitted the eligible selected profile"
 
+  out=$(route unsupported-blocked \
+    --ambiguity 0 --ambiguity-evidence a \
+    --boundary-clarity 0 --boundary-clarity-evidence b \
+    --risk 0 --risk-evidence c \
+    --diagnosis 0 --diagnosis-evidence d \
+    --verification 0 --verification-evidence e \
+    --floor architecture \
+    --quota-candidate legacy-profile gpt-5.5-codex ultra ineligible unsupported-catalog 'Desktop catalog does not support this configured model' \
+    --quota-candidate sol-primary gpt-5.6-sol high eligible none 'candidate satisfies the floor' \
+    --resolved-profile sol-primary \
+    --resolved-model gpt-5.6-sol --resolved-effort high 2>&1) \
+    || fail "unsupported configured profile could not be recorded as blocked: $out"
+  record="$HOME_DIR/data/unsupported-blocked/model-routing.tsv"
+  assert_grep $'quota_candidate\tlegacy-profile\tgpt-5.5-codex\tultra\tineligible\tunsupported-catalog\tDesktop catalog does not support this configured model' "$record" \
+    "routing record omitted the unsupported blocked profile"
+
+  status=0
+  out=$(route empty-candidate-evidence \
+    --ambiguity 0 --ambiguity-evidence a \
+    --boundary-clarity 0 --boundary-clarity-evidence b \
+    --risk 0 --risk-evidence c \
+    --diagnosis 0 --diagnosis-evidence d \
+    --verification 0 --verification-evidence e \
+    --quota-candidate blocked gpt-5.5-codex ultra ineligible unsupported-catalog '' \
+    --quota-candidate luna-primary gpt-5.6-luna medium eligible none available \
+    --resolved-profile luna-primary \
+    --resolved-model gpt-5.6-luna --resolved-effort medium 2>&1) || status=$?
+  expect_code 2 "$status" "quota candidates must carry non-empty evidence"
+
+  status=0
+  out=$(route empty-candidate-reason \
+    --ambiguity 0 --ambiguity-evidence a \
+    --boundary-clarity 0 --boundary-clarity-evidence b \
+    --risk 0 --risk-evidence c \
+    --diagnosis 0 --diagnosis-evidence d \
+    --verification 0 --verification-evidence e \
+    --quota-candidate blocked gpt-5.5-codex ultra ineligible '' 'catalog evidence' \
+    --quota-candidate luna-primary gpt-5.6-luna medium eligible none available \
+    --resolved-profile luna-primary \
+    --resolved-model gpt-5.6-luna --resolved-effort medium 2>&1) || status=$?
+  expect_code 2 "$status" "ineligible quota candidates must carry a rejection reason"
+
   status=0
   out=$(route ineligible-selection \
     --ambiguity 0 --ambiguity-evidence a \

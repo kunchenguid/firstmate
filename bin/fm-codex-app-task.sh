@@ -97,37 +97,63 @@ require_owner() {
 }
 
 TASK_MUTATION_LOCK=
+TASK_MUTATION_OWNER=
+TASK_MUTATION_RECORD_PID=
+TASK_MUTATION_RECORD_IDENTITY=
+task_mutation_lock_record_parse() {
+  local record=$1 kind pid identity extra
+  IFS=: read -r kind pid identity extra <<EOF
+$record
+EOF
+  [ "$kind" = codex-app-mutation ] && [ -z "$extra" ] || return 1
+  case "$pid" in ''|*[!0-9]*|0|1|0*) return 1 ;; esac
+  [[ "$identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [ "$record" = "codex-app-mutation:$pid:$identity" ] || return 1
+  TASK_MUTATION_RECORD_PID=$pid
+  TASK_MUTATION_RECORD_IDENTITY=$identity
+}
+
 task_mutation_lock_release() {
   [ -n "$TASK_MUTATION_LOCK" ] || return 0
-  if [ "$(cat "$TASK_MUTATION_LOCK/pid" 2>/dev/null || true)" = "$$" ]; then
-    rm -f -- "$TASK_MUTATION_LOCK/pid"
+  if [ "$(cat "$TASK_MUTATION_LOCK/owner" 2>/dev/null || true)" = "$TASK_MUTATION_OWNER" ]; then
+    rm -f -- "$TASK_MUTATION_LOCK/owner"
     rmdir -- "$TASK_MUTATION_LOCK" 2>/dev/null || true
   fi
   TASK_MUTATION_LOCK=
+  TASK_MUTATION_OWNER=
 }
 
 task_mutation_lock_acquire() {  # <task-id>
-  local id=$1 lock owner
+  local id=$1 lock owner identity self_record
   lock="$STATE/.$id.codex-app-mutation-lock"
+  identity=$(fm_process_command_identity "$$" fm-codex-app-task.sh) \
+    || die "cannot establish task $id mutation process identity"
+  self_record="codex-app-mutation:$$:$identity"
   if ! mkdir -- "$lock" 2>/dev/null; then
-    owner=$(cat "$lock/pid" 2>/dev/null || true)
-    case "$owner" in
-      ''|*[!0-9]*) die "task $id mutation lock is invalid; refusing concurrent mutation" ;;
-    esac
-    if kill -0 "$owner" 2>/dev/null; then
-      die "task $id is already being mutated by process $owner"
+    owner=$(cat "$lock/owner" 2>/dev/null || true)
+    task_mutation_lock_record_parse "$owner" \
+      || die "task $id mutation lock is invalid; refusing concurrent mutation"
+    if [ "$(fm_process_command_identity "$TASK_MUTATION_RECORD_PID" \
+      fm-codex-app-task.sh 2>/dev/null || true)" = "$TASK_MUTATION_RECORD_IDENTITY" ]; then
+      die "task $id is already being mutated by process $TASK_MUTATION_RECORD_PID"
     fi
-    rm -f -- "$lock/pid" 2>/dev/null || true
+    rm -f -- "$lock/owner" 2>/dev/null || true
     rmdir -- "$lock" 2>/dev/null || true
     mkdir -- "$lock" 2>/dev/null \
       || die "task $id mutation ownership changed while recovering a stale lock"
   fi
-  printf '%s\n' "$$" > "$lock/pid" || {
-    rm -f -- "$lock/pid" 2>/dev/null || true
+  printf '%s\n' "$self_record" > "$lock/owner" || {
+    rm -f -- "$lock/owner" 2>/dev/null || true
     rmdir -- "$lock" 2>/dev/null || true
     die "cannot record task $id mutation ownership"
   }
+  chmod 0600 "$lock/owner" || {
+    rm -f -- "$lock/owner" 2>/dev/null || true
+    rmdir -- "$lock" 2>/dev/null || true
+    die "cannot protect task $id mutation ownership"
+  }
   TASK_MUTATION_LOCK=$lock
+  TASK_MUTATION_OWNER=$self_record
   trap task_mutation_lock_release EXIT
   trap 'task_mutation_lock_release; exit 129' HUP
   trap 'task_mutation_lock_release; exit 130' INT
@@ -477,6 +503,7 @@ register_task() {
     "$project_real" "$worktree_real" "$git_common_dir" "$kind" "$model" "$effort" \
     "$route_real" "$route_hash" "$envelope" "$mode" "$yolo") \
     || die "cannot bind Desktop registration request for $id"
+  task_mutation_recovery_owner "$id" register "$request_hash"
   if [ -e "$journal" ]; then
     desktop_transition_finish "$id" register "$request_hash" \
       || die "cannot recover the journaled Desktop registration for $id"
@@ -588,6 +615,7 @@ reconcile_task() {
   esac
   require_owner
   task_mutation_lock_acquire "$id"
+  task_mutation_recovery_owner "$id" reconcile none
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || die "no metadata for Desktop task $id"
   [ "$(fm_backend_of_meta "$meta")" = codex-app-host ] \
@@ -622,15 +650,25 @@ HARD_STOP_HOST=
 HARD_STOP_ENVELOPE=
 HARD_STOP_GENERATION=
 HARD_STOP_WORKTREE=
+HARD_STOP_REQUEST=
+HARD_STOP_META_PREIMAGE=
+HARD_STOP_CURRENT_PREIMAGE=
+HARD_STOP_CHECKPOINT=
+HARD_STOP_META_HASH=
+HARD_STOP_CURRENT_HASH=
 hard_stop_journal_parse() {  # <journal>
-  local journal=$1 key lines
+  local journal=$1 key lines value
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
   lines=$(wc -l < "$journal" | tr -d ' ')
-  [ "$lines" = 10 ] || return 1
-  [ "$(exact_meta_value "$journal" version)" = 1 ] || return 1
-  for key in pre_head index_tree reason handoff thread host envelope generation worktree; do
-    exact_meta_value "$journal" "$key" >/dev/null || return 1
+  [ "$lines" = 16 ] || return 1
+  [ "$(exact_meta_value "$journal" version)" = 2 ] || return 1
+  for key in request_sha256 pre_head index_tree reason handoff thread host envelope \
+    generation worktree meta_preimage_sha256 current_preimage_sha256 checkpoint \
+    meta_sha256 current_sha256; do
+    value=$(exact_meta_value "$journal" "$key") || return 1
+    valid_scalar "$value" || return 1
   done
+  HARD_STOP_REQUEST=$(exact_meta_value "$journal" request_sha256)
   HARD_STOP_PRE_HEAD=$(exact_meta_value "$journal" pre_head)
   HARD_STOP_INDEX_TREE=$(exact_meta_value "$journal" index_tree)
   HARD_STOP_REASON=$(exact_meta_value "$journal" reason)
@@ -640,16 +678,85 @@ hard_stop_journal_parse() {  # <journal>
   HARD_STOP_ENVELOPE=$(exact_meta_value "$journal" envelope)
   HARD_STOP_GENERATION=$(exact_meta_value "$journal" generation)
   HARD_STOP_WORKTREE=$(exact_meta_value "$journal" worktree)
+  HARD_STOP_META_PREIMAGE=$(exact_meta_value "$journal" meta_preimage_sha256)
+  HARD_STOP_CURRENT_PREIMAGE=$(exact_meta_value "$journal" current_preimage_sha256)
+  HARD_STOP_CHECKPOINT=$(exact_meta_value "$journal" checkpoint)
+  HARD_STOP_META_HASH=$(exact_meta_value "$journal" meta_sha256)
+  HARD_STOP_CURRENT_HASH=$(exact_meta_value "$journal" current_sha256)
+  [[ "$HARD_STOP_REQUEST" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s' "$HARD_STOP_PRE_HEAD" | grep -Eq '^[0-9a-f]{40,64}$' || return 1
   printf '%s' "$HARD_STOP_INDEX_TREE" | grep -Eq '^[0-9a-f]{40,64}$' || return 1
+  [[ "$HARD_STOP_META_PREIMAGE" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$HARD_STOP_CURRENT_PREIMAGE" =~ ^[0-9a-f]{64}$ ]] || return 1
+  valid_thread "$HARD_STOP_THREAD" && valid_atom "$HARD_STOP_HOST" \
+    && valid_envelope "$HARD_STOP_ENVELOPE" || return 1
+  [ -n "$HARD_STOP_REASON" ] && [ -n "$HARD_STOP_HANDOFF" ] \
+    && [ -n "$HARD_STOP_WORKTREE" ] || return 1
   case "$HARD_STOP_GENERATION" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$HARD_STOP_CHECKPOINT" = none ]; then
+    [ "$HARD_STOP_META_HASH" = none ] && [ "$HARD_STOP_CURRENT_HASH" = none ] \
+      || return 1
+  else
+    printf '%s' "$HARD_STOP_CHECKPOINT" | grep -Eq '^[0-9a-f]{40,64}$' || return 1
+    [[ "$HARD_STOP_META_HASH" =~ ^[0-9a-f]{64}$ ]] \
+      && [[ "$HARD_STOP_CURRENT_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
+  fi
+}
+
+hard_stop_journal_write() {  # <journal>
+  local journal=$1 tmp
+  tmp=$(umask 077; mktemp "$STATE/.hard-stop-journal.XXXXXX") || return 1
+  {
+    printf 'version=2\n'
+    printf 'request_sha256=%s\n' "$HARD_STOP_REQUEST"
+    printf 'pre_head=%s\n' "$HARD_STOP_PRE_HEAD"
+    printf 'index_tree=%s\n' "$HARD_STOP_INDEX_TREE"
+    printf 'reason=%s\n' "$HARD_STOP_REASON"
+    printf 'handoff=%s\n' "$HARD_STOP_HANDOFF"
+    printf 'thread=%s\n' "$HARD_STOP_THREAD"
+    printf 'host=%s\n' "$HARD_STOP_HOST"
+    printf 'envelope=%s\n' "$HARD_STOP_ENVELOPE"
+    printf 'generation=%s\n' "$HARD_STOP_GENERATION"
+    printf 'worktree=%s\n' "$HARD_STOP_WORKTREE"
+    printf 'meta_preimage_sha256=%s\n' "$HARD_STOP_META_PREIMAGE"
+    printf 'current_preimage_sha256=%s\n' "$HARD_STOP_CURRENT_PREIMAGE"
+    printf 'checkpoint=%s\n' "$HARD_STOP_CHECKPOINT"
+    printf 'meta_sha256=%s\n' "$HARD_STOP_META_HASH"
+    printf 'current_sha256=%s\n' "$HARD_STOP_CURRENT_HASH"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$journal" || { rm -f -- "$tmp"; return 1; }
+}
+
+task_mutation_recovery_owner() {  # <task-id> <operation> <request-sha256-or-none>
+  local id=$1 operation=$2 request_hash=$3 transition hard_stop
+  transition="$STATE/$id.codex-app-transition"
+  hard_stop="$STATE/$id.hard-stop-journal"
+  if { [ -e "$transition" ] || [ -L "$transition" ]; } \
+    && { [ -e "$hard_stop" ] || [ -L "$hard_stop" ]; }; then
+    die "task $id has conflicting mutation recovery journals"
+  fi
+  if [ -e "$transition" ] || [ -L "$transition" ]; then
+    desktop_transition_journal_parse "$transition" \
+      || die "task $id has an invalid Desktop transition recovery journal"
+    if [ "$operation" != "$DESKTOP_TRANSITION_OPERATION" ] \
+      || [ "$request_hash" != "$DESKTOP_TRANSITION_REQUEST" ]; then
+      die "task $id has an interrupted $DESKTOP_TRANSITION_OPERATION mutation; retry that exact mutation before $operation"
+    fi
+  elif [ -e "$hard_stop" ] || [ -L "$hard_stop" ]; then
+    hard_stop_journal_parse "$hard_stop" \
+      || die "task $id has an invalid hard-stop recovery journal"
+    [ "$operation" = hard-stop ] \
+      || die "task $id has an interrupted hard-stop mutation; retry that exact mutation before $operation"
+  fi
 }
 
 hard_stop_task() {
   local id=$1
   shift
-  local reason='' handoff='' meta worktree_real handoff_parent handoff_real journal
+  local reason='' handoff='' meta current worktree_real handoff_parent handoff_real journal
   local thread host envelope generation checkpoint tmp pre_head index_tree head parent commit_tree subject
+  local request_hash meta_preimage current_preimage hard_meta_stage hard_current_stage
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --reason) [ "$#" -ge 2 ] || usage; reason=$2; shift 2 ;;
@@ -667,8 +774,11 @@ hard_stop_task() {
   fi
   require_owner
   task_mutation_lock_acquire "$id"
+  task_mutation_recovery_owner "$id" hard-stop none
   meta="$STATE/$id.meta"
+  current="$STATE/$id.codex-app-current"
   [ -f "$meta" ] || die "no metadata for Desktop task $id"
+  [ -f "$current" ] || die "no current state for Desktop task $id"
   [ "$(fm_backend_of_meta "$meta")" = codex-app-host ] \
     || die "task $id is not a Codex Desktop host task"
   registered_route_validate "$meta" \
@@ -696,10 +806,16 @@ hard_stop_task() {
     || die "task $id has no session generation"
   case "$generation" in ''|*[!0-9]*) die "task $id has invalid session generation" ;; esac
   journal="$STATE/$id.hard-stop-journal"
+  hard_meta_stage="$STATE/.$id.hard-stop.meta"
+  hard_current_stage="$STATE/.$id.hard-stop.current"
+  request_hash=$(desktop_transition_request_hash hard-stop "$id" "$reason" \
+    "$handoff_real" "$thread" "$host" "$envelope" "$generation" "$worktree_real") \
+    || die "cannot bind Desktop hard-stop request for $id"
   if [ -e "$journal" ] || [ -L "$journal" ]; then
     hard_stop_journal_parse "$journal" \
       || die "task $id has an invalid hard-stop recovery journal"
-    [ "$HARD_STOP_REASON" = "$reason" ] && [ "$HARD_STOP_HANDOFF" = "$handoff_real" ] \
+    [ "$HARD_STOP_REQUEST" = "$request_hash" ] \
+      && [ "$HARD_STOP_REASON" = "$reason" ] && [ "$HARD_STOP_HANDOFF" = "$handoff_real" ] \
       && [ "$HARD_STOP_THREAD" = "$thread" ] && [ "$HARD_STOP_HOST" = "$host" ] \
       && [ "$HARD_STOP_ENVELOPE" = "$envelope" ] \
       && [ "$HARD_STOP_GENERATION" = "$generation" ] \
@@ -716,22 +832,32 @@ hard_stop_task() {
       || die "could not read the pre-checkpoint commit for $id"
     index_tree=$(git -C "$worktree_real" write-tree) \
       || die "could not record the staged checkpoint tree for $id"
-    tmp=$(umask 077; mktemp "$STATE/.$id.hard-stop-journal.XXXXXX") \
-      || die "cannot stage hard-stop recovery journal for $id"
-    {
-      printf 'version=1\n'
-      printf 'pre_head=%s\n' "$pre_head"
-      printf 'index_tree=%s\n' "$index_tree"
-      printf 'reason=%s\n' "$reason"
-      printf 'handoff=%s\n' "$handoff_real"
-      printf 'thread=%s\n' "$thread"
-      printf 'host=%s\n' "$host"
-      printf 'envelope=%s\n' "$envelope"
-      printf 'generation=%s\n' "$generation"
-      printf 'worktree=%s\n' "$worktree_real"
-    } > "$tmp" || { rm -f -- "$tmp"; die "cannot write hard-stop recovery journal for $id"; }
-    mv -f -- "$tmp" "$journal" \
-      || { rm -f -- "$tmp"; die "cannot publish hard-stop recovery journal for $id"; }
+    meta_preimage=$(desktop_transition_snapshot "$meta") \
+      || die "cannot record hard-stop metadata preimage for $id"
+    current_preimage=$(desktop_transition_snapshot "$current") \
+      || die "cannot record hard-stop current-state preimage for $id"
+    [[ "$meta_preimage" =~ ^[0-9a-f]{64}$ ]] \
+      && [[ "$current_preimage" =~ ^[0-9a-f]{64}$ ]] \
+      || die "cannot bind hard-stop task preimages for $id"
+    rm -f -- "$hard_meta_stage" "$hard_current_stage" \
+      || die "cannot clear stale hard-stop stages for $id"
+    HARD_STOP_REQUEST=$request_hash
+    HARD_STOP_PRE_HEAD=$pre_head
+    HARD_STOP_INDEX_TREE=$index_tree
+    HARD_STOP_REASON=$reason
+    HARD_STOP_HANDOFF=$handoff_real
+    HARD_STOP_THREAD=$thread
+    HARD_STOP_HOST=$host
+    HARD_STOP_ENVELOPE=$envelope
+    HARD_STOP_GENERATION=$generation
+    HARD_STOP_WORKTREE=$worktree_real
+    HARD_STOP_META_PREIMAGE=$meta_preimage
+    HARD_STOP_CURRENT_PREIMAGE=$current_preimage
+    HARD_STOP_CHECKPOINT=none
+    HARD_STOP_META_HASH=none
+    HARD_STOP_CURRENT_HASH=none
+    hard_stop_journal_write "$journal" \
+      || die "cannot publish hard-stop recovery journal for $id"
   fi
   head=$(git -C "$worktree_real" rev-parse HEAD) \
     || die "could not read checkpoint state for $id"
@@ -783,16 +909,57 @@ hard_stop_task() {
     mv -- "$tmp" "$handoff_real" \
       || { rm -f -- "$tmp"; die "cannot publish session handoff for $id"; }
   fi
-  tmp=$(umask 077; mktemp "$STATE/.$id.meta.XXXXXX") \
-    || die "cannot stage checkpoint metadata for $id"
-  grep -v -e '^session_checkpoint=' -e '^session_handoff=' "$meta" > "$tmp" || true
-  {
-    printf 'session_checkpoint=%s\n' "$checkpoint"
-    printf 'session_handoff=%s\n' "$handoff_real"
-  } >> "$tmp"
-  mv -f -- "$tmp" "$meta" || die "cannot publish checkpoint metadata for $id"
-  write_current "$id" "$thread" "$host" paused "hard session boundary; checkpoint $checkpoint"
+  if [ "$HARD_STOP_CHECKPOINT" = none ]; then
+    if ! desktop_transition_file_matches "$meta" "$HARD_STOP_META_PREIMAGE" \
+      || ! desktop_transition_file_matches "$current" "$HARD_STOP_CURRENT_PREIMAGE"; then
+      die "task $id changed after its hard-stop recovery journal was written"
+    fi
+    rm -f -- "$hard_meta_stage" "$hard_current_stage" \
+      || die "cannot reset hard-stop publication stages for $id"
+    tmp=$(umask 077; mktemp "$STATE/.$id.meta.XXXXXX") \
+      || die "cannot stage checkpoint metadata for $id"
+    grep -v -e '^session_checkpoint=' -e '^session_handoff=' "$meta" > "$tmp" || true
+    {
+      printf 'session_checkpoint=%s\n' "$checkpoint"
+      printf 'session_handoff=%s\n' "$handoff_real"
+    } >> "$tmp"
+    mv -f -- "$tmp" "$hard_meta_stage" \
+      || { rm -f -- "$tmp"; die "cannot retain staged checkpoint metadata for $id"; }
+    tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-current.XXXXXX") \
+      || die "cannot stage checkpoint current state for $id"
+    {
+      printf 'thread_id=%s\n' "$thread"
+      printf 'host_id=%s\n' "$host"
+      printf 'state=paused\n'
+      printf 'updated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      printf 'detail=hard session boundary; checkpoint %s\n' "$checkpoint"
+    } > "$tmp" || { rm -f -- "$tmp"; die "cannot write staged checkpoint current state for $id"; }
+    mv -f -- "$tmp" "$hard_current_stage" \
+      || { rm -f -- "$tmp"; die "cannot retain staged checkpoint current state for $id"; }
+    HARD_STOP_CHECKPOINT=$checkpoint
+    HARD_STOP_META_HASH=$(fm_task_route_sha256 "$hard_meta_stage") \
+      || die "cannot bind staged checkpoint metadata for $id"
+    HARD_STOP_CURRENT_HASH=$(fm_task_route_sha256 "$hard_current_stage") \
+      || die "cannot bind staged checkpoint current state for $id"
+    hard_stop_journal_write "$journal" \
+      || die "cannot bind hard-stop publication stages for $id"
+  else
+    [ "$HARD_STOP_CHECKPOINT" = "$checkpoint" ] \
+      || die "task $id checkpoint changed during hard-stop recovery"
+  fi
+  if ! desktop_transition_file_matches "$hard_meta_stage" "$HARD_STOP_META_HASH" \
+    || ! desktop_transition_file_matches "$hard_current_stage" "$HARD_STOP_CURRENT_HASH"; then
+    die "task $id hard-stop publication stages are incomplete"
+  fi
+  desktop_transition_publish_file "$id" "$hard_meta_stage" "$meta" \
+    "$HARD_STOP_META_PREIMAGE" "$HARD_STOP_META_HASH" \
+    || die "task $id metadata changed during hard-stop recovery; refusing to overwrite it"
+  desktop_transition_publish_file "$id" "$hard_current_stage" "$current" \
+    "$HARD_STOP_CURRENT_PREIMAGE" "$HARD_STOP_CURRENT_HASH" \
+    || die "task $id current state changed during hard-stop recovery; refusing to overwrite it"
   rm -f -- "$journal" || die "cannot retire hard-stop recovery journal for $id"
+  rm -f -- "$hard_meta_stage" "$hard_current_stage" \
+    || die "cannot retire hard-stop publication stages for $id"
   printf 'hard-stop: %s checkpoint=%s handoff=%s\n' "$id" "$checkpoint" "$handoff_real"
 }
 
@@ -887,6 +1054,7 @@ resume_task() {
   journal="$STATE/$id.codex-app-transition"
   request_hash=$(desktop_transition_request_hash resume "$id" "$thread" "$host" \
     "$checkpoint" "$handoff_real") || die "cannot bind Desktop resume request for $id"
+  task_mutation_recovery_owner "$id" resume "$request_hash"
   if [ -e "$journal" ]; then
     desktop_transition_finish "$id" resume "$request_hash" \
       || die "cannot recover the journaled Desktop resume for $id"
@@ -985,6 +1153,7 @@ archive_preflight_task() {
   valid_scalar "$report" || die_usage "report path must be a single-line value"
   require_owner
   task_mutation_lock_acquire "$id"
+  task_mutation_recovery_owner "$id" archive-preflight none
   meta="$STATE/$id.meta"
   current="$STATE/$id.codex-app-current"
   [ -f "$meta" ] || die "no metadata for Desktop task $id"

@@ -138,14 +138,15 @@ The shared routing parser requires the ordered five factors and their evidence, 
 Each configured quota profile records its model, effort, eligibility, rejection reason, and candidate-specific evidence, including profiles that the floor or explicit override makes ineligible.
 The selected eligible profile is separate from both the deterministic result and any explicit captain override.
 Registration binds the exact routing record digest and every later host mutation refuses changed routing evidence.
-Registration and resume share one preimage-bound transition journal, so an exact retry cannot overwrite newer reconciled state or status events after interruption.
+Every Desktop task operation passes one process-identity-bound mutation owner that blocks sibling operations while registration, resume, or hard-stop recovery is incomplete.
+Registration, resume, and hard stop publish through preimage-bound journals, so an exact retry cannot overwrite newer task state or status events after interruption.
 
 ## Session envelope boundary
 
 Codex Desktop does not currently expose reliable exact per-task cost, remaining-context, compaction-count, or output-token metrics to Firstmate.
 The envelope classes therefore provide qualitative soft boundaries and never claim exact enforcement or savings from those signals.
 At an explicit hard boundary, the worker stages intended changes and `fm-codex-app-task.sh hard-stop` creates a staged-only checkpoint commit plus a structured handoff outside the app-owned worktree.
-The hard-stop recovery journal binds the pre-checkpoint commit, staged tree, requested handoff, and endpoint generation before the commit, so an interrupted publication retries from that exact checkpoint.
+The hard-stop recovery journal binds the pre-checkpoint commit, staged tree, requested handoff, endpoint generation, task preimages, checkpoint, and staged publication digests, so an interrupted publication retries from that exact checkpoint without overwriting later task records.
 The primary creates a fresh Desktop task for the retained worktree, then `fm-codex-app-task.sh resume` verifies the exact checkpoint and handoff before replacing endpoint identity and advancing `session_generation`.
 Each completed resume publishes a durable receipt binding the previous and fresh thread identifiers and generations, and only that exact receipt makes a retry idempotent.
 Unstaged and untracked artifacts remain preserved throughout this transition.
