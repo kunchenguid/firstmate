@@ -59,7 +59,10 @@ make_home() {  # <name> [task-id...]
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+case "${1:-}" in
+  capture-pane) printf 'Thinking... (esc to interrupt)\n'; exit 0 ;;
+  display-message) printf 'firstmate\n'; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
