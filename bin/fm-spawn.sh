@@ -1325,26 +1325,32 @@ exclude_path() {
 }
 
 native_node_executable() {
-  local IFS=: path_dir candidate magic
-  for path_dir in $PATH; do
-    [ -n "$path_dir" ] || path_dir=.
-    candidate="$path_dir/node"
-    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
-    magic=
-    IFS= LC_ALL=C read -r -n 4 magic < "$candidate" || true
-    case "$magic" in
-      $'\x7fELF'|$'\xce\xfa\xed\xfe'|$'\xcf\xfa\xed\xfe'|$'\xfe\xed\xfa\xce'|$'\xfe\xed\xfa\xcf'|$'\xca\xfe\xba\xbe'|$'\xbe\xba\xfe\xca'|$'\xca\xfe\xba\xbf'|$'\xbf\xba\xfe\xca')
-        printf '%s\n' "$candidate"
-        return 0
-        ;;
-    esac
-  done
-  return 1
+  local shim candidate magic
+  shim=$(command -v node 2>/dev/null) || return 1
+  candidate=$(NODE_OPTIONS= "$shim" -p 'process.execPath' 2>/dev/null) || return 1
+  [ -n "$candidate" ] || return 1
+  case "$candidate" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$candidate" in
+    *$'\n'*) return 1 ;;
+  esac
+  [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
+  magic=
+  IFS= LC_ALL=C read -r -n 4 magic < "$candidate" || true
+  case "$magic" in
+    $'\x7fELF'|$'\xce\xfa\xed\xfe'|$'\xcf\xfa\xed\xfe'|$'\xfe\xed\xfa\xce'|$'\xfe\xed\xfa\xcf'|$'\xca\xfe\xba\xbe'|$'\xbe\xba\xfe\xca'|$'\xca\xfe\xba\xbf'|$'\xbf\xba\xfe\xca')
+      printf '%s\n' "$candidate"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 beeline_workspace_links_match_worktree() {
-  local source=$1 source_real=$2 target=${3:-} entry entry_real name expected expected_real candidate candidate_real found
+  local source=$1 source_real=$2 target=${3:-} entry entry_real name expected expected_real candidate candidate_real found wt_real
   [ -z "$target" ] || [ -d "$target" ] || return 1
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || return 1
   found=0
   for entry in "$source/@beeline"/* "$source/@beeline"/.[!.]* "$source/@beeline"/..?*; do
     [ -L "$entry" ] || continue
@@ -1357,6 +1363,7 @@ beeline_workspace_links_match_worktree() {
       [ -e "$candidate" ] || [ -L "$candidate" ] || return 1
       expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
       expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
+      [[ "$expected_real" == "$wt_real"/* ]] || return 1
       candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
       [ "$candidate_real" = "$expected_real" ] || return 1
     fi
@@ -1372,6 +1379,7 @@ beeline_workspace_links_match_worktree() {
       [[ "$entry_real" != "$source_real"/* ]] || return 1
       expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
       expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
+      [[ "$expected_real" == "$wt_real"/* ]] || return 1
       candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
       [ "$candidate_real" = "$expected_real" ] || return 1
     done

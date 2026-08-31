@@ -106,6 +106,19 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_toolbin_without_node() {
+  local dir=$1 source name
+  mkdir -p "$dir"
+  for source in /usr/bin/* /bin/*; do
+    [ -x "$source" ] || continue
+    name=${source##*/}
+    [ "$name" = node ] && continue
+    [ ! -e "$dir/$name" ] && [ ! -L "$dir/$name" ] || continue
+    /bin/ln -s "$source" "$dir/$name"
+  done
+  printf '%s\n' "$dir"
+}
+
 make_case() {
   local name=$1 id=$2 case_dir home project worktree fakebin
   case_dir="$TMP_ROOT/$name"
@@ -157,7 +170,7 @@ run_spawn() {
     FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE="${FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE:-0}" \
     FM_INTERRUPT_NODE_MODULES_CLEANUP="${FM_INTERRUPT_NODE_MODULES_CLEANUP:-0}" \
     FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
-    PATH="$FAKEBIN_DIR:$PATH" \
+    PATH="${FM_SPAWN_TEST_PATH:-$FAKEBIN_DIR:$PATH}" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
@@ -224,6 +237,24 @@ test_spawn_publication_is_independent_of_path_node_wrappers() {
   publication=$(readlink "$WORKTREE_DIR/node_modules")
   [ -d "$WORKTREE_DIR/$publication" ] || fail "owner-safe publisher left dependency backing unavailable"
   pass "fm-spawn dependency publication is independent of PATH Node wrappers"
+}
+
+test_spawn_resolves_script_managed_node_runtime() {
+  local rec id out status publication toolbin
+  id=node-modules-script-node-z1c
+  rec=$(make_case script-node "$id")
+  read_case "$rec"
+  toolbin=$(make_toolbin_without_node "$TMP_ROOT/script-node-tools")
+
+  out=$(FM_REJECT_PATH_NODE_PUBLISHER=1 \
+    FM_SPAWN_TEST_PATH="$FAKEBIN_DIR:$toolbin" run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should resolve a script-managed Node runtime"
+  assert_contains "$out" "spawned $id" "script-managed Node runtime did not launch the worker"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "script-managed Node runtime did not publish node_modules"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$publication" ] || fail "script-managed Node runtime left dependency backing unavailable"
+  pass "fm-spawn resolves script-managed Node runtimes before publication"
 }
 
 test_spawn_leaves_existing_node_modules_untouched() {
@@ -322,6 +353,29 @@ test_spawn_rejects_workspace_link_from_another_worktree() {
   [ "$(readlink "$WORKTREE_DIR/node_modules/@beeline/legacy")" = "$other_worktree/packages/legacy" ] \
     || fail "spawn mutated another worktree's workspace link"
   pass "fm-spawn refuses workspace links outside the exact worktree"
+}
+
+test_spawn_rejects_worktree_workspace_alias() {
+  local rec id out status candidate
+  id=node-modules-worktree-alias-z2f
+  rec=$(make_case worktree-alias "$id")
+  read_case "$rec"
+  /bin/rm -rf "$WORKTREE_DIR/packages/lib"
+  ln -s "$PROJECT_DIR/packages/lib" "$WORKTREE_DIR/packages/lib"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a worktree workspace alias to primary source"
+  assert_not_contains "$out" "spawned $id" "worktree workspace alias launched a worker"
+  [ "$(readlink "$WORKTREE_DIR/packages/lib")" = "$PROJECT_DIR/packages/lib" ] \
+    || fail "spawn mutated the worktree workspace alias"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "worktree workspace alias published node_modules"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "worktree workspace alias leaked dependency staging"
+  done
+  pass "fm-spawn refuses workspace aliases outside the canonical worktree"
 }
 
 test_spawn_ignores_published_beeline_consumers() {
@@ -519,11 +573,13 @@ test_spawn_cleans_known_unpublished_staging_during_interrupt() {
 
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_publication_is_independent_of_path_node_wrappers
+test_spawn_resolves_script_managed_node_runtime
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_rejects_existing_primary_dependency_link
 test_spawn_rejects_target_only_primary_workspace_link
 test_spawn_rejects_dangling_existing_workspace_link
 test_spawn_rejects_workspace_link_from_another_worktree
+test_spawn_rejects_worktree_workspace_alias
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
