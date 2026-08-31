@@ -679,6 +679,37 @@ test_cursor_exemption_permits_an_attended_or_enveloped_spawn() {
   pass "a recognized cursor exemption permits the spawn, keeps the sandbox posture, and is recorded single-valued"
 }
 
+# A grant is inherited only when an EXISTING task is restarted from its own
+# record - `--relaunch`, or the `--secondmate` shape firstmate's liveness
+# recovery uses. An ordinary fresh spawn whose id happens to still carry a stale
+# record must NOT pick that grant up, or a launch nobody granted an exemption for
+# would run under a previous launch's authority, which is exactly the implicit
+# grant the per-invocation flag exists to prevent.
+test_a_fresh_spawn_never_inherits_a_stale_recorded_grant() {
+  local rec id out status
+  id=profile-cursor-stale-record-z6n
+  rec=$(make_spawn_case profile-cursor-stale-record cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption envelope:bench)
+  status=$?
+  expect_code 0 "$status" "the first enveloped cursor spawn should succeed"
+  assert_grep "cursor_exemption=envelope:bench" "$HOME_DIR/state/$id.meta" \
+    "the first spawn must leave the recorded grant this case depends on"
+
+  # The pane died and nothing tore the task down, so the record survives. An
+  # ordinary fresh spawn of that same id passes no flag and must be refused by
+  # the unattended bar rather than reusing the record's grant.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a fresh spawn must not inherit a stale record's cursor grant"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "the unflagged fresh spawn must be refused on the ordinary cursor bar"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unflagged fresh spawn must be refused before any launch is sent"
+  pass "a fresh spawn never inherits a cursor grant from a stale record of the same id"
+}
+
 # The regression the per-invocation flag exists for: a grant used on one spawn
 # must not carry into the next spawn in the same shell.
 test_cursor_exemption_does_not_leak_to_a_later_spawn() {
@@ -1031,6 +1062,7 @@ test_cursor_unrecognized_exemption_still_refuses
 test_cursor_exemption_rejects_a_record_injecting_grant
 test_cursor_exemption_permits_an_attended_or_enveloped_spawn
 test_cursor_exemption_does_not_leak_to_a_later_spawn
+test_a_fresh_spawn_never_inherits_a_stale_recorded_grant
 test_cursor_bar_ignores_an_ambient_environment_grant
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
