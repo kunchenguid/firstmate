@@ -93,7 +93,9 @@ Requirements on the work, such as a named exit criterion and its raw output, an 
 The generated ship brief already tells the crewmate to read and follow the project's own instructions, so name in the brief only what changes this task's scope, acceptance criteria, or required evidence.
 
 Requirements on the dispatcher must be satisfied before the spawn, not left for the worker to discover.
-Where the project mandates an issue-first intake, create the issue with `gh-axi` using the issue form that project names, and pass its number into the brief so the worker can claim it and link it from the pull request.
+Where the project mandates an issue-first intake, search that project's open issues with `gh-axi` first and reuse a matching open issue rather than creating a second one for work already tracked.
+Only when no open issue covers the scope, create it with `gh-axi` using the issue form that project names.
+Either way, pass the issue number into the brief so the worker can claim it and link it from the pull request.
 Where the project mandates scanning open pull requests for overlapping scope, run that scan and reconcile the overlap under `AGENTS.md` section 7's serialization rules before dispatching.
 
 Never copy a project's rules into firstmate's own instructions, and never carry one project's workflow to another project.

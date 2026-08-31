@@ -375,8 +375,8 @@ test_ship_project_memory_wording() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "read it before you edit any file and follow it for this task" "$brief" \
     "ship brief must instruct the crewmate to read and follow the project's own instructions"
-  assert_grep "Where it conflicts with this brief, follow this brief and report the conflict" "$brief" \
-    "ship brief must route a project-instruction conflict back to firstmate"
+  assert_grep 'Where it conflicts with this brief, append `needs-decision: {the conflict}` and stop' "$brief" \
+    "ship brief must stop and route a project-instruction conflict back to firstmate"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
