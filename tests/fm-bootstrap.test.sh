@@ -965,21 +965,31 @@ test_forge_host_resolver_rejects_invalid_resolution_flag() {
 }
 
 test_forge_host_resolver_expands_safe_includes() {
-  local case_dir config_dir marker result
+  local case_dir config_dir fakebin marker result
   case_dir="$TMP_ROOT/forge-ssh-include"
   config_dir="$case_dir/home/.ssh"
+  fakebin="$case_dir/fakebin"
   marker="$case_dir/match-exec-ran"
-  mkdir -p "$config_dir"
+  mkdir -p "$config_dir" "$fakebin"
   cat > "$config_dir/config" <<EOF
 Include included.conf
 Match exec "touch $marker"
   HostName should-not-be-used.example
 EOF
   cat > "$config_dir/included.conf" <<'EOF'
-Host github-work
+  Host github-work
   HostName github.com
 EOF
-  result=$(HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+if grep -F -q 'HostName should-not-be-used.example' >/dev/null; then
+  printf '%s\n' 'hostname should-not-be-used.example'
+else
+  printf '%s\n' 'hostname github.com'
+fi
+SH
+  chmod +x "$fakebin/ssh"
+  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
     bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = github.com ] || fail "included SSH alias must resolve to its canonical host, got: $result"
   [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
