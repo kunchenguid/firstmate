@@ -46,12 +46,13 @@
 # relaunch and never rewrites it afterwards, so it carries the start on a host
 # whose filesystem reports no usable birth time; because a relaunch replaces
 # it with the relaunch epoch, the status birth is what holds the window open
-# over the whole task, which is the narrowing condition stated above. The meta file's own mtime is NOT a start source in its
-# own right: later meta writes (PR registration, busy-state updates) move it
-# forward to near the end of the task and collapse the window. Only when
-# neither durable source is available (a task spawned before the token
-# existed, on a birthless filesystem) does the start fall back to the meta
-# mtime, then the status mtime.
+# over the whole task, which is the narrowing condition stated above.
+# The meta file's own mtime is NOT a start source in its own right: later
+# meta writes (PR registration, busy-state updates) move it forward to near
+# the end of the task and collapse the window.
+# Only when neither durable source is available (a task spawned before the
+# token existed, on a birthless filesystem) does the start fall back to the
+# meta mtime, then the status mtime.
 # A start later than the end (a spawn with no status append after it) is
 # pinned to the end so spawned_at never postdates completed_at.
 # Turn estimate: count of "^working:" lines in the status file.
@@ -63,10 +64,10 @@
 #     request's usage at .message.usage (input_tokens,
 #     cache_read_input_tokens, cache_creation_input_tokens, output_tokens) and
 #     Claude logs one entry per content block, so requests are deduped by
-#     .message.id before summing. cached_input_tokens folds cache_read + cache_creation (both
-#     billed on top of input_tokens); reasoning_tokens captures
-#     output_tokens_details.thinking_tokens when present (a subset of
-#     output_tokens).
+#     .message.id before summing. cached_input_tokens folds cache_read +
+#     cache_creation (both billed on top of input_tokens); reasoning_tokens
+#     captures output_tokens_details.thinking_tokens when present (a subset
+#     of output_tokens).
 #   harness=codex: <codex-sessions>/**/*.jsonl in the task window whose
 #     session_meta cwd equals the meta worktree. Per-turn token_count events
 #     carry one request's delta at .payload.info.last_token_usage
