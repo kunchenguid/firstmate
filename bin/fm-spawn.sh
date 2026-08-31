@@ -1685,6 +1685,13 @@ validate_link_local_paths() {  # validates against the primary project checkout
         echo "error: --link-local path repeated: ${LINK_LOCAL_PATHS[$i]}" >&2
         return 1
       fi
+      # -ef (same device+inode) catches two spellings that only differ by
+      # case-folding on a case-insensitive filesystem, which the lexical
+      # normalization above cannot see.
+      if [ "${LINK_LOCAL_SOURCES[$i]}" -ef "${LINK_LOCAL_SOURCES[$j]}" ]; then
+        echo "error: --link-local paths resolve to the same project path: ${LINK_LOCAL_PATHS[$i]}, ${LINK_LOCAL_PATHS[$j]}" >&2
+        return 1
+      fi
       if path_is_ancestor_of "${LINK_LOCAL_PATHS[$i]}" "${LINK_LOCAL_PATHS[$j]}" ||
          path_is_ancestor_of "${LINK_LOCAL_PATHS[$j]}" "${LINK_LOCAL_PATHS[$i]}"; then
         echo "error: --link-local paths conflict, one is nested in the other: ${LINK_LOCAL_PATHS[$i]}, ${LINK_LOCAL_PATHS[$j]}" >&2
@@ -1694,15 +1701,27 @@ validate_link_local_paths() {  # validates against the primary project checkout
   done
 }
 
+link_local_rollback() {  # undoes the symlinks/dirs a partial link_local_paths_into_worktree call made
+  local -a links=("${!1}") dirs=("${!2}")
+  local i
+  for ((i = ${#links[@]} - 1; i >= 0; i--)); do
+    rm -f -- "${links[$i]}" 2>/dev/null || true
+  done
+  for ((i = ${#dirs[@]} - 1; i >= 0; i--)); do
+    rmdir -- "${dirs[$i]}" 2>/dev/null || true
+  done
+}
+
 link_local_paths_into_worktree() {  # <worktree>, after its clean base refresh
   local worktree=$1 path source destination parent component current i
-  local -a parent_components
+  local -a parent_components created_links=() created_dirs=()
   for i in "${!LINK_LOCAL_PATHS[@]}"; do
     path=${LINK_LOCAL_PATHS[$i]}
     source=${LINK_LOCAL_SOURCES[$i]}
     destination="$worktree/$path"
     [ ! -e "$destination" ] && [ ! -L "$destination" ] || {
       echo "error: --link-local destination already exists in the task worktree: $path" >&2
+      link_local_rollback created_links[@] created_dirs[@]
       return 1
     }
     parent=${path%/*}
@@ -1714,22 +1733,30 @@ link_local_paths_into_worktree() {  # <worktree>, after its clean base refresh
         current="$current/$component"
         if [ -L "$current" ]; then
           echo "error: --link-local destination parent is a symlink in the task worktree: $path" >&2
+          link_local_rollback created_links[@] created_dirs[@]
           return 1
         fi
         if [ -e "$current" ]; then
           [ -d "$current" ] || {
             echo "error: --link-local destination parent is not a directory in the task worktree: $path" >&2
+            link_local_rollback created_links[@] created_dirs[@]
             return 1
           }
         else
-          mkdir "$current" || return 1
+          mkdir "$current" || {
+            link_local_rollback created_links[@] created_dirs[@]
+            return 1
+          }
+          created_dirs+=("$current")
         fi
       done
     fi
     ln -s "$source" "$destination" || {
       echo "error: could not link local project path into the task worktree: $path" >&2
+      link_local_rollback created_links[@] created_dirs[@]
       return 1
     }
+    created_links+=("$destination")
   done
 }
 

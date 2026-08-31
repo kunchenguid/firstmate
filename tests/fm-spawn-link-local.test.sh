@@ -173,6 +173,54 @@ ROWS
   pass "fm-spawn: link-local refuses a repeated or nested path before creating any symlink"
 }
 
+test_link_local_rolls_back_earlier_links_when_a_later_one_collides() {
+  local rec id out status case_dir home project worktree fakebin
+  id=link-local-rollback-c3
+  case_dir="$TMP_ROOT/rollback"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_home "$home" claude
+  fm_test_spawn_brief "$home" "$id" $'You are a crewmate.\n\nDelivery contract: mode=no-mistakes'
+  # The ignore rule is committed from the start, so a file that is already
+  # sitting in the fresh worktree at an ignored path stays outside `git
+  # status --porcelain` and survives the clean-base reset untouched -- the
+  # same shape a leftover from an interrupted prior spawn would take, which
+  # no preflight check against the primary checkout alone can see.
+  mkdir -p "$project"
+  git -C "$project" init -q
+  printf 'config/config.yaml\nsecrets/\n' > "$project/.gitignore"
+  git -C "$project" add .gitignore
+  git -C "$project" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -qm 'ignore local config and secrets'
+  fm_git_add_origin "$project" "$project.origin.git"
+  git -C "$project" worktree add --quiet -b "fm/$id" "$worktree"
+  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake" claude)
+  CASE_DIR=$case_dir HOME_DIR=$home PROJECT_DIR=$project WORKTREE_DIR=$worktree FAKEBIN_DIR=$fakebin
+
+  mkdir -p "$PROJECT_DIR/config" "$PROJECT_DIR/secrets"
+  printf 'local config\n' > "$PROJECT_DIR/config/config.yaml"
+  printf 'write-token\n' > "$PROJECT_DIR/secrets/token"
+  mkdir -p "$WORKTREE_DIR/config"
+  printf 'leftover from an earlier attempt\n' > "$WORKTREE_DIR/config/config.yaml"
+  [ -z "$(git -C "$WORKTREE_DIR" status --porcelain)" ] \
+    || fail "test setup: the pre-existing worktree file was not actually ignored"
+
+  out=$(run_spawn "$id" --link-local secrets/token --link-local config/config.yaml)
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected the spawn to refuse a link-local destination tracked in the fresh worktree"
+  assert_contains "$out" "already exists in the task worktree" \
+    "refusal did not name the worktree destination collision"
+  [ ! -e "$WORKTREE_DIR/secrets/token" ] && [ ! -L "$WORKTREE_DIR/secrets/token" ] \
+    || fail "the earlier link-local symlink was not rolled back after a later one collided"
+  [ -f "$WORKTREE_DIR/config/config.yaml" ] && [ ! -L "$WORKTREE_DIR/config/config.yaml" ] \
+    || fail "the pre-existing worktree file was altered by the refused link-local spawn"
+  [ "$(cat "$WORKTREE_DIR/config/config.yaml")" = 'leftover from an earlier attempt' ] \
+    || fail "the pre-existing worktree file's content changed"
+  assert_absent "$HOME_DIR/state/$id.meta" "refused spawn published metadata"
+  pass "fm-spawn: a link-local destination collision rolls back earlier links instead of leaving a partial worktree"
+}
+
 test_link_local_does_not_mask_real_uncommitted_work() {
   local rec id out status
   id=link-local-dirty-b2
@@ -205,6 +253,7 @@ test_help_documents_the_secret_exposure_warning
 test_linked_ignored_file_is_available_recorded_and_removed_by_teardown
 test_link_local_refuses_unsafe_or_unavailable_paths
 test_link_local_refuses_conflicting_paths_before_linking
+test_link_local_rolls_back_earlier_links_when_a_later_one_collides
 test_link_local_does_not_mask_real_uncommitted_work
 
 echo "# all fm-spawn-link-local tests passed"
