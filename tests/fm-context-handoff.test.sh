@@ -286,7 +286,7 @@ plugin_cli() {
       HERDR_WORKSPACE_ID=workspace-1 \
       HERDR_TAB_ID=tab-1 \
       HERDR_PANE_ID=pane-1 \
-      "$PLUGIN/scripts/adapter.py" "$@"
+      python3 -I -S "$PLUGIN/scripts/adapter.py" "$@"
   )
 }
 
@@ -1034,6 +1034,16 @@ test_bounded_transports_and_delivery() {
   [ "$(jq -r .status "$EROOT/herdr-snapshot-output")" = notified ] || fail "delivery re-executed replaced Herdr bytes after its initial probe"
   [ "$(wc -l < "$HERDR_EFFECTS")" -eq 1 ] || fail "stable Herdr snapshot did not submit exactly one acknowledged prompt"
 
+  new_env reviewed-large-herdr
+  enable_consumer
+  make_ready 'Allow the reviewed production-sized Herdr artifact through its independent bound.' >/dev/null || fail "large Herdr fixture failed"
+  DELIVERY_ENABLED=true
+  printf 'idempotent\n' > "$HERDR_MODE"
+  dd if=/dev/zero bs=1048576 count=9 2>/dev/null | tr '\000' '#' >> "$FAKE_HERDR"
+  write_config
+  delivery=$(cli deliver) || fail "reviewed production-sized Herdr executable was rejected"
+  [ "$(printf '%s' "$delivery" | jq -r .status)" = notified ] || fail "production-sized Herdr executable did not complete notification"
+
   new_env delivery-deadline
   enable_consumer
   registered=$(register_statement 'Persist compaction before declining an unsafe notification deadline.') || fail "deadline delivery candidate did not register"
@@ -1198,6 +1208,7 @@ EOF
     else
       cat > "$adapter_root/bin/fm-context-handoff.py" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$adapter_root/calls'
 printf '%s\n' '$body'
 EOF
     fi
@@ -1264,6 +1275,12 @@ for (const [root, cancel] of [[process.env.MALFORMED,true],[process.env.UNKNOWN,
   mod.registerContextHandoff({on(name, handler){handlers.set(name, handler);}}, root, process.env.FM_HOME);
   const result = await handlers.get("session_before_compact")({reason:"threshold"}, ctx);
   if (Boolean(result?.cancel) !== cancel) throw new Error(`unexpected cancel result for ${root}`);
+  if (!cancel) {
+    await handlers.get("session_compact")({reason:"threshold"}, ctx);
+    await handlers.get("session_compact_failed")({reason:"threshold"}, ctx);
+    const calls = fs.readFileSync(`${root}/calls`, "utf8").trim().split("\n");
+    if (calls.some(line => line.startsWith("compaction-outcome "))) throw new Error(`no-op seal emitted a terminal outcome for ${root}`);
+  }
 }
 for (const root of [process.env.MISSING, process.env.EXITED]) {
   const handlers = new Map();
@@ -1296,8 +1313,7 @@ if (failureCalls.length !== 2) throw new Error("failed Pi outcome was not retrie
 const failurePayload = JSON.parse(failureCalls.at(-1).split("\t")[1]);
 if (failurePayload.bindings?.[0]?.record_id !== "handoff-111111111111111111111111111111111111111111111111") throw new Error("retried Pi outcome lost its exact seal binding");
 const calls = fs.readFileSync(process.env.FM_STALE_BINDING_LOG, "utf8").trim().split("\n").filter(line => line.startsWith("compaction-outcome success"));
-const payload = JSON.parse(calls.at(-1).split("\t")[1]);
-if (Object.hasOwn(payload, "bindings")) throw new Error("prior Pi binding crossed into a later no-op attempt");
+if (calls.length !== 0) throw new Error("later no-op attempt emitted an unbound Pi outcome");
 EOF
   pass "model-free Pi lifecycle and fail-closed adapter validation"
 }
@@ -1836,7 +1852,7 @@ test_orphan_apply_execution_claim() {
 }
 
 test_claude_lifecycle_and_plugin_discovery() {
-  local statement arguments registered output marker adapter_status
+  local statement arguments registered output marker adapter_status ambient ambient_marker
   new_env claude-plugin
   enable_consumer
   bind_claude >/dev/null || fail "Claude binding failed"
@@ -1854,7 +1870,7 @@ test_claude_lifecycle_and_plugin_discovery() {
   ) > "$EROOT/crash-post" 2> "$EROOT/crash-post-error"; then
     fail "Claude terminal compaction failpoint unexpectedly completed"
   fi
-  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"manual"}' | cli claude-hook) || fail "Claude terminal compaction recovery failed"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"manual"}' | CAPABILITY=claude-process-generation-2 PROCESS_GENERATION=2 cli claude-hook) || fail "Claude terminal compaction recovery failed"
   [ -z "$output" ] || fail "successful Claude PostCompact emitted content"
   if find "$FM_HOME/state/context-handoff/queue" -name 'handoff-*.json' -exec jq -e '.compaction!="succeeded"' {} \; | grep -q true; then
     fail "opposite Claude outcome reversed a durable terminal result"
@@ -1881,12 +1897,27 @@ test_claude_lifecycle_and_plugin_discovery() {
     fail "Claude lifecycle persisted summary or transcript input"
   fi
   jq -e '.name=="firstmate-context-handoff" and (.version | type=="string")' "$PLUGIN/.claude-plugin/plugin.json" >/dev/null || fail "Claude plugin manifest is not discoverable"
-  jq -e '(.hooks | keys | sort)==["PostCompact","PreCompact","PreToolUse","SessionStart","StopFailure"] and all(.hooks[]; length>0 and all(.[]; (.hooks | length)==1 and .hooks[0].type=="command" and .hooks[0].command=="python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook" and (.hooks[0].timeout | type=="number") and .hooks[0].timeout>=10))' "$PLUGIN/hooks/hooks.json" >/dev/null || fail "Claude plugin hook lifecycle contract is incomplete"
-  jq -e '.mcpServers["firstmate-context-handoff"] | .command=="python3" and .args==["${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py","mcp-server"]' "$PLUGIN/.mcp.json" >/dev/null || fail "Claude plugin MCP discovery contract is incomplete"
-  jq -nc --arg session "$CLAUDE_SESSION" --arg path "$VAULT/blocked.md" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"Write",tool_input:{file_path:$path,content:"x"}}' | plugin_cli claude-hook > "$EROOT/plugin-out" 2> "$EROOT/plugin-error"
+  jq -e '(.hooks | keys | sort)==["PostCompact","PreCompact","PreToolUse","SessionStart","StopFailure"] and all(.hooks[]; length>0 and all(.[]; (.hooks | length)==1 and .hooks[0].type=="command" and .hooks[0].command=="python3 -I -S \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook" and (.hooks[0].timeout | type=="number") and .hooks[0].timeout>=10))' "$PLUGIN/hooks/hooks.json" >/dev/null || fail "Claude plugin hook lifecycle contract is incomplete"
+  jq -e '.mcpServers["firstmate-context-handoff"] | .command=="python3" and .args==["-I","-S","${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py","mcp-server"]' "$PLUGIN/.mcp.json" >/dev/null || fail "Claude plugin MCP discovery contract is incomplete"
+  ambient="$EROOT/hostile-plugin-startup"
+  ambient_marker="$EROOT/ambient-plugin-executed"
+  mkdir -p "$ambient"
+  cat > "$ambient/sitecustomize.py" <<'PY'
+import os
+from pathlib import Path
+
+Path(os.environ["FM_AMBIENT_PLUGIN_MARKER"]).write_text("executed\n", encoding="utf-8")
+os._exit(0)
+PY
+  (
+    export PYTHONPATH="$ambient"
+    export FM_AMBIENT_PLUGIN_MARKER="$ambient_marker"
+    jq -nc --arg session "$CLAUDE_SESSION" --arg path "$VAULT/blocked.md" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"Write",tool_input:{file_path:$path,content:"x"}}' | plugin_cli claude-hook
+  ) > "$EROOT/plugin-out" 2> "$EROOT/plugin-error"
   adapter_status=$?
   [ "$adapter_status" -eq 2 ] && [ ! -s "$EROOT/plugin-out" ] || fail "Claude plugin adapter changed deny transport status"
   jq -e '.hookSpecificOutput.permissionDecision=="deny"' "$EROOT/plugin-error" >/dev/null || fail "Claude plugin adapter did not preserve the mutation guard"
+  [ ! -e "$ambient_marker" ] || fail "Claude plugin boundary executed ambient Python startup code"
   pass "Claude lifecycle and model-free plugin discovery"
 }
 
@@ -1991,7 +2022,7 @@ test_candidate_identity_binding() {
 }
 
 test_seal_binding_failure_receipt() {
-  local seal
+  local seal record
   new_env seal-binding-receipt
   register_statement 'Durable seal receipts survive an unhealthy Vault binding.' >/dev/null || fail "seal binding fixture did not register"
   jq '.vault.inode=999999999' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not break the reviewed Vault binding"
@@ -2010,6 +2041,19 @@ test_seal_binding_failure_receipt() {
   seal=$(seal_pi) || fail "malformed configuration escaped the nonempty seal receipt boundary"
   [ "$(printf '%s' "$seal" | jq -r .status)" = seal-failed ] || fail "malformed configuration did not cancel nonempty Pi compaction"
   jq -se 'any(.[]; .reason=="seal-binding-failed" and .failure_code=="RECORD_JSON")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "malformed static configuration wrote no durable nonempty failure receipt"
+
+  new_env malformed-queue-seal-receipt
+  register_statement 'Malformed matching queue state must still cancel nonempty Pi compaction.' >/dev/null || fail "malformed queue fixture did not register"
+  seal=$(seal_pi) || fail "malformed queue fixture did not seal"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  find "$FM_HOME/state/context-handoff/candidates" -type f -name 'candidate-*.json' -delete
+  printf '{\n' > "$FM_HOME/state/context-handoff/queue/$record.json"
+  chmod 600 "$FM_HOME/state/context-handoff/queue/$record.json"
+  printf '{\n' > "$FM_HOME/config/context-handoff.json"
+  chmod 600 "$FM_HOME/config/context-handoff.json"
+  seal=$(seal_pi) || fail "malformed matching queue escaped the failure receipt boundary"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = seal-failed ] || fail "malformed matching queue failed open"
+  jq -se 'any(.[]; .reason=="seal-binding-failed" and .failure_code=="RECORD_JSON")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "malformed matching queue wrote no configuration-independent receipt"
   pass "durable receipt for unhealthy seal-time bindings"
 }
 

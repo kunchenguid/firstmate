@@ -221,31 +221,19 @@ export function registerContextHandoff(
     return { cancel: true };
   });
 
-  pi.on("session_compact", async (event) => {
+  pi.on("session_compact", async () => {
     const binding = pendingSeal;
-    if (binding) {
-      binding.terminal = "success";
-      binding.terminalReason = "pi-session-compact-succeeded";
-      await persistPendingOutcome();
-      return;
-    }
-    await runHandoff(root, fmHome, ["compaction-outcome", "success"], {
-      trigger: event.reason,
-      reason: "pi-session-compact-succeeded-without-seal-binding",
-    });
+    if (!binding) return;
+    binding.terminal = "success";
+    binding.terminalReason = "pi-session-compact-succeeded";
+    await persistPendingOutcome();
   });
 
-  pi.on("session_compact_failed", async (event) => {
+  pi.on("session_compact_failed", async () => {
     const binding = pendingSeal;
-    if (binding) {
-      binding.terminal = "failure";
-      binding.terminalReason = "pi-session-compact-failed";
-      await persistPendingOutcome();
-      return;
-    }
-    await runHandoff(root, fmHome, ["compaction-outcome", "failure"], {
-      trigger: event.reason,
-      reason: "pi-session-compact-failed-without-seal-binding",
-    });
+    if (!binding) return;
+    binding.terminal = "failure";
+    binding.terminalReason = "pi-session-compact-failed";
+    await persistPendingOutcome();
   });
 }

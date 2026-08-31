@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
+            "command": "python3 -I -S \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
             "timeout": 10
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
+            "command": "python3 -I -S \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
             "timeout": 30
           }
         ]
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
+            "command": "python3 -I -S \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
             "timeout": 10
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
+            "command": "python3 -I -S \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
             "timeout": 10
           }
         ]
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
+            "command": "python3 -I -S \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook",
             "timeout": 10
           }
         ]
